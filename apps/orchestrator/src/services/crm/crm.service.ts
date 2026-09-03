@@ -42,6 +42,14 @@ export const CRM_ERRORS = {
   /// An amount with no currency, or a currency with no amount.
   AMOUNT_NEEDS_CURRENCY: "amount_needs_currency",
   DUPLICATE_LINK: "duplicate_link",
+  /// WARP-2577 — the five nullable FK columns this service used to write
+  /// without checking. Each names the column the caller got wrong, which is
+  /// the whole reason they are separate codes and not one `not_found`.
+  PROJECT_NOT_FOUND: "project_not_found",
+  NOTE_NOT_FOUND: "note_not_found",
+  EMAIL_MESSAGE_NOT_FOUND: "email_message_not_found",
+  CALENDAR_EVENT_NOT_FOUND: "calendar_event_not_found",
+  WORK_ITEM_NOT_FOUND: "work_item_not_found",
 } as const;
 
 // ── Default pipeline ─────────────────────────────────────────────────────────
@@ -768,6 +776,45 @@ async function requireStageInPipeline(
   return stage;
 }
 
+/**
+ * WARP-2577 — one nullable foreign key the caller may name, and the 404 it
+ * reports when the row it points at is not there.
+ */
+interface ReferenceCheck {
+  /** What the caller sent. `null` (an explicit clear) and `undefined` (no
+   *  change) are both "not named", and neither costs a lookup. */
+  readonly id: string | null | undefined;
+  /** Looks the row up, selecting nothing but the id — existence is the question. */
+  readonly exists: (id: string) => Promise<{ id: string } | null>;
+  /** The code the route maps to 404. Names the COLUMN, not merely "not found". */
+  readonly error: string;
+}
+
+/**
+ * Verify every foreign key the caller named actually resolves, before the write.
+ *
+ * `companyId` and the activity subject were checked from the start; five more
+ * FK-bearing columns were not — `CrmDeal.projectId` and `CrmActivity`'s four
+ * reference columns. A bad id there reached Postgres, raised P2003, and the
+ * route's error handler redacted it into a **500**: the box reporting its own
+ * failure for what is a client mistake.
+ *
+ * Checked here rather than by catching P2003 downstream, deliberately. The
+ * driver error carries the CONSTRAINT name, not the field the caller got
+ * wrong, so a caught P2003 cannot say which of four references was bad — and
+ * naming the column is the entire value of the 404 over the 500.
+ *
+ * Lookups run concurrently but the *report* is in declaration order, so a
+ * caller who got two ids wrong gets a stable answer rather than a race.
+ */
+async function requireReferencedRows(checks: readonly ReferenceCheck[]): Promise<void> {
+  const named = checks.filter((c) => typeof c.id === "string" && c.id.length > 0);
+  if (named.length === 0) return;
+  const rows = await Promise.all(named.map((c) => c.exists(c.id as string)));
+  const missing = rows.findIndex((row) => row === null);
+  if (missing !== -1) throw new Error(named[missing].error);
+}
+
 export interface ListDealsOptions {
   pipelineId?: string;
   stageId?: string;
@@ -851,6 +898,14 @@ export async function createDeal(
     if (!company) throw new Error(CRM_ERRORS.COMPANY_NOT_FOUND);
   }
 
+  await requireReferencedRows([
+    {
+      id: input.projectId,
+      exists: (id) => prisma.pmProject.findUnique({ where: { id }, select: { id: true } }),
+      error: CRM_ERRORS.PROJECT_NOT_FOUND,
+    },
+  ]);
+
   const { amountMinor, currency } = resolveAmount(input.amountMinor, input.currency, {
     amountMinor: null,
     currency: null,
@@ -931,6 +986,17 @@ export async function updateDeal(
     });
     if (!company) throw new Error(CRM_ERRORS.COMPANY_NOT_FOUND);
   }
+
+  // WARP-2577 — the fifth FK this service used to write unchecked. Sits with
+  // the other pre-write validation for the reason WARP-2579 established: a
+  // PATCH that throws must not already have moved the deal.
+  await requireReferencedRows([
+    {
+      id: input.projectId,
+      exists: (pid) => prisma.pmProject.findUnique({ where: { id: pid }, select: { id: true } }),
+      error: CRM_ERRORS.PROJECT_NOT_FOUND,
+    },
+  ]);
 
   const targetPipelineId = input.pipelineId ?? existing.pipelineId;
   let targetStage: StageRow | null = null;
@@ -1147,6 +1213,33 @@ export async function logActivity(
     const d = await prisma.crmDeal.findUnique({ where: { id: subjectId }, select: { id: true } });
     if (!d) throw new Error(CRM_ERRORS.DEAL_NOT_FOUND);
   }
+
+  // The four reference columns, checked after the subject: an activity naming
+  // a deal that does not exist is not improved by first being told its note id
+  // is fine. All four are `SetNull`, so Postgres would have taken a bad id as
+  // a P2003 and the caller would have been handed a redacted 500.
+  await requireReferencedRows([
+    {
+      id: input.noteId,
+      exists: (id) => prisma.note.findUnique({ where: { id }, select: { id: true } }),
+      error: CRM_ERRORS.NOTE_NOT_FOUND,
+    },
+    {
+      id: input.emailMessageId,
+      exists: (id) => prisma.emailMessage.findUnique({ where: { id }, select: { id: true } }),
+      error: CRM_ERRORS.EMAIL_MESSAGE_NOT_FOUND,
+    },
+    {
+      id: input.calendarEventId,
+      exists: (id) => prisma.calendarEvent.findUnique({ where: { id }, select: { id: true } }),
+      error: CRM_ERRORS.CALENDAR_EVENT_NOT_FOUND,
+    },
+    {
+      id: input.workItemId,
+      exists: (id) => prisma.pmWorkItem.findUnique({ where: { id }, select: { id: true } }),
+      error: CRM_ERRORS.WORK_ITEM_NOT_FOUND,
+    },
+  ]);
 
   const row = await prisma.crmActivity.create({
     data: {

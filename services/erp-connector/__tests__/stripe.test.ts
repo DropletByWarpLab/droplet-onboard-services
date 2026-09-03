@@ -268,8 +268,13 @@ describe("restricted-key intake", () => {
       caught = e;
     }
     const rendered = JSON.stringify({
-      message: (caught as Error).message,
+      // Spread FIRST, explicit `message` last. `Error.prototype.message` is a
+      // NON-ENUMERABLE own property, so the spread never carried it and the
+      // old `message`-then-spread order only looked like it overwrote it
+      // (TS2783). Same keys and same value either way — this ordering just
+      // makes the message the test asserts on deterministically the real one.
       ...(caught as InvalidStripeCredentialError),
+      message: (caught as Error).message,
     });
     expect(rendered).not.toContain("SUPERSECRETVALUE");
     expect(rendered).not.toContain("sk_live_");

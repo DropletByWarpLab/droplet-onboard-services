@@ -15,6 +15,7 @@ import type {
   CrmPipeline,
   CrmStageSummary,
   CrmSubject,
+  CustomerRecord,
 } from "./types";
 
 /** Mirrors `PmRequestError`: carries the HTTP status so the UI can tell an
@@ -108,15 +109,52 @@ export function useDeals(pipelineId: string | null): {
   return { deals: data?.deals, error, isLoading, mutate: () => void mutate() };
 }
 
+/**
+ * WARP-2561 — now reports `error` and `isLoading`, like every sibling hook in
+ * this file.
+ *
+ * It returned neither, which is survivable on the deal board (the board has
+ * its own columns and the summary only decorates them) and is not survivable
+ * on a tile whose entire content IS the summary: with only `stages`, a failed
+ * read and a slow one are the same `undefined`, so the tile must either show a
+ * skeleton forever or invent a zero. Both lie in a different direction.
+ */
 export function useCrmSummary(pipelineId: string | null): {
   stages: CrmStageSummary[] | undefined;
+  error: unknown;
+  isLoading: boolean;
   mutate: () => void;
 } {
-  const { data, mutate } = useSWR<{ pipelineId: string; stages: CrmStageSummary[] }>(
+  const { data, error, isLoading, mutate } = useSWR<{
+    pipelineId: string;
+    stages: CrmStageSummary[];
+  }>(
     pipelineId ? `/api/crm/summary?pipeline=${encodeURIComponent(pipelineId)}` : null,
     getJson,
   );
-  return { stages: data?.stages, mutate: () => void mutate() };
+  return { stages: data?.stages, error, isLoading, mutate: () => void mutate() };
+}
+
+/**
+ * WARP-2563 — the customer record, as ONE read.
+ *
+ * Deliberately not five hooks. Five would each carry their own loading and
+ * error state, and the page would resolve section by section in whatever order
+ * the network returned them — a layout that reflows three times while someone
+ * is reading it. The orchestrator composes the sections where the joins are
+ * cheap, and the page has one loading state and one failure state.
+ */
+export function useCustomerRecord(companyId: string | null): {
+  record: CustomerRecord | undefined;
+  error: unknown;
+  isLoading: boolean;
+  mutate: () => void;
+} {
+  const { data, error, isLoading, mutate } = useSWR<{ record: CustomerRecord }>(
+    companyId ? `/api/crm/companies/${encodeURIComponent(companyId)}/record` : null,
+    getJson,
+  );
+  return { record: data?.record, error, isLoading, mutate: () => void mutate() };
 }
 
 export function useTimeline(subject: { type: CrmSubject; id: string } | null): {

@@ -484,6 +484,36 @@ jobs:
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/erp-connector build
 
+      # WARP-2606: ship-check's `tsc-full` phase 4 — the pass that type-checks
+      # each workspace's `tsconfig.test.json` — has no CI runner. `packages/
+      # tools-core` is the only workspace that ships one today, so phase 4 IS
+      # this one command, and `stage` carried 8 errors in it (a TS1470
+      # `import.meta` under CommonJS, plus 7 TS2339 reads of `.data` through the
+      # unnarrowed `ToolResult` union) while every other check was green:
+      # `vitest` strips types with esbuild and the package's own
+      # `tsconfig.json` excludes `__tests__/`, so nothing in CI looked.
+      #
+      # A step on THIS leg rather than a new `tsc-full` job or a new
+      # `ci-summary` leg, deliberately, per docs/ci-cost-budget.md: the leg is
+      # already gated on the `packages/tools-core/**` detect filter, already
+      # reported through `check_leg node`, and has already installed, generated
+      # Prisma and built the workspace dists this command needs. Marginal cost
+      # is one `tsc` over 137 test files: 1.9 s measured locally, budget 10 s on
+      # a runner. 10 of the last 100 commits on `stage` touch
+      # `packages/tools-core/**`, so at ~30 such PR runs/month this is well
+      # under 10 runner-min/month — inside the docs/ci-cost-budget.md noise
+      # floor, no callout threshold approached. A separate `tsc-full` job would
+      # repeat checkout + `npm ci` + `prisma generate` + four workspace builds
+      # for the same seconds of signal (~4 min/run, ~120 min/month) AND would
+      # need a new required-check name added to branch protection by hand. No
+      # new job names, no new `pull_request:` workflow.
+      #
+      # Runs BEFORE the vitest run: a type error should be reported as itself,
+      # not as whatever the suite happens to do with it.
+      - name: Typecheck @droplet/tools-core tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/tools-core typecheck:tests
+
       - name: Test @droplet/tools-core
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/tools-core test
