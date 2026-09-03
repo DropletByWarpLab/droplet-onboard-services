@@ -40,6 +40,27 @@
 # metal, but it does not overwrite the platters. A box moving from one customer
 # to another needs a separate full-overwrite pass.
 #
+# WARP-2629 (the live secrets on /data are factory state too): since the
+# WARP-232 relocation the real .env is /data/droplet/env/.env and the audit /
+# doc-KEK keys are /data/droplet/secrets/, with symlinks left in the repo. This
+# script removed the SYMLINKS — so on a relocated box every generated secret
+# survived the reset, and storage-wipe.sh never covered /data (it owns bulk
+# drives under /mnt/droplet only). On a 2-year LEASE that means a returned or
+# re-provisioned rack still carried the previous tenant's keys. Phase 4 now
+# overwrite-then-unlinks them through scripts/lib/secrets-wipe.sh.
+#
+#   Wipe, not re-key — and why. The ticket offered two shapes: (1) shred the
+#   live secrets, (2) re-key the LUKS /data volume. This is (1): the minimal
+#   change that closes the leak now, on a volume that is already encrypted.
+#   (2) is the stronger hardening and is deliberately NOT done here — erasing
+#   the keyslots makes EVERY byte unrecoverable, including anything a future
+#   writer forgets to add to the wipe list (a list rots; a destroyed key does
+#   not). It costs a re-format + re-provision of /data and a TPM re-seal, which
+#   turns a reset into something that cannot run unattended and still leave a
+#   bootable box, so it is an operator decision rather than a default. The
+#   destroy-the-key path already exists for decommissioning:
+#   scripts/host/droplet-crypto-shred.sh + docs/security/crypto-shred.md.
+#
 # WARP-980 (AMENDS ADR-023 reset behavior — reset ≠ deregister): a factory-reset
 # now RELEASES the box's HQ name + revokes its cert but KEEPS the device
 # REGISTERED and trusted (its durable TPM key stays authoritative), so the box
@@ -106,7 +127,8 @@ Options:
 What gets deleted:
   - All Docker volumes (database, files, AI keys, Matter fabric state)
   - The Docker build cache (always reclaimed — largest rebuildable consumer)
-  - Generated secrets (.env)
+  - Generated secrets: the LIVE .env and data/secrets on the encrypted /data
+    (not just the repo symlinks), overwritten before they are unlinked
   - TLS certificates
   - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
@@ -147,6 +169,10 @@ done
 source "$SCRIPT_DIR/lib/logging.sh"
 # WARP-1988 — bulk-storage discovery + erase (see the header).
 source "$SCRIPT_DIR/lib/storage-wipe.sh"
+# WARP-2629 — overwrite-then-unlink of the LIVE secrets on the encrypted /data
+# (see the header). Needs no Docker: the wipe runs even on a box whose daemon
+# is dead.
+source "$SCRIPT_DIR/lib/secrets-wipe.sh"
 
 # --- Sanity check ---
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
@@ -774,9 +800,36 @@ if [ -L "$_env_reset_target" ]; then
   _env_reset_target="$(readlink -f "$_env_reset_target" 2>/dev/null || readlink "$_env_reset_target")"
   [ -n "$_env_reset_target" ] || _env_reset_target="$REPO_ROOT/.env"
 fi
+# WARP-2629: data/secrets is relocated the same way and needs the same resolve
+# before the rm further down unlinks its symlink. Same shape as the block above
+# on a different path — WARP-2630 collapses both (and the five copies in
+# secrets.sh) into one shared helper.
+_secrets_reset_target="$REPO_ROOT/data/secrets"
+if [ -L "$_secrets_reset_target" ]; then
+  _secrets_reset_target="$(readlink -f "$_secrets_reset_target" 2>/dev/null || readlink "$_secrets_reset_target")"
+  [ -n "$_secrets_reset_target" ] || _secrets_reset_target="$REPO_ROOT/data/secrets"
+fi
 
-# .env (device secrets)
-if [ -f "$REPO_ROOT/.env" ]; then
+# WARP-2629 — wipe the LIVE secrets THROUGH the symlinks, before the unlinks
+# below make the targets unreachable from here. Removing the link alone left
+# DEVICE_SECRET_KEY, the audit signing key and doc-kek.key sitting on /data
+# after a "factory reset"; on a 2-year lease that is the previous tenant's
+# keys shipped with the box. Ordering is the whole fix: this MUST stay above
+# both of the unlinks further down.
+secw_wipe_live_secrets "$_env_reset_target" "$_secrets_reset_target"
+# The reset's record of what it destroyed: paths and COUNTS only, never a
+# value (rule 19). Emitted even when nothing was found, so a reset transcript
+# always states the /data secrets were considered rather than staying silent.
+log_success "Wiped live secrets on $(dirname "$_env_reset_target") + $_secrets_reset_target (env=$SECW_WIPED_ENV snapshots=$SECW_WIPED_SNAPSHOTS secrets=$SECW_WIPED_SECRETS)"
+if [ "$SECW_FAILED_COUNT" -gt 0 ]; then
+  log_error "$SECW_FAILED_COUNT secret file(s) could NOT be removed — the box still carries them."
+  log_error "Do not hand this box on. Run scripts/host/droplet-crypto-shred.sh (docs/security/crypto-shred.md)."
+fi
+
+# .env (device secrets). `-L` matters: the wipe above shredded the target, so a
+# relocated box's .env is now a DANGLING symlink and `-f` alone would leave it
+# behind pointing into /data.
+if [ -f "$REPO_ROOT/.env" ] || [ -L "$REPO_ROOT/.env" ]; then
   rm -f "$REPO_ROOT/.env"
   log_success "Removed .env (device secrets)"
 fi
@@ -800,7 +853,11 @@ for f in "$REPO_ROOT"/.env.bak.* \
          "$_env_reset_target".tmp.* \
          "$_env_reset_target".migrate.* \
          "$_env_reset_target".upsert.*; do
-  [ -f "$f" ] && rm -f "$f" && log_success "Removed $(basename "$f")"
+  # WARP-2629: overwrite before unlinking here too. The resolved-target side is
+  # already gone by now (secw_wipe_live_secrets above), so what this loop still
+  # finds is the LINK-side legacy copies — i.e. the ones on the UNENCRYPTED
+  # boot disk, where an overwrite is worth the most.
+  [ -f "$f" ] && secw_shred_file "$f" && log_success "Removed $(basename "$f")"
 done
 
 # Accumulated device-backup tarballs (WARP-570 / the daily droplet-backup
@@ -850,7 +907,11 @@ fi
 # eras. The orchestrator's sync_audit_signing_key (scripts/lib/secrets.sh)
 # re-generates the file on next setup.sh run; the empty ActivityRow table
 # then writes its first row as the new chain's genesis.
-if [ -d "$REPO_ROOT/data/secrets" ]; then
+# WARP-2629: the KEY FILES are already shredded (secw_wipe_live_secrets, above)
+# — on a relocated box this `rm -rf` only ever removed the symlink, which is
+# exactly how the audit key survived a reset. `-L` so a link whose target the
+# wipe left empty is still removed rather than left dangling into /data.
+if [ -d "$REPO_ROOT/data/secrets" ] || [ -L "$REPO_ROOT/data/secrets" ]; then
   rm -rf "$REPO_ROOT/data/secrets"
   log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
