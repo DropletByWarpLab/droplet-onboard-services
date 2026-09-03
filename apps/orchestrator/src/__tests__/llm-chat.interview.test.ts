@@ -24,6 +24,14 @@
  * which shrinks the pool before the estimate is taken. That is a property of
  * the current fixtures, not a guarantee, which is exactly why the mode is
  * stated rather than inherited from an absent key.
+ *
+ * WARP-2631 — the last describe block makes the mode load-bearing here, on an
+ * ORDINARY conversation (no overlay, so the full chat pool) where it costs
+ * something: under `off` the pool no longer fits the shipped 16,384 window and
+ * `degradeToFit` drops the business block, which this file can see directly in
+ * the system prompt. The same block covers the WARP-1921 cross-turn continuity
+ * read at `routes/llm.ts:1320`, which was silently inert here because the
+ * `ChatPersistenceService` double had no `getConversationToolNames`.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -89,15 +97,35 @@ vi.mock("../services/query-enhancement.service.js", () => ({
 vi.mock("../services/file-citation.service.js", () => ({
   createFileCitationService: vi.fn().mockReturnValue({ enqueue: vi.fn() }),
 }));
+// WARP-2631 — the persistence double, now with the two knobs continuity needs.
+//
+// `sessionId` defaults to `null`, reproducing the previous
+// `ensureConversation: () => null` exactly: the route's local `conversationId`
+// stays null (`routes/llm.ts:1176`), so every pre-existing case below runs
+// unchanged. Only the WARP-2631 cases set it.
+//
+// `getConversationToolNames` was MISSING, and absence was not inert:
+// `routes/llm.ts:1320` calls it on every non-`off` turn that has a
+// conversation, and a missing method throws `TypeError` synchronously — caught
+// by the deliberate fail-open, so the file stayed green while every turn
+// advertised `priorToolNames: []`. A double that omits a method the route calls
+// does not exercise the fail-open; it hides the input.
+const persistence = vi.hoisted(() => ({
+  sessionId: null as string | null,
+  getConversationToolNames: vi.fn<(id: string, userId: string) => Promise<string[]>>(),
+}));
 vi.mock("../services/chat-persistence.service.js", () => ({
   ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue(null),
+    ensureConversation: vi.fn(async () =>
+      persistence.sessionId ? { id: persistence.sessionId } : null,
+    ),
     createTurnRows: vi.fn().mockResolvedValue(null),
     finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
     updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
     listConversationsForUser: vi.fn().mockResolvedValue([]),
     getConversationForUser: vi.fn().mockResolvedValue(null),
     deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    getConversationToolNames: persistence.getConversationToolNames,
   })),
 }));
 
@@ -112,6 +140,17 @@ import {
   INTERVIEW_CONDUCTOR_BLOCK,
 } from "../services/business-onboarding.service.js";
 import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  effectiveAdvertisedToolNames,
+  type SelectionMessage,
+} from "../services/tool-selection.service.js";
+import { guardComposerFailOpen } from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — this file's persona and business fixtures are already correct
+// (it is the one chat-route suite that always rendered both blocks). The guard
+// keeps it that way; the single case that WANTS the profile read to throw
+// declares it.
+const composers = guardComposerFailOpen();
 
 /** The live interview conversation id — must be a UUID (chat zod schema). */
 const INTERVIEW_ID = "7b9e4a80-33f1-4bfa-9c65-0d1f6f0e2a11";
@@ -188,11 +227,19 @@ function buildApp(prisma: ReturnType<typeof createPrismaMock>, role = "owner") {
   return app;
 }
 
-function lastAgentRequest(): { messages: ChatMessage[]; allowed_tools?: string[] } {
+function lastAgentRequest(): {
+  messages: ChatMessage[];
+  allowed_tools?: string[];
+  // WARP-2631 — the two selection inputs the route derives and ships.
+  tool_selection_mode?: "off" | "domains";
+  prior_tool_names?: string[];
+} {
   expect(mockRunAgent).toHaveBeenCalled();
   return mockRunAgent.mock.calls.at(-1)![1] as {
     messages: ChatMessage[];
     allowed_tools?: string[];
+    tool_selection_mode?: "off" | "domains";
+    prior_tool_names?: string[];
   };
 }
 
@@ -219,6 +266,9 @@ async function chat(
 beforeEach(() => {
   h.config.OLLAMA_CONTEXT_LENGTH = 16384;
   h.config.TOOL_SELECTION_MODE = "domains";
+  persistence.sessionId = null;
+  persistence.getConversationToolNames.mockReset();
+  persistence.getConversationToolNames.mockResolvedValue([]);
   mockRunAgent.mockReset();
   mockRunAgent.mockResolvedValue({
     message: { role: "assistant", content: "ok" },
@@ -342,11 +392,137 @@ describe("interview conductor overlay (WARP-1121 §9.3)", () => {
   });
 
   it("fail-opens to a normal chat when the overlay probe throws", async () => {
+    // WARP-2652 — deliberate: `profileThrows` makes the SAME read the business
+    // composer uses throw, so the business fail-open fires on purpose here.
+    composers.expectFailOpen("business");
     const app = buildApp(createPrismaMock({ profileThrows: true }));
     const res = await chat(app, { conversationId: INTERVIEW_ID });
     expect(res.status).toBe(200);
     expect(systemPromptText()).not.toContain(
       "--- onboarding interview (conductor) ---",
     );
+  });
+});
+
+/**
+ * WARP-2631 — tool selection on the request path, on an ORDINARY conversation.
+ *
+ * Two things this file could not see before, both because
+ * `ChatPersistenceService`'s double omitted `getConversationToolNames`
+ * (`routes/llm.ts:1320` threw `TypeError`, the fail-open swallowed it, and
+ * every turn behaved as a first turn):
+ *
+ *   1. WARP-1921 cross-turn continuity — the tools an earlier turn called stay
+ *      advertised on a later turn that names no matching domain. Unit-covered
+ *      in `tool-selection.service.test.ts` and
+ *      `chat-persistence.continuity.test.ts`; the JOIN between them — the
+ *      route deciding whether to read, for whom, and what to forward — had no
+ *      coverage at all.
+ *   2. What `TOOL_SELECTION_MODE` actually costs. The interview cases above are
+ *      spared because the overlay pins a small write-free pool before the
+ *      estimate is taken; an ordinary owner turn is not, and under `off` the
+ *      full chat pool no longer fits the shipped 16,384 window (WARP-1893).
+ *      `degradeToFit` then drops the business block — WARP-2552's cost, in the
+ *      one place this file can observe it without a synthetic window.
+ */
+const CONTINUITY_ID = "2a7c9f10-6d4b-4e73-8c15-0b9a3e2d4c61";
+
+/** Read-only, one per domain, none in `CORE_TOOL_NAMES`: `search_content` is
+ *  the floor, `list_cameras` the domain continuity should re-admit,
+ *  `list_smart_home_devices` the out-of-domain control. */
+const POOL = ["search_content", "list_cameras", "list_smart_home_devices"];
+
+/** The names the loop will advertise from exactly what the route shipped.
+ *  Through `effectiveAdvertisedToolNames` — the same function the loop calls,
+ *  pinned as agreeing with the route's own estimate by
+ *  `tool-selection.parity.test.ts` — rather than a local copy of the rule. */
+function advertisedFromAgentRequest(): Set<string> {
+  const req = lastAgentRequest();
+  return effectiveAdvertisedToolNames({
+    mode: req.tool_selection_mode!,
+    messages: req.messages as unknown as SelectionMessage[],
+    priorToolNames: req.prior_tool_names,
+    pool: req.allowed_tools ?? [],
+  });
+}
+
+describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode cost)", () => {
+  beforeEach(() => {
+    persistence.sessionId = CONTINUITY_ID;
+  });
+
+  it("keeps an earlier turn's out-of-domain tool advertised on a later turn", async () => {
+    persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
+    const app = buildApp(createPrismaMock());
+    const res = await chat(app, {
+      conversationId: CONTINUITY_ID,
+      // The WARP-1921 sentence: a follow-up with no camera word in it. Without
+      // continuity the model loses the tool it used one turn ago and the
+      // WARP-642 self-heal burns an iteration getting it back.
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    // Server-authoritative and user-scoped: read from the persisted trace for
+    // the authenticated user, never from the request body's claim.
+    expect(persistence.getConversationToolNames).toHaveBeenCalledWith(
+      CONTINUITY_ID,
+      "stefan",
+    );
+    expect(lastAgentRequest().prior_tool_names).toEqual(["list_cameras"]);
+    const advertised = advertisedFromAgentRequest();
+    expect(advertised.has("search_content")).toBe(true);
+    // Red when the continuity read at `routes/llm.ts:1320` is removed.
+    expect(advertised.has("list_cameras")).toBe(true);
+    // Continuity re-admits the prior turn's DOMAIN, not the whole pool.
+    expect(advertised.has("list_smart_home_devices")).toBe(false);
+  });
+
+  it("advertises the floor only when the conversation has no prior tool calls", async () => {
+    persistence.getConversationToolNames.mockResolvedValue([]);
+    const app = buildApp(createPrismaMock());
+    const res = await chat(app, {
+      conversationId: CONTINUITY_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+      allowed_tools: POOL,
+    });
+    expect(res.status).toBe(200);
+    expect([...advertisedFromAgentRequest()]).toEqual(["search_content"]);
+  });
+
+  it("under `domains`, an ordinary full-pool turn keeps its business block", async () => {
+    // Half one of the mode pair. The window is the SHIPPED 16,384, not a
+    // synthetic 1 — this is what a box does on a real turn.
+    h.config.TOOL_SELECTION_MODE = "domains";
+    const app = buildApp(createPrismaMock());
+    const res = await chat(app, {
+      conversationId: CONTINUITY_ID,
+      // No `allowed_tools` and role owner ⇒ the full chat pool.
+      messages: [{ role: "user", content: "and how did that go" }],
+    });
+    expect(res.status).toBe(200);
+    expect(lastAgentRequest().allowed_tools).toBeUndefined();
+    expect(systemPromptText()).toContain("SUMMARY_SENTINEL");
+  });
+
+  it("under `off`, the same turn loses the business block to the tool pool (WARP-2552)", async () => {
+    // The other half, and the assertion WARP-2619 reported this file as
+    // lacking: a verdict that changes with the mode. Since the pool passed the
+    // ceiling in WARP-1893, `off` does not fit the 16,384 window beside the
+    // fixed prompt blocks — it leans on `degradeToFit`, which drops business
+    // first. That is why `off` is documented as a diagnostic/rollback mode
+    // rather than a second supported steady state (`docs/ENVIRONMENT.md:36`),
+    // and this is the route-level evidence for the claim.
+    h.config.TOOL_SELECTION_MODE = "off";
+    const app = buildApp(createPrismaMock());
+    const res = await chat(app, {
+      conversationId: CONTINUITY_ID,
+      messages: [{ role: "user", content: "and how did that go" }],
+    });
+    expect(res.status).toBe(200);
+    expect(systemPromptText()).not.toContain("SUMMARY_SENTINEL");
+    // …and `off` skips the continuity read outright (`routes/llm.ts:1318`).
+    expect(persistence.getConversationToolNames).not.toHaveBeenCalled();
+    expect(lastAgentRequest().prior_tool_names).toEqual([]);
   });
 });

@@ -6,6 +6,19 @@ import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — `new PrismaClient()` here resolves to the shared in-memory
+// double from src/__tests__/setup.ts, which has no `assistantPersona`,
+// `businessProfile` or `workspace` model. Both block composers therefore threw
+// on every turn and the route's fail-open swallowed it. See the helper header.
+guardComposerFailOpen();
+
 // Stub auth middleware — pulls a role from `x-test-role` so tests can
 // exercise both authenticated and unauthenticated paths. Matches the
 // pattern in `llm-chat.integration.test.ts` and `llm-tools-route.test.ts`.
@@ -142,7 +155,9 @@ describe("LLM routes", () => {
   beforeAll(() => {
     const prisma = new PrismaClient();
     initDeviceService(prisma);
-    app = createApp(prisma);
+    // WARP-2652 — the three delegates the prompt-block composers need,
+    // layered on for THIS suite only.
+    app = createApp(withPromptBlockDelegates(prisma));
   });
 
   beforeEach(() => {
@@ -434,6 +449,40 @@ describe("LLM routes", () => {
       expect(res.body.stop_reason).toBe("model_done");
       expect(Array.isArray(res.body.trace)).toBe(true);
       expect(mockChat).toHaveBeenCalledOnce();
+    });
+
+    // WARP-2652 — the fixture floor. Every chat case in this file ran against
+    // a prompt missing the persona and business blocks, because the shared
+    // Prisma double has no model for either singleton.
+    it("assembles a base prompt carrying both the persona and the business block", async () => {
+      let sys = "";
+      mockChat.mockImplementationOnce(
+        async (req: { messages?: { role: string; content: unknown }[] }) => {
+          const first = req.messages?.[0];
+          sys = first && typeof first.content === "string" ? first.content : "";
+          return {
+            ok: true,
+            json: vi.fn().mockResolvedValue({
+              choices: [
+                { index: 0, message: { role: "assistant", content: "Hi!" }, finish_reason: "stop" },
+              ],
+            }),
+          };
+        },
+      );
+
+      const res = await request(app)
+        .post("/api/llm/chat")
+        .set("x-test-role", "owner")
+        .send({
+          model: "llama3:8b",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        });
+
+      expect(res.status).toBe(200);
+      expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+      expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
     });
 
     it("persists an empty completion as a FAILED turn (WARP-854)", async () => {
