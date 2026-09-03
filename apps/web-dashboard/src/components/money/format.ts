@@ -5,6 +5,13 @@
  * named export fails `next build` at page-data collection, invisibly to tsc
  * and vitest. And these rules are worth testing directly rather than through
  * a rendered table.
+ *
+ * 🔴 DATES AND "TIME AGO" ARE NOT HERE, deliberately. `lib/erp-format.ts`
+ * already owns both for every surface that reads from a connected system, and
+ * the copies this module briefly carried had drifted: money's `formatDate`
+ * never inherited the calendar-date correction, so an invoice due the 10th
+ * rendered "Sep 9" on any box behind UTC. `/money` imports `formatDate` and
+ * `syncedAgo` from there. Only the money-SPECIFIC rules live here.
  */
 
 /** Vendor words that mean the document is settled. */
@@ -46,25 +53,6 @@ export function formatFigure(value: string | null, currency: string | null): str
   const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const rendered = `${negative ? "-" : ""}${grouped}${fraction ? `.${fraction}` : ""}`;
   return currency === null ? rendered : `${rendered} ${currency}`;
-}
-
-export function formatDate(iso: string | null): string {
-  if (iso === null) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
-}
-
-/** "4 min ago". Never "up to date" — that is a claim this box cannot make. */
-export function relativeAge(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "just now";
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  const days = Math.floor(hours / 24);
-  return `${days} ${days === 1 ? "day" : "days"} ago`;
 }
 
 /** An hour is the line between "read" and "last read" (WARP-2581 §3.1). */

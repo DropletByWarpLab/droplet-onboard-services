@@ -36,13 +36,11 @@ import { useState, type JSX } from "react";
 import { ArrowDownLeft, ArrowUpRight, Wallet } from "lucide-react";
 
 import { ShellPage } from "@/components/shell/ShellPage";
-import {
-  formatDate,
-  formatFigure,
-  relativeAge,
-  statusClassFor,
-  STALE_AFTER_MS,
-} from "@/components/money/format";
+// One date formatter and one "time ago" for every connected-system surface.
+// `formatDate` reads a UTC-midnight ledger date as the calendar date it is;
+// rolling a private copy is how `/money` came to render due dates a day early.
+import { formatDate, syncedAgo } from "@/lib/erp-format";
+import { formatFigure, statusClassFor, STALE_AFTER_MS } from "@/components/money/format";
 import {
   useMoneyDocuments,
   useMoneySummary,
@@ -197,7 +195,7 @@ function StalenessChip({ lastReadAt }: { lastReadAt: string | null }): JSX.Eleme
   const stale = ageMs > STALE_AFTER_MS;
   return (
     <span className={`money-band__read${stale ? " money-band__read--stale" : ""}`}>
-      {stale ? `Last read ${relativeAge(ageMs)}` : `Read ${relativeAge(ageMs)}`}
+      {stale ? `Last read ${syncedAgo(lastReadAt)}` : `Read ${syncedAgo(lastReadAt)}`}
     </span>
   );
 }
@@ -316,7 +314,7 @@ function ReadFailed({ summary }: { summary: MoneySummary | undefined }): JSX.Ele
       <span className="money-empty__title">Couldn&rsquo;t read from your accounting system</span>
       <span className="money-empty__body">
         {summary?.lastReadAt
-          ? `Last successful read ${relativeAge(Date.now() - new Date(summary.lastReadAt).getTime())}. What was read before is below.`
+          ? `Last successful read ${syncedAgo(summary.lastReadAt)}. What was read before is below.`
           : "What was read before is below."}
       </span>
     </div>
