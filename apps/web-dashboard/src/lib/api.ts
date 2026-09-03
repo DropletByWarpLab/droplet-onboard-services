@@ -8124,6 +8124,21 @@ export async function fetchAppDownloads(
 ): Promise<AppDownloadCatalog> {
   const res = await authFetch(`${BASE}/api/app-downloads`, { signal });
 
+  // An expired session answers 401 with `{error: "..."}` — no boolean
+  // `available` — which the malformed-body branch below would render as
+  // "the box's app catalog is corrupted". That is a lie about the box, and
+  // because this page fetches once on mount with no retry, it is a
+  // permanent one until the customer reloads. Name the real problem.
+  if (res.status === 401 || res.status === 403) {
+    return {
+      available: false,
+      reason: "not_authenticated",
+      detail: "Your session has expired.",
+      attestation: null,
+      platforms: [],
+    };
+  }
+
   let body: unknown;
   try {
     body = await res.json();
@@ -8135,10 +8150,19 @@ export async function fetchAppDownloads(
   // Only an explicit `available: true` counts. A malformed body is
   // "unavailable with an unknown reason", never optimistically available.
   if (!parsed || typeof parsed.available !== "boolean") {
+    // A non-ok response that DID parse (every 503 the route emits carries a
+    // real `reason`) must keep that reason: the page has hand-written copy
+    // for signature_failed, malformed_catalog and the schema_* family, and
+    // flattening them all to "malformed_response" throws away the only
+    // diagnosis the box gave.
+    const passthrough =
+      parsed && typeof parsed.reason === "string" ? parsed.reason : null;
     return {
       available: false,
-      reason: "malformed_response",
-      detail: "The box returned an unexpected app-catalog response.",
+      reason: passthrough ?? "malformed_response",
+      detail:
+        (parsed && typeof parsed.detail === "string" ? parsed.detail : null) ??
+        "The box returned an unexpected app-catalog response.",
       attestation: null,
       platforms: [],
     };
