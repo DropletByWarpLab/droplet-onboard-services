@@ -26,7 +26,6 @@ vi.mock("../services/mqtt.service.js", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 
 import { extractCitedFilePaths } from "../services/llm-agent.service.js";
 import { parseToolResultPayload } from "../services/tool-result-payload.js";

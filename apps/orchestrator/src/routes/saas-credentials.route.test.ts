@@ -17,7 +17,6 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
-import path from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
