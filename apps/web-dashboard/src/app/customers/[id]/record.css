@@ -1,0 +1,124 @@
+/* ============================================================
+   WARP-2563 (ADR-044) — the customer record.
+
+   Sits inside the PM design scope (`pm-scope` / `pm-surface` / `pm-sect`),
+   which the CRM already renders in, so the record reads as part of the same
+   surface rather than as a third visual language. Only the record-specific
+   pieces live here; everything structural is borrowed.
+
+   Tokens from the indigo shell scope only — `--text`, `--text-muted`,
+   `--brand`, `--brand-subtle`, `--card-bd`. No new tokens.
+   ============================================================ */
+
+.cr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+/* One column below the tablet breakpoint. Source order is reading order —
+   People, then what is live, then the work, then the history — and the stack
+   keeps it. */
+@media (max-width: 899px) {
+  .cr-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cr-section {
+  padding: 14px 16px 16px;
+}
+
+.cr-count {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cr-empty {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.cr-skel {
+  height: 180px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  opacity: 0.7;
+}
+
+.cr-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cr-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* The timeline row leads with a glyph, so it aligns on the icon rather than
+   on the text. */
+.cr-tl {
+  align-items: center;
+}
+
+.cr-row-k {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cr-tl .cr-row-k {
+  flex: 1;
+}
+
+.cr-row-v {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cr-muted {
+  opacity: 0.75;
+}
+
+.cr-link {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+.cr-link:hover {
+  text-decoration: underline;
+}
+
+/* A quiet chip, not a status colour: "primary" and a match score are facts
+   about the row, not warnings about it. */
+.cr-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--card-bd);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
