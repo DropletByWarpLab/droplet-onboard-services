@@ -190,6 +190,7 @@ import erpGetScheduleToday from "./handlers/erp/get-schedule-today.js";
 import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
+import moneyListOpenDocuments from "./handlers/money/list-open-documents.js";
 
 // cloud (WARP-2497) — the connected SaaS accounts (Stripe / HubSpot /
 // Mailchimp). Deliberately ONE tool for all three vendors and all ten record
@@ -389,6 +390,7 @@ const allTools: Tool[] = [
   erpGetScheduleToday,
   erpFindPatient,
   erpGetArSummary,
+  moneyListOpenDocuments,
   erpScheduleAppointment,
   // WARP-2497: cloud connectors (Stripe/HubSpot/Mailchimp) — one Read-tier
   // tool covering all ten datasets; the dataset arg picks the provider.

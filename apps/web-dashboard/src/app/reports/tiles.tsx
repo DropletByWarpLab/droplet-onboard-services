@@ -10,6 +10,8 @@
  * invents its own empty state is the thing to avoid.
  */
 
+import { formatFigure } from "@/components/money/format";
+import { useMoneySummary } from "@/app/money/useMoney";
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -503,21 +505,62 @@ function money(n: number): string {
   });
 }
 
-/** The half that has no data source, ever. Brief §9.1. */
+/**
+ * The half the brief recorded as having no data source, ever (§9.1).
+ *
+ * WARP-2581 gave it one: bills landed from a connected cloud ledger. It stays
+ * a DOORWAY rather than a ledger — one figure and a link — because Reports
+ * answers "how did it go" and /money answers "who owes what".
+ *
+ * 🔴 Two ledgers are never added here either. Where more than one contributes,
+ * the figure is withheld and the tile says how many bills across how many
+ * ledgers; the page that can show them side by side is one click away.
+ */
 function MoneyOutHalf() {
+  const { summary } = useMoneySummary();
+  const payable = summary?.payable;
+
+  if (payable === undefined || payable.documentCount === 0) {
+    return (
+      <div className="rp-money-half">
+        <div className="rp-money-label">
+          <TrendingDown size={14} aria-hidden="true" />
+          Paid out
+        </div>
+        <div className="rp-money-note">No accounting system connected</div>
+        <div className="rp-money-sub">Connect one to see money going out.</div>
+        <a href="/integrations" className="rp-state-link">
+          Browse connectors →
+        </a>
+        {/* Present so the two halves stay balanced, but obviously inert. */}
+        <span className="rp-money-bar is-inert" />
+      </div>
+    );
+  }
+
+  const single = payable.ledgers.length === 1 ? payable.ledgers[0] : null;
   return (
     <div className="rp-money-half">
       <div className="rp-money-label">
         <TrendingDown size={14} aria-hidden="true" />
-        Paid out
+        You owe
       </div>
-      <div className="rp-money-note">No accounting system connected</div>
-      <div className="rp-money-sub">Connect one to see money going out.</div>
-      <a href="/integrations" className="rp-state-link">
-        Browse connectors →
-      </a>
-      {/* Present so the two halves stay balanced, but obviously inert. */}
-      <span className="rp-money-bar is-inert" />
+      {single ? (
+        <>
+          <div className="rp-money-fig">{formatFigure(single.balance, single.currency)}</div>
+          <div className="rp-money-sub">
+            across <span className="rp-mono">{payable.documentCount}</span> open bills
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="rp-money-note">
+            {payable.documentCount} open bills in {payable.ledgers.length} ledgers
+          </div>
+          <div className="rp-money-sub">Totals aren&rsquo;t shown across ledgers.</div>
+        </>
+      )}
+      <span className="rp-money-bar is-in" />
     </div>
   );
 }
@@ -618,6 +661,11 @@ export function MoneyBody({
         )}
       </div>
       <MoneyOutHalf />
+      {/* The doorway. Reports answers "how did it go"; /money answers "who
+          owes what". Do not grow a ledger inside this tile. */}
+      <a href="/money" className="rp-state-link">
+        Open Money →
+      </a>
     </>
   );
 }
