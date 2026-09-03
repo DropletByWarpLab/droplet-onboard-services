@@ -679,6 +679,64 @@ entries:
     review_by: 2027-08-27
     code_refs: [services/erp-connector/src/hubspot/connector.ts]
 
+  - id: atlassian-mcp
+    kind: egress
+    service: mcp-bridge
+    destination:
+      hosts: [mcp.atlassian.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Atlassian's hosted remote MCP server (ADR-043, WARP-2316) — the box dials
+      OUT to https://mcp.atlassian.com/v1/mcp and holds a Streamable-HTTP MCP
+      session against the Jira and Confluence site the owner connected. Carries
+      that customer content in the response: issue summaries, descriptions,
+      comments, page bodies, search results. Nothing box-local is sent beyond
+      the tool arguments the request needs, and the session's `_meta` is
+      deliberately NOT forwarded — the caller's Nextcloud session token,
+      username and confirmation token stay on this side of the boundary
+      (mcp-multiplexer.service.ts). Dial-out only, per ADR-043 §1: no inbound
+      path, no webhook, no callback URL, and the appliance accepts no inbound
+      connections in any case.
+      KIND IS `egress`, NOT `dynamic`, and the distinction is real rather than
+      bookkeeping. Atlassian's MCP is HOSTED-ONLY — there is no self-hosted
+      build and no per-tenant subdomain — so the endpoint is a fixed repo
+      literal the static scanner can see, unlike Mailchimp's datacentre-suffixed
+      host or Shopify's per-store one. The code-side exact-host guard is still
+      present and still mandatory (assertSafeMcpUrl against a ONE-element set;
+      an empty set denies everything), because registration and the guard are
+      two controls with different failure modes.
+      ONE HOST, DELIBERATELY. WARP-2364's text names three. `auth.atlassian.com`
+      is NOT registered: it serves the OAuth 2.1 endpoint (/v1/mcp/authv2),
+      which is an explicit v1 non-goal — ADR-043 §7 classifies Atlassian as the
+      customer-created-credential model, the box presents
+      `Authorization: Basic base64(email:api_token)` against the same
+      mcp.atlassian.com host, and nothing in the tree dials the OAuth host.
+      `api.atlassian.com` is NOT registered either: the REST API is not how this
+      integration reaches Atlassian, the MCP server does that reaching on its
+      own side, and nothing in the diff dials it. The rule is "register what the
+      box dials"; registering a host nothing dials would put a permanent,
+      unfalsifiable hole in a default-deny registry, and the gate's own NOTICE
+      for unmatched entries exists to prune exactly that.
+      READ-ONLY IN v1. Every remote tool is refused unless it appears in the
+      operator-owned classification table
+      (docs/security/atlassian-mcp-tool-surface.json, generated from
+      apps/orchestrator/src/services/atlassian-tool-policy.ts), and only its 26
+      read rows are allowed — writes are blocked by ADR-043 §3 and
+      updateConfluencePage is excluded outright (upstream #210/#217/#60,
+      whole-body replacement). Off by default twice over: the server must be
+      named in REMOTE_MCP_SERVER_ALLOWLIST, which ships empty, AND the customer
+      must have supplied a token their own org admin enabled Rovo MCP for.
+      The credential is the customer's, created in their tenant, revocable by
+      them, and expires within 365 days (surfaced as an explicit status, never
+      as a green CONNECTED inside 30 days).
+    ticket: WARP-2316
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/mcp-bridge/src/atlassian.ts]
+
   - id: ref-dentrix-ascend-spec
     kind: reference
     service: orchestrator
