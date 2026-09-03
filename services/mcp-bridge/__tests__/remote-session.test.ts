@@ -15,6 +15,7 @@ import {
   RemoteMcpSession,
   RemoteMcpSessionNotReadyError,
   type RemoteMcpConnection,
+  type RemoteMcpSessionOptions,
   type RemoteToolDescriptor,
 } from "../src/remote-session.js";
 import { basicCredential } from "../src/credentials.js";
@@ -64,11 +65,11 @@ function nodeError(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code });
 }
 
-function makeSession(opts: {
-  connect: ConstructorParameters<typeof RemoteMcpSession>[0]["connect"];
-  scheduleRetry?: (delayMs: number, run: () => void) => void;
-  maxReconnectAttempts?: number;
-}) {
+function makeSession(
+  opts: Partial<RemoteMcpSessionOptions> & {
+    connect: ConstructorParameters<typeof RemoteMcpSession>[0]["connect"];
+  },
+) {
   return new RemoteMcpSession({
     serverId: "vendor",
     url: "https://mcp.vendor.example/v1/mcp",
@@ -305,6 +306,151 @@ describe("reconnect is event-driven and bounded — no scheduling loop", () => {
     pending.shift()!();
     await vi.waitFor(() => expect(s.state).toBe("ready"));
     expect(s.health().consecutiveFailures).toBe(0);
+  });
+
+  /**
+   * The shape the 20-test suite structurally could not see: every other
+   * reconnect test uses a `connect` that FAILS after the first success, so the
+   * attempt counter always accumulated. Here every dial succeeds and the
+   * server drops us straight afterwards — a budget reset on `connect()` alone
+   * is never spent, the backoff never leaves its 1 s floor, and `health()`
+   * reports `ready` with zero failures while the box dials a vendor once a
+   * second forever.
+   *
+   * MUTATION: move the reset back to `connect()`'s success branch
+   * (`this.#reconnectAttempts = 0`) → this test goes red.
+   */
+  it("a server that accepts and immediately drops SPENDS the budget", async () => {
+    const delays: number[] = [];
+    const pending: Array<() => void> = [];
+    const d = connectionDouble();
+    const s = makeSession({
+      maxReconnectAttempts: 2,
+      // Frozen clock: no reconnect ever holds `ready` for the stability
+      // window, which is exactly the accept-then-drop server's behaviour.
+      now: () => 1_700_000_000_000,
+      scheduleRetry: (ms, run) => {
+        delays.push(ms);
+        pending.push(run);
+      },
+      connect: async () => d.connection,
+    });
+    await s.connect();
+    expect(s.state).toBe("ready");
+
+    for (let i = 0; i < 2; i += 1) {
+      d.drop(nodeError("ECONNRESET"));
+      expect(s.state).toBe("reconnecting");
+      pending.shift()!();
+      // The reconnect SUCCEEDS every time — that is the point.
+      await vi.waitFor(() => expect(s.state).toBe("ready"));
+    }
+
+    d.drop(nodeError("ECONNRESET"));
+    expect(delays).toEqual([1_000, 2_000]);
+    expect(pending).toHaveLength(0);
+    expect(s.state).toBe("unreachable");
+    expect(s.health().reason).toBe("retries_exhausted");
+  });
+
+  /**
+   * The other half of the same rule: a reconnect that HELD is a reconnect that
+   * worked, and the budget comes back.
+   *
+   * MUTATION: delete the stability-window reset in `#onTransportClosed` →
+   * this test goes red (the session settles on `unreachable` instead).
+   */
+  it("a reconnect that holds past the stability window gets the budget back", async () => {
+    const delays: number[] = [];
+    const pending: Array<() => void> = [];
+    let clock = 1_700_000_000_000;
+    const d = connectionDouble();
+    const s = makeSession({
+      maxReconnectAttempts: 1,
+      reconnectStabilityWindowMs: 60_000,
+      now: () => clock,
+      scheduleRetry: (ms, run) => {
+        delays.push(ms);
+        pending.push(run);
+      },
+      connect: async () => d.connection,
+    });
+    await s.connect();
+
+    d.drop(nodeError("ECONNRESET"));
+    pending.shift()!();
+    await vi.waitFor(() => expect(s.state).toBe("ready"));
+
+    clock += 60_000; // the reconnected session held for the whole window
+
+    d.drop(nodeError("ECONNRESET"));
+    expect(s.state).toBe("reconnecting");
+    expect(delays).toEqual([1_000, 1_000]);
+  });
+});
+
+describe("close() racing an in-flight connect", () => {
+  /**
+   * ADR-043 §4's kill switch: `close()` landing mid-connect must not be
+   * overwritten by the dial it interrupted. Without the post-await state
+   * re-check the freshly built transport — CARRYING THE CUSTOMER'S BASIC
+   * CREDENTIAL — is assigned to a session the caller has torn down, nothing
+   * holds a reference to it, and the socket leaks.
+   *
+   * MUTATION: remove the `if (this.#state === "closed")` block after the
+   * `await this.#connect(...)` → this test goes red.
+   */
+  it("closes the transport the interrupted dial produced and stays closed", async () => {
+    const d = connectionDouble();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const s = makeSession({
+      connect: async () => {
+        await gate;
+        return d.connection;
+      },
+    });
+
+    const opening = s.connect();
+    await s.close();
+    expect(s.state).toBe("closed");
+
+    release();
+    const health = await opening;
+
+    expect(health.state).toBe("closed");
+    expect(s.state).toBe("closed");
+    expect(d.close).toHaveBeenCalledOnce();
+    await expect(s.callTool("jira_get_issue", {})).rejects.toBeInstanceOf(
+      RemoteMcpSessionNotReadyError,
+    );
+  });
+
+  /**
+   * MUTATION: remove the `if (this.#state === "closed") return this.health();`
+   * guard in the catch branch → this test goes red (the session lands on
+   * `unreachable`, which `connect()` will happily re-dial).
+   */
+  it("a FAILED interrupted dial does not move the session out of closed", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const s = makeSession({
+      connect: async () => {
+        await gate;
+        throw nodeError("ECONNREFUSED");
+      },
+    });
+
+    const opening = s.connect();
+    await s.close();
+    release();
+
+    expect((await opening).state).toBe("closed");
+    expect(s.state).toBe("closed");
   });
 });
 
