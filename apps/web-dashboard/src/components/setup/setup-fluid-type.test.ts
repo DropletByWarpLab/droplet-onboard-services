@@ -10,15 +10,25 @@
  * and the BASE (unscoped) tokens stay fixed-px so the rest of the dashboard is
  * untouched.
  *
- * The file is read via `fs` from `process.cwd()` (the dashboard package root) —
- * NOT `new URL(import.meta.url)`, which yields a `C:\C:\…` ENOENT on Windows
- * (see the pre-existing a11y source-scrape suites).
+ * WARP-2613 — the file is read via `fs` relative to THIS FILE, not to
+ * `process.cwd()`. `process.cwd()` is only the dashboard package root when the
+ * runner was started from inside it; `vitest run --root apps/web-dashboard`
+ * from the repo root leaves cwd at the repo root (`--root` does not chdir) and
+ * the read became `<repo>/src/app/globals.css` → ENOENT before a single
+ * assertion ran. `fileURLToPath`, NOT `new URL(import.meta.url).pathname`,
+ * which yields a `C:\C:\…` ENOENT on Windows — the same pattern the
+ * pre-existing a11y source-scrape suites use.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+const here = dirname(fileURLToPath(import.meta.url));
+const css = readFileSync(
+  resolve(here, "../../app/globals.css"),
+  "utf8",
+);
 
 /** Pull the first px value out of a `clamp(MIN, …)` declaration. */
 function clampMinPx(decl: string): number {
