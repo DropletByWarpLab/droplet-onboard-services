@@ -598,11 +598,20 @@ export interface XeroAccessToken {
  * Keyed on the connection id rather than on the client id so two organisations
  * connected with credentials that happen to share an id cannot see each other's
  * token, and so {@link forgetXeroToken} has a key the disconnect path already
- * holds.
+ * holds — and, since the review on #1946, actually uses.
  */
 const xeroTokenCache = new Map<string, XeroAccessToken>();
 
-/** Test seam and the disconnect hook: drop one connection's minted token. */
+/**
+ * Drop one connection's minted token.
+ *
+ * Three callers, and the third was missing until #1946's review found it: the
+ * two 401 paths (a token Xero has stopped accepting is worse than no token,
+ * because it costs a call to learn that again), `decommission()`, and
+ * `integrations.service.disconnect()`. Without that last one the DB row was
+ * purged while a live bearer token for the account sat in this map for up to
+ * {@link XERO_ACCESS_TOKEN_TTL_MS} plus the prune cron's lag.
+ */
 export function forgetXeroToken(connectionId: string): void {
   xeroTokenCache.delete(connectionId);
 }
@@ -663,19 +672,47 @@ const XERO_DOTNET_DATE = /^\/Date\((-?\d+)([+-]\d{4})?\)\/$/;
  * `now` would put a value in the column the watermark TRUSTS.
  */
 export function xeroInstant(value: unknown): string | undefined {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? new Date(value).toISOString() : undefined;
-  }
+  if (typeof value === "number") return isoFromEpochMs(value);
   if (typeof value !== "string") return undefined;
   const raw = value.trim();
   if (raw === "") return undefined;
   const dotnet = XERO_DOTNET_DATE.exec(raw);
-  if (dotnet) {
-    const ms = Number(dotnet[1]);
-    return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-  }
-  const ms = Date.parse(raw);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+  if (dotnet) return isoFromEpochMs(Number(dotnet[1]));
+  return isoFromEpochMs(Date.parse(raw));
+}
+
+/**
+ * The largest epoch-ms magnitude `Date` can represent — ECMA-262's Time Range,
+ * ±100,000,000 days around the epoch. Beyond it a `Date` is Invalid and
+ * `toISOString()` THROWS `RangeError` rather than returning a value.
+ *
+ * The clause is named by TITLE and never by its dotted number: a four-part
+ * dotted numeric in a comment is read by `scripts/check-egress-allowlist.py`
+ * as a registrable domain and denied — the same class
+ * `ref-dotted-identifier-keys` describes for `.chat` / `.zip`. Citing the
+ * title costs nothing and keeps the gate honest.
+ */
+const MAX_EPOCH_MS = 8.64e15;
+
+/**
+ * One epoch-ms → ISO conversion for all three of {@link xeroInstant}'s
+ * branches, because `Number.isFinite` is not the same predicate as "a `Date`
+ * can hold this".
+ *
+ * `/Date(99999999999999999999)/` is finite, matches the .NET form, and made
+ * `toISOString()` throw — an uncaught `RangeError` on a *value coercion* that
+ * the docstring above promises will only ever return `undefined` for input it
+ * cannot read. One malformed field in one row would have taken down the whole
+ * page's mapping rather than leaving that field absent, which is the exact
+ * failure the "absent stays absent" rule exists to avoid.
+ *
+ * `Date.parse` already answers NaN for an out-of-range literal, so that branch
+ * was never the reachable one; it shares this helper so a fourth branch cannot
+ * be added without the bound.
+ */
+function isoFromEpochMs(ms: number): string | undefined {
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_EPOCH_MS) return undefined;
+  return new Date(ms).toISOString();
 }
 
 /**

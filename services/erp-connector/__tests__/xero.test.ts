@@ -591,6 +591,28 @@ describe("the read surface", () => {
     expect(xeroIfModifiedSince(undefined)).toBeUndefined();
   });
 
+  it("returns undefined for an epoch no Date can hold, instead of throwing", async () => {
+    // #1946's review: `Number.isFinite` admits values `Date` cannot represent,
+    // so `/Date(99999999999999999999)/` reached `new Date(ms).toISOString()`
+    // and threw `RangeError` out of a coercion whose whole contract is
+    // "anything else stays undefined". One malformed field in one row would
+    // have taken down the mapping for the entire page rather than leaving that
+    // one field absent.
+    //
+    // Mutation: drop the `Math.abs(ms) > MAX_EPOCH_MS` half of the guard in
+    // `isoFromEpochMs` → these throw instead of returning undefined.
+    expect(xeroInstant("/Date(99999999999999999999)/")).toBeUndefined();
+    expect(xeroInstant("/Date(-99999999999999999999)/")).toBeUndefined();
+    expect(xeroInstant(8.64e15 + 1)).toBeUndefined();
+    expect(xeroInstant(-8.64e15 - 1)).toBeUndefined();
+    // The BOUNDARY itself is representable and must survive — a guard that
+    // rejects it would be an off-by-one silently discarding a legal instant.
+    expect(xeroInstant(8.64e15)).toBe("+275760-09-13T00:00:00.000Z");
+    // And the header derived from it degrades the same way: no header at all,
+    // which is a full enumeration, rather than a throw at the call site.
+    expect(xeroIfModifiedSince("/Date(99999999999999999999)/")).toBeUndefined();
+  });
+
   it("keeps a part-paid document and drops a settled one", async () => {
     // The same open predicate every other accounting track applies. Mutation:
     // filter on `Status` instead → status vocabularies differ per product and
