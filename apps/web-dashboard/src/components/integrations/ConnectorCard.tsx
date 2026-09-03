@@ -18,15 +18,20 @@ import { Badge } from "@/components/shell/primitives";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
 import type { HubEntry } from "@/lib/hooks/useIntegrations";
 import { connectorIcon, statusView } from "./connector-visuals";
+import { DisconnectControl } from "./DisconnectControl";
 
 export function ConnectorCard({
   entry,
   onConnect,
   onOpen,
+  onDisconnected,
 }: {
   entry: Pick<HubEntry, "meta" | "state" | "connect" | "open">;
   onConnect: () => void;
   onOpen: () => void;
+  /** WARP-2518 — fired after the box confirmed a disconnect. The hub answers
+   *  by re-reading, which is how the purge line appears on this very tile. */
+  onDisconnected?: () => void;
 }) {
   const { meta, state } = entry;
   const Icon = connectorIcon(meta.id);
@@ -74,6 +79,30 @@ export function ConnectorCard({
   // Connected and needs-attention tiles go to the detail surface; everything
   // else runs the setup flow. Whichever it is, the tile knows whether that
   // action can actually happen.
+  /**
+   * WARP-2518 — whether this tile offers Disconnect at all.
+   *
+   * The rule is stated over what the BOX reported, never over the tile's own
+   * availability flag: the point of the control is to reach a connection the
+   * catalog may not even list. Three exclusions, each for its own reason:
+   *
+   *  - no reported row, or `NOT_CONFIGURED`: there is nothing to disconnect,
+   *    and a destructive control on a connector that was never set up is an
+   *    invitation to a confirmation dialog with no subject.
+   *  - `DISABLED` with `credentialsPurged === true`: the box just said the key
+   *    is gone. Offering to remove it again would contradict the line rendered
+   *    directly above the button.
+   *
+   * `DISABLED` with the purge fact ABSENT or `false` keeps the control, and
+   * that is the case that matters most — "disconnected, key still stored" is
+   * precisely the state whose remedy was previously reachable only through
+   * `ManageSheet`, i.e. only for a provider with a detail page.
+   */
+  const disconnectable =
+    reported !== null &&
+    status !== "NOT_CONFIGURED" &&
+    !(status === "DISABLED" && reported.credentialsPurged === true);
+
   const usesOpen = isConnected || needsAttention || credentialRetained;
   const action = usesOpen ? entry.open : entry.connect;
   const handler = usesOpen ? onOpen : onConnect;
@@ -207,6 +236,24 @@ export function ConnectorCard({
         >
           {label}
         </button>
+      )}
+
+      {/* WARP-2518 — Disconnect, on the tile. Below the primary action and
+          separated from it, because it is the destructive one and must not sit
+          where a click aimed at Connect could land. `provider` is the key the
+          BOX reported, not `meta.id`: those two are byte-equal for exactly one
+          vendor, and using the catalog id here would rebuild the join defect
+          WARP-2291 removed — a disconnect addressed to `quickbooks` when the
+          row the tile is showing is `quickbooks-online`. Renders nothing for a
+          non-admin (the control's own gate). */}
+      {!comingSoon && disconnectable && reported && (
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <DisconnectControl
+            provider={reported.provider}
+            displayName={meta.name}
+            onDisconnected={onDisconnected}
+          />
+        </div>
       )}
     </div>
   );
