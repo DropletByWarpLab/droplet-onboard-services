@@ -4493,6 +4493,13 @@ model IntegrationConnection {
   /// the connection at the next refresh.
   providerTokensEnc String?
 
+  /// WARP-2549 — what this connection landed. RESTRICT on the far side, so a
+  /// delete here fails loudly rather than taking a customer's records with it.
+  landedContacts  Contact[]
+  landedCompanies CrmCompany[]
+  landedDeals     CrmDeal[]
+  landedPipeline  CrmPipeline?
+
   /// WARP-2562 — the parties linked to records in THIS connection's upstream.
   /// Required for the WARP-2461 purge walker to answer "what did this
   /// connection land", which it cannot do from the provider name alone when
@@ -5583,6 +5590,24 @@ model Contact {
   /// Stable id in the upstream system — the reconcile key that stops two
   /// connectors from each creating their own copy of one person.
   externalId String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// CardDAV's own identity/versioning triple.
   externalUid  String?
@@ -5640,7 +5665,8 @@ model Contact {
   /// upstream id), so a re-sync updates rather than duplicates.
   @@unique([sourceId, externalUid])
   /// The cross-connector reconcile key.
-  @@unique([externalSystem, externalId])
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
   @@index([userId, displayName])
   @@index([userId, origin])
   /// The default listing is "this person's contacts, unarchived, by name".
@@ -5761,6 +5787,24 @@ model CrmCompany {
   origin         CrmRecordOrigin @default(LOCAL)
   externalSystem String?
   externalId     String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
   /// (WARP-884). `archivedAt` is the audit timestamp only.
@@ -5780,7 +5824,8 @@ model CrmCompany {
   projects     PmProject[]
   partyLinks   PartyLink[]
 
-  @@unique([externalSystem, externalId])
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
@@ -5933,6 +5978,18 @@ model CrmPipeline {
 
   /// Exactly one pipeline is the default new deals land in. Enforced by a
   /// partial unique index in the migration.
+  /// WARP-2549 — the connection whose deals land into this pipeline, when it is
+  /// a synced one. UNIQUE: a connection gets exactly one pipeline, created on
+  /// its first landed deal.
+  ///
+  /// A vendor's stages are not the owner's stages. Landing HubSpot deals into
+  /// the owner's own pipeline would either invent a mapping between two sets of
+  /// stage names nobody reconciled, or dump every synced deal into whichever
+  /// stage happened to sort first. A pipeline of its own keeps the owner's
+  /// board theirs and makes the purge scope obvious.
+  connectionId String? @unique
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
   isDefault Boolean @default(false)
 
   sortOrder Int @default(0)
@@ -5964,6 +6021,10 @@ model CrmPipelineStage {
   /// What landing here means for the deal. Owner-configurable stage NAMES,
   /// fixed outcome SEMANTICS.
   kind CrmStageKind @default(OPEN)
+  /// WARP-2549 — the vendor's own value for this stage (HubSpot `dealstage`),
+  /// on a synced pipeline. The reconcile key: stage NAMES are owner-editable
+  /// and re-landing must not create a second stage because someone renamed one.
+  externalKey String?
 
   /// Optional forecast weighting, 0-100. Advisory only — nothing derives an
   /// outcome from it.
@@ -5975,6 +6036,7 @@ model CrmPipelineStage {
   deals CrmDeal[]
 
   @@unique([pipelineId, sortOrder])
+  @@unique([pipelineId, externalKey])
   @@index([pipelineId, kind])
 }
 
@@ -6018,6 +6080,24 @@ model CrmDeal {
   origin         CrmRecordOrigin @default(LOCAL)
   externalSystem String?
   externalId     String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   isArchived Boolean   @default(false)
   archivedAt DateTime?
@@ -6029,7 +6109,8 @@ model CrmDeal {
   contactLinks CrmDealContact[]
   activities   CrmActivity[]
 
-  @@unique([externalSystem, externalId])
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
   @@index([pipelineId, stageId])
   @@index([stageId])
   @@index([companyId])
