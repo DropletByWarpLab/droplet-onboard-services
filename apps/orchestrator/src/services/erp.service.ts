@@ -35,11 +35,6 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   ConnectorBlockedError,
   DatasetNotServedError,
-  QuotaExhaustedError,
-  ReauthorizationRequiredError,
-  AscendAuthorizationError,
-  UnsafeBaseUrlError,
-  UnsafeAscendBaseUrlError,
   WRITE_COMMANDS,
   exportProviders,
   scheduleDayBounds,
@@ -47,6 +42,9 @@ import {
 } from "@droplet/erp-connector";
 import { cloudProviderIds, providerDescriptor } from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
+// WARP-2610 — the SAME `code` reader the persisted-status classifier uses, so
+// the two cannot disagree about what a connector error means.
+import { CONNECTOR_BLOCKED_CODE, connectorErrorCode } from "./cloud-connection-state.js";
 import { ErpError } from "./erp-error.js";
 import {
   apiMaterialFromRow,
@@ -122,28 +120,33 @@ export interface ErpUser {
 export interface ScheduleResult {
   connected: boolean;
   reason?: string;
+  capability?: CapabilityLimit;
   date: string;
   items: unknown[];
 }
 export interface PatientsResult {
   connected: boolean;
   reason?: string;
+  capability?: CapabilityLimit;
   items: unknown[];
 }
 export interface PatientResult {
   connected: boolean;
   reason?: string;
+  capability?: CapabilityLimit;
   patient: unknown | null;
 }
 export interface ArSummaryResult {
   connected: boolean;
   reason?: string;
+  capability?: CapabilityLimit;
   totalBalance: number | null;
   accountCount: number | null;
 }
 export interface RecallResult {
   connected: boolean;
   reason?: string;
+  capability?: CapabilityLimit;
   items: unknown[];
 }
 
@@ -194,28 +197,128 @@ function defaultConnectorFor(conn: ConnRow): Connector {
 }
 
 /**
- * The cloud-track states that are outcomes, not faults (WARP-2137 finding #1).
+ * The cloud-track states that are outcomes, not faults (WARP-2137 finding #1),
+ * keyed on the connector error's `code` rather than its class (WARP-2610).
  *
  * Returned with `connected: true`, which is the point: the connection is intact
  * and correctly configured. Collapsing either into ERROR — or into
  * ERP_NOT_CONNECTED — would tell the owner to go re-check a connection that has
  * nothing wrong with it, and would hide the one thing they can actually act on.
  *
- *  • QUOTA_EXHAUSTED — this period's metered Intuit allowance is spent. Nothing
- *    is broken, no data is lost, and reads resume next period. There is no user
+ *  • QUOTA_EXHAUSTED — this period's metered allowance is spent. Nothing is
+ *    broken, no data is lost, and reads resume next period. There is no user
  *    action, so presenting it as a failure would be a lie that costs a support
  *    call.
  *  • REAUTHORIZE_REQUIRED — the grant is dead (refresh token lapsed, consent
  *    withdrawn, vendor enablement pulled). Retrying can NEVER fix it; only a
  *    person re-consenting can. The opposite of the above, and the reason they
  *    are two states rather than one "degraded".
+ *
+ * ## Why `code` and not `instanceof` (WARP-2610)
+ *
+ * This was three `instanceof` checks naming QuickBooks Online's two classes and
+ * Dentrix Ascend's one. Every other vendor's identically-meaning error fell
+ * through to the generic ERROR branch: Stripe, HubSpot, Mailchimp and Shopify
+ * each export their OWN `…ReauthorizationRequiredError` — a package cannot
+ * re-export four classes of one name — so the list was a per-vendor registry
+ * that nobody was told to update, and it had fallen four vendors behind.
+ *
+ * Every ADR-041 connector error carries a `readonly code`, and the tracks
+ * already agree on the strings. Keying on the code means this function holds no
+ * vendor knowledge, and `cloud-connection-state.ts` — which classifies the same
+ * errors into the persisted status — reads the same field with the same helper.
+ * A sixth vendor is classified the day it lands, with no edit here.
+ *
+ * `USER_DOES_NOT_HAVE_PERMISSIONS` (HubSpot: the private app's creator lost
+ * super admin) is reauth-class for the same reason
+ * `INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE` calls it NEEDS_RECONNECT — the
+ * portal refuses every call until a current super admin re-creates the app and
+ * the new token is pasted here. One vocabulary across both classifiers.
  */
-function cloudReasonFor(err: unknown): "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED" | null {
-  if (err instanceof QuotaExhaustedError) return "QUOTA_EXHAUSTED";
-  if (err instanceof ReauthorizationRequiredError) return "REAUTHORIZE_REQUIRED";
-  if (err instanceof AscendAuthorizationError) return "REAUTHORIZE_REQUIRED";
-  return null;
+const READ_REASON_BY_CODE: Readonly<Record<string, "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED">> = {
+  QUOTA_EXHAUSTED: "QUOTA_EXHAUSTED",
+  REAUTHORIZE_REQUIRED: "REAUTHORIZE_REQUIRED",
+  USER_DOES_NOT_HAVE_PERMISSIONS: "REAUTHORIZE_REQUIRED",
+};
+
+/**
+ * The codes that mean "this connection works and exactly one dataset is
+ * refused" (WARP-2610).
+ *
+ * A THIRD rendering, not a variant of either state above, because the owner
+ * action is different again: nothing about the credential or the box changes
+ * this, and nothing about waiting does either. Only the vendor-side plan,
+ * scope or permission does — and the connector's own message names which.
+ *
+ * Rendering these as `connected: false, reason: "ERROR"` (which is what they
+ * did) is the defect: a Basic-plan Shopify store reads orders, products and
+ * inventory perfectly and withholds only customer identities, and a Mailchimp
+ * account on a plan without a resource is otherwise entirely healthy. The owner
+ * was sent to fix a credential with nothing wrong with it, and the one fact
+ * they could act on — the plan — never reached them.
+ *
+ * It is still emphatically NOT an empty success: ADR-041's hard rule is that a
+ * withheld dataset renders THIS, never `[]`, which reads as "you have no
+ * customers".
+ *
+ *  • CAPABILITY_MISSING — Mailchimp: the account's plan or permissions do not
+ *    grant the resource.
+ *  • CAPABILITY_NOT_AVAILABLE — HubSpot: the portal's tier does not include the
+ *    object.
+ *  • SCOPE_MISSING — Shopify (PR #1945): the app was never granted a scope this
+ *    read needs. The merchant ticks it in the Dev Dashboard.
+ *  • PROTECTED_CUSTOMER_DATA_DENIED — Shopify (PR #1945): protected customer
+ *    data withheld, either as an explicit vendor error or as a silent
+ *    redaction. The connector's `capability_limited` state, named here.
+ *
+ * Listed rather than pattern-matched on the substring "CAPABILITY": a code is
+ * capability-class because somebody decided it is, and a `startsWith` would
+ * silently enrol whatever a future vendor happens to name that way.
+ */
+const CAPABILITY_LIMITED_CODES: ReadonlySet<string> = new Set([
+  "CAPABILITY_MISSING",
+  "CAPABILITY_NOT_AVAILABLE",
+  "SCOPE_MISSING",
+  "PROTECTED_CUSTOMER_DATA_DENIED",
+]);
+
+/** What a CAPABILITY_LIMITED answer carries beyond the reason: which dataset
+ *  the vendor withheld, and the connector's own text for what would grant it.
+ *  Both come off the thrown error — this module never composes vendor copy. */
+export interface CapabilityLimit {
+  dataset: string;
+  remediation: string;
 }
+
+/**
+ * Pull the withheld dataset + remediation off a capability-class error.
+ *
+ * `dataset` is the field the connector already names it with — Shopify's scope
+ * error says `dataset`, Mailchimp's and HubSpot's say `resource` — falling back
+ * to the read that was refused, so the caller is never handed an empty string.
+ *
+ * `remediation` prefers an explicit `remediation` field and otherwise takes the
+ * message, which every capability error builds to be read by an owner. Neither
+ * field can carry a credential: each of these classes documents that it reports
+ * only the rejection CLASS, never the offered value (rule 19).
+ */
+function capabilityLimitFrom(err: unknown, readName: string): CapabilityLimit {
+  const e = (err ?? {}) as { dataset?: unknown; resource?: unknown; remediation?: unknown };
+  const named = typeof e.dataset === "string" ? e.dataset : e.resource;
+  return {
+    dataset: typeof named === "string" && named.length > 0 ? named : readName,
+    remediation:
+      typeof e.remediation === "string" && e.remediation.length > 0
+        ? e.remediation
+        : err instanceof Error
+          ? err.message
+          : String(err),
+  };
+}
+
+/** Every ADR-041 guard throws its own class for this — five classes, one code
+ *  — because one package cannot export five `UnsafeBaseUrlError`s. */
+const UNSAFE_BASE_URL_CODE = "UNSAFE_BASE_URL";
 
 /**
  * Classify an error thrown while BUILDING a connector.
@@ -224,10 +327,16 @@ function cloudReasonFor(err: unknown): "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED
  * fault — the box never dialled anything. It degrades to ERP_NOT_CONNECTED so
  * the owner is told the connection needs fixing, and it is logged at error
  * level because, unlike a spent quota, somebody does have to act.
+ *
+ * WARP-2610 — on `code`, not on the class, for the same reason as above: this
+ * named `UnsafeBaseUrlError` (QuickBooks Online) and `UnsafeAscendBaseUrlError`
+ * only, so the Stripe, HubSpot, Mailchimp and Shopify guards reported a refused
+ * host as a generic ERROR instead of a connection that needs fixing.
  */
 function reasonForConnectorError(err: unknown, phase: string): string {
-  if (err instanceof ConnectorBlockedError) return "ERP_NOT_CONNECTED";
-  if (err instanceof UnsafeBaseUrlError || err instanceof UnsafeAscendBaseUrlError) {
+  const code = connectorErrorCode(err);
+  if (code === CONNECTOR_BLOCKED_CODE) return "ERP_NOT_CONNECTED";
+  if (code === UNSAFE_BASE_URL_CODE) {
     logger.error({ err, phase }, "erp connection names a destination we refuse to dial");
     return "ERP_NOT_CONNECTED";
   }
@@ -287,6 +396,8 @@ export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
 export interface DatasetQueryResult {
   connected: boolean;
   reason?: string;
+  /** Present only with `reason: "CAPABILITY_LIMITED"` (WARP-2610). */
+  capability?: CapabilityLimit;
   dataset: string;
   /** The provider the rows came from, or null when nothing is configured.
    *  Named so the assistant can attribute an answer to an account. */
@@ -478,7 +589,13 @@ export function createErpService(
     conn: ConnRow | null,
     name: string,
     params: Record<string, unknown>,
-  ): Promise<{ connected: boolean; reason?: string; rows: unknown[] }> {
+  ): Promise<{
+    connected: boolean;
+    reason?: string;
+    /** Present only alongside `reason: "CAPABILITY_LIMITED"` (WARP-2610). */
+    capability?: CapabilityLimit;
+    rows: unknown[];
+  }> {
     if (!conn) return { connected: false, reason: "NOT_CONFIGURED", rows: [] };
     // WARP-2137 — construction is INSIDE the try. It can throw: a cloud row
     // naming a base URL we refuse to send a token to throws UnsafeBaseUrlError,
@@ -521,15 +638,31 @@ export function createErpService(
       if (err instanceof DatasetNotServedError) {
         return { connected: true, reason: "DATASET_NOT_SERVED", rows: [] };
       }
-      if (err instanceof ConnectorBlockedError) {
+      const code = connectorErrorCode(err);
+      if (code === CONNECTOR_BLOCKED_CODE) {
         return { connected: false, reason: "ERP_NOT_CONNECTED", rows: [] };
+      }
+      // WARP-2610 — a capability gap is the THIRD rendering, and the one this
+      // ticket exists for: the connection is healthy, one dataset is refused,
+      // and neither re-pasting a credential nor waiting changes it. Reported
+      // with the connector's own remediation so the owner is told the thing
+      // they can act on (the plan, the scope) rather than sent to fix a
+      // working connection. Never `[]` — ADR-041's hard rule.
+      if (code !== undefined && CAPABILITY_LIMITED_CODES.has(code)) {
+        const capability = capabilityLimitFrom(err, name);
+        // Not error level, for the same reason DATASET_NOT_SERVED is not.
+        logger.info(
+          { query: name, reason: "CAPABILITY_LIMITED", code, dataset: capability.dataset },
+          "erp read stopped by a vendor capability limit",
+        );
+        return { connected: true, reason: "CAPABILITY_LIMITED", capability, rows: [] };
       }
       // WARP-2137 — the two cloud-track outcomes that are NOT faults and must
       // not collapse into the generic ERROR branch. Each needs its own
       // owner-facing state, because the actions they call for are opposite:
       // one resolves itself next period, the other never resolves without a
       // person.
-      const cloudReason = cloudReasonFor(err);
+      const cloudReason = code === undefined ? undefined : READ_REASON_BY_CODE[code];
       if (cloudReason) {
         // Deliberately not logged at error level, for the same reason
         // DATASET_NOT_SERVED is not: an operator scanning red logs would find a
@@ -550,7 +683,13 @@ export function createErpService(
       const conn = await eaglesoftRow();
       const r = await runReadOrBlocked(conn, "get_schedule_today", scheduleDayBounds(date));
       await audit(conn, user.id, "read:schedule", { date });
-      return { connected: r.connected, reason: r.reason, date, items: r.rows };
+      return {
+        connected: r.connected,
+        reason: r.reason,
+        capability: r.capability,
+        date,
+        items: r.rows,
+      };
     },
 
     async searchPatients({ query }, user) {
@@ -566,7 +705,7 @@ export function createErpService(
       // The raw search term can contain a name → keep it OUT of the audit scope
       // (redaction contract, review D-1). Length only.
       await audit(conn, user.id, "read:patients", { termLength: term.length });
-      return { connected: r.connected, reason: r.reason, items: r.rows };
+      return { connected: r.connected, reason: r.reason, capability: r.capability, items: r.rows };
     },
 
     async getPatient(patientId, user) {
@@ -576,7 +715,7 @@ export function createErpService(
       // patientId is an internal key (not a name/DOB) → allowed in scope (§14).
       await audit(conn, user.id, "read:patient", { patientId });
       const patient = r.connected && r.rows.length > 0 ? r.rows[0] : null;
-      return { connected: r.connected, reason: r.reason, patient };
+      return { connected: r.connected, reason: r.reason, capability: r.capability, patient };
     },
 
     async getArSummary(user) {
@@ -591,6 +730,7 @@ export function createErpService(
       return {
         connected: r.connected,
         reason: r.reason,
+        capability: r.capability,
         totalBalance: row?.total_balance ?? null,
         accountCount: row?.account_count ?? null,
       };
@@ -626,6 +766,11 @@ export function createErpService(
       return {
         connected: r.connected,
         reason: r.reason,
+        // WARP-2610 — the withheld resource + the connector's remediation, so
+        // the caller (and the chat tool that forwards this body verbatim) can
+        // say WHICH dataset the plan or scope withholds and what would grant
+        // it. Absent for every other reason; `undefined` never reaches JSON.
+        capability: r.capability,
         dataset,
         provider: conn?.provider ?? null,
         rows: r.rows,
@@ -637,7 +782,7 @@ export function createErpService(
       const conn = await eaglesoftRow();
       const r = await runReadOrBlocked(conn, "get_recall_due", {});
       await audit(conn, user.id, "read:recall-due", {});
-      return { connected: r.connected, reason: r.reason, items: r.rows };
+      return { connected: r.connected, reason: r.reason, capability: r.capability, items: r.rows };
     },
 
     async createWriteRequest({ command, params }, user) {

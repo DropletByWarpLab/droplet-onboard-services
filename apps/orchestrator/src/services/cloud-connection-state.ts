@@ -113,13 +113,26 @@ export const INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE: Readonly<
  * dialing. That is "not configured", not "broken" and emphatically not
  * "connected" — and it is the one probe outcome that is about the box's own
  * state rather than the vendor's answer.
+ *
+ * Exported as of WARP-2610: `erp.service.ts` tests the same code at both of its
+ * read-path classifiers, and two modules hardcoding one literal is exactly the
+ * drift this ticket removed everywhere else.
  */
-const BLOCKED_CODE = "CONNECTOR_BLOCKED";
+export const CONNECTOR_BLOCKED_CODE = "CONNECTOR_BLOCKED";
 
-/** Read a connector error's `code` without trusting its class identity across
- *  a package boundary. Returns undefined for anything that is not shaped like
- *  one, which the caller treats as an unclassifiable failure. */
-function errorCode(err: unknown): string | undefined {
+/**
+ * Read a connector error's `code` without trusting its class identity across
+ * a package boundary. Returns undefined for anything that is not shaped like
+ * one, which the caller treats as an unclassifiable failure.
+ *
+ * Exported as of WARP-2610 so `erp.service.ts`'s two read-path classifiers key
+ * on the same field this one does. They were `instanceof` chains over
+ * per-vendor classes and had silently fallen five vendors behind: a HubSpot,
+ * Mailchimp, Stripe or Shopify reauth landed in the generic ERROR branch while
+ * the identically-coded QuickBooks one did not. One reader, one rule — a sixth
+ * vendor is classified by both sites the day it lands.
+ */
+export function connectorErrorCode(err: unknown): string | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const code = (err as { code?: unknown }).code;
   return typeof code === "string" ? code : undefined;
@@ -135,9 +148,9 @@ function errorCode(err: unknown): string | undefined {
  * there is no branch in this function that can return `CONNECTED`.
  */
 export function integrationStatusForHealthFailure(err: unknown): IntegrationStatusName {
-  const code = errorCode(err);
+  const code = connectorErrorCode(err);
   if (code === undefined) return "ERROR";
-  if (code === BLOCKED_CODE) return "NOT_CONFIGURED";
+  if (code === CONNECTOR_BLOCKED_CODE) return "NOT_CONFIGURED";
   return INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE[code] ?? "ERROR";
 }
 
