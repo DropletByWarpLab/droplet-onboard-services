@@ -102,6 +102,35 @@ function sseText(res: { body?: unknown; text?: string }): string {
   return typeof res.body === "string" ? res.body : (res.text ?? "");
 }
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import { DEFAULT_CONTEXT_WINDOW } from "../services/context-budget.service.js";
+import { loadIdentityPrompt } from "../services/identity-prompt.js";
+import { OUTPUT_RESERVE } from "../services/prompt-budget.consts.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — the shared in-memory double from src/__tests__/setup.ts has no
+// `assistantPersona`, `businessProfile` or `workspace` model, so both block
+// composers threw on every turn here and the route's fail-open swallowed it.
+// WARP-2655 reads the context-budget drops off the same spy.
+const composers = guardComposerFailOpen();
+
+/** The shipped budget ceiling, derived rather than restated: the route passes
+ *  `config.OLLAMA_CONTEXT_LENGTH` (16384, the docker-compose default that
+ *  `DEFAULT_CONTEXT_WINDOW` mirrors) and the estimator reserves `OUTPUT_RESERVE`
+ *  for the answer. 15360 today; a window change moves the assertions with it. */
+const THRESHOLD_TOKENS = DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE;
+
+/** The oversized user message the two budget cases below send. Their token
+ *  floor is this string alone (`CHARS_PER_TOKEN` = 4 in the estimator), which
+ *  is what lets them assert a RANGE instead of a literal that a one-word
+ *  tool-description edit would flake. */
+const OVERSIZED_MESSAGE_CHARS = 70_000;
+const OVERSIZED_MESSAGE_TOKENS = OVERSIZED_MESSAGE_CHARS / 4;
+
 type SseFrame = { event: string; data: Record<string, unknown> };
 
 // Parse an SSE response body into a sequence of {event, data} frames.
@@ -157,8 +186,52 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       get: (target, prop) =>
         prop === "user" ? userStub : Reflect.get(target, prop),
     });
-    app = createApp(prismaForApp);
+    // WARP-2652 — and the three delegates the two prompt-block composers
+    // need, which the shared double has no model for at all.
+    app = createApp(withPromptBlockDelegates(prismaForApp));
   }, 30_000);
+
+  /** WARP-2652 — the outbound gateway payload's system message. The route
+   *  hands the assembled prompt to the agent loop, which serializes it into
+   *  the ai-gateway request; capturing it there is the honest read of what a
+   *  turn in this suite actually sends. */
+  function captureSystemPrompt(): () => string {
+    let sys = "";
+    mockChat.mockImplementationOnce(
+      async (req: { messages?: { role: string; content: unknown }[] }) => {
+        const first = req.messages?.[0];
+        sys = first && typeof first.content === "string" ? first.content : "";
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { role: "assistant", content: "ok" } }],
+          }),
+        };
+      },
+    );
+    return () => sys;
+  }
+
+  // WARP-2652 — the fixture floor. Not a test of the persona or business
+  // feature (llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts
+  // own those); it is the statement that the turns measured in the rest of
+  // this file run against the prompt the product assembles, blocks included.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const systemPrompt = captureSystemPrompt();
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "admin")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      });
+
+    expect(res.status).toBe(200);
+    expect(systemPrompt()).toContain(PERSONA_BLOCK_PREFIX);
+    expect(systemPrompt()).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
 
   it("non-streaming returns AgentResult shape (assistant message + trace)", async () => {
     mockChat.mockResolvedValueOnce({
@@ -265,28 +338,42 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     // WARP-854 gate required an EMPTY trace to rewrite, so this exact case
     // — a non-empty trace, blank final content, stop_reason context_budget
     // — used to persist as a silent "completed" empty bubble.
+    // WARP-2655 — capture the system message actually put on the wire, so the
+    // drop below is asserted on the prompt the model would have received and
+    // not only on the warn that announced it.
+    let systemPrompt = "";
     mockChat
-      .mockResolvedValueOnce({
-        // iter 0 — the model dispatches a real, advertised tool.
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call_budget",
-                    type: "function",
-                    function: { name: "list_network_devices", arguments: "{}" },
+      .mockImplementationOnce(
+        async (req: { messages?: { role: string; content: unknown }[] }) => {
+          const first = req.messages?.[0];
+          systemPrompt =
+            first && typeof first.content === "string" ? first.content : "";
+          return {
+            // iter 0 — the model dispatches a real, advertised tool.
+            ok: true,
+            json: async () => ({
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_budget",
+                        type: "function",
+                        function: {
+                          name: "list_network_devices",
+                          arguments: "{}",
+                        },
+                      },
+                    ],
                   },
-                ],
-              },
-            },
-          ],
-        }),
-      })
+                },
+              ],
+            }),
+          };
+        },
+      )
       .mockResolvedValueOnce({
         // iter 1 — the §2 guard has already fired (finalize pass: zero
         // tools), and the model answers with nothing.
@@ -303,15 +390,116 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         messages: [
           // Comfortably over the default 16384-window guard threshold
           // (~55k chars) on its own, so the guard fires on iteration 1
-          // regardless of the (small, fail-open in this test harness)
-          // system-prompt overhead.
-          { role: "user", content: "x".repeat(70000) },
+          // regardless of the system-prompt overhead.
+          { role: "user", content: "x".repeat(OVERSIZED_MESSAGE_CHARS) },
         ],
       });
 
     expect(res.status).toBe(200);
     expect(res.body.stop_reason).toBe("error");
     expect(res.body.error).toContain("empty_completion");
+
+    // ── WARP-2655: the degradation this turn causes, pinned ──────────────
+    //
+    // This assertion block exists because the NUMBER MOVED and nothing said
+    // so. Until WARP-2652 restored the two prompt blocks to this suite's
+    // fixture, both composers threw into the route's fail-open and this turn
+    // estimated UNDER threshold — the degradation path never ran, and the
+    // case asserted a budget outcome the real prompt would not have produced.
+    // With an honest prompt it overshoots and `degradeToFit` drops a block.
+    // Pin that, or the next fixture change hides it again just as silently.
+    const drops = composers.degradations();
+    expect(drops.map((d) => d.block)).toEqual(["persona"]);
+
+    const [personaDrop] = drops;
+    expect(personaDrop.thresholdTokens).toBe(THRESHOLD_TOKENS);
+    // A RANGE, not the literal 17859: the floor is the oversized message
+    // itself (17,500 tokens), which no prompt-text edit can move, and the
+    // ceiling leaves room for the fixed blocks to grow by ~5,000 chars before
+    // this needs revisiting. `estimatedTokens` is the estimate AFTER the drop,
+    // and it is still ~2.5k OVER threshold — dropping persona does not save
+    // this turn, it is simply everything the gate is allowed to do.
+    expect(personaDrop.estimatedTokens).toBeGreaterThan(THRESHOLD_TOKENS);
+    expect(personaDrop.estimatedTokens).toBeGreaterThanOrEqual(
+      OVERSIZED_MESSAGE_TOKENS,
+    );
+    expect(personaDrop.estimatedTokens).toBeLessThan(
+      OVERSIZED_MESSAGE_TOKENS + 1_250,
+    );
+
+    // The drop is visible on the wire, not just in the log: the persona block
+    // is gone from the system message the gateway was handed.
+    expect(systemPrompt).not.toContain(PERSONA_BLOCK_PREFIX);
+
+    // The business block is absent too — but it was never a DROP CANDIDATE on
+    // this turn, and the difference matters. This request carries no
+    // `x-test-role`, so `businessViewForRole(undefined)` is "none"
+    // (`business-profile.service.ts:102-106`) and the block composes to "".
+    // `degradeToFit` skips a zero-length block, which is why only one
+    // degradation fired above. The sibling case below drives a role-bearing
+    // turn so the full drop ORDER is pinned somewhere.
+    expect(systemPrompt).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    expect(drops.some((d) => d.block === "business")).toBe(false);
+  });
+
+  it("degrades a role-bearing overflow turn business-block-first, then persona (WARP-2655)", async () => {
+    // The same overflow as above with a role attached, which is the shape
+    // every production turn has (`authMiddleware` never leaves `role`
+    // undefined). Both optional blocks are now non-empty, so this is the one
+    // route-level case that observes `degradeToFit`'s RANK ORDER end to end:
+    // business (rank 1) before persona (rank 2), identity never.
+    // `context-budget.service.test.ts` pins the order on the pure function;
+    // this pins that the route feeds it blocks in a state where the order is
+    // actually reachable.
+    let systemPrompt = "";
+    mockChat
+      .mockImplementationOnce(
+        async (req: { messages?: { role: string; content: unknown }[] }) => {
+          const first = req.messages?.[0];
+          systemPrompt =
+            first && typeof first.content === "string" ? first.content : "";
+          return {
+            ok: true,
+            json: async () => ({
+              choices: [{ message: { role: "assistant", content: "" } }],
+            }),
+          };
+        },
+      );
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "admin")
+      .send({
+        model: "ollama/qwen3",
+        messages: [
+          { role: "user", content: "x".repeat(OVERSIZED_MESSAGE_CHARS) },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+
+    const drops = composers.degradations();
+    expect(drops.map((d) => d.block)).toEqual(["business", "persona"]);
+    // Rank 1 re-estimates before rank 2 runs, so the second reading is the
+    // smaller one — the sequence is monotonically shrinking, which is the
+    // property that makes the order observable at all.
+    expect(drops[0].estimatedTokens).toBeGreaterThan(drops[1].estimatedTokens);
+    for (const d of drops) {
+      expect(d.thresholdTokens).toBe(THRESHOLD_TOKENS);
+      expect(d.estimatedTokens).toBeGreaterThan(THRESHOLD_TOKENS);
+    }
+
+    // Both optional blocks gone from the wire, and the never-dropped identity
+    // still leads the prompt — `degradeToFit` is only ever allowed to take the
+    // two optional blocks, so an overflow must not cost the safety/honesty
+    // layer. `loadIdentityPrompt()` rather than a literal: it resolves to the
+    // same string the route used (the fallback here, since
+    // `data/droplet-identity.md` is absent in a test tree, and the real file
+    // on a box).
+    expect(systemPrompt).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    expect(systemPrompt).not.toContain(PERSONA_BLOCK_PREFIX);
+    expect(systemPrompt).toContain(loadIdentityPrompt());
   });
 
   it("non-streaming rewrites a blank model_done even with prior tool activity (WARP-1479)", async () => {

@@ -144,6 +144,13 @@ import {
   effectiveAdvertisedToolNames,
   type SelectionMessage,
 } from "../services/tool-selection.service.js";
+import { guardComposerFailOpen } from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — this file's persona and business fixtures are already correct
+// (it is the one chat-route suite that always rendered both blocks). The guard
+// keeps it that way; the single case that WANTS the profile read to throw
+// declares it.
+const composers = guardComposerFailOpen();
 
 /** The live interview conversation id — must be a UUID (chat zod schema). */
 const INTERVIEW_ID = "7b9e4a80-33f1-4bfa-9c65-0d1f6f0e2a11";
@@ -385,6 +392,9 @@ describe("interview conductor overlay (WARP-1121 §9.3)", () => {
   });
 
   it("fail-opens to a normal chat when the overlay probe throws", async () => {
+    // WARP-2652 — deliberate: `profileThrows` makes the SAME read the business
+    // composer uses throw, so the business fail-open fires on purpose here.
+    composers.expectFailOpen("business");
     const app = buildApp(createPrismaMock({ profileThrows: true }));
     const res = await chat(app, { conversationId: INTERVIEW_ID });
     expect(res.status).toBe(200);
