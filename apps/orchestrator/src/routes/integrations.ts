@@ -34,6 +34,7 @@ import {
   type ConnectInput,
 } from "../services/integrations.service.js";
 import { ErpError } from "../services/erp-error.js";
+import { isConcurrencyConflict } from "../services/role-mutation-guard.service.js";
 
 type AuthedRequest = { user?: { id?: string; role?: string } };
 
@@ -41,6 +42,24 @@ type AuthedRequest = { user?: { id?: string; role?: string } };
 function handleErpError(res: Response, err: unknown): boolean {
   if (err instanceof ErpError) {
     res.status(err.status).json(err.toJSON());
+    return true;
+  }
+  // `connect()`'s reconnect branch and `disconnect()` both run SERIALIZABLE
+  // transactions and neither retries. Postgres answers a genuine write-write
+  // race with P2034, and an optimistic-write miss arrives as P2025; both mean
+  // "nothing was applied, retry", which is a 409 — not the redacted 500 an
+  // unmapped Prisma error becomes. Every other SERIALIZABLE call site
+  // (routes/people.ts, routes/auth.ts) already maps it this way, and a
+  // double-clicked Disconnect is the ordinary way to reach it.
+  //
+  // It lives in the shared funnel so every lifecycle route inherits it at
+  // once. The body is this route's own `{ error, code }` shape rather than
+  // `RoleMutationRefusedError`, whose copy is about changing a PERSON.
+  if (isConcurrencyConflict(err)) {
+    res.status(409).json({
+      error: "Another change to this integration is still in flight. Nothing was applied — try again.",
+      code: "CONCURRENT_MUTATION",
+    });
     return true;
   }
   return false;
