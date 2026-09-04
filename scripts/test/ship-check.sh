@@ -511,9 +511,19 @@ run_check_compose_config() {
     # double-quoted printf, so bash ran `compose config` as a command
     # substitution every time this branch was taken — a gate reporting
     # "docker is missing" was shelling out to a docker subcommand to
-    # compose its own message. Single quotes, no substitution.
-    printf '  %sFAIL%s  %s — docker not on PATH (required for "docker compose config")\n' \
-      "$_RED" "$_RESET" "$label"
+    # compose its own message.
+    #
+    # WARP-2620: single-quoting the whole FORMAT string fixed that but broke
+    # the colour. printf expands backslash escapes only in the FORMAT string,
+    # and `_RED` is the literal six characters `\033[0;31m` — so
+    # passing it as a %s ARGUMENT printed those characters verbatim instead of
+    # colouring anything. Invisible in CI, where `_RED=''` because stdout is
+    # not a tty, and a literal `\033[0;31m` in front of every FAIL banner on an
+    # operator's terminal. So: the colours go back in the format string, and
+    # the prose that carried the backticks moves out into a single-quoted
+    # ARGUMENT, where nothing it ever grows can be substituted.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s\n" "$label" \
+      'docker not on PATH (required for "docker compose config")'
     _record_result "$label" fail
     return 1
   fi
@@ -544,8 +554,11 @@ run_check_compose_config() {
     # missing at exec time — produces the same banner otherwise, which is
     # what let a self-test assert "compose-config failed" and call that proof
     # the planted YAML break was caught.
-    printf '  %sFAIL%s  %s — "docker compose config" rejected %s\n' \
-      "$_RED" "$_RESET" "$label" "${compose#"$REPO_ROOT"/}"
+    #
+    # WARP-2620: colours in the format string, prose in a single-quoted
+    # argument — see the `docker not on PATH` branch above for why both.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s %s\n" \
+      "$label" '"docker compose config" rejected' "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
     _record_result "$label" fail
