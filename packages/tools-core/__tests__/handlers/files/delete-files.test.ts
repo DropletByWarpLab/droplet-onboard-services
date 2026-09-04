@@ -337,4 +337,26 @@ describe("delete_files", () => {
     await deleteFiles.handler({ paths: ["/Downloads/a.tmp"] }, ctxWith({ get: treeGet(TREE), del: okDelete(), post }));
     expect(post).not.toHaveBeenCalled();
   });
+
+  // PR #1985 review: a bare "%" is a filename character, not an encoding
+  // error. Until _paths.ts learned that, this one name aborted the WHOLE
+  // batch — the other paths were never attempted.
+  it("deletes a file whose name holds a bare %, alongside the rest of the batch", async () => {
+    const del = okDelete();
+    const r = await deleteFiles.handler(
+      { paths: ["/Downloads/50% Off Report.pdf", "/Downloads/a.tmp"] },
+      ctxWith({
+        get: treeGet({ "/Downloads": [{ path: "/Downloads/50% Off Report.pdf" }, { path: "/Downloads/a.tmp" }] }),
+        del,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.data as any).deleted).toEqual(["/Downloads/50% Off Report.pdf", "/Downloads/a.tmp"]);
+    expect(del.mock.calls.map((c) => c[0])).toEqual([
+      `/?path=${encodeURIComponent("/Downloads/50% Off Report.pdf")}`,
+      `/?path=${encodeURIComponent("/Downloads/a.tmp")}`,
+    ]);
+  });
+
 });

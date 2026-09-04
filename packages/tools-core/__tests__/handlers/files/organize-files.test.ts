@@ -397,4 +397,21 @@ describe("organize_files", () => {
     await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf(DOWNLOADS), post: okPost(), del }));
     expect(del).not.toHaveBeenCalled();
   });
+
+  // PR #1985 review: the destination is re-validated before the move, and a
+  // bare "%" in the NAME used to fail that check — the file was skipped with
+  // a reason that blamed a benign filename.
+  it("moves a file whose name holds a bare % instead of skipping it as unsafe", async () => {
+    const post = okPost();
+    const r = await organizeFiles.handler(
+      { path: "/Downloads" },
+      ctxWith({ get: listingOf([row("/Downloads/50% Off Report.pdf", { mimeType: "application/pdf" })]), post }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.data as Record<string, any>;
+    expect(d.moved).toEqual([{ from: "/Downloads/50% Off Report.pdf", to: "/Downloads/Documents/50% Off Report.pdf" }]);
+    expect(d.skipped).toEqual([]);
+  });
+
 });
