@@ -1700,13 +1700,37 @@ model PendingOverlayEnrollment {
   @@index([wgPublicKey])
 }
 
+/// WARP-2587 — the notification vocabulary, as an enum rather than a comment.
+///
+/// These four labels were already the whole vocabulary: notifications.service
+/// declared them as a TS union, routes/notifications.ts as a zod enum, and
+/// tools-core's send-notification handler hardcodes 'ai'. The COLUMN was a
+/// free String with the list in a `//` comment above it — exactly the
+/// string-soup ContextPin's docstring cites CLAUDE.md's no-guessing rule
+/// against, and one raw insert away from a fifth label nothing renders.
+///
+/// Lowercase labels on purpose: they are the WIRE contract. The MQTT toast
+/// payload, the dashboard's NotificationToaster union and the POST
+/// /notifications/send body all carry these strings, so renaming a label is a
+/// dashboard change and a mobile change, not a migration.
+///
+/// Adding a label later is NOT free: `ALTER TYPE ... ADD VALUE` cannot be used
+/// in the same transaction that adds it, so it needs its own migration ahead
+/// of any migration that writes it (see baseline entry 1 in
+/// schema-drift-baseline.sql for the ToolRunStatus instance of exactly this).
+enum NotificationKind {
+  reminder
+  event
+  system
+  ai
+}
+
 // Append-only log of every notification dispatched. Powers the in-app
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {
-  id          String    @id @default(cuid())
+  id          String           @id @default(cuid())
   userId      String
-  // "reminder" | "event" | "system" | "ai"
-  kind        String
+  kind        NotificationKind
   title       String
   body        String?
   // Comma-separated channels actually attempted: "toast,push"
@@ -4269,21 +4293,48 @@ enum PmActivityVerb {
   module_removed
 }
 
+/// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.
+///
+/// An EXPLICIT enum, not a nullable `notifiedAt` claimed on IS NULL. A
+/// two-state timestamp cannot express "considered and correctly declined", so
+/// every row the sweep legitimately passes over — an `updated` verb, a CRM
+/// NOTE, an assignment whose only recipient is the person who made it — would
+/// sit at NULL forever and be rescanned every 60s for the life of the row.
+/// `not_needed` makes "skipped" a decision somebody wrote down. Copies
+/// TeamChatMeetingReminderStatus, which solved the same problem for the
+/// meeting sweep.
+enum NotifyStatus {
+  pending
+  sent
+  not_needed
+}
+
 /// Append-only activity/history feed for a work item. `actorId` null = system /
 /// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
+///
+/// WARP-2587: this table is ALSO the notification queue. There is no separate
+/// event table because there does not need to be one — these rows are already
+/// written inside the same transaction as the mutation they describe, and
+/// already carry the actor and the diff. `notifyStatus` is the claim;
+/// `notifiedAt` is an audit timestamp pinned to it by
+/// `PmActivity_notifiedAt_matches_status`, a CHECK in the migration (Prisma
+/// cannot express it — the CrmActivity_subject_exactly_one precedent).
 model PmActivity {
-  id         String         @id @default(uuid())
-  workItemId String
-  workItem   PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
-  actorId    String?
-  verb       PmActivityVerb
-  field      String?
-  oldValue   String?
-  newValue   String?
-  createdAt  DateTime       @default(now())
+  id           String         @id @default(uuid())
+  workItemId   String
+  workItem     PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  actorId      String?
+  verb         PmActivityVerb
+  field        String?
+  oldValue     String?
+  newValue     String?
+  notifyStatus NotifyStatus   @default(pending)
+  notifiedAt   DateTime?
+  createdAt    DateTime       @default(now())
 
   @@index([workItemId, createdAt])
+  @@index([notifyStatus, createdAt])
 }
 
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations
@@ -6397,6 +6448,14 @@ model CrmActivity {
   externalSystem String?
   externalId     String?
 
+  /// WARP-2587 — the notify claim (see PmActivity for why it is an enum and
+  /// not an IS-NULL over `notifiedAt`). Only a STAGE_CHANGE whose destination
+  /// stage has kind WON or LOST is ever notified; every other row reaches
+  /// `not_needed` on its first sweep, so a connector backfill of 10,000
+  /// SYNCED rows drains to terminal instead of being rescanned forever.
+  notifyStatus NotifyStatus @default(pending)
+  notifiedAt   DateTime?
+
   createdAt DateTime @default(now())
 
   @@unique([externalSystem, externalId])
@@ -6414,4 +6473,11 @@ model CrmActivity {
   @@index([emailMessageId])
   @@index([calendarEventId])
   @@index([workItemId])
+
+  /// createdAt, NOT occurredAt — unlike every index above it. `occurredAt` is
+  /// when the interaction HAPPENED and is caller-supplied: a connector
+  /// backdates it and a MEETING can carry a future one, and a sweep gated on a
+  /// future occurredAt would leave that row pending forever. `createdAt` is
+  /// the row-write clock and is monotone.
+  @@index([notifyStatus, createdAt])
 }
