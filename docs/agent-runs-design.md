@@ -190,20 +190,63 @@ resume needs both.
 | `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
 | `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
 
-## 6. Tool-result summarisation (WARP-2178) — scoped
+## 6. Tool-result summarisation (WARP-2178)
 
-Context is the real ceiling, not durability. `OLLAMA_CONTEXT_LENGTH` is 16384
-and `context-budget.service.ts` has no history compaction; a run's message
-array grows monotonically with every tool result. Planned shape, borrowed from
-Strands' conversation managers: a tool result over a measured byte threshold is
-reduced before it is appended — head and tail kept around a
-`<truncated chars="N"/>` marker, ids/paths/counts preserved so the next
-iteration can chain — while the **full payload stays in `trace`**. Tool-use /
-tool-result pairs are never broken. Extend `context-budget.service.ts`'s drop
-ladder; do not add a second sizing path. Resumed messages are already reduced,
-so a resume is never more expensive than the original. This is also what lets
-`maxIter` rise above the chat cap: the worker can then drive the loop in
-segments, each resumed from the checkpoint.
+Context is the real ceiling, not durability: `OLLAMA_CONTEXT_LENGTH` is
+16384 and a run's message array grows with every tool result. Most of the
+mechanism this ticket asks for already existed when it was written, and this
+section says which half was there and which half landed here.
+
+**Already there (WARP-2203, `tool-result-bounding.ts`).** Every tool result
+over `MODEL_TOOL_RESULT_CAP_CHARS` (8000) is shortened for the model by a
+shape-driven reducer that keeps the emitted payload valid JSON, keeps paging
+cursors arithmetically honest or deletes them, and marks what was cut
+(`_orchestrator_truncation`, naming the tool and the reductions). The **full
+payload stays in `trace` and on the SSE stream**; only the `role: "tool"`
+message the model carries is shortened. The in-loop context guard (agent
+budgets spec §2) finalises a turn with `stop_reason: "context_budget"` when
+the transcript nears `window − OUTPUT_RESERVE − ITERATION_MIN_HEADROOM`.
+Both apply to interactive chat and to runs alike, because runs drive the same
+loop. And because the checkpoint stores the bounded conversation, a resumed
+run is never more expensive than the original at the same iteration
+(pinned in `agent-run-worker.test.ts`).
+
+**Landed here.**
+
+- **The cap is a knob:** `AGENT_TOOL_RESULT_CAP_CHARS` (default 8000, floor
+  1000, ceiling 8000 because `ITERATION_MIN_HEADROOM` and the gateway's
+  32,000-char message cap are calibrated against it). `boundToolResultForModel`
+  takes it as a parameter; the loop passes the configured value.
+- **Identifier fields are never cut.** `IDENTIFIER_KEYS` (`id`, `path`,
+  `name`, `url`, `href`, `key`, `uuid`, `slug`) and the conventional suffixes
+  (`_id`, `Id`, `_path`, `Path`, `_key`, `Key`, `_url`, `Url`) are excluded
+  from the reducer's string sites at any depth, so a shortened `list_files`
+  reply still lets the next iteration `read_file` a real path
+  (`tool-result-bounding.identifiers.test.ts`, including end to end through
+  the loop). A payload made only of identifiers takes the refusal rail — the
+  honest outcome, and logged.
+- **The context guard warns.** `agent_context_budget_reached` names the
+  iteration, the estimate, the threshold, the window and, for a run, the
+  `agent_run_id`. A run that hits the window ends with `stopReason:
+  "context_budget"` on its row; it never fails silently.
+- **The measurement is instrumented.** Every dispatch logs
+  `agent_tool_result_size` at debug level (`tool`, `result_chars`,
+  `bounded_chars`, `reduced`; never the payload). The threshold is chosen from
+  that distribution: run the staging suite with the orchestrator at debug
+  level and aggregate by `tool`. The lab box was unreachable when this landed,
+  so the numbers are recorded on WARP-2178 as they are gathered; until then
+  the default stays at the historical value.
+
+**Not done, deliberately.** History compaction (a sliding window or a
+summarising manager over *older* iterations, the Strands shape) is not built:
+the ACs are per-result, and with the cap at 8000 and the guard at 1536 tokens
+of headroom a 16K window carries roughly three to four full-size results
+alongside the prompt blocks. If the measured distribution shows results are
+small but numerous, compaction of older tool replies is the next lever, and
+it belongs in the same module as an extension of the ladder, not a second
+sizing path. Model-written summaries were rejected for now on the ticket's
+own grounds: an inference call per large result can cost more on CPU
+inference than the tokens it saves.
 
 ## 7. Tier-2 park-and-confirm (WARP-2179) — scoped
 

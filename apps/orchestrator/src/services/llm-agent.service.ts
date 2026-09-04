@@ -1584,14 +1584,28 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // transcript headroom at the 16k default window and cap every tool turn
     // at one iteration — the exact regression this comment exists to prevent
     // a future edit from reintroducing.
-    if (
-      iter > 0 &&
-      finalizeReason === null &&
-      toolChoice !== "none" &&
-      estimateTokensFromChars(JSON.stringify(messages).length) >
-        contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM
-    ) {
-      finalizeReason = "context_budget";
+    if (iter > 0 && finalizeReason === null && toolChoice !== "none") {
+      const estimatedTokens = estimateTokensFromChars(JSON.stringify(messages).length);
+      const thresholdTokens = contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM;
+      if (estimatedTokens > thresholdTokens) {
+        finalizeReason = "context_budget";
+        // WARP-2178 — a turn (or a durable run) that hits the window must
+        // never do so silently: name the iteration and the estimate, the
+        // same way context-budget.service.ts warns once per dropped block.
+        logger.warn(
+          {
+            turn_id: turnId,
+            iter,
+            estimated_tokens: estimatedTokens,
+            threshold_tokens: thresholdTokens,
+            context_window: contextWindow,
+            ...(req.toolCallContext?.agentRunId
+              ? { agent_run_id: req.toolCallContext.agentRunId }
+              : {}),
+          },
+          "agent_context_budget_reached",
+        );
+      }
     }
     if (finalizeReason !== null) {
       messages.push({
@@ -2466,10 +2480,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // The trace already holds `parsed` (line ~1974), the SSE event already
       // carried it (~2039) and citation extraction already ran (~2046), so
       // this step takes TEXT and returns TEXT and touches nothing else.
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: boundToolResultForModel(text, call.function.name, (refusal) => {
+      // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
+      // the historical 8000), so it can be set from a measured distribution.
+      const bounded = boundToolResultForModel(
+        text,
+        call.function.name,
+        (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
           // SSE already said `ok: true` and the trace holds the full payload,
           // while the model's history now carries none of it. Without this
@@ -2487,7 +2503,33 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             },
             "agent_tool_result_refused",
           );
-        }),
+        },
+        config.AGENT_TOOL_RESULT_CAP_CHARS,
+      );
+      // WARP-2178 — the per-tool result-size distribution, one line per
+      // dispatch at debug level (a chat turn must not pay an info line per
+      // tool). This is what the cap is meant to be chosen from: run the
+      // staging suite with LOG_LEVEL=debug and aggregate by `tool`. Sizes and
+      // names only — never the payload.
+      logger.debug(
+        {
+          tool: call.function.name,
+          tool_call_id: call.id,
+          turn_id: turnId,
+          iter,
+          result_chars: text.length,
+          bounded_chars: bounded.length,
+          reduced: bounded !== text,
+          ...(req.toolCallContext?.agentRunId
+            ? { agent_run_id: req.toolCallContext.agentRunId }
+            : {}),
+        },
+        "agent_tool_result_size",
+      );
+      messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: bounded,
       });
     }
 
