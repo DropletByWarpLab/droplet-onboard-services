@@ -215,9 +215,20 @@ export interface ComposerFailOpenGuard {
  * Call once at module top level. Installs a `console.warn` spy per test and
  * asserts, after each, that no composer fail-open fired.
  *
- * `vi.spyOn` WITHOUT `mockImplementation`: the spy calls through, so the
- * stderr line stays visible while it is also being asserted on — the guard
- * makes the noise fatal, it does not hide it.
+ * The spy still calls through, so the stderr line stays visible while it is
+ * also being asserted on — the guard makes the noise fatal, it does not hide
+ * it.
+ *
+ * WHAT IT RECORDS INTO, AND WHY NOT `spy.mock.calls` (#1955). The first cut
+ * read the spy's own call history, which `vi.clearAllMocks()` empties. That is
+ * not a hypothetical: `llm-chat.streaming-reasoning-leak.test.ts:297` calls it
+ * MID-TEST, after `runTurn(true)` has already driven a full chat turn — so a
+ * fixture regression firing on that first turn was erased before `afterEach`
+ * could read it, and that case ran UNGUARDED inside the very sweep meant to
+ * guarantee it could not. Recording into a plain array owned by this closure
+ * puts the evidence somewhere vitest's mock bookkeeping cannot reach, so the
+ * guarantee holds for every caller including ones not yet written.
+ * `prompt-block-fixtures.guard.test.ts` pins it.
  *
  * Scoped to the two composer signatures rather than "any warn": the route
  * warns legitimately elsewhere (memory-fact load failures, context-budget
@@ -230,26 +241,37 @@ export interface ComposerFailOpenGuard {
  * test files at once.
  */
 export function guardComposerFailOpen(): ComposerFailOpenGuard {
-  let warnSpy: ReturnType<typeof vi.spyOn> | null = null;
+  /** Every `console.warn` argument list of the CURRENT test, in order.
+   *  Owned by this closure, so no `vi.clearAllMocks()` can empty it. */
+  let seen: unknown[][] = [];
+  let restoreWarn: (() => void) | null = null;
   let allowed = new Set<ComposerBlock>();
 
   beforeEach(() => {
     allowed = new Set();
-    warnSpy = vi.spyOn(console, "warn");
+    seen = [];
+    // Captured BEFORE the spy replaces it, so the pass-through writes to
+    // whatever console.warn was — the real one, or an outer spy.
+    const original = console.warn;
+    const spy = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      seen.push(args);
+      original.apply(console, args);
+    });
+    restoreWarn = () => spy.mockRestore();
   });
 
   afterEach(() => {
-    const spy = warnSpy;
-    warnSpy = null;
-    if (!spy) return;
-    const swallowed = spy.mock.calls
+    const restore = restoreWarn;
+    restoreWarn = null;
+    if (!restore) return;
+    const swallowed = seen
       .map((args) => String(args[0]))
       .filter((first) =>
         (Object.keys(SIGNATURES) as ComposerBlock[]).some(
           (block) => !allowed.has(block) && first.includes(SIGNATURES[block]),
         ),
       );
-    spy.mockRestore();
+    restore();
     // Named so a failure reads as "this fixture stopped rendering a block",
     // not as an unexplained console assertion.
     expect(swallowed, "prompt block composer fail-open swallowed").toEqual([]);
@@ -260,7 +282,7 @@ export function guardComposerFailOpen(): ComposerFailOpenGuard {
       for (const block of blocks) allowed.add(block);
     },
     degradations: () =>
-      (warnSpy?.mock.calls ?? [])
+      seen
         .map((args) => asDegradation(args[1]))
         .filter((d): d is ContextBudgetDegradation => d !== null),
   };
