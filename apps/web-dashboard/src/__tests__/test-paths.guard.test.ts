@@ -96,6 +96,36 @@ describe("test path resolution is anchored to the owning file", () => {
   });
 
   /**
+   * The other door into the same failure. Anchoring the ROOT is only half the
+   * contract: `resolve(ROOT, relative)` happily walks back out of it, so
+   * `repoPath("../shared_brain/…")` — or any absolute argument — reads a tree
+   * this repo does not own and then asserts a source contract about it. That
+   * is exactly the walk-up failure the helper replaced, reached through a
+   * different door, and the `process.cwd(` gate above cannot see it because
+   * such a call contains no `process.cwd(`.
+   *
+   * Mutation: drop either containment check in
+   * `src/__tests__/helpers/test-paths.ts` → the matching case here goes green
+   * where it should throw.
+   */
+  it("refuses to resolve outside the tree it is anchored to", () => {
+    expect(() => repoPath("../something")).toThrow(/outside the monorepo root/);
+    expect(() => packagePath("../orchestrator/package.json")).toThrow(
+      /outside the web-dashboard package/,
+    );
+    // An absolute argument wins outright against `resolve()`'s base.
+    expect(() => packagePath(REPO_ROOT)).toThrow(/outside the web-dashboard package/);
+    // A sibling whose name merely starts with the root's is still outside it.
+    expect(() => repoPath(`${REPO_ROOT}-evil/x`)).toThrow(/outside the monorepo root/);
+
+    // The paths the suites actually ask for are unaffected.
+    expect(repoPath("docs/integrations")).toBe(join(REPO_ROOT, "docs", "integrations"));
+    expect(packagePath("src/app/globals.css")).toBe(
+      join(PACKAGE_ROOT, "src", "app", "globals.css"),
+    );
+  });
+
+  /**
    * Mutation: put `process.cwd()` back into any dashboard test, into a
    * `__tests__/helpers/` module, or into `__tests__/setup.ts` → red, naming
    * the file.
