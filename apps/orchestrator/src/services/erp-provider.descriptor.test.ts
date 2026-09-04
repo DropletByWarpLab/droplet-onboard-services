@@ -903,4 +903,40 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "xero",
     ]);
   });
+
+  it("gives every card its OWN slot — no two descriptors share a catalog.order", () => {
+    // Added after #1946, where this branch and the Shopify branch each claimed
+    // `order: 7` and the merge produced a hub that still rendered. It renders
+    // because `catalogDescriptors()` sorts on that number and `Array#sort` is
+    // stable, so a tie falls back to DECLARATION order — which means the two
+    // tied cards swap places the moment somebody moves a descriptor in the
+    // file, and the branch whose descriptor happens to be declared second
+    // silently loses the slot it asked for. The test above cannot see this: it
+    // pins the sequence, and the tie produces a sequence too.
+    //
+    // Mutation: set Xero's `catalog.order` back to 7 -> red here, naming both
+    // colliding ids, while the ordering test above stays green.
+    const bySlot = new Map<number, string[]>();
+    for (const d of catalogDescriptors()) {
+      const slot = d.catalog?.order;
+      if (slot === undefined) continue;
+      bySlot.set(slot, [...(bySlot.get(slot) ?? []), d.catalog?.id ?? d.id]);
+    }
+    const collisions = [...bySlot.entries()]
+      .filter(([, ids]) => ids.length > 1)
+      .map(([slot, ids]) => `order ${slot}: ${ids.join(" + ")}`);
+    expect(collisions).toEqual([]);
+  });
+
+  it("declares a catalog.order for every card, so no card falls back to slot 0", () => {
+    // `catalogDescriptors()` reads a missing order as `?? 0`, which puts an
+    // undeclared card on top of Eaglesoft rather than at the end. A new
+    // descriptor that simply forgets the field is the likeliest way that
+    // happens. Mutation: delete `order` from any catalog block -> red.
+    for (const d of catalogDescriptors()) {
+      expect(typeof d.catalog?.order, `${d.catalog?.id ?? d.id} has no catalog.order`).toBe(
+        "number",
+      );
+    }
+  });
 });
