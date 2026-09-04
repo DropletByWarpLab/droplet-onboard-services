@@ -4005,6 +4005,14 @@ model PmProject {
   icon        String?
   color       String?
   leadId      String?
+  /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
+  /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
+  /// one must never delete work, and a project with no department reads as
+  /// unassigned rather than as an error. A work item may override this per item
+  /// (`PmWorkItem.departmentId`). This is a DIMENSION, not a boundary — PM is
+  /// household-shared and every role still reads every project.
+  departmentId String?
+  department   Department? @relation("PmProjectDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   seqCounter  Int         @default(0)
   sortOrder   Int         @default(0)
   /// Canonical "is archived" signal (WARP-884) — explicit column, not
@@ -4048,6 +4056,10 @@ model PmProject {
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
+  /// WARP-845: an unindexed ON DELETE SET NULL FK makes the parent delete a
+  /// sequential scan of this table. Five such columns already shipped
+  /// unindexed on the CRM side; not repeating it here.
+  @@index([departmentId])
   /// "This customer's projects" is the customer record's own query.
   @@index([companyId, isArchived])
 }
@@ -4148,6 +4160,13 @@ model PmWorkItem {
   children        PmWorkItem[] @relation("PmSubIssues")
   cycleId         String?
   cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  /// ADR-045 §5.3 — the department that owns THIS item, OVERRIDING its
+  /// project's when set. Null means "inherit the project's", which is also
+  /// null-tolerant, so "nobody owns this" stays representable at both levels.
+  /// SetNull for the same reason as the project's: deleting a department must
+  /// never delete work, and must never be the reason work goes invisible.
+  departmentId    String?
+  department      Department?  @relation("PmWorkItemDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
@@ -4182,6 +4201,14 @@ model PmWorkItem {
   @@index([parentId])
   @@index([cycleId])
   @@index([stateId])
+  /// WARP-845 — the ON DELETE SET NULL scan index.
+  @@index([departmentId])
+  /// ADR-045 §5.3 — the board's department filter is "this project's items,
+  /// owned by department X". Neither `[departmentId]` above nor
+  /// `[projectId, stateId, sortOrder]` can serve it, so the filter gets its own
+  /// composite. Two columns only: the unfiltered board still orders off the
+  /// state index.
+  @@index([projectId, departmentId])
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -5061,6 +5088,13 @@ model Department {
   memberships       DepartmentMembership[]
   shares            DepartmentShare[]
   inviteGrants      UserInviteDepartment[]
+  /// WARP-2717 — the WORK this department owns. Back-relations only: this
+  /// model stays a Nextcloud groupfolder and knows nothing about PM. Nothing on
+  /// the storage side (provisioner, reconciler, membership service) reads
+  /// these, and nothing in PM reads `state`/`provisionError`/`quotaBytes` — the
+  /// two halves share a row and nothing else.
+  pmProjects        PmProject[]            @relation("PmProjectDepartment")
+  pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which

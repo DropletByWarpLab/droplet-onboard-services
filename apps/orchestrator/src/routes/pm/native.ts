@@ -37,16 +37,25 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "label_not_found":
     case "work_item_not_found":
     case "comment_not_found":
+    case "department_not_found":
       res.status(404).json({ error: msg });
       return true;
     case "invalid_parent":
     case "invalid_state":
     case "invalid_label":
+    // ADR-045 §5.3 — the HOUSEHOLD refusal. The referenced row exists and the
+    // request is well-formed; it is the CHOICE that is not processable, which
+    // is the same shape as invalid_state above.
+    case "department_not_assignable":
       res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
     case "state_is_last":
     case "state_is_default":
+    // ADR-045 §5.3 — the department exists and is a legal owner in principle;
+    // it is on its way out. A conflict with the resource's current state, the
+    // same class as state_is_last, not a validation failure.
+    case "department_archived":
       // A project must keep at least one state and its sole default landing
       // state — deleting the last/only-default one is a conflict (409), not a
       // missing resource.
@@ -67,6 +76,8 @@ const projectCreateSchema = z.object({
   description: z.string().max(10000).optional(),
   icon: z.string().max(64).optional(),
   color: z.string().max(32).optional(),
+  // ADR-045 §5.3 — the department that owns this project's work.
+  department_id: z.string().max(64).optional(),
 });
 
 const projectPatchSchema = z.object({
@@ -75,6 +86,8 @@ const projectPatchSchema = z.object({
   icon: z.string().max(64).nullable().optional(),
   color: z.string().max(32).nullable().optional(),
   leadId: z.string().max(64).nullable().optional(),
+  // ADR-045 §5.3 — `null` clears the department; omitting it leaves it alone.
+  department_id: z.string().max(64).nullable().optional(),
   archived: z.boolean().optional(),
 });
 
@@ -110,6 +123,8 @@ const workItemCreateSchema = z.object({
   assignees: z.array(z.string().max(64)).max(50).optional(),
   label_ids: z.array(z.string().max(64)).max(50).optional(),
   parent_id: z.string().max(64).optional(),
+  // ADR-045 §5.3 — overrides the project's department for this item.
+  department_id: z.string().max(64).optional(),
   start_date: z.string().datetime().optional(),
   due_date: z.string().datetime().optional(),
 });
@@ -122,6 +137,9 @@ const workItemPatchSchema = z.object({
   assignees: z.array(z.string().max(64)).max(50).optional(),
   label_ids: z.array(z.string().max(64)).max(50).optional(),
   parent_id: z.string().max(64).nullable().optional(),
+  // ADR-045 §5.3 — `null` clears the OVERRIDE, so the item inherits its
+  // project's department again (which may itself be none).
+  department_id: z.string().max(64).nullable().optional(),
   start_date: z.string().datetime().nullable().optional(),
   due_date: z.string().datetime().nullable().optional(),
   // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
@@ -212,6 +230,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         description: parsed.data.description,
         icon: parsed.data.icon,
         color: parsed.data.color,
+        departmentId: parsed.data.department_id,
       });
       res.status(201).json({ project });
     } catch (err) {
@@ -233,7 +252,17 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       const parsed = projectPatchSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(res, parsed);
-      res.json({ project: await pm.updateProject(prisma, req.params.id, parsed.data) });
+      // ADR-045 §5.3 — `department_id` is the only wire field on this schema
+      // whose name differs from the service's, so the spread cannot carry it.
+      // `undefined` (absent) and `null` (clear) mean different things and both
+      // must survive the rename.
+      const { department_id, ...rest } = parsed.data;
+      res.json({
+        project: await pm.updateProject(prisma, req.params.id, {
+          ...rest,
+          departmentId: department_id,
+        }),
+      });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -356,6 +385,16 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
               : undefined)
           : undefined,
         parentId: parentRaw === undefined ? undefined : parentRaw === "none" ? null : String(parentRaw),
+        // ADR-045 §5.3 — `?department=<id>` matches that department AND its
+        // teams; `?department=none` matches work no department owns. The
+        // `none` sentinel mirrors `?parent=none` directly above so the API has
+        // ONE way to say "explicitly nothing".
+        departmentId:
+          q.department === undefined
+            ? undefined
+            : q.department === "none"
+              ? null
+              : String(q.department),
         q: q.q ? String(q.q) : undefined,
         perPage: pageParsed.data.per_page,
         page: pageParsed.data.page,
@@ -383,6 +422,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           assignees: d.assignees,
           labelIds: d.label_ids,
           parentId: d.parent_id,
+          departmentId: d.department_id,
           startDate: d.start_date ? new Date(d.start_date) : undefined,
           dueDate: d.due_date ? new Date(d.due_date) : undefined,
         });
@@ -434,6 +474,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           assignees: d.assignees,
           labelIds: d.label_ids,
           parentId: d.parent_id,
+          departmentId: d.department_id,
           startDate: d.start_date === undefined ? undefined : d.start_date === null ? null : new Date(d.start_date),
           dueDate: d.due_date === undefined ? undefined : d.due_date === null ? null : new Date(d.due_date),
           sortOrder: d.sortOrder,
