@@ -38,7 +38,7 @@ import {
   resolveToolAccessScope,
   WRITE_TOOLS,
 } from "../services/tool-access.service.js";
-import { nextFireFromRrule } from "../utils/rrule.js";
+import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -805,21 +805,29 @@ export function createToolsRouter(
   /**
    * Compute the first fire, and in doing so validate the rule.
    *
-   * `nextFireFromRrule` returns null for anything this box cannot actually
-   * fire — an unsupported FREQ, a malformed segment, an unknown IANA zone.
-   * The ticker's response to such a rule is to disable the schedule and
-   * audit it; refusing at write time means the operator finds out while
-   * they are still looking at the field they typed it into.
+   * `isSupportedRrule` goes first, and it is not a courtesy check: it is the
+   * DAILY/WEEKLY, INTERVAL=1 subset `routes/scenes.ts` accepts, and it is
+   * what BOUNDS the computation below. `nextFireFromRrule` walks
+   * 8 x INTERVAL candidate days for a WEEKLY rule, synchronously, so an
+   * INTERVAL taken from the request body (`INTERVAL=100000000` is 40 bytes,
+   * well inside the 512-char cap) would hold the event loop for minutes.
+   *
+   * `nextFireFromRrule` then returns null for anything this box cannot
+   * actually fire — a malformed segment, an unknown IANA zone. The ticker's
+   * response to such a rule is to disable the schedule and audit it;
+   * refusing at write time means the operator finds out while they are
+   * still looking at the field they typed it into.
    */
   function firstFire(rrule: string, timezone: string): Date | null {
+    if (!isSupportedRrule(rrule)) return null;
     return nextFireFromRrule(rrule, new Date(), timezone);
   }
 
   const UNSUPPORTED_RULE = {
     error: "Unsupported schedule rule",
     detail:
-      "FREQ must be DAILY or WEEKLY (optionally with BYDAY/BYHOUR/BYMINUTE), " +
-      "and timezone must be a valid IANA zone",
+      "FREQ must be DAILY or WEEKLY (optionally with BYDAY/BYHOUR/BYMINUTE, " +
+      "no INTERVAL), and timezone must be a valid IANA zone",
   };
 
   router.get(

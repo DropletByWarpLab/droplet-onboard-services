@@ -516,6 +516,33 @@ describe("WARP-2665 — ToolSchedule finally has a write path", () => {
     expect(prisma.schedules.get(created.body.id)!.rrule).toBe(RRULE);
   });
 
+  it("refuses an unbounded INTERVAL before computing anything", async () => {
+    // 40 bytes, well under the 512-char cap, and `nextFireFromRrule` walks
+    // 8 x INTERVAL candidate days for a WEEKLY rule, synchronously: this one
+    // holds the event loop for minutes, for every other request on the box.
+    // The 2s budget is the assertion; a guard that refuses AFTER computing
+    // is not a guard.
+    const HUGE = "FREQ=WEEKLY;BYDAY=MO;INTERVAL=100000000";
+    const prisma = createPrismaMock([mkSpec({ slug: "daily-report" })]);
+    const app = buildApp(prisma, mkUser("owner"));
+    const created = await request(app)
+      .post("/api/tools/daily-report/schedules")
+      .send({ rrule: RRULE });
+
+    const posted = await request(app)
+      .post("/api/tools/daily-report/schedules")
+      .send({ rrule: HUGE });
+    expect(posted.status).toBe(400);
+
+    const patched = await request(app)
+      .patch(`/api/tools/daily-report/schedules/${created.body.id}`)
+      .send({ rrule: HUGE });
+    expect(patched.status).toBe(400);
+
+    expect(prisma.schedules.size).toBe(1);
+    expect(prisma.schedules.get(created.body.id)!.rrule).toBe(RRULE);
+  }, 2_000);
+
   it("deletes a schedule", async () => {
     const prisma = createPrismaMock([mkSpec({ slug: "daily-report" })]);
     const app = buildApp(prisma, mkUser("owner"));
