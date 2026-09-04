@@ -7,6 +7,7 @@ import { PmIcon } from "./icons";
 import {
   PriorityFlag,
   LabelTag,
+  DepartmentTag,
   AvatarStack,
   DueChip,
   CountMeta,
@@ -66,8 +67,17 @@ export function WorkItemCard({
       <div className="pm-clamp2" style={{ fontSize: 13.5, fontWeight: 500, lineHeight: 1.35, color: "var(--text)" }}>
         {item.name}
       </div>
-      {item.labels.length > 0 && (
+      {/* ADR-045 §5.3 — the department chip appears ONLY when this item
+          overrides its project's. An inherited department is already true of
+          every card in the project and repeating it on all of them says
+          nothing; an OVERRIDE is a per-item decision, and without the chip it
+          is invisible right up until the item disappears from a department
+          filter for reasons the board never showed. */}
+      {(item.labels.length > 0 || item.department?.source === "item") && (
         <div className="pm-row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {item.department?.source === "item" && (
+            <DepartmentTag dept={item.department} small />
+          )}
           {item.labels.map((l) => (
             <LabelTag key={l.id} label={l} small />
           ))}
