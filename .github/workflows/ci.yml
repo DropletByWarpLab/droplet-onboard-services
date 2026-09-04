@@ -542,6 +542,7 @@ jobs:
       #   services/mcp-server    | tools-core-mcp-server | services/mcp-server/**
       #   packages/shared-types  | orchestrator          | packages/shared-types/**
       #   services/erp-connector | erp-connector         | services/erp-connector/**
+      #   services/mcp-bridge    | mcp-bridge (own job)  | services/mcp-bridge/**
       #
       # No workspace ships a `tsconfig.test.json` that is absent from that
       # table; `apps/orchestrator` and `apps/web-dashboard` have none (their
@@ -928,6 +929,14 @@ jobs:
       # Typecheck (vitest does not) — see the leg comment above.
       - name: Build @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge build
+
+      # WARP-2617: `build` reads `tsconfig.json`, which excludes `__tests__`,
+      # so the step above typechecks none of this workspace's 9 test files.
+      # Same runner shape as the `typecheck:tests` steps on the node matrix
+      # (mapping table on the tools-core step); this job is its own leg, so
+      # the step sits here. Runs BEFORE vitest for the same reason as there.
+      - name: Typecheck @droplet/mcp-bridge tests (tsconfig.test.json)
+        run: npm run -w @droplet/mcp-bridge typecheck:tests
 
       - name: Test @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge test

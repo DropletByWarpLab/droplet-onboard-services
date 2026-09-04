@@ -231,9 +231,9 @@ CHECKS
   tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
                         (orchestrator, web-dashboard, auth-policy,
                         fips-selftest, shared-types, tools-core, erp-connector,
-                        matter-controller, mcp-server). Prisma generate runs
-                        first so orchestrator's `@prisma/client` import
-                        resolves.
+                        matter-controller, mcp-bridge, mcp-server). Prisma
+                        generate runs first so orchestrator's `@prisma/client`
+                        import resolves.
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
@@ -458,6 +458,7 @@ run_check_tsc_full() {
     packages/tools-core
     services/erp-connector
     services/matter-controller
+    services/mcp-bridge
     services/mcp-server
   )
 
