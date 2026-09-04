@@ -127,6 +127,10 @@ DISABLED (turned off)
 
 `CAPABILITY_LIMITED` (WARP-2623) and `NEEDS_RECONNECT` (WARP-2458) are the two members this diagram used to fold into `ERROR`, and both distinctions are the product. `NEEDS_RECONNECT` says a new credential fixes it; `CAPABILITY_LIMITED` says the credential is fine and the fix is a plan or scope change in the vendor's own console — sync keeps running through it, because withholding one dataset is not a reason to stop reading the others.
 
+"Sync keeps running" is a claim about the CURSORS, and it has a specific mechanism. A `CAPABILITY_LIMITED` connection is polled (`POLLABLE_CONNECTION_STATUSES`), so the refused dataset's cursor still ticks and still throws. `asSyncFailure` classifies both vendor capability errors — Mailchimp's `CAPABILITY_MISSING`, HubSpot's `CAPABILITY_NOT_AVAILABLE` — as transient, so that ONE cursor parks in `BACKOFF` at the maximum retry interval, keeps its watermark, and does **not** set `needsReconnect`. Every other cursor on the connection is untouched.
+
+The state it must never take is `FAILED`, and the reason is that `FAILED` is terminal by construction rather than by policy: it is absent from `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor` never revives an existing row, and `foldSyncState` ranks it highest — so one refused dataset would report the whole connection's sync as failed on `GET /api/integrations` forever, including after the owner buys the plan. `BACKOFF` is claimable, which is what makes the recovery automatic: when the plan or the scope grant changes, the next tick after the backoff window simply succeeds. Nobody has to touch the box.
+
 A connect attempt that can't reach the external system lands in **`PROVISIONING`**, never a fake `CONNECTED`. This is honest degradation — the dashboard shows "connecting / not connected", which is the truth.
 
 ### `WriteStatus` (write-request outbox lifecycle)
