@@ -569,8 +569,12 @@ run_check_compose_config() {
     #     Confirmed two ways before skipping: compose named the file, AND the
     #     file really is absent. CI seeds one (.github/workflows/ci.yml,
     #     "Seed .env for the compose-config case").
+    #     The pattern stops at `.env`, not `/.env`: on Windows Git Bash
+    #     compose prints `env file C:\...\.env not found`, and the separator
+    #     would have turned this skip back into the bogus FAIL it replaces.
+    #     The `-f` check below is what confirms it is OUR .env either way.
     case "$out" in
-      *"env file "*"/.env not found"*)
+      *"env file "*".env not found"*)
         if [ ! -f "$REPO_ROOT/.env" ]; then
           printf '  %sSKIP%s  %s — no .env in this worktree, so the merged tree cannot be resolved\n' \
             "$_YELLOW" "$_RESET" "$label"
