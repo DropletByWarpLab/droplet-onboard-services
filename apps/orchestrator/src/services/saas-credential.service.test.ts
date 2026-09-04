@@ -16,6 +16,7 @@ import {
   registerProviderDescriptor,
   __resetRegisteredProvidersForTest,
   CREDENTIAL_VARIANT_FIELD,
+  SAAS_CONNECTION_STATES,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
 
@@ -269,6 +270,69 @@ describe("saasConnectionState — honesty", () => {
   it("reports a stored-but-unproven credential as PROVISIONING", () => {
     expect(saasConnectionState("NOT_CONFIGURED", true)).toBe("PROVISIONING");
     expect(saasConnectionState("PROVISIONING", true)).toBe("PROVISIONING");
+  });
+
+  it("passes CAPABILITY_LIMITED through — the connection WORKS", () => {
+    // WARP-2623. The case shipped with no test at all: deleting its two lines
+    // dropped the status through to `default: return "PROVISIONING"`, the
+    // credentials page said "Setting up..." about a connection that has been
+    // reading data for months, and every suite in the repo stayed green.
+    // Mutation: delete `case "CAPABILITY_LIMITED"` → PROVISIONING → red.
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).toBe("CAPABILITY_LIMITED");
+    // And it is not any of the three things it is deliberately NOT: the key is
+    // fine, nothing is being set up, and nothing needs repairing.
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("PROVISIONING");
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("NEEDS_RECONNECT");
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("ERROR");
+  });
+
+  /**
+   * The gate the `default` arm needed and did not have.
+   *
+   * `integration-status.schema.test.ts:290-343` set-compares
+   * `SAAS_CONNECTION_STATES` against the Prisma enum and nothing else, so a
+   * newly-added status passes every gate in the repo and still falls silently
+   * through `default: return "PROVISIONING"`. That is how `CAPABILITY_LIMITED`
+   * came to ship a case with no test: the parity gate said the LISTS agreed,
+   * which is a different claim from the FUNCTION agreeing with them.
+   *
+   * Stated as an identity over the whole list rather than one `it` per member,
+   * because the thing being asserted is a property of the mapping and not of
+   * any one status: every state a person can be shown is the status of the
+   * same name, except the three the docstring derives. Those three are named
+   * here explicitly — a set difference would let a member vanish from both
+   * sides at once and still read as green.
+   */
+  it("maps every non-derived status to the state of the same name", () => {
+    // Mutation: drop any `case` from the switch, or add a member to
+    // SAAS_CONNECTION_STATES without giving the switch an arm → red here even
+    // though the Prisma-parity gate stays green.
+    const DERIVED = new Set([
+      // `!hasCredentials` short-circuits before the switch; with a credential
+      // present these two mean "we hold something unproven".
+      "NOT_CONFIGURED",
+      "PROVISIONING",
+      // Wins over everything, above the switch.
+      "DISABLED",
+    ]);
+    const passthrough = SAAS_CONNECTION_STATES.filter((s) => !DERIVED.has(s));
+    // Guards the guard: if the derived list ever swallowed the union this
+    // would assert nothing at all.
+    expect(passthrough.length).toBeGreaterThan(4);
+    for (const status of passthrough) {
+      expect(saasConnectionState(status, true)).toBe(status);
+    }
+  });
+
+  it("still answers DISABLED and the credential-less rule for every status", () => {
+    // The two derivations are stated over the WHOLE list too, so a new member
+    // cannot quietly acquire an exception to either.
+    for (const status of SAAS_CONNECTION_STATES) {
+      expect(saasConnectionState(status, false)).toBe(
+        status === "DISABLED" ? "DISABLED" : "NOT_CONFIGURED",
+      );
+    }
+    expect(saasConnectionState("DISABLED", true)).toBe("DISABLED");
   });
 });
 

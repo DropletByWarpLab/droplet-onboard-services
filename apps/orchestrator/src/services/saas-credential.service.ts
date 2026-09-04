@@ -112,7 +112,13 @@ export type { SaasConnectionState };
 export interface SaasConnectionRow {
   id: string;
   provider: string;
-  status: string;
+  /**
+   * The Prisma `IntegrationStatus` enum column, typed as the enum. It was
+   * `string`, which is what let `saasConnectionState`'s `default` arm stay
+   * unreachable-by-gate: a `string` cannot be narrowed to `never`, so the
+   * compiler had nothing to say about a status the switch had not learned.
+   */
+  status: IntegrationStatusName;
   /** ADR-042 §5 — where a customer-supplied credential lives. */
   providerTokensEnc: string | null;
   /**
@@ -289,7 +295,7 @@ export function openSaasCredentials(
  *     until one of them works, which is the opposite of actionable.
  */
 export function saasConnectionState(
-  status: string,
+  status: IntegrationStatusName,
   hasCredentials: boolean,
 ): SaasConnectionState {
   if (status === "DISABLED") return "DISABLED";
@@ -307,10 +313,35 @@ export function saasConnectionState(
       return "DEGRADED";
     case "DRIFT_LOCKED":
       return "DRIFT_LOCKED";
-    default:
-      // NOT_CONFIGURED / PROVISIONING with a credential present: we hold
-      // something and have not yet proved it works.
+    // Both mean "we hold something and have not yet proved it works" — the
+    // only two statuses this function deliberately RENAMES, and they are
+    // spelled out rather than left to `default` so that arm can be a
+    // never-check.
+    case "NOT_CONFIGURED":
+    case "PROVISIONING":
       return "PROVISIONING";
+    default: {
+      // The gate the parity test could not be. `integration-status.schema.test.ts`
+      // set-compares the ARRAYS against the Prisma enum, which is a claim about
+      // two lists and says nothing about this function: a status added to both
+      // lists passed every gate in the repo and still fell through the old
+      // `default` to "PROVISIONING", telling an owner a working connection was
+      // "Setting up...". That is exactly how `CAPABILITY_LIMITED` came to ship
+      // a case with no test.
+      //
+      // Typing the parameter `IntegrationStatusName` and assigning the
+      // fallthrough to `never` moves the decision to COMPILE time: the next
+      // member added to `INTEGRATION_STATUSES` breaks the build here until
+      // somebody says what a person should be told about it. It cannot be
+      // answered by omission, which is the "no guessing state" rule applied to
+      // a switch.
+      const unhandled: never = status;
+      // Runtime arm kept for the value that cannot exist in the type but can
+      // exist in a column an older box wrote. "Unproven" is the honest answer
+      // for a status this build has never heard of — it claims nothing.
+      void unhandled;
+      return "PROVISIONING";
+    }
   }
 }
 
