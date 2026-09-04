@@ -4115,7 +4115,7 @@ enum PmRelationKind {
 /// REFERENCE crosses freely.
 ///
 /// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — both live in raw migration
-/// SQL (see 20260901000000_warp_2586_pm_work_item_relation) and are proven
+/// SQL (see 20260904140100_warp_2586_pm_work_item_relation) and are proven
 /// against a real Postgres in `pm-work-item-relation.pg.test.ts`:
 ///
 ///   * `PmWorkItemRelation_no_self_edge` — CHECK ("fromId" <> "toId").
