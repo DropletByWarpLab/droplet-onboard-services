@@ -75,6 +75,8 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "files",
         "knowledge",
         "managed_switch",
+        // WARP-2581 — money, on the same terms.
+        "money",
         "network",
         "projects",
         "smart_home",

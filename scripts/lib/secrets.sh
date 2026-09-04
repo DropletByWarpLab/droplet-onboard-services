@@ -52,7 +52,14 @@ _upsert_env_kv() {
   if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
     printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
+  # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
+  # well as a bare one. Every sed writer this primitive replaces matched
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
+  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # so a plain `^KEY=` strip would leave their commented placeholder behind and
+  # append a SECOND line for the same key. Only an assignment form is matched —
+  # `# KEY: prose` documentation lines in the generated .env are untouched.
+  ( umask 077; { grep -vE "^[[:space:]]*#?[[:space:]]*${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
   mv "$stage" "$target"

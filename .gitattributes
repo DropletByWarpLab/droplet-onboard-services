@@ -108,3 +108,11 @@ scripts/host/etc-systemd-system.conf.d/* text eol=lf
 # the box's checkout; a trailing CR would land inside a path and every lookup
 # would miss. Same hazard as the units above, same pin.
 scripts/host/MANIFEST text eol=lf
+
+# WARP-2666 - the client-app release declaration, read field-by-field from the
+# box's checkout by scripts/app-downloads/audit.sh. Extensionless, so nothing
+# above catches it. A trailing CR lands in the LAST field of every row: on a
+# 3-field `absent`/`blocked` row it ends up INSIDE the ticket, so `-\r` stops
+# equalling `-` and the auditor refuses to give a verdict on a file that is
+# perfectly correct. Same hazard as MANIFEST, same pin.
+data/app-downloads/EXPECTED text eol=lf

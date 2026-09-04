@@ -96,7 +96,7 @@ import {
 } from "./reconcile.js";
 import {
   landCanonicalRows,
-  landsInCrm,
+  landsOnBox,
   type LandOutcome,
   type LandingConnection,
   type LandingDb,
@@ -454,7 +454,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       // A landing failure therefore falls into the catch below and parks the
       // cursor as a sync failure, which is the honest report: the vendor was
       // read, and this box did not keep what it read.
-      const landing = landsInCrm(cursor.entity)
+      const landing = landsOnBox(cursor.entity)
         ? await land({
             connection: { id: conn.id, provider: conn.provider },
             entity: cursor.entity,

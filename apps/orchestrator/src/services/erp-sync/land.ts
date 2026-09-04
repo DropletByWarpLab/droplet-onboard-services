@@ -54,6 +54,8 @@ import { providerDescriptor } from "@droplet/shared-types";
 import { toMinorUnits } from "@droplet/shared-types";
 import { createLogger } from "../../lib/logger.js";
 
+import { landMoneyDocuments, landsMoney, type MoneyLandingDb } from "./land-money.js";
+
 const logger = createLogger("erp-sync-land");
 
 /** The tables a landing touches. Narrow on purpose — it is also the mock's shape. */
@@ -67,6 +69,7 @@ export type LandingDb = Pick<
   | "crmDeal"
   | "crmPipeline"
   | "crmPipelineStage"
+  | "erpDocument"
 >;
 
 export interface LandingConnection {
@@ -81,7 +84,12 @@ export type LandSkipReason =
   /** A contact is owner-scoped and this box has no owner to scope it to. */
   | "no-owner"
   /** The vendor row carried no id, so nothing could reconcile it. */
-  | "unidentified";
+  | "unidentified"
+  /**
+   * A LAN track offered a ledger. Its receivables are a patient ledger, and
+   * PHI is read-through on this box (WARP-2581).
+   */
+  | "not-cloud";
 
 export interface LandOutcome {
   readonly entity: string;
@@ -102,6 +110,17 @@ export const NEVER_LANDED_ENTITIES = ["patient", "appointment", "account"] as co
 
 export function landsInCrm(entity: string): boolean {
   return (LANDED_ENTITIES as readonly string[]).includes(entity);
+}
+
+/**
+ * Does this dataset land ANYWHERE on the box — CRM row or ledger document?
+ *
+ * The tick's gate. Separate from `landsInCrm` because the two answer different
+ * questions and a caller that conflates them would either open a transaction
+ * for a dataset with nowhere to go, or skip one that has somewhere.
+ */
+export function landsOnBox(entity: string): boolean {
+  return landsInCrm(entity) || landsMoney(entity);
 }
 
 type Row = Record<string, unknown>;
@@ -183,6 +202,10 @@ export async function landCanonicalRows(
   },
 ): Promise<LandOutcome> {
   const { connection, entity, rows } = args;
+
+  if (landsMoney(entity)) {
+    return landMoneyDocuments(db as unknown as MoneyLandingDb, args);
+  }
 
   if (!landsInCrm(entity)) {
     return { entity, landed: 0, skipped: rows.length, reason: "not-landed" };

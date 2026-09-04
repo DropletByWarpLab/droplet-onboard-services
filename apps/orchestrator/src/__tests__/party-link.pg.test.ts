@@ -350,4 +350,145 @@ describe.skipIf(!RUN)("PartyLink invariants live in the database (WARP-2562)", (
       expect(await prisma.partyLink.count({ where: { connectionId } })).toBe(1);
     });
   });
+
+  /**
+   * WARP-2562 review — the unique is PARTIAL, so an archive frees the slot.
+   *
+   * `PartyLink_connectionId_externalId_key` covered every row, archived or
+   * not. Archiving a wrong link therefore never gave the record back: linking
+   * Contact A to #4471, archiving it, and then linking the CORRECT Contact B
+   * to #4471 was refused forever, and the only exposed recovery restored the
+   * wrong link.
+   *
+   * The service check is the message; this is the invariant. A connector, the
+   * WARP-2549 landing seam, or a psql session all write this table without
+   * passing through `party-link.service.ts`.
+   */
+  describe("archiving a link frees its (connection, externalId) slot", () => {
+    it("lets the CORRECT party claim a record whose wrong link was archived", async () => {
+      // MUTATION: restore the unqualified
+      // `PartyLink_connectionId_externalId_key` → the second create is
+      // refused and the customer is unlinkable on the only party they belong
+      // to.
+      const wrong = await aContact("wrong");
+      const right = await aContact("right");
+      const connectionId = await aConnection("freed", "warp2562-eaglesoft");
+
+      const first = await prisma.partyLink.create({
+        data: {
+          contactId: wrong,
+          connectionId,
+          externalSystem: "warp2562-eaglesoft",
+          externalId: "4471",
+        },
+      });
+      await prisma.partyLink.update({
+        where: { id: first.id },
+        data: { isArchived: true, archivedAt: new Date() },
+      });
+
+      const second = await prisma.partyLink.create({
+        data: {
+          contactId: right,
+          connectionId,
+          externalSystem: "warp2562-eaglesoft",
+          externalId: "4471",
+        },
+      });
+
+      expect(second.contactId).toBe(right);
+      // The archived row is KEPT — "these were never the same customer" is
+      // still a claim worth having. Freeing the slot is not a delete.
+      expect(
+        await prisma.partyLink.count({ where: { connectionId, externalId: "4471" } }),
+      ).toBe(2);
+    });
+
+    it("still refuses a second LIVE link to the same record", async () => {
+      // The rule the partial index must not lose. Scoping the unique to live
+      // rows is not the same as dropping it.
+      const a = await aCompany("live-a");
+      const b = await aCompany("live-b");
+      const connectionId = await aConnection("live", "warp2562-eaglesoft");
+
+      await prisma.partyLink.create({
+        data: { companyId: a, connectionId, externalSystem: "warp2562-eaglesoft", externalId: "9" },
+      });
+      await expect(
+        prisma.partyLink.create({
+          data: {
+            companyId: b,
+            connectionId,
+            externalSystem: "warp2562-eaglesoft",
+            externalId: "9",
+          },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("lets several ARCHIVED links pile up on one record", async () => {
+      // Two wrong guesses, both archived, is a history — not a contradiction.
+      // A unique that still covered archived rows would refuse the second
+      // mistake and make the audit trail lossy.
+      const first = await aContact("hist-1");
+      const second = await aContact("hist-2");
+      const connectionId = await aConnection("history", "warp2562-eaglesoft");
+
+      for (const contactId of [first, second]) {
+        const row = await prisma.partyLink.create({
+          data: {
+            contactId,
+            connectionId,
+            externalSystem: "warp2562-eaglesoft",
+            externalId: "77",
+          },
+        });
+        await prisma.partyLink.update({
+          where: { id: row.id },
+          data: { isArchived: true, archivedAt: new Date() },
+        });
+      }
+
+      expect(
+        await prisma.partyLink.count({ where: { connectionId, externalId: "77" } }),
+      ).toBe(2);
+    });
+
+    it("refuses to un-archive into a slot a live link has since taken", async () => {
+      // The dual of freeing the slot: undo is no longer unconditional, and
+      // the database says so rather than leaving two live claims on one
+      // record. The route maps this P2002 to the same 409 as a create clash.
+      const wrong = await aContact("undo-wrong");
+      const right = await aContact("undo-right");
+      const connectionId = await aConnection("undo", "warp2562-eaglesoft");
+
+      const archived = await prisma.partyLink.create({
+        data: {
+          contactId: wrong,
+          connectionId,
+          externalSystem: "warp2562-eaglesoft",
+          externalId: "5150",
+        },
+      });
+      await prisma.partyLink.update({
+        where: { id: archived.id },
+        data: { isArchived: true, archivedAt: new Date() },
+      });
+      await prisma.partyLink.create({
+        data: {
+          contactId: right,
+          connectionId,
+          externalSystem: "warp2562-eaglesoft",
+          externalId: "5150",
+        },
+      });
+
+      await expect(
+        prisma.partyLink.update({
+          where: { id: archived.id },
+          data: { isArchived: false, archivedAt: null },
+        }),
+      ).rejects.toThrow();
+    });
+  });
 });

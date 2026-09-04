@@ -40,7 +40,9 @@ export type ConnectorId =
   // rendering a tile nothing can route to.
   | "stripe"
   | "hubspot"
-  | "mailchimp";
+  | "mailchimp"
+  // WARP-2296 — the fourth SaaS vendor.
+  | "shopify";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 
