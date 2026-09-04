@@ -31,7 +31,9 @@ describe("start_agent_run (WARP-2180)", () => {
   });
 
   it("posts the goal attributed to the acting user and returns the run id", async () => {
-    const post = vi.fn(async () => makeResponse(201, { id: "run-1", status: "queued" }));
+    const post = vi.fn(async (_path: string, _body: unknown, _init?: unknown) =>
+      makeResponse(201, { id: "run-1", status: "queued" }),
+    );
     const res = await startAgentRun.handler({ goal: "tidy old files", max_iter: 6 }, ctxWith({ post }));
     expect(res.ok).toBe(true);
     expect((res as { data: { runId: string } }).data.runId).toBe("run-1");
@@ -76,7 +78,8 @@ describe("list_agent_runs (WARP-2180)", () => {
   });
 
   it("lists the acting user's runs with status and limit, mapping a parked run to what it waits on", async () => {
-    const get = vi.fn(async () =>
+    // Typed parameters so `mock.calls[0][0]` is a string for tsc, not `[]`.
+    const get = vi.fn(async (_path: string, _init?: unknown) =>
       makeResponse(200, {
         items: [
           {
