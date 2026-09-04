@@ -33,11 +33,14 @@
  */
 
 import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
+import brevo from "../../../../docs/integrations/brevo.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
+import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import mailchimp from "../../../../docs/integrations/mailchimp.md?raw";
+import pipedrive from "../../../../docs/integrations/pipedrive.md?raw";
 import readme from "../../../../docs/integrations/README.md?raw";
 import setup from "../../../../docs/integrations/SETUP.md?raw";
 import shopify from "../../../../docs/integrations/shopify.md?raw";
@@ -59,11 +62,14 @@ export const GUIDE_ROUTE_PREFIX = "/help/integrations";
  */
 export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "add-a-provider": addAProvider,
+  brevo,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,
   hubspot,
+  klaviyo,
   mailchimp,
+  pipedrive,
   readme,
   setup,
   shopify,

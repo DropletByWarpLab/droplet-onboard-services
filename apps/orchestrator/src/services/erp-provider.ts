@@ -64,6 +64,15 @@ import {
   ShopifyConnector,
   SHOPIFY_PROVIDER,
   SHOPIFY_TRACK_REMEDIATION,
+  // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor programme.
+  // Two fixed-host tracks and one per-account host.
+  BrevoConnector,
+  BREVO_PROVIDER,
+  KlaviyoConnector,
+  KLAVIYO_PROVIDER,
+  PipedriveConnector,
+  PIPEDRIVE_PROVIDER,
+  PIPEDRIVE_TRACK_REMEDIATION,
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
@@ -876,6 +885,95 @@ registerConnectorFactory(SHOPIFY_PROVIDER, ({ selector: sel, config: cfg }) => {
     // undefined when nothing is sealed, so the connector keeps
     // `blockedShopifyCredentialResolver` and says what is missing.
     { resolveCredential: resolve ? (field) => resolve(field) : undefined },
+  );
+});
+
+// WARP-2708 — Brevo. One FIXED host, so unlike Mailchimp and Pipedrive there is
+// nothing to select and no per-connection destination to refuse: the base URL is
+// a constant in the connector and `baseUrl` here is a test/staging override only.
+registerConnectorFactory(BREVO_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new BrevoConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      // NOT passing `dealCurrency`, deliberately. `parseProviderConfig` builds
+      // its output from the DECLARED credential fields only, so a key the
+      // descriptor does not declare never survives parsing and the read would
+      // be `undefined` on every call — a dead read that looks like a
+      // configurable setting. The connector resolves the account's display
+      // currency itself instead. If per-connection override is ever wanted, it
+      // is a descriptor field first, and this line second.
+    },
+    // Named by DESCRIPTOR FIELD NAME and nothing else — the same generic seam
+    // every other cloud track uses. Left undefined when nothing is sealed, so
+    // the connector keeps its blocked resolver and says what is missing.
+    { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+// WARP-2709 — Klaviyo. Fixed host. `apiRevision` is a non-secret connection
+// fact in providerConfig rather than a constant, because the `revision` header
+// is effectively an API-version pin: a connection that was working must be able
+// to stay on the revision it was built against when the shipped default moves.
+registerConnectorFactory(KLAVIYO_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new KlaviyoConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      // Only `conversionMetricId` is read, because it is the only one of the
+      // three the descriptor DECLARES — and an undeclared key does not survive
+      // `parseProviderConfig`, so reading it would be `undefined` forever.
+      //
+      // `apiRevision` and `reportTimeframeKey` are deliberately NOT surfaced:
+      // Klaviyo's `revision` header is an API-version pin, and putting a dated
+      // string in front of a small-business owner is a worse failure than
+      // shipping one considered default. The connector's own constant is that
+      // default. Pinning a revision per connection is a real future need — it
+      // is a descriptor field and a wizard decision when it arrives, not a
+      // silent config key nothing can write.
+      conversionMetricId: providerConfigString(cfg, "conversionMetricId"),
+    },
+    { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+// WARP-2710 — Pipedrive. The company domain SELECTS THE HOST, so this is the
+// Mailchimp shape: without it there is no destination at all, and guessing one
+// would assemble a URL whose first label is the string "undefined". Read from
+// `providerConfig`, never derived from the token, so answering "where does this
+// dial?" never decrypts a credential — and a token swapped out-of-band cannot
+// move the destination.
+//
+// Refused HERE rather than inside the connector, for the QuickBooks reason: the
+// row is known to be unconfigured at this point, and a ConnectorBlockedError
+// degrades to ERP_NOT_CONNECTED like every other absent-material path instead
+// of surfacing as a fault.
+registerConnectorFactory(PIPEDRIVE_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const companyDomain = providerConfigString(cfg, "companyDomain");
+  if (!companyDomain) {
+    throw new ConnectorBlockedError(
+      "construct (no Pipedrive company domain configured)",
+      PIPEDRIVE_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new PipedriveConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      companyDomain,
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+      // NOT passing `burstCeiling` — same reason as Brevo's `dealCurrency`: an
+      // undeclared key is dropped by `parseProviderConfig`, so the read is
+      // `undefined` on every call. Pipedrive's burst allowance also scales with
+      // the customer's plan and seat count, which is a fact to MEASURE from the
+      // vendor's own rate-limit headers rather than to ask an owner to type.
+    },
+    { resolveApiToken: resolve ? () => resolve("apiToken") : undefined },
   );
 });
 

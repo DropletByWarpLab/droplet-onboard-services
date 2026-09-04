@@ -118,6 +118,9 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **Only a specific person can create it** — and the connector breaks later if that person's role changes. | HubSpot | [`hubspot.md`](hubspot.md) |
 | **Droplet will refuse the credential the vendor shows you first.** Stripe's most prominent key is a secret key; the box accepts only a restricted one, by design. | Stripe | [`stripe.md`](stripe.md) |
 | **The credential has a tail that looks like noise and is not optional.** Trimming it points the box at the wrong host. | Mailchimp | [`mailchimp.md`](mailchimp.md) |
+| **The key expires if nobody uses it.** Brevo retires a key after a period of inactivity, so a connection that works today can stop on its own with nothing changed. | Brevo | [`brevo.md`](brevo.md) |
+| **The scope cannot be changed after you create it.** Picking the wrong one means deleting the key and making a new one. | Klaviyo | [`klaviyo.md`](klaviyo.md) |
+| **The token carries the permissions of the person who made it**, so it stops seeing data if that person's access changes — and it is shared with every other tool that account has connected. | Pipedrive | [`pipedrive.md`](pipedrive.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -130,6 +133,9 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **Mailchimp** | An API key, pasted whole including its `-us14`-style tail | [`mailchimp.md`](mailchimp.md) |
 | **Shopify** | A client id **and** client secret from your own Dev Dashboard app | [`shopify.md`](shopify.md) |
 | **Xero** | A Custom Connection's client id and client secret | [`xero.md`](xero.md) |
+| **Brevo** | An API key from your own Brevo profile | [`brevo.md`](brevo.md) |
+| **Klaviyo** | A **private** API key (`pk_…`), scoped read-only | [`klaviyo.md`](klaviyo.md) |
+| **Pipedrive** | A personal API token **and** your company domain | [`pipedrive.md`](pipedrive.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
 
