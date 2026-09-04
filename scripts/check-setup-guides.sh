@@ -194,6 +194,7 @@ fact_pins() {
       #    network timeout rather than as a permission error, which is why
       #    the distinction has to survive a copy pass.
       printf '%s\n' '365 days' 'Rovo MCP server' 'Free plan' 'IP allowlist'
+      ;;
     brevo)
       # Brevo is the EXCEPTION to credential-handling.md's "these do not
       # expire" rule, in two independent ways: the owner picks a lifetime at
