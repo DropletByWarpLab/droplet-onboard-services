@@ -28,9 +28,19 @@ export function useDrives() {
     systemDisk: data?.system_disk,
     isLoading,
     error,
+    // WARP-2098 (code review): a failed fetch must be VISIBLE. fetchDrives()
+    // throws on a non-ok reply before reading the body, so the `{error}` the
+    // orchestrator sends on a bridge 502 never arrives here; SWR keeps the last
+    // good `data` and sets its own `error`. Deriving bridgeError from `data`
+    // alone therefore rendered the previous totals and system-drive card with
+    // nothing marking them stale. SWR's error is the signal for that case, and
+    // it clears itself on the next good fetch.
     bridgeError:
       data?.error ??
-      (data?.reason === "bridge_unavailable" ? "bridge_unavailable" : undefined),
+      (data?.reason === "bridge_unavailable" ? "bridge_unavailable" : undefined) ??
+      (error
+        ? (error instanceof Error && error.message) || "fetch_failed"
+        : undefined),
     refresh: mutate,
   };
 }
