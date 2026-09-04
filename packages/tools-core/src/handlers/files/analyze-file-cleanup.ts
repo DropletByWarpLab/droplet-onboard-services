@@ -176,6 +176,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const junkBytes = junk.reduce((n, f) => n + f.size, 0);
 
   const duplicates = duplicateGroups(files);
+  // The whole set: every extra copy in every group, shown or not. Each shown
+  // group carries its own figure for the candidates it actually lists.
+  const extraCopies = duplicates.reduce((n, g) => n + g.duplicates.length, 0);
   const reclaimable = duplicates.reduce((n, g) => n + g.size * g.duplicates.length, 0);
 
   // The plan, from THE helper organize_files uses — planOrganize itself, not
@@ -251,15 +254,24 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       },
       duplicate_candidates: {
         groups: duplicates.length,
+        extra_copies: extraCopies,
         reclaimable_human: humanBytes(reclaimable),
         shown: Math.min(duplicates.length, SAMPLE.duplicateGroups),
-        items: duplicates.slice(0, SAMPLE.duplicateGroups).map((g) => ({
-          size_human: humanBytes(g.size),
-          keep: g.keep,
-          delete_candidates: g.duplicates.slice(0, SAMPLE.duplicatePaths),
-          copies: g.duplicates.length + 1,
-        })),
-        note: "Matched by name and size, not by content. `keep` is the copy to keep; the reclaimable figure assumes only the delete_candidates go. Confirm with the user before deleting any copy.",
+        items: duplicates.slice(0, SAMPLE.duplicateGroups).map((g) => {
+          // The figure is for the candidates LISTED, since that list is what
+          // the model hands to delete_files (PR #1985 review: it used to
+          // count every copy while claiming otherwise).
+          const delete_candidates = g.duplicates.slice(0, SAMPLE.duplicatePaths);
+          return {
+            size_human: humanBytes(g.size),
+            keep: g.keep,
+            delete_candidates,
+            shown: delete_candidates.length,
+            copies: g.duplicates.length + 1,
+            reclaimable_human: humanBytes(g.size * delete_candidates.length),
+          };
+        }),
+        note: "Matched by name and size, not by content. `keep` is the copy to keep. A group's reclaimable_human covers only its listed delete_candidates (shown of copies-1 extra); the top-level figure covers every extra copy in every group, listed here or not. Confirm with the user before deleting any copy.",
       },
       empty_directories: {
         count: walk.emptyDirectories.length,

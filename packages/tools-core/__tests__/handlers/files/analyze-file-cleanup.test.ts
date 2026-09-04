@@ -235,8 +235,11 @@ describe("analyze_file_cleanup", () => {
       // survived normalization untouched.
       keep: "/Downloads/report.pdf",
       delete_candidates: ["/Downloads/Old/report.pdf", "/Downloads/report (1).pdf"],
+      shown: 2,
       copies: 3,
+      reclaimable_human: "9.8 KB",
     });
+    expect(d.duplicate_candidates.extra_copies).toBe(2);
     expect(d.duplicate_candidates.items[0].delete_candidates).not.toContain(
       d.duplicate_candidates.items[0].keep,
     );
@@ -260,6 +263,32 @@ describe("analyze_file_cleanup", () => {
     // An empty subfolder was seen, and an empty listing is indistinguishable
     // from an unreachable one, so the caveat rides along.
     expect(d.caveat).toMatch(/unreachable file service/i);
+  });
+
+  // PR #1985 review: delete_candidates is cut to SAMPLE.duplicatePaths per
+  // group, and the group's reclaimable figure used to count EVERY extra copy
+  // while the note claimed it assumed only the listed candidates go. For a
+  // group with more extra copies than the sample, deleting the listed ones
+  // recovered less than the report promised, and nothing said more existed.
+  it("a group's reclaimable figure matches its listed candidates, and the total says it covers every copy", async () => {
+    const copies = ["", " (1)", " (2)", " (3)", " (4)", " (5)"].map((suffix) =>
+      row(`/Dup/report${suffix}.pdf`, { size: 1024, mimeType: "application/pdf" }),
+    );
+    const r = await analyzeFileCleanup.handler({ path: "/Dup", max_depth: 0 }, ctxWith(treeGet({ "/Dup": copies })));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dc = (r.data as any).duplicate_candidates;
+    expect(dc.groups).toBe(1);
+    expect(dc.extra_copies).toBe(5);
+    expect(dc.reclaimable_human).toBe("5.0 KB");
+    const [g] = dc.items;
+    expect(g.copies).toBe(6);
+    expect(g.delete_candidates).toHaveLength(SAMPLE.duplicatePaths);
+    expect(g.shown).toBe(SAMPLE.duplicatePaths);
+    // 3 listed candidates x 1 KB — what deleting exactly this list recovers.
+    expect(g.reclaimable_human).toBe("3.0 KB");
+    expect(dc.note).toMatch(/listed delete_candidates/);
+    expect(dc.note).toMatch(/every extra copy/);
   });
 
   it("honours max_depth (0 lists only the folder itself) and stale_days", async () => {
