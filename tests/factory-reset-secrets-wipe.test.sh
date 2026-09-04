@@ -471,6 +471,226 @@ STUB
   || fail "the gate does not complete when docker fails"
 
 # =============================================================================
+# Phase 7: /data is NOT mounted (WARP-2621)
+# =============================================================================
+# THE DEFECT. TPM unlock fails, or a reset is run on a box whose LUKS volume is
+# still locked. `/data` is then an EMPTY mountpoint on the ROOT filesystem and
+# <repo>/.env is a DANGLING symlink into it. Every step downstream then agrees
+# that nothing is wrong:
+#
+#   - `readlink -f` cannot canonicalise a path whose parent chain is missing, so
+#     the `|| readlink` fallback in factory-reset.sh hands the library the RAW
+#     link text — a path naming a directory that is not there;
+#   - every wipe target is absent, so the wipe reports
+#     `env=0 snapshots=0 secrets=0`, SECW_FAILED_COUNT stays 0, nothing errors;
+#   - `_secw_recreate_dir` then `mkdir -p`s /data/droplet/env and
+#     /data/droplet/secrets ON THE ROOT FILESYSTEM, underneath the unmounted
+#     mountpoint — destroying the only structural evidence that the volume was
+#     unreachable, under a path the next successful mount will SHADOW;
+#   - `secw_verify_wipe` re-scans, finds nothing (there was never anything to
+#     find) and returns PASS with SECW_LEFTOVER_COUNT=0.
+#
+# The transcript reads "Verified: no .env, snapshot or secrets-dir file
+# remains" while every secret is intact on the locked volume. On a leased box
+# that is exactly the tenant handover this stack exists to prevent, wearing a
+# green verification.
+#
+# A re-scan AFTER the recreate step CANNOT tell "wiped" from "unreachable" —
+# the two leave a byte-identical tree. So the reset has to refuse before it
+# starts, the re-create step must never fabricate a container under an
+# unmounted mountpoint, and the gate has to be TOLD the pre-wipe fact instead
+# of re-deriving it.
+echo ""
+echo "--- Phase 7: an unmounted /data must ABORT, never verify clean ---"
+
+# The same shape as make_fixture, minus the mount: $TMP/data is an EMPTY
+# mountpoint, so $TMP/data/droplet does not exist and both repo-side links
+# dangle into it.
+make_unmounted_fixture() {
+  TMP="$(mktemp -d)"
+  export TMP
+  mkdir -p "$TMP/repo/data" "$TMP/data"
+
+  ENV_TARGET="$TMP/data/droplet/env/.env"
+  SECRETS_TARGET="$TMP/data/droplet/secrets"
+
+  ln -s "$ENV_TARGET" "$TMP/repo/.env"
+  ln -s "$SECRETS_TARGET" "$TMP/repo/data/secrets"
+
+  SECW_SUDO=""
+  SECW_OWNER=""
+  SECW_REPO_ROOT="$TMP/repo"
+  export SECW_SUDO SECW_OWNER SECW_REPO_ROOT
+  # shellcheck disable=SC1090
+  source "$LIB"
+}
+
+unmounted_wipe() {
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" >/dev/null 2>&1
+}
+
+# The premise, asserted rather than assumed: this really is the shape the box is
+# in, and the resolve really does fall back to the raw link text.
+( make_unmounted_fixture
+  [ -L "$TMP/repo/.env" ] && [ ! -e "$TMP/repo/.env" ] \
+    && ! readlink -f "$TMP/repo/.env" >/dev/null 2>&1 \
+    && [ "$(resolve_env_target "$TMP/repo/.env")" = "$ENV_TARGET" ] \
+    && [ ! -d "$(dirname "$ENV_TARGET")" ]
+) && pass "premise: the repo .env dangles, readlink -f fails, the container is absent" \
+  || fail "the unmounted-/data fixture does not reproduce the dangling-link shape"
+
+# The wipe genuinely cannot see anything — which is WHY its own counters can
+# never be the evidence. Pinned so the honest-but-misleading zero stays honest.
+( make_unmounted_fixture
+  unmounted_wipe
+  [ "$SECW_WIPED_COUNT" = "0" ] && [ "$SECW_FAILED_COUNT" = "0" ]
+) && pass "premise: the wipe reports 0 wiped / 0 failed — it never saw the secrets" \
+  || fail "the unmounted-/data wipe does not report the zero counts the defect rests on"
+
+# --- (a) the reset refuses to start ----------------------------------------
+( make_unmounted_fixture
+  secw_volume_unreachable "$TMP/repo" "$(resolve_env_target "$TMP/repo/.env")"
+) && pass "the volume-reachability predicate FIRES on an unmounted /data" \
+  || fail "an unmounted /data is not detected — the reset would run and report clean"
+
+# The other direction matters just as much: a predicate that always fires would
+# brick every reset on every shipped box.
+( make_fixture
+  # `command -v` first: without it a MISSING function exits 127 and the `!`
+  # would report a pass — a guard that cannot fail.
+  command -v secw_volume_unreachable >/dev/null \n    && ! secw_volume_unreachable "$TMP/repo" "$(resolve_env_target "$TMP/repo/.env")"
+) && pass "it does NOT fire on a normally-mounted relocated box" \
+  || fail "the predicate fires on a healthy relocated box — every reset would abort"
+
+( TMP="$(mktemp -d)"; export TMP
+  mkdir -p "$TMP/repo/data/secrets"
+  printf '%s\n' "$FIXTURE_SECRET" > "$TMP/repo/.env"
+  SECW_SUDO=""; SECW_OWNER=""; SECW_REPO_ROOT="$TMP/repo"
+  export SECW_SUDO SECW_OWNER SECW_REPO_ROOT
+  # shellcheck disable=SC1090
+  source "$LIB"
+  command -v secw_volume_unreachable >/dev/null \n    && ! secw_volume_unreachable "$TMP/repo" "$TMP/repo/.env"
+) && pass "it does NOT fire on a plain (never-relocated) box — .env is no symlink" \
+  || fail "the predicate fires on a non-relocated box"
+
+# The abort has to happen BEFORE the wipe. Once secw_wipe_live_secrets has run,
+# the re-create step has already had its chance at the mountpoint and the
+# transcript already claims a clean wipe.
+UNREACHABLE_LINE="$(grep -E '^[0-9]+:if secw_volume_unreachable ' <<<"$CODE_NUM" | head -n 1 | cut -d: -f1 || true)"
+if [ -n "$UNREACHABLE_LINE" ] && [ -n "$WIPE_LINE" ] && [ "$UNREACHABLE_LINE" -lt "$WIPE_LINE" ]; then
+  pass "factory-reset checks volume reachability BEFORE it wipes"
+else
+  fail "factory-reset does not gate on secw_volume_unreachable before the wipe"
+fi
+
+if [ -n "$UNREACHABLE_LINE" ] \
+   && sed -n "${UNREACHABLE_LINE},$((UNREACHABLE_LINE + 14))p" "$RESET" | grep -qE '^[[:space:]]*exit 1$'; then
+  pass "the unreachable-volume branch ABORTS the reset (exit 1)"
+else
+  fail "an unmounted /data does not abort the reset — it would report a clean wipe"
+fi
+
+# The operator has to be able to act on it: name the volume, and say the keys
+# are still sitting on it.
+if [ -n "$UNREACHABLE_LINE" ] \
+   && sed -n "${UNREACHABLE_LINE},$((UNREACHABLE_LINE + 14))p" "$RESET" | grep -qi 'unlock'; then
+  pass "the abort tells the operator to unlock the volume and re-run"
+else
+  fail "the abort does not tell the operator what to do"
+fi
+
+# --- (b) the re-create step never fabricates a container --------------------
+( make_unmounted_fixture
+  unmounted_wipe
+  # NOTHING may appear under the unmounted mountpoint. The moment
+  # $TMP/data/droplet exists on the root filesystem the one piece of evidence
+  # that the volume was never mounted is gone — and it is gone under a path the
+  # next successful mount SHADOWS, so it is unfindable afterwards too.
+  [ ! -e "$TMP/data/droplet" ] && [ -z "$(find "$TMP/data" -mindepth 1 -print -quit)" ]
+) && pass "the wipe never fabricates the /data containers under an unmounted mountpoint" \
+  || fail "the re-create step wrote into the unmounted mountpoint on the root filesystem"
+
+# --- (c) the gate cannot report PASS ---------------------------------------
+( make_unmounted_fixture
+  unmounted_wipe
+  emulate_reset_link_purge
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+) && fail "the gate PASSES an unmounted /data — a clean re-scan of an empty mountpoint proves nothing" \
+  || pass "the gate REFUSES to pass when the volume was unreachable before the wipe"
+
+( make_unmounted_fixture
+  unmounted_wipe
+  emulate_reset_link_purge
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo" || true
+  # BLOCKED, not "leftovers found": no path SURVIVED, the volume was never
+  # readable. Two different findings, and the transcript must not merge them.
+  [ "$SECW_VERIFY_BLOCKED" = "1" ] && [ -n "$SECW_VERIFY_BLOCKED_REASON" ] \
+    && [ "$SECW_LEFTOVER_COUNT" = "0" ]
+) && pass "it reports BLOCKED with a reason, not a phantom leftover path" \
+  || fail "the unreachable verdict is not distinguishable from a surviving-secret verdict"
+
+# The pre-wipe fact has to be captured BEFORE step (4), not merely before the
+# gate. These two are the only assertions that separate the recording from the
+# hardening above: mutate the capture to run after _secw_recreate_dir and the
+# rest of Phase 7 still passes, because the hardened re-create leaves the
+# container absent and a late re-derivation happens to reach the same answer.
+#
+# The fixture that tells them apart is a box where the CONTAINER is missing but
+# its PARENT is not — /data/droplet present, /data/droplet/env gone. That is a
+# box a previous buggy reset already fabricated a tree on, and it is the one
+# shape where the re-create step legitimately succeeds: capture the fact
+# afterwards and it reads "the container is there", which is only true because
+# this function just made it so.
+make_orphaned_container_fixture() {
+  TMP="$(mktemp -d)"
+  export TMP
+  mkdir -p "$TMP/repo/data" "$TMP/data/droplet"
+
+  ENV_TARGET="$TMP/data/droplet/env/.env"
+  SECRETS_TARGET="$TMP/data/droplet/secrets"
+
+  ln -s "$ENV_TARGET" "$TMP/repo/.env"
+  ln -s "$SECRETS_TARGET" "$TMP/repo/data/secrets"
+
+  SECW_SUDO=""
+  SECW_OWNER=""
+  SECW_REPO_ROOT="$TMP/repo"
+  export SECW_SUDO SECW_OWNER SECW_REPO_ROOT
+  # shellcheck disable=SC1090
+  source "$LIB"
+}
+
+( make_orphaned_container_fixture
+  unmounted_wipe
+  # The re-create step DID run here (the parent exists, so it is allowed to) —
+  # and the recorded fact must still be the one from before it ran.
+  [ -d "$(dirname "$ENV_TARGET")" ] && [ "$SECW_ENV_CONTAINER_MISSING" = "1" ]
+) && pass "the pre-wipe fact survives a re-create step that legitimately succeeds" \
+  || fail "the container fact is re-derived after the re-create step, so it reads the step's own output"
+
+( make_orphaned_container_fixture
+  unmounted_wipe
+  emulate_reset_link_purge
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+) && fail "the gate passes a tree whose container only exists because the wipe re-created it" \
+  || pass "the gate still refuses when only the re-create step made the container exist"
+
+# The pre-wipe fact is an INPUT, not something the gate re-derives. That is the
+# whole point: by the time the gate runs, the tree looks identical either way.
+( make_fixture
+  full_wipe
+  ! secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo" 1
+) && pass "a caller-supplied pre-wipe fact overrides a clean re-scan" \
+  || fail "the gate talks itself out of the pre-wipe fact by re-scanning"
+
+( make_fixture
+  full_wipe
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo" 0
+) && pass "and an explicit -container was there- still passes a clean tree" \
+  || fail "the 4th argument breaks the happy path"
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""

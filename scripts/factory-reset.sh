@@ -922,6 +922,34 @@ if [ -L "$_secrets_reset_target" ]; then
   [ -n "$_secrets_reset_target" ] || _secrets_reset_target="$REPO_ROOT/data/secrets"
 fi
 
+# WARP-2621 — REFUSE if the volume the links point at is not mounted.
+#
+# On a box whose TPM unlock failed, or whose LUKS /data is simply still locked,
+# $REPO_ROOT/.env is a DANGLING symlink: `readlink -f` cannot canonicalise a
+# path whose parent chain is missing, so the fallback above yields the raw link
+# text and every step downstream agrees nothing is wrong. The wipe finds nothing
+# and logs `env=0 snapshots=0 secrets=0`, SECW_FAILED_COUNT stays 0, the
+# re-create step builds /data/droplet/{env,secrets} on the ROOT filesystem
+# under the unmounted mountpoint, and the verify gate at the end of this phase
+# re-scans an empty tree and returns PASS. The transcript reads as a verified
+# clean reset while every device secret is intact on the locked volume.
+#
+# There is no way to recover from that later in the run: once the containers
+# have been re-created, "wiped" and "never reachable" are the same empty tree.
+# So this is the point of no return — before the wipe, before anything is
+# created, while the box can still be told apart.
+if secw_volume_unreachable "$REPO_ROOT" "$_env_reset_target"; then
+  log_error "The encrypted volume holding this box's secrets is NOT mounted."
+  log_error "  $REPO_ROOT/.env points at $_env_reset_target"
+  log_error "  but $(dirname "$_env_reset_target") does not exist."
+  log_error "Nothing was wiped. Unlock the volume and re-run — the previous"
+  log_error "tenant's keys (DEVICE_SECRET_KEY, the audit signing key, doc-kek.key)"
+  log_error "are still on it, and a reset that cannot read them cannot destroy them."
+  log_error "To destroy the volume instead of unlocking it, see"
+  log_error "scripts/host/droplet-crypto-shred.sh (docs/security/crypto-shred.md)."
+  exit 1
+fi
+
 # WARP-2629 — wipe the LIVE secrets THROUGH the symlinks, before the unlinks
 # below make the targets unreachable from here. Removing the link alone left
 # DEVICE_SECRET_KEY, the audit signing key and doc-kek.key sitting on /data
@@ -1230,6 +1258,16 @@ fi
 # It re-enumerates the filesystem rather than reading the wipe's own counters,
 # needs no Docker and no root, and prints PATHS ONLY — never a value (rule 19).
 if ! secw_verify_wipe "$_env_reset_target" "$_secrets_reset_target" "$REPO_ROOT"; then
+  # WARP-2621: two different verdicts reach this branch. BLOCKED means the gate
+  # could not observe the volume at all (it was not mounted when the wipe ran) —
+  # nothing "survived", and telling the operator to shred harder would be the
+  # wrong instruction. The reachability check above normally catches this first;
+  # this is the backstop for a volume that went away mid-reset.
+  if [ "$SECW_VERIFY_BLOCKED" = "1" ]; then
+    log_error "The secrets wipe CANNOT be verified: $SECW_VERIFY_BLOCKED_REASON"
+    log_error "Refusing to report a clean reset. Unlock the volume and re-run."
+    exit 1
+  fi
   log_error "$SECW_LEFTOVER_COUNT secret-bearing path(s) SURVIVED the wipe:"
   printf '%s\n' "$SECW_LEFTOVER_PATHS" | while IFS= read -r _leftover; do
     [ -n "$_leftover" ] && log_error "  - $_leftover"

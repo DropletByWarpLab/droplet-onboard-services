@@ -108,11 +108,53 @@ SECW_WIPED_SECRETS=0
 SECW_WIPED_COUNT=0
 SECW_FAILED_COUNT=0
 
+# WARP-2621 — recorded by secw_wipe_live_secrets BEFORE it touches anything,
+# and consumed by secw_verify_wipe. 1 means the directory the .env lives in was
+# not there when the wipe started, which on a relocated box means the /data
+# volume was not mounted. It has to be captured pre-wipe: step (4) re-creates
+# the containers, after which "wiped" and "was never reachable" are the same
+# empty tree and no amount of re-scanning can tell them apart.
+SECW_ENV_CONTAINER_MISSING=0
+
 # Set by secw_verify_wipe. Paths only — never contents (rule 19).
 SECW_LEFTOVER_PATHS=""
 SECW_LEFTOVER_COUNT=0
+# BLOCKED is a THIRD verdict, distinct from both pass and "a secret survived":
+# the gate could not observe the volume at all. For a secrets wipe it has to be
+# treated as failure, but the operator needs to be told which one it was — one
+# says "shred it again", the other says "unlock the volume".
+SECW_VERIFY_BLOCKED=0
+SECW_VERIFY_BLOCKED_REASON=""
 
 _secw_warn() { printf '  ! %s\n' "$*" >&2; }
+
+# secw_volume_unreachable <repo-root> <resolved-env-target>
+#
+# 0 (true) when <repo-root>/.env is a SYMLINK whose target lives in a directory
+# that does not exist — i.e. the box HAS been relocated onto /data, but /data is
+# not mounted (TPM unlock failed, or the LUKS volume is still locked).
+#
+# That state is invisible to everything downstream: `readlink -f` fails on a
+# path whose parent chain is missing, so factory-reset.sh's fallback yields the
+# raw link text; the wipe then finds nothing at every path and reports zero
+# wiped AND zero failed. A reset must refuse rather than shred nothing and say
+# so — the previous tenant's keys are intact on the locked volume.
+#
+# Deliberately keyed on the SYMLINK, not on "the directory is missing":
+#   - on a never-relocated box .env is a plain file and its directory is the
+#     checkout, which is always present — so this can never fire there;
+#   - after a normal wipe the container is re-created, so a second reset on the
+#     same box does not fire either (the reset stays idempotent).
+# It is NOT keyed on data/secrets: that container can legitimately be absent on
+# a box whose setup never generated one, and a false abort here would refuse to
+# reset a healthy appliance.
+secw_volume_unreachable() {
+  local _repo="$1" _env_target="$2"
+  [ -n "$_repo" ] && [ -n "$_env_target" ] || return 1
+  [ -L "$_repo/.env" ] || return 1
+  [ -d "$(dirname "$_env_target")" ] && return 1
+  return 0
+}
 
 # _secw_try <cmd...> — run it as us; retry under $SECW_SUDO only if that failed
 # AND a sudo command is configured. Keeps the whole library usable unprivileged.
@@ -153,12 +195,25 @@ secw_shred_file() {
 # non-relocated box those belong to setup.sh, and Phase 4's existing
 # `rm -rf data/secrets` must find nothing put back.
 _secw_recreate_dir() {
-  local _d="$1"
+  local _d="$1" _parent
   [ -n "$_d" ] || return 0
   if [ -n "$SECW_REPO_ROOT" ]; then
     case "$_d" in
       "$SECW_REPO_ROOT" | "$SECW_REPO_ROOT"/*) return 0 ;;
     esac
+  fi
+  # WARP-2621 — the PARENT has to already exist. `mkdir -p /data/droplet/env`
+  # on a box whose /data is not mounted happily builds the whole chain on the
+  # ROOT filesystem, underneath the mountpoint: it destroys the one structural
+  # signal that the volume was unreachable, and it does so under a path the
+  # next successful mount SHADOWS, so nothing can find it afterwards either.
+  # Re-creating a container whose parent is present is the legitimate case
+  # (relocate_secrets_to_data made /data/droplet and the wipe only emptied the
+  # leaf); conjuring the tree never is.
+  _parent="$(dirname "$_d")"
+  if [ ! -d "$_parent" ]; then
+    _secw_warn "not re-creating $_d — $_parent does not exist, so the volume behind it is not mounted"
+    return 0
   fi
   _secw_try mkdir -p "$_d" || { _secw_warn "could not re-create $_d"; return 0; }
   if [ -n "$SECW_OWNER" ]; then
@@ -203,6 +258,13 @@ secw_wipe_live_secrets() {
   SECW_WIPED_SECRETS=0
   SECW_WIPED_COUNT=0
   SECW_FAILED_COUNT=0
+
+  # WARP-2621 — observe the container BEFORE anything below can create it.
+  # Step (4) re-creates the containers, so after this function returns there is
+  # no way left to tell "the wipe emptied it" from "the volume was never
+  # mounted". secw_verify_wipe consumes this rather than re-deriving it.
+  SECW_ENV_CONTAINER_MISSING=0
+  [ -d "$(dirname "$_env_target")" ] || SECW_ENV_CONTAINER_MISSING=1
 
   # (1) the live .env — every generated device secret.
   if _secw_wipe_one "$_env_target"; then
@@ -255,7 +317,7 @@ _secw_record_leftover() {
   SECW_LEFTOVER_COUNT=$(( SECW_LEFTOVER_COUNT + 1 ))
 }
 
-# secw_verify_wipe <env-target> <secrets-dir> [<repo-root>]
+# secw_verify_wipe <env-target> <secrets-dir> [<repo-root>] [<container-missing-pre-wipe>]
 #
 # The post-wipe gate (WARP-2638). Re-enumerates the filesystem — it does NOT
 # read the counters secw_wipe_live_secrets set, because a gate built on the
@@ -268,12 +330,28 @@ _secw_record_leftover() {
 # Call it AFTER the reset has purged the link side too, not straight after the
 # wipe: the `<repo>/.env.*` classes and `<repo>/data/secrets` are removed by
 # factory-reset.sh further down Phase 4, and this checks those as well.
+#
+# THE ONE THING RE-SCANNING CANNOT DECIDE (WARP-2621). If /data was never
+# mounted, every path below is absent for the wrong reason and this gate would
+# return PASS over a volume holding an intact DEVICE_SECRET_KEY — the exact
+# green verification a leased-box handover must never wear. That fact is only
+# observable BEFORE the wipe (step (4) re-creates the containers), so it is an
+# INPUT here: 4th argument, defaulting to what secw_wipe_live_secrets recorded.
+# When set, no re-scan result can produce a pass.
 secw_verify_wipe() {
   local _env_target="$1" _secrets_dir="$2" _repo="${3:-$SECW_REPO_ROOT}"
+  local _pre_missing="${4:-$SECW_ENV_CONTAINER_MISSING}"
   local _f
 
   SECW_LEFTOVER_PATHS=""
   SECW_LEFTOVER_COUNT=0
+  SECW_VERIFY_BLOCKED=0
+  SECW_VERIFY_BLOCKED_REASON=""
+
+  if [ "$_pre_missing" = "1" ]; then
+    SECW_VERIFY_BLOCKED=1
+    SECW_VERIFY_BLOCKED_REASON="$(dirname "$_env_target") did not exist before the wipe — the volume behind it was not mounted, so an empty re-scan proves nothing about what is on it"
+  fi
 
   # (1)+(2) the resolved .env and every snapshot / staging sibling beside it.
   # An unmatched glob stays literal (no nullglob), and `-e` on the literal is
@@ -319,5 +397,5 @@ secw_verify_wipe() {
     done
   fi
 
-  [ "$SECW_LEFTOVER_COUNT" -eq 0 ]
+  [ "$SECW_VERIFY_BLOCKED" -eq 0 ] && [ "$SECW_LEFTOVER_COUNT" -eq 0 ]
 }
