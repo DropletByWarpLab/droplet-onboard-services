@@ -906,6 +906,110 @@ entries:
     review_by: 2027-08-28
     code_refs: [services/erp-connector/src/mailchimp/connector.ts]
 
+  # kind: dynamic, NOT egress — same reasoning as mailchimp-marketing-api
+  # above, with one difference that matters and is easy to get wrong.
+  #
+  # Shopify's API base is https:// + <store> + .myshopify.com, where <store> is
+  # the merchant's own handle, so there is no hostname to write down. What is
+  # DIFFERENT from every other cloud track here: THE TOKEN ENDPOINT IS ON THE
+  # SAME PER-STORE HOST. The client-credentials grant posts to
+  # <store>.myshopify.com/admin/oauth/access_token, not to a central Shopify
+  # OAuth host — so unlike quickbooks-online-oauth / m365-entra-login, there is
+  # NO fixed second destination for this vendor and none is registered. A
+  # reviewer looking for the usual API-host + token-host pair should find only
+  # this entry, and that is correct rather than an omission.
+  #
+  # DO NOT "FIX" THIS INTO A STATIC ENTRY. A kind: egress entry with a wildcard
+  # (*.myshopify.com) or one sampled store would turn egress-gate green over a
+  # host that nothing constrains. Since a dynamic entry contributes NO host
+  # patterns to the scanner, this connector's source deliberately carries no
+  # https://…myshopify.com literal either. What it DOES carry is the bare
+  # suffix constant ".myshopify.com" the code-side guard anchors on — visible
+  # to the gate since the WARP-2467 bare-host scan reads string literals, and
+  # accounted for by ref-shopify-shop-domain below, which registers that NAME
+  # without granting any egress.
+  #
+  # THE ENFORCEMENT IS IN CODE, not here. assertSafeShopifyBaseUrl() does
+  # exact-host equality against the store domain this connection stores —
+  # anchored, so "acme.myshopify.com.evil.test" is refused — and it runs before
+  # any request object exists, including on the ONE request that carries the
+  # merchant's client secret. Its tests assert on the injected fetch having ZERO
+  # calls. Treat that guard as the control this entry documents.
+  - id: shopify-admin-api
+    kind: dynamic
+    service: erp-connector
+    config_key: IntegrationConnection.providerConfig.shopDomain (the <store>.myshopify.com domain the merchant pastes at connect time)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Shopify GraphQL Admin API — the storefront commerce cloud connector
+      (WARP-2296). Read-only: orders, products and inventory, and, where the
+      store's plan permits it, the customers those orders belong to. Carries the
+      merchant's own commercial records and (on a Grow-plan store) their
+      customers' names and email addresses, fetched on request under client
+      credentials the merchant created in their own Shopify organization and
+      pasted; never ambient, never a background crawl. ONE entry covers this
+      connector completely: the same per-store host serves the GraphQL endpoint
+      AND the client-credentials token endpoint, so there is no separate OAuth
+      host — unlike QuickBooks Online. The box only ever dials out; Shopify
+      webhooks and the bulk_operations/finish topic need a publicly reachable
+      HTTPS endpoint the box will never have (ADR-041 §1), so polling is the
+      only ingestion path. READ-ONLY at every tier: the connector's document
+      guard admits only the two bulk-export mutations, and no order, refund,
+      fulfilment or product mutation surface exists. Like the Stripe, HubSpot
+      and Mailchimp tracks it does NOT persist what it reads — commerce reads
+      are answered read-through, and even the 24-hour access token the box mints
+      lives only in memory, so this connector does not become the first writer
+      of the unencrypted ErpEntityCache or of ErpSyncCursor (ADR-041 §4,
+      WARP-2028). A completed BULK EXPORT is served from a signed URL on a
+      DIFFERENT host (object storage); the connector returns that reference
+      rather than dialing it, because that host is not registered here and
+      downloading it is a separate decision with its own security review — the
+      same line the hubspot-api entry draws. Off until the merchant connects a
+      store. Metered by query COST against a refilling leaky bucket rather than
+      by a request rate, so the connector derives its backoff from the
+      throttleStatus Shopify returns rather than from a guessed constant.
+    ticket: WARP-2296
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/erp-connector/src/shopify/connector.ts]
+
+  - id: ref-shopify-shop-domain
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination and NOT a wildcard grant. The box never dials
+      # myshopify.com itself — the dialled host is <store>.myshopify.com,
+      # per-connection, governed by shopify-admin-api above and by
+      # assertSafeShopifyBaseUrl(). This entry exists because the connector
+      # carries ".myshopify.com" as a whole-string literal for that guard to
+      # anchor on, and the WARP-2467 bare-host scan (rightly) reads a bare name
+      # out of it. Exact name only, so a sampled-store literal like
+      # acme.myshopify.com is still denied — which is the point.
+      hosts: [myshopify.com]
+    purpose: the anchored shop-domain suffix constant behind the Shopify exact-host guard, named in code as the guard's anchor — not a connection the box makes
+    ticket: WARP-2296
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [services/erp-connector/src/shopify/connector.ts]
+
+  - id: ref-shopify-dev-dashboard
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination. This is where the MERCHANT'S OWN BROWSER
+      # goes to create the Dev Dashboard app and copy its client id and secret
+      # — a page a person visits, never a host the box opens a connection to.
+      # ADR-042 §Egress names it explicitly for this reason, and it is
+      # registered so that the credential-field help text naming it cannot be
+      # read by the scanner as an unregistered destination.
+      hosts: [shopify.dev]
+    purpose: the developer dashboard the merchant uses to create their own app, cited in the connect form's help text and in the setup guide — not a connection the box makes
+    ticket: WARP-2296
+    added: 2026-09-02
+    review_by: 2027-09-02
+    code_refs: [packages/shared-types/src/provider-registry.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

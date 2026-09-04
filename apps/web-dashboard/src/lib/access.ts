@@ -416,6 +416,33 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     ],
   },
   {
+    // WARP-2581. Value-identical ladder to the server's access-catalog entry;
+    // only the copy lives here. TWO levels, not three: money is read-only on
+    // this box — the vendor stays the system of record — so there is no `act`
+    // to grant, because there is no action.
+    moduleId: "money",
+    label: "Money",
+    description: "Invoices and bills from a connected ledger",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "See what is owed and what is due",
+        minTier: FAMILY,
+        dropNoun: "See the money",
+        dropVerb: "see invoices and bills",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Connect and disconnect the ledger",
+        minTier: ADMIN,
+        dropNoun: "Manage the ledger",
+        dropVerb: "connect a ledger",
+      },
+    ],
+  },
+  {
     // WARP-2018/2032.
     moduleId: "contacts",
     label: "Contacts",

@@ -109,6 +109,14 @@ scripts/host/etc-systemd-system.conf.d/* text eol=lf
 # would miss. Same hazard as the units above, same pin.
 scripts/host/MANIFEST text eol=lf
 
+# WARP-2666 - the client-app release declaration, read field-by-field from the
+# box's checkout by scripts/app-downloads/audit.sh. Extensionless, so nothing
+# above catches it. A trailing CR lands in the LAST field of every row: on a
+# 3-field `absent`/`blocked` row it ends up INSIDE the ticket, so `-\r` stops
+# equalling `-` and the auditor refuses to give a verdict on a file that is
+# perfectly correct. Same hazard as MANIFEST, same pin.
+data/app-downloads/EXPECTED text eol=lf
+
 # WARP-2613 — shared cross-language fixtures. scripts/fixtures/heading-slug-
 # cases.tsv is the single statement of the heading-slug rule, and BOTH
 # implementations parse it FIELD-WISE: integration-guides.test.ts splits on the

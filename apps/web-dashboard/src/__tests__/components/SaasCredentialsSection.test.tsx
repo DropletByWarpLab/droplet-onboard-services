@@ -27,6 +27,11 @@ vi.mock("@/lib/api", () => ({
   saveSaasCredential: saveSaasCredentialMock,
 }));
 
+// WARP-2518 — the page now carries a Disconnect control, and the control makes
+// the call itself. Stubbed at the module boundary like every other API here.
+const { disconnectProviderMock } = vi.hoisted(() => ({ disconnectProviderMock: vi.fn() }));
+vi.mock("@/lib/api.erp", () => ({ disconnectProvider: disconnectProviderMock }));
+
 import {
   SaasCredentialsSection,
   stateCopyFor,
@@ -108,6 +113,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   fetchSaasCredentialsMock.mockResolvedValue([BILLING, CRM]);
   saveSaasCredentialMock.mockResolvedValue(BILLING);
+  disconnectProviderMock.mockResolvedValue({});
 });
 
 describe("the admin gate", () => {
@@ -238,6 +244,45 @@ describe("connection state honesty", () => {
     // limit), so the copy must not send the admin off to mint another one.
     expect(await screen.findByText(/Can't connect/)).toBeInTheDocument();
     expect(screen.queryByText(/Credential rejected/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * WARP-2623 — a capability-limited row is a WORKING connection.
+   *
+   * The four capability codes (Mailchimp's `CAPABILITY_MISSING`, HubSpot's
+   * `CAPABILITY_NOT_AVAILABLE`, Shopify's `SCOPE_MISSING` and
+   * `PROTECTED_CUSTOMER_DATA_DENIED`) all persisted as `ERROR`, so a Basic-plan
+   * Shopify store reading orders, products and inventory perfectly rendered
+   * here as "Can't connect — check the vendor's settings". This is the page an
+   * owner lands on to REPAIR a connection, and there was nothing on it to
+   * repair: the credential is valid and stored.
+   */
+  it("renders a capability-limited row as connected, with no reconnect prompt", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, state: "CAPABILITY_LIMITED" as const },
+      CRM,
+    ]);
+    render(<SaasCredentialsSection />);
+
+    // Mutation: delete the CAPABILITY_LIMITED row from `STATE_COPY` → `tsc`
+    // red (the Record is total) AND this red at runtime, because
+    // `STATE_COPY[view.state]` is `undefined` and `.label` throws.
+    const line = await screen.findByText(/Connected · limited/);
+    expect(line).toBeInTheDocument();
+
+    // The remediation names where the fix actually is. Mutation: drop the
+    // second half of the label → red, and the owner is told a dataset is
+    // missing with nowhere to go about it.
+    expect(line.textContent).toMatch(/plan or permission change/i);
+
+    // NO reconnect affordance — the whole point. A new key changes nothing,
+    // and both of the neighbouring states' copy sends the admin after one.
+    // Mutation: reuse NEEDS_RECONNECT's or ERROR's copy here → red.
+    const card = screen.getByTestId(`provider-${BILLING.provider}`);
+    expect(card.textContent).not.toMatch(/Credential rejected/);
+    expect(card.textContent).not.toMatch(/replace it/);
+    expect(card.textContent).not.toMatch(/Can't connect/);
   });
 
   /**
@@ -434,6 +479,7 @@ describe("hub and credentials page agree about the credential", () => {
     "NOT_CONFIGURED",
     "PROVISIONING",
     "CONNECTED",
+    "CAPABILITY_LIMITED",
     "DEGRADED",
     "DRIFT_LOCKED",
     "NEEDS_RECONNECT",
@@ -455,6 +501,8 @@ describe("hub and credentials page agree about the credential", () => {
     NOT_CONFIGURED: "PROVISIONING",
     PROVISIONING: "PROVISIONING",
     CONNECTED: "CONNECTED",
+    // WARP-2623 — folded straight through, like ERROR and NEEDS_RECONNECT.
+    CAPABILITY_LIMITED: "CAPABILITY_LIMITED",
     DEGRADED: "DEGRADED",
     DRIFT_LOCKED: "DRIFT_LOCKED",
     NEEDS_RECONNECT: "NEEDS_RECONNECT",
@@ -618,5 +666,177 @@ describe("the Status union", () => {
     // An empty list standing in for a broken load is the dishonesty this whole
     // surface exists to prevent.
     expect(await screen.findByText(/Couldn’t load the connector list/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2518 — Disconnect on the credentials page
+// ---------------------------------------------------------------------------
+
+/**
+ * This is the one surface in the product where a person hands over a
+ * credential, which makes it the surface that most owes them a way to take it
+ * back. Before this it had none: an admin could paste a key here and could
+ * only remove it by calling the API.
+ *
+ * The `offersDisconnect` rule is asserted through the DOM rather than as a
+ * pure-function unit, because the defect being prevented is a *rendered*
+ * control appearing on the wrong card.
+ */
+describe("disconnecting a configured provider", () => {
+  const disconnectFor = (name: string) =>
+    screen.queryByRole("button", { name: `Disconnect ${name}` });
+
+  /**
+   * Mutation: drop the `<DisconnectControl>` block from `ProviderForm` → red,
+   * which is the shipped state.
+   */
+  it("offers Disconnect on a configured provider", async () => {
+    setRole("admin");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+
+    expect(disconnectFor("Fixture Billing")).not.toBeNull();
+  });
+
+  /**
+   * …and not on one that was never configured. `fixture-crm` is
+   * `NOT_CONFIGURED`, so there is no credential for the button to purge.
+   *
+   * Mutation: make `offersDisconnect` return `true` unconditionally → red.
+   */
+  it("does not offer it for a provider that was never configured", async () => {
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-crm");
+
+    expect(disconnectFor("Fixture CRM")).toBeNull();
+  });
+
+  /**
+   * The rule is NOT `hasCredentials`.
+   *
+   * `hasCredentials` is an `every()` over the DECLARED secret fields, so a
+   * provider declaring two with one stored answers `false` while a live key
+   * sits sealed on the row — the exact question WARP-2489 proved is the wrong
+   * one for the state line. Gating the button that PURGES the key by it would
+   * bring that confusion straight back, and in the direction where the admin
+   * cannot remove a credential the box is still holding.
+   *
+   * Mutation: gate on `view.hasCredentials` → red, because this CONNECTED row
+   * reports `false` and loses its Disconnect.
+   */
+  it("offers it for a connected row whose declared secrets are only partly stored", async () => {
+    setRole("admin");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, hasCredentials: false },
+    ]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+
+    expect(disconnectFor("Fixture Billing")).not.toBeNull();
+  });
+
+  /**
+   * Mutation: drop the `credentialsPurged === true` clause → red, because the
+   * card then offers to remove a key it has just told the admin is gone.
+   */
+  it("does not offer it once the box says the credential is purged", async () => {
+    setRole("admin");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, state: "DISABLED" as SaasConnectionState, credentialsPurged: true },
+    ]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+
+    expect(screen.getByText(CREDENTIAL_PURGED_LINE)).toBeTruthy();
+    expect(disconnectFor("Fixture Billing")).toBeNull();
+  });
+
+  /**
+   * …and still offers it when the box says the key is STILL THERE, which is
+   * the unfinished state the page's own copy tells the admin to act on.
+   *
+   * Mutation: exclude every DISABLED row → red, and the card then says
+   * "reconnect or remove" while offering neither.
+   */
+  it("offers it when the box says the credential is still stored", async () => {
+    setRole("admin");
+    fetchSaasCredentialsMock.mockResolvedValue([
+      { ...BILLING, state: "DISABLED" as SaasConnectionState, credentialsPurged: false },
+    ]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+
+    expect(screen.getByText(CREDENTIAL_RETAINED_LINE)).toBeTruthy();
+    expect(disconnectFor("Fixture Billing")).not.toBeNull();
+  });
+
+  /**
+   * The confirmation gate, and the provider actually posted.
+   *
+   * Mutation: call `disconnectProvider` from the trigger's own `onClick` → red
+   * on the first assertion, because one click on the page where credentials
+   * live would then destroy one.
+   */
+  it("confirms first, then posts the provider key", async () => {
+    setRole("admin");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+
+    fireEvent.click(disconnectFor("Fixture Billing")!);
+    expect(disconnectProviderMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledWith("fixture-billing"));
+  });
+
+  /**
+   * The result arrives by RE-READING, not by mapping the disconnect response
+   * onto the row: the two payloads are different shapes and hand-mapping is
+   * how the hub and this page would come to disagree about `credentialsPurged`.
+   *
+   * Mutation: drop `onDisconnected={() => void load()}` from the panel → red,
+   * because the card keeps saying "Connected" after a confirmed purge.
+   */
+  it("re-reads afterwards, so the purge line replaces the connected state", async () => {
+    setRole("admin");
+    fetchSaasCredentialsMock.mockResolvedValueOnce([BILLING]).mockResolvedValue([
+      { ...BILLING, state: "DISABLED" as SaasConnectionState, credentialsPurged: true },
+    ]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    expect(screen.getByText("Connected")).toBeTruthy();
+
+    fireEvent.click(disconnectFor("Fixture Billing")!);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    await waitFor(() => expect(screen.getByText(CREDENTIAL_PURGED_LINE)).toBeTruthy());
+  });
+
+  /**
+   * A refusal is surfaced, and carries nothing the server echoed (rule 19).
+   *
+   * Mutation: replace the control's `catch` body with `{}` → red, because the
+   * admin is then shown nothing and believes the credential was removed.
+   */
+  it("surfaces a refusal without echoing the response body", async () => {
+    setRole("admin");
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    disconnectProviderMock.mockRejectedValueOnce(
+      Object.assign(new Error("rk_live_leaky_message"), {
+        code: "CONFLICT",
+        body: { key: "rk_live_should_never_render" },
+      }),
+    );
+
+    fireEvent.click(disconnectFor("Fixture Billing")!);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't disconnect Fixture Billing (CONFLICT)");
+    expect(document.body.textContent).not.toContain("rk_live_should_never_render");
+    expect(document.body.textContent).not.toContain("rk_live_leaky_message");
   });
 });

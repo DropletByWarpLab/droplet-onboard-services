@@ -51,6 +51,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createCrmRouter } from "./routes/crm.js";
+import { createMoneyRouter } from "./routes/money.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
@@ -400,6 +401,10 @@ export function createApp(
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
   app.use("/api", createCrmRouter(prisma));
+  // WARP-2581 — money: invoices and bills landed from a cloud ledger. Its own
+  // disjoint prefix (`/api/money`) and its own `money` module gate; read-only,
+  // because the vendor stays the system of record.
+  app.use("/api", createMoneyRouter(prisma));
   // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
   app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
