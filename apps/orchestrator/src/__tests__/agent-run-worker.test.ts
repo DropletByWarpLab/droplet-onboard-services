@@ -299,6 +299,12 @@ describe("agent-run worker — checkpoint, crash, resume (WARP-2177)", () => {
     // calls), not the whole run (3).
     expect(b.chat).toHaveBeenCalledTimes(2);
     expect(resumed.iteration).toBe(3);
+    // WARP-2178 — a resume is never more expensive than the original at the
+    // same iteration: the checkpoint holds the already-bounded conversation,
+    // so B's first request (iteration 1) is at most the size of A's.
+    const size = (req: unknown) =>
+      JSON.stringify((req as { messages: unknown }).messages).length;
+    expect(size(b.chat.mock.calls[0]![0])).toBeLessThanOrEqual(size(a.chat.mock.calls[1]![0]));
   });
 
   it("replay guard: a send_notification that already fired is fed back from the trace, never re-sent", async () => {
