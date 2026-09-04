@@ -422,6 +422,8 @@ export interface WalkOptions {
   maxDepth: number;
   maxEntries: number;
   maxListings: number;
+  /** Checked before every listing, as the write handlers check it before every write. */
+  signal: AbortSignal;
 }
 
 export interface WalkResult {
@@ -441,6 +443,8 @@ export interface WalkResult {
   listed: number;
   /** A bound stopped the walk with folders still unread; the report covers what was reached, not the tree. */
   truncated: boolean;
+  /** The signal aborted with folders still unread. Implies `truncated`. */
+  cancelled: boolean;
   /** Folders below root whose listing failed (status), skipped and noted. */
   errors: Array<{ path: string; status: number }>;
   /** HTTP status of the root listing. Non-2xx ⇒ nothing else was read. */
@@ -464,11 +468,20 @@ export async function walkTree(
     possiblyDegraded: false,
     listed: 0,
     truncated: false,
+    cancelled: false,
     errors: [],
     rootStatus: 0,
   };
   const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   while (queue.length > 0) {
+    // PR #1985 review: the write handlers stop before every iteration once
+    // cancelled; without this the walk kept issuing up to `maxListings`
+    // listings after the caller had given up.
+    if (opts.signal.aborted) {
+      result.cancelled = true;
+      result.truncated = true;
+      break;
+    }
     // Only ever declared with a folder still queued (the loop condition), so
     // a scan that read everything — including one folder holding more than
     // `maxEntries` files, all of which land in `entries` — reports complete,

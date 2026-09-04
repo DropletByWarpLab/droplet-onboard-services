@@ -311,6 +311,7 @@ describe("clampInt / humanBytes", () => {
 
 describe("walkTree", () => {
   type Tree = Record<string, Array<Partial<CleanupEntry> & { path: string }> | number>;
+  const live = () => new AbortController().signal;
 
   function lister(tree: Tree) {
     const calls: string[] = [];
@@ -341,7 +342,7 @@ describe("walkTree", () => {
 
   it("walks breadth-first to maxDepth, reporting empty folders", async () => {
     const { list, calls } = lister(tree);
-    const r = await walkTree("/D", list, { maxDepth: 1, maxEntries: 100, maxListings: 100 });
+    const r = await walkTree("/D", list, { maxDepth: 1, maxEntries: 100, maxListings: 100, signal: live() });
     expect(calls).toEqual(["/D", "/D/sub", "/D/empty"]);
     expect(r.entries.map((e) => e.path)).toEqual([
       "/D/a.txt", "/D/sub", "/D/empty", "/D/sub/b.txt", "/D/sub/deeper",
@@ -357,29 +358,29 @@ describe("walkTree", () => {
   // PR #1985 review: the "may be an outage" signal is decided once, in
   // readListing, and OR'd across the walk — not re-derived per handler.
   it("possiblyDegraded is false when every listing had entries, true when the root itself read empty", async () => {
-    const full = await walkTree("/D", lister({ "/D": [{ path: "/D/a.txt" }] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100 });
+    const full = await walkTree("/D", lister({ "/D": [{ path: "/D/a.txt" }] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100, signal: live() });
     expect(full.possiblyDegraded).toBe(false);
-    const empty = await walkTree("/D", lister({ "/D": [] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100 });
+    const empty = await walkTree("/D", lister({ "/D": [] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100, signal: live() });
     expect(empty.possiblyDegraded).toBe(true);
     expect(empty.emptyDirectories).toEqual([]); // the root is reported via the flag, not as an empty subfolder
   });
 
   it("depth 0 lists only the root", async () => {
     const { list, calls } = lister(tree);
-    await walkTree("/D", list, { maxDepth: 0, maxEntries: 100, maxListings: 100 });
+    await walkTree("/D", list, { maxDepth: 0, maxEntries: 100, maxListings: 100, signal: live() });
     expect(calls).toEqual(["/D"]);
   });
 
   it("stops at maxListings and flags truncation", async () => {
     const { list } = lister(tree);
-    const r = await walkTree("/D", list, { maxDepth: 5, maxEntries: 100, maxListings: 2 });
+    const r = await walkTree("/D", list, { maxDepth: 5, maxEntries: 100, maxListings: 2, signal: live() });
     expect(r.listed).toBe(2);
     expect(r.truncated).toBe(true);
   });
 
   it("stops at maxEntries and flags truncation", async () => {
     const { list } = lister(tree);
-    const r = await walkTree("/D", list, { maxDepth: 5, maxEntries: 3, maxListings: 100 });
+    const r = await walkTree("/D", list, { maxDepth: 5, maxEntries: 3, maxListings: 100, signal: live() });
     expect(r.truncated).toBe(true);
     expect(r.listed).toBe(1);
   });
@@ -389,26 +390,58 @@ describe("walkTree", () => {
   // complete — flagging it sent the user a false "this may be incomplete".
   it("a scan that reaches maxEntries with nothing left to list is complete, not truncated", async () => {
     const flat: Tree = { "/E": [{ path: "/E/a" }, { path: "/E/b" }, { path: "/E/c" }] };
-    const exact = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 3, maxListings: 100 });
+    const exact = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 3, maxListings: 100, signal: live() });
     expect(exact.entries).toHaveLength(3);
     expect(exact.truncated).toBe(false);
     // One folder's worth is always read whole, so overrunning the cap inside
     // a single listing is still a complete read of that folder.
-    const over = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 2, maxListings: 100 });
+    const over = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 2, maxListings: 100, signal: live() });
     expect(over.entries).toHaveLength(3);
     expect(over.truncated).toBe(false);
   });
 
+  // PR #1985 review: the write handlers check the signal before every
+  // iteration; the walk did not, so a cancelled analyze kept listing up to
+  // maxListings folders.
+  describe("cancellation", () => {
+    it("stops listing once the signal is aborted, keeps what was read, and says so", async () => {
+      const controller = new AbortController();
+      const inner = lister(tree);
+      const list = vi.fn(async (dir: string) => {
+        const res = await inner.list(dir);
+        controller.abort();
+        return res;
+      });
+      const r = await walkTree("/D", list, { maxDepth: 3, maxEntries: 100, maxListings: 100, signal: controller.signal });
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(r.entries.map((e) => e.path)).toEqual(["/D/a.txt", "/D/sub", "/D/empty"]);
+      expect(r.listed).toBe(1);
+      expect(r.cancelled).toBe(true);
+      // Two folders were still queued, so the report does not cover the tree.
+      expect(r.truncated).toBe(true);
+    });
+
+    it("lists nothing when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const { list } = lister(tree);
+      const r = await walkTree("/D", list, { maxDepth: 3, maxEntries: 100, maxListings: 100, signal: controller.signal });
+      expect(list).not.toHaveBeenCalled();
+      expect(r.cancelled).toBe(true);
+      expect(r.listed).toBe(0);
+    });
+  });
+
   it("a failed subfolder is recorded and skipped, the walk goes on", async () => {
     const { list } = lister({ ...tree, "/D/sub": 500 });
-    const r = await walkTree("/D", list, { maxDepth: 2, maxEntries: 100, maxListings: 100 });
+    const r = await walkTree("/D", list, { maxDepth: 2, maxEntries: 100, maxListings: 100, signal: live() });
     expect(r.errors).toEqual([{ path: "/D/sub", status: 500 }]);
     expect(r.emptyDirectories).toEqual(["/D/empty"]);
   });
 
   it("a failed root ends the walk with its status and no further calls", async () => {
     const { list, calls } = lister({ "/D": 404 });
-    const r = await walkTree("/D", list, { maxDepth: 2, maxEntries: 100, maxListings: 100 });
+    const r = await walkTree("/D", list, { maxDepth: 2, maxEntries: 100, maxListings: 100, signal: live() });
     expect(r.rootStatus).toBe(404);
     expect(r.entries).toEqual([]);
     expect(calls).toEqual(["/D"]);

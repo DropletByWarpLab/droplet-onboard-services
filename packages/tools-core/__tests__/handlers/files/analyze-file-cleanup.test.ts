@@ -37,7 +37,7 @@ afterAll(() => {
 
 function ctxWith(
   get: Mock,
-  opts: { ncToken?: string; userId?: string; post?: Mock; del?: Mock } = {},
+  opts: { ncToken?: string; userId?: string; post?: Mock; del?: Mock; signal?: AbortSignal } = {},
 ): ToolContext {
   return {
     http: {
@@ -52,7 +52,7 @@ function ctxWith(
     matter: {} as ToolContext["matter"],
     userId: opts.userId === undefined ? "alice" : opts.userId,
     ncToken: opts.ncToken === undefined ? "tok" : opts.ncToken,
-    signal: new AbortController().signal,
+    signal: opts.signal ?? new AbortController().signal,
   };
 }
 
@@ -453,6 +453,40 @@ describe("analyze_file_cleanup", () => {
         "/Mixed/middle.txt",
         "/Mixed/newest.txt",
       ]);
+    });
+  });
+
+  // PR #1985 review: the walk checks the signal before every listing, like
+  // the write handlers do before every mkdir / move / delete.
+  describe("cancellation", () => {
+    it("stops the walk once aborted and marks the scan cancelled", async () => {
+      const controller = new AbortController();
+      const inner = treeGet(TREE);
+      const get = vi.fn(async (url: string, opts?: { headers?: Record<string, string> }) => {
+        const res = await inner(url, opts);
+        controller.abort();
+        return res;
+      });
+      const r = await analyzeFileCleanup.handler({ path: "/Downloads" }, ctxWith(get, { signal: controller.signal }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(d.scanned.directories_listed).toBe(1);
+      expect(d.scanned.cancelled).toBe(true);
+      expect(d.scanned.truncated).toBe(true);
+      // What the one listing returned is still reported.
+      expect(d.scanned.files).toBe(6);
+    });
+
+    it("returns CANCELLED without any HTTP when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const get = vi.fn();
+      const r = await analyzeFileCleanup.handler({ path: "/Downloads" }, ctxWith(get, { signal: controller.signal }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("CANCELLED");
+      expect(get).not.toHaveBeenCalled();
     });
   });
 

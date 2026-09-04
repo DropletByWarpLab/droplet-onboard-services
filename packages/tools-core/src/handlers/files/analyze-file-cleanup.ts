@@ -127,8 +127,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const walk = await walkTree(
     v.path,
     (dir) => ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers }),
-    { maxDepth, maxEntries: ANALYZE_MAX_ENTRIES, maxListings: ANALYZE_MAX_LISTINGS },
+    { maxDepth, maxEntries: ANALYZE_MAX_ENTRIES, maxListings: ANALYZE_MAX_LISTINGS, signal: ctx.signal },
   );
+  if (walk.cancelled && walk.listed === 0) {
+    return err("CANCELLED", "the request was cancelled before the folder was read");
+  }
   if (walk.rootStatus === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (walk.rootStatus < 200 || walk.rootStatus >= 300) {
     return err("LIST_FAILED", `nextcloud returned ${walk.rootStatus}`);
@@ -225,6 +228,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         max_depth: maxDepth,
         directories_listed: walk.listed,
         truncated: walk.truncated,
+        ...(walk.cancelled ? { cancelled: true } : {}),
       },
       by_category,
       largest,
