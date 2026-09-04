@@ -254,11 +254,18 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // through), and not a pass-through — the roster below is unchanged, which
     // is the distinction this count exists to keep visible.
     //
-    // RECONCILIATION NOTE: PR #1985 (WARP-2664) takes this same line to 42 for
-    // `organize_files` + `delete_files`. Both changes are independent and both
-    // are correct; whichever lands second must resolve the conflict to 43, not
-    // pick a side.
-    expect(confirming).toHaveLength(41);
+    // 42 as of WARP-2180: `start_agent_run`. Tier-2 because it spends the
+    // box's compute unattended — the interceptor challenges it and chat
+    // approves it, exactly like any other flag-gated tool. Not a pass-through
+    // (it never calls passThroughConfirmation; the route it posts to has no
+    // gate of its own), so the roster below is unchanged, which is the
+    // distinction this count exists to keep visible.
+    //
+    // RECONCILIATION NOTE: PR #1985 (WARP-2664) takes this same line up by
+    // two for `organize_files` + `delete_files`. Both changes are independent
+    // and both are correct; whichever lands second must resolve the conflict
+    // to 44, not pick a side.
+    expect(confirming).toHaveLength(42);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
