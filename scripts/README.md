@@ -263,6 +263,12 @@ display name can be reworded freely but its id changes only on purpose
 (WARP-2645 — keying on the prose name meant a rewording silently un-allowed
 that case's skip).
 
+The bar for adding an id to `SHIPCHECK_ALLOW_SKIP` in CI is *this job cannot
+run that case at all*, not *that case sometimes flakes*: an exempted case is a
+case that can no longer fail. An environmental SKIP on the runner — the
+`docker-build-smoke` shim case losing its container before the planted
+`docker buildx` — is meant to red the job and be re-run (WARP-2620).
+
 WARP-2637: before this, every SKIP returned 0 and was counted in `N/N passed`,
 so CI's `shipcheck` job — which does no `npm ci` — reported green while both
 `tsc-full` cases had never run, and the WARP-329 fixture guard sat vacuous for

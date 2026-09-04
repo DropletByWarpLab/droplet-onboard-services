@@ -1030,6 +1030,15 @@ jobs:
       # developer-machine gates only. Running them in CI is a spend decision,
       # not an oversight.
       #
+      # WARP-2620 — the bar for adding an id here is "this job structurally
+      # cannot run that case", not "that case sometimes flakes". Both ids below
+      # clear it: no `npm ci`, so no node_modules, so neither tsc-full case can
+      # execute, ever, on this job. `docker-build-smoke-shim-allowlist` does NOT
+      # clear it and is deliberately absent — it runs fine here, and its SKIP
+      # (the smoke container died before reaching the planted `docker buildx`) is
+      # news worth a red and a re-run, not a standing exemption. Allow-listing
+      # it would leave a guard that can no longer fail.
+      #
       # WARP-2645 — the value is a list of SKIP IDS, not display names. The
       # ids are declared beside each `_run_test` registration in
       # scripts/test/ship-check.test.sh. Keying this on the display name made
