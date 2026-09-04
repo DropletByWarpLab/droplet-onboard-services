@@ -823,9 +823,16 @@ run_check_shellcheck() {
   # ShellCheck will surface it loudly. (Capitalised so this line does not
   # open with the bare token `shellcheck` — see WARP-2477 and the note at
   # the head of this file.)
+  #
+  # WARP-2620 added scripts/bootstrap.sh. It is 238 lines of bash on the
+  # `tsc-full` critical path (this file runs it before every typecheck) and it
+  # is the command CLAUDE.md and CONTRIBUTING.md both tell a new implementer to
+  # run first — the same argument that put this gate's own two files on the
+  # list under WARP-2477. It is clean today; this is what keeps it that way.
   local targets=()
   local file
   for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/bootstrap.sh" \
               "$REPO_ROOT/scripts/test/ship-check.sh" \
               "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
