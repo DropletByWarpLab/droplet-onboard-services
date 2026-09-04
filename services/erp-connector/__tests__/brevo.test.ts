@@ -1522,6 +1522,58 @@ describe("vendor errors", () => {
     expect((await c.status()).state).toBe("ip_blocked");
   });
 
+  it("reports needs_reconnect after a bare 401, and clears it on the next success", async () => {
+    // `BrevoConnectionState` declares `needs_reconnect` precisely so a dead key
+    // is never "an absent value defaulted into connected". A plain 401 — the
+    // deleted / expired / deactivated causes in BREVO_UNAUTHORIZED_CAUSES —
+    // therefore has to land on the connection state, not only on the thrown
+    // error, or an expired key reads "connected" until somebody regenerates it.
+    // Mutation: drop the `needs_reconnect` assignment in request() → red.
+    const { c } = connector({
+      routes: [
+        {
+          match: /\/account/,
+          responses: [
+            { status: 401, body: { code: "unauthorized", message: "Key not found" } },
+            { body: { companyName: "Acme" } },
+          ],
+        },
+      ],
+    });
+    const err = await rejection(() => c.connect());
+    expect(err).toBeInstanceOf(BrevoReauthorizationRequiredError);
+    const status = await c.status();
+    expect(status.state).toBe("needs_reconnect");
+    expect(status.ok).toBe(false);
+    await expect(c.health()).rejects.toThrow(BrevoReauthorizationRequiredError);
+    // A later successful call is the only thing that clears it.
+    await c.connect();
+    expect((await c.status()).state).toBe("connected");
+  });
+
+  it("a bare 401 AFTER an IP block reads as needs_reconnect, not a stale ip_blocked", async () => {
+    // The two remedies are opposites (fix the allowlist vs. regenerate the
+    // key), and a dead key can never produce the success that would otherwise
+    // reset the flag — so the LAST failure has to win, not the first.
+    // Mutation: make `ip_blocked` sticky over a later plain 401 → red.
+    const { c } = connector({
+      routes: [
+        {
+          match: /\/account/,
+          responses: [
+            { status: 401, body: { code: "unauthorized", message: "Your IP address 203.0.113.9 is not authorized" } },
+            { status: 401, body: { code: "unauthorized", message: "Key not found" } },
+          ],
+        },
+      ],
+    });
+    await rejection(() => c.connect());
+    expect((await c.status()).state).toBe("ip_blocked");
+    const err = await rejection(() => c.connect());
+    expect(err).toBeInstanceOf(BrevoReauthorizationRequiredError);
+    expect((await c.status()).state).toBe("needs_reconnect");
+  });
+
   it("backs off on the vendor's RESET header, because Brevo documents no Retry-After", async () => {
     // "Rate limit headers are included in all responses": Brevo sends
     // x-sib-ratelimit-limit / -remaining / -reset and NO Retry-After. A

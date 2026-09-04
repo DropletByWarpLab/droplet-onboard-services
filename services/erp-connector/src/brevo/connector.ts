@@ -1873,7 +1873,7 @@ export class BrevoConnector implements Connector {
   private probe: BrevoAccountProbe = { state: "unverified" };
   private displayCurrency: string | null = null;
   private companyPaging: BrevoCompanyPaging | null = null;
-  private lastFailure: "ip_blocked" | "capability_missing" | null = null;
+  private lastFailure: "ip_blocked" | "capability_missing" | "needs_reconnect" | null = null;
 
   constructor(
     private readonly config: BrevoConnectorConfig,
@@ -2018,6 +2018,13 @@ export class BrevoConnector implements Connector {
           this.lastFailure = "capability_missing";
           throw new BrevoCapabilityMissingError(path, res.status, code);
         }
+        // A bare 401 is a dead key (deleted, expired, deactivated). It lands on
+        // the connection state, not only on the thrown error: `state()` reads
+        // this, and without it an expired key reports "connected" until somebody
+        // regenerates it. Overwrites an earlier ip_blocked deliberately - the
+        // remedies are opposites and a dead key can never produce the success
+        // that would otherwise clear the flag.
+        this.lastFailure = "needs_reconnect";
         throw new BrevoReauthorizationRequiredError(res.status, code);
       }
 
@@ -2251,6 +2258,9 @@ export class BrevoConnector implements Connector {
     const state = await this.state();
     if (state === "ip_blocked") {
       throw new BrevoIpBlockedError(401, undefined);
+    }
+    if (state === "needs_reconnect") {
+      throw new BrevoReauthorizationRequiredError(401, undefined);
     }
     if (state === "capability_missing") {
       const probe = this.probe;
@@ -2834,6 +2844,9 @@ export class BrevoConnector implements Connector {
       return "disconnected";
     }
     if (this.lastFailure === "ip_blocked") return "ip_blocked";
+    // A dead key. Distinct from capability_missing (the key works, the plan
+    // or scope does not) because the remedy is to regenerate the key.
+    if (this.lastFailure === "needs_reconnect") return "needs_reconnect";
     if (this.lastFailure === "capability_missing" || this.probe.state === "forbidden") {
       return "capability_missing";
     }
