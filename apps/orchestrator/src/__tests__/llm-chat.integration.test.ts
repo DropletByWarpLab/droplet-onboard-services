@@ -427,6 +427,17 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       OVERSIZED_MESSAGE_TOKENS + 1_250,
     );
 
+    // The POSITIVE anchor, first (#1955). This file has no `beforeEach` and
+    // never resets `mockChat`, so every case relies on consuming exactly what
+    // it queued; if the queue shifts, the `mockImplementationOnce` capture
+    // above never runs, `systemPrompt` stays `""`, and the two negative
+    // assertions below pass vacuously — the drop would read as proven by a
+    // string that was never on the wire. `loadIdentityPrompt()` is the right
+    // anchor because identity is the one block `degradeToFit` may never take,
+    // so its presence is unconditional however the turn degrades. The sibling
+    // case below already asserts it.
+    expect(systemPrompt).toContain(loadIdentityPrompt());
+
     // The drop is visible on the wire, not just in the log: the persona block
     // is gone from the system message the gateway was handed.
     expect(systemPrompt).not.toContain(PERSONA_BLOCK_PREFIX);
