@@ -93,11 +93,14 @@ WF_DIR=".github/workflows"
 runners_file="$(mktemp)"
 trap 'rm -f "$runners_file"' EXIT
 
+# Strips one layer of surrounding quotes into UNQ. A setter rather than a
+# `$(…)` so the harvest costs no forks: it runs per token, per command, per
+# workflow, on a gate that has to stay cheap enough to keep unfiltered.
+UNQ=""
 unquote() {
-  local s="$1"
-  s="${s#\"}"; s="${s%\"}"
-  s="${s#\'}"; s="${s%\'}"
-  printf '%s' "$s"
+  UNQ="$1"
+  UNQ="${UNQ#\"}"; UNQ="${UNQ%\"}"
+  UNQ="${UNQ#\'}"; UNQ="${UNQ%\'}"
 }
 
 # One command between `;`, `&&`, `||`, `|` or `&`. Prints the path it runs,
@@ -129,7 +132,8 @@ handle_segment() {
       var="${tok[$((i + 1))]}"
       while [ "$j" -lt "${#tok[@]}" ]; do
         [ "${tok[$j]}" = "do" ] && break
-        list="$list $(unquote "${tok[$j]}")"
+        unquote "${tok[$j]}"
+        list="$list $UNQ"
         j=$((j + 1))
       done
       loop_names+=("$var")
@@ -149,7 +153,8 @@ handle_segment() {
       done
       [ "$noexec" -eq 0 ] || return 0
       [ -n "$target" ] || return 0
-      target="$(unquote "$target")"
+      unquote "$target"
+      target="$UNQ"
       case "$target" in
         '$'*)
           target="${target#\$}"; target="${target#\{}"; target="${target%\}}"
@@ -159,7 +164,10 @@ handle_segment() {
       ;;
     *)
       case "$cmd" in
-        ./*|/*) case "$cmd" in *.sh) printf '%s\n' "$(unquote "$cmd")" ;; esac ;;
+        ./*|/*)
+          case "$cmd" in
+            *.sh) unquote "$cmd"; printf '%s\n' "$UNQ" ;;
+          esac ;;
       esac
       ;;
   esac
