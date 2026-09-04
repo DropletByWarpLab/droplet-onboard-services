@@ -268,9 +268,15 @@ export function discoveryUrlFor(workload: string): string | null {
  * Strip delta tokens out of a string before it is logged or persisted.
  *
  * A delta link is a CREDENTIAL-SHAPED URL: replaying one reads the customer's
- * mail. `delta-cursor.service.ts` already redacts the Outlook forms; this adds
- * the driveItem `token=` form, which the existing pattern does not match — a
- * gap that would have leaked exactly the workload with the largest blast radius.
+ * mail. This adds the driveItem `token=` form, which the Outlook-only pattern
+ * in `delta-cursor.service.ts` does not match — a gap that would have leaked
+ * exactly the workload with the largest blast radius.
+ *
+ * WIRED, not just available: `redactSyncError()` in `delta-cursor.service.ts`
+ * calls this before its own pass, so every persisted `lastError` goes through
+ * it. The two are LAYERED on purpose — this one anchors on `?`/`&` and so
+ * cannot see a bare `$deltatoken=` spliced into a message, which the other
+ * pattern catches. Neither is a superset; see that function's note.
  */
 export function redactDeltaTokens(text: string): string {
   return text.replace(
