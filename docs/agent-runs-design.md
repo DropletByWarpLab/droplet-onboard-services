@@ -248,18 +248,76 @@ sizing path. Model-written summaries were rejected for now on the ticket's
 own grounds: an inference call per large result can cost more on CPU
 inference than the tokens it saves.
 
-## 7. Tier-2 park-and-confirm (WARP-2179) — scoped
+## 7. Tier-2 park-and-confirm (WARP-2179)
 
-A Tier-2 call transitions the run to `awaiting_confirmation` and persists the
-pending call bound to `{ service, action, resourceId }` — the shape the
-interceptor's token binds. The run is parked, not cancelled, and releases its
-lease. The token is minted **when the human opens the notification**, so the
-60 s TTL starts at human attention. Notification rides the ws-bridge
-(`droplet/notifications/<user>`) the desktop app already consumes. Deny yields
-a tool result the loop sees, so the model adapts. Tier-3 stays refused — no new
-bypass. Confirmation is not an escalation: RBAC still applies per dispatch. The
-worker's approvals port maps onto the existing `ChatApprovalStore` shape
-(`register` / `claimGrant`) so the round-trip reuses WARP-2469's mechanism.
+A background run is an unattended privileged actor. The user authorised a
+goal, not each destructive act the model later chose, so a confirming tool is
+**never auto-confirmed** because "the user started the run" — that is the
+trust failure the tier system exists to prevent. The run's pool now includes
+Tier-2 (`requiresConfirmation`) tools; what chat excludes on policy grounds
+stays out and is the run's Tier-3.
+
+**Park.** The WARP-2305 interceptor challenges a Tier-2 call exactly as in
+chat. The loop hands the challenge to the worker's approvals port
+(`register`, the `ChatApprovalPort` shape WARP-2469 introduced), which records
+the request and stops the loop through the same signal cancellation uses.
+After the loop returns the worker writes the park in one fenced update:
+`status = awaiting_confirmation`, the lease released (`claimedBy` null), the
+pending call in **explicit columns** bound as the interceptor binds its token
+— `pendingTool` + `pendingBindingHash = confirmationBindingHash(tool, args)` —
+plus `pendingArgs`, `pendingToolCallId`, `parkedAt`. The interceptor's token is
+**dropped**: no token exists anywhere while the run sits parked. The owner is
+notified over `droplet/notifications/<username>` (the ws-bridge topic the
+desktop app already consumes) with the run's goal, the tool and a PHI-free
+argument summary; a `tool_call` ActivityRow with `refs.agentRunId` records
+`confirmation: "parked"`. No confirmation inside any window leaves it parked.
+
+**Decide.** `decideAgentRun(prisma, { id, decision, decidedBy })` — the
+service behind `POST /api/agent-runs/:id/confirm` (§8). Only the run's owner
+or an `owner`-role principal may decide. **Approval is not an escalation
+path:** the run's attributed principal must still reach the tool now, on both
+axes (`toolAllowedForPrincipal` over `resolveAttributedToolAccess`), or the
+approval is refused and the run stays parked. A decision re-queues the run
+with `pendingDecision` set and extends `deadlineAt` by the time spent parked,
+so a day waiting for a human is not a day of wall clock. Denial needs no
+reach check.
+
+**Resume.** The run is claimed like any other and resumes from its checkpoint
+— the top of the parked iteration — so the model re-issues the call. In
+`beforeToolCall`, a call whose binding matches the decided pending call is
+consumed:
+
+- *approved* — the worker performs the interceptor handshake itself: one
+  dispatch without a token, which returns a **fresh** challenge minted now,
+  seconds after the human decided; one dispatch presenting it. The
+  interceptor stays the single gate and the token's TTL starts at human
+  attention, which is where it was designed to start. The tool runs exactly
+  once. Anything other than a challenge on the first leg (a deny-tier
+  refusal, a tool that no longer confirms, an error) is the box's honest
+  answer and is handed back as-is.
+- *denied* — the model receives a `CONFIRMATION_DENIED` tool result and
+  adapts or finishes; the tool never runs.
+
+Either way the pending columns clear, the trace entry carries
+`confirmation: "confirmed" | "denied"`, and a `tool_call` row with
+`refs.agentRunId` records the outcome. A run resumed after a box restart
+loses nothing: the park is the checkpoint plus the pending columns.
+
+**Tier-3.** A tool outside the run's pool hits the loop's unknown-tool guard;
+a tool the interceptor's deny tier refuses comes back as a `TOOL_DENIED`
+error. Neither is a challenge, so neither parks. Pinned by
+`agent-run-worker.park-and-confirm.test.ts`.
+
+**Copy.** `packages/tools-core/src/confirmation.ts` no longer promises "the
+Droplet dashboard": that text reaches a chat chip, a paired desktop (ADR-014)
+and a parked run alike, so it now says only what is true everywhere — the
+action needs the user's confirmation and has not been performed — and each
+surface renders its own copy.
+
+**Not done.** Batching several parked confirmations into one prompt (the
+ticket's own follow-up; it must not become a single "allow all"), and any
+allow-list of Tier-2 tools that may auto-confirm in a run (needs its own ADR
+and Romain's sign-off, as ADR-014 §③ required for desktop tools).
 
 ## 8. API, Activity view, scheduling, LLM tools (WARP-2180) — scoped
 

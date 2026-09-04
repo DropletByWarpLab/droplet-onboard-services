@@ -38,6 +38,15 @@ export interface AgentRunRow {
   result: string | null;
   stopReason: string | null;
   error: string | null;
+  /** WARP-2179 — the parked Tier-2 call. */
+  pendingTool: string | null;
+  pendingBindingHash: string | null;
+  pendingArgs: unknown;
+  pendingToolCallId: string | null;
+  parkedAt: Date | null;
+  pendingDecision: string | null;
+  pendingDecidedAt: Date | null;
+  pendingDecidedBy: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -77,7 +86,12 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
 
 function applyData(row: Record<string, unknown>, data: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(data)) {
-    if (value && typeof value === "object" && !(value instanceof Date) && "increment" in (value as object)) {
+    const ctor = value && typeof value === "object" ? (value as object).constructor?.name : undefined;
+    if (ctor === "DbNull" || ctor === "JsonNull" || ctor === "AnyNull") {
+      // Prisma's JSON-null sentinels (WARP-2484 mirrors them in setup.ts):
+      // `Prisma.DbNull` on a nullable Json column is SQL NULL.
+      row[key] = null;
+    } else if (value && typeof value === "object" && !(value instanceof Date) && "increment" in (value as object)) {
       row[key] = (row[key] as number) + ((value as { increment: number }).increment ?? 0);
     } else if (value && typeof value === "object" && !(value instanceof Date)) {
       // A Json column is SERIALISED on write. Storing the caller's array by
@@ -142,6 +156,14 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         result: null,
         stopReason: null,
         error: null,
+        pendingTool: null,
+        pendingBindingHash: null,
+        pendingArgs: null,
+        pendingToolCallId: null,
+        parkedAt: null,
+        pendingDecision: null,
+        pendingDecidedAt: null,
+        pendingDecidedBy: null,
         createdAt: now(),
         updatedAt: now(),
       };

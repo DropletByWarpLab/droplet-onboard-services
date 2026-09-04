@@ -3305,6 +3305,22 @@ model AgentRun {
   /// The loop's own `stop_reason` for the terminal segment.
   stopReason  String?
   error       String?
+  /// WARP-2179 — the parked Tier-2 call, while `status = awaiting_confirmation`.
+  /// Explicit columns, not a blob: the call is bound the way the interceptor
+  /// binds its token — tool name + `confirmationBindingHash(tool, args)` — so
+  /// what the human approves is exactly what will be redeemed, and nothing
+  /// else can be smuggled through the park. No token is stored: the
+  /// interceptor's own token is minted at resume, seconds after the human
+  /// decided, and redeemed in the same breath. `parkedAt` is what the
+  /// deadline is extended by on resume, so a day parked is not a day spent.
+  pendingTool        String?
+  pendingBindingHash String?
+  pendingArgs        Json?
+  pendingToolCallId  String?
+  parkedAt           DateTime?
+  pendingDecision    AgentRunPendingDecision?
+  pendingDecidedAt   DateTime?
+  pendingDecidedBy   String?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -3329,6 +3345,15 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2179 — the human's decision on a parked Tier-2 call. Absent while
+/// parked; set by the confirm/deny route, consumed by the worker on resume.
+/// `approved` redeems the call once; `denied` is fed back to the model as a
+/// tool result so it can adapt or finish.
+enum AgentRunPendingDecision {
+  approved
+  denied
 }
 
 /// WARP-474 — Phase G2. Smart-home scene definition.
