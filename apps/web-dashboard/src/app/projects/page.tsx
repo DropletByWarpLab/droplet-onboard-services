@@ -187,21 +187,24 @@ function ProjectsWorkspace(): JSX.Element {
             Note the honest limit — pm_list_projects / pm_get_work_item are in
             EXCLUDED_FROM_CHAT_TOOLS, so a project pin scopes retrieval and
             names the record; it does not unlock a PM read tool. */}
-        <Link
-          className="btn"
-          href="/chat"
-          onClick={() => {
-            if (project) {
+        {/* Rendered only with the record in hand — the CRM drawer does the
+            same. A button that navigates to /chat with nothing staged would
+            be a silent regression to a bare link. */}
+        {project && (
+          <Link
+            className="btn"
+            href="/chat"
+            onClick={() =>
               stageRecordPinHandoff({
                 kind: "project",
                 id: project.id,
                 name: project.name,
-              });
+              })
             }
-          }}
-        >
-          <PmIcon name="msg" size={14} /> Ask AI about this project
-        </Link>
+          >
+            <PmIcon name="msg" size={14} /> Ask AI about this project
+          </Link>
+        )}
         {!readOnly && project && (
           <button className="btn primary" type="button" onClick={() => setModal("newitem")}>
             <PmIcon name="plus" size={14} /> New item

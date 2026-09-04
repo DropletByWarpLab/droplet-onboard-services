@@ -2938,16 +2938,33 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         //
         // Same two-axis gate as the chat turn, and the same reason: this route
         // is behind the `chat` module, not `crm`/`projects`.
-        const scope = await resolveToolAccessScope(
-          prisma,
-          (req as AuthedRequest).user,
-          "session-claim",
-        );
-        const targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+        //
+        // Resolution is BEST-EFFORT here, as it is on the chat turn: a CRM/PM
+        // read failing must not take the whole listing down, least of all for
+        // a session whose pins are all path-shaped and never touched CRM. On a
+        // failure every business pin reads `unavailable` — the same explicit
+        // state the per-target resolver uses when a module cannot answer —
+        // and the path-shaped pins are unaffected.
+        let targets: Awaited<ReturnType<typeof resolveBusinessPinTargets>> = new Map();
+        try {
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/pins] failed to resolve business pin targets:", err);
+        }
         res.json({
           pins: pins.map((p: { id: string; kind: string }) => ({
             ...p,
-            resolved: targets.get(p.id) ?? null,
+            resolved:
+              targets.get(p.id) ??
+              (isBusinessPinKind(p.kind)
+                ? { state: "unavailable", label: null, sublabel: null }
+                : null),
           })),
         });
       } catch (err) {
@@ -3021,6 +3038,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           where: { sessionId: req.params.sessionId },
         });
         if (existingCount >= MAX_PINS_PER_SESSION) {
+          // The cap bounds NEW pins. Re-pinning a record that is already in
+          // the set is idempotent (the P2002 branch below) and adds nothing to
+          // the block, so a full session still answers 200 with the existing
+          // row instead of refusing the one gesture that changes nothing.
+          const already = await prisma.contextPin.findFirst({
+            where: {
+              sessionId: req.params.sessionId,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+            },
+          });
+          if (already) {
+            res.status(200).json({ pin: already });
+            return;
+          }
           res.status(409).json({ error: "too_many_pins", limit: MAX_PINS_PER_SESSION });
           return;
         }

@@ -164,3 +164,15 @@ describe("pinnedToolDomainsFromMessages", () => {
     expect(block.startsWith(PIN_BLOCK_HEADER)).toBe(true);
   });
 });
+
+describe("PIN_BLOCK_HEADER is the WARP-460 literal, byte for byte", () => {
+  it("still opens with the em-dash form anything grepping box logs was written against", () => {
+    // b3d612a6 shipped "Context pins for this conversation \u2014 prefer these as …";
+    // the review caught a hyphen creeping in under a comment that promised
+    // byte-identity. `pinnedToolDomainsFromMessages` finds the block by this
+    // prefix, so a drift here is a silent detection miss, not a typo.
+    expect(PIN_BLOCK_HEADER).toBe(
+      "Context pins for this conversation \u2014 prefer these as scope hints when calling retrieval tools:",
+    );
+  });
+});

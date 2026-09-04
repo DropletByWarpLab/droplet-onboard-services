@@ -128,7 +128,7 @@ export interface RenderablePin {
  * `pinnedToolDomainsFromMessages` identifies the block by.
  */
 export const PIN_BLOCK_HEADER =
-  "Context pins for this conversation - prefer these as scope hints when " +
+  "Context pins for this conversation \u2014 prefer these as scope hints when " +
   "calling retrieval tools:";
 
 /**
