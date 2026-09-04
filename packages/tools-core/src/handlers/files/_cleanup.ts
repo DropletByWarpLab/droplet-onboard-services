@@ -50,7 +50,17 @@ export interface CleanupEntry {
   isDirectory: boolean;
   size: number;
   mimeType: string | null;
-  /** ISO-8601, or "" when the listing carried no usable timestamp. */
+  /**
+   * ISO-8601. `""` only when the row carried no string `modifiedAt` at all
+   * (`parseEntries`' fallback), which the shipping producer never sends:
+   * the orchestrator's listing parser (`parseMultiStatus`,
+   * nextcloud.client.ts) stamps a PROPFIND block that lacks
+   * `<d:getlastmodified>` with the CURRENT time. A file Nextcloud cannot
+   * date therefore arrives here looking freshly modified — never stale,
+   * filed under today's month or year — rather than as "Undated". The
+   * "Undated" branch below is defensive, for a producer that omits the
+   * field, not a state this listing produces.
+   */
   modifiedAt: string;
 }
 
