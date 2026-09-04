@@ -30,6 +30,10 @@ on:
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
       - "tests/droplet-relay-dns.test.sh"
+      # WARP-2647: the boot-time network backstop and its suite, neither of
+      # which any workflow named. Same harness family as droplet-watchdog.
+      - "scripts/host/usr-local-sbin/droplet-net-selfheal"
+      - "tests/droplet-net-selfheal.test.sh"
       - ".github/workflows/droplet-watchdog-tests.yml"
   push:
     branches: [main]
@@ -48,6 +52,10 @@ on:
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
       - "tests/droplet-relay-dns.test.sh"
+      # WARP-2647: the boot-time network backstop and its suite, neither of
+      # which any workflow named. Same harness family as droplet-watchdog.
+      - "scripts/host/usr-local-sbin/droplet-net-selfheal"
+      - "tests/droplet-net-selfheal.test.sh"
       - ".github/workflows/droplet-watchdog-tests.yml"
   workflow_dispatch:
 
@@ -72,3 +80,15 @@ jobs:
         run: bash tests/droplet-watchdog.test.sh
       - name: Run droplet-relay-dns shell tests
         run: bash tests/droplet-relay-dns.test.sh
+
+      # WARP-2647: WARP-1680's boot-time backstop ran in NO workflow. It is
+      # what recovers a box whose NIC rename left netplan configuring a device
+      # that does not exist and the appliance with no IPv4 on any interface —
+      # the failure that twice required a physical console trip. Its harness is
+      # this suite's own: a fake /sys/class/net tree plus `ip`/`logger`/`dhcpcd`
+      # stubs on PATH, so no root, no hardware, no real interface is touched.
+      # ~22 s (it exercises the retry backoff), on a job that already exists.
+      - name: shellcheck the network self-heal backstop
+        run: shellcheck --severity=warning scripts/host/usr-local-sbin/droplet-net-selfheal
+      - name: Run droplet-net-selfheal shell tests
+        run: bash tests/droplet-net-selfheal.test.sh
