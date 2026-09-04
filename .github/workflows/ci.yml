@@ -248,6 +248,13 @@ jobs:
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
+              # WARP-2647: the other two factory-reset guards. Both are static
+              # greps of scripts/factory-reset.sh — already in this filter — so
+              # the only PRs these two lines newly catch are the rare ones that
+              # touch a guard and nothing else. Listed so a guard edit fires
+              # the leg that runs it; the leg itself is unchanged in cost.
+              - "tests/factory-reset-volume-wipe.test.sh"
+              - "tests/factory-reset-purge-scope.test.sh"
             # WARP-2481: the WARP-229 FIPS static source lint, moved here from
             # test-fips.yml so its result reaches branch protection through
             # ci-summary. This list is the EXACT `paths:` test-fips.yml used
@@ -630,6 +637,20 @@ jobs:
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
 
+      # WARP-2647: the guarded migration entrypoint's own suite (WARP-573) —
+      # 33 assertions over apps/orchestrator/scripts/migrate-and-start.sh, and
+      # it ran in NO workflow. vitest never sees it (it is bash, driven with
+      # mock psql/pg_dump/pg_restore/npx on PATH), and neither does
+      # orchestrator-tests.yml's pg-integration job, which runs the REAL
+      # `prisma migrate deploy` rather than the entrypoint that wraps it — so
+      # the backup-before-migrate and abort-on-failure branches this pins were
+      # unguarded end to end. Pure bash, no Docker, no Postgres: ~5 s on a leg
+      # that already paid for checkout + npm ci. Its trigger is
+      # `apps/orchestrator/**`, already in this leg's detect filter.
+      - name: Guarded migration entrypoint (migrate-and-start.sh)
+        if: matrix.suite == 'orchestrator'
+        run: bash apps/orchestrator/scripts/migrate-and-start.test.sh
+
       # The staging half of /downloads. The orchestrator's own suite covers the
       # serving half (parse, digest, refuse); this covers the script that puts
       # an installer there in the first place — including the silent failure
@@ -844,6 +865,23 @@ jobs:
 
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
+
+      # WARP-2647: the two factory-reset guards that ran in NO workflow at all.
+      # Both were written after a real incident — the WARP-605 project-name bug
+      # that left droplet_pgdata alive behind a "successful" reset, and the
+      # `docker system prune -af` that would have deleted the sibling
+      # droplet-local-LLM images — and both then sat green on developers'
+      # machines for months without ever running at PR time. They are static
+      # greps of scripts/factory-reset.sh, which is already this leg's trigger:
+      # no Docker, no root, <0.1 s each.
+      #
+      # KEEP IN LOCKSTEP with storage-pool-tests.yml's storage-pool-unit job —
+      # scripts/check-test-wiring.sh fails if the two lists diverge.
+      - name: Run factory-reset volume-wipe unit tests
+        run: bash tests/factory-reset-volume-wipe.test.sh
+
+      - name: Run factory-reset purge-scope unit tests
+        run: bash tests/factory-reset-purge-scope.test.sh
 
   # WARP-2398 / ADR-043 §5 — the OUTBOUND MCP session component.
   #

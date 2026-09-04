@@ -764,7 +764,7 @@ describe("loading, fetch-error and not-configured are three states", () => {
    * Mutation: delete the NEEDS_RECONNECT case so it falls through to
    * `statusView`'s `default` → the tile reads "Unknown state" → red.
    */
-  it("gives all eight IntegrationStatus values their own rendering", async () => {
+  it("gives all nine IntegrationStatus values their own rendering", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([
       conn("eaglesoft", "CONNECTED"),
       conn("dentrix-ascend", "DEGRADED"),
@@ -774,6 +774,10 @@ describe("loading, fetch-error and not-configured are three states", () => {
       conn("aaa-export", "DISABLED"),
       conn("zzz-export", "NOT_CONFIGURED"),
       conn("mmm-export", "NEEDS_RECONNECT"),
+      // WARP-2623 — the ninth. Mutation: delete the CAPABILITY_LIMITED case
+      // from `statusView` → it falls to the `default` and the tile reads
+      // "Unknown state" → red.
+      conn("mailchimp", "CAPABILITY_LIMITED"),
     ]);
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
@@ -787,11 +791,42 @@ describe("loading, fetch-error and not-configured are three states", () => {
       ["Aaa Export", "Turned off"],
       ["Zzz Export", "Not connected"],
       ["Mmm Export", "Paste a new key"],
+      ["Mailchimp", "Connected · limited"],
     ];
     for (const [name, label] of labels) {
       expect(within(tile(container, name)).getByText(label), `${name} → ${label}`).toBeTruthy();
     }
-    expect(new Set(labels.map(([, l]) => l)).size).toBe(8);
+    expect(new Set(labels.map(([, l]) => l)).size).toBe(9);
+  });
+
+  /**
+   * WARP-2623 — the capability-limited tile offers no credential.
+   *
+   * Before the persisted member existed, these rows arrived as `ERROR` and the
+   * tile's action read "Retry" — re-probing a credential that is fine. Adding
+   * the member without teaching `ConnectorCard` about it would be worse: the
+   * tile would fall to the final `else` and read "Connect", running the setup
+   * wizard and storing a SECOND credential beside the working one.
+   *
+   * The fix is a plan or a scope grant in the vendor's own console, so the
+   * only honest action is the detail surface — which is where Disconnect
+   * lives, so disconnecting stays available exactly as it does for CONNECTED.
+   */
+  it("offers a capability-limited connector the same action as a connected one", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("mailchimp", "CAPABILITY_LIMITED"),
+      conn("stripe", "CONNECTED"),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Mailchimp"));
+
+    const limited = tile(container, "Mailchimp");
+    // Mutation: drop `capabilityLimited` from `usesOpen`/`label` in
+    // `ConnectorCard` → the button reads "Connect" → red.
+    expect(within(limited).getByText("Open")).toBeTruthy();
+    expect(limited.textContent).not.toMatch(/Retry|Connect\b|Fix connection/);
+    // The remediation, on the tile's detail line rather than inside the pill.
+    expect(limited.textContent).toMatch(/plan or permission change/i);
   });
 
   /**

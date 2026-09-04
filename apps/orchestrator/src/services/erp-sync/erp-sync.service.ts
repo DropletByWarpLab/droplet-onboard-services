@@ -54,11 +54,15 @@
 import type { Connector } from "@droplet/erp-connector";
 import {
   ConnectorBlockedError,
+  HubSpotCapabilityUnavailableError,
+  MailchimpCapabilityMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
   DEFAULT_CALL_CEILING,
 } from "@droplet/erp-connector";
 import { providerDescriptor } from "@droplet/shared-types";
+
+import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
 
 import { createLogger } from "../../lib/logger.js";
 import type { ActivityRowRecorder } from "../activity.service.js";
@@ -71,6 +75,7 @@ import {
 } from "../erp-provider.js";
 import {
   claimDueErpCursors,
+  POLLABLE_CONNECTION_STATUSES,
   releaseErpCursorFailure,
   releaseErpCursorSuccess,
   upsertErpCursor,
@@ -229,8 +234,43 @@ function defaultBudgetFor(conn: SyncConnectionRow): SyncCallBudget {
   return sharedCallBudget(conn.id, ceiling);
 }
 
+/**
+ * WARP-2623 — is this the vendor refusing a dataset the plan does not include?
+ *
+ * ONE predicate with TWO consumers, deliberately: `asSyncFailure` reads it to
+ * pick the classification and `retryAfterOf` reads it to pick the interval. As
+ * two independent checks they would drift, and the failure mode of that drift
+ * is silent — a capability error classified non-FATAL but ridden up the
+ * exponential ramp still works, it just spends vendor calls to learn what the
+ * error already said.
+ *
+ * `instanceof` rather than a `code` string set, matching the three named
+ * branches below: both classes are exported from `@droplet/erp-connector`, so
+ * this is a compile-time coupling. A renamed class breaks the build; a renamed
+ * `code` literal would silently stop matching.
+ *
+ * A third connector growing a capability error must be added HERE. That is the
+ * same maintenance contract the three named branches already carry, and the
+ * cost of forgetting is stated in `asSyncFailure`.
+ */
+function isCapabilityBlocked(err: unknown): boolean {
+  return (
+    err instanceof HubSpotCapabilityUnavailableError ||
+    err instanceof MailchimpCapabilityMissingError
+  );
+}
+
 /** Pull a `Retry-After` off whatever shape the vendor error arrived in. */
 function retryAfterOf(err: unknown): string | null {
+  // Checked FIRST, and synthesised rather than read: neither vendor sends a
+  // `Retry-After` with a plan boundary, because from their side nothing is
+  // throttled. We know more than the header does — a plan changes on a
+  // human's timescale, never on the 30s base of the exponential ramp — so the
+  // first refused tick goes straight to the ceiling instead of spending seven
+  // pointless calls climbing to it. Expressed in `MAX_BACKOFF_MS` and not a
+  // literal so the two cannot drift; `computeBackoffMs` honours a
+  // `Retry-After` exactly, so this IS the wait.
+  if (isCapabilityBlocked(err)) return String(MAX_BACKOFF_MS / 1000);
   const e = err as { headers?: Record<string, string>; retryAfter?: string } | null;
   if (!e) return null;
   if (typeof e.retryAfter === "string") return e.retryAfter;
@@ -268,6 +308,42 @@ function asSyncFailure(err: unknown): {
   if (err instanceof ConnectorBlockedError) {
     // Not configured, or the vendor is unreachable. Retrying is reasonable.
     return { code: "CONNECTOR_BLOCKED", statusCode: 503, message: err.message };
+  }
+  if (isCapabilityBlocked(err)) {
+    // WARP-2623 — the vendor's plan or scope grant does not include this
+    // dataset. Neither class carries a `statusCode`, and `classifySyncFailure`
+    // reads `statusCode` plus two fixed code sets and nothing else, so without
+    // this branch both answered FATAL — and FATAL is TERMINAL here in a way no
+    // other classification is: `releaseErpCursorFailure` parks the cursor
+    // `FAILED` with `nextAttemptAt: null`, `FAILED` is absent from
+    // `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor`'s `update: {}` never
+    // revives it, and `foldSyncState` ranks `FAILED` highest — so ONE refused
+    // dataset renders the WHOLE connection's sync as failed on
+    // `GET /api/integrations`, forever, including after the owner buys the
+    // plan. `entities.ts:80-102` documents that exact chain as a known hazard.
+    //
+    // 429/TRANSIENT is the honest classification, for the same reason
+    // `QuotaExhaustedError` above takes it: nothing is broken and nothing is
+    // permanent. A quota returns next period; a plan boundary returns when the
+    // owner buys the plan — different timescales, same shape, and the
+    // timescale is carried by `retryAfterOf`'s matching arm, not by the class.
+    //
+    // NOT `AUTH`, which is the tempting near-miss: AUTH sets `needsReconnect`,
+    // which sends the owner to re-paste a credential that is working perfectly.
+    // Both error messages say so in as many words.
+    //
+    // Deliberately NOT a new `ErpSyncState` enum member. A dedicated
+    // capability-blocked cursor state would need a second Prisma enum
+    // migration in this PR, a rank in `SYNC_STATE_RANK`, a decision in
+    // `foldSyncState`, and a rendering in the hub — for behaviour `BACKOFF` at
+    // the ceiling already delivers exactly. The connection-level fact the
+    // owner needs is already modelled: it is the `CAPABILITY_LIMITED`
+    // IntegrationStatus this ticket adds.
+    return {
+      code: "CAPABILITY_BLOCKED",
+      statusCode: 429,
+      message: (err as Error).message,
+    };
   }
   const e = err as { statusCode?: number; status?: number; code?: string; message?: string };
   return {
@@ -558,8 +634,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
      * serves). Idempotent, and never resets an existing cursor's watermark.
      */
     async registerCursors() {
+      // WARP-2623 — the claim's own list, not a third copy of it. A status the
+      // scheduler polls but never registers a cursor for is a connection that
+      // silently syncs nothing.
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
       for (const conn of live) {
@@ -600,7 +679,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       let deferred = 0;
 
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
 

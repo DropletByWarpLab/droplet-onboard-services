@@ -26,3 +26,11 @@ jobs:
         run: bash tests/storage-pool-destroy-superblock.test.sh
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
+      # WARP-2647: mirrors ci.yml's `storage` leg exactly. This workflow is
+      # dispatch-only, so a divergence between the two lists would stay
+      # invisible until somebody ran this by hand — scripts/check-test-wiring.sh
+      # fails when they stop matching.
+      - name: Run factory-reset volume-wipe unit tests
+        run: bash tests/factory-reset-volume-wipe.test.sh
+      - name: Run factory-reset purge-scope unit tests
+        run: bash tests/factory-reset-purge-scope.test.sh
