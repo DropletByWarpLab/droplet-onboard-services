@@ -182,6 +182,13 @@ Options:
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
   --keep-storage   Leave attached data drives alone. DEFAULT: erase them.
+                   The drives survive; their DERIVED recovery path does not.
+                   An enrolled drive's LUKS recovery passphrase is
+                   HKDF(DEVICE_SECRET_KEY, luks-uuid) (droplet-usb-enroll.sh)
+                   and the restic repo password is derived from the same key —
+                   this reset destroys it, so neither opens anything
+                   afterwards. The drives' TPM keyslots are untouched and
+                   still unlock them on this box.
   -h, --help       Show this help message
 
 What gets deleted:
@@ -283,6 +290,18 @@ printf "    ${_RED}•${_RESET} TLS certificates and device secrets\n"
 if [ "$KEEP_STORAGE" = "true" ]; then
   printf "\n"
   printf "  ${_DIM}Attached data drives are being KEPT (--keep-storage).${_RESET}\n"
+  # WARP-2621 — "KEPT" was the reassuring half of the truth and the only half
+  # said out loud. An enrolled drive carries TWO LUKS keyslots
+  # (droplet-usb-enroll.sh): a TPM2 slot, and a RECOVERY slot whose passphrase
+  # is HKDF(DEVICE_SECRET_KEY, uuid). This reset destroys DEVICE_SECRET_KEY, so
+  # the drives survive but their derived recovery path does not — and neither
+  # does the restic repository password, derived from the same key. Say both,
+  # and say the TPM slot still works, so this reads as a real trade-off rather
+  # than "your drives are gone".
+  printf "    ${_YELLOW}•${_RESET} but their derived LUKS recovery passphrase stops working: it is\n"
+  printf "      HKDF(DEVICE_SECRET_KEY) per drive, and this reset destroys that key\n"
+  printf "    ${_YELLOW}•${_RESET} same for the restic repo password, derived from the same key\n"
+  printf "    ${_DIM}The drives' TPM keyslots are untouched — they still unlock on this box.${_RESET}\n"
 else
   _fr_pools="$(sw_assembled_arrays | tr '\n' ' ')"
   _fr_mounts="$(sw_droplet_mounts | tr '\n' ' ')"

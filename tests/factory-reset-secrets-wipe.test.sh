@@ -786,6 +786,73 @@ else
 fi
 
 # =============================================================================
+# Phase 9: --keep-storage tells the operator the opposite of what happens
+# =============================================================================
+# The prompt and --help say only "Attached data drives are being KEPT
+# (--keep-storage)". The drives do survive — but an enrolled drive carries TWO
+# LUKS keyslots (scripts/host/droplet-usb-enroll.sh): a TPM2 slot, and a
+# RECOVERY slot whose passphrase is
+# hex(HMAC-SHA256(PRK, "droplet-usb-luks-recovery:" || uuid || 0x01)) with
+# DEVICE_SECRET_KEY as the IKM. This stack destroys DEVICE_SECRET_KEY, so the
+# recovery slot stops being derivable the moment the reset finishes — as does
+# the restic repository password, derived from the same key.
+#
+# The drives survive; their recovery path does not. An operator who passes
+# --keep-storage is told the reassuring half and none of the rest, and finds out
+# when the TPM changes and the drive will not open.
+echo ""
+echo "--- Phase 9: --keep-storage says what it actually costs ---"
+
+# Grounding first: if droplet-usb-enroll.sh ever stops deriving the recovery
+# passphrase from DEVICE_SECRET_KEY, the warning below becomes a false claim and
+# should be removed rather than left to rot.
+USB_ENROLL="$REPO_ROOT_REAL/scripts/host/droplet-usb-enroll.sh"
+if [ -f "$USB_ENROLL" ] \
+   && grep -qF 'droplet-usb-luks-recovery:' "$USB_ENROLL" \
+   && grep -qF 'DEVICE_SECRET_KEY' "$USB_ENROLL"; then
+  pass "grounding: the drive recovery passphrase really is derived from DEVICE_SECRET_KEY"
+else
+  fail "droplet-usb-enroll.sh no longer derives from DEVICE_SECRET_KEY — the warning is stale"
+fi
+
+# The --keep-storage branch of the pre-RESET prompt, read as a region: the
+# reassurance and the caveat have to be in the same breath, not somewhere else
+# in the file.
+KS_LINE="$(grep -nF 'if [ "$KEEP_STORAGE" = "true" ]; then' "$RESET" | head -n 1 | cut -d: -f1 || true)"
+KS_END="$(awk -v s="${KS_LINE:-0}" 'NR>s && /^else$/ {print NR; exit}' "$RESET" || true)"
+KS_BLOCK=""
+[ -n "$KS_LINE" ] && [ -n "$KS_END" ] && KS_BLOCK="$(sed -n "${KS_LINE},${KS_END}p" "$RESET")"
+
+if [ -n "$KS_BLOCK" ] && grep -qi 'recovery passphrase' <<<"$KS_BLOCK"; then
+  pass "the --keep-storage prompt says the derived recovery passphrase stops working"
+else
+  fail "the --keep-storage prompt still says only that the drives are KEPT"
+fi
+
+if [ -n "$KS_BLOCK" ] && grep -qi 'restic' <<<"$KS_BLOCK"; then
+  pass "it names the restic repo password as the other thing the shredded key opened"
+else
+  fail "the prompt does not mention the restic repo password"
+fi
+
+# And the reassuring half that stops this reading as "your drives are bricked":
+# the TPM keyslots are untouched, so the drives still open on this box.
+if [ -n "$KS_BLOCK" ] && grep -qi 'TPM' <<<"$KS_BLOCK"; then
+  pass "it says the TPM keyslots still unlock the drives"
+else
+  fail "the prompt does not say the TPM path still works — it reads as 'your drives are lost'"
+fi
+
+# Same three facts in --help, which is where anyone scripting --keep-storage
+# looks instead of the prompt.
+HELP_OUT="$("$RESET" --help 2>/dev/null || true)"
+if grep -qi 'recovery passphrase' <<<"$HELP_OUT" && grep -qi 'TPM' <<<"$HELP_OUT"; then
+  pass "--help states the same cost of --keep-storage"
+else
+  fail "--help still promises drives are kept without saying their recovery path is not"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
