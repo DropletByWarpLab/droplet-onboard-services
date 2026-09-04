@@ -38,7 +38,9 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-32 services) fronted by one nginx `gateway`. The **orchestrator** is the brain —
+**36 services** — 14 default-on, the rest profile-gated; count taken from the
+compose file on 2026-09-02, when WARP-2627 added `mcp-bridge`) fronted by one
+nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
 (ADR-009): the nginx `gateway` is only a TLS terminator + path router.
@@ -75,6 +77,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types |
 | **fips-selftest** | `packages/fips-selftest/` | TypeScript | FIPS 140-3 boot self-test (Node services) |
 | **mcp-server** | `services/mcp-server/` | TypeScript + MCP SDK | Tool dispatch (stdio + HTTP) |
+| **mcp-bridge** | `services/mcp-bridge/` | TypeScript + MCP SDK | **Outbound** MCP sessions (ADR-043 §5) — profile `remote-mcp`, off by default |
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
@@ -110,6 +113,7 @@ network. Host-published ports and host-network services are called out.
 | ai-gateway | 8000 | HTTP (REST/SSE) | internal (proxied at `/ai/`) |
 | ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `Chat` |
 | mcp-server | 9090 (`MCP_PORT`) | streamable-HTTP | internal (+ stdio child of orchestrator) |
+| mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
@@ -260,6 +264,44 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.
+
+## services/mcp-bridge (`@droplet/mcp-bridge`)
+
+- **Purpose:** the **other direction** from `mcp-server`. The box dialling OUT to
+  an MCP server it does not own — today only Atlassian's hosted Rovo server.
+  ADR-043 §5 forbids the orchestrator holding that socket, so it lives here and
+  the orchestrator reaches it through the gate → audit front in
+  `remote-mcp-gateway.service.ts` (the shape `routes/web.ts` puts in front of
+  `web-fetch`). WARP-2300 / WARP-2316 / WARP-2627.
+- **Stack / entry point:** TypeScript, `@modelcontextprotocol/sdk` (its ONLY
+  dependency — no Prisma, no `@droplet/*`), `node:http`. Boots
+  `dist/server.js` on `MCP_BRIDGE_PORT` (9096). Compose profile **`remote-mcp`,
+  off by default**; `expose:` only, never a host port.
+- **Surface:** `GET /health` (no bearer — the compose healthcheck),
+  `POST /sessions/:serverId/open`, `GET /sessions/:serverId/tools`,
+  `POST /sessions/:serverId/call`, `GET /sessions/:serverId/state`,
+  `POST /sessions/:serverId/acknowledge-catalog`, `DELETE /sessions/:serverId`.
+  Bearer `MCP_BRIDGE_SERVICE_TOKEN` on everything else; **unset fails CLOSED
+  (503)**, the `web-fetch` / `doc-render` posture.
+- **Talks to:** `mcp.atlassian.com` (the ONLY registered outbound host —
+  `docs/security/allowed-egress.yaml`, `atlassian-mcp`). Nothing else; it has no
+  database, no volume and no LAN membership.
+- **Key files:** `src/http-api.ts` (routing + refusal vocabulary),
+  `src/session-profiles.ts` (the CLOSED server-id registry — a URL is never a
+  parameter), `src/remote-session.ts` (states, bounded event-driven reconnect),
+  `src/atlassian.ts` (the host literal, the protocol pin, the four upstream
+  guards), `src/streamable-http.ts` (**the one file in the repo allowed to
+  construct an outbound MCP transport** — pinned by
+  `apps/orchestrator/src/services/adr-043-boundary.test.ts`).
+- **Gotchas:** the customer's API token is held **in memory only**, for the life
+  of the session — a container restart is a genuine teardown, which is what
+  ADR-043 §4's kill switch requires. Three independent gates must ALL pass
+  before anything is dialled: the `remote-mcp` compose profile, a non-empty
+  `REMOTE_MCP_SERVER_ALLOWLIST`, and a `CONNECTED` `IntegrationConnection` row
+  holding a sealed credential — all three are off/absent on a fresh box. The
+  wire contract is **duplicated** in `apps/orchestrator/src/services/mcp-bridge.client.ts`
+  on purpose (importing this package would drag the transport across the §5
+  line); the duplication is gated by the boundary test, not trusted.
 
 ## services/ai-gateway
 

@@ -1968,6 +1968,68 @@ services:
     cpus: ${WEB_FETCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  # --- Outbound MCP session bridge (WARP-2627 / ADR-043 §5) ---
+  # The ONLY component that opens a session to a remote MCP server. ADR-043 §5
+  # is binding — "the orchestrator process MUST NOT open a session to a remote
+  # MCP server" — because a vendor's server sends us tool definitions, tool
+  # results and error text that all flow toward a model that acts on them, and
+  # the orchestrator is the process with the most reach in the box. So the
+  # socket lives here, and the orchestrator reaches it through the same
+  # gate -> audit shape `routes/web.ts` puts in front of web-fetch.
+  #
+  # OPT-IN THREE TIMES OVER, and each gate refuses independently:
+  #   1. this `remote-mcp` compose profile (off by default);
+  #   2. REMOTE_MCP_SERVER_ALLOWLIST naming a server id (EMPTY by default);
+  #   3. a CONNECTED IntegrationConnection row holding the customer's sealed
+  #      credential (ADR-042) — no credential, no session.
+  # Deliberately NOT in the `full` profile: `full` means "real hardware and
+  # operator credentials are present", and this one needs a vendor credential
+  # the customer mints in their own tenant.
+  #
+  # Bridge-net, `expose:` only, no host ports: the orchestrator is the only
+  # caller, with MCP_BRIDGE_SERVICE_TOKEN as a bearer. The container holds the
+  # customer's API token IN MEMORY ONLY for the life of the session — it has no
+  # volume, no database and no persistence of any kind, which is what makes a
+  # restart a genuine teardown of every outbound session (ADR-043 §4).
+  mcp-bridge:
+    build:
+      context: ..
+      dockerfile: services/mcp-bridge/Dockerfile
+    expose:
+      - "9096"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot gate +
+      # OpenSSL config to the literal OFF posture (see the device-identity-svc
+      # comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - MCP_BRIDGE_PORT=9096
+      # Shared with the orchestrator's MCP_BRIDGE_SERVICE_TOKEN. EMPTY fails
+      # CLOSED at BOTH ends: this service 503s every non-/health route and the
+      # orchestrator refuses without dialling. Rotate both sides in lockstep —
+      # change .env, then `up -d --force-recreate orchestrator mcp-bridge`
+      # (`docker restart` does not re-read env_file).
+      - MCP_BRIDGE_SERVICE_TOKEN=${MCP_BRIDGE_SERVICE_TOKEN:-}
+    healthcheck:
+      # /health is the one route served without a bearer, so the probe needs no
+      # secret. It answers 200 whether or not a session is open — "is any vendor
+      # reachable" is a question about a SESSION and is read from
+      # GET /sessions/:id/state, not from container liveness.
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9096/health >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    profiles: ["remote-mcp"]
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${MCP_BRIDGE_MEM_LIMIT:-256m}
+    cpus: ${MCP_BRIDGE_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   # --- Document renderer (WARP-2211) ---
   # Turns a document SPEC into .pdf / .docx / .xlsx bytes for the
   # orchestrator's POST /api/files/render, which is what the

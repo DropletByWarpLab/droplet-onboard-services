@@ -89,10 +89,29 @@ _fail() {
 # matches. The display name is prose: it gets reworded whenever the case's
 # rationale sharpens, and every rewording used to silently un-allow that
 # case's skip in `.github/workflows/ci.yml` — the same wire-contract hazard as
-# renaming a required check (root CLAUDE.md §9.3). The id is a short slug that
-# is only ever changed deliberately, and changing it is a visible two-file edit
-# because ci.yml stops matching.
+# renaming a required check (root CLAUDE.md § "CI cost budget (hard
+# constraint)"; inventory and rule in docs/ci-required-checks.md). The id is a
+# short slug that is only ever changed deliberately, and changing it is a
+# visible two-file edit because ci.yml stops matching.
 _run_test() {
+  # WARP-2620 — validate the arity, because getting it wrong is SILENT.
+  # `_run_test` took (name, fn) before WARP-2645 added the skip id in front.
+  # On a stale 2-arg call `shift 2` consumes both words, `"$@"` is empty, and
+  # a simple command with no words is a no-op that returns 0 — so the case
+  # reports PASS having executed nothing. That is the exact vacuous-green
+  # class WARP-2637 and WARP-2645 exist to eliminate, reachable from the fix
+  # itself: any in-flight branch or rebase reintroducing the old form scores
+  # a green. `declare -f` also catches a typo'd or not-yet-defined function
+  # name, which `"$@"` would otherwise report as a plain non-zero FAIL.
+  # `exit 2` rather than a FAIL: a mis-registered case is a broken harness,
+  # not a failing gate, and it must not be counted in either column.
+  if [ "$#" -lt 3 ] || ! declare -f "$3" >/dev/null; then
+    printf 'usage: _run_test <skip-id> <name> <fn>
+' >&2
+    printf '  got %d arg(s): %s
+' "$#" "$*" >&2
+    exit 2
+  fi
   local id="$1" name="$2"; shift 2
   local rc=0
   TOTAL=$((TOTAL + 1))
@@ -864,8 +883,22 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
   #
   # So: shim diagnostic present -> the shim held (pass). Gate exited 0 -> the
   # shim is fail-open, which is the regression (fail). Gate failed without the
-  # diagnostic -> the smoke never reached the plant, which is a SKIP, loud and
-  # allow-listed like any other, not a green.
+  # diagnostic -> the smoke never reached the plant, which is a SKIP, loud, and
+  # NOT a green.
+  #
+  # WARP-2620 — that SKIP is deliberately NOT in `SHIPCHECK_ALLOW_SKIP` in
+  # .github/workflows/ci.yml, and must not be added. The two ids that are
+  # allow-listed there are allow-listed because the `parse + self-test` job
+  # STRUCTURALLY cannot run them — it does no `npm ci`, on purpose, for spend.
+  # This case is not in that category: the runner has docker and far more than
+  # the 2 GB setup.sh's preflight asks for, so this SKIP on a runner is not a
+  # known limitation, it is news — either the smoke container's environment
+  # moved under us or setup.sh started aborting earlier, and in both cases this
+  # case has silently stopped exercising the shim. Allow-listing it would buy a
+  # green over a rare re-runnable hiccup and pay for it with a guard that can
+  # never fail again, which is the WARP-2637 defect one level up. A dev machine
+  # that genuinely cannot run it (colima at 2 GiB) names the id on the command
+  # line for that run instead.
   local output rc
   output="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" docker-build-smoke 2>&1)" \
     && rc=0 || rc=$?
@@ -2276,7 +2309,8 @@ fi
 # WARP-2645 — it matches on the SKIP ID, not the display name. The names are
 # prose and get reworded; every rewording silently un-allowed that case's skip
 # in ci.yml, which is the same class of hazard as renaming a required check
-# (root CLAUDE.md §9.3). Failure was safe-but-confusing — the job went red
+# (root CLAUDE.md § "CI cost budget (hard constraint)";
+# docs/ci-required-checks.md). Failure was safe-but-confusing — the job went red
 # naming a case nobody had touched. Ids live beside each `_run_test`
 # registration and change only on purpose.
 if [ "$SKIPPED" -gt 0 ]; then

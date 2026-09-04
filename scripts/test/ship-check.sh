@@ -159,6 +159,7 @@ ALL_CHECKS=(
   lifecycle-naming
   image-pipeline
   tls-invariants
+  app-downloads
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -531,9 +532,19 @@ run_check_compose_config() {
     # double-quoted printf, so bash ran `compose config` as a command
     # substitution every time this branch was taken — a gate reporting
     # "docker is missing" was shelling out to a docker subcommand to
-    # compose its own message. Single quotes, no substitution.
-    printf '  %sFAIL%s  %s — docker not on PATH (required for "docker compose config")\n' \
-      "$_RED" "$_RESET" "$label"
+    # compose its own message.
+    #
+    # WARP-2620: single-quoting the whole FORMAT string fixed that but broke
+    # the colour. printf expands backslash escapes only in the FORMAT string,
+    # and `_RED` is the literal six characters `\033[0;31m` — so
+    # passing it as a %s ARGUMENT printed those characters verbatim instead of
+    # colouring anything. Invisible in CI, where `_RED=''` because stdout is
+    # not a tty, and a literal `\033[0;31m` in front of every FAIL banner on an
+    # operator's terminal. So: the colours go back in the format string, and
+    # the prose that carried the backticks moves out into a single-quoted
+    # ARGUMENT, where nothing it ever grows can be substituted.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s\n" "$label" \
+      'docker not on PATH (required for "docker compose config")'
     _record_result "$label" fail
     return 1
   fi
@@ -609,17 +620,19 @@ run_check_compose_config() {
         ;;
     esac
 
-    # WARP-2645: the backticks that used to be in this message were inside a
-    # double-quoted printf, and here that was actively harmful — reporting
-    # that the merged tree was rejected ran a SECOND, argument-less
-    # `docker compose config` in the caller's cwd, whose "no configuration
-    # file provided: not found" landed on the operator's terminal one line
-    # ABOVE the real diagnostic.
+    # The message also has to NAME the file it rejected. Every environmental
+    # way this branch can be reached — daemon down, missing .env, docker
+    # missing at exec time — produces the same banner otherwise, which is
+    # what let a self-test assert "compose-config failed" and call that proof
+    # the planted YAML break was caught.
     #
-    # The message also NAMES the file it rejected, so a real rejection is
-    # distinguishable from the environmental routes handled above.
-    printf '  %sFAIL%s  %s — "docker compose config" rejected %s\n' \
-      "$_RED" "$_RESET" "$label" "${compose#"$REPO_ROOT"/}"
+    # WARP-2620 / WARP-2645: colours in the format string, prose in a
+    # single-quoted argument — see the `docker not on PATH` branch above for
+    # why both. Backticks inside a double-quoted printf here once ran a SECOND,
+    # argument-less `docker compose config` in the caller's cwd, whose "no
+    # configuration file provided" landed one line ABOVE the real diagnostic.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s %s\n" \
+      "$label" '"docker compose config" rejected' "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
     _record_result "$label" fail
@@ -884,9 +897,16 @@ run_check_shellcheck() {
   # ShellCheck will surface it loudly. (Capitalised so this line does not
   # open with the bare token `shellcheck` — see WARP-2477 and the note at
   # the head of this file.)
+  #
+  # WARP-2620 added scripts/bootstrap.sh. It is 238 lines of bash on the
+  # `tsc-full` critical path (this file runs it before every typecheck) and it
+  # is the command CLAUDE.md and CONTRIBUTING.md both tell a new implementer to
+  # run first — the same argument that put this gate's own two files on the
+  # list under WARP-2477. It is clean today; this is what keeps it that way.
   local targets=()
   local file
   for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/bootstrap.sh" \
               "$REPO_ROOT/scripts/test/ship-check.sh" \
               "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
@@ -1843,6 +1863,76 @@ run_check_image_pipeline() {
   return 0
 }
 
+run_check_app_downloads() {
+  # WARP-2666. `/downloads` is where a customer gets the client app for the box
+  # in front of them. Every box that has ever shipped served it empty, and no
+  # gate said so: an empty catalog answers HTTP 200 with available:false, which
+  # is correct for the API and invisible to everything downstream of it.
+  #
+  # ship-check is the pre-ship gate, so this is where "we are about to ship a
+  # box that can give a customer nothing" becomes a sentence someone has to
+  # read. It reports what data/app-downloads/EXPECTED declares versus what is
+  # actually staged; it never fetches or builds anything.
+  local label="app-downloads"
+  local audit="$REPO_ROOT/scripts/app-downloads/audit.sh"
+
+  if [ ! -r "$audit" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s is missing, so nothing can say what this release should carry
+"       "$label" "scripts/app-downloads/audit.sh" >&2
+    _record_result "$label" fail
+    return 1
+  fi
+
+  local out rc=0
+  out="$(bash "$audit" --dir "$REPO_ROOT/data/app-downloads" 2>&1)" || rc=$?
+
+  case "$rc" in
+    0)
+      printf "  ${_GREEN}PASS${_RESET}  %s (every platform EXPECTED declares is staged and verified)
+" "$label"
+      _record_result "$label" pass
+      return 0
+      ;;
+    3)
+      # Declared-and-ticketed absence. A checkout is the normal place for this
+      # to be true (installers are git-ignored and staged on the box), so
+      # failing here would make ship-check permanently red for every developer
+      # and train people to ignore it. Skip — but PRINT the blocked list, so
+      # "nothing to download" is never silent.
+      printf "  ${_YELLOW}SKIP${_RESET}  %s — declared blocked, nothing staged in this checkout:
+" "$label"
+      printf '%s
+' "$out" | sed -n 's/^BLOCKED  */    | blocked: /p'
+      printf "    | These platforms will have NOTHING at /downloads on an image built
+"
+      printf "    | from this tree. scripts/image/build-iso.sh refuses unless you pass
+"
+      printf "    | --allow-blank-downloads.
+"
+      _record_result "$label" skip
+      return 0
+      ;;
+    4)
+      # "Could not look" is not "it is fine" — the exact collapse this work
+      # exists to end. EXIT_CANNOT_RUN is the script's own vocabulary for it.
+      printf "  ${_RED}FAIL${_RESET}  %s — the audit reached NO VERDICT (exit %s: missing EXPECTED, staging root or python3)
+"         "$label" "$EXIT_CANNOT_RUN" >&2
+      printf '%s
+' "$out" | head -10 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+    *)
+      printf "  ${_RED}FAIL${_RESET}  %s — this release does not carry what data/app-downloads/EXPECTED declares
+" "$label" >&2
+      printf '%s
+' "$out" | head -20 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+  esac
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -2098,6 +2188,7 @@ _dispatch_check() {
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;
+    app-downloads)        run_check_app_downloads ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2

@@ -257,6 +257,54 @@ export const ERP_SYNC_ENTITIES: readonly ErpSyncEntity[] = [
     updatedAtField: "updated_at",
     openToUndeclaredTracks: false,
   },
+
+  // ── commerce: Shopify (WARP-2296) ────────────────────────────────────────
+  //
+  // The three datasets whose `updated_at` `profiles.ts` sources from "Shopify's
+  // own `updated_at`, filterable as `updated_at_min`" — the only vendor here
+  // whose field already carries this name and this meaning. The connector
+  // pushes `since` DOWN as `updated_at:>='…'` and sorts by `UPDATED_AT`, so the
+  // order the rows arrive in IS the modification order and the watermark
+  // advances on the position it enumerated by.
+  //
+  // `created_at` is the declared marker on all three as the honest fallback for
+  // a row that somehow arrives without a modification time: positioned by when
+  // it was created is approximately right, and positioned by nothing resets the
+  // watermark to null and re-enumerates the whole store.
+  //
+  // ⚠ The reconciliation sweep is NOT optional on this track, and for a reason
+  // none of the rows above share: Shopify publishes no deletions at all. A
+  // cancelled-and-deleted order or a removed product simply stops appearing, so
+  // an incremental pass keyed on `updated_at` can never see one — the row it
+  // would have to notice is the one that is not there. `ShopifyConnector`
+  // exposes `listEntityIds()` for the id-set diff that can (WARP-2503 owns the
+  // sweep itself). Note the trap that sweep must respect: without the
+  // `read_all_orders` scope, Shopify only returns the last 60 days of orders,
+  // so an absent older order is NOT a delete.
+  {
+    entity: "order",
+    readQuery: "get_recent_orders",
+    sourceKeyField: "order_id",
+    markerField: "created_at",
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
+  {
+    entity: "product",
+    readQuery: "get_low_stock_products",
+    sourceKeyField: "product_id",
+    markerField: "created_at",
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
+  {
+    entity: "customer",
+    readQuery: "find_customer",
+    sourceKeyField: "customer_id",
+    markerField: "created_at",
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
 ];
 
 const BY_ENTITY = new Map(ERP_SYNC_ENTITIES.map((e) => [e.entity, e]));

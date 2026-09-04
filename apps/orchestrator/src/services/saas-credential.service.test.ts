@@ -16,6 +16,7 @@ import {
   registerProviderDescriptor,
   __resetRegisteredProvidersForTest,
   CREDENTIAL_VARIANT_FIELD,
+  SAAS_CONNECTION_STATES,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
 
@@ -270,6 +271,69 @@ describe("saasConnectionState — honesty", () => {
     expect(saasConnectionState("NOT_CONFIGURED", true)).toBe("PROVISIONING");
     expect(saasConnectionState("PROVISIONING", true)).toBe("PROVISIONING");
   });
+
+  it("passes CAPABILITY_LIMITED through — the connection WORKS", () => {
+    // WARP-2623. The case shipped with no test at all: deleting its two lines
+    // dropped the status through to `default: return "PROVISIONING"`, the
+    // credentials page said "Setting up..." about a connection that has been
+    // reading data for months, and every suite in the repo stayed green.
+    // Mutation: delete `case "CAPABILITY_LIMITED"` → PROVISIONING → red.
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).toBe("CAPABILITY_LIMITED");
+    // And it is not any of the three things it is deliberately NOT: the key is
+    // fine, nothing is being set up, and nothing needs repairing.
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("PROVISIONING");
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("NEEDS_RECONNECT");
+    expect(saasConnectionState("CAPABILITY_LIMITED", true)).not.toBe("ERROR");
+  });
+
+  /**
+   * The gate the `default` arm needed and did not have.
+   *
+   * `integration-status.schema.test.ts:290-343` set-compares
+   * `SAAS_CONNECTION_STATES` against the Prisma enum and nothing else, so a
+   * newly-added status passes every gate in the repo and still falls silently
+   * through `default: return "PROVISIONING"`. That is how `CAPABILITY_LIMITED`
+   * came to ship a case with no test: the parity gate said the LISTS agreed,
+   * which is a different claim from the FUNCTION agreeing with them.
+   *
+   * Stated as an identity over the whole list rather than one `it` per member,
+   * because the thing being asserted is a property of the mapping and not of
+   * any one status: every state a person can be shown is the status of the
+   * same name, except the three the docstring derives. Those three are named
+   * here explicitly — a set difference would let a member vanish from both
+   * sides at once and still read as green.
+   */
+  it("maps every non-derived status to the state of the same name", () => {
+    // Mutation: drop any `case` from the switch, or add a member to
+    // SAAS_CONNECTION_STATES without giving the switch an arm → red here even
+    // though the Prisma-parity gate stays green.
+    const DERIVED = new Set([
+      // `!hasCredentials` short-circuits before the switch; with a credential
+      // present these two mean "we hold something unproven".
+      "NOT_CONFIGURED",
+      "PROVISIONING",
+      // Wins over everything, above the switch.
+      "DISABLED",
+    ]);
+    const passthrough = SAAS_CONNECTION_STATES.filter((s) => !DERIVED.has(s));
+    // Guards the guard: if the derived list ever swallowed the union this
+    // would assert nothing at all.
+    expect(passthrough.length).toBeGreaterThan(4);
+    for (const status of passthrough) {
+      expect(saasConnectionState(status, true)).toBe(status);
+    }
+  });
+
+  it("still answers DISABLED and the credential-less rule for every status", () => {
+    // The two derivations are stated over the WHOLE list too, so a new member
+    // cannot quietly acquire an exception to either.
+    for (const status of SAAS_CONNECTION_STATES) {
+      expect(saasConnectionState(status, false)).toBe(
+        status === "DISABLED" ? "DISABLED" : "NOT_CONFIGURED",
+      );
+    }
+    expect(saasConnectionState("DISABLED", true)).toBe("DISABLED");
+  });
 });
 
 /**
@@ -394,7 +458,7 @@ describe("resolveCredentialUpdate — the three-way rule", () => {
     expect(resolved.providerTokensEnc).toBeNull();
     expect(resolved.hasSecret).toBe(false);
     expect(resolved.cleared).toBe(true);
-    expect(statusAfterCredentialUpdate("CONNECTED", resolved.hasSecret)).toBe(
+    expect(statusAfterCredentialUpdate(FIXTURE, "CONNECTED", resolved.hasSecret)).toBe(
       "NOT_CONFIGURED",
     );
   });
@@ -776,5 +840,93 @@ describe("the write path is variant-aware", () => {
         (err as SaasCredentialValidationError).fieldErrors.pkceClientId,
       ).toEqual(["PKCE client ID is required."]);
     }
+  });
+});
+
+/**
+ * WARP-2300 — "no credential stored" and "credential stored, no expiry date"
+ * are different states, and only one of them is a warning.
+ *
+ * `credentialExpiryVerdict` cannot tell them apart: it is handed a descriptor
+ * and a config, and an absent date reads `EXPIRY_UNKNOWN` whether the customer
+ * has connected the vendor or has never touched it. The dashboard renders that
+ * as "No expiry date recorded — Droplet can't warn you before this credential
+ * stops working" (`SaasCredentialsSection.tsx`), which on a provider with NO
+ * credential is a warning about a thing that does not exist.
+ *
+ * `atlassian-token-expiry.ts` held this rule ("distinguishes 'no token' from
+ * 'no expiry date'") and had no production callers, so the rule was stated in
+ * code nothing ran. It is asserted HERE, on the wired path, and the module is
+ * gone.
+ */
+describe("buildCredentialView — expiry is about a credential that exists", () => {
+  const EXPIRING: ProviderDescriptor = {
+    ...FIXTURE_TWO,
+    id: "fixture-expiring",
+    credentialFields: [
+      {
+        name: "tokenExpiresAt",
+        label: "Token expires on",
+        type: "string",
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+      },
+      ...FIXTURE_TWO.credentialFields,
+    ],
+    credentialExpiry: { field: "tokenExpiresAt", warningDays: 30, maxLifetimeDays: 365 },
+  };
+
+  beforeEach(() => registerProviderDescriptor(EXPIRING));
+
+  function rowFor(config: Record<string, string>, secrets?: Record<string, string>) {
+    return rowWith({
+      provider: EXPIRING.id,
+      status: "CONNECTED",
+      providerConfig: { provider: EXPIRING.id, ...config },
+      providerTokensEnc: secrets ? sealSaasCredentials(ROW_ID, secrets) : null,
+    });
+  }
+
+  it("gives a provider that was never connected NO expiry verdict", () => {
+    // Not EXPIRY_UNKNOWN: there is nothing to record a date for, so there is
+    // nothing to warn about. `null` is what the dashboard reads as "this
+    // provider has no expiry line", the same answer a provider with no expiry
+    // policy at all gets.
+    const view = buildCredentialView(EXPIRING, null);
+    expect(view.credentialExpiry).toBeNull();
+  });
+
+  it("gives a row whose secret is not stored NO expiry verdict either", () => {
+    const view = buildCredentialView(EXPIRING, rowFor({ tokenExpiresAt: "2026-09-01" }));
+    expect(view.hasCredentials).toBe(false);
+    expect(view.credentialExpiry).toBeNull();
+  });
+
+  it("WARNS a stored credential that recorded no expiry date", () => {
+    // The other half, and the reason the fix is not "suppress it whenever the
+    // date is missing": a token IS stored, no date was recorded, so no warning
+    // can ever fire for it and the owner is the only one who can fix that.
+    const view = buildCredentialView(EXPIRING, rowFor({}, { privateToken: SEEDED_SECRET }));
+    expect(view.hasCredentials).toBe(true);
+    expect(view.credentialExpiry).toEqual({ status: "EXPIRY_UNKNOWN", daysRemaining: null });
+  });
+
+  it("still classifies a stored credential that DID record a date", () => {
+    const view = buildCredentialView(
+      EXPIRING,
+      rowFor({ tokenExpiresAt: "2026-10-02" }, { privateToken: SEEDED_SECRET }),
+      new Date("2026-09-02T00:00:00Z"),
+    );
+    expect(view.credentialExpiry).toEqual({ status: "EXPIRING_SOON", daysRemaining: 30 });
+  });
+
+  it("leaves a provider with no expiry policy alone, credential or not", () => {
+    expect(buildCredentialView(FIXTURE_TWO, null).credentialExpiry).toBeNull();
+    expect(
+      buildCredentialView(FIXTURE_TWO, sealedRow({ privateToken: SEEDED_SECRET }, {
+        provider: FIXTURE_TWO.id,
+      })).credentialExpiry,
+    ).toBeNull();
   });
 });

@@ -42,7 +42,10 @@ import {
   integrationStatusForHealthFailure,
   statusAfterHealthProbe,
 } from "./cloud-connection-state.js";
-import { providerDescriptor } from "@droplet/shared-types";
+import {
+  providerDescriptor,
+  type IntegrationStatus as IntegrationStatusName,
+} from "@droplet/shared-types";
 import {
   connectorForProvider,
   encodeApiCredentials,
@@ -55,6 +58,7 @@ import {
 // WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
 // WHEN one happens. Exposed as a single call so the credential lifecycle never
 // hand-writes the cursor field set (see `UNSTARTED_ERP_CURSOR`).
+import { purgeLandedRecords } from "./crm/landed-purge.js";
 import { resetCursorsForConnection } from "./erp-sync/cursor.service.js";
 import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
@@ -65,21 +69,23 @@ const logger = createLogger("integrations-service");
 // EAGLESOFT_PROVIDER from this module.
 export { EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER };
 
-/** The explicit lifecycle states (mirror of the Prisma `IntegrationStatus`
- *  enum). A provider with no row is reported as NOT_CONFIGURED — the explicit
- *  constant, never a derived-from-null value. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  // WARP-2458 — the eighth member. ADR-041 §5 names it mandatory; a revoked
-  // customer credential is neither "never configured" nor "broken", and a
-  // surface reading only `status` must not render it as healthy.
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The explicit lifecycle states (the Prisma `IntegrationStatus` enum). A
+ * provider with no row is reported as NOT_CONFIGURED — the explicit constant,
+ * never a derived-from-null value.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the same enum. The member docs live with
+ * the definition; the Prisma-parity gate is
+ * `__tests__/integration-status.schema.test.ts`.
+ *
+ * Re-exported under the name this module already used rather than left to
+ * callers to import from the package, so every existing
+ * `from "./integrations.service.js"` import keeps working and the move stays a
+ * refactor rather than a rename of the whole surface.
+ */
+export type { IntegrationStatusName };
 
 /** Hub row (brief §13 `GET /api/integrations`). No PHI, no secret. */
 export interface IntegrationSummary {
@@ -973,6 +979,19 @@ export function createIntegrationsService(
           },
         });
         const cursorsReset = await resetCursorsForConnection(tx, row.id);
+        // WARP-2549 — ADR-041 §4's other binding constraint: "deletion is a
+        // real operation". The credential purge above stops the box READING
+        // this account; this stops it KEEPING what it already read.
+        //
+        // In the same transaction, for the same reason the purge is one
+        // `update`: two transactions can half-commit, and a box whose
+        // credentials are gone but whose landed customers are not is a box
+        // that tells an owner it disconnected and did half of it.
+        //
+        // Records carrying a note a human typed are ARCHIVED, not deleted —
+        // every `CrmActivity` subject relation is `onDelete: Cascade`, so
+        // deleting the parent silently destroys the owner's own prose.
+        const landed = await purgeLandedRecords(tx, row.id, new Date());
         await tx.erpAuditLog.create({
           data: {
             connectionId: row.id,
@@ -995,7 +1014,14 @@ export function createIntegrationsService(
             // constant. An audit whose provider is hardcoded cannot be used to
             // find out that the wrong provider was purged, which is precisely
             // the question this row exists to answer.
-            scope: { provider: row.provider, purged: true, cursorsReset },
+            scope: {
+              provider: row.provider,
+              purged: true,
+              cursorsReset,
+              // Counts, never names — the same rule the line above follows.
+              landedDeleted: landed.deleted,
+              landedArchived: landed.archived,
+            },
           },
         });
         return updated;

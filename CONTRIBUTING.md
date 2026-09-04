@@ -90,7 +90,11 @@ npm ci
 
 # Make the checkout buildable: prisma generate, then build the leaf
 # workspaces (see "Workspace builds come first" — skipping this is the usual
-# cause of a "broken" fresh checkout). Takes ~7 s.
+# cause of a "broken" fresh checkout). One prisma generate plus five tsc
+# builds; the machine dominates, not the repo — seconds on a warm Mac, ~48 s
+# on an idle Windows box, 6m07s on that same box under heavy load. Let it
+# finish: it clears all five leaf dist/ before rebuilding them, so a half-run
+# tree is worse off than an untouched one.
 npm run bootstrap
 
 # Set up the AI Gateway Python environment
@@ -154,7 +158,8 @@ absent.
 workspace or the Prisma schema — a `dist/` from the previous commit type-checks
 happily against the wrong types. If `tsc` or Vitest is reporting something that
 looks impossible, `npm run bootstrap:check` says in one line whether the tree is
-bootstrapped at all; the root `npm run test` runs that check for you first.
+bootstrapped — a stale `dist/` included, not just a missing one; the root
+`npm run test` runs that check for you first.
 
 Deliberately **not** a `postinstall` hook: `services/mcp-server/Dockerfile` runs
 `npm ci` before it `COPY`s `apps/orchestrator/prisma`, so a hook would generate

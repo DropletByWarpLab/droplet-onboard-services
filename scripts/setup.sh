@@ -683,8 +683,21 @@ main() {
   # Carve-out: a --regenerate-env run KEEPS .env.bak.* — that backup is the
   # documented recovery path when data volumes still hold the pre-rotation
   # passwords (see scripts/README.md "What is NOT guaranteed").
+  #
+  # WARP-2621 / WARP-2624: once relocate_secrets_to_data has run, $REPO_ROOT/.env
+  # is a SYMLINK and every secrets.sh writer now stages and copies beside the
+  # link's REAL target inside the encrypted /data — so the sweep must look THERE
+  # too or the copies outlive the run. Both directions are swept: a box upgraded
+  # mid-life still has pre-WARP-2624 strays beside the link. When .env is a plain
+  # file the resolved path IS $REPO_ROOT/.env, the two glob sets are identical,
+  # and the `[ -f ]` guard makes the second pass a no-op.
+  _env_sweep_target="$REPO_ROOT/.env"
+  if [ -L "$_env_sweep_target" ]; then
+    _env_sweep_target="$(readlink -f "$_env_sweep_target" 2>/dev/null || readlink "$_env_sweep_target")"
+    [ -n "$_env_sweep_target" ] || _env_sweep_target="$REPO_ROOT/.env"
+  fi
   if [ "$REGENERATE_ENV" != "true" ]; then
-    for _stale in "$REPO_ROOT"/.env.bak.*; do
+    for _stale in "$REPO_ROOT"/.env.bak.* "$_env_sweep_target".bak.*; do
       [ -f "$_stale" ] || continue
       # `rm -f` swallows a missing file, but a REAL removal failure (e.g. a
       # root-owned backup an earlier privileged run left that this non-root run
@@ -700,15 +713,19 @@ main() {
   # Each pattern below is produced by a real writer that stages onto a sibling
   # then rename(2)s into place; an interrupted run strands the sibling, and it
   # carries the same device secrets as .env. Named writers (scripts/lib/):
-  #   .env.torn.*    — secrets.sh generate_env torn-file quarantine ("$env_file.torn.$(date +%s)")
+  #   .env.torn.*    — secrets.sh generate_env torn-file quarantine ("$env_write_target.torn.$(date +%s)")
   #   .env.tmp.*     — secrets.sh atomic .env write ("$env_write_target.tmp.$$")
-  #   .env.migrate.* — secrets.sh migrate_env backfill stage ("$env_file.migrate.$$")
+  #   .env.migrate.* — secrets.sh migrate_env backfill stage ("$env_target.migrate.$$")
   #   .env.upsert.*  — secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
   # factory-reset.sh wipes the identical set — both sites clear secrets-bearing strays.
   for _stale in "$REPO_ROOT"/.env.torn.* \
                 "$REPO_ROOT"/.env.tmp.* \
                 "$REPO_ROOT"/.env.migrate.* \
-                "$REPO_ROOT"/.env.upsert.*; do
+                "$REPO_ROOT"/.env.upsert.* \
+                "$_env_sweep_target".torn.* \
+                "$_env_sweep_target".tmp.* \
+                "$_env_sweep_target".migrate.* \
+                "$_env_sweep_target".upsert.*; do
     [ -f "$_stale" ] || continue
     # Same set -e abort hazard as the .env.bak.* rm above — guard it too.
     rm -f "$_stale" 2>/dev/null || true

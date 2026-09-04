@@ -260,7 +260,11 @@ leaf workspaces that resolve through `dist/` have not been built (`Failed to
 resolve entry for package "@droplet/fips-selftest"` when the orchestrator suite
 collects `fips.test.ts`; `TS2305`/`TS2724` from `@droplet/erp-connector`).
 
-One step, ~7 s:
+One step — but not a quick one. It is `prisma generate` plus five `tsc` builds,
+and what dominates is the machine, not the repo: seconds on a warm Mac, ~48 s on
+an idle Windows box, `6m07s` on that same box under heavy load. **Let it
+finish.** Killing it partway leaves the checkout worse than it found it, because
+it removes all five leaf `dist/` before it rebuilds them.
 
 ```bash
 npm ci
@@ -273,7 +277,9 @@ npm run bootstrap     # prisma generate → clean stale dist/ → build the five
   carries a `*.test.js` whose `*.test.ts` has since moved reds the WARP-2515
   guard on a tree that is perfectly clean.
 - `npm run bootstrap:check` answers "is this tree bootstrapped?" in one line and
-  exits non-zero if not. The root `npm run test` runs it first (`pretest`).
+  exits non-zero if not — including the stale case, where a leaf `dist/` still
+  carries an emitted `.js` whose source has moved or been deleted. The root
+  `npm run test` runs it first (`pretest`).
 - The five leaves and their dependency order live in `scripts/bootstrap.sh` —
   the single list, also used by ship-check's `tsc-full`. Don't re-derive it.
   CI keeps its own explicit per-suite steps on purpose; don't replace them.
@@ -302,7 +308,7 @@ npm run test:ai-gateway     # ai-gateway only
 
 ## Docker stack
 
-30 compose services (13 default-on, the rest profile-gated) behind
+36 compose services (14 default-on, the rest profile-gated) behind
 nginx (dashboard at `/`, orchestrator at `/api/`, ai-gateway at `/ai/`,
 Nextcloud at `/nextcloud/`). Full service/port/profile table +
 .env-update procedure: the **`docker-stack`** skill. Two

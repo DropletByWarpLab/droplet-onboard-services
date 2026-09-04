@@ -31,7 +31,8 @@ import { ManageSheet } from "@/components/erp/ManageSheet";
 import { NewAppointmentDialog } from "@/components/erp/NewAppointmentDialog";
 import { WriteConfirmModal } from "@/components/erp/WriteConfirmModal";
 import { useEaglesoft, useEaglesoftSchedule, useErpAccess } from "@/lib/hooks/useEaglesoft";
-import { setProviderWrites, disconnectProvider } from "@/lib/api.erp";
+import { setProviderWrites } from "@/lib/api.erp";
+import { lifecycleErrorMessage } from "@/lib/lifecycle-errors";
 import { formatDayLabel, syncedAgo } from "@/lib/erp-format";
 import { writeModeOf, type AppointmentWriteRequest } from "@/lib/erp-types";
 
@@ -63,26 +64,35 @@ export default function EaglesoftPage() {
   const otherDay = useEaglesoftSchedule(showData && !isToday ? day.toISOString().slice(0, 10) : null);
   const entries = isToday ? schedule : otherDay.entries;
 
-  // WARP-2500 — both verbs are addressed to `connection.provider`, the key the
-  // row itself carries, rather than to a hardcoded "eaglesoft". This page is
+  // WARP-2500 — the verb is addressed to `connection.provider`, the key the row
+  // itself carries, rather than to a hardcoded "eaglesoft". This page is
   // reached only for the Eaglesoft connection today, so the VALUE is the same;
   // what changes is that the value now comes from the connection being acted
-  // on. When a second surface reuses these handlers, it cannot silently act on
+  // on. When a second surface reuses this handler, it cannot silently act on
   // the wrong connector, and the request no longer depends on the deprecated
   // literal alias routes.
+  //
+  // WARP-2519 — and it no longer swallows the failure. This was `catch {}` with
+  // the comment "backend not wired yet — surfaced elsewhere", and it was not
+  // surfaced elsewhere: `refresh()` re-read the unchanged connection and the
+  // toggle sprang back with no message, no banner and no console line. A write
+  // kill-switch that silently declines to move is the worst possible one — the
+  // owner is left believing writes are off when the box still has them on, or
+  // the reverse.
+  //
+  // The message is built from the typed code, never the response body
+  // (`lifecycleErrorMessage`, rule 19), and it clears on the next attempt so a
+  // stale failure cannot outlive the state it described.
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+
   async function toggleWrites(next: boolean) {
+    setLifecycleError(null);
     try {
       await setProviderWrites(connection.provider, next);
-    } catch {
-      /* backend not wired yet — surfaced elsewhere; refresh keeps UI honest */
-    }
-    refresh();
-  }
-  async function disconnect() {
-    try {
-      await disconnectProvider(connection.provider);
-    } catch {
-      /* no-op if backend absent */
+    } catch (err) {
+      setLifecycleError(
+        lifecycleErrorMessage(next ? "turn writes on" : "turn writes off", err),
+      );
     }
     refresh();
   }
@@ -100,6 +110,25 @@ export default function EaglesoftPage() {
         onConnect={() => setWizardOpen(true)}
         onManage={() => setManageOpen(true)}
       />
+
+      {/* WARP-2519 — the lifecycle failure, in the page's existing banner
+          vocabulary. `danger`, not `warn`: unlike the drift and degraded
+          banners below (which describe a connection behaving as designed under
+          a problem) this one says the box refused something the owner just
+          asked for, and the state they are looking at is not the state they
+          asked for. Its action retries the READ, which is what tells them what
+          the box actually holds now. */}
+      {lifecycleError && (
+        <StateBanner
+          tone="danger"
+          text={lifecycleError}
+          action="Re-check"
+          onAction={() => {
+            setLifecycleError(null);
+            refresh();
+          }}
+        />
+      )}
 
       {/* Degraded / drift banner — one line, one action; worst problem wins */}
       {status === "DRIFT_LOCKED" && (
@@ -164,7 +193,7 @@ export default function EaglesoftPage() {
         canToggleWrites={access.canEnableWrites}
         onToggleWrites={toggleWrites}
         onSyncNow={refresh}
-        onDisconnect={disconnect}
+        onDisconnected={refresh}
       />
       <PatientPeek patient={peek} open={peek !== null} onClose={() => setPeek(null)} />
       <NewAppointmentDialog

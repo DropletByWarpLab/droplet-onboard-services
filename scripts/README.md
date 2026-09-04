@@ -232,7 +232,7 @@ Each check exists because a specific bug class shipped to droplet-sys during the
 | `tsc-full` | `npx tsc --noEmit` in every workspace with a Dockerfile | WARP-329 — test-fixture type errors that `npm run dev` skips but `RUN npm run build` catches |
 | `compose-config` | `docker compose config --quiet` against `.env.example` | YAML breakage, missing env refs, malformed service defs |
 | `frigate-env-scan` | Parse `docker/frigate/config.yml` for `{VAR}` substitutions and assert every one resolves | WARP-446 — operator-specific env in committed config raises KeyError at Frigate boot, restart-loops the stack |
-| `shellcheck` | shellcheck warning-severity across `setup.sh`, `factory-reset.sh`, `lib/*.sh`, with **no global excludes** — every waiver is a per-line `# shellcheck disable=SCxxxx` directive with rationale (WARP-486) | bash bugs caught by static analysis (parse errors, quoting, declared-outside-function) |
+| `shellcheck` | shellcheck warning-severity across `setup.sh`, `factory-reset.sh`, `bootstrap.sh`, `test/ship-check.sh`, `test/ship-check.test.sh` and `lib/*.sh`, with **no global excludes** — every waiver is a per-line `# shellcheck disable=SCxxxx` directive with rationale (WARP-486) | bash bugs caught by static analysis (parse errors, quoting, declared-outside-function) |
 | `matter-env-allowlist` | Delegates to `scripts/test-security.sh` Test 7 | architecture-guard rule 11 — `MATTER_*` env outside the allowlist collides with matter.js's auto-imported `VariableService` and crashes controller init |
 | `exec-bits` | `git ls-files --stage` assert mode 100755 for every operator-facing script (setup, factory-reset, camera-drivers, install-device-bridge, ship-check, ship-check.test, openwrt/scripts/upgrade-router) | WARP-487 — index-100644 ships to main, so `./<path>/<name>.sh` invocations documented in the script's own `--help` are silent no-ops on filesystems that honour the index bit (WARP-489 extended the sweep to `openwrt/scripts/`) |
 | `stale-repo-names` | Walk curated user-facing surfaces (README, service READMEs/TESTING.md, top-level `scripts/*.sh`, `apps/orchestrator/src/**/*.ts`, `services/ai-gateway/**/*.py`, `services/voice-io/**/*.py`, `docker/docker-compose.yml`) and FAIL on any reference to the legacy inference-repo names that predate the canonical `droplet-local-LLM` (the exact blocked strings live in `scripts/test/ship-check.sh`). Allowlists the mDNS hostname `inference-engine.local` and the compose project-name + container-label call sites tied to it | WARP-494 — stale repo-name refs accumulating in user-facing surfaces after the canonical DropletByWarpLab remote rename; new refs reach for the old name out of habit |
@@ -262,6 +262,12 @@ contract with `SHIPCHECK_ALLOW_SKIP` in `.github/workflows/ci.yml`, so a case's
 display name can be reworded freely but its id changes only on purpose
 (WARP-2645 — keying on the prose name meant a rewording silently un-allowed
 that case's skip).
+
+The bar for adding an id to `SHIPCHECK_ALLOW_SKIP` in CI is *this job cannot
+run that case at all*, not *that case sometimes flakes*: an exempted case is a
+case that can no longer fail. An environmental SKIP on the runner — the
+`docker-build-smoke` shim case losing its container before the planted
+`docker buildx` — is meant to red the job and be re-run (WARP-2620).
 
 WARP-2637: before this, every SKIP returned 0 and was counted in `N/N passed`,
 so CI's `shipcheck` job — which does no `npm ci` — reported green while both
