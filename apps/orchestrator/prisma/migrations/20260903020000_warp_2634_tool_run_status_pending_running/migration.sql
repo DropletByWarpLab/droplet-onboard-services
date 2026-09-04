@@ -22,7 +22,7 @@
 -- THE COLUMN DEFAULT IS NOT SET HERE, ON PURPOSE.
 -- `ToolRun.status DEFAULT 'pending'` USES a value this file adds, and Postgres
 -- will not let a value be used in the transaction that adds it. It lands in the
--- next migration, 20260902190100, which is a separate transaction.
+-- next migration, 20260903020100, which is a separate transaction.
 --
 -- Guarded on the pg_enum catalog: `ALTER TYPE … ADD VALUE` has no
 -- transaction-safe `IF NOT EXISTS` across every supported PG and re-adding an

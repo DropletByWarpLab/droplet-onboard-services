@@ -13,7 +13,7 @@
 -- ── 1 · ToolRun.status DEFAULT 'ok' → 'pending' ──
 --
 -- 20260528100000_warp_462_tool_spec wrote DEFAULT 'ok'; schema.prisma declares
--- `@default(pending)`. The value being set was added by 20260902190000, in the
+-- `@default(pending)`. The value being set was added by 20260903020000, in the
 -- previous migration and therefore the previous transaction — Postgres will not
 -- accept a new enum value and a DEFAULT that uses it in one transaction, which
 -- is why this is a second file.

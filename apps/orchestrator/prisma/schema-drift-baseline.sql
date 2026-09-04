@@ -56,9 +56,9 @@
 --
 --  1. ToolRunStatus was missing `pending` and `running`; ToolRun.status
 --     defaulted to 'ok' in SQL and `pending` in the datamodel.
---     -> CLOSED, migration side. 20260902190000 adds both enum members
+--     -> CLOSED, migration side. 20260903020000 adds both enum members
 --        (BEFORE 'ok', matching the datamodel's declaration order) and
---        20260902190100 sets the column default. Two files because Postgres
+--        20260903020100 sets the column default. Two files because Postgres
 --        will not accept a new enum value and a DEFAULT that USES it in one
 --        transaction. Additive: tool-spec-runner.service.ts:410 is the only
 --        writer and always passes `status` explicitly, so no runtime behaviour
@@ -85,7 +85,7 @@
 --  4. AssistantPersona.updatedAt / BusinessProfile.updatedAt / TlsCert
 --     .updatedAt carried DEFAULT CURRENT_TIMESTAMP in SQL, none in the
 --     datamodel.
---     -> CLOSED, migration side: 20260902190100 drops all three defaults.
+--     -> CLOSED, migration side: 20260903020100 drops all three defaults.
 --        `@updatedAt` is application-managed and Prisma emits no DB default
 --        for it, so the datamodel was right and the hand-written migrations
 --        had added something extra. Declaring `@default(now())` instead would
