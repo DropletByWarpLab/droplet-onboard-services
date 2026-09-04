@@ -88,7 +88,7 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # The cloud/SaaS providers that must each have a customer setup guide.
 # Source of truth: ADR-042 §2. Space-separated (bash 3.2 — macOS ships
 # 3.2.57 and has no associative arrays; keep this script 3.2-compatible).
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero brevo klaviyo pipedrive"
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -178,6 +178,22 @@ fact_pins() {
       # is the one place we cannot claim minimal access.
       printf '%s\n' '-us14' 'full account access'
       ;;
+    atlassian)
+      # Four facts a customer acts on, and every one of them is a way the
+      # setup fails for a reason Droplet cannot fix (WARP-2316):
+      #  - 365 days is a HARD stop with no grace period and no auto-renewal.
+      #    It is the only connector on this list with an expiry the customer
+      #    must diary, and softening it produces a silent outage a year later.
+      #  - The Rovo MCP server toggle is an ORG ADMIN action in a console the
+      #    person doing the setup often cannot open. Naming the exact screen
+      #    is the difference between a one-minute ask and a support ticket.
+      #  - The Free plan cannot connect at all — a pre-sale qualification
+      #    gate, like Shopify's Grow plan and Xero's four countries.
+      #  - The IP allowlist, not the domain allowlist, is the Atlassian
+      #    control that governs this. Getting that backwards presents as a
+      #    network timeout rather than as a permission error, which is why
+      #    the distinction has to survive a copy pass.
+      printf '%s\n' '365 days' 'Rovo MCP server' 'Free plan' 'IP allowlist'
     brevo)
       # Brevo is the EXCEPTION to credential-handling.md's "these do not
       # expire" rule, in two independent ways: the owner picks a lifetime at

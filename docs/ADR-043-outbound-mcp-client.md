@@ -142,6 +142,7 @@ Whichever model applies, ADR-041 §5 carries over: the credential is a key to th
 ## Follow-ups
 
 - **Transport, session lifecycle and the tool multiplexer** — [WARP-2300](https://warp-lab.atlassian.net/browse/WARP-2300). Widens the agent loop's MCP dependency from the one stdio child to an interface, then builds the remote transport, the credential lifecycle and the encrypted token store.
+- **Which MCP SDK the client is built on** — [WARP-2423](https://warp-lab.atlassian.net/browse/WARP-2423), recorded in [`docs/mcp-client-sdk-version.md`](mcp-client-sdk-version.md). `^1.30.0`, the pin already on `stage`; there is no v2 to weigh against it. That doc also names the three triggers that would re-open the question, so nobody re-derives it from a version-drift alert.
 - **The generic `requiresConfirmation` interceptor** — [WARP-2305](https://warp-lab.atlassian.net/browse/WARP-2305), under [WARP-2214](https://warp-lab.atlassian.net/browse/WARP-2214). Blocking for any remote write, per §3.
 - **The classification table, the runtime deny tier and per-server allowlisting** — [WARP-2321](https://warp-lab.atlassian.net/browse/WARP-2321). Blocking for any remote write, per §3.
 - **Per-turn tool selection under the 16K budget** — [WARP-2348](https://warp-lab.atlassian.net/browse/WARP-2348). Gates any remote catalog reaching default chat, per Consequences.

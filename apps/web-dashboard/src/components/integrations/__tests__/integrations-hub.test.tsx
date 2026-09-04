@@ -23,13 +23,12 @@
  * runs, only the module boundary (`fetchIntegrations`) is stubbed. No database,
  * mock or otherwise (team rule).
  */
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
 import type { IntegrationConnection, IntegrationStatus } from "@/lib/erp-types";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 
 /**
  * WARP-2518 — the tile now carries a Disconnect control, and that control
@@ -164,24 +163,6 @@ function renderedNames(container: HTMLElement): string[] {
   return tiles(container).map(
     (t) => t.querySelector(".type-headline")?.textContent ?? "?",
   );
-}
-
-/**
- * Read a dashboard source file. `import.meta.url` is not a `file:` URL under
- * vite's transform, so resolve from the package root instead and fail loudly
- * if the walk misses — a source assertion that silently reads the wrong file
- * would pass forever.
- */
-function readSource(relative: string): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    const candidate = resolve(dir, relative);
-    if (existsSync(candidate)) return readFileSync(candidate, "utf8");
-    dir = resolve(dir, "..");
-  }
-  const fromRepoRoot = resolve(process.cwd(), "apps/web-dashboard", relative);
-  if (existsSync(fromRepoRoot)) return readFileSync(fromRepoRoot, "utf8");
-  throw new Error(`could not locate ${relative} from ${process.cwd()}`);
 }
 
 beforeEach(() => {
@@ -489,8 +470,12 @@ describe("hub dispatch", () => {
    * to either file → red.
    */
   it("neither the hub page nor the hook names a provider id", () => {
-    const page = readSource("src/app/integrations/page.tsx");
-    const hook = readSource("src/lib/hooks/useIntegrations.ts");
+    // WARP-2632 — `readPackageFile` is anchored to the owning file, not to
+    // `process.cwd()`. The walk-up this replaced did not fail on a wrong cwd,
+    // it climbed until *something* matched, so a runner started outside the
+    // package scraped whatever tree it landed in.
+    const page = readPackageFile("src/app/integrations/page.tsx");
+    const hook = readPackageFile("src/lib/hooks/useIntegrations.ts");
     for (const id of ["eaglesoft", "dentrix", "quickbooks", "opendental"]) {
       expect(page, `page.tsx names "${id}"`).not.toContain(`"${id}"`);
       expect(hook, `useIntegrations.ts names "${id}"`).not.toContain(`"${id}"`);
@@ -777,7 +762,7 @@ describe("loading, fetch-error and not-configured are three states", () => {
    * Mutation: delete the NEEDS_RECONNECT case so it falls through to
    * `statusView`'s `default` → the tile reads "Unknown state" → red.
    */
-  it("gives all eight IntegrationStatus values their own rendering", async () => {
+  it("gives all nine IntegrationStatus values their own rendering", async () => {
     vi.mocked(fetchIntegrations).mockResolvedValue([
       conn("eaglesoft", "CONNECTED"),
       conn("dentrix-ascend", "DEGRADED"),
@@ -787,6 +772,10 @@ describe("loading, fetch-error and not-configured are three states", () => {
       conn("aaa-export", "DISABLED"),
       conn("zzz-export", "NOT_CONFIGURED"),
       conn("mmm-export", "NEEDS_RECONNECT"),
+      // WARP-2623 — the ninth. Mutation: delete the CAPABILITY_LIMITED case
+      // from `statusView` → it falls to the `default` and the tile reads
+      // "Unknown state" → red.
+      conn("mailchimp", "CAPABILITY_LIMITED"),
     ]);
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
@@ -800,11 +789,42 @@ describe("loading, fetch-error and not-configured are three states", () => {
       ["Aaa Export", "Turned off"],
       ["Zzz Export", "Not connected"],
       ["Mmm Export", "Paste a new key"],
+      ["Mailchimp", "Connected · limited"],
     ];
     for (const [name, label] of labels) {
       expect(within(tile(container, name)).getByText(label), `${name} → ${label}`).toBeTruthy();
     }
-    expect(new Set(labels.map(([, l]) => l)).size).toBe(8);
+    expect(new Set(labels.map(([, l]) => l)).size).toBe(9);
+  });
+
+  /**
+   * WARP-2623 — the capability-limited tile offers no credential.
+   *
+   * Before the persisted member existed, these rows arrived as `ERROR` and the
+   * tile's action read "Retry" — re-probing a credential that is fine. Adding
+   * the member without teaching `ConnectorCard` about it would be worse: the
+   * tile would fall to the final `else` and read "Connect", running the setup
+   * wizard and storing a SECOND credential beside the working one.
+   *
+   * The fix is a plan or a scope grant in the vendor's own console, so the
+   * only honest action is the detail surface — which is where Disconnect
+   * lives, so disconnecting stays available exactly as it does for CONNECTED.
+   */
+  it("offers a capability-limited connector the same action as a connected one", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn("mailchimp", "CAPABILITY_LIMITED"),
+      conn("stripe", "CONNECTED"),
+    ]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Mailchimp"));
+
+    const limited = tile(container, "Mailchimp");
+    // Mutation: drop `capabilityLimited` from `usesOpen`/`label` in
+    // `ConnectorCard` → the button reads "Connect" → red.
+    expect(within(limited).getByText("Open")).toBeTruthy();
+    expect(limited.textContent).not.toMatch(/Retry|Connect\b|Fix connection/);
+    // The remediation, on the tile's detail line rather than inside the pill.
+    expect(limited.textContent).toMatch(/plan or permission change/i);
   });
 
   /**

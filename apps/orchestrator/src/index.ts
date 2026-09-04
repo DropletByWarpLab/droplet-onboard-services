@@ -28,7 +28,11 @@ import {
   stopHealthMonitor,
   onHealthSnapshot,
 } from "./services/health-monitor.service.js";
-import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
+import {
+  ensureMcpStarted,
+  ensureRemoteMcpAttached,
+  stopMcp,
+} from "./services/mcp-client.singleton.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -381,6 +385,24 @@ async function main() {
     logger.info("MCP stdio child started");
   } catch (err) {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
+  }
+
+  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP session, if this box is
+  // entitled to one. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
+  // empty) this constructs nothing and dials nothing — it returns
+  // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
+  // vendor session that cannot be opened must not stop the appliance booting.
+  try {
+    const attached = await ensureRemoteMcpAttached(prisma);
+    if (!attached.attached) {
+      logger.info(
+        "Remote MCP not attached (%s): %s",
+        attached.reason,
+        attached.message,
+      );
+    }
+  } catch (err) {
+    logger.warn("Remote MCP attach failed: %s", (err as Error).message);
   }
 
   // First-boot model readiness: if LLM_MODEL is set and Ollama doesn't

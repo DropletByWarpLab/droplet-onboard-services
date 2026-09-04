@@ -135,6 +135,7 @@ run_wd() {
       DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
       DROPLET_WATCHDOG_RELAY_DNS_BIN="$WORK/bin/droplet-relay-dns" \
+      DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/app-downloads-audit" \
       "$@" \
       bash "$WATCHDOG" 2>&1
 }
@@ -176,6 +177,18 @@ cat "$WORK/host_units_out" 2>/dev/null
 exit \$(cat "$WORK/host_units_exit" 2>/dev/null || echo 0)
 EOF
   chmod +x "$WORK/bin/droplet-host-units"
+}
+
+# WARP-2666 app-downloads auditor stub. Report comes from $WORK/audit_out,
+# exit code from $WORK/audit_exit (default 0).
+mk_app_downloads_stub() {
+  cat > "$WORK/bin/app-downloads-audit" <<EOF
+#!/bin/sh
+printf 'app-downloads-audit %s\n' "\$*" >> "$WORK/audit.log"
+cat "$WORK/audit_out" 2>/dev/null
+exit \$(cat "$WORK/audit_exit" 2>/dev/null || echo 0)
+EOF
+  chmod +x "$WORK/bin/app-downloads-audit"
 }
 
 STATUS_JSON="$WORK/state/status.json"
@@ -913,6 +926,131 @@ if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
   pass "an auditor that cannot run reports not_applicable, not a fake verdict"
 else
   fail "expected not_applicable for a broken auditor, got $(wd_field host_artefacts status)"
+fi
+
+# =============================================================================
+# Phase 8c: app_downloads (WARP-2666)
+# =============================================================================
+# The same shape as 8b, one layer up. `/downloads` is where a customer gets the
+# client app for the box in front of them, and it has been EMPTY on every box
+# that has ever shipped — because an empty catalog answers HTTP 200 with
+# available:false, which is correct for the API and invisible to /api/health,
+# to every uptime probe and to all seven of the other checks here.
+#
+# Detect-and-report only: the fix is a human copying an installer onto the box.
+echo "--- Phase 8c: app_downloads ---"
+
+ADL='DROPLET_WATCHDOG_CHECKS=app_downloads'
+
+# No auditor reachable → no verdict. Never ok.
+reset_work
+run_wd "$ADL" DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/absent-auditor" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: not_applicable when the auditor cannot be found"
+else
+  fail "expected not_applicable, got $(wd_field app_downloads status)"
+fi
+
+# Exit 0 — everything the release declares is staged.
+reset_work
+mk_app_downloads_stub
+echo 0 > "$WORK/audit_exit"
+printf 'OK            windows  Droplet_0.2.0_x64-setup.exe (1 installer asset(s)) verified\n' > "$WORK/audit_out"
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "ok" ]; then
+  pass "app_downloads: ok when every declared client app is staged"
+else
+  fail "expected ok, got $(wd_field app_downloads status)"
+fi
+
+# Exit 3 — declared blocked. not_applicable, but the MESSAGE must name the
+# platforms and their tickets: a silent n/a is the shape this check exists to
+# end, and reporting it as broken would train people to ignore a permanent red.
+reset_work
+mk_app_downloads_stub
+echo 3 > "$WORK/audit_exit"
+cat > "$WORK/audit_out" <<'BLOCKED_FIXTURE'
+BLOCKED       windows  WARP-1955 — no v* tag cut yet; release.yml has never run
+BLOCKED       android  WARP-1415 — no signing secrets, no tag, no Play listing
+BLOCKED       ios  WARP-1955 — no distribution pipeline at all
+BLOCKED_FIXTURE
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: a declared-blocked release is not_applicable, not a failure"
+else
+  fail "expected not_applicable for declared-blocked, got $(wd_field app_downloads status)"
+fi
+ad_msg="$(wd_field app_downloads message)"
+case "$ad_msg" in
+  *windows*WARP-1955*) pass "the blocked message names the platform AND its ticket" ;;
+  *) fail "blocked message does not name platform + ticket: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *android*) pass "the blocked message names every blocked platform" ;;
+  *) fail "blocked message does not name android: $ad_msg" ;;
+esac
+
+# Exit 4 — could not look. THE distinction this whole change is about: it must
+# never collapse into ok.
+reset_work
+mk_app_downloads_stub
+echo 4 > "$WORK/audit_exit"
+printf 'audit: no readable EXPECTED — no verdict\n' > "$WORK/audit_out"
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: exit 4 (no verdict) never reports ok"
+else
+  fail "expected not_applicable for exit 4, got $(wd_field app_downloads status)"
+fi
+case "$(wd_field app_downloads message)" in
+  *"no verdict"*) pass "the exit-4 message says there is no verdict" ;;
+  *) fail "exit-4 message does not say 'no verdict': $(wd_field app_downloads message)" ;;
+esac
+
+# Exit 1 — a declared installer is genuinely missing on a box that should have
+# it. That IS a failure.
+reset_work
+mk_app_downloads_stub
+echo 1 > "$WORK/audit_exit"
+cat > "$WORK/audit_out" <<'GAP_FIXTURE'
+MISSING       windows  declared 'installer' in EXPECTED but nothing is staged
+STALE         android  staged bytes disagree with catalog.json: droplet.apk(digest)
+OK            ios  store link https://apps.apple.com/app/id123
+GAP_FIXTURE
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "heal_failed" ]; then
+  pass "app_downloads: heal_failed when a declared client app is missing"
+else
+  fail "expected heal_failed, got $(wd_field app_downloads status)"
+fi
+ad_msg="$(wd_field app_downloads message)"
+case "$ad_msg" in
+  *"1 missing"*) pass "the message counts what is missing" ;;
+  *) fail "message does not count missing: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *"1 stale"*) pass "the message counts stale bytes separately from absence" ;;
+  *) fail "message does not distinguish stale from missing: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *windows*) pass "the message names the affected platform" ;;
+  *) fail "message does not name the platform: $ad_msg" ;;
+esac
+# An OK row must never be counted as a problem.
+case "$ad_msg" in
+  *ios*) fail "an OK row leaked into the failure message: $ad_msg" ;;
+  *) pass "OK rows are not reported as problems" ;;
+esac
+case "$ad_msg" in
+  *stage.sh*) pass "the message carries the one-line fix" ;;
+  *) fail "message does not say how to fix it: $ad_msg" ;;
+esac
+
+# Detect-and-report only: the watchdog must never stage anything itself.
+if grep -qE 'stage|gen-catalog' "$WORK/audit.log" 2>/dev/null; then
+  fail "the watchdog tried to stage an installer: $(cat "$WORK/audit.log")"
+else
+  pass "the watchdog never stages (detect-and-report only)"
 fi
 
 # =============================================================================
