@@ -3,7 +3,11 @@
  *
  * Every 60s scans ToolSchedule rows whose `nextFireAt <= now()` and:
  *   1. Resolves the parent spec (must be status=live).
- *   2. Safety gate — when `spec.writes && !spec.reversible` we DO NOT
+ *   2. Safety gate — when the spec WRITES and is not `reversible` we DO NOT
+ *      auto-fire. "Writes" is `spec.writes || derived-from-steps`, never the
+ *      stored column alone: rows authored before WARP-2665 were never checked
+ *      against their steps, so the column can say false while the spec calls a
+ *      write tool. Deriving here cannot go stale (see the note at the gate).
  *      auto-fire; the run is skipped, an ActivityRow is emitted, and
  *      `nextFireAt` still advances so the schedule doesn't loop. This
  *      keeps "destructive + unreliable to undo" specs from running
@@ -85,6 +89,7 @@ import {
 import {
   firstToolDeniedForPrincipal,
   resolveAttributedToolAccess,
+  WRITE_TOOLS,
 } from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
@@ -173,7 +178,31 @@ export async function tickToolSchedules(
       continue;
     }
 
-    if (spec.writes && !spec.reversible) {
+    // WARP-2665 — DERIVE, do not trust the column.
+    //
+    // `spec.writes` is stored, and every row written before this ticket used
+    // `parsed.data.writes ?? false` with nothing checking it against the
+    // steps. So a spec authored through `POST /api/tools` months ago can sit
+    // in the table flagged `writes:false` while calling a write tool, and the
+    // authoring-time reconciliation added by this ticket never revisits it —
+    // a description-only PATCH does not touch `writes`, and there is no
+    // migration that could: deriving it needs `plannedToolNames` +
+    // `WRITE_TOOLS`, which are TypeScript, and a SQL snapshot of the write
+    // list would start drifting the day the registry changes.
+    //
+    // This gate is the one deciding whether something destructive runs with
+    // nobody watching, so it reads the steps it is about to dispatch instead.
+    // Derived at fire time it cannot go stale, and it covers rows from every
+    // authoring path, past and future.
+    //
+    // OR, never override: a conservative operator `writes:true` on a spec
+    // that calls no write tool still holds, matching reconcileWrites().
+    const derivedWrites = plannedToolNames(spec.steps).some((tool) =>
+      WRITE_TOOLS.has(tool),
+    );
+    const effectiveWrites = spec.writes || derivedWrites;
+
+    if (effectiveWrites && !spec.reversible) {
       // Safety gate — see file header. Skip + audit + advance.
       await recordActivity({
         kind: "tool_run",
@@ -186,6 +215,9 @@ export async function tickToolSchedules(
           specId: spec.id,
           scheduleId: schedule.id,
           reason: "writes_and_not_reversible",
+          // Visible signal that the stored column was wrong: this row
+          // would have auto-fired before WARP-2665.
+          writesSource: spec.writes ? "declared" : "derived",
         },
       });
       await advanceOrDisable(prisma, schedule, now);
