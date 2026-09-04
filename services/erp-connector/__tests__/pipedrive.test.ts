@@ -943,6 +943,32 @@ describe("cursor pagination", () => {
     await expect(c.listDataset("contact")).rejects.toThrow(ConnectorBlockedError);
   });
 
+  it("refuses a 200 with no `data` key at all — absent is not the documented empty page", async () => {
+    // `data: null` is the empty page and terminates the walk cleanly. A body
+    // with no `data` key whatsoever ({} or {"success": false}) is a renamed
+    // field, an error served as a 200, or a rewritten response — none of which
+    // is evidence that the account has no rows. Coercing it to [] reports the
+    // dataset as fully synced with nothing in it and nothing red anywhere, the
+    // same defect the Brevo connector's collectionOf() refuses.
+    // Mutation: coerce a missing key to [] → red.
+    for (const body of [{}, { success: false }, { success: true, additional_data: {} }]) {
+      const { c } = connector({ routes: [{ match: /.*/, responses: [{ body }] }] });
+      await expect(c.listDataset("contact")).rejects.toThrow(ConnectorBlockedError);
+    }
+  });
+
+  it("reads Pipedrive's `data: null` as a genuinely empty page", async () => {
+    // The key present and null is the vendor's own empty answer, and it must
+    // stay tellable apart from the key being absent.
+    // Mutation: refuse null along with a missing key → red, and an account
+    // with no contacts reads as an outage.
+    const { c } = connector({
+      routes: [{ match: /.*/, responses: [{ body: { success: true, data: null, additional_data: {} } }] }],
+    });
+    const result = await c.listDataset("contact");
+    expect(result.rows).toHaveLength(0);
+  });
+
   it("clamps `limit` to Pipedrive's documented maximum and default", async () => {
     // limit: default 100, maximum 500 (core-api-concepts-pagination). Asking
     // for more is a 400 from the vendor, and asking for zero is a walk that

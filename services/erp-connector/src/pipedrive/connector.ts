@@ -2003,6 +2003,20 @@ export class PipedriveConnector implements Connector {
 
     for (let page = 1; page <= PIPEDRIVE_MAX_PAGES; page += 1) {
       const body = await this.request(op, path, { ...search, limit, cursor });
+      if (!("data" in body)) {
+        // `data: null` is the empty page — the key present. A body without the
+        // key at all is a renamed field, an error served with a 200, or a
+        // rewritten response, none of which is evidence that the account has
+        // no rows. Coercing it to [] would end the walk on this page and report
+        // the dataset as fully synced with nothing in it and nothing red
+        // anywhere — the same defect Brevo's collectionOf() refuses.
+        throw new ConnectorBlockedError(
+          `${op} returned a 200 with no \`data\` key`,
+          "Pipedrive's documented v2 list envelope carries `data` on every page (null for an " +
+            "empty one), and this response does not. Refusing to interpret it rather than " +
+            "reporting zero rows as a clean result.",
+        );
+      }
       const data = body.data;
       if (data != null && !Array.isArray(data)) {
         throw new ConnectorBlockedError(
