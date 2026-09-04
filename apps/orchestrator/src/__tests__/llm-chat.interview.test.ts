@@ -425,7 +425,19 @@ describe("interview conductor overlay (WARP-1121 §9.3)", () => {
  *      `degradeToFit` then drops the business block — WARP-2552's cost, in the
  *      one place this file can observe it without a synthetic window.
  */
-const CONTINUITY_ID = "2a7c9f10-6d4b-4e73-8c15-0b9a3e2d4c61";
+/**
+ * The id the REQUEST BODY claims, and the id the SERVER resolved — two
+ * different values on purpose (#1955, twin of the fixture in
+ * `rbac-tool-narrowing.route.test.ts`).
+ *
+ * One constant playing both parts makes the id half of the
+ * `toHaveBeenCalledWith` below undiscriminating: it cannot tell the session
+ * `ensureConversation` returned from the caller's claim, so
+ * `routes/llm.ts:1320` could read `chatReq.conversationId` and the suite would
+ * stay green while the "server-authoritative" comment stopped being true.
+ */
+const CLAIMED_CONTINUITY_ID = "2a7c9f10-6d4b-4e73-8c15-0b9a3e2d4c61";
+const SERVER_CONTINUITY_ID = "c07f4a19-9e52-4d38-b6ac-71d0e58b3f24";
 
 /** Read-only, one per domain, none in `CORE_TOOL_NAMES`: `search_content` is
  *  the floor, `list_cameras` the domain continuity should re-admit,
@@ -448,14 +460,14 @@ function advertisedFromAgentRequest(): Set<string> {
 
 describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode cost)", () => {
   beforeEach(() => {
-    persistence.sessionId = CONTINUITY_ID;
+    persistence.sessionId = SERVER_CONTINUITY_ID;
   });
 
   it("keeps an earlier turn's out-of-domain tool advertised on a later turn", async () => {
     persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
     const app = buildApp(createPrismaMock());
     const res = await chat(app, {
-      conversationId: CONTINUITY_ID,
+      conversationId: CLAIMED_CONTINUITY_ID,
       // The WARP-1921 sentence: a follow-up with no camera word in it. Without
       // continuity the model loses the tool it used one turn ago and the
       // WARP-642 self-heal burns an iteration getting it back.
@@ -463,10 +475,16 @@ describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode 
       allowed_tools: POOL,
     });
     expect(res.status).toBe(200);
-    // Server-authoritative and user-scoped: read from the persisted trace for
-    // the authenticated user, never from the request body's claim.
+    // Server-authoritative and user-scoped, with each half independently
+    // falsifiable: the id is the one `ensureConversation` returned rather than
+    // `CLAIMED_CONTINUITY_ID` (what the body sent), and the user is
+    // `req.user`'s (the body carries none).
     expect(persistence.getConversationToolNames).toHaveBeenCalledWith(
-      CONTINUITY_ID,
+      SERVER_CONTINUITY_ID,
+      "stefan",
+    );
+    expect(persistence.getConversationToolNames).not.toHaveBeenCalledWith(
+      CLAIMED_CONTINUITY_ID,
       "stefan",
     );
     expect(lastAgentRequest().prior_tool_names).toEqual(["list_cameras"]);
@@ -482,7 +500,7 @@ describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode 
     persistence.getConversationToolNames.mockResolvedValue([]);
     const app = buildApp(createPrismaMock());
     const res = await chat(app, {
-      conversationId: CONTINUITY_ID,
+      conversationId: CLAIMED_CONTINUITY_ID,
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
@@ -496,7 +514,7 @@ describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode 
     h.config.TOOL_SELECTION_MODE = "domains";
     const app = buildApp(createPrismaMock());
     const res = await chat(app, {
-      conversationId: CONTINUITY_ID,
+      conversationId: CLAIMED_CONTINUITY_ID,
       // No `allowed_tools` and role owner ⇒ the full chat pool.
       messages: [{ role: "user", content: "and how did that go" }],
     });
@@ -516,7 +534,7 @@ describe("tool selection on /api/llm/chat (WARP-1921 continuity, WARP-2552 mode 
     h.config.TOOL_SELECTION_MODE = "off";
     const app = buildApp(createPrismaMock());
     const res = await chat(app, {
-      conversationId: CONTINUITY_ID,
+      conversationId: CLAIMED_CONTINUITY_ID,
       messages: [{ role: "user", content: "and how did that go" }],
     });
     expect(res.status).toBe(200);

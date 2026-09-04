@@ -418,7 +418,28 @@ describe("/api/llm/chat — §3 tool scope wiring", () => {
  * second turn advertises the floor only, the model cannot see the camera tool
  * it just used, and the WARP-642 self-heal burns an iteration recovering.
  */
-const CONVO_ID = "3f5c1c56-3b0a-4d9e-9a1b-5f2c8d7e6a40";
+/**
+ * The id the REQUEST BODY claims, and the id the SERVER resolved — deliberately
+ * different values.
+ *
+ * #1955 caught the first cut of this file asserting `toHaveBeenCalledWith(
+ * CONVO_ID, "sam")` with ONE constant playing both parts. The user half of
+ * that assertion discriminated (the body carries no user id, so "sam" can only
+ * have come from `req.user`), but the id half discriminated nothing: with
+ * `persistence.sessionId === chatReq.conversationId`, swapping
+ * `routes/llm.ts:1320` to read the body's claim instead of the id
+ * `ensureConversation` returned left the suite green. The comment below it
+ * ("a guessed conversation id from another household member reveals nothing")
+ * was therefore an unpinned claim.
+ *
+ * Two constants make it a real one. `ensureConversation` is the authority: on
+ * a real box it OWNS the mismatch case — a `conversationId` that belongs to
+ * another user does not resolve to that user's session, it opens a new one —
+ * so the id the continuity read must use is always the one it returned, never
+ * the one the caller sent.
+ */
+const CLAIMED_CONVO_ID = "3f5c1c56-3b0a-4d9e-9a1b-5f2c8d7e6a40";
+const SERVER_CONVO_ID = "8b1e0d74-2c96-4f5a-a3d7-16e4c9b0f782";
 
 /** Read-only, one per domain, none of them in `CORE_TOOL_NAMES`:
  *  `search_content` is the floor, `list_cameras` is the domain continuity
@@ -428,7 +449,7 @@ const POOL = ["search_content", "list_cameras", "list_smart_home_devices"];
 
 describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
   beforeEach(() => {
-    persistence.sessionId = CONVO_ID;
+    persistence.sessionId = SERVER_CONVO_ID;
     resolveEffectiveAccessMock.mockResolvedValue({
       tier: "admin",
       toolDomains: ["cameras", "smart-home", "files"],
@@ -439,17 +460,26 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
   it("reads the prior turn's tool names for THIS user and ships them to the loop", async () => {
     persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
     const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
-      conversationId: CONVO_ID,
+      conversationId: CLAIMED_CONVO_ID,
       // No camera word anywhere — the only route to the cameras domain on
       // this turn is the prior turn's trace.
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
     expect(res.status).toBe(200);
-    // Scoped to the authenticated user, not the body's claim: a guessed
-    // conversation id from another household member reveals nothing.
+    // BOTH arguments are server-authoritative, and the fixture is built so
+    // each one can fail on its own: the id is the one `ensureConversation`
+    // returned (NOT `CLAIMED_CONVO_ID`, which is what the body sent), and the
+    // user is `req.user`'s (the body carries no user id at all). A guessed
+    // conversation id from another household member therefore reveals nothing
+    // — and swapping `routes/llm.ts:1320` to `chatReq.conversationId` reddens
+    // this line instead of sliding past it.
     expect(persistence.getConversationToolNames).toHaveBeenCalledWith(
-      CONVO_ID,
+      SERVER_CONVO_ID,
+      "sam",
+    );
+    expect(persistence.getConversationToolNames).not.toHaveBeenCalledWith(
+      CLAIMED_CONVO_ID,
       "sam",
     );
     expect(agentRequest().prior_tool_names).toEqual(["list_cameras"]);
@@ -458,7 +488,7 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
   it("keeps an out-of-domain tool from an earlier turn in the advertised pool", async () => {
     persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
     const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
-      conversationId: CONVO_ID,
+      conversationId: CLAIMED_CONVO_ID,
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
@@ -477,7 +507,7 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
     // The control for the case above: same turn, same pool, empty trace.
     persistence.getConversationToolNames.mockResolvedValue([]);
     const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
-      conversationId: CONVO_ID,
+      conversationId: CLAIMED_CONVO_ID,
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
@@ -494,7 +524,7 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
     h.config.TOOL_SELECTION_MODE = "off";
     persistence.getConversationToolNames.mockResolvedValue(["list_cameras"]);
     const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
-      conversationId: CONVO_ID,
+      conversationId: CLAIMED_CONVO_ID,
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
@@ -514,7 +544,7 @@ describe("/api/llm/chat — WARP-1921 cross-turn tool continuity", () => {
     // used to make every case in this file take this path.
     persistence.getConversationToolNames.mockRejectedValue(new Error("db down"));
     const res = await chat(buildApp(createPrismaMock("role-1"), "owner"), {
-      conversationId: CONVO_ID,
+      conversationId: CLAIMED_CONVO_ID,
       messages: [{ role: "user", content: "and how did that go" }],
       allowed_tools: POOL,
     });
