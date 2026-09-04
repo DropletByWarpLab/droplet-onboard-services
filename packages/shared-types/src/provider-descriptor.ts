@@ -186,7 +186,25 @@ export type ProviderTrack =
   /** A hub catalog card with NO shipped track. Never buildable, never a valid
    *  `IntegrationConnection.provider`. Explicit rather than inferred from an
    *  absent factory — absence is never a silent anything. */
-  | "catalog";
+  | "catalog"
+  /**
+   * WARP-2650 — reaches a vendor's hosted MCP server through `services/mcp-bridge`
+   * (ADR-043). Takes its account identity from `providerConfig` and its
+   * credential from `providerTokensEnc`, exactly like `cloud` — and NOTHING
+   * else like it.
+   *
+   * The difference that earns a fourth track rather than a flag on `cloud`:
+   * there is no `Connector`, no dataset, and no sync. A cloud track's whole
+   * contract is "this vendor's rows arrive as canonical datasets a connector
+   * produces on a schedule"; an MCP track's is "this vendor's own tools become
+   * callable, one at a time, through the multiplexer, under an operator-owned
+   * classification table". Reusing `cloud` would have made `datasets: []` mean
+   * two different things — "this cloud track serves nothing" (a bug) and "this
+   * track has no dataset concept" (the truth) — and every reader that resolves
+   * a dataset, registers a sync cursor or builds a connector would have had to
+   * learn a vendor exception instead of reading the track.
+   */
+  | "mcp";
 
 export type ProviderAvailability = "available" | "coming-soon";
 
@@ -434,6 +452,123 @@ interface ProviderDescriptorBase {
   readonly pollIntervalFloorMs?: number;
   /** Declared by a LAN track that provisions its own database account. */
   readonly lanProvisioning?: LanProvisioning;
+  /**
+   * Declared by a track whose credential has a HARD expiry the customer must
+   * act on before it passes.
+   *
+   * Optional because most credentials have none: a Stripe restricted key, a
+   * HubSpot private-app token and a Mailchimp key all live until somebody
+   * revokes them, so there is nothing to warn about and inventing a window for
+   * them would be a guess wearing a policy's clothes — the same reason
+   * `rateLimit` is absent on Dentrix Ascend.
+   *
+   * PRESENCE is what says "this connection can expire". Its absence is not an
+   * optimistic "it never expires" inferred from silence; it is the track
+   * declaring it has no expiry concept, which is why
+   * {@link credentialExpiryVerdict} returns `undefined` rather than a status
+   * for such a provider.
+   */
+  readonly credentialExpiry?: CredentialExpiryPolicy;
+}
+
+/**
+ * A credential with a hard stop, and the window in which an owner is told.
+ *
+ * Atlassian is the shipped case (WARP-2353): an API token lasts at most 365
+ * days, the vendor sends no reminder, there is no refresh and no grace period,
+ * and the box cannot mint a replacement — only the customer can, in their own
+ * console. So the expiry has to become a STATUS a person sees, ahead of time,
+ * rather than an outage that arrives as "the integration stopped working".
+ */
+export interface CredentialExpiryPolicy {
+  /**
+   * The `providerConfig` field carrying the expiry date, as `YYYY-MM-DD`.
+   *
+   * Named rather than assumed so the declaration and the field definition
+   * cannot drift: `provider-registry.test.ts` asserts the named field is one
+   * the descriptor actually declares, with `storage: "providerConfig"`.
+   */
+  readonly field: string;
+  /** How far ahead a pending expiry becomes a status rather than a footnote. */
+  readonly warningDays: number;
+  /** The vendor's maximum lifetime, for the guide and the rotation copy. */
+  readonly maxLifetimeDays: number;
+}
+
+/**
+ * What a person is told about a credential's expiry.
+ *
+ * A closed union, and `EXPIRY_UNKNOWN` is a member rather than a `null`: "a
+ * credential is stored and no expiry date was recorded" is a real state with
+ * its own remedy (go and record one), and it is emphatically not `VALID`. The
+ * repo rule that persistent state is never derived from an absent value applies
+ * to what is SHOWN as much as to what is stored.
+ */
+export type CredentialExpiryStatus =
+  | "VALID"
+  | "EXPIRING_SOON"
+  | "EXPIRED"
+  | "EXPIRY_UNKNOWN";
+
+export interface CredentialExpiryVerdict {
+  readonly status: CredentialExpiryStatus;
+  /** Whole days until expiry, FLOORED; negative once past. `null` when no date
+   *  is recorded — never 0 standing in for "unknown". */
+  readonly daysRemaining: number | null;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Classify a connection's credential expiry, or `undefined` when the provider
+ * declares no {@link CredentialExpiryPolicy}.
+ *
+ * Pure, and deliberately in this module rather than beside a vendor: the
+ * dashboard renders the verdict and cannot import a server-only package, and
+ * the orchestrator's credential service is generic by doctrine — a comparison
+ * of `provider` against a vendor key there *is* the defect it exists to
+ * prevent.
+ *
+ * Two rules, and each is the safe direction for a HARD stop:
+ *
+ *  • Days are **floored**, never rounded. Rounding puts 30.6 days at 31 and
+ *    keeps a connection green on the first day it should have been warning.
+ *    `atlassian-provider.test.ts` pins the case that separates the two.
+ *
+ * This is the ONLY implementation of the rule. WARP-2353 shipped a second one
+ * (`atlassian-token-expiry.ts`), vendor-named and orchestrator-only, with no
+ * production callers; the two were held in step by an assertion, which is the
+ * arrangement to avoid, so it was deleted in WARP-2300 and this one kept — it
+ * is the wired one, both apps can import it, and it takes its numbers from the
+ * descriptor instead of hardcoding a vendor.
+ *
+ * It answers "how long has this credential got", NOT "is one stored". A caller
+ * that has not checked for a stored credential first will render
+ * `EXPIRY_UNKNOWN` on a provider nobody has ever connected — see the gate in
+ * `saas-credential.service.ts`.
+ *  • A bare `YYYY-MM-DD` parses as **midnight UTC**, i.e. the START of the
+ *    stated day. The customer transcribes a date, not an instant, and the
+ *    vendor's actual cut-off within that day is unknown — so the connection
+ *    reads EXPIRED from the beginning of its last day rather than at some hour
+ *    nobody can predict. Warning early costs a person one unnecessary token
+ *    rotation; warning late costs them an outage they were promised notice of.
+ */
+export function credentialExpiryVerdict(
+  descriptor: ProviderDescriptor | undefined,
+  config: ProviderConfig | undefined,
+  now: Date,
+): CredentialExpiryVerdict | undefined {
+  const policy = descriptor?.credentialExpiry;
+  if (!policy) return undefined;
+  const raw = providerConfigString(config, policy.field);
+  const at = raw === undefined ? Number.NaN : Date.parse(raw);
+  if (Number.isNaN(at)) return { status: "EXPIRY_UNKNOWN", daysRemaining: null };
+  const daysRemaining = Math.floor((at - now.getTime()) / MS_PER_DAY);
+  if (daysRemaining < 0) return { status: "EXPIRED", daysRemaining };
+  if (daysRemaining <= policy.warningDays) {
+    return { status: "EXPIRING_SOON", daysRemaining };
+  }
+  return { status: "VALID", daysRemaining };
 }
 
 /**
@@ -452,7 +587,106 @@ export type ProviderDescriptor =
   | (ProviderDescriptorBase & {
       readonly track: "cloud";
       readonly catalog?: CloudProviderCatalogMeta;
-    });
+    })
+  | McpProviderDescriptor;
+
+/**
+ * WARP-2650 — a provider reached through a vendor's hosted MCP server.
+ *
+ * Four properties of the base are CLOSED OFF rather than left merely optional,
+ * and each is the point of having a separate arm at all — an `mcp` descriptor
+ * that tried to declare one would not compile, which is a stronger statement
+ * than a review note or a runtime check. `?: never` rather than `Omit`, so that
+ * the union's shared readers keep writing `descriptor.rateLimit` without
+ * narrowing first (the property the base's own docstring is built around) while
+ * the DECLARATION site is still refused:
+ *
+ *  • **`datasets` is the empty tuple, by construction.** Not `readonly
+ *    DatasetName[]` that happens to be empty today. An MCP track has no
+ *    canonical-dataset concept at all: `cloudRowForDataset` resolves a dataset
+ *    to a connection through the registry, and a future author adding one name
+ *    here would make an MCP row answer a `cloud_query_dataset` call that no
+ *    connector can serve.
+ *  • **`pollIntervalFloorMs` is gone**, not set to a magic `0`. A floor is the
+ *    minimum interval a SCHEDULED SYNC may run at, and there is no scheduled
+ *    sync for this track — an MCP tool is called when the model calls it. `0`
+ *    would read as "no floor, poll as fast as you like", which is a different
+ *    and wrong claim.
+ *  • **`lanProvisioning` is gone.** Its own docstring makes PRESENCE select the
+ *    connect wizard's LAN flow; a hosted vendor endpoint has no database
+ *    account to provision.
+ *  • **`rateLimit` is gone.** `ProviderRateLimit` is a call ceiling over a
+ *    period, and Atlassian's documented limiter is neither: upstream #171
+ *    reports 429s at a CONCURRENCY depth with no volume threshold, which is why
+ *    `services/mcp-bridge/src/call-scheduler.ts` enforces a depth of 4. A
+ *    monthly number invented here would be a guess wearing a policy's clothes.
+ */
+export type McpProviderDescriptor = Omit<ProviderDescriptorBase, "datasets"> & {
+  readonly track: "mcp";
+  /** @see McpProviderDescriptor — never declarable on this track. */
+  readonly pollIntervalFloorMs?: never;
+  /** @see McpProviderDescriptor — never declarable on this track. */
+  readonly lanProvisioning?: never;
+  /** @see McpProviderDescriptor — never declarable on this track. */
+  readonly rateLimit?: never;
+  /**
+   * The server id `services/mcp-bridge`'s CLOSED registry serves
+   * (`session-profiles.ts` `SESSION_FACTORIES`), and the id the orchestrator
+   * attaches under.
+   *
+   * A FOURTH declaration of a literal that already exists three times, and it
+   * is gated rather than trusted: `adr-043-boundary.test.ts` reads the bridge's
+   * own source as text and fails when any of the four diverge. The alternative
+   * — importing the bridge's constant — would pull
+   * `StreamableHTTPClientTransport` into this module, which is bundled into the
+   * Next.js dashboard, across the very line ADR-043 §5 draws.
+   */
+  readonly mcpServerId: string;
+  readonly datasets: readonly [];
+  /**
+   * Where the customer reads how to produce this credential. REQUIRED, not
+   * optional, for the same reason {@link CloudProviderCatalogMeta} makes it
+   * required for an `available` cloud card: the credential is minted in a
+   * vendor console Warp Lab does not control, so shipping the track without the
+   * click-path is shipping an unusable integration.
+   *
+   * Declared HERE rather than inside `catalog` because an MCP track puts no
+   * card on the Integrations hub (see `catalog` below) and would otherwise have
+   * nowhere to carry it. Read both homes through {@link setupGuideHrefFor}.
+   */
+  readonly setupGuideHref: string;
+  /**
+   * An MCP track puts NO card on the Integrations hub, and `never` says so at
+   * the declaration site rather than leaving it to be discovered.
+   *
+   * The hub's card ids are a closed union in the dashboard (`ConnectorId`), and
+   * a card's connect flow is the ERP wizard — which probes a transport, offers
+   * read scopes and starts a dataset sync, none of which exists here. The
+   * connect surface for this track is the descriptor-driven credential
+   * configurator at `/integrations/credentials`. Giving the track a tile is a
+   * design change with its own blast radius; recorded as a gap on WARP-2650.
+   */
+  readonly catalog?: never;
+};
+
+/**
+ * Where a provider's customer setup guide lives — the ONE read path.
+ *
+ * Two homes exist and neither is redundant: a hub card carries the href because
+ * the tile and the connect wizard both render it (WARP-2342), and an `mcp`
+ * track carries it directly because it has no card. A caller reaching into
+ * either home itself is how the two surfaces end up linking different places,
+ * which is precisely what `connectorSetupGuideHref`'s docstring already argues
+ * — so that function, and the credential configurator's view, both come here.
+ */
+export function setupGuideHrefFor(
+  descriptor: ProviderDescriptor | undefined,
+): string | undefined {
+  if (!descriptor) return undefined;
+  return descriptor.track === "mcp"
+    ? descriptor.setupGuideHref
+    : descriptor.catalog?.setupGuideHref;
+}
 
 /**
  * The variant a form is currently on, or `undefined` for a provider that

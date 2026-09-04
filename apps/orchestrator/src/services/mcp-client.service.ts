@@ -19,6 +19,11 @@ import {
 } from "./confirmation-audit.js";
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
+import type {
+  McpClientPort,
+  McpToolCallOutcome,
+  McpToolDescriptor,
+} from "./mcp-client.port.js";
 
 export interface McpClientOptions {
   command: string;
@@ -27,18 +32,17 @@ export interface McpClientOptions {
   env?: Record<string, string>;
 }
 
-export interface ToolDescriptor {
-  name: string;
-  description: string;
-  inputSchema: object;
-}
+/**
+ * WARP-2391 — the local names are now aliases of the port's types rather
+ * than a second declaration of the same shape. Two identical interfaces is
+ * how the stdio client and the port would drift apart without a compiler
+ * signal; existing importers of `ToolDescriptor` / `ToolCallResult` are
+ * unaffected.
+ */
+export type ToolDescriptor = McpToolDescriptor;
+export type ToolCallResult = McpToolCallOutcome;
 
-export interface ToolCallResult {
-  content: { type: string; text?: string }[];
-  isError: boolean;
-}
-
-export class McpClientService {
+export class McpClientService implements McpClientPort {
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private toolsCache: ToolDescriptor[] | null = null;

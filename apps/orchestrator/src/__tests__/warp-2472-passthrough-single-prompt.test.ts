@@ -249,10 +249,18 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // and neither is a pass-through — the roster below is unchanged, which is
     // the distinction this count exists to keep visible.
     //
-    // 42 as of WARP-2664: `organize_files` and `delete_files`. Flag-gated by
-    // the interceptor, no `confirmed` boolean in either schema (so only a
-    // human-minted token gets through), and neither is a pass-through.
-    expect(confirming).toHaveLength(42);
+    // 41 as of WARP-2669: `delete_file`. Flag-gated by the interceptor, no
+    // `confirmed` boolean in its schema (so only a human-minted token gets
+    // through), and not a pass-through — the roster below is unchanged, which
+    // is the distinction this count exists to keep visible.
+    //
+    // 43 as of WARP-2664: `organize_files` and `delete_files`. Same shape —
+    // flag-gated by the interceptor, no `confirmed` boolean in either schema,
+    // neither a pass-through. This is the reconciliation origin/stage's note
+    // asked for: WARP-2669's `delete_file` (40→41) and WARP-2664's two
+    // (41→43) are independent and both correct, so the count is the UNION of
+    // both, not either side's number.
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

@@ -23,6 +23,16 @@
  * suite goes red. That is the same discipline `WRITE_TOOLS` uses in the
  * orchestrator — derive from the registry, never maintain a silent
  * parallel list.
+ *
+ * WHAT IS DELIBERATELY ABSENT (WARP-2418 / ADR-043). A tool advertised at
+ * runtime by a remote MCP server has NO entry here and must never gain one:
+ * this catalog answers "what is installed on this box", and a session to a
+ * vendor's server is not an installed capability. Its domain — the one thing
+ * per-turn selection needs and a wire catalog cannot supply — lives in the
+ * parallel runtime layer,
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`, written
+ * only by `remote-mcp-servers.ts`. `tool-selection.service.ts` reads both,
+ * with THIS one winning any name collision.
  */
 
 import { TOOLS } from "./registry.js";
@@ -311,7 +321,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   read_document_text: "Read a whole PDF or scanned document end to end",
   list_recent_files: "See the files you changed most recently",
   write_file: "Save a new file or update an existing one",
-  delete_file: "Delete a file from your Droplet",
+  delete_file: "Delete a file, or a folder and everything in it, from your Droplet",
   create_directory: "Make a new folder",
   rename_file: "Rename a file or folder",
   move_file: "Move a file or folder somewhere else",

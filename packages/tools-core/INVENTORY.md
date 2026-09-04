@@ -34,7 +34,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | read_document_text | files | Full extracted text of one document in chunk order, paged via `next_chunk`; NOT_INDEXED when the file has no extracted text. Reads PDFs/scans `read_file` rejects. WARP-2057. | false | false | orchestrator |
 | list_recent_files | files | 30 most recently modified files. | false | false | orchestrator |
 | write_file | files | Create or overwrite a file (UTF-8 or base64; max 10 MB). | true | false | orchestrator |
-| delete_file | files | Delete a file or directory (Nextcloud trash). | true | false | orchestrator |
+| delete_file | files | Delete a file, or a directory AND EVERYTHING INSIDE IT, to the Nextcloud trash (restorable from the dashboard; emptying the trash stays dashboard-only). Write-tier + interceptor-owned confirmation as of WARP-2669 — it shipped `false` from the WARP-102 port, which triaged destructiveness for network/switch/smart-home and never did the files domain; `docs/tool-confirmation-contract.md` §3 had been using this tool as its worked example of a challenging one the whole time. No `confirmed` flag in the schema, so only a human-minted token gets through. | true | true | orchestrator |
 | create_directory | files | Create a directory. | true | false | orchestrator |
 | rename_file | files | Rename in place (basename only). | true | false | orchestrator |
 | move_file | files | Move file or directory to a new path. | true | false | orchestrator |

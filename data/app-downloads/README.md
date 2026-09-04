@@ -88,19 +88,59 @@ here, so git can never deliver one to a box. Only `.gitignore`, this
 README, and `platforms.example.json` are tracked. Every checkout and every
 freshly imaged box therefore mounts an effectively empty directory, and
 `/downloads` honestly reports that no apps are staged rather than
-erroring. `catalog.json` and the staged binaries are local state: they
-survive a `git pull` and a deploy, and they do not survive a factory reset
-or a reimage. Re-stage after either.
+erroring. `catalog.json` and the staged binaries are local state, and it is worth
+being exact about what erases them, because "re-stage to be safe" is how
+a box ends up serving last release's installer:
+
+- **`git pull` / an OTA deploy — survive.** They are git-ignored, so
+  nothing in a deploy touches them. The *catalog* can go stale against a
+  new client release, though: `scripts/app-downloads/audit.sh` reports
+  `STALE` for that, and it is the only thing that will.
+- **A factory reset — survives.** `scripts/factory-reset.sh` removes
+  `data/secrets`, `.data`, `docker/certs`, `docker/secrets` and `.env`,
+  and runs no `git clean`. It never touches this directory. (Verify
+  before trusting this line: `grep -c app-downloads scripts/factory-reset.sh`
+  → 0.)
+- **A reimage — does NOT survive.** The installer is not in the repo and
+  is not in the ISO, and first boot clones a fresh checkout. Re-stage
+  after a reimage; commissioning a reimaged box without re-staging is how
+  a customer gets the empty page.
+
+## What EXPECTED is for
+
+`EXPECTED` is the tracked declaration of what a release must carry, one
+row per platform, with `installer` / `store` / `blocked` / `absent`
+policies. `scripts/app-downloads/audit.sh` reconciles it against what is
+actually staged and is read by the image build, `ship-check` and the
+box's own watchdog.
+
+It exists because observing this directory is not enough. "It is empty"
+is true and uninformative, and any check that only looks at the bytes
+goes green the moment one platform is staged — which is how the other
+four would go quiet again. A `blocked` row must name a ticket *and* a
+reason, so "blocked, and a human signed that" stays distinguishable from
+"nobody noticed". Flipping a row to `installer` asserts that a release
+now **must** carry it: do that in the same change that makes the artifact
+real, never ahead of it.
 
 ## Trust model — read before "hardening" this
 
 Two gates, and it matters which one is load-bearing:
 
 - **Digest (always on, fail-closed).** Every byte is re-hashed against the
-  catalog pin at serve time. The artifacts ship with the appliance image
-  and are mounted read-only, so that image is the trust root; the box's
-  remaining job is proving the bytes it hands over are the bytes that
-  shipped. This gate works today.
+  catalog pin at serve time. This gate works today — but be precise about
+  what it proves. **The trust root is the operator's stage**, not the
+  image: the artifacts do not ship with the image, they are put here by a
+  human who downloaded them with their own credentials. The digest proves
+  the bytes have not changed *since that stage*. It says nothing about
+  whether they were the right bytes to begin with — that is what the
+  operator's own verification of the release download is for, and why
+  `clients.lock.json` records what was staged.
+
+  This distinction stops mattering the day anything fetches automatically:
+  a gate that pins whatever it just downloaded is self-referential. Any
+  future fetch must verify against the tracked lock *before* `gen-catalog`
+  pins anything.
 
 - **Cosign signature over `catalog.json` (opt-in, off by default).**
   Enabled with `DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE=1`. It is off on

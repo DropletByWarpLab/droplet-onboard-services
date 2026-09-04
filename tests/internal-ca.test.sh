@@ -7,7 +7,13 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 log_info() { :; }; log_warn() { :; }; log_success() { :; }
-# shellcheck disable=SC1091
+# SC2097/SC2098 are the point, not a mistake: the prefix assignment must apply
+# to the sourced library (so it writes into the sandbox), while the path must
+# expand to the OLD value (so it sources the REAL library). `.` is a builtin, so
+# the assignment does persist for the duration of the source — shellcheck's
+# fork-based reasoning does not apply. Waived inline per the ship-check
+# convention; it surfaced only once WARP-2647 put this suite under shellcheck.
+# shellcheck disable=SC1091,SC2097,SC2098
 REPO_ROOT="$WORK" . "$REPO_ROOT/scripts/lib/internal-ca.sh"
 
 # Inspect certs with the same openssl the lib picked: LibreSSL (macOS default)
@@ -18,7 +24,14 @@ OSSL="${OPENSSL:-openssl}"
 internal_ca_ensure
 [ -s "$WORK/data/secrets/internal-ca/ca.key" ] || fail "ca.key missing"
 [ -s "$WORK/data/secrets/internal-ca/ca.pem" ] || fail "ca.pem missing"
-[ "$(stat -f %Lp "$WORK/data/secrets/internal-ca/ca.key" 2>/dev/null || stat -c %a "$WORK/data/secrets/internal-ca/ca.key")" = "600" ] || fail "ca.key not 0600"
+# GNU first, BSD fallback — the repo idiom (setup.sh:217, device-backup.sh:305,
+# droplet-host-units.sh:846). The inverse order is BROKEN on Linux: GNU
+# `stat -f` means "filesystem status", so it prints a block-device report for
+# the file and only then errors on the format string, and the successful part
+# of that output lands in the command substitution alongside the fallback's.
+# The comparison then never matches. This suite ran in no workflow (WARP-2647),
+# so nothing on Linux ever executed this line.
+[ "$(stat -c %a "$WORK/data/secrets/internal-ca/ca.key" 2>/dev/null || stat -f %Lp "$WORK/data/secrets/internal-ca/ca.key" 2>/dev/null)" = "600" ] || fail "ca.key not 0600"
 before="$(openssl x509 -in "$WORK/data/secrets/internal-ca/ca.pem" -noout -fingerprint)"
 internal_ca_ensure
 after="$(openssl x509 -in "$WORK/data/secrets/internal-ca/ca.pem" -noout -fingerprint)"

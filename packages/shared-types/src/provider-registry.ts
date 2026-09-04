@@ -20,7 +20,7 @@
  * come out in the order callers already see. Hub ordering is separate and
  * pinned by `catalog.order`.
  */
-import type { ProviderDescriptor } from "./provider-descriptor";
+import { setupGuideHrefFor, type ProviderDescriptor } from "./provider-descriptor";
 
 /** Practice-management datasets — mirrors `PRACTICE_DATASETS` in the connector
  *  package, gated by the orchestrator's dataset-vocabulary drift test. */
@@ -652,6 +652,124 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 7,
     },
   },
+  // ── WARP-2650 — the first MCP-backed provider ────────────────────────────
+  //
+  // #1944 built the outbound MCP client, #1956 the Atlassian profile and #1964
+  // the bridge service and its three fail-closed gates. The third gate is a
+  // CONNECTED `IntegrationConnection` row holding an ADR-042-sealed credential,
+  // and NOTHING could create one: there was no `atlassian` descriptor, so the
+  // credential configurator had no provider to render, `requireDescriptor()`
+  // 404'd the PATCH, and the row had to be inserted by hand. This is that
+  // descriptor.
+  {
+    id: "atlassian",
+    displayName: "Atlassian (Jira & Confluence)",
+    category: "Project management",
+    track: "mcp",
+    // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
+    // source by `adr-043-boundary.test.ts`, which now checks four declarations.
+    mcpServerId: "atlassian",
+    credentialFields: [
+      {
+        // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly
+        // this name out of `providerConfig`. The three names below are a wire
+        // contract with that function, and `provider-registry.test.ts` asserts
+        // it rather than trusting it — a renamed field here would produce a row
+        // the attach path reports as `credential_incomplete`, which reads as a
+        // customer mistake.
+        name: "email",
+        label: "Atlassian account email",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        help:
+          "The account the API token belongs to. The token carries that person's " +
+          "full permissions, so choose an account that will outlive any one individual.",
+      },
+      {
+        name: "apiToken",
+        label: "Atlassian API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // Deliberately NO `pattern`. Atlassian's `ATATT`-prefixed format is not
+        // a documented contract the way Stripe's `rk_` is — it has changed
+        // before — and a regex that rejects a token the vendor considers valid
+        // would present as "your token is wrong" with no way for a customer to
+        // be right. The boundary rejection ADR-042 §4 asks for is not available
+        // here at all: the token is UNSCOPED by design, so there is no narrower
+        // shape to insist on. The guide says so instead.
+        // The click-path names the MENU, not the host. A bare `id.atlassian.com`
+        // literal here is read by `scripts/check-egress-allowlist.py` as an
+        // outbound destination and refused — correctly: the box never dials it,
+        // the customer's browser does. The full URL lives in the guide, which
+        // is where a person following a click-path actually is.
+        help:
+          "Account settings → Security → Create and manage API tokens. Copy it once; " +
+          "Atlassian never shows it again.",
+      },
+      {
+        name: "cloudId",
+        label: "Atlassian site (cloud) ID",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // Required, and load-bearing: the token is NOT bound to a site, so every
+        // call has to name one. `withAtlassianCloudId` forces this value onto
+        // each call LAST, overwriting anything the model supplied — an argument
+        // the model could win would be a prompt-injection path to a different
+        // site the same token can reach.
+        help: "Visit <your-site>.atlassian.net/_edge/tenant_info to read it.",
+      },
+      {
+        name: "tokenExpiresAt",
+        label: "Token expiry date",
+        type: "string",
+        // OPTIONAL, and the optionality is a stated position rather than
+        // leniency: Atlassian does not tell the box when a token expires, so
+        // this is the customer transcribing what their own console showed them.
+        // Requiring it would block a connection over a date nobody can look up
+        // after the fact. A connection without it reports `EXPIRY_UNKNOWN` —
+        // its own status, never `VALID` (see `credentialExpiry` below).
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+        help:
+          "YYYY-MM-DD, from the API tokens page. Atlassian tokens last at most 365 " +
+          "days and there is no grace period — Droplet warns 30 days ahead if it knows the date.",
+      },
+    ],
+    // `mcp.atlassian.com` is the ONE host this integration dials, registered by
+    // #1956 as `atlassian-mcp` (`kind: egress`, fixed hosted-only endpoint).
+    // Declared here as the descriptor's half of that registration even though
+    // the socket lives in `services/mcp-bridge` — ADR-043 §5 puts the transport
+    // in another process, not the egress in another repo. `auth.atlassian.com`
+    // (OAuth, a v1 non-goal) and `api.atlassian.com` are deliberately absent:
+    // nothing dials them, and a registered host nothing dials is a permanent
+    // unfalsifiable hole in a default-deny list.
+    egressHosts: ["mcp.atlassian.com"],
+    // Empty BY CONSTRUCTION — the type is `readonly []`, not "empty for now".
+    datasets: [],
+    credentialExpiry: {
+      field: "tokenExpiresAt",
+      // WARP-2353's number, and since WARP-2300 the only copy of it: the
+      // orchestrator-only module it used to be mirrored from had no production
+      // callers and was deleted rather than kept in step by an assertion.
+      //
+      // 30 days is sized so the warning outlasts a holiday or a handover —
+      // creating a replacement is a customer-admin action in a console the box
+      // does not control, and Atlassian offers no grace period and sends no
+      // reminder of its own.
+      warningDays: 30,
+      // Atlassian's documented maximum API-token lifetime.
+      maxLifetimeDays: 365,
+    },
+    setupGuideHref: "/help/integrations/atlassian",
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**
@@ -699,15 +817,51 @@ export function providerDescriptor(id: string): ProviderDescriptor | undefined {
 }
 
 /**
- * Providers with a shipped transport — the descriptor-derived replacement for
- * the hand-maintained `KNOWN_ERP_PROVIDERS`.
+ * Providers the ERP CONNECTOR FACTORY can build — the descriptor-derived
+ * replacement for the hand-maintained `KNOWN_ERP_PROVIDERS`.
  *
- * Excludes `catalog` tracks: a placeholder card is not something a connection
- * row may name.
+ * An explicit `lan | cloud` allow-list, not `!== "catalog"`. Those two were the
+ * same set while three tracks existed, and WARP-2650's `mcp` track is exactly
+ * the case that separates them: it IS a valid `IntegrationConnection.provider`
+ * (unlike `catalog`) and it has NO connector (unlike `lan`/`cloud`), so a
+ * negative filter would have admitted it here and `connectorForProvider` would
+ * have thrown the first time a real row used it. A positive list makes the next
+ * track's author classify it rather than inherit an answer.
  */
 export function buildableProviderIds(): readonly string[] {
   return providerDescriptors()
-    .filter((d) => d.track !== "catalog")
+    .filter((d) => d.track === "lan" || d.track === "cloud")
+    .map((d) => d.id);
+}
+
+/**
+ * The MCP-backed tracks (ADR-043).
+ *
+ * Kept as its own derivation for the same reason {@link cloudProviderIds} is:
+ * a caller genuinely needs to know which kind a row is. An MCP row's credential
+ * is opened by `attachAtlassianRemote`, not by a `Connector`, and it serves no
+ * dataset — so a caller that folded it into the cloud list would resolve a
+ * dataset to a connection nothing can read.
+ */
+export function mcpProviderIds(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => d.track === "mcp")
+    .map((d) => d.id);
+}
+
+/**
+ * Every provider whose credential is minted by the CUSTOMER in a vendor console
+ * and therefore ships with a setup guide — the set
+ * `scripts/check-setup-guides.sh`'s `CLOUD_PROVIDERS` must cover.
+ *
+ * Derived from `setupGuideHrefFor`, so it is the same read the tile, the
+ * wizard and the credential configurator make. A `coming-soon` cloud card
+ * declares none and is correctly absent: it has no connect flow, so there is no
+ * moment of use to link from.
+ */
+export function providersWithSetupGuide(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => setupGuideHrefFor(d) !== undefined)
     .map((d) => d.id);
 }
 
