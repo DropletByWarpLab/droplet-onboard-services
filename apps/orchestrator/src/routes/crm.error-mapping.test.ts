@@ -23,28 +23,20 @@
  *   - add a new *_NOT_FOUND code to the service and forget the route
  *   - move a not-found code to the 422 or 409 arm
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { CRM_ERRORS } from "../services/crm/crm.service.js";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
 
 /**
- * Resolved from `process.cwd()`, not from `import.meta.url`: this app emits
- * CommonJS, where `import.meta` is a compile error (TS1470). The candidate
- * list is the shape the schema tests under `__tests__/` already use, so the
- * file is found whether vitest runs from the app or from the repo root.
+ * Anchored to this test file, not to `process.cwd()` (WARP-2654). The old
+ * candidate list took the first base that existed, so a cwd inside a second
+ * checkout of this repo made this gate assert against that tree's route.
+ * `readPackageFile` uses `__dirname`, not `import.meta.url`, which this app
+ * rejects at compile time (TS1470, CommonJS output).
  */
-const ROUTE_SOURCE = (() => {
-  const relative = join("src", "routes", "crm.ts");
-  for (const base of [process.cwd(), join(process.cwd(), "apps", "orchestrator")]) {
-    const candidate = join(base, relative);
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(`Could not locate ${relative} from ${process.cwd()}`);
-})();
-const source = readFileSync(ROUTE_SOURCE, "utf8");
+const source = readPackageFile("src", "routes", "crm.ts");
 
 /**
  * The `case crm.CRM_ERRORS.X:` labels attached to the arm that responds with

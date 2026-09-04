@@ -87,23 +87,21 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import * as ts from "typescript";
+import { REPO_ROOT, packagePath, repoPath } from "./helpers/test-paths";
 
-// `__dirname`, not `import.meta.url` (WARP-2606): this package builds to
-// CommonJS (`module: NodeNext` + no `"type": "module"`), where `import.meta`
-// is a TS1470 error — and `tsconfig.test.json` deliberately keeps the tests on
-// the package's own module setting precisely so that error is CAUGHT rather
-// than configured away. `vitest` does not typecheck, so this file was green
-// under `npm run -w @droplet/tools-core test` while `typecheck:tests` was red
-// on `stage`. Same note, and the same resolution, as `tool-routes.test.ts`,
-// which already anchors its walk this way; `vitest` defines `__dirname` in its
-// CJS-interop module scope.
-const HERE = __dirname;
+// Anchored to this test file, never to `process.cwd()` (WARP-2654), through
+// the one helper this package's roots live in. That helper uses `__dirname`,
+// not `import.meta.url` (WARP-2606): this package builds to CommonJS
+// (`module: NodeNext` + no `"type": "module"`), where `import.meta` is a
+// TS1470 error — and `tsconfig.test.json` deliberately keeps the tests on the
+// package's own module setting precisely so that error is CAUGHT rather than
+// configured away. `vitest` does not typecheck, so this file was green under
+// `npm run -w @droplet/tools-core test` while `typecheck:tests` was red on
+// `stage`.
 /** This file, so the walk can skip it — see `CANDIDATES`. */
 const SELF = __filename;
-/** `<repo>/packages/tools-core/__tests__` → `<repo>`. */
-const REPO_ROOT = resolve(HERE, "..", "..", "..");
-const SKILL_PATH = join(REPO_ROOT, ".claude", "skills", "add-llm-tool", "SKILL.md");
-const HANDLERS_DIR = resolve(REPO_ROOT, "packages", "tools-core", "src", "handlers");
+const SKILL_PATH = repoPath(".claude", "skills", "add-llm-tool", "SKILL.md");
+const HANDLERS_DIR = packagePath("src", "handlers");
 
 /** Where a drift gate can live. Scoped to the workspace roots so the walk is
  *  deterministic and never descends into `.claude/worktrees/` (sibling agent

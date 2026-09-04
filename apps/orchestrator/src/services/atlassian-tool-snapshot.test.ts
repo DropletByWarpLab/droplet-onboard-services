@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   ATLASSIAN_SNAPSHOT_FORMAT,
   ATLASSIAN_SNAPSHOT_PATH,
@@ -22,19 +22,10 @@ import {
   ATLASSIAN_TOOL_CLASSIFICATIONS,
   ATLASSIAN_V1_READ_TOOLS,
 } from "./atlassian-tool-policy.js";
+import { repoPath } from "../__tests__/helpers/test-paths.js";
 
-/** Walk up to the repo root. Fails loudly rather than silently reading the
- *  wrong tree — a path assertion that reads nothing passes forever. */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    if (existsSync(resolve(dir, "docs/security"))) return dir;
-    dir = resolve(dir, "..");
-  }
-  throw new Error(`could not locate the repo root from ${process.cwd()}`);
-}
-
-const committedPath = resolve(repoRoot(), ATLASSIAN_SNAPSHOT_PATH);
+// Anchored to this test file, not to `process.cwd()` (WARP-2654).
+const committedPath = repoPath(ATLASSIAN_SNAPSHOT_PATH);
 
 describe("the Atlassian tool-surface snapshot", () => {
   it("regenerates into tmp byte-identically to the committed artefact", () => {

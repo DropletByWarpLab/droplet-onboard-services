@@ -16,9 +16,6 @@
 // agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
 // repo file it reads. Drop the pragma and it stops being derived from.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { describe, it, expect } from "vitest";
 import { TOOLS, TOOL_CATALOG } from "@droplet/tools-core";
 
@@ -32,13 +29,21 @@ import {
   effectiveAdvertisedToolNames,
   lastUserMessageText,
 } from "./tool-selection.service.js";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
 
 const POOL = [...TOOLS.values()]
   .map((t) => t.name)
   .filter((n) => !EXCLUDED_FROM_CHAT_TOOLS.has(n));
 
+/**
+ * WARP-2654 — anchored to THIS FILE, not to the runner's cwd. Resolved from
+ * cwd, this gate died at import with `ENOENT …/src/routes/llm.ts` under
+ * `vitest run --root apps/orchestrator` from the repo root, and vitest
+ * reported `Tests  no tests`: all 23 assertions below ran zero times while
+ * the route↔loop parity they exist to pin went unchecked.
+ */
 function sourceOf(rel: string): string {
-  return readFileSync(join(process.cwd(), "src", rel), "utf8");
+  return readPackageFile("src", rel);
 }
 
 const ROUTE_SRC = sourceOf("routes/llm.ts");
