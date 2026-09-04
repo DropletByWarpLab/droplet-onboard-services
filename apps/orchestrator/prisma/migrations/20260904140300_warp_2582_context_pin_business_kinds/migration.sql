@@ -4,7 +4,7 @@
 -- ITS OWN MIGRATION DIRECTORY, ahead of anything that USES the values.
 -- PostgreSQL will not let a transaction read an enum value the same
 -- transaction added, so the unique index this slice also needs lives in
--- 20260901001000_warp_2582_context_pin_unique instead of here. That is the
+-- 20260904140400_warp_2582_context_pin_unique instead of here. That is the
 -- idiom 20260829000000_warp_2117_module_ids used for exactly this reason.
 --
 -- Guarded on pg_enum so a replay is a no-op: `ALTER TYPE ... ADD VALUE` has
