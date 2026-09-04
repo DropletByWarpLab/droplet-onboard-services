@@ -187,6 +187,52 @@ describe("business_find — searches", () => {
     expect(url).toContain("kind=OPEN");
     expect(url).toContain("company=c1");
     expect(url).toContain("idle_days=14");
+    // No query: the page IS the answer, so it is `limit` wide.
+    expect(url).toContain("per_page=20");
+  });
+
+  it("honours `query` on a deal search instead of dropping it", async () => {
+    // HONOURED_ARGS says deal takes `query`, so rejectMisusedArgs let it
+    // through -- and the branch never read it, answering ok:true with the
+    // unfiltered list. The route has no `q`, so the match is made here over
+    // title and customer, as the project branch already does. MUTATION:
+    // drop the filter -> d1 comes back for "acme".
+    get.mockResolvedValue(
+      res(true, 200, {
+        deals: [
+          { ...apiDeal, id: "d1", title: "Annual contract", companyName: "Example Roofing" },
+          { ...apiDeal, id: "d2", title: "Acme rollout", companyName: null },
+          { ...apiDeal, id: "d3", title: "Gutters", companyName: "ACME Ltd" },
+        ],
+        total: 3,
+      }),
+    );
+    const out = await businessFind.handler({ entity: "deal", query: "acme", limit: 1 }, ctx);
+    // With a query the request is the route's whole page, not `limit`:
+    // filtering twenty rows and calling the survivors "the deals named
+    // Acme" is a lie by omission.
+    expect(get.mock.calls[0][0]).toContain("per_page=200");
+    const data = expectOk(out).data as {
+      deals: Array<{ id: string }>;
+      total: number;
+      note?: string;
+    };
+    expect(data.deals.map((d) => d.id)).toEqual(["d2"]);
+    expect(data.total).toBe(2);
+    expect(data.note).toBeUndefined();
+  });
+
+  it("says when a deal search could not see the whole table", async () => {
+    get.mockResolvedValue(
+      res(true, 200, {
+        deals: Array.from({ length: 200 }, (_, i) => ({ ...apiDeal, id: `d${i}`, title: `Deal ${i}` })),
+        total: 350,
+      }),
+    );
+    const out = await businessFind.handler({ entity: "deal", query: "deal 19" }, ctx);
+    const data = expectOk(out).data as { note?: string };
+    expect(data.note).toContain("200");
+    expect(data.note).toContain("350");
   });
 
   it("asks the project route for work items when scoped to a project", async () => {
@@ -285,6 +331,38 @@ describe("business_find — the graph edges", () => {
     await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
     const pmCalls = get.mock.calls.filter((c) => String(c[0]).includes("/api/pm/projects"));
     expect(pmCalls).toHaveLength(1);
+  });
+
+  it("reads by id any linked project the listing did not return", async () => {
+    // GET /pm/projects has no `page` and hides archived rows, so one page
+    // can miss a project a deal points to -- a box past 200 projects, or a
+    // job archived after its deal. Before this the customer came back with
+    // `open_deals[].project_id` set and `projects: []`, and the model
+    // reported "no delivery project" for one that exists. MUTATION: drop
+    // the by-id fallback -> p-far is missing below.
+    get.mockImplementation(async (url: string) => {
+      if (url.includes("/api/crm/companies/")) return res(true, 200, { company: apiCompany });
+      if (url.includes("/api/crm/deals"))
+        return res(true, 200, {
+          deals: [
+            { ...apiDeal, id: "d1", projectId: "p1" },
+            { ...apiDeal, id: "d2", projectId: "p-far" },
+          ],
+        });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      if (url === "/api/pm/projects/p-far")
+        return res(true, 200, { project: { ...apiProject, id: "p-far", name: "Far away" } });
+      return res(true, 200, { projects: [apiProject] });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const urls = get.mock.calls.map((c) => c[0] as string);
+    // The page is the route's maximum, and only the MISSING id is read.
+    expect(urls).toContain("/api/pm/projects?per_page=200");
+    expect(urls.filter((u) => /^\/api\/pm\/projects\/[^?]+$/.test(u))).toEqual([
+      "/api/pm/projects/p-far",
+    ]);
+    const projects = (expectOk(out).data as { projects: Array<{ id: string }> }).projects;
+    expect(projects.map((p) => p.id).sort()).toEqual(["p-far", "p1"]);
   });
 
   it("a project by id returns the project and its open work", async () => {

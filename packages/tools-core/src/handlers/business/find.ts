@@ -124,9 +124,15 @@ interface Args {
   limit?: number;
 }
 
-/** How many projects to pull when resolving a customer's delivery work. One
- *  page, one call — see the customer branch. */
-const PROJECT_LOOKUP_PAGE = 100;
+/** How many projects to pull when resolving a customer's delivery work: the
+ *  route's maximum (`listProjects` clamps to 200), and `GET /pm/projects`
+ *  has no `page`, so this is one call — and anything it cannot show is read
+ *  by id. See the customer branch. */
+const PROJECT_LOOKUP_PAGE = 200;
+
+/** The deal route's maximum page (`listDeals` clamps to 200). Read whole
+ *  when a free-text query has to be matched here — see the deal branch. */
+const DEAL_SEARCH_PAGE = 200;
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const a = args as unknown as Args;
@@ -202,8 +208,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // company column, and the schema says why — the link lives on the
         // DEAL (`CrmDeal.projectId`, SetNull) so deleting a project leaves
         // the commercial record intact. So delivery work is reached
-        // transitively, in ONE extra call rather than one per deal, and only
-        // when at least one deal actually became a job.
+        // transitively, in ONE extra call for the whole page rather than one
+        // per deal, and only when at least one deal actually became a job.
         const wanted = new Set(
           openDeals.map((d) => d.project_id).filter((p): p is string => typeof p === "string"),
         );
@@ -214,7 +220,24 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
             "get",
             `/api/pm/projects?per_page=${PROJECT_LOOKUP_PAGE}`,
           );
-          projects = (page.projects ?? []).filter((p) => wanted.has(p.id)).map(toPlaneProject);
+          const listed = (page.projects ?? []).filter((p) => wanted.has(p.id));
+          // The listing has no `page` and hides archived rows, so a project a
+          // deal points to can be absent from it — a box past 200 projects,
+          // or a job archived after its deal. Each such id is read directly
+          // rather than silently left out: the model would otherwise report
+          // "no delivery project" for one that exists. Rare by construction,
+          // and bounded by the customer's open deals, never by the table.
+          const missing = [...wanted].filter((pid) => !listed.some((p) => p.id === pid));
+          const direct = await Promise.all(
+            missing.map((pid) =>
+              callOrch<{ project: Parameters<typeof toPlaneProject>[0] }>(
+                ctx,
+                "get",
+                `/api/pm/projects/${encodeURIComponent(pid)}`,
+              ),
+            ),
+          );
+          projects = [...listed, ...direct.map((d) => d.project)].map(toPlaneProject);
         }
         return {
           ok: true,
@@ -271,17 +294,35 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         if (typeof status === "string") params.set("kind", status);
         if (parent) params.set("company", parent);
         if (a.idle_days !== undefined) params.set("idle_days", String(a.idle_days));
-        params.set("per_page", String(limit));
+        // `/api/crm/deals` has no `q` (`listDeals` filters on stage, company,
+        // owner, kind and idle time only), so free text is matched HERE over
+        // the title and the customer's name — the same client-side rule the
+        // project branch uses, so `query` means one thing across the six
+        // entities. A query reads the route's whole page rather than `limit`:
+        // filtering twenty rows and calling the survivors "the deals named
+        // Acme" would be a lie by omission. At household scale 200 is the
+        // whole table; when it is not, the answer says so.
+        params.set("per_page", String(q ? DEAL_SEARCH_PAGE : limit));
         const data = await callOrch<{
           deals?: Parameters<typeof toGraphDeal>[0][];
           total?: number;
         }>(ctx, "get", `/api/crm/deals?${params.toString()}`);
+        const all = (data.deals ?? []).map(toGraphDeal);
+        if (!q) return { ok: true, data: { entity, deals: all, total: data.total ?? 0 } };
+        const needle = q.toLowerCase();
+        const matches = all.filter((d) =>
+          `${d.title} ${d.company ?? ""}`.toLowerCase().includes(needle),
+        );
+        const tableSize = data.total ?? all.length;
         return {
           ok: true,
           data: {
             entity,
-            deals: (data.deals ?? []).map(toGraphDeal),
-            total: data.total ?? 0,
+            deals: matches.slice(0, limit),
+            total: matches.length,
+            ...(tableSize > all.length
+              ? { note: `matched within the first ${all.length} of ${tableSize} deals` }
+              : {}),
           },
         };
       }
