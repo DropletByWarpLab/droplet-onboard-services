@@ -194,7 +194,8 @@ function readPath(
       // a typo'd `${steps.r.rows.5abc}` would silently read row 5 — the exact
       // "silent undefined reaching a tool" class this file refuses to
       // tolerate, just one row over.
-      const idx = Number.parseInt(seg, 10); // MUTANT
+      if (!/^\d+$/.test(seg)) return { ok: false, at: here };
+      const idx = Number(seg);
       if (idx >= cur.length) return { ok: false, at: here };
       cur = cur[idx];
       continue;
