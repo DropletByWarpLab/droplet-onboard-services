@@ -983,6 +983,23 @@ describe("cursor pagination", () => {
     await expect(c.listProfiles()).rejects.toBeInstanceOf(ConnectorBlockedError);
   });
 
+  it("refuses a plan probe whose 200 carries no `data` array, rather than recording ok", async () => {
+    // `probePlanAccess` is the one call `connect()` uses to establish that the
+    // key can read anything at all. A 200 whose envelope is missing `data` —
+    // a proxy-rewritten body, an error served with a 200 — is not evidence of
+    // a verified, zero-metric account: it is an unreadable answer, and every
+    // other envelope reader in the connector already refuses it.
+    // Mutation: coerce a missing/non-array `data` into metricCount 0 → red.
+    for (const body of [{}, { data: null }, { data: { id: "m1" } }]) {
+      const { c } = connector({
+        routes: [{ match: /\/api\/metrics/, responses: [{ body }] }],
+      });
+      await expect(c.probePlanAccess()).rejects.toBeInstanceOf(ConnectorBlockedError);
+      // Nothing was established, so nothing is recorded as established.
+      expect((await c.status()).planProbe.state).toBe("unverified");
+    }
+  });
+
   it("REFUSES to advance a watermark from an interrupted walk", () => {
     // THE boundary rule, and the reason it is enforced by a signature rather
     // than a comment. Profiles and lists offer only STRICT greater-than, so a

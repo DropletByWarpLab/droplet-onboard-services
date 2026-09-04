@@ -2279,9 +2279,21 @@ export class KlaviyoConnector implements Connector {
         KLAVIYO_ENDPOINTS.metrics.path,
       );
       const data = body.data;
+      if (!Array.isArray(data)) {
+        // The same refusal `page()` applies to every list read. Recording `ok`
+        // here would assert that API access was exercised when the answer was
+        // not even readable - and `connect()` trusts this probe as exactly that
+        // evidence. An unreadable response is not a verified, zero-metric account.
+        throw this.blocked(
+          "probePlanAccess",
+          `Klaviyo returned a non-array \`data\` (${typeof data}) from the plan probe - refusing to ` +
+            `record a verified account from a response that does not match the documented ` +
+            `JSON:API list contract rather than guessing at a shape`,
+        );
+      }
       this.probe = {
         state: "ok",
-        metricCount: Array.isArray(data) ? data.length : 0,
+        metricCount: data.length,
         probedAt: this.now(),
       };
     } catch (err) {
