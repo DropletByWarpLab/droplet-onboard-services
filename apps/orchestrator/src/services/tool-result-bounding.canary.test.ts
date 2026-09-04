@@ -24,6 +24,10 @@
  * control envelopes to 4000 would be a behaviour change to the WARP-642
  * self-correction message the moment the real registry's envelope crosses it.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

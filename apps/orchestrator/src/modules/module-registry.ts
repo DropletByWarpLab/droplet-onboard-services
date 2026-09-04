@@ -221,6 +221,24 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator
   },
   {
+    id: "money", label: "Money",
+    description: "Invoices and bills landed from a connected ledger.",
+    category: "workspace", routePrefixes: ["/api/money"],
+    navHrefs: ["/money"],
+    // WARP-2581 — NO tool domain claimed. `money_list_open_documents` is
+    // excluded from the chat pool while `base-prompt-budget.test.ts` sits 59
+    // characters under its 60,000 tripwire (WARP-2547 owns that decision), and
+    // the registry's `unknown domain` invariant is about a gate pointing at
+    // nothing — a domain claimed here for a tool the model can never be
+    // offered would be exactly that.
+    toolDomains: [], core: false, defaultEnabled: false,
+    // No `requires`. The bar is "the child has no reachable surface of its own
+    // without the parent" — /money reads landed documents and needs neither the
+    // CRM nor Projects to be on. A box that does its books in QuickBooks and
+    // keeps no customer list is a supported shape.
+    available: () => true, // native to the orchestrator
+  },
+  {
     id: "contacts", label: "Contacts",
     description: "The address book — people entered here or synced from an address-book source.",
     category: "workspace", routePrefixes: ["/api/contacts"],

@@ -52,7 +52,14 @@ _upsert_env_kv() {
   if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
     printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
+  # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
+  # well as a bare one. Every sed writer this primitive replaces matched
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
+  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # so a plain `^KEY=` strip would leave their commented placeholder behind and
+  # append a SECOND line for the same key. Only an assignment form is matched —
+  # `# KEY: prose` documentation lines in the generated .env are untouched.
+  ( umask 077; { grep -vE "^[[:space:]]*#?[[:space:]]*${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
   mv "$stage" "$target"
@@ -451,6 +458,13 @@ generate_env() {
   # added to this function, which is why /api/web/* fails closed on a box
   # nobody hand-edited.
   doc_render_service_token=$(openssl rand -hex 32)
+  # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
+  # container — the one component allowed to open an outbound MCP session
+  # (ADR-043 §5). Minted unconditionally even though the `remote-mcp` compose
+  # profile is off by default: the alternative is an operator who enables the
+  # profile and gets a service that 503s every route with nothing in the logs
+  # pointing at a missing secret. Both ends fail CLOSED when it is empty.
+  mcp_bridge_service_token=$(openssl rand -hex 32)
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -778,6 +792,15 @@ SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 # its side is empty.
 DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
 
+# --- Outbound MCP bridge bearer (orchestrator -> mcp-bridge) ---
+# WARP-2627 / ADR-043 §5. The orchestrator presents this to the mcp-bridge
+# container, which is the ONLY component that opens a session to a remote MCP
+# server. Both ends read the same .env key via compose — rotate in lockstep and
+# recreate orchestrator + mcp-bridge together. mcp-bridge fails CLOSED (503 on
+# every non-/health route) when its side is empty, and the orchestrator refuses
+# without dialling when its side is.
+MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
+
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
 # service's apscheduler jobs present this token on POSTs to
@@ -1061,6 +1084,9 @@ migrate_env() {
   # refuse until someone hand-edited .env. Backfill is only-when-missing, so
   # an operator who already set one keeps it.
   _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
+  # missing, so an operator who already set one keeps it.
+  _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #

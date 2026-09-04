@@ -29,6 +29,7 @@
 import {
   catalogDescriptors,
   descriptorForCatalogId,
+  setupGuideHrefFor,
   type CredentialFieldDef,
 } from "@droplet/shared-types";
 import type { ConnectorId, ConnectorMeta } from "./erp-types";
@@ -98,5 +99,5 @@ export function providerKeyForConnector(id: string): string | undefined {
  * (WARP-2342).
  */
 export function connectorSetupGuideHref(id: string): string | undefined {
-  return descriptorForCatalogId(id)?.catalog?.setupGuideHref;
+  return setupGuideHrefFor(descriptorForCatalogId(id));
 }

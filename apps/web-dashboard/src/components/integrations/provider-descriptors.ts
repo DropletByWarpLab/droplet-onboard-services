@@ -77,6 +77,28 @@ export interface ProviderDescriptor {
   readonly connect: ConnectAction;
   /** What the tile's "open" / "fix connection" action does. */
   readonly open: ConnectAction;
+  /**
+   * WARP-2568 (ADR-044) — what this vertical calls the people it serves.
+   *
+   * A dental practice has patients, a firm has clients, a hotel has guests.
+   * ADR-044 settles that this is a per-connector LABEL and never a second
+   * entity: there is one `Contact` and one `CrmCompany` underneath, whatever
+   * the surface calls them.
+   *
+   * 🔴 NOT for the nav label, and there is a rule behind that rather than an
+   * omission. Slice 1 of this epic deleted `shellLabel = crmEnabled ? "CRM" :
+   * "Projects"` because a destination that renames itself when a module flips
+   * leaves the sidebar and the page header disagreeing. Driving the /practice
+   * nav entry off connector state would reintroduce exactly that, one axis
+   * over — the label would change when a connector connects, and change back
+   * when it drops. The nav says "Practice"; this noun belongs in the copy
+   * INSIDE a surface, where it is read next to the thing it names.
+   *
+   * Singular. Call sites that need a plural build it, because "patients" and
+   * "guests" pluralise the same way and a second field would be two strings
+   * to keep in agreement.
+   */
+  readonly partyNoun: string;
 }
 
 /**
@@ -125,6 +147,34 @@ export function providerKeysFor(catalogId: string): readonly string[] {
   ];
 }
 
+/**
+ * WARP-2568 — the vertical's own word for the people it serves, per catalog id.
+ *
+ * Keyed by CATALOG id rather than by provider key, because the noun is a
+ * property of the vendor's domain and not of the track it is reached over:
+ * `eaglesoft` and `eaglesoft-api` are the same practice with the same
+ * patients, and listing both would be two strings to keep in agreement.
+ *
+ * The default is deliberately "customer" — the word the rest of this surface
+ * already uses. An unlisted connector reads as slightly generic; an unlisted
+ * connector with a WRONG noun would read as a bug about somebody's business.
+ */
+const PARTY_NOUNS: Readonly<Record<string, string>> = {
+  eaglesoft: "patient",
+  dentrix: "patient",
+  opendental: "patient",
+  // Accounting: the people on the ledger are customers, and calling them
+  // patients on a box that runs both would be worse than saying nothing.
+  quickbooks: "customer",
+};
+
+const DEFAULT_PARTY_NOUN = "customer";
+
+/** The vertical's noun for a catalog id, singular. */
+export function partyNounFor(catalogId: string): string {
+  return PARTY_NOUNS[catalogId] ?? DEFAULT_PARTY_NOUN;
+}
+
 function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
   const route = DETAIL_ROUTES[meta.id];
   // WARP-2451: which tiles open the wizard is DERIVED — a card backed by a
@@ -146,12 +196,30 @@ function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
     open: route
       ? { kind: "route", href: route }
       : { kind: "unavailable", reason: NO_DETAIL_VIEW_REASON },
+    partyNoun: partyNounFor(meta.id),
   };
 }
 
 /** The catalog, in catalog order — the hub's stable spine. */
 export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] =
   CONNECTORS.map(descriptorFor);
+
+/**
+ * WARP-2568 — the vertical's noun for an orchestrator PROVIDER KEY.
+ *
+ * The reverse direction of {@link providerKeysFor}, and it lives here for the
+ * reason this whole module exists: the two namespaces share exactly one
+ * member by accident, and every place that re-derives the relationship from
+ * an identity match is a place the WARP-2291 defect can grow back. A caller
+ * holding `eaglesoft-api` — which is what a `PartyLink.externalSystem`
+ * carries — must not have to know it maps to the `eaglesoft` tile.
+ *
+ * An unrecognised key gets the neutral word rather than a guess.
+ */
+export function partyNounForProviderKey(providerKey: string): string {
+  const owner = PROVIDER_DESCRIPTORS.find((d) => d.providerKeys.includes(providerKey));
+  return owner?.partyNoun ?? DEFAULT_PARTY_NOUN;
+}
 
 /**
  * A tile for a provider the box reports that the catalog does not list —
@@ -177,5 +245,9 @@ export function descriptorForReportedProvider(
     providerKeys: [provider],
     connect: { kind: "unavailable", reason: NOT_IN_CATALOG_REASON },
     open: { kind: "unavailable", reason: NO_DETAIL_VIEW_REASON },
+    // A provider nobody wrote a tile for gets the neutral word. Guessing a
+    // vertical from an unrecognised key would be inventing copy about
+    // somebody's business, which this function refuses to do everywhere else.
+    partyNoun: DEFAULT_PARTY_NOUN,
   };
 }

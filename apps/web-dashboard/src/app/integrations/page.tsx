@@ -151,6 +151,11 @@ export default function IntegrationsPage() {
             entry={e}
             onConnect={() => connectConnector(e)}
             onOpen={() => openConnector(e)}
+            // WARP-2518 — the same re-read the wizard's `onConnected` triggers.
+            // It is what makes the tile's own `credentialsPurged` line appear:
+            // the hub asserts nothing about the disconnect itself, it just asks
+            // the box again.
+            onDisconnected={() => refresh()}
           />
         ))}
       </div>

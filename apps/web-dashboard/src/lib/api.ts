@@ -2,6 +2,9 @@ import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
 } from "@droplet/shared-types";
+// WARP-2633 — the ONE `SaasConnectionState`; re-exported below (see the
+// docstring there) so `@/lib/api` stays the name every consumer imports from.
+import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -8124,6 +8127,21 @@ export async function fetchAppDownloads(
 ): Promise<AppDownloadCatalog> {
   const res = await authFetch(`${BASE}/api/app-downloads`, { signal });
 
+  // An expired session answers 401 with `{error: "..."}` — no boolean
+  // `available` — which the malformed-body branch below would render as
+  // "the box's app catalog is corrupted". That is a lie about the box, and
+  // because this page fetches once on mount with no retry, it is a
+  // permanent one until the customer reloads. Name the real problem.
+  if (res.status === 401 || res.status === 403) {
+    return {
+      available: false,
+      reason: "not_authenticated",
+      detail: "Your session has expired.",
+      attestation: null,
+      platforms: [],
+    };
+  }
+
   let body: unknown;
   try {
     body = await res.json();
@@ -8135,10 +8153,19 @@ export async function fetchAppDownloads(
   // Only an explicit `available: true` counts. A malformed body is
   // "unavailable with an unknown reason", never optimistically available.
   if (!parsed || typeof parsed.available !== "boolean") {
+    // A non-ok response that DID parse (every 503 the route emits carries a
+    // real `reason`) must keep that reason: the page has hand-written copy
+    // for signature_failed, malformed_catalog and the schema_* family, and
+    // flattening them all to "malformed_response" throws away the only
+    // diagnosis the box gave.
+    const passthrough =
+      parsed && typeof parsed.reason === "string" ? parsed.reason : null;
     return {
       available: false,
-      reason: "malformed_response",
-      detail: "The box returned an unexpected app-catalog response.",
+      reason: passthrough ?? "malformed_response",
+      detail:
+        (parsed && typeof parsed.detail === "string" ? parsed.detail : null) ??
+        "The box returned an unexpected app-catalog response.",
       attestation: null,
       platforms: [],
     };
@@ -8180,27 +8207,19 @@ export interface SaasCredentialField {
 /**
  * Connection state, straight from the orchestrator.
  *
- * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
- * credential is not an absent one, and telling a person to "connect" when they
- * already did is how a broken connection stays broken.
+ * WARP-2633 — this was a hand-maintained MIRROR of the orchestrator's union
+ * and is now a re-export of the shared definition in `@droplet/shared-types`
+ * (`saas-connection-state.ts`), which both sides import. Mirroring is what
+ * WARP-2517 shipped and what WARP-2623 had to edit twice; dropping a member
+ * the box can send is how `STATE_COPY[view.state]` came to crash the
+ * credentials page on the very rows it exists to repair, and there is no
+ * longer a second list to drop it from.
  *
- * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
- * here by WARP-2517): the service folds a persisted `ERROR` status straight
- * through, and it means something a new key will not fix — a vendor-side
- * refusal like an IP access policy or a plan limit. This union mirrors the
- * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
- * dropping a member the box can send is how `STATE_COPY[view.state]` came to
- * crash the credentials page on the very rows it exists to repair.
+ * Re-exported from here, rather than every consumer being retargeted at the
+ * package, because `SaasCredentialView` below carries it and the components
+ * import the pair together from `@/lib/api`.
  */
-export type SaasConnectionState =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "DISABLED";
+export type { SaasConnectionState };
 
 export interface SaasCredentialView {
   provider: string;
@@ -8230,6 +8249,24 @@ export interface SaasCredentialView {
   /** Non-secret field values only. */
   values: Record<string, string | number>;
   updatedAt: string | null;
+  /**
+   * WARP-2650 — where the customer reads how to mint this credential.
+   *
+   * OPTIONAL for the same reason `credentialsPurged` is: this interface mirrors
+   * a JSON payload rather than being one, so a box that predates the field must
+   * render as "no guide declared" rather than as an empty link.
+   */
+  setupGuideHref?: string | null;
+  /**
+   * WARP-2650 — the credential's expiry verdict, for a provider whose token has
+   * a hard stop. `null` (or absent) means the provider declares no expiry
+   * concept, which is NOT the same as `EXPIRY_UNKNOWN` — that one means it does
+   * and no date was recorded, so no warning can ever fire.
+   */
+  credentialExpiry?: {
+    status: "VALID" | "EXPIRING_SOON" | "EXPIRED" | "EXPIRY_UNKNOWN";
+    daysRemaining: number | null;
+  } | null;
 }
 
 export async function fetchSaasCredentials(): Promise<SaasCredentialView[]> {

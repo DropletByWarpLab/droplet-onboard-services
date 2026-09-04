@@ -74,11 +74,17 @@ const patchSchema = z
   })
   .strict();
 
-/** Only tracks that actually reach a vendor SaaS get a credential form. A
+/** Only tracks that actually reach a vendor get a credential form. A
  *  `catalog` placeholder has no transport and nothing to authenticate to; a
- *  `lan` track's connection facts are real columns owned by the ERP wizard. */
+ *  `lan` track's connection facts are real columns owned by the ERP wizard.
+ *
+ *  WARP-2650 adds `mcp`. It belongs here for the one reason this page exists:
+ *  its credential is minted by the customer in a vendor console and pasted in,
+ *  which is the same gesture on the same ADR-042 seam. It is also the ONLY
+ *  connect surface an MCP track has — it puts no card on the hub — so leaving
+ *  it out is what kept #1964's third gate unsatisfiable. */
 function configurableDescriptors() {
-  return providerDescriptors().filter((d) => d.track === "cloud");
+  return providerDescriptors().filter((d) => d.track === "cloud" || d.track === "mcp");
 }
 
 type IntegrationPrisma = Pick<PrismaClient, "integrationConnection">;
@@ -172,7 +178,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
         );
 
         const data: Record<string, unknown> = {
-          status: statusAfterCredentialUpdate(row.status, resolved.hasSecret),
+          status: statusAfterCredentialUpdate(descriptor, row.status, resolved.hasSecret),
         };
         // `undefined` means "omitted" — the key is absent from the update, so
         // the stored ciphertext is left byte-identical. Writing `undefined`

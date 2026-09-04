@@ -20,7 +20,7 @@
  * come out in the order callers already see. Hub ordering is separate and
  * pinned by `catalog.order`.
  */
-import type { ProviderDescriptor } from "./provider-descriptor";
+import { setupGuideHrefFor, type ProviderDescriptor } from "./provider-descriptor";
 
 /** Practice-management datasets — mirrors `PRACTICE_DATASETS` in the connector
  *  package, gated by the orchestrator's dataset-vocabulary drift test. */
@@ -538,6 +538,238 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 6,
     },
   },
+  {
+    id: "shopify",
+    displayName: "Shopify",
+    category: "Commerce",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "shopDomain",
+        label: "Store domain",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored separately from the credentials on purpose
+        // (ADR-042 §5: "non-secret connection facts … go in `providerConfig`,
+        // never in the encrypted blob and never re-derived per request").
+        // Keeping it here means answering "where does this connection dial?"
+        // never requires decrypting a credential — which matters more on this
+        // track than anywhere else, because the store domain IS the host for
+        // both the API and the token endpoint.
+        //
+        // `SHOPIFY_SHOP_NAME_PATTERN` with the suffix appended. The suffix is
+        // mandatory in the FORM even though the connector accepts a bare
+        // handle: a merchant typing a custom domain they pointed at the store
+        // is the mistake this field exists to catch, and Shopify authenticates
+        // only on the myshopify one.
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.myshopify\\.com$",
+        // The help text names the SUFFIX and never a sampled store: a
+        // "your-store.myshopify.com" example here is a bare hostname in a
+        // string literal, which `egress-gate` reads as an unregistered
+        // destination and denies — correctly, since the dynamic entry
+        // registers no hosts. The example belongs in the setup guide, which
+        // the scanner does not read.
+        help:
+          "Your store's .myshopify.com address, not a custom domain you point at the store. " +
+          "Shopify authenticates on this one.",
+      },
+      {
+        name: "clientId",
+        label: "Client ID",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `SHOPIFY_CLIENT_CREDENTIAL_PATTERN`. The NEGATIVE half is the
+        // boundary rejection ADR-042 §4 requires: a `shpat_` admin-created
+        // token is refused before it is ever stored, because Shopify removed
+        // the flow that minted it on 2026-01-01 and it cannot be re-created if
+        // it stops working. The positive half is deliberately loose — Shopify
+        // publishes no format guarantee, and a false rejection here blocks a
+        // paying customer's onboarding for no security gain.
+        //
+        // Marked `secret` although a client id is not, strictly, a secret: it
+        // is half of a credential PAIR that authenticates on its own, so it is
+        // sealed with the other half rather than left in `providerConfig`
+        // where a read view would render it.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help:
+          "From your own Dev Dashboard app at shopify.dev, in the same Shopify organization " +
+          "as the store. An old shpat_ token is not this — that flow was removed in 2026.",
+      },
+      {
+        name: "clientSecret",
+        label: "Client secret",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // The only vendor in WARP-2214 whose paste includes a client secret —
+        // the MERCHANT's secret, for the MERCHANT's app, on the MERCHANT's box
+        // (ADR-042 §2). Compatible with §3 precisely because Warp Lab minted
+        // none of it, and Shopify's own rule that the app and the store share
+        // an organization is what makes it unmistakably theirs.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help: "Shown once when the app is created. Treat it like a password.",
+      },
+    ],
+    // EMPTY, and not because this track stays on the LAN — it emphatically does
+    // not. Every request goes to `<store>.myshopify.com`, THE TOKEN MINT
+    // INCLUDED: Shopify's client-credentials grant posts to the store's own
+    // host, so unlike QuickBooks Online there is no separate OAuth host to
+    // register and no static name for the egress scanner to find.
+    // `dynamicEgress` below is what says so.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.shopDomain",
+      registryId: "shopify-admin-api",
+    },
+    // Mirrors `SHOPIFY_DATASETS`. These three names were RESERVED for Shopify
+    // when the vocabulary was widened (WARP-2280) and the columns were compared
+    // before this list was written — `ecommerce_order` is deliberately NOT here
+    // (it is Mailchimp's attribution shadow, with no tax, refund or fulfilment
+    // column) and neither is `contact` (a CRM person, not a storefront buyer).
+    datasets: ["order", "product", "customer"],
+    // No `rateLimit`: Shopify's GraphQL Admin API meters by QUERY COST against
+    // a refilling leaky bucket, not by a call ceiling over a period, so a
+    // monthly number invented here would be a guess wearing a policy's clothes
+    // — the same reason Dentrix Ascend and Mailchimp have none. The connector
+    // derives its backoff from the `throttleStatus` the vendor returns.
+    catalog: {
+      id: "shopify",
+      name: "Shopify",
+      category: "Commerce",
+      description: "Orders, catalogue and inventory read straight from your store — never a write.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not control,
+      // so shipping the card without the click-path is shipping an unusable
+      // connector. Served from `docs/integrations/shopify.md`, bundled at build
+      // so the link works with no internet.
+      setupGuideHref: "/help/integrations/shopify",
+      order: 7,
+    },
+  },
+  // ── WARP-2650 — the first MCP-backed provider ────────────────────────────
+  //
+  // #1944 built the outbound MCP client, #1956 the Atlassian profile and #1964
+  // the bridge service and its three fail-closed gates. The third gate is a
+  // CONNECTED `IntegrationConnection` row holding an ADR-042-sealed credential,
+  // and NOTHING could create one: there was no `atlassian` descriptor, so the
+  // credential configurator had no provider to render, `requireDescriptor()`
+  // 404'd the PATCH, and the row had to be inserted by hand. This is that
+  // descriptor.
+  {
+    id: "atlassian",
+    displayName: "Atlassian (Jira & Confluence)",
+    category: "Project management",
+    track: "mcp",
+    // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
+    // source by `adr-043-boundary.test.ts`, which now checks four declarations.
+    mcpServerId: "atlassian",
+    credentialFields: [
+      {
+        // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly
+        // this name out of `providerConfig`. The three names below are a wire
+        // contract with that function, and `provider-registry.test.ts` asserts
+        // it rather than trusting it — a renamed field here would produce a row
+        // the attach path reports as `credential_incomplete`, which reads as a
+        // customer mistake.
+        name: "email",
+        label: "Atlassian account email",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        help:
+          "The account the API token belongs to. The token carries that person's " +
+          "full permissions, so choose an account that will outlive any one individual.",
+      },
+      {
+        name: "apiToken",
+        label: "Atlassian API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // Deliberately NO `pattern`. Atlassian's `ATATT`-prefixed format is not
+        // a documented contract the way Stripe's `rk_` is — it has changed
+        // before — and a regex that rejects a token the vendor considers valid
+        // would present as "your token is wrong" with no way for a customer to
+        // be right. The boundary rejection ADR-042 §4 asks for is not available
+        // here at all: the token is UNSCOPED by design, so there is no narrower
+        // shape to insist on. The guide says so instead.
+        // The click-path names the MENU, not the host. A bare `id.atlassian.com`
+        // literal here is read by `scripts/check-egress-allowlist.py` as an
+        // outbound destination and refused — correctly: the box never dials it,
+        // the customer's browser does. The full URL lives in the guide, which
+        // is where a person following a click-path actually is.
+        help:
+          "Account settings → Security → Create and manage API tokens. Copy it once; " +
+          "Atlassian never shows it again.",
+      },
+      {
+        name: "cloudId",
+        label: "Atlassian site (cloud) ID",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // Required, and load-bearing: the token is NOT bound to a site, so every
+        // call has to name one. `withAtlassianCloudId` forces this value onto
+        // each call LAST, overwriting anything the model supplied — an argument
+        // the model could win would be a prompt-injection path to a different
+        // site the same token can reach.
+        help: "Visit <your-site>.atlassian.net/_edge/tenant_info to read it.",
+      },
+      {
+        name: "tokenExpiresAt",
+        label: "Token expiry date",
+        type: "string",
+        // OPTIONAL, and the optionality is a stated position rather than
+        // leniency: Atlassian does not tell the box when a token expires, so
+        // this is the customer transcribing what their own console showed them.
+        // Requiring it would block a connection over a date nobody can look up
+        // after the fact. A connection without it reports `EXPIRY_UNKNOWN` —
+        // its own status, never `VALID` (see `credentialExpiry` below).
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+        help:
+          "YYYY-MM-DD, from the API tokens page. Atlassian tokens last at most 365 " +
+          "days and there is no grace period — Droplet warns 30 days ahead if it knows the date.",
+      },
+    ],
+    // `mcp.atlassian.com` is the ONE host this integration dials, registered by
+    // #1956 as `atlassian-mcp` (`kind: egress`, fixed hosted-only endpoint).
+    // Declared here as the descriptor's half of that registration even though
+    // the socket lives in `services/mcp-bridge` — ADR-043 §5 puts the transport
+    // in another process, not the egress in another repo. `auth.atlassian.com`
+    // (OAuth, a v1 non-goal) and `api.atlassian.com` are deliberately absent:
+    // nothing dials them, and a registered host nothing dials is a permanent
+    // unfalsifiable hole in a default-deny list.
+    egressHosts: ["mcp.atlassian.com"],
+    // Empty BY CONSTRUCTION — the type is `readonly []`, not "empty for now".
+    datasets: [],
+    credentialExpiry: {
+      field: "tokenExpiresAt",
+      // WARP-2353's number, and since WARP-2300 the only copy of it: the
+      // orchestrator-only module it used to be mirrored from had no production
+      // callers and was deleted rather than kept in step by an assertion.
+      //
+      // 30 days is sized so the warning outlasts a holiday or a handover —
+      // creating a replacement is a customer-admin action in a console the box
+      // does not control, and Atlassian offers no grace period and sends no
+      // reminder of its own.
+      warningDays: 30,
+      // Atlassian's documented maximum API-token lifetime.
+      maxLifetimeDays: 365,
+    },
+    setupGuideHref: "/help/integrations/atlassian",
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**
@@ -585,15 +817,51 @@ export function providerDescriptor(id: string): ProviderDescriptor | undefined {
 }
 
 /**
- * Providers with a shipped transport — the descriptor-derived replacement for
- * the hand-maintained `KNOWN_ERP_PROVIDERS`.
+ * Providers the ERP CONNECTOR FACTORY can build — the descriptor-derived
+ * replacement for the hand-maintained `KNOWN_ERP_PROVIDERS`.
  *
- * Excludes `catalog` tracks: a placeholder card is not something a connection
- * row may name.
+ * An explicit `lan | cloud` allow-list, not `!== "catalog"`. Those two were the
+ * same set while three tracks existed, and WARP-2650's `mcp` track is exactly
+ * the case that separates them: it IS a valid `IntegrationConnection.provider`
+ * (unlike `catalog`) and it has NO connector (unlike `lan`/`cloud`), so a
+ * negative filter would have admitted it here and `connectorForProvider` would
+ * have thrown the first time a real row used it. A positive list makes the next
+ * track's author classify it rather than inherit an answer.
  */
 export function buildableProviderIds(): readonly string[] {
   return providerDescriptors()
-    .filter((d) => d.track !== "catalog")
+    .filter((d) => d.track === "lan" || d.track === "cloud")
+    .map((d) => d.id);
+}
+
+/**
+ * The MCP-backed tracks (ADR-043).
+ *
+ * Kept as its own derivation for the same reason {@link cloudProviderIds} is:
+ * a caller genuinely needs to know which kind a row is. An MCP row's credential
+ * is opened by `attachAtlassianRemote`, not by a `Connector`, and it serves no
+ * dataset — so a caller that folded it into the cloud list would resolve a
+ * dataset to a connection nothing can read.
+ */
+export function mcpProviderIds(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => d.track === "mcp")
+    .map((d) => d.id);
+}
+
+/**
+ * Every provider whose credential is minted by the CUSTOMER in a vendor console
+ * and therefore ships with a setup guide — the set
+ * `scripts/check-setup-guides.sh`'s `CLOUD_PROVIDERS` must cover.
+ *
+ * Derived from `setupGuideHrefFor`, so it is the same read the tile, the
+ * wizard and the credential configurator make. A `coming-soon` cloud card
+ * declares none and is correctly absent: it has no connect flow, so there is no
+ * moment of use to link from.
+ */
+export function providersWithSetupGuide(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => setupGuideHrefFor(d) !== undefined)
     .map((d) => d.id);
 }
 
