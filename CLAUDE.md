@@ -248,6 +248,43 @@ Debugging "AI not reachable" / chat 502s? Use the
 
 Run `./scripts/setup.sh` to provision a fresh device. Generates unique per-device secrets, installs Docker, builds and starts the full stack. Idempotent — safe to re-run. See `scripts/README.md` for flags and troubleshooting.
 
+## Fresh checkout / new worktree
+
+`npm ci` is **not** enough. Two things are still missing afterwards and both
+report themselves as errors in *product code* rather than as an incomplete
+install, which is why this has cost several implementers a debugging session:
+`node_modules/.prisma/client` is Prisma's placeholder (`PrismaClient: any`, so
+every `ctx.prisma.<model>` destructure is a `TS7031` — most often
+`packages/tools-core/src/handlers/network/list-network-devices.ts:30`), and the
+leaf workspaces that resolve through `dist/` have not been built (`Failed to
+resolve entry for package "@droplet/fips-selftest"` when the orchestrator suite
+collects `fips.test.ts`; `TS2305`/`TS2724` from `@droplet/erp-connector`).
+
+One step — but not a quick one. It is `prisma generate` plus five `tsc` builds,
+and what dominates is the machine, not the repo: seconds on a warm Mac, ~48 s on
+an idle Windows box, `6m07s` on that same box under heavy load. **Let it
+finish.** Killing it partway leaves the checkout worse than it found it, because
+it removes all five leaf `dist/` before it rebuilds them.
+
+```bash
+npm ci
+npm run bootstrap     # prisma generate → clean stale dist/ → build the five leaves
+```
+
+- **Re-run it after every merge or rebase** that touches a leaf workspace or the
+  Prisma schema. `tsc` emits but never prunes, so a `dist/` from the previous
+  commit type-checks happily against the wrong types — and a `dist/` that still
+  carries a `*.test.js` whose `*.test.ts` has since moved reds the WARP-2515
+  guard on a tree that is perfectly clean.
+- `npm run bootstrap:check` answers "is this tree bootstrapped?" in one line and
+  exits non-zero if not — including the stale case, where a leaf `dist/` still
+  carries an emitted `.js` whose source has moved or been deleted. The root
+  `npm run test` runs it first (`pretest`).
+- The five leaves and their dependency order live in `scripts/bootstrap.sh` —
+  the single list, also used by ship-check's `tsc-full`. Don't re-derive it.
+  CI keeps its own explicit per-suite steps on purpose; don't replace them.
+- WARP-2620. Full rationale: `CONTRIBUTING.md` § "Workspace builds come first".
+
 ## Commands
 
 ```bash

@@ -1138,7 +1138,44 @@ jobs:
       - name: Seed .env for the compose-config case
         run: cp .env.example .env
 
+      # WARP-2637 — a SKIP is no longer folded into the pass count, and the
+      # suite refuses to exit 0 on a skip the caller has not named.
+      #
+      # This job deliberately does NOT `npm ci`. Installing the monorepo plus
+      # `npm run bootstrap` plus the FOUR `tsc-full` sweeps the two
+      # node_modules-gated cases perform (each runs the check twice: clean
+      # baseline, then mutated) is minutes of metered time per run, on a job
+      # whose remit is parse + self-test — see docs/ci-cost-budget.md and
+      # WARP-2455's out-of-scope list. So those two cases cannot run here, and
+      # they are named explicitly rather than blanket-allowed: any OTHER case
+      # that starts skipping on the runner now fails this job instead of
+      # quietly inflating "N/N passed", which is exactly how the WARP-329
+      # fixture guard stayed vacuous. The names are also written to the job
+      # summary by the script, so the hole is visible without reading the log.
+      #
+      # The trade this leaves standing: the WARP-329 and WARP-492 cases are
+      # developer-machine gates only. Running them in CI is a spend decision,
+      # not an oversight.
+      #
+      # WARP-2620 — the bar for adding an id here is "this job structurally
+      # cannot run that case", not "that case sometimes flakes". Both ids below
+      # clear it: no `npm ci`, so no node_modules, so neither tsc-full case can
+      # execute, ever, on this job. `docker-build-smoke-shim-allowlist` does NOT
+      # clear it and is deliberately absent — it runs fine here, and its SKIP
+      # (the smoke container died before reaching the planted `docker buildx`) is
+      # news worth a red and a re-run, not a standing exemption. Allow-listing
+      # it would leave a guard that can no longer fail.
+      #
+      # WARP-2645 — the value is a list of SKIP IDS, not display names. The
+      # ids are declared beside each `_run_test` registration in
+      # scripts/test/ship-check.test.sh. Keying this on the display name made
+      # it a prose-shaped wire contract: rewording a case's name — which
+      # happens whenever its rationale sharpens — silently stopped allowing
+      # that case's skip and reddened this job for a case nobody had touched.
+      # Changing an id now takes a deliberate edit in both files.
       - name: Run the ship-check self-test
+        env:
+          SHIPCHECK_ALLOW_SKIP: "tsc-full-warp329-fixture,tsc-full-prisma-pin"
         run: bash scripts/test/ship-check.test.sh
 
 
