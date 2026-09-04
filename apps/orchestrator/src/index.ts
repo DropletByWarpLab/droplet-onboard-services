@@ -42,6 +42,10 @@ import {
   AGENT_RUN_LOCK_KEY,
   createAgentRunWorker,
 } from "./services/agent-run-worker.service.js";
+import {
+  AGENT_RUN_SCHEDULE_LOCK_KEY,
+  tickAgentRunSchedules,
+} from "./services/agent-run-schedule-ticker.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -579,6 +583,16 @@ async function main() {
   cronRuntime.scheduleInterval(config.agentRuns.heartbeatMs, async () => {
     await agentRunWorker.heartbeatOnce();
   });
+  // WARP-2180 — recurring runs. Every 60 s, due AgentRunSchedule rows are
+  // ENQUEUED (never executed here); the worker above claims them. Same
+  // clock, its own lock key, no second scheduler.
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      await tickAgentRunSchedules(prisma);
+    },
+    { lockKey: AGENT_RUN_SCHEDULE_LOCK_KEY },
+  );
   logger.info(
     {
       workerId: agentRunWorker.workerId,

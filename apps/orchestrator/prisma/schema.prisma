@@ -3347,6 +3347,31 @@ enum AgentRunStatus {
   cancelled
 }
 
+/// WARP-2180 — a recurring background run: the same RRULE vocabulary as
+/// `ToolSchedule` / `SceneSchedule`, fired by the agent-run-schedule ticker
+/// on the ONE sanctioned clock (`cronRuntime.scheduleInterval`, its own lock
+/// key). Each fire enqueues an `AgentRun` attributed to `userId`, whose reach
+/// is re-resolved at claim — a schedule cannot outlive its creator's role.
+/// `timezone` is the IANA zone the rrule's wall clock is read in (KAN-6).
+model AgentRunSchedule {
+  id          String    @id @default(uuid())
+  userId      String
+  goal        String
+  model       String
+  maxIter     Int
+  rrule       String
+  timezone    String    @default("UTC")
+  nextFireAt  DateTime
+  enabled     Boolean   @default(true)
+  lastFiredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // The ticker's scan: `enabled AND nextFireAt <= now()`.
+  @@index([enabled, nextFireAt])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
 /// WARP-2179 — the human's decision on a parked Tier-2 call. Absent while
 /// parked; set by the confirm/deny route, consumed by the worker on resume.
 /// `approved` redeems the call once; `denied` is fed back to the model as a
