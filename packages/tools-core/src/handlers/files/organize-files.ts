@@ -32,6 +32,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { ncHeaders } from "./_render.js";
 import {
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
@@ -82,10 +83,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return err("INVALID_ARGS", `rule must be one of: ${ORGANIZE_RULES.join(", ")}`);
   }
 
-  const headers: Record<string, string> = {
-    "X-Nextcloud-Token": ctx.ncToken,
-    "X-Nextcloud-User": ctx.userId,
-  };
+  const headers = ncHeaders(ctx);
   const listing = await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(v.path)}`, {
     headers,
   });

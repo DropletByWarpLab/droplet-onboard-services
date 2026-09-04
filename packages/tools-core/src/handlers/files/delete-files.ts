@@ -55,6 +55,7 @@
 import { posix as posixPath } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
+import { ncHeaders } from "./_render.js";
 import {
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
@@ -113,10 +114,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     targets.push(v.path);
   }
 
-  const headers: Record<string, string> = {
-    "X-Nextcloud-Token": ctx.ncToken,
-    "X-Nextcloud-User": ctx.userId,
-  };
+  const headers = ncHeaders(ctx);
 
   // One listing per distinct parent: cleanup targets cluster by folder, so a
   // hundred paths usually cost a handful of reads.
