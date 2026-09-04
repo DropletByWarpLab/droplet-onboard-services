@@ -24,9 +24,8 @@
  * `Dialog`, and the real field rendering all run.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 import {
   providerDescriptor,
   registerProviderDescriptor,
@@ -203,23 +202,6 @@ function renderWizard(catalogId: string) {
 /** Every text input the wizard put on screen, in DOM order. */
 function inputs(): HTMLInputElement[] {
   return Array.from(document.querySelectorAll<HTMLInputElement>("input"));
-}
-
-/**
- * Read a dashboard source file. `import.meta.url` is not a `file:` URL under
- * vite's transform, so walk up from the cwd and fail loudly if the walk misses
- * — a source assertion that silently reads the wrong file passes forever.
- */
-function readSource(relative: string): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    const candidate = resolve(dir, relative);
-    if (existsSync(candidate)) return readFileSync(candidate, "utf8");
-    dir = resolve(dir, "..");
-  }
-  const fromRepoRoot = resolve(process.cwd(), "apps/web-dashboard", relative);
-  if (existsSync(fromRepoRoot)) return readFileSync(fromRepoRoot, "utf8");
-  throw new Error(`could not locate ${relative} from ${process.cwd()}`);
 }
 
 beforeEach(() => {
@@ -704,7 +686,11 @@ describe("the wizard is closed to vendors and open to descriptors", () => {
    * Mutation: re-introduce any vendor id or vendor-specific copy → red.
    */
   it("names no provider id", () => {
-    const source = readSource("src/components/integrations/ConnectWizard.tsx");
+    // WARP-2632 — `readPackageFile` is anchored to the owning file, not to
+    // `process.cwd()`. The walk-up this replaced did not fail on a wrong cwd,
+    // it climbed until *something* matched, so a runner started outside the
+    // package scraped whatever tree it landed in.
+    const source = readPackageFile("src/components/integrations/ConnectWizard.tsx");
     for (const id of ["eaglesoft", "dentrix", "quickbooks", "opendental", "stripe"]) {
       expect(source.toLowerCase(), `ConnectWizard.tsx names "${id}"`).not.toContain(id);
     }

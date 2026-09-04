@@ -16,6 +16,7 @@ import {
   Clock,
   Lock,
   KeyRound,
+  EyeOff,
   HelpCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -64,8 +65,8 @@ export interface StatusView {
 /**
  * Hub-tile / connected-row status pill.
  *
- * All eight `IntegrationStatus` values get their own treatment (WARP-2291,
- * NEEDS_RECONNECT added by WARP-2458).
+ * All nine `IntegrationStatus` values get their own treatment (WARP-2291,
+ * NEEDS_RECONNECT added by WARP-2458, CAPABILITY_LIMITED by WARP-2623).
  * Fixing the status merge made five of them reachable in the hub for the first
  * time, and collapsing DRIFT_LOCKED into DEGRADED loses the one distinction
  * that tells an owner whether to fix something or whether a schema change
@@ -122,6 +123,20 @@ export function statusView(
     // paste a new key. Rendering it as an error tells them to call support.
     case "NEEDS_RECONNECT":
       return { label: "Paste a new key", kind: "warn", icon: KeyRound };
+    // WARP-2623 — a WORKING connection with one dataset withheld. It is not
+    // `danger`, because nothing is broken, and it is not `ok`, because the
+    // owner is owed the fact. The pill carries the state and the detail line
+    // carries the remediation, which is the split `StatusView.detail` exists
+    // for — and neither says "reconnect", because a new key changes nothing.
+    // `EyeOff` rather than `AlertTriangle`: something is not visible to us,
+    // which is a different picture from something being wrong.
+    case "CAPABILITY_LIMITED":
+      return {
+        label: "Connected · limited",
+        kind: "warn",
+        icon: EyeOff,
+        detail: "One dataset needs a plan or permission change at the vendor",
+      };
     case "ERROR":
       return { label: "Can't connect", kind: "danger", icon: AlertTriangle };
     case "PROVISIONING":

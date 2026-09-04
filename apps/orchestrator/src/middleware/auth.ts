@@ -693,9 +693,17 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
   },
   {
     // WARP-1800: the rack panel's device-bridge presents this Bearer on GET
-    // /api/network/wifi/join-code — the ONE route this principal may reach
-    // (pinned by requireRoleOrService, so the coarse `service` role shared by
-    // every principal above is not enough).
+    // /api/network/wifi/join-code, which is pinned to this principal by name
+    // via requireRoleOrService — the coarse `service` role shared by every
+    // principal above is not enough to reach it.
+    //
+    // WARP-2668 adds a SECOND caller in the other half of the panel: display.py
+    // reads GET /api/storage for the STORAGE cell's data-drive total. That
+    // route carries no requireRole at all — like every authenticated reader on
+    // this router it is open to any principal — so nothing here changes for it,
+    // and the pin above is a statement about join-code, not an allowlist. If
+    // the panel's reach ever needs to be BOUNDED rather than described, that is
+    // a per-route guard on the routes themselves, not an edit to this comment.
     //
     // Same token as the orchestrator → oled-display leg (WARP-165); compose
     // already gives both ends the value, so this adds a direction, not a

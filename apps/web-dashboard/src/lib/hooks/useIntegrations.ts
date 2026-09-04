@@ -61,6 +61,11 @@ export interface ConnectedEntry extends HubEntry {
  */
 const LIVE_STATUSES: IntegrationStatus[] = [
   "CONNECTED",
+  // WARP-2623 — a working connection with one dataset refused. It is MORE
+  // live than NEEDS_RECONNECT, which is already here: reads are still landing
+  // through it. Leaving it out would move a syncing connector back into the
+  // catalog as though it had never been set up.
+  "CAPABILITY_LIMITED",
   "DEGRADED",
   "DRIFT_LOCKED",
   "NEEDS_RECONNECT",

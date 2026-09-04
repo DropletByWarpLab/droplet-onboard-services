@@ -8,9 +8,12 @@
     "packages/*"
   ],
   "scripts": {
+    "bootstrap": "bash scripts/bootstrap.sh",
+    "bootstrap:check": "bash scripts/bootstrap.sh --check",
     "dev": "turbo run dev",
     "dev:docker": "docker compose -f docker/docker-compose.yml --env-file .env up --build",
     "build": "turbo run build",
+    "pretest": "bash scripts/bootstrap.sh --check",
     "test": "turbo run test",
     "test:ai-gateway": "cd services/ai-gateway && python -m pytest tests/ -v",
     "test:orchestrator": "cd apps/orchestrator && npx vitest run",

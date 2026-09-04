@@ -1,0 +1,68 @@
+name: mcp-bridge-tests
+
+# Vitest for services/mcp-bridge — the outbound MCP session component
+# (ADR-043 §5). Path-filtered.
+#
+# WHY THIS FILE EXISTS AT ALL. PR-time coverage for this suite is already owned
+# by ci.yml's path-aware `mcp-bridge` leg (added by WARP-2398), and duplicating
+# it here would be pure spend. What changed with WARP-2627 is that the workspace
+# gained a Dockerfile, and `scripts/check-ci-coverage.sh` requires every
+# `services/<name>/` with a Dockerfile to have `.github/workflows/<name>-tests.yml`.
+# So this is the push-to-main post-merge canary — the same split doc-render,
+# ops-console and email-indexer use.
+#
+# COST (docs/ci-cost-budget.md): push-to-main only, filtered to this workspace,
+# and the job is `npm ci` + `tsc` + vitest with no Docker, no Prisma and no
+# workspace build chain — ~2 minutes. At the handful of merges a month that
+# touch this directory it is well under 100 min/month. NO `pull_request:`
+# trigger: the per-service `*-tests.yml` workflows are push-to-main canaries by
+# policy, and re-adding one here would double every PR's cost for this suite.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/mcp-bridge/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/mcp-bridge-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-bridge-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# The job only checks out and runs tests, so read is all the GITHUB_TOKEN needs.
+# Stated explicitly because CodeQL's actions/missing-workflow-permissions flags
+# an unset block — the default is write-heavy, and a new workflow should not
+# inherit that by omission.
+permissions:
+  contents: read
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. This workspace has one dependency and no Docker — 10 min is
+    # already generous.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      # `vitest` does not typecheck (esbuild strips types), so a green suite
+      # says nothing about `tsc`. The build IS the typecheck here.
+      - name: Build @droplet/mcp-bridge
+        run: npm run -w @droplet/mcp-bridge build
+
+      - name: Run @droplet/mcp-bridge vitest
+        run: npm run -w @droplet/mcp-bridge test

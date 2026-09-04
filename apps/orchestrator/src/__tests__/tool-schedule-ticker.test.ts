@@ -218,6 +218,74 @@ describe("WARP-463 — tickToolSchedules", () => {
     );
   });
 
+  it("safety gate: a LEGACY spec stored writes:false still skips when its steps write (WARP-2665)", async () => {
+    // The gap this closes. Rows authored through POST /api/tools before
+    // WARP-2665 took `writes` from the request body with nothing checking it
+    // against the steps, and the authoring-time reconciliation never revisits
+    // them — a description-only PATCH does not touch the column. Trusting it
+    // here would auto-fire `delete_file` at 03:00 with nobody watching, which
+    // is the exact scenario this gate exists for.
+    const now = new Date("2026-05-27T09:00:00Z");
+    const past = new Date("2026-05-27T08:55:00Z");
+    const prisma = createPrismaMock({
+      schedules: [
+        { id: "legacy", specId: "spec-l", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true },
+      ],
+      specs: [
+        {
+          id: "spec-l",
+          slug: "legacy-wipe",
+          ownerId: "user-owner",
+          name: "Legacy wipe",
+          status: "live",
+          writes: false, // <- the stale column
+          reversible: false,
+          steps: [{ id: "x", idx: 0, kind: "call", args: { tool: "delete_file" } }],
+        },
+      ],
+    });
+    const result = await tickToolSchedules(prisma as any, okDispatcher, now);
+    expect(result.skipped).toBe(1);
+    expect(result.fired).toBe(0);
+    expect(okDispatcher.call).not.toHaveBeenCalled();
+    const warn = recordActivityMock.mock.calls.find(
+      (c) => c[0].what === "Scheduled run skipped (needs confirmation)",
+    );
+    expect(warn).toBeDefined();
+    // The audit says the column was wrong, so a stale row is visible and not
+    // merely silently corrected.
+    expect(warn?.[0].refs?.writesSource).toBe("derived");
+    expect(prisma.schedules[0].nextFireAt.toISOString()).toBe(
+      "2026-05-28T09:00:00.000Z",
+    );
+  });
+
+  it("safety gate: a read-only spec stored writes:false still fires (WARP-2665)", async () => {
+    // The other direction — deriving must not turn every schedule into a skip.
+    const now = new Date("2026-05-27T09:00:00Z");
+    const past = new Date("2026-05-27T08:55:00Z");
+    const prisma = createPrismaMock({
+      schedules: [
+        { id: "ro", specId: "spec-ro", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true },
+      ],
+      specs: [
+        {
+          id: "spec-ro",
+          slug: "read-only",
+          ownerId: "user-owner",
+          name: "Read only",
+          status: "live",
+          writes: false,
+          reversible: false,
+          steps: [{ id: "x", idx: 0, kind: "call", args: { tool: "list_drives" } }],
+        },
+      ],
+    });
+    const result = await tickToolSchedules(prisma as any, okDispatcher, now);
+    expect(result.fired).toBe(1);
+    expect(result.skipped).toBe(0);
+  });
+
   it("skips a draft spec without firing (but advances cadence)", async () => {
     const now = new Date("2026-05-27T09:00:00Z");
     const past = new Date("2026-05-27T08:55:00Z");

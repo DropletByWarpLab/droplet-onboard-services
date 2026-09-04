@@ -77,6 +77,8 @@ const PLATFORM_ORDER: AppDownloadPlatform[] = [
  * but honest" rather than a blank page.
  */
 const REASON_COPY: Record<string, string> = {
+  not_authenticated:
+    "Your session has expired. Sign in again and this page will load the apps.",
   catalog_missing:
     "No apps have been added to this box yet. It only offers apps that were put on it directly, so waiting for an update won't bring them — whoever set the box up needs to add them.",
   catalog_unreadable:
@@ -168,6 +170,12 @@ function PlatformCard({
     ? entry.assets.find((a) => a.name === entry.primary)
     : undefined;
 
+  // The catalog named a primary that isn't in its own asset list. Today
+  // that falls through to the muted "nothing staged yet" note, which reads
+  // as a box nobody has set up — when in fact something IS staged and the
+  // catalog is wrong. Different problem, different person to tell.
+  const primaryDangling = Boolean(entry?.primary) && !primary;
+
   // A detached signature over the primary installer, offered as a
   // secondary "verify this yourself" link rather than a second download.
   const signature = primary
@@ -178,7 +186,9 @@ function PlatformCard({
     <Card
       icon={isMobile ? <Smartphone size={16} /> : <AppWindow size={16} />}
       title={label}
-      meta={entry ? `v${entry.version}` : undefined}
+      // A version chip on a platform that can give you nothing advertises a
+      // release that isn't here. Show it only when there is something to get.
+      meta={entry && (primary || entry.storeUrl) ? `v${entry.version}` : undefined}
       className={recommended ? "dl-card dl-card-rec" : "dl-card"}
     >
       {recommended ? (
@@ -211,6 +221,15 @@ function PlatformCard({
               </div>
             ) : null}
           </dl>
+          {platform === "windows" ? (
+            <p className="dl-note">
+              Windows will warn you about an “unknown publisher” when you run
+              this. That is expected — the installer is signed for the app’s
+              own updater, not with a commercial certificate. Choose{" "}
+              <b>More info</b> then <b>Run anyway</b>, and check the SHA-256
+              above first if you want to be certain.
+            </p>
+          ) : null}
           {signature ? (
             <p className="dl-note">
               <a href={signature.url} download>
@@ -237,6 +256,24 @@ function PlatformCard({
               `The ${label} app is distributed through its app store, so it updates with the rest of your apps.`}
           </p>
         </>
+      ) : primaryDangling ? (
+        <p className="dl-note">
+          This box lists a {label} app but can’t find the file for it, so the
+          download is turned off. That’s a fault on the box — whoever set it
+          up needs to re-stage the installer.
+        </p>
+      ) : isMobile ? (
+        // Store-distributed platforms must never be told to "ask for the
+        // installer". iOS cannot install one from a local device at all, and
+        // Android's is a Play listing that doesn't exist yet — telling a
+        // family member to chase their admin for a file nobody can produce
+        // wastes their time and makes the box look broken.
+        <p className="dl-note dl-note-muted">
+          {entry?.note ??
+            (platform === "ios"
+              ? `The ${label} app isn’t published yet. When it is, it comes from Apple — iPhones and iPads can’t install apps straight from this box.`
+              : `The ${label} app isn’t published yet. When it is, it comes from Google Play, or as a file this box serves you here.`)}
+        </p>
       ) : (
         <p className="dl-note dl-note-muted">
           {entry?.note ??

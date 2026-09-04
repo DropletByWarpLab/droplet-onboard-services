@@ -44,6 +44,11 @@ on:
       - "services/oled-display/droplet-storage-pool-apply.service"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
+      # WARP-2647: this suite's name does not match the
+      # `tests/openwrt-attach-*.test.sh` glob the run step loops over, so it
+      # ran in no workflow at all despite guarding the same attach script.
+      - "tests/openwrt-rpcd-acl-provisioning.test.sh"
+      - "openwrt/**"
       - ".github/workflows/openwrt-attach-tests.yml"
   push:
     branches: [main]
@@ -71,6 +76,11 @@ on:
       - "services/oled-display/droplet-storage-pool-apply.service"
       - "tests/openwrt-attach-*.test.sh"
       - "tests/wifi-watchdog.test.sh"
+      # WARP-2647: this suite's name does not match the
+      # `tests/openwrt-attach-*.test.sh` glob the run step loops over, so it
+      # ran in no workflow at all despite guarding the same attach script.
+      - "tests/openwrt-rpcd-acl-provisioning.test.sh"
+      - "openwrt/**"
       - ".github/workflows/openwrt-attach-tests.yml"
   workflow_dispatch:
 
@@ -88,7 +98,14 @@ jobs:
         run: |
           set -u
           fail=0
-          for t in tests/openwrt-attach-*.test.sh tests/wifi-watchdog.test.sh; do
+          # WARP-2647: openwrt-rpcd-acl-provisioning is named explicitly — it
+          # guards the same attach script but its filename does not match the
+          # `openwrt-attach-*` glob, so it ran in no workflow at all. It is the
+          # regression guard for the 2026-06-11 .87 reflash, where a silenced
+          # `docker cp` left the container without /usr/share/rpcd/acl.d and
+          # every `file`/`umdns` read 500'd. Static greps, <0.1 s.
+          for t in tests/openwrt-attach-*.test.sh tests/wifi-watchdog.test.sh \
+                   tests/openwrt-rpcd-acl-provisioning.test.sh; do
             echo "::group::$t"
             if bash "$t"; then echo "ok: $t"; else echo "FAILED: $t"; fail=1; fi
             echo "::endgroup::"

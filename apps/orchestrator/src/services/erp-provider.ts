@@ -151,8 +151,14 @@ export function loadOperatorExportProfiles(): { profiles: ExportProfile[]; error
 export function isKnownErpProvider(provider: string): boolean {
   // Read the registry live rather than the import-time snapshot above, so a
   // descriptor registered at runtime is admitted without a restart.
+  //
+  // WARP-2650 — an explicit `lan | cloud` allow-list, matching
+  // `buildableProviderIds()`. It was `!== "catalog"`, which was the same set
+  // while three tracks existed; the `mcp` track is a valid connection provider
+  // with no connector at all, so the negative form would have answered "yes,
+  // this factory can build it" and then thrown.
   const descriptor = providerDescriptor(provider);
-  if (descriptor) return descriptor.track !== "catalog";
+  if (descriptor) return descriptor.track === "lan" || descriptor.track === "cloud";
   if (!vendorFromExportProvider(provider)) return false;
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }

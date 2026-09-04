@@ -118,6 +118,8 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **Only a specific person can create it** — and the connector breaks later if that person's role changes. | HubSpot | [`hubspot.md`](hubspot.md) |
 | **Droplet will refuse the credential the vendor shows you first.** Stripe's most prominent key is a secret key; the box accepts only a restricted one, by design. | Stripe | [`stripe.md`](stripe.md) |
 | **The credential has a tail that looks like noise and is not optional.** Trimming it points the box at the wrong host. | Mailchimp | [`mailchimp.md`](mailchimp.md) |
+| **Someone else has to switch it on first**, at organisation level, and the credential looks perfectly valid until they do. Also needs a paid plan — the Free plan cannot connect at all. | Atlassian | [`atlassian.md`](atlassian.md) |
+| **The credential expires within a year**, with no grace period and no automatic renewal. It is the only one on this list that does. | Atlassian | [`atlassian.md`](atlassian.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -130,8 +132,11 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **Mailchimp** | An API key, pasted whole including its `-us14`-style tail | [`mailchimp.md`](mailchimp.md) |
 | **Shopify** | A client id **and** client secret from your own Dev Dashboard app | [`shopify.md`](shopify.md) |
 | **Xero** | A Custom Connection's client id and client secret | [`xero.md`](xero.md) |
+| **Atlassian** | An API token, the email that made it, your site id, and the token's expiry date | [`atlassian.md`](atlassian.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
+
+> Atlassian is the odd one out in this table in two ways, both covered in its guide: the token **expires** (365 days at most), and it is the only credential here that is **not scoped** — it carries the full access of whoever created it, so *whose* account creates it is the access decision. Droplet limits itself instead, to reads only, from a list held in the product.
 
 ### 3.4 What Droplet does with your credential
 
