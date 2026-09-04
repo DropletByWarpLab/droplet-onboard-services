@@ -122,12 +122,29 @@ function parseArgs(argv) {
  * multi-platform stage, because they carry different versions.
  */
 function resolvePlatform(files, explicit) {
-  if (explicit) return explicit;
   const guesses = new Set();
   for (const file of files) {
     const guess = PLATFORM_BY_EXT[path.extname(file).toLowerCase()];
     if (guess) guesses.add(guess);
   }
+
+  // An explicit --platform used to return before the files were looked at, so
+  // `--platform windows droplet.apk` staged an APK into windows/ where
+  // gen-catalog happily made it `primary` — the Windows download button then
+  // handed a customer an Android package, with a catalog that parses and a
+  // digest that verifies. --platform is for files whose extension says
+  // nothing, not an override for files that contradict it.
+  if (explicit) {
+    const contradicting = [...guesses].filter((g) => g !== explicit);
+    if (contradicting.length > 0) {
+      fail(
+        `--platform ${explicit} contradicts these files, which look like ` +
+          `${contradicting.join(" + ")}. Drop --platform, or stage the right files.`,
+      );
+    }
+    return explicit;
+  }
+
   if (guesses.size === 1) return [...guesses][0];
   if (guesses.size === 0) {
     fail("cannot infer the platform from these files — pass --platform");
@@ -193,7 +210,11 @@ async function main() {
     }
     for (const name of existing) {
       if (staged.includes(name)) continue;
-      await rm(path.join(platformDir, name), { force: true });
+      // `recursive` matters: a stray subdirectory in a platform dir (an
+      // unpacked bundle, a `.git`, an editor backup folder) would otherwise
+      // abort the clear with an opaque ERR_FS_EISDIR *after* mkdir and
+      // *before* any copy — leaving the platform dir half-cleared.
+      await rm(path.join(platformDir, name), { force: true, recursive: true });
       process.stdout.write(`stage: removed stale ${platform}/${name}\n`);
     }
   }
