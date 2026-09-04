@@ -257,6 +257,34 @@ describe("the NEEDS_RECONNECT migration (WARP-2458)", () => {
       expect(creating, "no migration creates IntegrationStatus").toBeDefined();
       expect(dirsFor()[0] > creating!).toBe(true);
     });
+
+    it("sorts after the last migration already on the base branch", () => {
+      // Prisma applies migrations in DIRECTORY-NAME order, not merge order, so
+      // a long-lived branch whose stamp predates a migration that landed on
+      // the base while it sat becomes a migration that deploys out of order.
+      // This one was stamped 20260902113000 and `stage` acquired
+      // 20260903010000 underneath it.
+      //
+      // Harmless for THIS statement in isolation — a standalone
+      // `ALTER TYPE ... ADD VALUE` neither reads nor is read by the party-link
+      // change — but the invariant is asserted for exactly this reason at
+      // `crm-contacts.schema.test.ts:337-341`, and an exception granted
+      // because one instance happened to be harmless is how the next one
+      // arrives unnoticed.
+      //
+      // Pins the PREDECESSOR, not "is newest": WARP-2554 already learned that
+      // "sorts after everything" is a description of the day a branch landed,
+      // not an invariant — the next unrelated migration turns it red while
+      // being perfectly correct.
+      //
+      // Mutation: re-stamp back to 20260902113000 → red.
+      const PREDECESSOR = "20260903010000_warp_2562_party_link_archive_scope";
+      expect(
+        readdirSync(migrationsDir),
+        "predecessor migration is gone — re-pin this to the new one",
+      ).toContain(PREDECESSOR);
+      expect(dirsFor()[0] > PREDECESSOR).toBe(true);
+    });
   });
 });
 
