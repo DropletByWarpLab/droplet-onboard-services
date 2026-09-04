@@ -23,6 +23,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { createLogger } from "../lib/logger.js";
+import { WRITE_TOOLS } from "./tool-access.service.js";
 
 const logger = createLogger("pattern-miner");
 
@@ -186,7 +187,25 @@ export async function mineToolCallPatterns(
         description,
         status: "suggested" as any,
         safety: 1,
-        writes: false,
+        // WARP-2665 — classify from the tools this pattern actually calls,
+        // the same `WRITE_TOOLS` set (derived from each tool's
+        // `requiresWrite`) that both routes in tools.ts use. A hardcoded
+        // `false` here minted rows whose own steps contradicted their safety
+        // flag: a mined `send_notification` sequence claimed it did not
+        // write, and every gate downstream — the run-now confirmation, the
+        // ticker's `writes && !reversible` skip, the Suggested tab's chip —
+        // reads that stored value. The promotion route repairs the flag now,
+        // but a row should not need repairing to be true.
+        //
+        // `p.toolNames` IS the step list: each name below becomes one
+        // `kind:"call"` step with that tool, so classifying the names and
+        // classifying the steps are the same operation here.
+        writes: p.toolNames.some((tool) => WRITE_TOOLS.has(tool)),
+        // `reversible` stays at the schema/route default. Unlike `writes` it
+        // is operator-declared (schema.prisma:3135) and nothing in the
+        // registry expresses undo-ability, so there is nothing to derive it
+        // from — the miner matching `POST /tools`'s `?? true` is the
+        // consistent posture, not an assertion of its own.
         reversible: true,
         steps: {
           create: p.toolNames.map((tool, idx) => ({
