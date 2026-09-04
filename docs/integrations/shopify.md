@@ -3,6 +3,7 @@
 > **Audience:** the person who owns the Shopify store.
 > **Time:** about fifteen minutes — longer than the others, because Shopify asks you to create an app rather than a key.
 > **What Droplet does with what you paste:** [`credential-handling.md`](credential-handling.md).
+> **Implementation landed 2026-09-02 (WARP-2296).** Everything below now describes a shipped connector rather than a plan, and the two were reconciled in that PR. What Droplet does with each of the vendor limits on this page is written down in *What the box refuses* at the bottom.
 > **Sources checked 2026-08-27** — against Shopify's own developer documentation and the credential facts recorded in ADR-042 §2 (pinned to WARP-2296). **Not yet walked through the live Shopify Dev Dashboard by us**, so treat the screen and button names below as a close guide rather than a screenshot. Shopify changed this flow on 2026-01-01, so anything you read elsewhere that is older than that is describing a screen which no longer exists.
 
 ---
@@ -130,6 +131,68 @@ So: **you will never be asked to reconnect Shopify because a token expired.** If
 **If you suspect the box has been tampered with**, uninstall the app at Shopify first — that takes effect immediately and does not depend on the box being reachable or cooperative.
 
 **What a revoked credential looks like on the dashboard:** the connection moves to a named state saying the credential no longer works, and sync pauses. It does not show zero orders.
+
+---
+
+## Order history: the 60-day wall
+
+There is a second vendor limit on this page and it is easy to miss, because — like the customer-data one — **Shopify does not report it as an error. It just returns fewer orders.**
+
+**`read_orders` reaches the last 60 days of your order history and no further.** Everything older needs a separate access scope, `read_all_orders`, which Shopify grants **by request** on the app. It is not a tick you can simply add: you ask, and Shopify decides.
+
+| What your app has | What Droplet can answer |
+|---|---|
+| `read_orders` only | "What did we sell last month", "what shipped this week", "which products move" — anything inside 60 days |
+| `read_orders` + `read_all_orders` | The same questions over your whole history |
+
+**Why this matters more than it sounds.** A revenue question answered from a silently truncated window is wrong in the one place nobody checks it. So Droplet does not answer it:
+
+- Ask for orders from a date **inside** the 60 days and you get them.
+- Ask for orders from a date **before** the wall, without `read_all_orders`, and Droplet **refuses the question and says why** rather than returning the 60 days it can see and letting that pass as the answer.
+- The **background sync** is different on purpose: it asks "what changed", for which 60 days is a complete answer, so it quietly works to the wall rather than failing. Your recent orders keep syncing either way.
+
+Droplet knows which of the two you have without asking you: Shopify tells the box exactly which scopes were granted at the moment it mints its access token.
+
+---
+
+## What we could not verify without a live store (WARP-2299)
+
+Two facts on this page came from Shopify's own documentation and **have not been confirmed against a real merchant store by us.** They are recorded here rather than smoothed over, because both change what a customer can do and both are cheap to check on day one.
+
+**1. Does the protected-customer-data request actually get granted on a Grow store?** The documentation says Level 2 access requires Grow. What it does not say is how the request behaves for an app that is installed on one store and never distributed — which is exactly our shape. The connector handles **both outcomes** and does not assume either: granted, and the customer datasets work; denied, and the connection stays up with a named state on the customer dataset only.
+
+**2. Can a merchant-owned Dev Dashboard app obtain `read_all_orders` at all?** Shopify's request flow was written for distributed apps going through app review. Whether it is offered — and granted — for a single-store app is unconfirmed. The connector treats its absence as the normal case and the wall as the default.
+
+**What a real store must show, on day one, to close this out.** In order, each answerable in a minute once a store is connected:
+
+1. **Connect and read the granted scopes.** Droplet displays them. They are the merchant's own ticks, echoed back by Shopify at token mint. If `read_customers` is absent, stop — that is a tick, not a plan problem.
+2. **Read one customer.** A name and an email present ⇒ Level 2 is genuinely granted on this store. Every protected field blank across every customer ⇒ the silent redaction, and the plan or the data-access request is the cause.
+3. **Ask for an order older than 60 days.** A refusal naming `read_all_orders` ⇒ the wall is real for this app. Orders returned ⇒ the scope was granted and the wall is lifted.
+4. **Check the store's plan against what you saw.** A Grow store that still redacts means the app's protected-data request was never granted, which is a different fix from upgrading.
+
+**The exact shapes Droplet detects**, recorded so a future reader does not have to rediscover them:
+
+| What Shopify sends | What it means | What Droplet does |
+|---|---|---|
+| HTTP 200, an `errors` entry saying the app *"is not approved to use the … field"* | Protected data refused outright | Names it as a permission state; orders and products keep working |
+| HTTP 200, customers returned with **every** name, surname and email `null` | The silent redaction — the dangerous one | Same named state. Never shows the blank rows |
+| HTTP 200, an `errors` entry naming a **required access scope** | A scope the merchant did not tick | A different message: go and tick it, do not upgrade anything |
+| Fewer orders than the window asked for | The 60-day wall | Refuses a question that reaches past it, rather than answering short |
+
+A store with **no customers yet** is deliberately none of the above: Droplet records "nothing to test against" rather than guessing, because a brand-new Grow store and a redacted one look identical from the outside, and telling a merchant to upgrade a plan they already have is the wrong half of that guess.
+
+---
+
+## What the box refuses
+
+Short list, because refusals are easier to plan around than surprises.
+
+- **An old `shpat_` token, in either field.** Not a preference: the flow that minted it was removed on 2026-01-01, so it cannot be re-created if it stops working. Droplet says so instead of storing it.
+- **A custom domain in the store-domain field.** Shopify authenticates on the `.myshopify.com` name; a domain you pointed at the store is not it.
+- **Any write, at any tier.** Droplet does not cancel orders, issue refunds, edit products or change fulfilment, and there is no setting that turns that on. The connector cannot express those requests at all.
+- **A customer list with blank names.** See above — a named state instead.
+- **An order question that reaches past the 60-day wall** without the scope that lifts it.
+- **Anything but your own store.** Droplet checks the destination against the store domain on this connection before it sends the credentials, every time — so a mis-typed or tampered domain costs a refusal, not a request.
 
 ---
 

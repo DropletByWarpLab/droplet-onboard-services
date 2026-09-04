@@ -157,12 +157,17 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     );
     expect([...fullyExcluded].sort()).toEqual([
       "erp",
+      // WARP-2581 — money joins them: its one tool is excluded while the
+      // base-prompt budget tripwire stands (WARP-2547 owns the re-baseline),
+      // so a rule here would promise the model a tool it can never be offered.
+      "money",
       "notifications",
       "switch",
     ]);
-    // switch and erp are ruleless, which is the coherent state.
+    // switch, erp and money are ruleless, which is the coherent state.
     expect(RULED_DOMAINS.has("switch")).toBe(false);
     expect(RULED_DOMAINS.has("erp")).toBe(false);
+    expect(RULED_DOMAINS.has("money")).toBe(false);
   });
 
   it("the exclusion list governs LOCAL tools only — a remote tool in a stripped domain is still selectable", () => {

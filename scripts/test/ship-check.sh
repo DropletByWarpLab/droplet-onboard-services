@@ -149,6 +149,7 @@ ALL_CHECKS=(
   lifecycle-naming
   image-pipeline
   tls-invariants
+  app-downloads
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -403,41 +404,33 @@ run_check_tsc_full() {
   local rc=0
   local out
 
-  # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
-  # the current schema or every Prisma-typed call site shows TS2305).
+  # Phases 1 + 2 (prisma generate, then build the leaf workspaces so their
+  # dist + .d.ts exist for downstream type resolution) are DELEGATED to
+  # scripts/bootstrap.sh — the same `npm run bootstrap` a developer runs after
+  # `npm ci`. WARP-2620: the leaf list was duplicated between this function,
+  # CONTRIBUTING.md and ci.yml and had already drifted (this copy omitted
+  # @droplet/shared-types; CONTRIBUTING's copy omitted @droplet/mcp-server),
+  # so a fresh checkout failed differently depending on which list you
+  # followed. One list now, in one file.
   #
-  # Pinned to the orchestrator workspace's `db:generate` script (WARP-492).
-  # The script body is `prisma generate`; npm resolves it through the
-  # workspace's `node_modules/.bin/prisma`, which is the `^5.14.0` pin
-  # declared in apps/orchestrator/package.json. The earlier form
-  # (`npx prisma generate`) silently fetched the LATEST published prisma
-  # (7.x at time of writing) off the npm registry whenever no local
-  # node_modules tree was present — and prisma 7 rejects this schema with
-  # P1012 ("datasource property `url` is no longer supported"), wedging
-  # ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
-  # ("prisma is not recognized" / "Missing script") when node_modules is
-  # missing instead of misleading the operator with a phantom P1012.
-  if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
-    if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
-      printf '%s\n' "$out" | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
+  # Two behaviours that live in bootstrap.sh and matter here:
+  #   - prisma generate is pinned to the orchestrator workspace's
+  #     `db:generate` script (WARP-492) rather than `npx prisma generate`,
+  #     which silently fetches the LATEST published prisma off the registry
+  #     when no local binary resolves — and prisma 7 rejects this schema with
+  #     P1012 ("datasource property `url` is no longer supported"), wedging
+  #     ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
+  #     instead. The WARP-492 self-test case still discriminates on this.
+  #   - each leaf `dist/` is removed before its build. `tsc` emits but never
+  #     prunes, so a file moved out of `src/` survives in `dist/` forever —
+  #     that is how a clean checkout reds the WARP-2515 guard on a phantom
+  #     `handlers/pm/pm-orch.test.js`.
+  if ! out="$(cd "$REPO_ROOT" && bash scripts/bootstrap.sh 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — workspace bootstrap failed (npm run bootstrap)\n" "$label"
+    printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
+    _record_result "$label" fail
+    return 1
   fi
-
-  # Phase 2: build leaf workspaces so their dist + .d.ts exist for
-  # downstream type resolution. These are the same RUN steps the
-  # orchestrator Dockerfile executes.
-  local leaf_pkg
-  for leaf_pkg in @droplet/erp-connector @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
-    if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
-      printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
-  done
 
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
@@ -515,7 +508,23 @@ run_check_compose_config() {
     return 1
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
+    # WARP-2645: the backticks that used to be here were inside a
+    # double-quoted printf, so bash ran `compose config` as a command
+    # substitution every time this branch was taken — a gate reporting
+    # "docker is missing" was shelling out to a docker subcommand to
+    # compose its own message.
+    #
+    # WARP-2620: single-quoting the whole FORMAT string fixed that but broke
+    # the colour. printf expands backslash escapes only in the FORMAT string,
+    # and `_RED` is the literal six characters `\033[0;31m` — so
+    # passing it as a %s ARGUMENT printed those characters verbatim instead of
+    # colouring anything. Invisible in CI, where `_RED=''` because stdout is
+    # not a tty, and a literal `\033[0;31m` in front of every FAIL banner on an
+    # operator's terminal. So: the colours go back in the format string, and
+    # the prose that carried the backticks moves out into a single-quoted
+    # ARGUMENT, where nothing it ever grows can be substituted.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s\n" "$label" \
+      'docker not on PATH (required for "docker compose config")'
     _record_result "$label" fail
     return 1
   fi
@@ -535,7 +544,22 @@ run_check_compose_config() {
 
   local out
   if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
-    printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
+    # WARP-2645: same command-substitution defect as the branch above, and
+    # here it was actively harmful — reporting that the merged tree was
+    # rejected ran a SECOND, argument-less `docker compose config` in the
+    # caller's cwd, whose "no configuration file provided: not found" landed
+    # on the operator's terminal one line ABOVE the real diagnostic.
+    #
+    # The message also has to NAME the file it rejected. Every environmental
+    # way this branch can be reached — daemon down, missing .env, docker
+    # missing at exec time — produces the same banner otherwise, which is
+    # what let a self-test assert "compose-config failed" and call that proof
+    # the planted YAML break was caught.
+    #
+    # WARP-2620: colours in the format string, prose in a single-quoted
+    # argument — see the `docker not on PATH` branch above for why both.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s %s\n" \
+      "$label" '"docker compose config" rejected' "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
     _record_result "$label" fail
@@ -800,9 +824,16 @@ run_check_shellcheck() {
   # ShellCheck will surface it loudly. (Capitalised so this line does not
   # open with the bare token `shellcheck` — see WARP-2477 and the note at
   # the head of this file.)
+  #
+  # WARP-2620 added scripts/bootstrap.sh. It is 238 lines of bash on the
+  # `tsc-full` critical path (this file runs it before every typecheck) and it
+  # is the command CLAUDE.md and CONTRIBUTING.md both tell a new implementer to
+  # run first — the same argument that put this gate's own two files on the
+  # list under WARP-2477. It is clean today; this is what keeps it that way.
   local targets=()
   local file
   for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/bootstrap.sh" \
               "$REPO_ROOT/scripts/test/ship-check.sh" \
               "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
@@ -1759,6 +1790,76 @@ run_check_image_pipeline() {
   return 0
 }
 
+run_check_app_downloads() {
+  # WARP-2666. `/downloads` is where a customer gets the client app for the box
+  # in front of them. Every box that has ever shipped served it empty, and no
+  # gate said so: an empty catalog answers HTTP 200 with available:false, which
+  # is correct for the API and invisible to everything downstream of it.
+  #
+  # ship-check is the pre-ship gate, so this is where "we are about to ship a
+  # box that can give a customer nothing" becomes a sentence someone has to
+  # read. It reports what data/app-downloads/EXPECTED declares versus what is
+  # actually staged; it never fetches or builds anything.
+  local label="app-downloads"
+  local audit="$REPO_ROOT/scripts/app-downloads/audit.sh"
+
+  if [ ! -r "$audit" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s is missing, so nothing can say what this release should carry
+"       "$label" "scripts/app-downloads/audit.sh" >&2
+    _record_result "$label" fail
+    return 1
+  fi
+
+  local out rc=0
+  out="$(bash "$audit" --dir "$REPO_ROOT/data/app-downloads" 2>&1)" || rc=$?
+
+  case "$rc" in
+    0)
+      printf "  ${_GREEN}PASS${_RESET}  %s (every platform EXPECTED declares is staged and verified)
+" "$label"
+      _record_result "$label" pass
+      return 0
+      ;;
+    3)
+      # Declared-and-ticketed absence. A checkout is the normal place for this
+      # to be true (installers are git-ignored and staged on the box), so
+      # failing here would make ship-check permanently red for every developer
+      # and train people to ignore it. Skip — but PRINT the blocked list, so
+      # "nothing to download" is never silent.
+      printf "  ${_YELLOW}SKIP${_RESET}  %s — declared blocked, nothing staged in this checkout:
+" "$label"
+      printf '%s
+' "$out" | sed -n 's/^BLOCKED  */    | blocked: /p'
+      printf "    | These platforms will have NOTHING at /downloads on an image built
+"
+      printf "    | from this tree. scripts/image/build-iso.sh refuses unless you pass
+"
+      printf "    | --allow-blank-downloads.
+"
+      _record_result "$label" skip
+      return 0
+      ;;
+    4)
+      # "Could not look" is not "it is fine" — the exact collapse this work
+      # exists to end. EXIT_CANNOT_RUN is the script's own vocabulary for it.
+      printf "  ${_RED}FAIL${_RESET}  %s — the audit reached NO VERDICT (exit %s: missing EXPECTED, staging root or python3)
+"         "$label" "$EXIT_CANNOT_RUN" >&2
+      printf '%s
+' "$out" | head -10 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+    *)
+      printf "  ${_RED}FAIL${_RESET}  %s — this release does not carry what data/app-downloads/EXPECTED declares
+" "$label" >&2
+      printf '%s
+' "$out" | head -20 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+  esac
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -2007,6 +2108,7 @@ _dispatch_check() {
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;
+    app-downloads)        run_check_app_downloads ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2

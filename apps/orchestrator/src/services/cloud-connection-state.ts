@@ -71,14 +71,30 @@ export const INTEGRATION_STATUS_BY_CLOUD_STATE: Readonly<
  *    a second, a metered budget resets with its period. Telling an owner to
  *    re-paste a working key because we were throttled wastes their time and
  *    teaches them to ignore the state.
- *  • `ERROR` — reconnecting will NOT fix it. A plan that does not include the
- *    resource, an access policy that refuses this appliance's address, a base
- *    URL that is not the vendor's. A new key changes none of them.
+ *  • `CAPABILITY_LIMITED` — the connection WORKS and one dataset is refused.
+ *    Nothing about the credential is wrong and nothing is broken; the vendor's
+ *    plan or the app's scope grant excludes a single resource. WARP-2623.
+ *  • `ERROR` — reconnecting will NOT fix it. An access policy that refuses this
+ *    appliance's address, a base URL that is not the vendor's. A new key
+ *    changes none of them.
  *
  * `STRIPE_ACCESS_POLICY` is the sharpest of these and the connector's own
  * docstring makes the argument: the key is fine, the permissions are fine, and
  * "telling the merchant to make a new key would waste their time and not fix
  * it". It is an `ERROR` carrying its own remediation, never a reconnect.
+ *
+ * ## Why the capability codes left `ERROR` (WARP-2623)
+ *
+ * They were here, and it was the wrong four lines in this table. `ERROR` is
+ * rendered as "Can't connect" on both the hub tile and `/integrations/
+ * credentials`, so a Basic-plan Shopify store — orders, products, inventory
+ * and fulfilment all reading correctly, only customer identities withheld —
+ * and a Mailchimp account whose plan excludes one resource were both drawn as
+ * BROKEN connections. That is wrong twice over: it sends the owner to repair
+ * something that is working, and it hides the plan or scope change that is the
+ * only thing they can actually do. Sync stopped too, because `ERROR` is not a
+ * pollable status, so a working store also silently stopped reading the
+ * datasets it CAN read.
  */
 export const INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE: Readonly<
   Record<string, IntegrationStatusName>
@@ -101,10 +117,26 @@ export const INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE: Readonly<
   QUOTA_EXHAUSTED: "DEGRADED",
   REQUEST_TIMEOUT: "DEGRADED",
 
-  // ── a new credential would not help ──────────────────────────────────────
+  // ── the connection works; ONE dataset is refused (WARP-2623) ─────────────
+  // Four vendors, four spellings, one meaning: the account's plan or the app's
+  // granted scopes exclude a resource. The fix is in the vendor's console and
+  // it is not a credential. Keyed on the code like every other row here, so
+  // the fifth vendor to throw one of these is classified the day it lands.
+  //
+  // Mailchimp: the plan does not include the resource.
+  CAPABILITY_MISSING: "CAPABILITY_LIMITED",
+  // HubSpot: the hub tier does not include the object (e.g. quotes needs Sales
+  // Hub Professional).
+  CAPABILITY_NOT_AVAILABLE: "CAPABILITY_LIMITED",
+  // Shopify (WARP-2296): the app was never granted the scope the dataset
+  // needs — `read_customers` for the customer dataset.
+  SCOPE_MISSING: "CAPABILITY_LIMITED",
+  // Shopify: protected customer data requires Shopify's own approval, which is
+  // an application to the vendor, not a key.
+  PROTECTED_CUSTOMER_DATA_DENIED: "CAPABILITY_LIMITED",
+
+  // ── a new credential would not help, and nothing works ───────────────────
   STRIPE_ACCESS_POLICY: "ERROR",
-  CAPABILITY_MISSING: "ERROR",
-  CAPABILITY_NOT_AVAILABLE: "ERROR",
   UNSAFE_BASE_URL: "ERROR",
 };
 

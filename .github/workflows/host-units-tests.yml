@@ -29,6 +29,10 @@ on:
       - "tests/droplet-host-units.test.sh"
       - "tests/droplet-host-net-unit.test.sh"
       - "tests/host-artefacts.test.sh"
+      # WARP-2647: the log-bundle collector's suite ran in no workflow.
+      # `scripts/host/**` above already fires this lane for the collector
+      # itself; this line is so an edit to the guard also fires it.
+      - "tests/collect-logs.test.sh"
       - ".github/workflows/host-units-tests.yml"
   push:
     branches: [main]
@@ -39,6 +43,10 @@ on:
       - "tests/droplet-host-units.test.sh"
       - "tests/droplet-host-net-unit.test.sh"
       - "tests/host-artefacts.test.sh"
+      # WARP-2647: the log-bundle collector's suite ran in no workflow.
+      # `scripts/host/**` above already fires this lane for the collector
+      # itself; this line is so an edit to the guard also fires it.
+      - "tests/collect-logs.test.sh"
       - ".github/workflows/host-units-tests.yml"
   workflow_dispatch:
 
@@ -111,3 +119,18 @@ jobs:
         # manifest row fails here, on the PR that adds it, rather than being
         # discovered months later on a box that never installed it.
         run: bash tests/host-artefacts.test.sh
+
+      # WARP-2647: WARP-823's collector suite ran in NO workflow.
+      # scripts/host/droplet-collect-logs.sh is the host executor behind the
+      # device-bridge's auth-gated GET /logs/bundle, and eight of its eighteen
+      # assertions are the REDACTION guarantee — bearer tokens, JWT_SECRET, DB
+      # and Redis URL passwords, PEM bodies and richdocuments tokens must not
+      # survive into the bundle a customer is asked to send in. Docker-free:
+      # DROPLET_LOGS_FIXTURE_DIR makes the collector read fixture text instead
+      # of shelling docker/journalctl. ~0.3 s.
+      #
+      # ubuntu-latest matters here: the collector's redaction uses GNU `sed`
+      # `c\` syntax, which BSD sed (a dev Mac) rejects outright — so this suite
+      # can only pass on Linux, and CI is the only place it will ever be true.
+      - name: Run log-bundle collector redaction tests
+        run: bash tests/collect-logs.test.sh

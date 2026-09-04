@@ -150,12 +150,18 @@ describe("routers sharing the /api/integrations prefix", () => {
         "post /integrations/:provider/disconnect",
         "post /integrations/:provider/write-enable",
         "post /integrations/:provider/write-disable",
+        // WARP-2520 — the LAN provisioning verbs, parameterised for the same
+        // reason and pinned by name for the same reason.
+        "post /integrations/:provider/connect",
+        "post /integrations/:provider/test",
         // The deprecated Eaglesoft literal aliases, kept for one release.
         // Listed so their eventual REMOVAL is a deliberate edit to this
         // expectation rather than a silent deletion nothing notices.
         "post /integrations/eaglesoft/disconnect",
         "post /integrations/eaglesoft/write-enable",
         "post /integrations/eaglesoft/write-disable",
+        "post /integrations/eaglesoft/connect",
+        "post /integrations/eaglesoft/test",
       ]),
     );
     expect(byOwner("createErpDriftRouter")).toEqual([
@@ -226,10 +232,11 @@ describe("routers sharing the /api/integrations prefix", () => {
         r.owner === "createIntegrationsRouter" &&
         r.segments.some((s) => s.startsWith(":")),
     );
-    // Not vacuous: the parameterised routes must actually exist. Three paths,
-    // whatever they are called — the point is that the sweep below has real
-    // patterns to work on, not that they still have the names above.
-    expect(new Set(mine.map((r) => r.path)).size).toBe(3);
+    // Not vacuous: the parameterised routes must actually exist. Five paths
+    // (WARP-2500's three lifecycle verbs plus WARP-2520's two LAN provisioning
+    // verbs), whatever they are called — the point is that the sweep below has
+    // real patterns to work on, not that they still have the names above.
+    expect(new Set(mine.map((r) => r.path)).size).toBe(5);
 
     const neighbours = ROUTES.filter((r) => r.owner !== "createIntegrationsRouter");
     expect(neighbours.length).toBeGreaterThan(0);

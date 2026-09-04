@@ -1,0 +1,59 @@
+# What a Droplet release is supposed to carry at /downloads.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Without it, every check can only observe "the directory is empty" —
+# true, and useless. It cannot tell "blocked upstream, ticketed, a human
+# signed off" apart from "nobody noticed", and it goes green the moment
+# ONE platform is staged, which is exactly how the other four would go
+# quiet again. Same shape as scripts/host/MANIFEST (WARP-2574): the
+# declaration is the half that makes an absence detectable.
+#
+# FORMAT
+#   <platform>  <policy>  <ticket>  <note...>
+#
+# Whitespace-separated, `#` comments, blank lines ignored. `-` in the
+# ticket column means "not applicable". The note runs to end of line.
+#
+# POLICIES
+#   installer   the catalog must carry at least one installer asset for
+#               this platform, and its bytes must match their digest.
+#   store       the catalog must carry a resolvable storeUrl. Not a
+#               placeholder — a URL containing REPLACE-ME is a failure,
+#               not a declaration.
+#   blocked     deliberately not shipping yet. TICKET AND NOTE ARE BOTH
+#               MANDATORY: a blocked row with no ticket is indistinguishable
+#               from a forgotten one, which is the failure this file exists
+#               to prevent. Audits exit 3 (not 0) while any row is blocked.
+#   absent      no client exists for this platform at all. No ticket needed.
+#
+# CHANGING A ROW IS A DECISION. Flipping `blocked` → `installer` asserts
+# that a release now MUST carry that installer or the image build, the
+# ship-check and the box's own watchdog all go red. Flip it in the same
+# change that makes the artifact real, never ahead of it.
+
+# Windows — droplet-windows builds an NSIS installer via release.yml.
+# Blocked on the first tag: the repo has 0 tags and release.yml has never
+# run, so there is no artifact to stage. Signing secrets ARE present, so
+# this is a release decision, not a capability gap (WARP-1955 covers the
+# updater-distribution + key-custody half that gates the tag).
+windows   blocked   WARP-1955   no v* tag cut yet; release.yml has never run, so no installer exists to stage
+
+# Android — droplet-android's release workflow needs four signing secrets
+# that do not exist (actions/secrets total_count 0) and its one attempted
+# run died in 41s at the fail-fast check. There is no Play listing either:
+# ai.warplab.droplet returns 404. Do NOT wire the debug APK as a stopgap —
+# its applicationId is ai.warplab.droplet.debug, a separate app that can
+# never update to a release build.
+android   blocked   WARP-1415   no signing secrets, no tag, no Play listing; box-served APK is the documented fallback once one exists
+
+# iOS — ios.yml is a simulator build+test with CODE_SIGNING_ALLOWED=NO.
+# No archive, exportArchive, ExportOptions, TestFlight, altool or fastlane
+# anywhere in the repo; zero Actions secrets. A real TestFlight link needs
+# an App Store Connect API key and an actual submission. iOS can never
+# serve a binary from the box regardless — when it ships, it ships `store`.
+ios       blocked   WARP-1955   no distribution pipeline at all; becomes `store` (never `installer`) once TestFlight exists
+
+# No macOS or Linux client is being built.
+macos     absent    -           no macOS client exists
+linux     absent    -           no Linux client exists

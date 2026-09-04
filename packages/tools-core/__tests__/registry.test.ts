@@ -186,6 +186,8 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
   // three vendors and all ten datasets; the dataset arg picks the provider.
   "cloud_query_dataset",
+  // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
+  "money_list_open_documents",
 ];
 
 describe("TOOLS registry", () => {
@@ -204,6 +206,25 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("list_files")?.requiresWrite).toBe(false);
     expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
+    // WARP-2669 — `delete_file` had no assertion here at all, which is part
+    // of how it kept `requiresConfirmation: false` while the confirmation
+    // contract doc (§3) used it as its worked example of a gated tool and
+    // three orchestrator suites used it as their confirming fixture. It is a
+    // RECURSIVE delete: a directory goes with everything inside it. Pinned
+    // now so a future flip back is a decision somebody has to write down.
+    expect(TOOLS.get("delete_file")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("delete_file")?.requiresConfirmation).toBe(true);
+    // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
+    // gate of its own, so there is no route challenge to stand down for.
+    expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();
+    // ...and no `confirmed` boolean in the schema, so the legacy path (§3) is
+    // closed to it and only a human-minted token gets through.
+    expect(
+      Object.keys(
+        (TOOLS.get("delete_file")?.inputSchema as { properties: Record<string, unknown> })
+          .properties,
+      ),
+    ).toEqual(["path"]);
     expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
     // WARP-508/509 — embedded Plane PM. Read tools are read-only; write
     // tools (create / update / comment / transition) are
