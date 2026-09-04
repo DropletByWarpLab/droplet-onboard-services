@@ -1006,18 +1006,40 @@ describe("WARP-2549 — the landing seam", () => {
     });
   });
 
-  it("does not reach the seam at all for a dataset that does not land", async () => {
-    // `invoice` is money, not a CRM row. It reaches `/api/money` (WARP-2581)
-    // and never these tables — the tick must not even open the transaction.
-    const h = harness();
+  it("does not reach the seam at all for a dataset that lands nowhere", async () => {
+    // A support ticket has no CRM home and is not a ledger document, so the
+    // tick must not even open the transaction for it. (`invoice` DOES land
+    // since WARP-2581 — it becomes an `ErpDocument`.)
+    const h = harness({
+      cursors: [cursorRow({ entity: "ticket" })],
+      read: async () => [
+        { ticket_id: "t-1", created_at: "2026-08-26T00:00:00Z", subject: "Broken chair" },
+      ],
+    });
     const land = vi.fn();
 
     await runnerFor(h, { land }).runIncrementalTick();
 
     expect(land).not.toHaveBeenCalled();
-    // The invoice page still advanced its own watermark — landing is what was
-    // skipped, not the sync.
-    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-20T00:00:00Z");
+    // The page still advanced its own watermark — landing is what was skipped,
+    // not the sync.
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-26T00:00:00Z");
+  });
+
+  it("hands an invoice page to the seam — money lands too (WARP-2581)", async () => {
+    const h = harness();
+    const land = vi.fn(async () => ({
+      entity: "invoice",
+      landed: 2,
+      skipped: 0,
+      reason: null,
+    }));
+
+    await runnerFor(h, { land }).runIncrementalTick();
+
+    expect(land).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: "invoice", rows: INVOICE_ROWS }),
+    );
   });
 
   it("lands BEFORE the watermark moves", async () => {

@@ -63,6 +63,11 @@ function mapPartyLinkError(err: unknown, res: Response): boolean {
       return true;
     case partyLinks.PARTY_LINK_ERRORS.PARTY_AMBIGUOUS:
     case partyLinks.PARTY_LINK_ERRORS.CONFIDENCE_NEEDS_MATCHED:
+    // WARP-2562 review — the connection id is RIGHT and the row exists; it
+    // just holds no credential a live fetch could spend. 422 rather than 404
+    // for the same reason `INVALID_STAGE` is a 422: a 404 would read as a
+    // typo, when what the owner has to do is reconnect.
+    case partyLinks.PARTY_LINK_ERRORS.CONNECTION_NOT_ACTIVE:
       // The request is well-formed but self-contradictory — 422, not 400, so
       // it does not read as a malformed body.
       res.status(422).json({ error: msg });
@@ -113,6 +118,15 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case crm.CRM_ERRORS.PIPELINE_HAS_DEALS:
     case crm.CRM_ERRORS.DUPLICATE_LINK:
       res.status(409).json({ error: msg });
+      return true;
+    case crm.CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD:
+    case crm.CRM_ERRORS.DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD:
+      // Same shape routes/contacts.ts already returns for a synced contact:
+      // a 409 whose body names the action that DOES work, rather than a bare
+      // refusal the dashboard can only render as "no". `remediation` is a
+      // stable token, not prose — the client holds the id it just tried to
+      // delete, so it can build the archive call itself.
+      res.status(409).json({ error: msg, remediation: "archive" });
       return true;
     default:
       return false;
@@ -268,11 +282,23 @@ const partyLinkCreateSchema = z
     path: ["contactId"],
   });
 
-const partyLinkQuerySchema = z.object({
-  contactId: z.string().max(64).optional(),
-  companyId: z.string().max(64).optional(),
-  archived: z.string().max(8).optional(),
-});
+const partyLinkQuerySchema = z
+  .object({
+    contactId: z.string().max(64).optional(),
+    companyId: z.string().max(64).optional(),
+    archived: z.string().max(8).optional(),
+  })
+  // The same both-or-neither rule as the create schema above, and it belongs
+  // on BOTH. Without it the READ path let the mistake through zod, and
+  // `resolveParty()` answered it with a bare 422
+  // `party_link_needs_exactly_one_party` — a body with no field in it, from
+  // the layer whose job is rows rather than request shape. "Both" is the more
+  // dangerous half: it looks like a filter and would quietly answer about one
+  // of the two.
+  .refine((v) => (v.contactId === undefined) !== (v.companyId === undefined), {
+    message: "exactly one of contactId or companyId",
+    path: ["contactId"],
+  });
 
 const partyLinkArchiveSchema = z.object({
   /** Absent means archive. `false` un-archives — the same route both ways, so

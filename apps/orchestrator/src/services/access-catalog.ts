@@ -118,6 +118,14 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-2581. Money is READ-ONLY on this box — the vendor stays the system of
+  // record — so there is no `act` level to offer: there is no action. `manage`
+  // is floored at `admin` because the only management verb in reach is
+  // connecting or disconnecting the ledger itself, which is credential work.
+  money: [
+    { level: "view", minTier: "family" },
+    { level: "manage", minTier: "admin" },
+  ],
   // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
   // live (carddav-4), which is a credential-handling action; editing one's own
   // contacts is `act`.

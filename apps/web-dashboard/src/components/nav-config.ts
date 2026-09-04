@@ -25,6 +25,7 @@ import {
   Film,
   FlaskConical,
   FolderKanban,
+  Receipt,
   FolderLock,
   FolderOpen,
   Globe,
@@ -283,6 +284,13 @@ export const NAV_GROUPS: NavGroup[] = [
       // module is off, so the nav never advertises a surface the box won't
       // serve.
       { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2581 — what the business is owed and what it owes, landed from a
+      // connected ledger. Gated on its own module: a box that keeps its books
+      // somewhere else has no /money entry at all rather than an empty page.
+      // Sits after Projects: customers, then the work, then what it is worth.
+      // Practice stays last — it is the vertical's surface, role-gated rather
+      // than module-gated, and ADR-044 put it at the end of the group.
+      { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
       // WARP-2560 (ADR-044) — the practice's day: schedule, KPIs, patient
       // lookup. It rendered at /integrations/eaglesoft, filed in Operations
       // beside the router, because that is where the CONNECTION is set up.

@@ -655,6 +655,20 @@ EOF
   log_info "  Self-heal:   droplet-watchdog.timer (status: /var/lib/droplet/watchdog/status.json)"
   log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
+
+  # WARP-2666. A freshly provisioned box has an EMPTY /downloads page: the
+  # installers are git-ignored and the ISO carries no repo payload, so a
+  # reimage always starts blank. Nothing else in a provision says this — the
+  # page answers HTTP 200 and every health probe is green — so the provision
+  # says it itself, right where the operator is already looking. Whoever
+  # commissions the box is the only person who can fix it, and this is the one
+  # moment they are certainly at a terminal on it.
+  if [ ! -f "$REPO_ROOT/data/app-downloads/catalog.json" ]; then
+    log_warn    "  Client apps:  NOTHING is staged — /downloads will be empty for every customer."
+    log_info    "                Stage the installer(s) you shipped this box with:"
+    log_info    "                  ./scripts/app-downloads/stage.sh <installer> [<installer>.sig] [latest.json]"
+    log_info    "                Then check it took:  bash ./scripts/app-downloads/audit.sh"
+  fi
 }
 
 # ----------------------------------------------------------------------------
