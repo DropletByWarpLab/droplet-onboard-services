@@ -41,6 +41,7 @@ import {
   isOrganizeRule,
   planOrganize,
   readListing,
+  unlessAborted,
 } from "./_cleanup.js";
 
 /** Per-list caps on the result, so a 500-move run cannot blow the 8,000-char
@@ -84,9 +85,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
 
   const headers = ncHeaders(ctx);
-  const listing = await readListing(
-    await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(v.path)}`, { headers }),
+  const listed = await unlessAborted(ctx.signal, () =>
+    ctx.http.nextcloud.get(`/?path=${encodeURIComponent(v.path)}`, { headers, signal: ctx.signal }),
   );
+  if (!listed) return err("CANCELLED", "the request was cancelled before the folder was read");
+  const listing = await readListing(listed);
   if (listing.status === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (!listing.ok) return err("LIST_FAILED", `nextcloud returned ${listing.status}`);
   const entries = listing.entries;
@@ -127,7 +130,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       });
       continue;
     }
-    const mk = await ctx.http.nextcloud.post("/mkdir", { path: folder }, { headers });
+    const mk = await unlessAborted(ctx.signal, () =>
+      ctx.http.nextcloud.post("/mkdir", { path: folder }, { headers, signal: ctx.signal }),
+    );
+    if (!mk) {
+      aborted = true;
+      break;
+    }
     // Not fatal: the folder usually already exists on a re-run. A folder
     // that is truly missing fails the move into it, reported per file.
     if (mk.ok && !existingChildren.has(folder)) created.push(folder);
@@ -161,11 +170,24 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         });
         continue;
       }
-      const res = await ctx.http.nextcloud.post(
-        "/move",
-        { from: move.from, to: dest.path, overwrite: false },
-        { headers },
+      const res = await unlessAborted(ctx.signal, () =>
+        ctx.http.nextcloud.post(
+          "/move",
+          { from: move.from, to: dest.path, overwrite: false },
+          { headers, signal: ctx.signal },
+        ),
       );
+      if (!res) {
+        // Cut short mid-flight: the file is in one of the two places, and
+        // this layer cannot say which — so it is neither moved nor remaining.
+        aborted = true;
+        unattempted = plan.moves.length - i - 1;
+        skipped.push({
+          path: move.from,
+          reason: "cancelled while the move was in flight; it may or may not have moved — check both folders",
+        });
+        break;
+      }
       if (res.ok) {
         movedCount++;
         if (moved.length < RESULT_SAMPLE.moved) moved.push({ from: move.from, to: dest.path });

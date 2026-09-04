@@ -7,7 +7,24 @@ import type { ToolContext } from "../../../src/types.js";
 
 // Full argument lists on purpose: `vi.fn(async () => …)` types `mock.calls`
 // as the empty tuple, so `calls[i][1]` is a tsc error vitest cannot see.
-type Opts = { headers?: Record<string, string> } | undefined;
+type Opts = { headers?: Record<string, string>; signal?: AbortSignal } | undefined;
+
+/**
+ * A call cut short by the caller's own signal while in flight — a cancel
+ * arriving during a slow Nextcloud round-trip. Resolves 200 at once if no
+ * signal was forwarded, so a handler that forgot to forward it fails the
+ * assertion cleanly instead of hanging the suite.
+ */
+function abortedInFlight(controller: AbortController) {
+  return (opts?: Opts): Promise<Response> => {
+    if (!opts?.signal) return Promise.resolve(new Response("{}", { status: 200 }));
+    const signal = opts.signal;
+    return new Promise<Response>((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+      controller.abort();
+    });
+  };
+}
 
 function ctxWith(
   mocks: { get?: Mock; del?: Mock; post?: Mock },
@@ -305,6 +322,33 @@ describe("delete_files", () => {
       ]);
       expect(get).not.toHaveBeenCalled();
       expect(del).not.toHaveBeenCalled();
+    });
+
+    // PR #1985 review: HttpClient takes a signal and none was forwarded, so
+    // a cancel could not interrupt a slow delete already in flight — it ran
+    // to completion after the caller had given up.
+    it("a DELETE cut short by the signal is reported as unknown, and the rest are not attempted", async () => {
+      const controller = new AbortController();
+      const get = treeGet(TREE);
+      const del = vi.fn((_path: string, opts?: Opts) => abortedInFlight(controller)(opts));
+      const r = await deleteFiles.handler(
+        { paths: ["/Downloads/a.tmp", "/Downloads/b.tmp", "/Downloads/c.tmp"] },
+        ctxWith({ get, del }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(del).toHaveBeenCalledTimes(1);
+      expect(d.deleted).toEqual([]);
+      // Unknown outcome is reported as such, never as deleted.
+      expect(d.failed).toEqual([{ path: "/Downloads/a.tmp", reason: expect.stringMatching(/in flight/) }]);
+      expect(d.skipped).toEqual([
+        { path: "/Downloads/b.tmp", reason: expect.stringMatching(/cancelled/) },
+        { path: "/Downloads/c.tmp", reason: expect.stringMatching(/cancelled/) },
+      ]);
+      for (const call of [...get.mock.calls, ...del.mock.calls]) {
+        expect(call[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+      }
     });
 
     // The per-iteration check is the whole point on the tool that removes

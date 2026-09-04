@@ -415,6 +415,30 @@ export function planOrganize(
   return { moves, folders, skipped, remaining };
 }
 
+// ── Cancellation ─────────────────────────────────────────────────────
+
+/**
+ * Await one HTTP call whose `signal` was forwarded, and return `null` if the
+ * signal cut it short mid-flight rather than letting the rejection escape.
+ *
+ * A forwarded signal makes fetch REJECT the in-flight request (WARP-887).
+ * Inside a per-file loop that rejection would discard everything the loop
+ * had already done — for `delete_files`, the list of what is already in the
+ * trash — so the handlers treat it as one more outcome to report. Anything
+ * that is not the caller's own cancellation still throws.
+ */
+export async function unlessAborted(
+  signal: AbortSignal,
+  call: () => Promise<Response>,
+): Promise<Response | null> {
+  try {
+    return await call();
+  } catch (err) {
+    if (signal.aborted) return null;
+    throw err;
+  }
+}
+
 // ── Bounded tree walk ────────────────────────────────────────────────
 
 export interface WalkOptions {
@@ -493,7 +517,14 @@ export async function walkTree(
     }
     const next = queue.shift();
     if (!next) break;
-    const listing = await readListing(await list(next.dir));
+    const res = await unlessAborted(opts.signal, () => list(next.dir));
+    if (!res) {
+      // Cut short mid-flight: this folder's contents are unknown.
+      result.cancelled = true;
+      result.truncated = true;
+      break;
+    }
+    const listing = await readListing(res);
     result.listed++;
     if (next.dir === root) result.rootStatus = listing.status;
     if (!listing.ok) {

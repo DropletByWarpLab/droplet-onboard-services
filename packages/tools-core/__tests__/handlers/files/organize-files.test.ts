@@ -10,7 +10,24 @@ import type { ToolContext } from "../../../src/types.js";
 // `vi.fn(async () => …)` types `mock.calls` as the empty tuple, so every
 // `calls[i][1]` assertion below is a tsc error the (type-stripping) vitest
 // run cannot see.
-type Opts = { headers?: Record<string, string> } | undefined;
+type Opts = { headers?: Record<string, string>; signal?: AbortSignal } | undefined;
+
+/**
+ * A call cut short by the caller's own signal while in flight — a cancel
+ * arriving during a slow Nextcloud round-trip. Resolves 200 at once if no
+ * signal was forwarded, so a handler that forgot to forward it fails the
+ * assertion cleanly instead of hanging the suite.
+ */
+function abortedInFlight(controller: AbortController) {
+  return (opts?: Opts): Promise<Response> => {
+    if (!opts?.signal) return Promise.resolve(new Response("{}", { status: 200 }));
+    const signal = opts.signal;
+    return new Promise<Response>((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+      controller.abort();
+    });
+  };
+}
 
 function ctxWith(
   mocks: { get?: Mock; post?: Mock; del?: Mock },
@@ -369,6 +386,51 @@ describe("organize_files", () => {
       expect(post).not.toHaveBeenCalled();
       expect(d.created_folders).toEqual([]);
       expect(d.moved_count).toBe(0);
+      expect(d.cancelled).toBe(true);
+    });
+
+    // PR #1985 review: HttpClient takes a signal and none was forwarded, so
+    // a cancel could not interrupt a slow mkdir or move already in flight.
+    it("a move cut short by the signal is reported as unknown, not as moved or remaining", async () => {
+      const controller = new AbortController();
+      const get = listingOf(DOWNLOADS);
+      const post = vi.fn((url: string, _body?: unknown, opts?: Opts) =>
+        url === "/move" ? abortedInFlight(controller)(opts) : Promise.resolve(new Response("{}", { status: 200 })),
+      );
+      const r = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get, post }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(d.moved_count).toBe(0);
+      expect(d.cancelled).toBe(true);
+      // The cut-short file is in one of two places and this layer cannot say
+      // which — so it is neither "moved" nor "a later run picks it up".
+      expect(d.skipped).toContainEqual({ path: "/Downloads/a.pdf", reason: expect.stringMatching(/in flight/) });
+      expect(d.remaining).toBe(2);
+      expect(get).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ signal: controller.signal }));
+      for (const call of post.mock.calls) {
+        expect(call[2]).toEqual(expect.objectContaining({ signal: controller.signal }));
+      }
+    });
+
+    it("a mkdir cut short by the signal ends the run before any move", async () => {
+      const controller = new AbortController();
+      const post = vi.fn((url: string, _body?: unknown, opts?: Opts) =>
+        url === "/mkdir" ? abortedInFlight(controller)(opts) : Promise.resolve(new Response("{}", { status: 200 })),
+      );
+      const r = await organizeFiles.handler(
+        { path: "/Downloads" },
+        ctxWith({ get: listingOf(DOWNLOADS), post }, { signal: controller.signal }),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(post.mock.calls.filter((c) => c[0] === "/move")).toEqual([]);
+      expect(d.moved_count).toBe(0);
+      expect(d.remaining).toBe(3);
       expect(d.cancelled).toBe(true);
     });
 

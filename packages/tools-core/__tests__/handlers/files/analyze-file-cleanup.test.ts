@@ -57,6 +57,24 @@ function ctxWith(
 }
 
 type Row = { path: string; isDirectory?: boolean; size?: number; mimeType?: string | null; modifiedAt?: string };
+type Opts = { headers?: Record<string, string>; signal?: AbortSignal } | undefined;
+
+/**
+ * A call cut short by the caller's own signal while in flight — a cancel
+ * arriving during a slow Nextcloud round-trip. Resolves 200 at once if no
+ * signal was forwarded, so a handler that forgot to forward it fails the
+ * assertion cleanly instead of hanging the suite.
+ */
+function abortedInFlight(controller: AbortController) {
+  return (opts?: Opts): Promise<Response> => {
+    if (!opts?.signal) return Promise.resolve(new Response("{}", { status: 200 }));
+    const signal = opts.signal;
+    return new Promise<Response>((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+      controller.abort();
+    });
+  };
+}
 
 const RECENT = "2026-08-01T00:00:00.000Z";
 const ANCIENT = "2019-05-05T00:00:00.000Z";
@@ -68,7 +86,7 @@ function row(path: string, o: Omit<Row, "path"> = {}): Row {
 
 /** A GET mock that serves a listing per `?path=` and 404s anything else. */
 function treeGet(tree: Record<string, Row[] | number>) {
-  return vi.fn(async (url: string, _opts?: { headers?: Record<string, string> }) => {
+  return vi.fn(async (url: string, _opts?: Opts) => {
     const m = /^\/\?path=(.*)$/.exec(url);
     const dir = m ? decodeURIComponent(m[1]) : "";
     const node = tree[dir];
@@ -462,7 +480,7 @@ describe("analyze_file_cleanup", () => {
     it("stops the walk once aborted and marks the scan cancelled", async () => {
       const controller = new AbortController();
       const inner = treeGet(TREE);
-      const get = vi.fn(async (url: string, opts?: { headers?: Record<string, string> }) => {
+      const get = vi.fn(async (url: string, opts?: Opts) => {
         const res = await inner(url, opts);
         controller.abort();
         return res;
@@ -477,6 +495,28 @@ describe("analyze_file_cleanup", () => {
       expect(d.scanned.truncated).toBe(true);
       // What the one listing returned is still reported.
       expect(d.scanned.files).toBe(6);
+    });
+
+    // PR #1985 review: HttpClient takes a signal and the walk never passed
+    // one, so a cancel could not interrupt a slow listing already in flight.
+    it("forwards the signal to every listing, and a listing cut short ends the scan as cancelled", async () => {
+      const controller = new AbortController();
+      const inner = treeGet(TREE);
+      let n = 0;
+      const get = vi.fn(async (url: string, opts?: Opts) => {
+        if (n++ === 0) return inner(url, opts);
+        return abortedInFlight(controller)(opts);
+      });
+      const r = await analyzeFileCleanup.handler({ path: "/Downloads" }, ctxWith(get, { signal: controller.signal }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.data as Record<string, any>;
+      expect(d.scanned.directories_listed).toBe(1);
+      expect(d.scanned.cancelled).toBe(true);
+      expect(get.mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const call of get.mock.calls) {
+        expect(call[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+      }
     });
 
     it("returns CANCELLED without any HTTP when the signal is already aborted", async () => {

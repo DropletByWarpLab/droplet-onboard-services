@@ -126,7 +126,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const headers = ncHeaders(ctx);
   const walk = await walkTree(
     v.path,
-    (dir) => ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers }),
+    (dir) => ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers, signal: ctx.signal }),
     { maxDepth, maxEntries: ANALYZE_MAX_ENTRIES, maxListings: ANALYZE_MAX_LISTINGS, signal: ctx.signal },
   );
   if (walk.cancelled && walk.listed === 0) {

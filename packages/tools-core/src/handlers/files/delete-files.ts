@@ -62,6 +62,7 @@ import {
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
   readListing,
+  unlessAborted,
   type Listing,
 } from "./_cleanup.js";
 
@@ -114,12 +115,15 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // One listing per distinct parent: cleanup targets cluster by folder, so a
   // hundred paths usually cost a handful of reads.
   const listings = new Map<string, Listing>();
-  async function listDir(dir: string): Promise<Listing> {
+  /** `null` when the read was cut short by the caller's signal. */
+  async function listDir(dir: string): Promise<Listing | null> {
     const cached = listings.get(dir);
     if (cached) return cached;
-    const listing = await readListing(
-      await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers }),
+    const res = await unlessAborted(ctx.signal, () =>
+      ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers, signal: ctx.signal }),
     );
+    if (!res) return null;
+    const listing = await readListing(res);
     listings.set(dir, listing);
     return listing;
   }
@@ -136,6 +140,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     }
     const parent = posixPath.dirname(target);
     const listing = await listDir(parent);
+    if (!listing) {
+      skipped.push({ path: target, reason: "not attempted: the request was cancelled" });
+      continue;
+    }
     if (!listing.ok) {
       failed.push({
         path: target,
@@ -159,7 +167,18 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       });
       continue;
     }
-    const res = await ctx.http.nextcloud.delete(`/?path=${encodeURIComponent(target)}`, { headers });
+    const res = await unlessAborted(ctx.signal, () =>
+      ctx.http.nextcloud.delete(`/?path=${encodeURIComponent(target)}`, { headers, signal: ctx.signal }),
+    );
+    if (!res) {
+      // Cut short mid-flight: the delete may or may not have reached the
+      // server. Reported as failed, never as deleted.
+      failed.push({
+        path: target,
+        reason: "cancelled while the delete was in flight; it may or may not be in the trash — re-run to check",
+      });
+      continue;
+    }
     if (res.ok) deleted.push(target);
     else failed.push({ path: target, reason: `nextcloud returned ${res.status}` });
   }

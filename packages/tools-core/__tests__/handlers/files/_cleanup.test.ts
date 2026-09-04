@@ -15,6 +15,7 @@ import {
   parseEntries,
   planOrganize,
   readListing,
+  unlessAborted,
   walkTree,
   type CleanupEntry,
 } from "../../../src/handlers/files/_cleanup.js";
@@ -290,6 +291,33 @@ describe("readListing", () => {
   });
 });
 
+// PR #1985 review: a forwarded signal makes fetch REJECT mid-flight, and
+// inside a per-file loop that rejection would discard everything the loop
+// had already done. The handlers await through this instead.
+describe("unlessAborted", () => {
+  it("returns the response when the call answers", async () => {
+    const res = new Response("{}", { status: 200 });
+    expect(await unlessAborted(new AbortController().signal, async () => res)).toBe(res);
+  });
+
+  it("returns null when the call rejects because the signal aborted", async () => {
+    const controller = new AbortController();
+    const r = await unlessAborted(controller.signal, async () => {
+      controller.abort();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    expect(r).toBeNull();
+  });
+
+  it("rethrows a rejection that is not the caller's own cancellation", async () => {
+    await expect(
+      unlessAborted(new AbortController().signal, async () => {
+        throw new Error("ECONNRESET");
+      }),
+    ).rejects.toThrow("ECONNRESET");
+  });
+});
+
 describe("clampInt / humanBytes", () => {
   it("clampInt truncates and clamps, falling back on non-numbers", () => {
     expect(clampInt(3.9, 0, 8, 3)).toBe(3);
@@ -419,6 +447,31 @@ describe("walkTree", () => {
       expect(r.cancelled).toBe(true);
       // Two folders were still queued, so the report does not cover the tree.
       expect(r.truncated).toBe(true);
+    });
+
+    it("a listing cut short by the signal ends the walk as cancelled instead of throwing", async () => {
+      const controller = new AbortController();
+      const inner = lister(tree);
+      let n = 0;
+      const list = vi.fn(async (dir: string) => {
+        if (n++ === 0) return inner.list(dir);
+        controller.abort();
+        throw new DOMException("The operation was aborted.", "AbortError");
+      });
+      const r = await walkTree("/D", list, { maxDepth: 3, maxEntries: 100, maxListings: 100, signal: controller.signal });
+      expect(r.entries.map((e) => e.path)).toEqual(["/D/a.txt", "/D/sub", "/D/empty"]);
+      expect(r.listed).toBe(1);
+      expect(r.cancelled).toBe(true);
+      expect(r.truncated).toBe(true);
+    });
+
+    it("a listing that fails for any other reason still throws", async () => {
+      const list = vi.fn(async (_dir: string) => {
+        throw new Error("ECONNRESET");
+      });
+      await expect(
+        walkTree("/D", list, { maxDepth: 3, maxEntries: 100, maxListings: 100, signal: live() }),
+      ).rejects.toThrow("ECONNRESET");
     });
 
     it("lists nothing when the signal is already aborted", async () => {
