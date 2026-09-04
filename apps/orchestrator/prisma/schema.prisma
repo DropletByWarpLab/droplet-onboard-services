@@ -3242,6 +3242,95 @@ enum ToolRunStatus {
   cancelled
 }
 
+/// WARP-2177 — a durable, background agent run (epic WARP-2176).
+///
+/// Everything a chat turn does inside one HTTP request, moved into a row that
+/// outlives the request, the browser tab and the container. The agent loop
+/// (`llm-agent.service.ts`) is not rewritten: `agent-run-worker.service.ts`
+/// claims a row, resumes the loop from the checkpoint below, and writes the
+/// outcome back. Design: `docs/agent-runs-design.md`.
+///
+/// `status` is an explicit enum, never derived from `endedAt IS NULL` — the
+/// CLAUDE.md "no guessing state" rule, same as `ToolRun`.
+///
+/// CHECKPOINT. `iteration` is the next loop iteration to execute and
+/// `messages` is the complete conversation at the top of that iteration. That
+/// is the loop's natural boundary: at the top of an iteration the array is a
+/// valid conversation (every `tool_calls` has its `role: "tool"` replies), so
+/// it can be handed back to `runAgent()` verbatim.
+///
+/// REPLAY GUARD. `trace` records every dispatched tool call — written BEFORE
+/// dispatch (`tool_call_id`, tool, args, iteration) and completed with the
+/// wire result after. A run resumed mid-iteration feeds a completed call's
+/// stored result back to the model instead of re-dispatching it, so a
+/// redeploy can never re-send a notification the run already sent.
+///
+/// LEASE. `claimedBy` / `claimedAt` / `heartbeatAt`. A `running` row whose
+/// heartbeat is older than `AGENT_RUN_RECLAIM_AFTER_MS` is re-queued with
+/// `attempts + 1`; past `AGENT_RUN_MAX_ATTEMPTS` it is failed with an error
+/// naming the count, so a crashing worker cannot wedge a run into infinite
+/// retry. Every executor write is fenced on `claimedBy`, so the zombie of a
+/// reclaimed run cannot clobber its successor.
+///
+/// `deadlineAt` is the wall-clock ceiling, stamped at first claim. A column
+/// rather than `startedAt + constant` so a config change cannot move the
+/// goalposts of a run already in flight. `maxIter` alone does not bound a run
+/// whose model calls are slow.
+model AgentRun {
+  id          String         @id @default(uuid())
+  /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
+  /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
+  /// run cannot outlive a role change with stale reach.
+  userId      String
+  /// The chat conversation that started the run, when one did.
+  sessionId   String?
+  goal        String
+  model       String
+  status      AgentRunStatus @default(queued)
+  /// Not before. Delay and backoff without a second queue.
+  runAfter    DateTime       @default(now())
+  claimedBy   String?
+  claimedAt   DateTime?
+  heartbeatAt DateTime?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  deadlineAt  DateTime?
+  attempts    Int            @default(0)
+  maxIter     Int
+  iteration   Int            @default(0)
+  messages    Json?
+  trace       Json?
+  /// The final assistant answer on `succeeded`.
+  result      String?
+  /// The loop's own `stop_reason` for the terminal segment.
+  stopReason  String?
+  error       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // Claim scan: `status = queued AND runAfter <= now()`.
+  @@index([status, runAfter])
+  // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
+  @@index([status, heartbeatAt])
+  // "My runs", newest first — the list route in WARP-2180.
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([sessionId])
+}
+
+/// WARP-2177 — AgentRun lifecycle. Non-terminal: `queued` (claimable),
+/// `running` (leased by a worker), `awaiting_confirmation` (parked on a
+/// Tier-2 call — WARP-2179; unused until it lands). Terminal: `succeeded`,
+/// `failed`, `cancelled`. Explicit, like `ToolRunStatus`: a row that was not
+/// transitioned to a terminal state must never read as a finished run.
+enum AgentRunStatus {
+  queued
+  running
+  awaiting_confirmation
+  succeeded
+  failed
+  cancelled
+}
+
 /// WARP-474 — Phase G2. Smart-home scene definition.
 ///
 /// One row per operator-created scene ("Movie night", "Goodnight").

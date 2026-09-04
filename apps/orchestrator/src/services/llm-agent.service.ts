@@ -426,6 +426,62 @@ export interface AgentRequest {
    * service callers (email-analysis) also pass nothing and are unaffected.
    */
   toolAccessScope?: ToolAccessScope | null;
+  /**
+   * WARP-2177 — durable-run checkpoint port (epic WARP-2176).
+   *
+   * The ONLY seam a background run needs from this loop, and the only change
+   * this loop takes for durability: the control flow, the guards, the RBAC
+   * narrowing and the SSE contract are untouched. Absent (every existing
+   * caller: chat, voice, email-analysis, the ToolSpec summariser) the loop is
+   * byte-for-byte what it was — the same optional-port shape as `approvals`,
+   * `enhancement` and `citation`.
+   *
+   * WHY A HOOK AND NOT A WRAPPER. The iteration boundary and the
+   * `tool_call_id` both live inside this function. A wrapper around
+   * `deps.mcp.callTool` sees neither, so it could persist a call only by
+   * (name, args) and could never say WHICH iteration the loop was in when
+   * the process died — which is exactly what a resume needs to know.
+   */
+  checkpoint?: AgentCheckpointPort;
+}
+
+/**
+ * WARP-2177 — what the loop tells a durable run, and what it asks back.
+ *
+ * All three are awaited: a checkpoint that could not be written is a run
+ * that cannot be resumed, so the failure must reach the worker, not be
+ * swallowed. A thrown hook aborts the turn like any other thrown await.
+ */
+export interface AgentCheckpointPort {
+  /**
+   * Top of iteration `iteration` (0-based within THIS `runAgent` call),
+   * before the model is called. `messages` is a complete, valid
+   * conversation — every prior `tool_calls` has its `role: "tool"` replies —
+   * which is why this, and not the tool boundary, is the checkpoint unit.
+   */
+  onIteration(iteration: number, messages: readonly ChatMessage[]): Promise<void>;
+  /**
+   * Immediately before a tool call is dispatched, after every guard has
+   * admitted it. The port persists the intent (`tool_call_id` before
+   * dispatch — the replay guard's whole point) and may answer with a stored
+   * result to REPLAY instead of dispatching: `text` is the raw wire payload
+   * the original dispatch produced, and it flows through the same bounding
+   * and SSE path a live result would.
+   */
+  beforeToolCall(call: {
+    tool_call_id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    iteration: number;
+  }): Promise<{ text: string; isError: boolean } | undefined>;
+  /** After a LIVE dispatch returned (never after a replay). */
+  afterToolCall(call: {
+    tool_call_id: string;
+    tool: string;
+    iteration: number;
+    text: string;
+    isError: boolean;
+  }): Promise<void>;
 }
 
 export interface AgentTraceEntry {
@@ -1505,6 +1561,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
     if (req.signal?.aborted) return abortedResult(iter);
+    // WARP-2177 — durable-run checkpoint, at the loop's natural boundary.
+    // `messages` is a valid conversation here (see AgentCheckpointPort).
+    // Awaited: a checkpoint that failed to persist must fail the run, not
+    // let it continue un-resumable.
+    if (req.checkpoint) await req.checkpoint.onIteration(iter, messages);
 
     // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
     // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
@@ -2193,8 +2254,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // tool. Tool-*reported* failures (`result.isError`) already flow
       // through the normal path below — this only adds the throw path.
       let result: McpToolCallResult;
+      // WARP-2177 — replay guard. The port persists `tool_call_id` BEFORE
+      // dispatch and hands back a stored result when this exact call already
+      // completed in an interrupted segment of the same iteration, so a
+      // resumed run never re-sends what the box already sent. A replayed
+      // result enters below through the same parse, bounding, trace and SSE
+      // path as a live one.
+      const replay = req.checkpoint
+        ? await req.checkpoint.beforeToolCall({
+            tool_call_id: call.id,
+            tool: call.function.name,
+            args,
+            iteration: iter,
+          })
+        : undefined;
       try {
-        result = await deps.mcp.callTool(call.function.name, args, toolContext);
+        result = replay
+          ? { isError: replay.isError, content: [{ type: "text", text: replay.text }] }
+          : await deps.mcp.callTool(call.function.name, args, toolContext);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = {
@@ -2212,6 +2289,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         };
       }
       const text = result.content[0]?.text ?? "{}";
+      // WARP-2177 — complete the trace entry with the wire result, so a
+      // resume after THIS point replays instead of re-dispatching. Skipped
+      // for a replay: the entry is already complete.
+      if (req.checkpoint && !replay) {
+        await req.checkpoint.afterToolCall({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          iteration: iter,
+          text,
+          isError: Boolean(result.isError),
+        });
+      }
       // WARP-1604 — single parse point for the tool-result wire payload.
       // `payload` carries the mcp-server contract in its type (see
       // services/tool-result-payload.ts); `parsed` is the same value widened
