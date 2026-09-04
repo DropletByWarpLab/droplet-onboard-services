@@ -42,7 +42,7 @@ const RUN =
   typeof process.env.DATABASE_URL === "string" &&
   process.env.DATABASE_URL.length > 0;
 
-const PREFIX = "warp2560-";
+const PREFIX = "warp2587-";
 const OURS = { startsWith: PREFIX } as const;
 
 describe.skipIf(!RUN)("activity notify sweep — real Postgres (WARP-2587)", () => {
