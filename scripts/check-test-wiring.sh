@@ -112,7 +112,7 @@ echo "============================="
 # to prevent. Materialise the list first and refuse to continue if it is empty.
 suites_file="$(mktemp)"
 trap 'rm -f "$mentions_file" "$suites_file"' EXIT
-if ! git ls-files '*.test.sh' | sort > "$suites_file"; then
+if ! git ls-files ':(glob)**/*.test.sh' | sort > "$suites_file"; then
   note "git ls-files failed — cannot enumerate test suites; refusing to pass"
   exit 1
 fi
@@ -178,7 +178,7 @@ if [ "$fail" -ne 0 ]; then
   cat >&2 <<'EOF'
 Test-wiring check FAILED.
 
-Every tracked `*.test.sh` must either:
+Every tracked *.test.sh must either:
   1. be named by a workflow `run:` step — put it on the existing job whose
      `paths:`/`detect` filter already covers the scripts it exercises, so it
      costs seconds on a job that was going to run anyway; or
