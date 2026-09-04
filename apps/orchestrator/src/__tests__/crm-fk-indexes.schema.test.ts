@@ -21,23 +21,12 @@
  *   - "fix" it by indexing the column second in a composite → red, because a
  *     non-leading column cannot serve this lookup
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { PRISMA_DIR } from "./helpers/test-paths.js";
 
-function findPrismaDir(): string {
-  const candidates = [
-    join(process.cwd(), "prisma"),
-    join(process.cwd(), "apps", "orchestrator", "prisma"),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, "schema.prisma"))) return resolve(candidate);
-  }
-  throw new Error(`Could not locate prisma/schema.prisma from ${process.cwd()}`);
-}
-
-const PRISMA_DIR = findPrismaDir();
 const schema = readFileSync(join(PRISMA_DIR, "schema.prisma"), "utf8");
 
 function modelBlock(name: string): string {

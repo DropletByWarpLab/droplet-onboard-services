@@ -2231,7 +2231,18 @@ class VPNApi:
         entry per peer that DID handshake (epoch > 0); a peer that exists but
         never handshook is simply absent from the dict, which — since the read
         succeeded — the caller reads as an observed 0 (a real failure). Read-only.
+
+        WARP-2687: the interface-status source below is EMPTY on OpenWrt 25.12 —
+        measured on a live RB5009, ``network.interface.wg0 status`` returns
+        ``data: {}`` with no ``peers`` key at all, so this returned None on every
+        call and the punch telemetry has been silently blind on that release. The
+        ``wireguard`` ubus object reports the same numbers from the kernel, so we
+        prefer it and keep the original read as the fallback for builds that do
+        populate it. Both are permitted reads; neither is ``file.exec``.
         """
+        live = self.live_peers(interface)
+        if live is not None:
+            return {pk: p["last_handshake"] for pk, p in live.items() if p["last_handshake"] > 0}
         try:
             status = self._r._call(f"network.interface.{interface}", "status")
         except Exception:  # noqa: BLE001 — telemetry read, never fatal
@@ -2249,6 +2260,121 @@ class VPNApi:
             if isinstance(pk, str) and isinstance(hs, (int, float)) and hs > 0:
                 out[pk] = int(hs)
         return out
+
+    # ------------------------------------------------------------------
+    # WARP-2686 / WARP-2687 — LIVE kernel state.
+    #
+    # Everything above this line reads uci, which is INTENT. `wg show` is
+    # state, and the two diverge routinely: a `uci.apply` can succeed without
+    # netifd reloading the wireguard peer set, so a peer can be absent from
+    # the config and still hold a live session. Verified on real hardware
+    # 2026-09-03 — a peer that DELETE had just reported `removed: 1` for
+    # completed a fresh handshake and reached the LAN. See
+    # 06-runbooks/wireguard-e2e-verification.md §5 in the engineering handbook.
+    # ------------------------------------------------------------------
+
+    def live_peers(self, interface: str = "wg0") -> Optional[dict[str, dict]]:
+        """Per-peer LIVE kernel state, keyed by public key, or None if unknown.
+
+        Source is the ``wireguard`` ubus object from ``rpcd-mod-wireguard``,
+        which reports the kernel's own view: which peers the interface actually
+        holds, their allowed-ips, and their handshake/transfer counters. This is
+        the only read that can contradict uci, which is exactly why it exists.
+
+        ``None`` means UNKNOWN, and callers MUST NOT read it as "no peers":
+        the object is absent on an image built without ``rpcd-mod-wireguard``,
+        and the call is refused when the ``droplet-ai`` rpcd ACL carries no
+        ``wireguard`` read grant. Both are true of routers flashed before
+        WARP-2183/WARP-2689, so degrading honestly is the common path, not the
+        edge case. An empty dict, by contrast, is a real observation: the
+        interface exists and holds no peers.
+
+        Deliberately NOT ``file.exec``/``wg show`` — the ACL denies file.exec
+        on purpose and verification must never motivate widening that grant
+        (same rule ``peer_handshakes`` documents).
+        """
+        try:
+            status = self._r._call("wireguard", "status")
+        except Exception:  # noqa: BLE001 — absent object / denied ACL / transport
+            return None
+        if not isinstance(status, dict):
+            return None
+        iface = status.get(interface)
+        if not isinstance(iface, dict):
+            # The object ANSWERED and does not list this interface ⇒ the kernel
+            # device is not there, so it is holding no peers. That is a real
+            # observation, not an unknown: `{}` lets a revoke verify correctly
+            # (the peer is definitively not live) while `interface_is_live`
+            # separately reports the device as missing. Returning None here
+            # would throw away a fact we actually have.
+            return {}
+        peers = iface.get("peers")
+        if not isinstance(peers, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for pk, p in peers.items():
+            if not isinstance(pk, str) or not isinstance(p, dict):
+                continue
+            allowed = p.get("allowed_ips")
+            hs = p.get("last_handshake")
+            out[pk] = {
+                "allowed_ips": list(allowed) if isinstance(allowed, list) else [],
+                "last_handshake": int(hs) if isinstance(hs, (int, float)) and hs > 0 else 0,
+                "rx_bytes": int(p.get("rx_bytes") or 0),
+                "tx_bytes": int(p.get("tx_bytes") or 0),
+            }
+        return out
+
+    def interface_is_live(self, interface: str = "wg0") -> Optional[bool]:
+        """Is the KERNEL device present, as opposed to merely configured?
+
+        ``True``/``False`` are observations; ``None`` is unknown. The whole
+        point is the case that motivated WARP-2687: on a router with no
+        wireguard kernel module, ``uci`` carries a perfect ``wg0`` section and
+        ``ip link show wg0`` says the device does not exist. netifd reports the
+        interface as ``proto: "none"`` with error ``NO_DEVICE``, because it
+        falls back to ``none`` for a protocol whose handler it never loaded —
+        so a correct config reads as a missing device, which is precisely what
+        it is.
+        """
+        try:
+            status = self._r._call("wireguard", "status")
+        except Exception:  # noqa: BLE001
+            status = None
+        if isinstance(status, dict):
+            return isinstance(status.get(interface), dict)
+        # Fall back to the always-permitted read. `l3_device` only appears once
+        # netifd has a real device to point at.
+        try:
+            st = self._r._call(f"network.interface.{interface}", "status")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(st, dict):
+            return None
+        proto = st.get("proto")
+        if proto in (None, "", "none"):
+            return False
+        return bool(st.get("up")) and bool(st.get("l3_device"))
+
+    def reload_interface(self, interface: str = "wg0") -> bool:
+        """Make staged peer changes take effect in the kernel. Best-effort.
+
+        ``uci.apply`` commits and nudges ucitrack; on the shapes we ship that
+        is NOT sufficient to reload a wireguard peer set, which is the whole
+        WARP-2686 defect. ``network.interface.<iface> up`` is the ifup the
+        peers actually need, and it is already granted by the droplet-ai ACL
+        (``network.interface.*: ["up", "down"]``) — no ACL change required, so
+        this half of the fix works on every router in the field today.
+
+        Returns True if the call was accepted. That is not proof the reload
+        did what we wanted; only `live_peers` can say that.
+        """
+        try:
+            self._r._call(f"network.interface.{interface}", "up")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vpn: ifup %s failed: %s", interface, exc)
+            return False
 
     def delete_peer(self, interface: str, public_key: str) -> int:
         """Delete every peer section matching `public_key`. Returns the count.

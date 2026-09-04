@@ -53,6 +53,43 @@ export function resolveAgentIterLimits(
   return { defaultIter, capIter };
 }
 
+/**
+ * WARP-2177 — the durable-run worker's knobs, resolved once.
+ *
+ * The one relation that must hold: the reclaim threshold is at least two
+ * heartbeats. A threshold below that reclaims a HEALTHY run on a single missed
+ * beat (a GC pause, a busy event loop), which re-runs work and — before the
+ * replay guard catches it — could re-dispatch a tool. Clamped up with a
+ * warning rather than rejected at boot, for the same reason the iteration
+ * limits clamp: a misconfigured knob should degrade to a safe value, not take
+ * the orchestrator down.
+ */
+export function resolveAgentRunLimits(
+  raw: {
+    concurrency: number;
+    tickMs: number;
+    heartbeatMs: number;
+    reclaimAfterMs: number;
+    maxAttempts: number;
+    maxWallMs: number;
+  },
+  warn: (msg: string) => void = (msg) => {
+    void import("./lib/logger.js").then(({ createLogger }) =>
+      createLogger("config").warn(msg),
+    );
+  },
+): typeof raw {
+  const floor = raw.heartbeatMs * 2;
+  if (raw.reclaimAfterMs < floor) {
+    warn(
+      `config: AGENT_RUN_RECLAIM_AFTER_MS (${raw.reclaimAfterMs}) is below ` +
+        `2 × AGENT_RUN_HEARTBEAT_MS (${floor}); clamping to ${floor}`,
+    );
+    return { ...raw, reclaimAfterMs: floor };
+  }
+  return raw;
+}
+
 // WARP-580 (part 2) — device/service secrets a PRODUCTION boot must carry
 // non-empty. Their schema defaults are "" so dev laptops + the vitest suite
 // run with zero env setup, but on a shipped box an empty value means either a
@@ -163,6 +200,40 @@ const envSchema = z.object({
   // costs nothing on easy turns. Only hard rows use the depth.
   AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
   AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  // WARP-2177 — durable agent runs (epic WARP-2176). The worker in
+  // agent-run-worker.service.ts reads the RESOLVED block (config.agentRuns),
+  // never these raw values, so the reclaim/heartbeat relation below is
+  // enforced in exactly one place.
+  //
+  // CONCURRENCY defaults to 1 on purpose: a background run is an unattended
+  // GPU spender and interactive chat shares the same model. Raising it is a
+  // measured interactive-latency decision, not a guess.
+  AGENT_RUN_CONCURRENCY: z.coerce.number().int().positive().default(1),
+  // How often the worker scans for claimable / stale rows.
+  AGENT_RUN_TICK_MS: z.coerce.number().int().positive().default(5_000),
+  // The lease heartbeat. Timer-driven and INDEPENDENT of iteration length,
+  // so a run parked in a slow model call still beats — which is what lets the
+  // reclaim threshold be derived from the heartbeat rather than from a guess
+  // at how long an iteration takes.
+  AGENT_RUN_HEARTBEAT_MS: z.coerce.number().int().positive().default(15_000),
+  // A `running` row whose heartbeat is older than this is reclaimed. Must be
+  // at least 2× the heartbeat (resolveAgentRunLimits clamps it up, loudly):
+  // one missed beat is a GC pause, not a dead worker.
+  AGENT_RUN_RECLAIM_AFTER_MS: z.coerce.number().int().positive().default(60_000),
+  // Reclaims a run may survive before it is failed for good.
+  AGENT_RUN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
+  // The epic sizes agentic work at 5–40 minutes.
+  AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2178 — characters of ONE tool result the model is fed per call
+  // (tool-result-bounding.ts). 8000 is the value the loop has always used and
+  // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
+  // cap are calibrated against, so it is the CEILING here: lowering it makes
+  // every in-loop guard more conservative, raising it would need the budget
+  // rail re-derived. The floor keeps a page useful. Pick the value from the
+  // measured per-tool result-size distribution (`agent_tool_result_size`
+  // debug lines), not by feel.
+  AGENT_TOOL_RESULT_CAP_CHARS: z.coerce.number().int().min(1000).max(8000).default(8000),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
@@ -1292,5 +1363,14 @@ export const config = {
     parsed.AGENT_MAX_ITER_DEFAULT,
     parsed.AGENT_MAX_ITER_CAP,
   ),
+  // WARP-2177 — see resolveAgentRunLimits.
+  agentRuns: resolveAgentRunLimits({
+    concurrency: parsed.AGENT_RUN_CONCURRENCY,
+    tickMs: parsed.AGENT_RUN_TICK_MS,
+    heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
+    reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
+    maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
+    maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
+  }),
 };
 export type Config = typeof config;
