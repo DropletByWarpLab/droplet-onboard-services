@@ -46,6 +46,7 @@
  */
 
 import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
+import atlassian from "../../../../docs/integrations/atlassian.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
@@ -72,6 +73,7 @@ export const GUIDE_ROUTE_PREFIX = "/help/integrations";
  */
 export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "add-a-provider": addAProvider,
+  atlassian,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,

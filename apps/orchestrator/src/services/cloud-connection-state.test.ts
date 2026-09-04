@@ -9,6 +9,7 @@
  */
 import {
   ConnectorBlockedError,
+  HubSpotCapabilityUnavailableError,
   HubSpotReauthorizationRequiredError,
   HubSpotSearchRateLimitedError,
   HubSpotSuperAdminRevokedError,
@@ -103,15 +104,18 @@ describe("integrationStatusForHealthFailure — classifying a rejected probe", (
 
   it("keeps failures a new credential cannot fix out of NEEDS_RECONNECT", () => {
     // Stripe's IP access policy: the key is fine and the permissions are fine.
-    // Mailchimp's capability gate: the account's PLAN excludes the resource.
-    // Mutation: map either to NEEDS_RECONNECT → red, and the product would be
+    // Mutation: map it to NEEDS_RECONNECT → red, and the product would be
     // telling a merchant to mint keys until one of them works.
     expect(integrationStatusForHealthFailure(new StripeAccessPolicyError("ip refused"))).toBe(
       "ERROR",
     );
+    // WARP-2623 — Mailchimp's capability gate used to be asserted here as
+    // ERROR alongside it. It moved, deliberately: "a new key will not fix it"
+    // is true of both, but only one of them means the connection is BROKEN.
+    // See the capability table below.
     expect(
       integrationStatusForHealthFailure(new MailchimpCapabilityMissingError("lists", "plan")),
-    ).toBe("ERROR");
+    ).not.toBe("ERROR");
   });
 
   it("reports an unwired connector as NOT_CONFIGURED, not as broken", () => {
@@ -131,6 +135,104 @@ describe("integrationStatusForHealthFailure — classifying a rejected probe", (
     for (const err of [new Error("boom"), { code: "SOMETHING_NEW" }, null, undefined, "nope"]) {
       expect(integrationStatusForHealthFailure(err)).toBe("ERROR");
     }
+  });
+});
+
+/**
+ * WARP-2623 — the four capability codes land on their own persisted status.
+ *
+ * ## What was wrong
+ *
+ * All four mapped to `IntegrationStatus.ERROR`, which both surfaces render as
+ * "Can't connect": the hub tile (`connector-visuals.tsx` `statusView`) and
+ * `/integrations/credentials` (`SaasCredentialsSection.tsx` `STATE_COPY`). So a
+ * Basic-plan Shopify store — orders, products, inventory and fulfilment all
+ * reading correctly, only customer identities withheld — and a Mailchimp
+ * account whose plan excludes one resource were both drawn as broken
+ * connections. `ERROR` is also not a pollable status, so the working store
+ * stopped syncing the datasets it CAN read as well.
+ *
+ * ## What this table pins
+ *
+ * One row per capability code, the vendor that throws it, and the persisted
+ * status it must produce — plus the codes that stay `ERROR`, listed so that
+ * widening the capability set later is a deliberate edit to this table rather
+ * than a silent reclassification.
+ */
+describe("integrationStatusForHealthFailure — capability codes are not ERROR (WARP-2623)", () => {
+  /**
+   * PR #1945's Shopify errors, mirrored locally.
+   *
+   * The connector is not on `stage` yet, so importing the real classes would
+   * not compile. What is asserted is the CONTRACT the classifier keys on — the
+   * `code` string — copied from `services/erp-connector/src/shopify/
+   * connector.ts` on `origin/feat/warp-2296-shopify-connector`
+   * (`ShopifyScopeMissingError`, `ShopifyProtectedDataDeniedError`). When
+   * #1945 merges these become plain imports; if its codes changed in review,
+   * this table goes red, which is the point.
+   */
+  class ShopifyScopeMissing extends Error {
+    readonly code = "SCOPE_MISSING";
+  }
+  class ShopifyProtectedDataDenied extends Error {
+    readonly code = "PROTECTED_CUSTOMER_DATA_DENIED";
+  }
+
+  const CAPABILITY: ReadonlyArray<[vendor: string, code: string, make: () => Error]> = [
+    [
+      "mailchimp",
+      "CAPABILITY_MISSING",
+      () => new MailchimpCapabilityMissingError("lists", "plan does not include it"),
+    ],
+    [
+      "hubspot",
+      "CAPABILITY_NOT_AVAILABLE",
+      () => new HubSpotCapabilityUnavailableError("quotes", "Sales Hub Professional"),
+    ],
+    ["shopify (#1945)", "SCOPE_MISSING", () => new ShopifyScopeMissing("read_customers")],
+    [
+      "shopify (#1945)",
+      "PROTECTED_CUSTOMER_DATA_DENIED",
+      () => new ShopifyProtectedDataDenied("silent redaction"),
+    ],
+  ];
+
+  it.each(CAPABILITY)("%s's %s classifies as CAPABILITY_LIMITED", (_vendor, code, make) => {
+    // Mutation: map any one of the four back to "ERROR" in
+    // INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE → that row goes red.
+    const err = make();
+    expect((err as unknown as { code: string }).code, "the code the classifier keys on").toBe(code);
+    expect(integrationStatusForHealthFailure(err)).toBe("CAPABILITY_LIMITED");
+  });
+
+  it("does not call a capability-limited connection healthy either", () => {
+    // The other half of the honesty rule. CONNECTED would hide the missing
+    // dataset behind a green pill, which is the failure ADR-041 §5 exists to
+    // prevent — the same one NEEDS_RECONNECT was added for.
+    // Mutation: map any capability code to "CONNECTED" → red.
+    for (const [, , make] of CAPABILITY) {
+      expect(integrationStatusForHealthFailure(make())).not.toBe("CONNECTED");
+    }
+  });
+
+  it("never sends the owner after a new credential for one", () => {
+    // A plan boundary and a scope grant are both fixed in the vendor's own
+    // console. Mutation: map any capability code to "NEEDS_RECONNECT" → red,
+    // and the product tells a merchant to mint keys until one of them works.
+    for (const [, , make] of CAPABILITY) {
+      expect(integrationStatusForHealthFailure(make())).not.toBe("NEEDS_RECONNECT");
+    }
+  });
+
+  it("leaves the genuinely broken codes at ERROR", () => {
+    // The boundary of the change, asserted so widening it later is deliberate.
+    // `STRIPE_ACCESS_POLICY` reads the same way from a distance — "a new key
+    // will not fix it" — but nothing works through it, so it is not the same
+    // state. Mutation: move either into the capability block → red.
+    expect(integrationStatusForHealthFailure(new StripeAccessPolicyError("ip refused"))).toBe(
+      "ERROR",
+    );
+    expect(integrationStatusForHealthFailure({ code: "UNSAFE_BASE_URL" })).toBe("ERROR");
   });
 });
 

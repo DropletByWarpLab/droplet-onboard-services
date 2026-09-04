@@ -23,10 +23,11 @@ import {
 } from "./access-catalog.js";
 
 describe("access-catalog — module vocabulary", () => {
-  // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14. The
-  // list is pinned so a new ModuleId cannot arrive without someone writing its
-  // §9 ladder — which is exactly what this test caught when they did.
-  it("gates the 14 non-core ModuleIds; chat is the always-on module at act", () => {
+  // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
+  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId
+  // cannot arrive without someone writing its §9 ladder — which is exactly
+  // what this test caught each time they did.
+  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -38,6 +39,7 @@ describe("access-catalog — module vocabulary", () => {
         "files",
         "knowledge",
         "managed_switch",
+        "money",
         "network",
         "projects",
         "smart_home",

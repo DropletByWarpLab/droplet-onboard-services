@@ -236,8 +236,33 @@ describe("WARP-2117 — CRM core", () => {
       const block = modelBlock(model);
       expect(block, `${model}.externalSystem`).toMatch(/externalSystem\s+String\?/);
       expect(block, `${model}.externalId`).toMatch(/externalId\s+String\?/);
-      expect(block, `${model} reconcile key`).toContain("@@unique([externalSystem, externalId])");
     }
+  });
+
+  it("scopes the reconcile key to the CONNECTION on every LANDED record", () => {
+    // WARP-2549. The key used to be `(externalSystem, externalId)`, which is
+    // correct on a box with one connection per vendor and wrong twice,
+    // silently, on a box with two HubSpot portals: their object ids are
+    // portal-scoped, so portal B's company `123` is refused forever as
+    // already belonging to portal A's customer. WARP-2461's purge walker keys
+    // on `connectionId` for the same reason — scoping a purge by PROVIDER
+    // destroys the sibling connection's data.
+    //
+    // Mutation: put the provider-scoped unique back → red here, and the second
+    // portal's customers can never land.
+    for (const model of ["Contact", "CrmCompany", "CrmDeal"]) {
+      const block = modelBlock(model);
+      expect(block, `${model} reconcile key`).toContain("@@unique([connectionId, externalId])");
+      expect(block, `${model} purge index`).toContain("@@index([connectionId])");
+      expect(block, `${model} connection`).toContain("onDelete: Restrict");
+    }
+
+    // `CrmActivity` keeps the provider-scoped pair, and that is not an
+    // oversight: NOTHING lands into it. HubSpot's search returns a property
+    // bag with no association data, so an engagement cannot satisfy the
+    // exactly-one-subject CHECK. The day something does land there, it needs
+    // this same treatment.
+    expect(modelBlock("CrmActivity")).toContain("@@unique([externalSystem, externalId])");
   });
 
   it("states record origin explicitly on CRM records too", () => {

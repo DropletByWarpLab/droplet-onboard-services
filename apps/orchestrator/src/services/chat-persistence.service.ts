@@ -24,6 +24,15 @@ import type { ToolConfirmationHandle } from "../types/sse-events.js";
  */
 const TITLE_MAX_LEN = 64;
 
+/**
+ * WARP-1921 — how many of the most recent assistant rows `getConversationToolNames`
+ * reads for cross-turn tool continuity. Exported (WARP-2643) so a test can pin the
+ * boundary against the shipped value instead of restating `50`: a test carrying its
+ * own literal keeps passing when the window changes, which is the one thing a
+ * boundary test must not do.
+ */
+export const CONTINUITY_TRACE_ROW_LIMIT = 50;
+
 export interface PersistedToolCall {
   id: string;
   name: string;
@@ -221,7 +230,7 @@ export class ChatPersistenceService {
       orderBy: { createdAt: "desc" },
       // A conversation only has so many distinct domains; the most recent
       // turns are the ones continuity is for. Bounds the read on a long thread.
-      take: 50,
+      take: CONTINUITY_TRACE_ROW_LIMIT,
     });
     const names = new Set<string>();
     for (const row of rows) {

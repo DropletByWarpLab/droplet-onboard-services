@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { useAuth } from "@/lib/auth";
+import { DisconnectControl } from "@/components/integrations/DisconnectControl";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
 import {
   fetchSaasCredentials,
@@ -60,6 +61,18 @@ const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "war
     // stored, and it was refused. "Not connected" would send an admin to paste
     // the same key again.
     NEEDS_RECONNECT: { label: "Credential rejected — replace it", tone: "warn" },
+    // WARP-2623 — the connection WORKS and one dataset is refused. The copy
+    // must not read as either of its neighbours: "replace it" would send the
+    // admin to mint a key that is already fine, and a bare "Connected" would
+    // hide a missing dataset behind a green line. The remediation names where
+    // the fix actually lives — the vendor's plan or the app's granted scopes,
+    // neither of which is anything this page can change. Deliberately no
+    // reconnect affordance: the only actions this state earns are "go and
+    // change the plan" and "disconnect".
+    CAPABILITY_LIMITED: {
+      label: "Connected · limited — one dataset needs a plan or permission change at the vendor",
+      tone: "warn",
+    },
     // And the OTHER distinction WARP-2458 pulled apart: something a new key
     // will not fix — a vendor-side refusal such as an IP access policy or a
     // plan limit. "Replace it" here would send an admin to mint keys until
@@ -139,10 +152,73 @@ function secretPlaceholder(field: SaasCredentialField): string {
   return field.hasValue ? "Saved — replace to change" : "Paste the value";
 }
 
+/**
+ * WARP-2650 — the expiry line, for a credential with a hard stop.
+ *
+ * Returns null for the two states that have nothing to say: a provider with no
+ * expiry concept (the field is absent or `null`) and a date comfortably in the
+ * future. `EXPIRY_UNKNOWN` is NOT one of those — a stored credential with no
+ * recorded date means no warning can ever fire, and the owner is the only one
+ * who can fix that, so it gets a line.
+ *
+ * Deliberately separate from `stateCopyFor`: `state` answers "does this
+ * connection work" and the expiry answers "for how much longer". A token twelve
+ * days from a hard stop is genuinely CONNECTED and genuinely needs action, and
+ * one field cannot say both without lying about one of them.
+ */
+export function expiryCopyFor(
+  view: SaasCredentialView,
+): { label: string; tone: "warn" | "idle" } | null {
+  const expiry = view.credentialExpiry;
+  if (!expiry) return null;
+  const days = expiry.daysRemaining;
+  switch (expiry.status) {
+    case "VALID":
+      return null;
+    case "EXPIRY_UNKNOWN":
+      return {
+        label:
+          "No expiry date recorded — Droplet can't warn you before this credential stops working.",
+        tone: "idle",
+      };
+    case "EXPIRING_SOON":
+      return {
+        label: `Expires in ${days} day${days === 1 ? "" : "s"} — create a replacement and paste it in.`,
+        tone: "warn",
+      };
+    case "EXPIRED":
+      return {
+        label: `Expired ${Math.abs(days ?? 0)} day${Math.abs(days ?? 0) === 1 ? "" : "s"} ago — every call is being refused.`,
+        tone: "warn",
+      };
+  }
+}
+
+/**
+ * WARP-2518 — whether this provider's card offers Disconnect.
+ *
+ * The mirror of `ConnectorCard`'s rule, over `SaasConnectionState` instead of
+ * `IntegrationStatus`, and deliberately NOT over `hasCredentials`: that is an
+ * `every()` over the declared secret fields, so a provider with two declared
+ * and one stored answers `false` while a live key sits on the row — the exact
+ * confusion WARP-2489 removed from the state line, which would come straight
+ * back if the button that PURGES the key were hidden by it.
+ *
+ * `NOT_CONFIGURED` has nothing to disconnect. A `DISABLED` row the box says is
+ * already purged has nothing left either, and offering it would contradict the
+ * "credential removed" line the same card is rendering.
+ */
+export function offersDisconnect(view: SaasCredentialView): boolean {
+  if (view.state === "NOT_CONFIGURED") return false;
+  if (view.state === "DISABLED" && view.credentialsPurged === true) return false;
+  return true;
+}
+
 function ProviderForm({
   view,
   status,
   onSave,
+  onDisconnected,
 }: {
   view: SaasCredentialView;
   status: Status;
@@ -151,6 +227,10 @@ function ProviderForm({
    *  `status` keeps the clearing tied to THIS submit, not to whatever the
    *  shared status happened to be when the component next rendered. */
   onSave: (provider: string, fields: Record<string, string>) => Promise<boolean>;
+  /** Fired after the box confirmed a disconnect — the panel answers by
+   *  re-reading, which is what refreshes `credentialsPurged` and the state
+   *  line derived from it. */
+  onDisconnected: () => void;
 }) {
   // Non-secret values pre-fill from the server; secrets start empty, always.
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
@@ -166,6 +246,7 @@ function ProviderForm({
   const busy = status.kind === "saving" && status.provider === view.provider;
   const justSaved = status.kind === "saved" && status.provider === view.provider;
   const stateCopy = stateCopyFor(view);
+  const expiryCopy = expiryCopyFor(view);
 
   async function submit() {
     const fields: Record<string, string> = {};
@@ -225,6 +306,32 @@ function ProviderForm({
         </span>
       </div>
 
+      {expiryCopy && (
+        <p
+          className={`type-caption-1 ${expiryCopy.tone === "warn" ? "text-system-red" : ""}`}
+          style={expiryCopy.tone === "idle" ? { color: "var(--text-muted)" } : undefined}
+          data-testid={`expiry-${view.provider}`}
+        >
+          {expiryCopy.label}
+        </p>
+      )}
+
+      {/* WARP-2650 — the click-path, at the moment it is needed. This page asks
+          a person to go to a vendor console and come back with a value, and it
+          was the one descriptor-rendering surface that could not link the guide
+          the descriptor already declares. The hub tile and the connect wizard
+          both do (WARP-2342); an MCP track has neither. */}
+      {view.setupGuideHref && (
+        <a
+          className="type-caption-1 underline"
+          style={{ color: "var(--brand)" }}
+          href={view.setupGuideHref}
+          data-testid={`guide-${view.provider}`}
+        >
+          How to create this credential
+        </a>
+      )}
+
       {view.fields.length === 0 ? (
         <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
           This connector needs no credentials.
@@ -279,6 +386,21 @@ function ProviderForm({
           </span>
         )}
       </div>
+
+      {/* WARP-2518 — the far side of the page. This is the one surface where a
+          credential is handed over, so it is the one where ADR-041 §2's
+          promise that disconnecting REMOVES it is most owed a control. Below
+          Save and behind its own confirmation: the two actions are opposites
+          and must not be adjacent buttons. */}
+      {offersDisconnect(view) && (
+        <div className="pt-3" style={{ borderTop: "1px solid var(--border)" }}>
+          <DisconnectControl
+            provider={view.provider}
+            displayName={view.displayName}
+            onDisconnected={onDisconnected}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -362,6 +484,13 @@ function SaasCredentialsPanel() {
             view={view}
             status={status}
             onSave={handleSave}
+            // WARP-2518 — re-read rather than patch the row in place. The
+            // disconnect response is an `IntegrationConnection`, a different
+            // shape from the `SaasCredentialView` this page renders, and
+            // hand-mapping one onto the other is how the two surfaces would
+            // come to disagree about `credentialsPurged`. Only the box derives
+            // that fact; the page asks it again.
+            onDisconnected={() => void load()}
           />
         ))
       )}

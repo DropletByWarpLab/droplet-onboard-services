@@ -57,7 +57,7 @@
  *     use `fileURLToPath(import.meta.url)`, NOT `new URL(…).pathname`.
  */
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 
 const here = __dirname;
 
@@ -103,14 +103,45 @@ assertAnchor(
   "monorepo root (a package.json declaring `workspaces`)",
 );
 
+/**
+ * Anchoring the roots is only half the contract. `resolve(ROOT, relative)`
+ * walks straight back out of ROOT for a `../` argument, and an ABSOLUTE
+ * argument discards ROOT altogether — so `repoPath("../shared_brain/…")` reads
+ * a tree this repo does not own and the caller then asserts a source contract
+ * about it. That is the walk-up failure this helper exists to remove, reached
+ * through a different door, and the `process.cwd(` guard cannot see it because
+ * such a call contains no `process.cwd(`.
+ *
+ * So resolution is contained, not just anchored: the result must live strictly
+ * BELOW the root. `ROOT + sep` rather than a bare `startsWith(ROOT)`, so a
+ * sibling directory whose name merely begins with the root's (`…/repo-evil`)
+ * is still outside. Throw with both paths — a test that wanted a file outside
+ * the tree has a design problem, and a silent wrong-tree read is what we are
+ * here to stop.
+ */
+function contain(root: string, resolved: string, what: string, relative: string): string {
+  if (!resolved.startsWith(root + sep)) {
+    throw new Error(
+      `test-paths: ${JSON.stringify(relative)} resolves to ${resolved}, which is ` +
+        `outside the ${what} (${root}). Tests may only read files this repo owns.`,
+    );
+  }
+  return resolved;
+}
+
 /** An absolute path inside the dashboard package, e.g. `"src/app/globals.css"`. */
 export function packagePath(relative: string): string {
-  return resolve(PACKAGE_ROOT, relative);
+  return contain(
+    PACKAGE_ROOT,
+    resolve(PACKAGE_ROOT, relative),
+    "web-dashboard package",
+    relative,
+  );
 }
 
 /** An absolute path inside the monorepo, e.g. `"docs/integrations"`. */
 export function repoPath(relative: string): string {
-  return resolve(REPO_ROOT, relative);
+  return contain(REPO_ROOT, resolve(REPO_ROOT, relative), "monorepo root", relative);
 }
 
 /**

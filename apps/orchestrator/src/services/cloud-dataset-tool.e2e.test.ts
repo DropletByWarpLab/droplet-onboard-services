@@ -27,6 +27,10 @@
  * check are both promises about requests that must NOT happen".
  */
 
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect, vi } from "vitest";
 import { StripeConnector, STRIPE_PROVIDER } from "@droplet/erp-connector";
 import { TOOLS, CLOUD_QUERY_DATASETS } from "@droplet/tools-core";
