@@ -20,9 +20,9 @@
 #   can silently diverge gets an explicit drift gate, not trust.
 #
 # WHAT IT ENFORCES
-#   1. Every tracked `*.test.sh` is named by at least one workflow `run:` line
-#      (directly, or by a glob in a loop such as
-#      `for t in tests/openwrt-attach-*.test.sh`), OR carries a
+#   1. Every tracked shell test suite is EXECUTED by at least one workflow
+#      `run:` step — `bash <suite>`, `./<suite>`, or a `for … in <list>` whose
+#      loop variable the same block then runs — OR carries a
 #      `# ci: developer-only — <reason>` line in its header.
 #   2. `scripts/test/pytest/` is executed by some workflow (it is run as a
 #      directory, so individual files need no separate wiring).
@@ -31,10 +31,17 @@
 #      suites, so the manual-dispatch copy cannot drift from the PR-blocking
 #      one.
 #
-# A `paths:` entry does NOT count as a runner. That distinction is the whole
-# point: `tests/mqtt-mtls.integration.test.sh` is listed in setup-tests.yml's
-# `paths:` (it makes another suite's anti-drift grep re-run) while nothing has
-# ever executed it.
+# BEING NAMED IS NOT BEING RUN. Two ways a suite can be mentioned all over
+# .github/workflows/ and still never execute an assertion, both of which this
+# gate rejects:
+#   * a `paths:` entry. `tests/mqtt-mtls.integration.test.sh` is listed in
+#     setup-tests.yml's `paths:` (it makes another suite's anti-drift grep
+#     re-run) while nothing has ever executed it.
+#   * a lint pass — `shellcheck <suite>`, `bash -n <suite>`. Those steps are
+#     real and worth having; this repo runs several of them beside the runner
+#     steps. They just are not runs, and a gate that accepted them would go
+#     green the day someone replaced the `bash` line with the `shellcheck`
+#     one.
 #
 # TO SILENCE A SUITE DELIBERATELY, put this in its header (first 30 lines):
 #   # ci: developer-only — <why it cannot run on a runner>
@@ -56,41 +63,205 @@ dev()  { printf '\033[33m DEV\033[0m %s\n' "$*"; }
 WF_DIR=".github/workflows"
 
 # ---------------------------------------------------------------------------
-# Executable mentions: every workflow line that could actually RUN something.
+# Runner targets: the paths a workflow step actually EXECUTES.
 #
-# Dropped, in order: full-line comments; trailing ` # …` comments (a shell
-# comment inside a `run:` block, and a YAML one everywhere else); `- name:` /
-# `- uses:` step headers; and bare YAML list items, which is what a `paths:` or
-# dorny/paths-filter entry looks like. What survives is `run:` content.
+# Naming a suite is not running it. `shellcheck tests/x.test.sh` and
+# `bash -n tests/x.test.sh` both name the file and neither runs one assertion
+# in it — and this repo has real lint-only steps sitting right beside real
+# runner steps (droplet-watchdog-tests.yml shellchecks
+# scripts/host/usr-local-sbin/droplet-net-selfheal two lines above the step
+# that runs that backstop's suite). Under a plain substring match the runner
+# line could be swapped for the lint line and this gate would stay green, so
+# the audit is driven off a parse instead: walk every `run:` block and keep
+# only paths that appear as the target of an interpreter (bash/sh/dash/zsh/
+# ksh, minus `-n` and `-c`, neither of which executes a named file) or as a
+# `./…` / `/…` invocation.
+#
+# Loop lists get the same treatment, and only the same treatment: the items
+# of `for t in <list>; do` count when — and only when — the same block goes
+# on to execute "$t". `for f in <list>; do shellcheck "$f"; done` harvests
+# nothing. That arm is what made this gate trivially widenable before: glob
+# patterns were scraped from the whole mentions file and applied to every
+# suite, so one well-meant lint line anywhere under .github/workflows/ could
+# mark every suite in a directory as wired.
+#
+# A `paths:` entry has never counted and still does not — it is not a `run:`
+# block. `tests/mqtt-mtls.integration.test.sh` is listed in setup-tests.yml's
+# `paths:` (it makes another suite's anti-drift grep re-run) while nothing
+# has ever executed it.
 # ---------------------------------------------------------------------------
-mentions_file="$(mktemp)"
-trap 'rm -f "$mentions_file"' EXIT
+runners_file="$(mktemp)"
+trap 'rm -f "$runners_file"' EXIT
 
-# shellcheck disable=SC2016  # the $ in the character class is literal, not a var
-sed -E \
-  -e 's/^[[:space:]]*#.*$//' \
-  -e 's/[[:space:]]#[[:space:]].*$//' \
-  "$WF_DIR"/*.yml \
-  | grep -vE '^[[:space:]]*-?[[:space:]]*(name|uses):' \
-  | grep -vE '^[[:space:]]*-[[:space:]]*"?[A-Za-z0-9_./*@{}$()-]+"?[[:space:]]*$' \
-  | grep -F '.sh' > "$mentions_file" || true
+unquote() {
+  local s="$1"
+  s="${s#\"}"; s="${s%\"}"
+  s="${s#\'}"; s="${s%\'}"
+  printf '%s' "$s"
+}
 
-# Glob patterns that appear in a runner position, e.g.
-# `for t in tests/openwrt-attach-*.test.sh; do`.
-glob_patterns=()
-while IFS= read -r pat; do
-  [ -n "$pat" ] && glob_patterns+=("$pat")
-done < <(grep -oE '[A-Za-z0-9_./-]*\*[A-Za-z0-9_./*-]*\.test\.sh' "$mentions_file" | sort -u)
+# One command between `;`, `&&`, `||`, `|` or `&`. Prints the path it runs,
+# if it runs one; records loop variables that get executed.
+handle_segment() {
+  local seg="$1"
+  local -a tok=()
+  read -r -a tok <<<"$seg" || true
+  [ "${#tok[@]}" -gt 0 ] || return 0
 
-is_wired() {
-  local suite="$1" pat
-  grep -qF -- "$suite" "$mentions_file" && return 0
-  for pat in ${glob_patterns+"${glob_patterns[@]}"}; do
-    # shellcheck disable=SC2254  # $pat is a glob on purpose
-    case "$suite" in
-      $pat) return 0 ;;
+  # Skip the words that can precede a command without being one.
+  local i=0
+  while [ "$i" -lt "${#tok[@]}" ]; do
+    case "${tok[$i]}" in
+      if|then|elif|else|while|until|do|sudo|time|command|exec|eval|'!'|'{'|'(')
+        i=$((i + 1)) ;;
+      [A-Za-z_]*=*) i=$((i + 1)) ;;   # a leading VAR=value assignment
+      *) break ;;
     esac
   done
+  [ "$i" -lt "${#tok[@]}" ] || return 0
+
+  local cmd="${tok[$i]}"
+  case "${cmd##*/}" in
+    for)
+      # `for VAR in ITEM …` — remembered, emitted later only if "$VAR" runs.
+      [ "${tok[$((i + 2))]:-}" = "in" ] || return 0
+      local var list="" j=$((i + 3))
+      var="${tok[$((i + 1))]}"
+      while [ "$j" -lt "${#tok[@]}" ]; do
+        [ "${tok[$j]}" = "do" ] && break
+        list="$list $(unquote "${tok[$j]}")"
+        j=$((j + 1))
+      done
+      loop_names+=("$var")
+      loop_lists+=("$list")
+      ;;
+    bash|sh|dash|zsh|ksh)
+      local target="" noexec=0 j=$((i + 1))
+      while [ "$j" -lt "${#tok[@]}" ]; do
+        case "${tok[$j]}" in
+          --) target="${tok[$((j + 1))]:-}"; break ;;
+          --*) : ;;                     # long options take no script argument
+          -*[nc]*) noexec=1 ;;          # -n syntax-checks, -c runs a string
+          -*) : ;;
+          *) target="${tok[$j]}"; break ;;
+        esac
+        j=$((j + 1))
+      done
+      [ "$noexec" -eq 0 ] || return 0
+      [ -n "$target" ] || return 0
+      target="$(unquote "$target")"
+      case "$target" in
+        '$'*)
+          target="${target#\$}"; target="${target#\{}"; target="${target%\}}"
+          exec_vars="$exec_vars$target " ;;
+        *) printf '%s\n' "$target" ;;
+      esac
+      ;;
+    *)
+      case "$cmd" in
+        ./*|/*) case "$cmd" in *.sh) printf '%s\n' "$(unquote "$cmd")" ;; esac ;;
+      esac
+      ;;
+  esac
+}
+
+# One `run:` block, its physical lines in block_lines.
+emit_block() {
+  local -a loop_names=() loop_lists=() logical=() segs=()
+  local exec_vars=" " joined="" line seg item i
+  [ "${#block_lines[@]}" -gt 0 ] || return 0
+
+  # Fold backslash continuations, so a multi-line `for t in … \` list is one
+  # logical command.
+  for line in "${block_lines[@]}"; do
+    line="${line%"${line##*[![:space:]]}"}"
+    if [ "${line: -1}" = '\' ]; then
+      joined="$joined${line%\\} "
+      continue
+    fi
+    logical+=("$joined$line")
+    joined=""
+  done
+  [ -z "$joined" ] || logical+=("$joined")
+
+  for line in ${logical+"${logical[@]}"}; do
+    IFS=';&|' read -r -a segs <<<"$line" || true
+    for seg in ${segs+"${segs[@]}"}; do
+      handle_segment "$seg"
+    done
+  done
+
+  i=0
+  while [ "$i" -lt "${#loop_names[@]}" ]; do
+    case "$exec_vars" in
+      *" ${loop_names[$i]} "*)
+        for item in ${loop_lists[$i]}; do
+          printf '%s\n' "$item"
+        done ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
+harvest_runner_targets() {
+  local f raw rest ws in_block key_col
+  # A YAML block scalar header: |, |-, |+, >, >-, >+, |2 …
+  local block_scalar_re='^[|>][0-9]*[-+]?$'
+  for f in "$WF_DIR"/*.yml; do
+    in_block=0
+    key_col=0
+    block_lines=()
+    # Same comment stripping as everywhere else here: a whole-line `#` (YAML
+    # or shell) and a trailing ` # …`.
+    while IFS= read -r raw; do
+      if [ "$in_block" -eq 1 ]; then
+        if [ -z "${raw//[[:space:]]/}" ]; then continue; fi
+        ws="${raw%%[![:space:]]*}"
+        if [ "${#ws}" -gt "$key_col" ]; then
+          block_lines+=("$raw")
+          continue
+        fi
+        in_block=0
+        emit_block
+      fi
+      if [[ "$raw" =~ ^([[:space:]]*(-[[:space:]]+)?)run:[[:space:]]*(.*)$ ]]; then
+        key_col="${#BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[3]}"
+        rest="${rest%"${rest##*[![:space:]]}"}"
+        block_lines=()
+        if [ -z "$rest" ] || [[ "$rest" =~ $block_scalar_re ]]; then
+          in_block=1
+        else
+          block_lines=("$rest")
+          emit_block
+        fi
+      fi
+    done < <(sed -E -e 's/^[[:space:]]*#.*$//' -e 's/[[:space:]]#[[:space:]].*$//' "$f")
+    if [ "$in_block" -eq 1 ]; then emit_block; fi
+  done
+}
+
+block_lines=()
+harvest_runner_targets | sort -u > "$runners_file"
+
+if [ ! -s "$runners_file" ]; then
+  note "no executed script found in $WF_DIR — the harvest is broken, not the tree"
+  exit 1
+fi
+
+is_wired() {
+  local suite="$1" target
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    [ "$target" = "$suite" ] && return 0
+    case "$target" in
+      *'*'*)
+        # shellcheck disable=SC2254  # $target is a glob on purpose
+        case "$suite" in
+          $target) return 0 ;;
+        esac ;;
+    esac
+  done < "$runners_file"
   return 1
 }
 
@@ -111,7 +282,7 @@ echo "============================="
 # would report "everything is wired" — the exact silent-pass this file exists
 # to prevent. Materialise the list first and refuse to continue if it is empty.
 suites_file="$(mktemp)"
-trap 'rm -f "$mentions_file" "$suites_file"' EXIT
+trap 'rm -f "$runners_file" "$suites_file"' EXIT
 if ! git ls-files ':(glob)**/*.test.sh' | sort > "$suites_file"; then
   note "git ls-files failed — cannot enumerate test suites; refusing to pass"
   exit 1
@@ -178,10 +349,14 @@ if [ "$fail" -ne 0 ]; then
   cat >&2 <<'EOF'
 Test-wiring check FAILED.
 
-Every tracked *.test.sh must either:
-  1. be named by a workflow `run:` step — put it on the existing job whose
-     `paths:`/`detect` filter already covers the scripts it exercises, so it
-     costs seconds on a job that was going to run anyway; or
+Every tracked shell test suite must either:
+  1. be EXECUTED by a workflow `run:` step — `bash <suite>`, `./<suite>`, or a
+     `for … in <list>` whose loop variable the block runs. Put it on the
+     existing job whose `paths:`/`detect` filter already covers the scripts it
+     exercises, so it costs seconds on a job that was going to run anyway.
+     A `shellcheck` or `bash -n` pass over the file does NOT count: neither
+     runs an assertion, so neither can hold the guard up. Nor does a `paths:`
+     entry; or
   2. carry `# ci: developer-only — <reason>` in its first 30 lines, for suites
      that need a live Docker daemon, root, real block devices, or minutes of
      image pulls.
