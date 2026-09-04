@@ -20,13 +20,28 @@
  */
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { PACKAGE_ROOT, REPO_ROOT, packagePath, repoPath } from "./helpers/test-paths";
 
 const SRC = packagePath("src");
 
 /** This file names the forbidden call in its own error message, which is code. */
 const SELF = "src/__tests__/test-paths.guard.test.ts";
+
+/**
+ * `SELF`, and every path this guard reports, is written with `/` — the way the
+ * repo names files everywhere else. `path.relative` answers in the PLATFORM
+ * separator, so on Windows it returns `src\__tests__\…` and a raw `!==`
+ * against `SELF` never matches. The guard then scans its own source, finds the
+ * `"process.cwd("` literal it tests FOR (a string in code, which `code()`
+ * rightly keeps), and reports itself: a deterministic red for every developer
+ * on the repo's primary dev platform, invisible to CI because the
+ * `node / web-dashboard` leg is ubuntu-only. Normalise on the way out, once,
+ * so the comparison and the message are both platform-independent.
+ */
+function rel(full: string): string {
+  return relative(PACKAGE_ROOT, full).split(sep).join("/");
+}
 
 /**
  * Comments are not the offense — several of the suites this ticket fixed
@@ -73,9 +88,9 @@ describe("test path resolution is anchored to the owning file", () => {
    */
   it("no test file resolves a path from the cwd", () => {
     const offenders = testFiles(SRC)
-      .filter((f) => relative(PACKAGE_ROOT, f) !== SELF)
+      .filter((f) => rel(f) !== SELF)
       .filter((f) => code(readFileSync(f, "utf8")).includes("process.cwd("))
-      .map((f) => relative(PACKAGE_ROOT, f));
+      .map(rel);
 
     expect(
       offenders,
