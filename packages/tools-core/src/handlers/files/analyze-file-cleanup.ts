@@ -42,6 +42,7 @@
  * {@link DEGRADED_LISTING_CAVEAT}. Results that the degrade could explain
  * say so rather than reporting a clean drive during an outage.
  */
+import { posix as posixPath } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 import { ncHeaders } from "./_render.js";
@@ -52,12 +53,11 @@ import {
   ORGANIZE_RULES,
   categoryOf,
   clampInt,
-  destinationFolderFor,
   duplicateGroups,
   humanBytes,
   isOrganizeRule,
-  isDotfile,
   junkReason,
+  planOrganize,
   walkTree,
   type FileCategory,
 } from "./_cleanup.js";
@@ -178,14 +178,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const duplicates = duplicateGroups(files);
   const reclaimable = duplicates.reduce((n, g) => n + g.size * g.duplicates.length, 0);
 
-  // The plan, from the same helper organize_files uses, so the preview and
-  // the write cannot disagree about what would move.
-  const planFiles = walk.entries.filter(
-    (e) => !e.isDirectory && !isDotfile(e.name) && parentOf(e.path) === v.path,
-  );
+  // The plan, from THE helper organize_files uses — planOrganize itself, not
+  // a restatement of its eligibility rule — so the preview and the write
+  // cannot disagree about what would move (PR #1985 review: the first cut
+  // re-derived eligibility by hand and only shared the folder naming).
+  // Uncapped here: the preview reports the whole job, and says below when
+  // it exceeds one run.
+  const plan = planOrganize(v.path, walk.entries, rule, Number.POSITIVE_INFINITY);
   const movesByFolder = new Map<string, number>();
-  for (const f of planFiles) {
-    const folder = destinationFolderFor(f, rule);
+  for (const move of plan.moves) {
+    const folder = posixPath.basename(move.folder);
     movesByFolder.set(folder, (movesByFolder.get(folder) ?? 0) + 1);
   }
   const rankedFolders = [...movesByFolder.entries()].sort((a, b) => b[1] - a[1]);
@@ -207,11 +209,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       : {
           rule,
           applicable: true,
-          files_to_move: planFiles.length,
+          files_to_move: plan.moves.length,
           moves_by_folder,
           folders_shown: Object.keys(moves_by_folder).length,
           folders_total: rankedFolders.length,
-          ...(planFiles.length > ORGANIZE_MAX_MOVES
+          ...(plan.moves.length > ORGANIZE_MAX_MOVES
             ? { note_partial: `organize_files moves up to ${ORGANIZE_MAX_MOVES} files per call, so this needs more than one run.` }
             : {}),
           note: "Only files directly inside this folder move; subfolders and hidden files stay put. Apply with organize_files.",
@@ -271,13 +273,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       ...(walk.possiblyDegraded ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
-}
-
-/** Parent of a posix path, without pulling in node:path for one call. */
-function parentOf(p: string): string {
-  const i = p.lastIndexOf("/");
-  if (i <= 0) return "/";
-  return p.slice(0, i);
 }
 
 const tool: Tool = {

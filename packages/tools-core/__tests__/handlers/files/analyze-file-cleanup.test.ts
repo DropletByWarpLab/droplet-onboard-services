@@ -9,6 +9,7 @@ import analyzeFileCleanup, {
   ANALYZE_MAX_ENTRIES,
   SAMPLE,
 } from "../../../src/handlers/files/analyze-file-cleanup.js";
+import organizeFiles from "../../../src/handlers/files/organize-files.js";
 import type { ToolContext } from "../../../src/types.js";
 
 /**
@@ -303,6 +304,41 @@ describe("analyze_file_cleanup", () => {
     expect(d.organize_plan.applicable).toBe(false);
     expect(d.organize_plan.moves_by_folder).toBeUndefined();
     expect(d.organize_plan.note).toMatch(/does not act on the top-level folder/);
+  });
+
+  // PR #1985 review: the preview must come from planOrganize itself, not a
+  // restatement of its eligibility rule, so the two cannot drift. Pinned by
+  // running both tools on one fixture that holds a file already in place
+  // under a destination folder (which neither may count) and a hidden file.
+  it("previews exactly the moves organize_files makes, on a fixture with a file already in place", async () => {
+    const tree: Record<string, Row[] | number> = {
+      "/Downloads": [
+        row("/Downloads/b.pdf", { mimeType: "application/pdf" }),
+        row("/Downloads/c.jpg", { mimeType: "image/jpeg" }),
+        row("/Downloads/.hidden"),
+        row("/Downloads/Documents", { isDirectory: true, size: 0, mimeType: null }),
+      ],
+      "/Downloads/Documents": [row("/Downloads/Documents/a.pdf", { mimeType: "application/pdf" })],
+    };
+    const preview = await analyzeFileCleanup.handler({ path: "/Downloads", max_depth: 1 }, ctxWith(treeGet(tree)));
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+    const plan = (preview.data as any).organize_plan;
+
+    const post = vi.fn(async (_url: string, _body?: unknown, _opts?: Opts) => new Response("{}", { status: 200 }));
+    const write = await organizeFiles.handler({ path: "/Downloads" }, ctxWith(treeGet(tree), { post }));
+    expect(write.ok).toBe(true);
+    if (!write.ok) return;
+    const moves = post.mock.calls.filter((c) => c[0] === "/move").map((c) => c[1] as { from: string; to: string });
+    const byFolder: Record<string, number> = {};
+    for (const m of moves) {
+      const folder = m.to.split("/").slice(-2, -1)[0];
+      byFolder[folder] = (byFolder[folder] ?? 0) + 1;
+    }
+    expect(plan.files_to_move).toBe(moves.length);
+    expect(plan.moves_by_folder).toEqual(byFolder);
+    // a.pdf is already in place and .hidden is left alone — by BOTH tools.
+    expect(byFolder).toEqual({ Documents: 1, Images: 1 });
   });
 
   it("reports the full job even when it exceeds one organize_files run", async () => {
