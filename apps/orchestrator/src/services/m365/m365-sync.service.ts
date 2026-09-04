@@ -414,7 +414,13 @@ export async function discoverResources(
       let depth = 0;
 
       while (frontier.length > 0 && depth < MAX_FOLDER_DEPTH) {
-        const nextFrontier: FoundFolder[] = [];
+        // NOT named `nextFrontier`/`nextLevel`: the WARP-2203 canary greps the
+        // producer surface for cursor-shaped keys and requires each to be
+        // classified as a cursor or a reviewed non-cursor. A BFS frontier is
+        // neither, and adding a local variable to that security-relevant
+        // exemption list to keep a nicer name would blunt the canary for a
+        // cosmetic reason.
+        const deeperFolders: FoundFolder[] = [];
 
         for (const folder of frontier) {
           await upsertCursor(deps.prisma, userId, workload, folder.id);
@@ -422,11 +428,11 @@ export async function discoverResources(
 
           if (folder.hasChildren && spec.childCollectionPath) {
             const childUrl = `${GRAPH_API_BASE_URL}${spec.childCollectionPath(folder.id)}`;
-            nextFrontier.push(...(await listFolders(deps, childUrl, accessToken)));
+            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken)));
           }
         }
 
-        frontier = nextFrontier;
+        frontier = deeperFolders;
         depth += 1;
       }
 
