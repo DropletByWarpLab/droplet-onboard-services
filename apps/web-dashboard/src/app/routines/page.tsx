@@ -259,6 +259,10 @@ function RoutineDetail({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Run-now was refused with 409: the server wants an explicit yes. Without
+  // this the routines the gate exists to protect could never be run from
+  // here — every click re-showed the same message (review, WARP-2671).
+  const [runConfirm, setRunConfirm] = useState(false);
 
   const catalog = useMemo(
     () => new Map(tools.map((t) => [t.name, t])),
@@ -298,13 +302,16 @@ function RoutineDetail({
       const { status, body } = await runRoutine(routine.slug, confirm);
       if (status === 409) {
         // The server's own destructive-spec gate. Surface its words rather
-        // than inventing copy, then let the person decide.
+        // than inventing copy, then let the person decide — with a button
+        // that re-POSTs `?confirm=true`, which is what the 409 asks for.
         const detail =
           (body as { detail?: string }).detail ??
           "This routine makes changes that are hard to undo.";
         setNotice(`${detail}`);
+        setRunConfirm(true);
         return;
       }
+      setRunConfirm(false);
       if (status >= 400) {
         setNotice((body as { error?: string }).error ?? `Run failed (${status})`);
         return;
@@ -326,7 +333,15 @@ function RoutineDetail({
           <h3 style={{ fontSize: 13 }}>What it does</h3>
         </div>
         <p style={{ margin: 0 }}>{readbackSentence(readback)}</p>
-        <p className="muted" style={{ margin: "4px 0 0" }}>
+        <p
+          className="muted"
+          style={{ margin: "4px 0 0" }}
+          title={
+            readback.writeTools.length > 0
+              ? `Changes things through: ${readback.writeTools.join(", ")}`
+              : undefined
+          }
+        >
           {readback.impactLine}
         </p>
       </div>
@@ -351,7 +366,24 @@ function RoutineDetail({
       ) : null}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {routine.status === "live" ? (
+        {routine.status === "live" && runConfirm ? (
+          <>
+            <button type="button" className="btn" disabled={busy} onClick={() => run(true)}>
+              <Play size={14} aria-hidden /> Run anyway
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={busy}
+              onClick={() => {
+                setRunConfirm(false);
+                setNotice(null);
+              }}
+            >
+              Cancel
+            </button>
+          </>
+        ) : routine.status === "live" ? (
           <button type="button" className="btn" disabled={busy} onClick={() => run()}>
             <Play size={14} aria-hidden /> Run now
           </button>
@@ -445,6 +477,22 @@ function SchedulePanel({
       ? (Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC")
       : "UTC";
 
+  // Every mutation in this panel routes its failure into `err`; a rejected
+  // request must never be an unhandled rejection with nothing on screen
+  // (review, WARP-2671).
+  async function mutate(work: () => Promise<unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await work();
+      onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function add() {
     setBusy(true);
     setErr(null);
@@ -484,21 +532,19 @@ function SchedulePanel({
               <button
                 type="button"
                 className="btn ghost"
-                onClick={async () => {
-                  await updateRoutineSchedule(slug, s.id, { enabled: !s.enabled });
-                  onChanged();
-                }}
+                disabled={busy}
+                onClick={() =>
+                  mutate(() => updateRoutineSchedule(slug, s.id, { enabled: !s.enabled }))
+                }
               >
                 {s.enabled ? "Pause" : "Resume"}
               </button>
               <button
                 type="button"
                 className="btn ghost"
+                disabled={busy}
                 aria-label={`Remove schedule ${describeSchedule(s)}`}
-                onClick={async () => {
-                  await deleteRoutineSchedule(slug, s.id);
-                  onChanged();
-                }}
+                onClick={() => mutate(() => deleteRoutineSchedule(slug, s.id))}
               >
                 <CircleSlash size={13} aria-hidden /> Remove
               </button>
@@ -538,7 +584,6 @@ function SchedulePanel({
           >
             Cancel
           </button>
-          {err ? <span className="muted">{err}</span> : null}
         </div>
       ) : (
         <button
@@ -550,6 +595,11 @@ function SchedulePanel({
           Add a schedule
         </button>
       )}
+      {err ? (
+        <p className="muted" role="status" style={{ margin: "6px 0 0" }}>
+          {err}
+        </p>
+      ) : null}
     </div>
   );
 }

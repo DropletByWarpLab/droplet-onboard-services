@@ -227,6 +227,51 @@ describe("/routines — turning one on", () => {
       await screen.findByText(/writes and is not reversible/),
     ).toBeInTheDocument();
   });
+
+  it("a 409 is not a dead end — Run anyway re-POSTs with confirm=true", async () => {
+    setRoutines([routine({ status: "live", writes: true, reversible: false })]);
+    runRoutineMock
+      .mockResolvedValueOnce({
+        status: 409,
+        body: { error: "confirmation_required", detail: "hard to undo" },
+      })
+      .mockResolvedValueOnce({ status: 201, body: { id: "run-1" } });
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Run now/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Run anyway/ }));
+    await waitFor(() =>
+      expect(runRoutineMock).toHaveBeenLastCalledWith("daily-report", true),
+    );
+    expect(await screen.findByText(/Run finished/)).toBeInTheDocument();
+    // Confirmed once; the next press is a fresh Run now, not a standing yes.
+    expect(screen.queryByRole("button", { name: /Run anyway/ })).not.toBeInTheDocument();
+  });
+
+  it("Cancel steps back from a 409 without running", async () => {
+    setRoutines([routine({ status: "live", writes: true, reversible: false })]);
+    runRoutineMock.mockResolvedValue({
+      status: 409,
+      body: { error: "confirmation_required", detail: "hard to undo" },
+    });
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Run now/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: /Run now/ })).toBeInTheDocument();
+    expect(runRoutineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a failed promote instead of swallowing it", async () => {
+    setRoutines([routine({ status: "draft" })]);
+    setRoutineStatusMock.mockRejectedValue(new Error("Only an owner can turn this on"));
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /Drafts/ }));
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Turn on/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Yes, turn it on/ }));
+    expect(await screen.findByText(/Only an owner can turn this on/)).toBeInTheDocument();
+  });
 });
 
 describe("/routines — schedules", () => {
@@ -280,6 +325,43 @@ describe("/routines — schedules", () => {
         enabled: false,
       }),
     );
+  });
+
+  it("surfaces a failed pause instead of failing silently", async () => {
+    setRoutines([routine()]);
+    useRoutineSchedulesMock.mockReturnValue({
+      schedules: [sched],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    updateScheduleMock.mockRejectedValue(new Error("The box did not answer"));
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pause" }));
+    expect(await screen.findByText(/The box did not answer/)).toBeInTheDocument();
+    // The button comes back — a failed request is not a stuck panel.
+    expect(await screen.findByRole("button", { name: "Pause" })).toBeEnabled();
+  });
+
+  it("removes a schedule, and says so when that fails", async () => {
+    setRoutines([routine()]);
+    useRoutineSchedulesMock.mockReturnValue({
+      schedules: [sched],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    deleteScheduleMock
+      .mockRejectedValueOnce(new Error("Schedule not found"))
+      .mockResolvedValueOnce(undefined);
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Remove schedule/ }));
+    expect(await screen.findByText(/Schedule not found/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /Remove schedule/ }));
+    await waitFor(() =>
+      expect(deleteScheduleMock).toHaveBeenLastCalledWith("daily-report", "sch-1"),
+    );
+    expect(deleteScheduleMock).toHaveBeenCalledTimes(2);
   });
 
   it("adds a schedule as an rrule the orchestrator can actually fire", async () => {
