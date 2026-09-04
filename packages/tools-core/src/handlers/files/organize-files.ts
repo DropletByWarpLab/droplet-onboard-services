@@ -34,11 +34,13 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 import { ncHeaders } from "./_render.js";
 import {
+  CLEANUP_CONCURRENCY,
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
   ORGANIZE_MAX_MOVES,
   ORGANIZE_RULES,
   isOrganizeRule,
+  mapPool,
   planOrganize,
   readListing,
   unlessAborted,
@@ -105,10 +107,50 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const created: string[] = [];
   /** Destinations this call could not create, with the reason every move into them is skipped. */
   const uncreatable = new Map<string, string>();
-  const moved: Array<{ from: string; to: string }> = [];
   const skipped = [...plan.skipped];
-  let movedCount = 0;
   let aborted = false;
+
+  // Destinations first, a few at a time. The signal is checked at every
+  // dispatch; a cancel here means no move is attempted at all.
+  type MkdirOutcome = "created" | "existed" | "blocked" | "cancelled" | { status: number };
+  const mkdirs = await mapPool(plan.folders, CLEANUP_CONCURRENCY, async (folder): Promise<MkdirOutcome> => {
+    if (ctx.signal.aborted) return "cancelled";
+    // A FILE already sitting where a destination folder needs to be: mkdir
+    // would fail and every move into it would too. Report it once, here,
+    // instead of once per file.
+    if (collidesWithFile.has(folder)) return "blocked";
+    const mk = await unlessAborted(ctx.signal, () =>
+      ctx.http.nextcloud.post("/mkdir", { path: folder }, { headers, signal: ctx.signal }),
+    );
+    if (!mk) return "cancelled";
+    if (!mk.ok) return { status: mk.status };
+    return existingChildren.has(folder) ? "existed" : "created";
+  });
+  plan.folders.forEach((folder, i) => {
+    const o = mkdirs[i];
+    if (o === "cancelled") {
+      aborted = true;
+    } else if (o === "created") {
+      created.push(folder);
+    } else if (o === "blocked") {
+      skipped.push({
+        path: folder,
+        reason: "a file already has this name, so the destination folder cannot be created",
+      });
+      uncreatable.set(folder, "is blocked by a file of the same name");
+    } else if (typeof o === "object") {
+      // A real failure — permissions, quota, a 5xx — not a re-run: the route
+      // answers 200 for "already exists" (see above). Reported once here, and
+      // every move into it is skipped with this reason rather than fired and
+      // then blamed on a name clash (PR #1985 review).
+      const reason = `could not be created (nextcloud returned ${o.status})`;
+      skipped.push({ path: folder, reason });
+      uncreatable.set(folder, reason);
+    }
+  });
+
+  const moved: Array<{ from: string; to: string }> = [];
+  let movedCount = 0;
   /**
    * Planned moves this call never got to, because it was cancelled. NOT the
    * same as skipped: a skipped file has a stated reason and no later run will
@@ -117,58 +159,21 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
    */
   let unattempted = 0;
 
-  for (const folder of plan.folders) {
-    if (ctx.signal.aborted) {
-      aborted = true;
-      break;
-    }
-    // A FILE already sitting where a destination folder needs to be: mkdir
-    // would fail and every move into it would too. Report it once, here,
-    // instead of once per file.
-    if (collidesWithFile.has(folder)) {
-      skipped.push({
-        path: folder,
-        reason: "a file already has this name, so the destination folder cannot be created",
-      });
-      uncreatable.set(folder, "is blocked by a file of the same name");
-      continue;
-    }
-    const mk = await unlessAborted(ctx.signal, () =>
-      ctx.http.nextcloud.post("/mkdir", { path: folder }, { headers, signal: ctx.signal }),
-    );
-    if (!mk) {
-      aborted = true;
-      break;
-    }
-    if (!mk.ok) {
-      // A real failure — permissions, quota, a 5xx — not a re-run: the route
-      // answers 200 for "already exists" (see above). Reported once here, and
-      // every move into it is skipped with this reason rather than fired and
-      // then blamed on a name clash (PR #1985 review).
-      const reason = `could not be created (nextcloud returned ${mk.status})`;
-      skipped.push({ path: folder, reason });
-      uncreatable.set(folder, reason);
-      continue;
-    }
-    if (!existingChildren.has(folder)) created.push(folder);
-  }
-
   if (aborted) {
     unattempted = plan.moves.length;
   } else {
-    for (let i = 0; i < plan.moves.length; i++) {
-      const move = plan.moves[i];
-      if (ctx.signal.aborted) {
-        aborted = true;
-        unattempted = plan.moves.length - i;
-        break;
-      }
+    type MoveOutcome =
+      | { kind: "moved"; to: string }
+      | { kind: "skipped"; reason: string }
+      | { kind: "cut"; reason: string }
+      | { kind: "unattempted" };
+    const outcomes = await mapPool(plan.moves, CLEANUP_CONCURRENCY, async (move): Promise<MoveOutcome> => {
+      if (ctx.signal.aborted) return { kind: "unattempted" };
       // P11 chokepoint: the destination was BUILT here, so it is validated
       // here, next to the call that uses it.
       const dest = validateNcPath(move.to);
       if (!dest.ok || dest.path !== move.to) {
-        skipped.push({ path: move.from, reason: `unsafe destination path (${dest.ok ? "normalized away" : dest.error})` });
-        continue;
+        return { kind: "skipped", reason: `unsafe destination path (${dest.ok ? "normalized away" : dest.error})` };
       }
       const blocked = uncreatable.get(move.folder);
       if (blocked) {
@@ -176,8 +181,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // per file rather than letting them fall into `remaining`, which
         // would read as "a later run will pick these up" when in fact nothing
         // will until the cause is resolved.
-        skipped.push({ path: move.from, reason: `destination ${move.folder} ${blocked}` });
-        continue;
+        return { kind: "skipped", reason: `destination ${move.folder} ${blocked}` };
       }
       const res = await unlessAborted(ctx.signal, () =>
         ctx.http.nextcloud.post(
@@ -189,24 +193,33 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       if (!res) {
         // Cut short mid-flight: the file is in one of the two places, and
         // this layer cannot say which — so it is neither moved nor remaining.
-        aborted = true;
-        unattempted = plan.moves.length - i - 1;
-        skipped.push({
-          path: move.from,
+        return {
+          kind: "cut",
           reason: "cancelled while the move was in flight; it may or may not have moved — check both folders",
-        });
-        break;
+        };
       }
-      if (res.ok) {
+      if (res.ok) return { kind: "moved", to: dest.path };
+      return {
+        kind: "skipped",
+        reason: `move failed (nextcloud returned ${res.status}); the destination may already hold a file with that name`,
+      };
+    });
+    // Fold back into plan order, whichever move answered first.
+    plan.moves.forEach((move, i) => {
+      const o = outcomes[i];
+      if (o.kind === "moved") {
         movedCount++;
-        if (moved.length < RESULT_SAMPLE.moved) moved.push({ from: move.from, to: dest.path });
+        if (moved.length < RESULT_SAMPLE.moved) moved.push({ from: move.from, to: o.to });
+      } else if (o.kind === "skipped") {
+        skipped.push({ path: move.from, reason: o.reason });
+      } else if (o.kind === "cut") {
+        aborted = true;
+        skipped.push({ path: move.from, reason: o.reason });
       } else {
-        skipped.push({
-          path: move.from,
-          reason: `move failed (nextcloud returned ${res.status}); the destination may already hold a file with that name`,
-        });
+        aborted = true;
+        unattempted++;
       }
-    }
+    });
   }
 
   const remaining = plan.remaining + unattempted;

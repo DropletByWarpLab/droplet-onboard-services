@@ -59,8 +59,10 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { validateNcPath } from "./_paths.js";
 import { ncHeaders } from "./_render.js";
 import {
+  CLEANUP_CONCURRENCY,
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
+  mapPool,
   readListing,
   unlessAborted,
   type Listing,
@@ -112,76 +114,78 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
   const headers = ncHeaders(ctx);
 
-  // One listing per distinct parent: cleanup targets cluster by folder, so a
-  // hundred paths usually cost a handful of reads.
-  const listings = new Map<string, Listing>();
-  /** `null` when the read was cut short by the caller's signal. */
-  async function listDir(dir: string): Promise<Listing | null> {
-    const cached = listings.get(dir);
-    if (cached) return cached;
+  // One listing per distinct parent, read a few at a time: cleanup targets
+  // cluster by folder, so a hundred paths usually cost a handful of reads.
+  const parents = [...new Set(targets.map((t) => posixPath.dirname(t)))];
+  const answers = await mapPool(parents, CLEANUP_CONCURRENCY, async (dir): Promise<Listing | null> => {
+    if (ctx.signal.aborted) return null;
     const res = await unlessAborted(ctx.signal, () =>
       ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers, signal: ctx.signal }),
     );
-    if (!res) return null;
-    const listing = await readListing(res);
-    listings.set(dir, listing);
-    return listing;
-  }
+    return res ? readListing(res) : null;
+  });
+  /** `null`: the read was cancelled, before it was sent or while in flight. */
+  const listings = new Map<string, Listing | null>(parents.map((dir, i) => [dir, answers[i]]));
 
-  const deleted: string[] = [];
-  const skipped: Array<{ path: string; reason: string }> = [];
-  const failed: Array<{ path: string; reason: string }> = [];
-  let possiblyDegraded = false;
+  type Outcome =
+    | { kind: "deletable" }
+    | { kind: "deleted" }
+    | { kind: "skipped"; reason: string }
+    | { kind: "failed"; reason: string };
 
-  for (const target of targets) {
-    if (ctx.signal.aborted) {
-      skipped.push({ path: target, reason: "not attempted: the request was cancelled" });
-      continue;
-    }
+  // Resolve every target in its parent's listing, in the order given. This
+  // tool only ever deletes something it has positively seen.
+  const resolved: Outcome[] = targets.map((target) => {
     const parent = posixPath.dirname(target);
-    const listing = await listDir(parent);
-    if (!listing) {
-      skipped.push({ path: target, reason: "not attempted: the request was cancelled" });
-      continue;
-    }
+    const listing = listings.get(parent);
+    if (!listing) return { kind: "skipped", reason: "not attempted: the request was cancelled" };
     if (!listing.ok) {
-      failed.push({
-        path: target,
-        reason: `could not read ${parent} (nextcloud returned ${listing.status})`,
-      });
-      continue;
+      return { kind: "failed", reason: `could not read ${parent} (nextcloud returned ${listing.status})` };
     }
-    if (listing.possiblyDegraded) possiblyDegraded = true;
     const entry = listing.entries.find((e) => e.path === target);
-    if (!entry) {
-      failed.push({ path: target, reason: "not found" });
-      continue;
-    }
+    if (!entry) return { kind: "failed", reason: "not found" };
     if (entry.isDirectory) {
       // No `allow_folders` escape hatch — see the header. Do not name a
       // less-guarded tool here.
-      skipped.push({
-        path: target,
+      return {
+        kind: "skipped",
         reason:
           "is a folder, and this tool deletes files only. Deleting a folder together with everything inside it is not something to do from a bulk list — ask the user to remove it from the Files app, where they can see the contents first.",
-      });
-      continue;
+      };
     }
+    return { kind: "deletable" };
+  });
+
+  // Delete the resolvable ones, a few at a time. The signal is checked at
+  // every dispatch, so a cancel stops the queue; a delete it cuts short in
+  // flight is reported as unknown, never as deleted.
+  const deletable = targets.filter((_, i) => resolved[i].kind === "deletable");
+  const deletes = await mapPool(deletable, CLEANUP_CONCURRENCY, async (target): Promise<Outcome> => {
+    if (ctx.signal.aborted) return { kind: "skipped", reason: "not attempted: the request was cancelled" };
     const res = await unlessAborted(ctx.signal, () =>
       ctx.http.nextcloud.delete(`/?path=${encodeURIComponent(target)}`, { headers, signal: ctx.signal }),
     );
     if (!res) {
-      // Cut short mid-flight: the delete may or may not have reached the
-      // server. Reported as failed, never as deleted.
-      failed.push({
-        path: target,
+      return {
+        kind: "failed",
         reason: "cancelled while the delete was in flight; it may or may not be in the trash — re-run to check",
-      });
-      continue;
+      };
     }
-    if (res.ok) deleted.push(target);
-    else failed.push({ path: target, reason: `nextcloud returned ${res.status}` });
-  }
+    return res.ok ? { kind: "deleted" } : { kind: "failed", reason: `nextcloud returned ${res.status}` };
+  });
+
+  // Fold back into the order the caller gave, whichever answered first.
+  const deleted: string[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+  const failed: Array<{ path: string; reason: string }> = [];
+  let next = 0;
+  targets.forEach((target, i) => {
+    const o = resolved[i].kind === "deletable" ? deletes[next++] : resolved[i];
+    if (o.kind === "deleted") deleted.push(target);
+    else if (o.kind === "skipped") skipped.push({ path: target, reason: o.reason });
+    else if (o.kind === "failed") failed.push({ path: target, reason: o.reason });
+  });
+  const possiblyDegraded = [...listings.values()].some((l) => l?.possiblyDegraded);
 
   return {
     ok: true,

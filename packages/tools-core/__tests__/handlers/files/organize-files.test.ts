@@ -3,7 +3,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import organizeFiles from "../../../src/handlers/files/organize-files.js";
-import { ORGANIZE_MAX_MOVES } from "../../../src/handlers/files/_cleanup.js";
+import { CLEANUP_CONCURRENCY, ORGANIZE_MAX_MOVES } from "../../../src/handlers/files/_cleanup.js";
 import type { ToolContext } from "../../../src/types.js";
 
 // Mocks declare the full HttpClient argument list rather than taking none:
@@ -357,6 +357,32 @@ describe("organize_files", () => {
       if (!r.ok) return;
       expect((r.data as any).caveat).toMatch(/unreachable file service/i);
     });
+  });
+
+  // PR #1985 review: moves used to go out strictly one at a time — up to
+  // ORGANIZE_MAX_MOVES serialized round-trips inside one tool call.
+  it("issues moves a few at a time, never more than CLEANUP_CONCURRENCY, in plan order", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => row(`/Downloads/f${i}.pdf`));
+    let inFlight = 0;
+    let peak = 0;
+    const post = vi.fn(async (url: string, _body?: unknown, _opts?: Opts) => {
+      if (url === "/move") {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise<void>((r) => setTimeout(r, 1 + (inFlight % 3)));
+        inFlight--;
+      }
+      return new Response("{}", { status: 200 });
+    });
+    const r = await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf(many), post }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(peak).toBeLessThanOrEqual(CLEANUP_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+    const moves = post.mock.calls.filter((c) => c[0] === "/move").map((c) => (c[1] as { from: string }).from);
+    expect(moves).toEqual(many.map((m) => m.path));
+    // The echoed sample is in plan order, whichever move answered first.
+    expect((r.data as any).moved.map((m: { from: string }) => m.from)).toEqual(many.map((m) => m.path));
   });
 
   it("by_month files by modification month", async () => {

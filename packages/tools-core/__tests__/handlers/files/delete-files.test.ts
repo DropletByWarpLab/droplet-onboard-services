@@ -3,6 +3,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import deleteFiles, { DELETE_FILES_MAX_PATHS } from "../../../src/handlers/files/delete-files.js";
+import { CLEANUP_CONCURRENCY } from "../../../src/handlers/files/_cleanup.js";
 import type { ToolContext } from "../../../src/types.js";
 
 // Full argument lists on purpose: `vi.fn(async () => …)` types `mock.calls`
@@ -158,6 +159,31 @@ describe("delete_files", () => {
     if (!r.ok) return;
     expect((r.data as any).counts.deleted).toBe(DELETE_FILES_MAX_PATHS);
     expect(del).toHaveBeenCalledTimes(DELETE_FILES_MAX_PATHS);
+  });
+
+  // PR #1985 review: deletes used to go out strictly one at a time — up to a
+  // hundred serialized round-trips inside one tool call.
+  it("issues deletes a few at a time, never more than CLEANUP_CONCURRENCY, in the order given", async () => {
+    const paths = Array.from({ length: 12 }, (_, i) => `/Bulk/f${i}.tmp`);
+    let inFlight = 0;
+    let peak = 0;
+    const del = vi.fn(async (_path: string, _opts?: Opts) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((r) => setTimeout(r, 1 + (inFlight % 3)));
+      inFlight--;
+      return new Response("{}", { status: 200 });
+    });
+    const r = await deleteFiles.handler(
+      { paths },
+      ctxWith({ get: treeGet({ "/Bulk": paths.map((p) => ({ path: p })) }), del }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(peak).toBeLessThanOrEqual(CLEANUP_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+    expect(del.mock.calls.map((c) => c[0])).toEqual(paths.map((p) => `/?path=${encodeURIComponent(p)}`));
+    expect((r.data as any).deleted).toEqual(paths);
   });
 
   it("deletes files it finds in the parent listing, listing each parent once, with the acting-user headers", async () => {

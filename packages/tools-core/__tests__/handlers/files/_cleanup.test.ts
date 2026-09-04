@@ -3,6 +3,7 @@
 // here, so each rule gets its own pin.
 import { describe, it, expect, vi } from "vitest";
 import {
+  CLEANUP_CONCURRENCY,
   categoryOf,
   clampInt,
   destinationFolderFor,
@@ -11,6 +12,7 @@ import {
   humanBytes,
   isOrganizeRule,
   junkReason,
+  mapPool,
   normalizeCopyName,
   parseEntries,
   planOrganize,
@@ -318,6 +320,57 @@ describe("unlessAborted", () => {
   });
 });
 
+// PR #1985 review: the three tools issued every round-trip one at a time —
+// up to hundreds of serialized listings, deletes or moves inside one chat
+// turn. mapPool bounds what is in flight without changing what is reported
+// or in what order.
+describe("mapPool", () => {
+  const settle = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  it("never has more than `limit` calls in flight, dispatches in order, and returns results in item order", async () => {
+    const items = Array.from({ length: 10 }, (_, i) => i);
+    const dispatched: number[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    const results = await mapPool(items, 4, async (i) => {
+      dispatched.push(i);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Later items finish first, so item order in the result is a property
+      // of the pool, not of the timing.
+      await settle((3 - (i % 3)) * 2);
+      inFlight--;
+      return i * 10;
+    });
+    expect(peak).toBe(4);
+    expect(dispatched).toEqual(items);
+    expect(results).toEqual(items.map((i) => i * 10));
+  });
+
+  it("runs no more workers than there are items", async () => {
+    expect(await mapPool([], 4, async (x: number) => x)).toEqual([]);
+    let inFlight = 0;
+    let peak = 0;
+    await mapPool([1, 2], 4, async (x) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await settle(1);
+      inFlight--;
+      return x;
+    });
+    expect(peak).toBe(2);
+  });
+
+  it("rejects when a call rejects", async () => {
+    await expect(
+      mapPool([1, 2, 3], 2, async (x) => {
+        if (x === 2) throw new Error("boom");
+        return x;
+      }),
+    ).rejects.toThrow("boom");
+  });
+});
+
 describe("clampInt / humanBytes", () => {
   it("clampInt truncates and clamps, falling back on non-numbers", () => {
     expect(clampInt(3.9, 0, 8, 3)).toBe(3);
@@ -483,6 +536,30 @@ describe("walkTree", () => {
       expect(r.cancelled).toBe(true);
       expect(r.listed).toBe(0);
     });
+  });
+
+  it("lists at most CLEANUP_CONCURRENCY folders at a time — and more than one — folding entries in queue order", async () => {
+    const wide: Tree = { "/W": Array.from({ length: 10 }, (_, i) => ({ path: `/W/d${i}`, isDirectory: true })) };
+    for (let i = 0; i < 10; i++) wide[`/W/d${i}`] = [{ path: `/W/d${i}/f.txt` }];
+    const inner = lister(wide);
+    let inFlight = 0;
+    let peak = 0;
+    const list = vi.fn(async (dir: string) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Vary the answer time so a later listing can answer first.
+      await new Promise<void>((r) => setTimeout(r, 1 + (Number(dir.slice(-1)) % 3)));
+      inFlight--;
+      return inner.list(dir);
+    });
+    const r = await walkTree("/W", list, { maxDepth: 2, maxEntries: 1000, maxListings: 100, signal: live() });
+    expect(r.listed).toBe(11);
+    expect(peak).toBeLessThanOrEqual(CLEANUP_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+    expect(r.entries.filter((e) => !e.isDirectory).map((e) => e.path)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `/W/d${i}/f.txt`),
+    );
+    expect(r.truncated).toBe(false);
   });
 
   it("a failed subfolder is recorded and skipped, the walk goes on", async () => {

@@ -415,6 +415,39 @@ export function planOrganize(
   return { moves, folders, skipped, remaining };
 }
 
+// ── Bounded concurrency ──────────────────────────────────────────────
+
+/**
+ * In-flight Nextcloud calls per tool call. Small on purpose: these tools run
+ * inside one chat turn against the box's own Nextcloud, and the point is to
+ * stop paying one round-trip of latency per file (PR #1985 review: up to
+ * hundreds, serialized), not to load-test the WebDAV layer.
+ */
+export const CLEANUP_CONCURRENCY = 4;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight. Items are DISPATCHED
+ * in order — `fn(items[i])` is called before `fn(items[i + 1])` — and the
+ * results come back in item order, so a handler's per-item signal check and
+ * the order of the lists it reports survive the parallelism unchanged.
+ */
+export async function mapPool<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // ── Cancellation ─────────────────────────────────────────────────────
 
 /**
@@ -478,8 +511,11 @@ export interface WalkResult {
 /**
  * Breadth-first, bounded walk. `list` is the handler's own
  * `ctx.http.nextcloud.get(...)` so the route manifest sees the hop.
- * Bounds are checked before each listing, so `entries` can overrun
- * `maxEntries` by at most one folder's worth.
+ * Up to {@link CLEANUP_CONCURRENCY} folders are listed together and their
+ * answers fold in queue order, so the entries come out in the same
+ * breadth-first order a one-at-a-time walk produced. Bounds are checked
+ * before each batch, so `entries` can overrun `maxEntries` by at most a
+ * batch's worth of folders.
  */
 export async function walkTree(
   root: string,
@@ -515,31 +551,38 @@ export async function walkTree(
       result.truncated = true;
       break;
     }
-    const next = queue.shift();
-    if (!next) break;
-    const res = await unlessAborted(opts.signal, () => list(next.dir));
-    if (!res) {
-      // Cut short mid-flight: this folder's contents are unknown.
-      result.cancelled = true;
-      result.truncated = true;
-      break;
-    }
-    const listing = await readListing(res);
-    result.listed++;
-    if (next.dir === root) result.rootStatus = listing.status;
-    if (!listing.ok) {
-      if (next.dir === root) return result;
-      result.errors.push({ path: next.dir, status: listing.status });
-      continue;
-    }
-    if (listing.possiblyDegraded) {
-      result.possiblyDegraded = true;
-      if (next.dir !== root) result.emptyDirectories.push(next.dir);
-    }
-    for (const entry of listing.entries) {
-      result.entries.push(entry);
-      if (entry.isDirectory && next.depth < opts.maxDepth) {
-        queue.push({ dir: entry.path, depth: next.depth + 1 });
+    const batch = queue.splice(0, Math.min(CLEANUP_CONCURRENCY, opts.maxListings - result.listed));
+    const answers = await mapPool(batch, CLEANUP_CONCURRENCY, async (item) => {
+      if (opts.signal.aborted) return null;
+      const res = await unlessAborted(opts.signal, () => list(item.dir));
+      return res ? readListing(res) : null;
+    });
+    for (let i = 0; i < batch.length; i++) {
+      const { dir, depth } = batch[i];
+      const listing = answers[i];
+      if (!listing) {
+        // Cut short mid-flight, or never sent: this folder's contents are
+        // unknown. The loop's own check ends the walk next.
+        result.cancelled = true;
+        result.truncated = true;
+        continue;
+      }
+      result.listed++;
+      if (dir === root) result.rootStatus = listing.status;
+      if (!listing.ok) {
+        if (dir === root) return result;
+        result.errors.push({ path: dir, status: listing.status });
+        continue;
+      }
+      if (listing.possiblyDegraded) {
+        result.possiblyDegraded = true;
+        if (dir !== root) result.emptyDirectories.push(dir);
+      }
+      for (const entry of listing.entries) {
+        result.entries.push(entry);
+        if (entry.isDirectory && depth < opts.maxDepth) {
+          queue.push({ dir: entry.path, depth: depth + 1 });
+        }
       }
     }
   }
