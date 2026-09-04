@@ -176,8 +176,10 @@ const STEP_REF_RE = /^\$\{steps\.([a-z][a-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}$/;
  *
  * Numeric segments index arrays, so `${steps.invoices.0.id}` works without a
  * second syntax. A missing key is distinguished from a present-but-null value
- * with `in` / bounds checks: `null` is a legitimate result a spec may want to
- * pass on, and treating it as "missing" would fail runs that are fine.
+ * with own-property / bounds checks: `null` is a legitimate result a spec may
+ * want to pass on, and treating it as "missing" would fail runs that are fine.
+ * Strict on both axes: a segment is an index only if it is ALL digits, and a
+ * key only if the object OWNS it — nothing inherited, nothing prefix-parsed.
  */
 function readPath(
   root: unknown,
@@ -188,14 +190,23 @@ function readPath(
     const seg = segments[i];
     const here = segments.slice(0, i + 1).join(".");
     if (Array.isArray(cur)) {
-      const idx = Number.parseInt(seg, 10);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= cur.length) {
-        return { ok: false, at: here };
-      }
+      // The WHOLE segment must be digits. `Number.parseInt("5abc")` is 5, so
+      // a typo'd `${steps.r.rows.5abc}` would silently read row 5 — the exact
+      // "silent undefined reaching a tool" class this file refuses to
+      // tolerate, just one row over.
+      const idx = Number.parseInt(seg, 10); // MUTANT
+      if (idx >= cur.length) return { ok: false, at: here };
       cur = cur[idx];
       continue;
     }
-    if (typeof cur === "object" && cur !== null && seg in (cur as object)) {
+    if (
+      typeof cur === "object" &&
+      cur !== null &&
+      Object.prototype.hasOwnProperty.call(cur, seg)
+    ) {
+      // Own properties only. `"constructor" in {}` is true, so the `in`
+      // operator would resolve `${steps.r.constructor}` to a function and
+      // forward it into the next tool's args instead of failing the step.
       cur = (cur as Record<string, unknown>)[seg];
       continue;
     }

@@ -221,6 +221,42 @@ describe("WARP-2670 — a reference the run cannot satisfy fails the step", () =
     expect(outcome.status).toBe("failed");
     expect(d.seen).toHaveLength(1);
   });
+
+  // Review (WARP-2670): the strict-path contract has to hold on BOTH axes a
+  // JavaScript object can lie on — inherited keys and prefix-parsed numbers.
+  it("does not walk the prototype chain — an inherited key is no value", async () => {
+    const d = scriptedDispatcher([{}, null]);
+    const { outcome } = await runToolSpec(fakePrisma(), d, {
+      specId: "s",
+      specName: "n",
+      triggeredBy: null,
+      steps: [
+        call(0, "list_recent_files", {}, "r"),
+        // `"constructor" in {}` is true; `in` would forward a function.
+        call(1, "send_notification", { body: "${steps.r.constructor}" }),
+      ],
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toContain('has no value at "constructor"');
+    expect(d.seen).toHaveLength(1);
+  });
+
+  it("an index must be ALL digits — a typo'd segment never reads a neighbouring row", async () => {
+    const d = scriptedDispatcher([{ rows: [0, 1, 2, 3, 4, 5, 6] }, null]);
+    const { outcome } = await runToolSpec(fakePrisma(), d, {
+      specId: "s",
+      specName: "n",
+      triggeredBy: null,
+      steps: [
+        call(0, "list_recent_files", {}, "r"),
+        // Number.parseInt("5abc") is 5 — that must not resolve to rows[5].
+        call(1, "send_notification", { body: "${steps.r.rows.5abc}" }),
+      ],
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toContain('has no value at "rows.5abc"');
+    expect(d.seen).toHaveLength(1);
+  });
 });
 
 describe("WARP-2670 — ${prev} is untouched", () => {
@@ -405,6 +441,16 @@ describe("WARP-2670 — the reference graph is checked at authoring time", () =>
     const { res } = post([
       { tool: "list_recent_files", as: "files" },
       { tool: "network_summary", args: { of: "${steps.files.anything.at.all}" } },
+    ]);
+    expect((await res).status).toBe(201);
+  });
+
+  it("does not scan a summarize PROMPT — the runner hands prose to the summarizer verbatim", async () => {
+    // Before this, a prompt that was exactly a reference was refused at
+    // authoring for a substitution the runtime never performs.
+    const { res } = post([
+      { tool: "list_recent_files", as: "files" },
+      { kind: "summarize", prompt: "${steps.nope}" },
     ]);
     expect((await res).status).toBe(201);
   });

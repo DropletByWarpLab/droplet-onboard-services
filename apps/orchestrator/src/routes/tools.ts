@@ -126,12 +126,19 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
  * Paths are NOT checked: `${steps.invoices.0.total}` depends on what the
  * tool returns at run time, which authoring cannot know. Only the name
  * graph — which is static — is decided here.
+ *
+ * A summarize step's `prompt` is NOT scanned either. The runner hands the
+ * prompt to the summarizer verbatim — it never runs `resolveRefs` over it —
+ * so a `${steps.x}` inside prose is text, not a reference, and refusing it
+ * here would enforce a contract the runtime does not implement. Only the
+ * args a `call` step dispatches are resolved, so only those are checked.
  */
 function stepReferenceError(steps: ParsedStep[]): Record<string, unknown> | null {
   const published = new Set<string>();
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
-    for (const ref of referencedStepNames(storedArgsFor(step))) {
+    const scanned = step.kind === "summarize" ? {} : storedArgsFor(step);
+    for (const ref of referencedStepNames(scanned)) {
       if (!published.has(ref)) {
         return {
           error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
