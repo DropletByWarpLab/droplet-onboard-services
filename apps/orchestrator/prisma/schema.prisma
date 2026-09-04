@@ -4401,6 +4401,22 @@ enum IntegrationStatus {
   PROVISIONING
   /// Usable. The last probe against the vendor succeeded.
   CONNECTED
+  /// Usable, and ONE dataset is refused. The credential is valid, the
+  /// handshake succeeded, and everything else reads — the vendor withholds a
+  /// single resource because of the account's PLAN or the app's granted
+  /// SCOPES. A Basic-plan Shopify store reads orders, products and inventory
+  /// and withholds only customer identities; a Mailchimp account on a plan
+  /// without a resource is otherwise entirely healthy.
+  ///
+  /// It is NOT ERROR, and that is the whole reason it exists: ERROR renders as
+  /// "Can't connect" and sends the owner to repair a connection with nothing
+  /// wrong with it, while hiding the one thing they CAN act on — the plan or
+  /// the scope grant, both of which live in the vendor's console. It is not
+  /// NEEDS_RECONNECT either: a new key changes nothing.
+  ///
+  /// Sync keeps running (`POLLABLE_CONNECTION_STATUSES`) — withholding one
+  /// dataset is not a reason to stop reading the others.
+  CAPABILITY_LIMITED
   /// Transient sync failure (brief §15). A health signal, not a request for
   /// human action — nobody needs to go and paste anything.
   DEGRADED

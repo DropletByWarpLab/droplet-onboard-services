@@ -61,6 +61,18 @@ const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "war
     // stored, and it was refused. "Not connected" would send an admin to paste
     // the same key again.
     NEEDS_RECONNECT: { label: "Credential rejected — replace it", tone: "warn" },
+    // WARP-2623 — the connection WORKS and one dataset is refused. The copy
+    // must not read as either of its neighbours: "replace it" would send the
+    // admin to mint a key that is already fine, and a bare "Connected" would
+    // hide a missing dataset behind a green line. The remediation names where
+    // the fix actually lives — the vendor's plan or the app's granted scopes,
+    // neither of which is anything this page can change. Deliberately no
+    // reconnect affordance: the only actions this state earns are "go and
+    // change the plan" and "disconnect".
+    CAPABILITY_LIMITED: {
+      label: "Connected · limited — one dataset needs a plan or permission change at the vendor",
+      tone: "warn",
+    },
     // And the OTHER distinction WARP-2458 pulled apart: something a new key
     // will not fix — a vendor-side refusal such as an IP access policy or a
     // plan limit. "Replace it" here would send an admin to mint keys until

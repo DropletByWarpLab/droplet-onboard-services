@@ -15,8 +15,15 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { Connector } from "@droplet/erp-connector";
-import { QuotaExhaustedError, ReauthorizationRequiredError } from "@droplet/erp-connector";
+import {
+  HubSpotCapabilityUnavailableError,
+  MailchimpCapabilityMissingError,
+  QuotaExhaustedError,
+  ReauthorizationRequiredError,
+} from "@droplet/erp-connector";
 
+import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
+import { CLAIMABLE_ERP_SYNC_STATES } from "./cursor.service.js";
 import { createErpSyncRunner, type SyncConnectionRow } from "./erp-sync.service.js";
 
 const NOW = new Date("2026-08-27T12:00:00Z");
@@ -1099,5 +1106,128 @@ describe("WARP-2549 — the landing seam", () => {
     expect(scope).not.toContain("ada@example.test");
     expect(scope).not.toContain("Lovelace");
     expect(scope).not.toContain("p-1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2623 — a plan boundary is not a broken sync
+// ---------------------------------------------------------------------------
+
+/**
+ * The chain this suite exists to keep broken.
+ *
+ * `POLLABLE_CONNECTION_STATUSES` now includes `CAPABILITY_LIMITED`, so the
+ * connection this ticket exists to stop drawing as broken finally gets
+ * polled — and the refused dataset's cursor throws on its very first tick.
+ * Before the capability branch in `asSyncFailure`, neither vendor error
+ * carried a `statusCode`, `classifySyncFailure` read only `statusCode` plus
+ * two fixed code sets, and the answer was `FATAL`:
+ *
+ *   FATAL → `releaseErpCursorFailure` parks the cursor `FAILED` with
+ *   `nextAttemptAt: null` → `FAILED` is absent from
+ *   `CLAIMABLE_ERP_SYNC_STATES` → `upsertErpCursor`'s `update: {}` never
+ *   revives it → `foldSyncState` ranks `FAILED` highest and
+ *   `GET /api/integrations` reports the WHOLE connection as a failed sync,
+ *   permanently — including after the owner buys the plan.
+ *
+ * `entities.ts:80-102` documents that exact chain as a known hazard, and this
+ * is the same hazard arriving through a different door.
+ */
+describe("WARP-2623 — a refused dataset must not park the connection at FAILED", () => {
+  const CAPABILITY_ERRORS: Array<[string, () => Error]> = [
+    [
+      "HubSpotCapabilityUnavailableError",
+      () => new HubSpotCapabilityUnavailableError("contacts", "Marketing Hub Professional"),
+    ],
+    [
+      "MailchimpCapabilityMissingError",
+      () => new MailchimpCapabilityMissingError("audience", "free plan"),
+    ],
+  ];
+
+  for (const [name, make] of CAPABILITY_ERRORS) {
+    it(`parks a cursor refused by ${name} in a CLAIMABLE state, never FAILED`, async () => {
+      // MUTATION: drop the capability branch from `asSyncFailure` → the error
+      // carries no statusCode, classifies FATAL, and the cursor parks FAILED
+      // with nextAttemptAt null → red on all three assertions.
+      const h = harness({
+        connections: [connectionRow({ status: "CAPABILITY_LIMITED" })],
+        read: async () => {
+          throw make();
+        },
+      });
+      await runnerFor(h).runIncrementalTick();
+      const cur = h.prisma.__cursor("cur-1")!;
+      expect(cur.state).not.toBe("FAILED");
+      expect(CLAIMABLE_ERP_SYNC_STATES).toContain(cur.state);
+      // A null nextAttemptAt is the other half of "never comes back": the
+      // claim's due-filter can only pick up a row that has one.
+      expect(cur.nextAttemptAt).toBeInstanceOf(Date);
+    });
+
+    it(`does not ask the owner for a new credential after ${name}`, async () => {
+      // The key is FINE. `needsReconnect` drives the hub's "reconnect" ask, and
+      // sending an owner to re-paste a working key to fix a plan boundary is
+      // the exact wrong instruction.
+      // MUTATION: classify the capability codes AUTH instead of TRANSIENT →
+      // needsReconnect flips true → red.
+      const h = harness({
+        connections: [connectionRow({ status: "CAPABILITY_LIMITED" })],
+        read: async () => {
+          throw make();
+        },
+      });
+      await runnerFor(h).runIncrementalTick();
+      expect(h.prisma.__cursor("cur-1")!.needsReconnect).toBe(false);
+      // And the watermark survives, so buying the plan does not also cost a
+      // full re-enumeration.
+      expect(h.prisma.__cursor("cur-1")!.watermark).toBe("2026-08-15T00:00:00Z");
+    });
+  }
+
+  it("waits the MAX interval, not the 30s first step of the exponential ramp", async () => {
+    // A quota returns next period; a plan boundary returns when the owner buys
+    // it, which is never on a 30-second timescale. Riding the ramp from its
+    // base would spend seven pointless vendor calls in the first hour to learn
+    // something the error already said.
+    // MUTATION: drop the capability arm of `retryAfterOf` → the first failure
+    // waits BASE_BACKOFF_MS (30s, jittered to 15-30s) → red.
+    const h = harness({
+      connections: [connectionRow({ status: "CAPABILITY_LIMITED" })],
+      read: async () => {
+        throw new HubSpotCapabilityUnavailableError("contacts", "Marketing Hub Professional");
+      },
+    });
+    await runnerFor(h).runIncrementalTick();
+    const cur = h.prisma.__cursor("cur-1")!;
+    expect((cur.nextAttemptAt as Date).getTime() - NOW.getTime()).toBe(MAX_BACKOFF_MS);
+  });
+
+  it("resumes the dataset once the owner buys the plan — no operator touch", async () => {
+    // The whole point. FAILED is terminal because nothing re-claims it; the
+    // state chosen here has to be one a later tick picks up on its own.
+    // MUTATION: park the capability codes at FAILED → the second tick claims
+    // zero cursors, runRead is never called again, and the state never
+    // returns to IDLE → red.
+    let refuse = true;
+    const h = harness({
+      connections: [connectionRow({ status: "CAPABILITY_LIMITED" })],
+      read: async () => {
+        if (refuse) throw new HubSpotCapabilityUnavailableError("contacts", "Marketing Hub Pro");
+        return INVOICE_ROWS;
+      },
+    });
+    await runnerFor(h).runIncrementalTick();
+    expect(h.prisma.__cursor("cur-1")!.state).toBe("BACKOFF");
+
+    // The owner buys the plan; the next tick after the backoff window elapses.
+    refuse = false;
+    const after = new Date(NOW.getTime() + MAX_BACKOFF_MS + 1000);
+    const out = await runnerFor(h, { now: () => after }).runIncrementalTick();
+
+    expect(out.cursorsClaimed).toBe(1);
+    expect(h.prisma.__cursor("cur-1")!.state).toBe("IDLE");
+    expect(h.prisma.__cursor("cur-1")!.consecutiveFailures).toBe(0);
+    expect(h.prisma.__cursor("cur-1")!.lastError).toBeNull();
   });
 });
