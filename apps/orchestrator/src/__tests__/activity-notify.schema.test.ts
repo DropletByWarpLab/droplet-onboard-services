@@ -9,23 +9,13 @@
  * only in the pg-integration job.
  */
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+// WARP-2654: paths are anchored to the owning file, never to the runner's
+// cwd — the guard in test-paths.guard.test.ts refuses cwd-relative lookups.
+import { MIGRATIONS_DIR, readSchema } from "./helpers/test-paths.js";
 
-function findPrismaDir(): string {
-  const candidates = [
-    join(process.cwd(), "prisma"),
-    join(process.cwd(), "apps", "orchestrator", "prisma"),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, "schema.prisma"))) return resolve(candidate);
-  }
-  throw new Error(`Could not locate prisma/schema.prisma from ${process.cwd()}`);
-}
-
-const PRISMA_DIR = findPrismaDir();
-const MIGRATIONS_DIR = join(PRISMA_DIR, "migrations");
-const SCHEMA = readFileSync(join(PRISMA_DIR, "schema.prisma"), "utf8");
+const SCHEMA = readSchema();
 
 const DIR = readdirSync(MIGRATIONS_DIR).filter((d) => d.includes("activity_notify"));
 const SQL = DIR.length > 0 ? readFileSync(join(MIGRATIONS_DIR, DIR[0], "migration.sql"), "utf8") : "";
