@@ -207,6 +207,10 @@ import {
   toolAdvertisementCeilingTokens,
   type AdvertisedToolSpec,
 } from "../services/tool-budget.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
 import { CONTINUITY_TRACE_ROW_LIMIT } from "../services/chat-persistence.service.js";
 import { CORE_TOOL_NAMES } from "../services/tool-selection.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
@@ -236,41 +240,21 @@ function traceRow(name: string, minutesAgo: number): TraceRow {
  */
 function createPrismaMock(trace: TraceRow[] = []) {
   return {
-    workspace: { findUnique: vi.fn(async () => ({ id: 1, type: "BUSINESS" })) },
-    businessProfile: {
-      findUnique: vi.fn(async () => ({
-        id: "singleton",
-        onboardingState: "completed",
-        interviewChatId: null,
-        summary: "Nine-chair dental practice in Costa Mesa",
-        whatWeDo: "General and cosmetic dentistry",
-        customers: "Local families",
-        teamShape: "Two dentists, four hygienists",
-        toolsUsed: "Eaglesoft",
-        typicalDay: "Twenty chairside appointments",
-        goals: "Cut no-shows",
-        lastSource: null,
-        reviewNudgeState: "none",
-        reviewDueAt: null,
-        reviewDismissedAt: null,
-        updatedBy: null,
-        updatedAt: new Date("2026-09-01T00:00:00Z"),
-      })),
-      create: vi.fn(),
-    },
-    assistantPersona: {
-      findUnique: vi.fn(async () => ({
-        id: "singleton",
-        preset: "warm_friendly",
-        verbosity: "balanced",
-        useFirstNames: true,
-        customInstructions: "",
-        updatedBy: null,
-        updatedAt: new Date("2026-09-01T00:00:00Z"),
-      })),
-      create: vi.fn(),
-      upsert: vi.fn(),
-    },
+    // WARP-2652's shared three delegates rather than a local copy. #1955 —
+    // this was the ONE chat-route suite the sweep missed, and it still carried
+    // the exact shape WARP-2642/2652 removed from the other sixteen:
+    // `businessProfile.create` and `assistantPersona.create` as bare
+    // `vi.fn()`s returning `undefined`. Inert only because `findUnique`
+    // happened to return a row — both services are create-on-first-read and
+    // hand whatever `create` resolved to straight to the composer, so a
+    // `findUnique` that ever returns `null` gives both composers `undefined`,
+    // both throw into the route's fail-open, and this file's four cases go
+    // green against a prompt missing two blocks. On a suite whose whole
+    // subject is what the model RECEIVES, and whose size assertions are taken
+    // against the shipped 16,384 window, that is the worst possible direction
+    // to be wrong in: a prompt smaller than the real one cannot reproduce a
+    // budget the real one blows.
+    ...promptBlockPrismaDelegates(),
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: { findMany: vi.fn(async () => []) },
     fileContentChunk: { findMany: vi.fn(async () => []) },
@@ -325,6 +309,15 @@ function systemPrompt(): string {
   expect(sys.role).toBe("system");
   return typeof sys.content === "string" ? sys.content : "";
 }
+
+/**
+ * WARP-2652's stderr guard, which this file was outside of (#1955). No case
+ * here wants either composer to throw, so no opt-out is declared and every
+ * case is guarded — including ones not yet written. Without it the fixture
+ * above can regress back to two silently absent blocks and this suite stays
+ * green while measuring a prompt no box ever sends.
+ */
+guardComposerFailOpen();
 
 beforeEach(() => {
   h.config.OLLAMA_CONTEXT_LENGTH = 16384;
