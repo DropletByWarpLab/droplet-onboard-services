@@ -128,6 +128,13 @@ export const AGENT_RUN_LOCK_KEY = "droplet:agent-run-worker";
 export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notification"]);
 
 /**
+ * WARP-2180 — tools a run may never see. `start_agent_run` is how a chat
+ * turn hands work off; inside a run it is how one prompt spawns a fleet that
+ * saturates the model. Structural refusal here; the handler refuses too.
+ */
+export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+
+/**
  * The pool a run starts from, before per-principal narrowing: the chat pool
  * (chat-tool-scope.ts) plus {@link RUN_READMITTED_TOOLS}. Confirming (Tier-2)
  * tools are IN — the interceptor challenges them and the run parks
@@ -136,7 +143,9 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  */
 export function runToolPool(): string[] {
   return TOOL_CATALOG.filter(
-    (t) => RUN_READMITTED_TOOLS.has(t.name) || !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+    (t) =>
+      !RUN_EXCLUDED_TOOLS.has(t.name) &&
+      (RUN_READMITTED_TOOLS.has(t.name) || !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
   ).map((t) => t.name);
 }
 

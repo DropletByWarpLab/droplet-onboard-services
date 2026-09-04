@@ -374,6 +374,9 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.
   { pattern: /\b(storage|disks?|drives?|updates?|system|health|audit|cpu|ram|gpu|memory usage|backups?|uptime|logs?|disk space|how much (room|space))\b/i, domains: ["system"] },
+  // WARP-2180 — durable background runs. Word boundaries on purpose; the
+  // vocabulary is how a person hands work off, not the work's subject.
+  { pattern: /\b(background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
 ];
 
 /**

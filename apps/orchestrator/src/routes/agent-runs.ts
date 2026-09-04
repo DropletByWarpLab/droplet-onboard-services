@@ -108,9 +108,14 @@ async function resolveActor(
   const user = (req as Request & { user?: AuthUser }).user;
   if (!user) return null;
   if (user.id === MCP_PRINCIPAL_ID && user.role === "service") {
-    if (!onBehalfOf) return null;
+    // The mcp-server's orchestrator client stamps `X-Nextcloud-User` with the
+    // acting user on every call (context.ts `withActingUser`), so a handler
+    // need not repeat it; an explicit `onBehalfOf` wins when both are present.
+    const header = req.header("x-nextcloud-user");
+    const named = onBehalfOf ?? (header && header.trim().length > 0 ? header.trim() : undefined);
+    if (!named) return null;
     const row = (await prisma.user.findFirst({
-      where: { username: onBehalfOf },
+      where: { username: named },
       select: { id: true, username: true, role: true },
     })) as Actor | null;
     return row;

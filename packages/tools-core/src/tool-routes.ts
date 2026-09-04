@@ -403,4 +403,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  // WARP-2180 — background runs. The route admits the mcp principal on
+  // behalf of the named chat user (requireRoleOrMcpService).
+  { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs")] },
 ];

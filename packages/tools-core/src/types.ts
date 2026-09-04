@@ -170,6 +170,13 @@ export interface ToolContext {
    *  reads). Absent → role-scoped handlers use the most-restrictive
    *  guest view. */
   role?: Role;
+  /**
+   * WARP-2180 — set when this dispatch belongs to a durable background run
+   * (forwarded by the orchestrator worker via `_meta.agentRunId`,
+   * stdio-trusted only). `start_agent_run` refuses when it is set: a run
+   * may not start a run.
+   */
+  agentRunId?: string;
   ncToken?: string;
   /**
    * WARP-437 — orchestrator-injected enhancement bundle plumbed through
