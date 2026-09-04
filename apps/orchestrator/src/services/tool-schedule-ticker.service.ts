@@ -197,9 +197,10 @@ export async function tickToolSchedules(
     //
     // OR, never override: a conservative operator `writes:true` on a spec
     // that calls no write tool still holds, matching reconcileWrites().
-    const derivedWrites = plannedToolNames(spec.steps).some((tool) =>
-      WRITE_TOOLS.has(tool),
-    );
+    //
+    // Parsed once: the access gate below reads the same list.
+    const toolNames = plannedToolNames(spec.steps);
+    const derivedWrites = toolNames.some((tool) => WRITE_TOOLS.has(tool));
     const effectiveWrites = spec.writes || derivedWrites;
 
     if (effectiveWrites && !spec.reversible) {
@@ -237,7 +238,7 @@ export async function tickToolSchedules(
       attributed.unresolved !== null
         ? null
         : firstToolDeniedForPrincipal(
-            plannedToolNames(spec.steps),
+            toolNames,
             attributed.tier ?? undefined,
             attributed.scope,
           );
