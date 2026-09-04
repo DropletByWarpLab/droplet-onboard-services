@@ -47,8 +47,8 @@ const INTERVIEW_CHAT_ID = "conv-interview-fresh";
 const OPENING_TURN =
   "[topic 1/7] To start — in a sentence or two, what does your business do?";
 
-const { state, push, fetchBusinessProfile, startBusinessOnboarding } = vi.hoisted(
-  () => {
+const { state, user, push, fetchBusinessProfile, startBusinessOnboarding } =
+  vi.hoisted(() => {
     const state = {
       messages: [] as Array<{ id: string; role: string; content: string }>,
       // `useChat`'s id. Settable to null on purpose: that is the value it
@@ -62,14 +62,22 @@ const { state, push, fetchBusinessProfile, startBusinessOnboarding } = vi.hoiste
     };
     return {
       state,
+      // ONE object for the whole run. The page re-reads the business profile
+      // on `[user]`, so a fresh literal per render refetches on every commit
+      // — which hides which read a test is actually exercising.
+      user: {
+        id: "u1",
+        username: "alice",
+        displayName: "Alice",
+        role: "owner",
+      },
       push: vi.fn((url: string) => {
         state.params = new URLSearchParams(url.split("?")[1] ?? "");
       }),
       fetchBusinessProfile: vi.fn(async () => state.profile),
       startBusinessOnboarding: vi.fn(),
     };
-  },
-);
+  });
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/chat",
@@ -119,9 +127,7 @@ vi.mock("@/lib/hooks/useStickyScroll", () => ({
 
 vi.mock("@/lib/auth", () => ({
   authFetch: vi.fn(),
-  useAuth: () => ({
-    user: { id: "u1", username: "alice", displayName: "Alice", role: "owner" },
-  }),
+  useAuth: () => ({ user }),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -147,7 +153,8 @@ describe("chat /chat — a started interview opens with its first question", () 
     state.params = new URLSearchParams();
     state.profile = { ...IN_PROGRESS };
     push.mockClear();
-    fetchBusinessProfile.mockClear();
+    fetchBusinessProfile.mockReset();
+    fetchBusinessProfile.mockImplementation(async () => state.profile);
     startBusinessOnboarding.mockReset();
   });
   afterEach(() => cleanup());
@@ -261,6 +268,90 @@ describe("chat /chat — a started interview opens with its first question", () 
     // The banner does not sit inside the session it just opened…
     expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
     // …and neither does the generic empty state.
+    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+  });
+
+  // ── the navigation is owed unconditionally ───────────────────────────────
+  // `startBusinessOnboarding` returning means the session AND its seeded
+  // opener are already persisted server-side. Whatever `GET
+  // /api/business-profile` does afterwards, the owner has to end up in that
+  // session: `fetchBusinessProfile` → `authFetch` carries no timeout and no
+  // AbortController, and swallows both outcomes internally, so anything the
+  // navigation hangs on it inherits a failure mode with no ceiling.
+
+  /** The profile the box would have reported, if the client could hear it. */
+  const startsTheInterview = () =>
+    startBusinessOnboarding.mockResolvedValue({
+      conversationId: INTERVIEW_CHAT_ID,
+      state: "in_progress",
+      created: true,
+    });
+
+  const anUntouchedBusinessBox = () => {
+    state.conversationId = null;
+    state.params = new URLSearchParams();
+    state.profile = {
+      onboardingState: "not_started",
+      interviewChatId: null,
+      interviewResumable: false,
+      workspaceType: "BUSINESS",
+    };
+  };
+
+  it("navigates into the new session even when the profile refresh never resolves", async () => {
+    anUntouchedBusinessBox();
+    startsTheInterview();
+    // The mount read lands; every read after it hangs — a backgrounded tab,
+    // a dropped connection, a stalled orchestrator. No timeout will rescue
+    // it, so nothing the user is owed may be sequenced behind it.
+    fetchBusinessProfile.mockReset();
+    fetchBusinessProfile.mockImplementationOnce(async () => state.profile);
+    fetchBusinessProfile.mockImplementation(() => new Promise<never>(() => {}));
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+
+    // The trip happens regardless.
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith(
+        `/chat?c=${encodeURIComponent(INTERVIEW_CHAT_ID)}`,
+      ),
+    );
+    rerender(<ChatPage />);
+
+    // And the surface follows it: no Start button for a session that already
+    // exists, and no generic empty state inside the interview. The client
+    // knows the id from the start response — it does not need the profile to
+    // tell it where it is.
+    expect(screen.queryByTestId("interview-intro-card")).toBeNull();
+    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+  });
+
+  it("navigates into the new session even when the profile refresh fails outright", async () => {
+    anUntouchedBusinessBox();
+    startsTheInterview();
+    // `refreshBizProfile` swallows the rejection and parks `null`, so the
+    // page is left with no `interviewChatId` at all — the surface must still
+    // resolve to the interview.
+    fetchBusinessProfile.mockReset();
+    fetchBusinessProfile.mockImplementationOnce(async () => state.profile);
+    fetchBusinessProfile.mockImplementation(async () => {
+      throw new Error("business_profile_500");
+    });
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith(
+        `/chat?c=${encodeURIComponent(INTERVIEW_CHAT_ID)}`,
+      ),
+    );
+    rerender(<ChatPage />);
+
+    expect(screen.queryByTestId("interview-intro-card")).toBeNull();
     expect(screen.queryByText("Ask Droplet anything")).toBeNull();
   });
 });

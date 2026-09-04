@@ -111,10 +111,10 @@ export default function ChatPage() {
   const [bizProfile, setBizProfile] = useState<
     (BusinessProfileView & { workspaceType?: string }) | null
   >(null);
-  // Returns the in-flight fetch so a caller that is about to navigate can
-  // await it — starting the interview and pushing before the new state has
-  // landed re-paints the intro card inside the session the click just
-  // created (the "click Start, get the Start card again" flash).
+  // Returns the in-flight fetch so a caller CAN observe it. Nothing the user
+  // is owed may be sequenced behind it: `fetchBusinessProfile` → `authFetch`
+  // carries no timeout and no AbortController and swallows both outcomes
+  // internally, so an await on it is an await with no ceiling.
   const refreshBizProfile = useCallback(() => {
     return fetchBusinessProfile()
       .then((p) => setBizProfile(p))
@@ -123,6 +123,14 @@ export default function ChatPage() {
   useEffect(() => {
     if (user) refreshBizProfile();
   }, [user, refreshBizProfile]);
+
+  // WARP-2667 — the interview session id `startBusinessOnboarding` just
+  // returned. Held here because the profile is not the only source of it, and
+  // must not be the only one the surface can read: the start response already
+  // names the session, and it is the one answer that cannot stall.
+  const [startedInterviewChatId, setStartedInterviewChatId] = useState<
+    string | null
+  >(null);
 
   const isPrivileged = user?.role === "owner" || user?.role === "admin";
   const isBusinessBox = bizProfile?.workspaceType === "BUSINESS";
@@ -177,8 +185,16 @@ export default function ChatPage() {
   // session still renders the card and never leaks raw fenced JSON or
   // `[topic n/7]` markers as plain text — it is a statement about the
   // transcript actually on screen, so it must NOT run ahead of the load.
-  const interviewConversation =
-    Boolean(conversationId) && bizProfile?.interviewChatId === conversationId;
+  //
+  // `startedInterviewChatId` counts as authoritative alongside the profile's
+  // link: it is only ever set from a `startBusinessOnboarding` response, so an
+  // id that matches it IS the interview session, whether or not the profile
+  // read that would have said so has come back yet.
+  const isInterviewChatId = (id: string | null): boolean =>
+    id !== null &&
+    (id === bizProfile?.interviewChatId || id === startedInterviewChatId);
+
+  const interviewConversation = isInterviewChatId(conversationId);
 
   // WARP-2667 — the interview session is open OR opening. Which surface owns
   // an empty /chat cannot be decided by `interviewConversation` alone: the two
@@ -193,9 +209,7 @@ export default function ChatPage() {
   // instant of the push, so reading it closes the gap from the other side.
   // Every surface that must not straddle it keys off THIS.
   const interviewSessionOpen =
-    interviewConversation ||
-    (Boolean(urlConversationId) &&
-      bizProfile?.interviewChatId === urlConversationId);
+    interviewConversation || isInterviewChatId(urlConversationId);
   // …the LIVE interview is the active subset — it flips false the moment
   // onboardingState settles. This drives the genuinely-active-only chrome
   // (progress dots, topic chips, wrap-up auto-send), NOT the message shaping.
@@ -434,13 +448,23 @@ export default function ChatPage() {
   const handleInterviewStart = useCallback(async () => {
     try {
       const r = await startBusinessOnboarding();
-      // Awaited, not fired-and-forgotten: `router.push` to `/chat?c=…` is a
-      // same-route query change, so this component never unmounts and keeps
-      // whatever `bizProfile` it already had. Pushing first left the stale
-      // `not_started` on screen for the frames before the fetch landed, and
-      // `not_started` + an empty transcript is exactly the intro card — so
-      // the user's own click painted the Start card a second time.
-      await refreshBizProfile();
+      // This returning means the session and its seeded opening turn are
+      // already persisted server-side, so the trip into it is owed to the
+      // user unconditionally — it must not be sequenced behind a second
+      // request that can hang. An awaited `refreshBizProfile()` here (the
+      // first cut of this fix) did exactly that: a stalled or backgrounded
+      // `GET /api/business-profile` never resolves, `router.push` never
+      // fires, and the owner is left on the intro card looking at a Start
+      // button for an interview that already exists, with no way to reach it
+      // short of a manual reload (pr-reviewer, #1987).
+      //
+      // Recording the id first is what makes the early push safe: the
+      // surface guards read it, so the interview owns the screen from the
+      // very next render whether the profile ever arrives or not — which is
+      // also what stops the stale `not_started` from painting the Start card
+      // a second time inside the session the click just created.
+      setStartedInterviewChatId(r.conversationId);
+      void refreshBizProfile();
       router.push(`/chat?c=${encodeURIComponent(r.conversationId)}`);
     } catch {
       refreshBizProfile(); // 409 = another admin moved it — re-sync.
