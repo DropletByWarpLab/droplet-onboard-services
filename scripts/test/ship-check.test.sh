@@ -82,9 +82,10 @@ _fail() {
 # matches. The display name is prose: it gets reworded whenever the case's
 # rationale sharpens, and every rewording used to silently un-allow that
 # case's skip in `.github/workflows/ci.yml` — the same wire-contract hazard as
-# renaming a required check (root CLAUDE.md §9.3). The id is a short slug that
-# is only ever changed deliberately, and changing it is a visible two-file edit
-# because ci.yml stops matching.
+# renaming a required check (root CLAUDE.md § "CI cost budget (hard
+# constraint)"; inventory and rule in docs/ci-required-checks.md). The id is a
+# short slug that is only ever changed deliberately, and changing it is a
+# visible two-file edit because ci.yml stops matching.
 _run_test() {
   # WARP-2620 — validate the arity, because getting it wrong is SILENT.
   # `_run_test` took (name, fn) before WARP-2645 added the skip id in front.
@@ -2057,7 +2058,8 @@ fi
 # WARP-2645 — it matches on the SKIP ID, not the display name. The names are
 # prose and get reworded; every rewording silently un-allowed that case's skip
 # in ci.yml, which is the same class of hazard as renaming a required check
-# (root CLAUDE.md §9.3). Failure was safe-but-confusing — the job went red
+# (root CLAUDE.md § "CI cost budget (hard constraint)";
+# docs/ci-required-checks.md). Failure was safe-but-confusing — the job went red
 # naming a case nobody had touched. Ids live beside each `_run_test`
 # registration and change only on purpose.
 if [ "$SKIPPED" -gt 0 ]; then
