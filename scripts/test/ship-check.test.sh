@@ -1254,8 +1254,10 @@ test_tsc_full_uses_workspace_pinned_prisma() {
 # This is a drift gate, not a mutation test: it re-derives the set of
 # TypeScript workspaces from the filesystem and asserts the list in
 # ship-check.sh matches it in both directions (nothing missing, nothing
-# stale). Cheap — no tsc run — so unlike the two tsc-full tests above it also
-# runs on a CI runner that has no node_modules.
+# stale) — and then, for every listed workspace, that its tests are actually
+# reachable by SOME tsconfig (the third check below; being listed was
+# necessary, not sufficient). Cheap — no tsc run — so unlike the two tsc-full
+# tests above it also runs on a CI runner that has no node_modules.
 test_tsc_full_workspace_list_covers_tree() {
   # Parse the single `ws_list=( … )` array out of the check. Deliberately
   # textual: sourcing ship-check.sh would execute it.
@@ -1298,6 +1300,47 @@ test_tsc_full_workspace_list_covers_tree() {
     printf "    these are in ws_list but no longer ship a tsconfig.json:\n" >&2
     printf '%s\n' "$stale" | sed 's/^/      /' >&2
     printf "    remove them from ws_list, or the list stops describing the tree\n" >&2
+    rc=1
+  fi
+
+  # Third check (WARP-2617 review): being on the list is necessary, not
+  # sufficient. The shape that actually caused the bug was a workspace whose
+  # BUILD config cannot see its tests — `exclude: ["__tests__"]`, or an
+  # `include` scoped to `src/**/*` — shipping no `tsconfig.test.json` for
+  # phase 4 to pick up. Such a workspace is listed, passes both checks above,
+  # and still has its tests typechecked by nothing: the same silent hole, one
+  # generation later. So for every listed workspace with a top-level
+  # `__tests__/`, either its `tsconfig.json` reaches that directory or a
+  # `tsconfig.test.json` must exist. Textual and JSONC-tolerant (`//` comments
+  # stripped), still no tsc run.
+  #
+  # `packages/auth-policy` keeps its tests in `src/__tests__/`: no top-level
+  # `__tests__/`, so its bare `"__tests__"` exclude matches nothing and it is
+  # correctly out of scope here. `services/mcp-bridge` was the first catch —
+  # it landed on stage in exactly matter-controller's shape while this branch
+  # was open.
+  local ws cfg body reason unreachable=""
+  for ws in $listed; do
+    [ -d "$REPO_ROOT_REAL/$ws/__tests__" ] || continue
+    [ -f "$REPO_ROOT_REAL/$ws/tsconfig.test.json" ] && continue
+    cfg="$REPO_ROOT_REAL/$ws/tsconfig.json"
+    body="$(sed -e 's#//.*$##' "$cfg" | tr -d '\n')"
+    reason=""
+    if printf '%s' "$body" | grep -qE '"exclude"[[:space:]]*:[[:space:]]*\[[^]]*"__tests__"'; then
+      reason='tsconfig.json excludes "__tests__"'
+    elif printf '%s' "$body" | grep -qE '"include"[[:space:]]*:' \
+      && ! printf '%s' "$body" \
+        | grep -qE '"include"[[:space:]]*:[[:space:]]*\[[^]]*"(\*\*|__tests__|\./\*\*|\./__tests__|\.")'; then
+      reason='tsconfig.json "include" never reaches __tests__/'
+    fi
+    [ -n "$reason" ] || continue
+    unreachable="${unreachable}      ${ws} — ${reason}"$'\n'
+  done
+  if [ -n "$unreachable" ]; then
+    printf "    these listed workspaces have a __tests__/ their build config cannot see, and no tsconfig.test.json:\n" >&2
+    printf '%s' "$unreachable" >&2
+    printf "    add <ws>/tsconfig.test.json in services/matter-controller's shape (extends ./tsconfig.json;\n" >&2
+    printf "    noEmit; rootDir '.'; include __tests__/**/*), plus a typecheck:tests script and a CI step\n" >&2
     rc=1
   fi
   return "$rc"
