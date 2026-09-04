@@ -545,13 +545,23 @@ jobs:
       # placed after that leg's existing leaf builds. The mapping, which is the
       # thing to keep true when a workspace joins or a filter moves:
       #
-      #   workspace              | leg                   | detect filter that fires it
-      #   -----------------------|-----------------------|----------------------------
-      #   packages/tools-core    | tools-core-mcp-server | packages/tools-core/**
-      #   packages/fips-selftest | tools-core-mcp-server | packages/fips-selftest/**
-      #   services/mcp-server    | tools-core-mcp-server | services/mcp-server/**
-      #   packages/shared-types  | orchestrator          | packages/shared-types/**
-      #   services/erp-connector | erp-connector         | services/erp-connector/**
+      #   workspace                  | leg                   | detect filter that fires it
+      #   ---------------------------|-----------------------|----------------------------
+      #   packages/tools-core        | tools-core-mcp-server | packages/tools-core/**
+      #   packages/fips-selftest     | tools-core-mcp-server | packages/fips-selftest/**
+      #   services/mcp-server        | tools-core-mcp-server | services/mcp-server/**
+      #   packages/shared-types      | orchestrator          | packages/shared-types/**
+      #   services/erp-connector     | erp-connector         | services/erp-connector/**
+      #   services/matter-controller | matter-controller     | services/matter-controller/**
+      #   services/mcp-bridge        | mcp-bridge (own job)  | services/mcp-bridge/**
+      #
+      # WARP-2617 added the last two rows: `services/matter-controller`, whose
+      # `tsconfig.json` also excludes `__tests__` so its `build` step checks
+      # none of its 6 test files, and `services/mcp-bridge`, the same shape.
+      # `ship-check.sh tsc-full` is still not what runs in CI (the `shipcheck`
+      # job is parse + self-test only), so a `typecheck:tests` script with no
+      # step in this file has NO caller — which is exactly how
+      # matter-controller's first landed.
       #
       # No workspace ships a `tsconfig.test.json` that is absent from that
       # table; `apps/orchestrator` and `apps/web-dashboard` have none (their
@@ -566,7 +576,9 @@ jobs:
       # the workspace dists these commands need. Marginal cost, measured
       # locally: tools-core 1.7 s, fips-selftest 0.6 s, mcp-server 1.4 s
       # (tools-core-mcp-server leg, +3.7 s); shared-types 0.7 s (orchestrator
-      # leg); erp-connector 1.0 s (erp-connector leg). Budget ~2.5x on a runner.
+      # leg); erp-connector 1.0 s (erp-connector leg); matter-controller 11.4 s
+      # (matter-controller leg); mcp-bridge 4.2 s (mcp-bridge job). Budget
+      # ~2.5x on a runner.
       # Of the last 100 commits on `stage`, 25 touch a path in the
       # tools-core-mcp-server filter and 11 touch `services/erp-connector/**`;
       # at the current ~590 PRs/month that is ~148 + ~65 runs, so worst case
@@ -734,11 +746,24 @@ jobs:
           esac
           bash tests/droplet-ssh-access.test.sh
 
-      # build IS the type-check for the matter sidecar — mirrors
-      # matter-controller-tests.yml.
+      # build IS the type-check for the matter sidecar's SOURCE — mirrors
+      # matter-controller-tests.yml. Its `tsconfig.json` excludes
+      # `__tests__`, so the 6 test files need the second step.
       - name: Type-check @droplet/matter-controller
         if: matrix.suite == 'matter-controller'
         run: npm run -w @droplet/matter-controller build
+
+      # WARP-2617: `typecheck:tests` reads `tsconfig.test.json`, the only
+      # config that reaches `__tests__/`. Without this step the script had
+      # NO CI caller — `ship-check.sh tsc-full` is not run in CI (the
+      # `shipcheck` job is parse + self-test only) — so a TS2322 fixture
+      # regression in these tests landed green on every gate. Same shape
+      # and ordering rule as the other `typecheck:tests` steps (mapping
+      # table on the tools-core step): before vitest, on the leg the
+      # `matter-controller` detect filter already fires.
+      - name: Typecheck @droplet/matter-controller tests (tsconfig.test.json)
+        if: matrix.suite == 'matter-controller'
+        run: npm run -w @droplet/matter-controller typecheck:tests
 
       - name: Test @droplet/matter-controller
         if: matrix.suite == 'matter-controller'
@@ -947,6 +972,14 @@ jobs:
       # Typecheck (vitest does not) — see the leg comment above.
       - name: Build @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge build
+
+      # WARP-2617: `build` reads `tsconfig.json`, which excludes `__tests__`,
+      # so the step above typechecks none of this workspace's 9 test files.
+      # Same runner shape as the `typecheck:tests` steps on the node matrix
+      # (mapping table on the tools-core step); this job is its own leg, so
+      # the step sits here. Runs BEFORE vitest for the same reason as there.
+      - name: Typecheck @droplet/mcp-bridge tests (tsconfig.test.json)
+        run: npm run -w @droplet/mcp-bridge typecheck:tests
 
       - name: Test @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge test
