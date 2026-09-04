@@ -56,8 +56,14 @@ import type { PrismaClient } from "@prisma/client";
 import {
   getAccessToken,
   M365NotConnectedError,
+  markNeedsReconnect,
   type EntraClient,
 } from "./m365-auth.service.js";
+import {
+  classifySyncFailure,
+  HANDLER_FAILED_CODE,
+  TOKEN_UNAVAILABLE_CODE,
+} from "./sync-policy.js";
 import {
   GRAPH_API_BASE_URL,
   GraphClient,
@@ -181,17 +187,38 @@ export async function syncCursor(
   try {
     accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now());
   } catch (err) {
-    // A dead or missing grant. `classifySyncFailure` maps this to AUTH, which
-    // `recordFailure` treats as a CONNECTION-level problem — the cursor is not
-    // marked broken, because every other cursor for this person shares the
-    // same dead grant and marking each one would turn a single reconnect into
-    // a storm of pointless calls.
-    const shaped =
-      err instanceof M365NotConnectedError
-        ? { statusCode: 401, code: "InvalidAuthenticationToken", message: "not connected" }
-        : { statusCode: 401, code: "InvalidAuthenticationToken", message: "token unavailable" };
-    await recordFailure(deps.prisma, cursor.id, shaped, null, now());
-    return { ...base, error: "the Microsoft 365 connection needs to be reconnected" };
+    if (err instanceof M365NotConnectedError) {
+      // A dead or missing grant. `classifySyncFailure` maps this to AUTH,
+      // which `recordFailure` treats as a CONNECTION-level problem — the
+      // cursor is not marked broken, because every other cursor for this
+      // person shares the same dead grant and marking each one would turn a
+      // single reconnect into a storm of pointless calls. The auth service
+      // has already moved the connection row itself before throwing.
+      await recordFailure(
+        deps.prisma,
+        cursor.id,
+        { statusCode: 401, code: "InvalidAuthenticationToken", message: "not connected" },
+        null,
+        now(),
+      );
+      return { ...base, error: "the Microsoft 365 connection needs to be reconnected" };
+    }
+    // Anything else is NOT an auth verdict — a database read that failed, a
+    // cache the box could not open this second — and must not be dressed up
+    // as one: a synthetic 401 would tell the responder to reconnect a grant
+    // that is fine, and hide the real error. Park the cursor, keep the real
+    // message for the log, retry on the backoff.
+    await recordFailure(
+      deps.prisma,
+      cursor.id,
+      { statusCode: 0, code: TOKEN_UNAVAILABLE_CODE, message: "token unavailable" },
+      null,
+      now(),
+    );
+    return {
+      ...base,
+      error: err instanceof Error ? err.message : "the access token could not be produced",
+    };
   }
 
   let items = 0;
@@ -211,6 +238,19 @@ export async function syncCursor(
       // throttled request still spends the tenant's budget.
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
+      if (classifySyncFailure(shaped) === "AUTH") {
+        // The token refreshed fine and Graph still refused it — resource
+        // access revoked, a conditional-access policy, a tenant change. The
+        // refresh path never sees this, so nothing else would ever move the
+        // connection off CONNECTED: the cursor would back off forever while
+        // the dashboard kept saying the link was healthy. Say so on the row
+        // the dashboard reads, and audit it as the box's discovery.
+        await markNeedsReconnect(
+          deps.prisma,
+          cursor.userId,
+          "Microsoft rejected the sync's access to this account.",
+        );
+      }
       return {
         ...base,
         items,
@@ -232,7 +272,7 @@ export async function syncCursor(
         await recordFailure(
           deps.prisma,
           cursor.id,
-          { statusCode: 0, code: "HANDLER_FAILED", message: "page handling failed" },
+          { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" },
           null,
           now(),
         );

@@ -130,8 +130,11 @@ export async function recordSuccess(
  *     early deepens the throttling.
  *   - **AUTH** — the grant is dead, which is a property of the CONNECTION, not
  *     this cursor. Park the cursor but **keep its delta link**: discarding it
- *     would force a full re-download once the person reconnects. The
- *     connection itself is moved to NEEDS_RECONNECT by the auth service.
+ *     would force a full re-download once the person reconnects. This
+ *     function does NOT touch the connection row: the auth service moves it
+ *     to NEEDS_RECONNECT when a refresh fails, and the sync service does the
+ *     same (`markNeedsReconnect`) when Graph answers a live call with 401/403
+ *     — the case a refresh never sees.
  *   - **FATAL** — stop. Retrying a malformed request forever helps nobody.
  */
 export async function recordFailure(
