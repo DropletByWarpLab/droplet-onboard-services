@@ -88,8 +88,8 @@ import {
 } from "./tool-spec-runner.service.js";
 import {
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   resolveAttributedToolAccess,
-  WRITE_TOOLS,
 } from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
@@ -200,8 +200,7 @@ export async function tickToolSchedules(
     //
     // Parsed once: the access gate below reads the same list.
     const toolNames = plannedToolNames(spec.steps);
-    const derivedWrites = toolNames.some((tool) => WRITE_TOOLS.has(tool));
-    const effectiveWrites = spec.writes || derivedWrites;
+    const effectiveWrites = spec.writes || hasWriteTool(toolNames);
 
     if (effectiveWrites && !spec.reversible) {
       // Safety gate — see file header. Skip + audit + advance.

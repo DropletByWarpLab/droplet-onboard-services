@@ -248,6 +248,25 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set(
 );
 
 /**
+ * WARP-2665 — the one place a tool list is classified as writing.
+ *
+ * Three surfaces decide something from "does this spec call a write tool":
+ * the routes' authoring-time reconcile (which names the offending tools in
+ * its 400), the ticker's fire-time gate, and the pattern miner's `writes`
+ * column. Each used to re-derive it against `WRITE_TOOLS` inline, and one
+ * classification site drifting from another is exactly how the miner's
+ * copy came to be a hardcoded `false`. `writeToolsIn` is the predicate;
+ * `hasWriteTool` is the boolean the two gates read.
+ */
+export function writeToolsIn(names: ReadonlyArray<string>): string[] {
+  return names.filter((name) => WRITE_TOOLS.has(name));
+}
+
+export function hasWriteTool(names: ReadonlyArray<string>): boolean {
+  return writeToolsIn(names).length > 0;
+}
+
+/**
  * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
  * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
  * the one documented, scoped exception (ADR-004 amendment, approved

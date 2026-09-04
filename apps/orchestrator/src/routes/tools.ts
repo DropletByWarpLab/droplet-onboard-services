@@ -36,7 +36,7 @@ import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.servi
 import {
   firstToolDeniedForPrincipal,
   resolveToolAccessScope,
-  WRITE_TOOLS,
+  writeToolsIn,
 } from "../services/tool-access.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
@@ -111,14 +111,15 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
  * writes — which is also what keeps a future non-dispatching kind correct here
  * without touching this function.
  *
- * `WRITE_TOOLS` is derived from each tool's `requiresWrite` in
- * `@droplet/tools-core`, so a write tool added to the registry is classified
- * here without anyone remembering to update a list.
+ * `writeToolsIn` is the classification the ticker's gate and the miner read
+ * too, against `WRITE_TOOLS` — derived from each tool's `requiresWrite` in
+ * `@droplet/tools-core` — so a write tool added to the registry is classified
+ * everywhere without anyone remembering to update a list.
  */
 function writeToolNamesIn(
   steps: ReadonlyArray<{ kind: string; args: unknown }>,
 ): string[] {
-  return plannedToolNames(steps).filter((tool) => WRITE_TOOLS.has(tool));
+  return writeToolsIn(plannedToolNames(steps));
 }
 
 /** Parsed request steps in the stored `{kind, args}` shape `plannedToolNames` reads. */
