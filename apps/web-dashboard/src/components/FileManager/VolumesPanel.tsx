@@ -20,6 +20,7 @@ import {
   drivePoolName,
   isPoolBackedDevice,
   poolBackingDrive,
+  usagePctOf,
 } from "./drive-display";
 
 function formatBytes(bytes: number): string {
@@ -34,13 +35,9 @@ function formatBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
 
-function pctOf(used: number, size: number): number {
-  if (!size) return 0;
-  return Math.max(0, Math.min(100, (used / size) * 100));
-}
 
 function pct(d: DriveInfo): number {
-  return pctOf(d.used_bytes, d.size_bytes);
+  return usagePctOf(d.used_bytes, d.size_bytes);
 }
 
 // Design Storage meter: the fill turns amber past 80% and red past 95%,
@@ -122,7 +119,7 @@ function VolumeTile({
 function SystemVolumeTile({ system }: { system: SystemDiskInfo }) {
   // null = identified but unmeasurable. Show capacity, no meter, no fake 0%.
   const measured = system.used_bytes !== null;
-  const p = measured ? pctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
+  const p = measured ? usagePctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
   return (
     <div role="listitem" className="card relative">
       <div className="card-h">

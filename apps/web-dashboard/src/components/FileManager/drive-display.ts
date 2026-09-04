@@ -32,6 +32,24 @@ const PREFIXED_HEX_TAIL = /^(?:drive|pool)-[0-9a-f]{2,}(?:-[0-9a-f]{1,8})*$/i;
 
 /** True when a mount tail is machine-generated and must never be shown as a
  *  volume's title (home-user persona, ADR-002). */
+/**
+ * WARP-2098 — ONE usage-meter percentage, shared by the Storage screen's
+ * DrivesPanel (drive cards, pool card, system-drive card) and the Files
+ * screen's VolumesPanel tiles.
+ *
+ * These were byte-identical private copies (`usagePctOf` / `pctOf`) added in
+ * the same change, which is the same duplication-drift class this ticket
+ * fixed for `fmtBytes`/`formatBytes` — two meters for the same volume must
+ * not be able to disagree.
+ *
+ * A zero or absent capacity yields 0, not NaN: NaN renders as an empty bar,
+ * which reads as "0% used" rather than "unknown".
+ */
+export function usagePctOf(used: number, size: number): number {
+  if (!size) return 0;
+  return Math.max(0, Math.min(100, (used / size) * 100));
+}
+
 export function isMachineTail(tail: string): boolean {
   return UUID_TAIL.test(tail) || HEX_SERIAL_TAIL.test(tail) || PREFIXED_HEX_TAIL.test(tail);
 }

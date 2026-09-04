@@ -144,6 +144,51 @@ def test_usage_is_null_not_zero_when_nothing_could_be_measured(monkeypatch):
     assert sys_disk["filesystems"] == []
 
 
+def test_partial_measurement_reports_null_not_an_undercount(monkeypatch):
+    # THE WARP-2098 DEFECT, RECURRING. If /data is unmeasurable (statvfs
+    # denied, device vanished mid-walk) while / still measures fine, the
+    # survivors sum to 20 GB — a real, non-null number describing a nearly
+    # empty disk, on the box whose whole problem is that /data is full.
+    # Indistinguishable from a true reading unless we refuse to publish it.
+    bridge = _load_bridge(monkeypatch)
+    survivors = [f for f in _OS_FILESYSTEMS if f["mount"] != "/data"]
+    sys_disk = bridge.system_disk_info(
+        _LSBLK, "nvme0n1", survivors, filesystems_complete=False)
+    assert sys_disk["used_bytes"] is None
+    assert sys_disk["free_bytes"] is None
+    assert sys_disk["measurement"] == "partial"
+    # The rows that DID measure are still returned — the owner sees what was
+    # readable, they just do not get a total that pretends to be the disk.
+    assert [f["mount"] for f in sys_disk["filesystems"]] == ["/", "/boot/efi"]
+    # Capacity is still known and still shown; only the meter goes away.
+    assert sys_disk["size_bytes"] == 512 * GB
+
+
+def test_complete_measurement_still_publishes_a_total(monkeypatch):
+    # The guard on over-correcting: refusing partial totals must not stop the
+    # normal path reporting one.
+    bridge = _load_bridge(monkeypatch)
+    sys_disk = bridge.system_disk_info(
+        _LSBLK, "nvme0n1", _OS_FILESYSTEMS, filesystems_complete=True)
+    assert sys_disk["used_bytes"] == 120 * GB
+    assert sys_disk["measurement"] == "complete"
+
+
+def test_unknown_disk_size_does_not_render_as_used_of_zero(monkeypatch):
+    # lsblk gave no size but the filesystems measured real bytes. Publishing
+    # used=120GB with size=0 renders as "120 GB of 0 B" — worse than saying
+    # nothing, because it looks like a reading. Null both halves instead.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        {"name": "nvme0n1", "type": "disk", "size": 0, "tran": "nvme",
+         "model": "Samsung SSD 980", "serial": "S64ANS0T1"},
+    ]}
+    sys_disk = bridge.system_disk_info(tree, "nvme0n1", _OS_FILESYSTEMS)
+    assert sys_disk["used_bytes"] is None
+    assert sys_disk["free_bytes"] is None
+    assert sys_disk["measurement"] == "partial"
+
+
 def test_reporting_it_does_not_re_admit_it_to_the_inventory(monkeypatch):
     # The load-bearing half of the pair. Making the OS disk visible must not put
     # it back into `disks`, where it would become an "Erase & adopt" candidate.
@@ -199,7 +244,7 @@ def _stub_host(bridge, monkeypatch, tmp_path):
 def test_discovery_finds_every_filesystem_on_the_os_disk(monkeypatch, tmp_path):
     bridge = _load_bridge(monkeypatch)
     _stub_host(bridge, monkeypatch, tmp_path)
-    rows = bridge._os_disk_filesystems({}, "nvme0n1")
+    rows, complete = bridge._os_disk_filesystems({}, "nvme0n1")
     mounts = [r["mount"] for r in rows]
     # /data is found by DISCOVERY, not by a hardcoded path — it only exists
     # after droplet-luks-provision.sh has moved the docker data-root there.
@@ -208,6 +253,8 @@ def test_discovery_finds_every_filesystem_on_the_os_disk(monkeypatch, tmp_path):
     assert "/boot/efi" in mounts
     # The pool is on a different disk and must never be counted here.
     assert "/mnt/droplet/pool" not in mounts
+    # Every qualifying mount measured, so the caller may publish a total.
+    assert complete is True
 
 
 def test_discovery_deduplicates_the_root_bind_mount(monkeypatch, tmp_path):
@@ -218,7 +265,7 @@ def test_discovery_deduplicates_the_root_bind_mount(monkeypatch, tmp_path):
     # mount wins.
     bridge = _load_bridge(monkeypatch)
     _stub_host(bridge, monkeypatch, tmp_path)
-    rows = bridge._os_disk_filesystems({}, "nvme0n1")
+    rows, complete = bridge._os_disk_filesystems({}, "nvme0n1")
     mounts = [r["mount"] for r in rows]
     assert "/mnt/droplet" not in mounts
     assert mounts.count("/") == 1
@@ -230,11 +277,39 @@ def test_discovery_ignores_pseudo_filesystems(monkeypatch, tmp_path):
     # system disk's usage with memory-backed mounts.
     bridge = _load_bridge(monkeypatch)
     _stub_host(bridge, monkeypatch, tmp_path)
-    rows = bridge._os_disk_filesystems({}, "nvme0n1")
+    rows, complete = bridge._os_disk_filesystems({}, "nvme0n1")
     assert not [r for r in rows if r["mount"] in ("/run", "/proc", "/sys")]
+
+
+def test_discovery_flags_itself_incomplete_when_a_filesystem_cannot_be_measured(
+    monkeypatch, tmp_path,
+):
+    # The other half of the undercount fix. A dropped row must be SIGNALLED,
+    # not merely omitted: omitting it silently is what lets the caller sum the
+    # survivors and call it the disk.
+    bridge = _load_bridge(monkeypatch)
+    _stub_host(bridge, monkeypatch, tmp_path)
+
+    real_bytes_for = bridge._bytes_for
+
+    def flaky(path):
+        # statvfs denied on /data only — exactly the asymmetry that makes a
+        # root-only reading look plausible.
+        if path == "/data":
+            return 0, 0, 0
+        return real_bytes_for(path)
+
+    monkeypatch.setattr(bridge, "_bytes_for", flaky)
+    rows, complete = bridge._os_disk_filesystems({}, "nvme0n1")
+    assert complete is False
+    assert "/data" not in [r["mount"] for r in rows]
+    # And end to end: the caller must not publish a total from it.
+    sys_disk = bridge.system_disk_info(_LSBLK, "nvme0n1", rows, complete)
+    assert sys_disk["used_bytes"] is None
+    assert sys_disk["measurement"] == "partial"
 
 
 def test_discovery_returns_nothing_when_the_os_disk_is_unknown(monkeypatch, tmp_path):
     bridge = _load_bridge(monkeypatch)
     _stub_host(bridge, monkeypatch, tmp_path)
-    assert bridge._os_disk_filesystems({}, "") == []
+    assert bridge._os_disk_filesystems({}, "") == ([], True)

@@ -1701,10 +1701,18 @@ def _os_disk_filesystems(mount_meta, os_disk):
     `mount_meta` is the /proc/mounts pass the caller already did, keyed by mount
     point. Mounts whose statvfs fails are dropped rather than reported as zero —
     an unmeasurable filesystem must not read as an empty one.
+
+    Returns (rows, complete). WARP-2098: dropping a row SILENTLY is the same
+    defect this ticket exists to fix. If /data is unmeasurable while / is fine,
+    the surviving rows still sum to a real, non-null number — a root-only
+    figure that understates a full disk, with nothing marking it partial.
+    `complete` is False when any qualifying mount was dropped or the walk
+    aborted, and system_disk_info refuses to publish a total from it.
     """
     if not os_disk:
-        return []
+        return [], True
     by_device = {}
+    complete = True
     try:
         with open("/proc/mounts") as f:
             for line in f:
@@ -1723,6 +1731,9 @@ def _os_disk_filesystems(mount_meta, os_disk):
                     continue
                 total, used, free = _bytes_for(mp)
                 if total <= 0:
+                    # Unmeasurable, not empty. Record the gap so the caller
+                    # cannot mistake the survivors for the whole disk.
+                    complete = False
                     continue
                 fs, _ro = mount_meta.get(mp, ("", True))
                 by_device[dev] = {
@@ -1733,13 +1744,15 @@ def _os_disk_filesystems(mount_meta, os_disk):
                     "free_bytes": free,
                 }
     except Exception:                                                  # noqa: BLE001
-        # Best-effort, exactly like the drive-enumeration passes above: a
-        # partial (or empty) list yields honest partial usage, never an error.
-        pass
-    return sorted(by_device.values(), key=lambda r: r["mount"])
+        # Best-effort, exactly like the drive-enumeration passes above — but a
+        # walk that aborted part-way has an arbitrary prefix of the mounts, so
+        # it is partial by definition.
+        complete = False
+    return sorted(by_device.values(), key=lambda r: r["mount"]), complete
 
 
-def system_disk_info(lsblk_tree, os_disk, os_filesystems):
+def system_disk_info(lsblk_tree, os_disk, os_filesystems,
+                     filesystems_complete=True):
     """WARP-2098 — the appliance's OWN install disk, as its own object.
 
     WARP-827 removed the OS/boot disk from BOTH lists this bridge emits: from
@@ -1771,6 +1784,14 @@ def system_disk_info(lsblk_tree, os_disk, os_filesystems):
     ADR-019 forbids, because they are disjoint extents of ONE physical device.
     `free_bytes` is measured against the whole disk, so unallocated LVM extents
     correctly count as free.
+
+    `filesystems_complete` is False when the caller could not measure every
+    filesystem on the disk. A sum over the survivors is then an UNDERCOUNT that
+    looks exactly like a real reading, so used/free are published as null
+    instead — the same contract as the nothing-measurable case below, and the
+    one the dashboard already honours (`measured = used_bytes !== null`, meter
+    hidden, capacity still shown). Reporting a confident root-only figure while
+    /data is unreadable would reproduce the WARP-2098 defect itself.
 
     Returns None (the key is then omitted entirely) when the disk cannot be
     identified — the same fail-open contract as the WARP-827 filters.
@@ -1808,21 +1829,37 @@ def system_disk_info(lsblk_tree, os_disk, os_filesystems):
             "free_bytes": fs.get("free_bytes") or 0,
         })
 
-    if filesystems:
+    # A total is publishable only when EVERY filesystem was measured AND the
+    # whole-disk size is known. Missing either one yields a pair the UI cannot
+    # render honestly: a partial sum understates a full disk, and a real `used`
+    # against an unknown size renders as "120 GB of 0 B".
+    if filesystems and filesystems_complete and disk_size:
         used = sum(f["used_bytes"] for f in filesystems)
-        free = max(0, disk_size - used) if disk_size else None
+        free = max(0, disk_size - used)
+        measurement = "complete"
+    elif filesystems:
+        # Something real was measured, but not enough to total. Null, never a
+        # number — the per-filesystem rows are still returned below so the owner
+        # sees what WAS readable.
+        used = None
+        free = None
+        measurement = "partial"
     else:
         # The disk is real but nothing on it could be measured (statvfs denied,
         # no visible mounts). Report null, NEVER 0 — a zero would render as a
         # pristine empty disk, which is a claim and a false one.
         used = None
         free = None
+        measurement = "unavailable"
 
     return {
         "name": os_disk,
         "size_bytes": disk_size,
         "used_bytes": used,
         "free_bytes": free,
+        # Explicit state, not inferred from the nulls: lets a consumer say WHY
+        # there is no meter ("some filesystems unreadable" vs "nothing was").
+        "measurement": measurement,
         "model": (node.get("model") or "").strip(),
         "serial": (node.get("serial") or "").strip(),
         "bus": (node.get("tran") or "").lower(),
@@ -2098,8 +2135,9 @@ def drives_snapshot(invalidate=False):
     # "this bridge has nothing to say about the system disk" apart from "the
     # system disk is empty". Added AFTER the two lists above and never merged
     # into either — see system_disk_info.
+    os_filesystems, os_fs_complete = _os_disk_filesystems(mount_meta, os_disk)
     system_disk = system_disk_info(
-        lsblk_tree, os_disk, _os_disk_filesystems(mount_meta, os_disk))
+        lsblk_tree, os_disk, os_filesystems, os_fs_complete)
     if system_disk is not None:
         snap["system_disk"] = system_disk
     _drives_cache["snap"] = snap

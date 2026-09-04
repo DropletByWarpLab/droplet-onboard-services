@@ -71,6 +71,7 @@ import {
   sanitizeFsLabel,
   takenVolumeNames,
   uniqueFsLabel,
+  usagePctOf,
 } from "./drive-display";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
@@ -107,13 +108,6 @@ function poolName(pool: PoolInfo): string {
 // orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
 const DRIVE_NAME_MAX = 64;
 
-// Shared by DriveCard, the pool card and the WARP-2098 system-drive card, so
-// one volume's meter can never disagree with another's. A zero/absent capacity
-// yields 0 rather than NaN (which renders as an empty bar, not an honest one).
-function usagePctOf(used: number, size: number): number {
-  if (!size) return 0;
-  return Math.max(0, Math.min(100, (used / size) * 100));
-}
 
 function usagePct(d: DriveInfo): number {
   return usagePctOf(d.used_bytes, d.size_bytes);

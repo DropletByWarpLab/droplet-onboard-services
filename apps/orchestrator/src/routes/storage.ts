@@ -471,11 +471,14 @@ const createPoolNameSchema = z.object({
 });
 
 /**
- * GET /api/storage — return the authenticated user's Nextcloud storage quota.
+ * The storage router: box-level storage, the drive inventory, and the pool
+ * lifecycle.
  *
- * Nextcloud enforces per-user quotas via OCS `/cloud/user`. We proxy that
- * call so the dashboard sees one consistent storage view regardless of
- * which user is logged in.
+ * NOTE the headline figures are NO LONGER the signed-in user's Nextcloud
+ * quota — WARP-2098 changed that, because on this appliance the quota
+ * described the install disk while being labelled "your storage". The
+ * reasoning lives on `GET /api/storage` below; this comment used to
+ * document the proxied-quota behaviour and contradicted it.
  */
 export function createStorageRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -546,6 +549,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // The Nextcloud quota is still worth reporting — it is what the user's
       // own cloud account can hold — it just is not the box's storage. Failing
       // to read it must not fail the whole response, so it degrades to null.
+      //
+      // WARP-2098: this and the device-bridge read below are independent
+      // network round-trips to different hosts, and awaiting them in sequence
+      // added their latencies together on every request — including the first
+      // paint of the Storage screen. Run concurrently; each keeps its OWN
+      // try/catch so one degrading never takes the other's result with it,
+      // which is why this is not a single try around both.
+      const cloudRead = (async (): Promise<StorageStats | null> => {
       let cloud: StorageStats | null = null;
       try {
         const token = await resolveNcToken(req);
@@ -566,7 +577,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       } catch (err) {
         logger.warn({ err }, "Failed to fetch Nextcloud quota");
       }
+      return cloud;
+      })();
 
+      const bridgeRead = (async (): Promise<{
+        totals: DataStorageTotals | null;
+        system: BridgeSystemDisk | undefined;
+      }> => {
       let totals: DataStorageTotals | null = null;
       let system: BridgeSystemDisk | undefined;
       try {
@@ -588,6 +605,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           logger.warn({ err }, "Failed to fetch drives from device-bridge");
         }
       }
+      return { totals, system };
+      })();
+
+      // Both already swallow their own failures, so this cannot reject.
+      const [cloud, { totals, system }] = await Promise.all([
+        cloudRead,
+        bridgeRead,
+      ]);
 
       res.json({
         // Headline = the owner's DATA drives. Zeroes when there are none, which
