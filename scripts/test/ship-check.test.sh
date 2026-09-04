@@ -86,6 +86,24 @@ _fail() {
 # is only ever changed deliberately, and changing it is a visible two-file edit
 # because ci.yml stops matching.
 _run_test() {
+  # WARP-2620 — validate the arity, because getting it wrong is SILENT.
+  # `_run_test` took (name, fn) before WARP-2645 added the skip id in front.
+  # On a stale 2-arg call `shift 2` consumes both words, `"$@"` is empty, and
+  # a simple command with no words is a no-op that returns 0 — so the case
+  # reports PASS having executed nothing. That is the exact vacuous-green
+  # class WARP-2637 and WARP-2645 exist to eliminate, reachable from the fix
+  # itself: any in-flight branch or rebase reintroducing the old form scores
+  # a green. `declare -f` also catches a typo'd or not-yet-defined function
+  # name, which `"$@"` would otherwise report as a plain non-zero FAIL.
+  # `exit 2` rather than a FAIL: a mis-registered case is a broken harness,
+  # not a failing gate, and it must not be counted in either column.
+  if [ "$#" -lt 3 ] || ! declare -f "$3" >/dev/null; then
+    printf 'usage: _run_test <skip-id> <name> <fn>
+' >&2
+    printf '  got %d arg(s): %s
+' "$#" "$*" >&2
+    exit 2
+  fi
   local id="$1" name="$2"; shift 2
   local rc=0
   TOTAL=$((TOTAL + 1))
