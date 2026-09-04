@@ -363,7 +363,19 @@ export function fail(code: string, message: string): ToolResult {
 }
 
 /**
- * One error mapping for both business graph reads.
+ * The entities whose routes sit behind the `projects` module gate. Only
+ * `/api/pm/projects*` and `/api/crm/*` are `requireModuleEnabled`-guarded
+ * (module-registry.ts `routePrefixes`), so the entity is enough to name the
+ * switch that is off.
+ */
+const PROJECTS_MODULE_ENTITIES: ReadonlySet<string> = new Set(["project", "work_item", "task"]);
+
+/**
+ * One error mapping for every `business_*` verb — reads and writes alike.
+ * `callOrch` throws `OrchPmError` whatever the target, so one mapper covers
+ * the PM and CRM routes. `write-shared.ts` RE-EXPORTS this rather than
+ * carrying a copy: the write path once shipped without the `module_disabled`
+ * branch, precisely because it had its own.
  *
  * `module_disabled` is separated from an ordinary 404 on purpose. Both arrive
  * as HTTP 404, but they mean opposite things to the person asking: one is
@@ -371,22 +383,23 @@ export function fail(code: string, message: string): ToolResult {
  * CRM". Collapsing them would have the model tell an owner their customer does
  * not exist because a module toggle is off.
  *
- * 422 keeps its message: the orchestrator's 422s (`invalid_stage`,
- * `amount_needs_currency`) name a fixable mistake and the model can act on it.
+ * 400 and 422 keep their message: the orchestrator's 422s (`invalid_stage`,
+ * `amount_needs_currency`, `invalid_state`) and zod's 400s name a fixable
+ * mistake and the model can act on it.
  */
 export function businessError(err: unknown, entity: string): ToolResult {
   if (err instanceof OrchPmError) {
     if (err.message === "module_disabled") {
-      const mod = entity === "project" || entity === "work_item" ? "Projects" : "CRM";
+      const mod = PROJECTS_MODULE_ENTITIES.has(entity) ? "Projects" : "CRM";
       return fail(
         "BUSINESS_MODULE_OFF",
-        `The ${mod} module is switched off on this Droplet, so there is nothing to read. It can be turned on in Settings.`,
+        `The ${mod} module is switched off on this Droplet, so that record cannot be reached. It can be turned on in Settings.`,
       );
     }
     const code =
       err.status === 404
         ? "BUSINESS_NOT_FOUND"
-        : err.status === 422
+        : err.status === 400 || err.status === 422
           ? "BUSINESS_INVALID_REQUEST"
           : "BUSINESS_API_ERROR";
     return fail(code, err.message);

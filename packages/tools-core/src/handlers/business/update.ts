@@ -36,7 +36,7 @@
  * handler-side prompt, and no `details` on any failure.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-import { callOrch } from "../pm/pm-orch.js";
+import { callOrch, toPlaneWorkItem } from "../pm/pm-orch.js";
 import {
   UPDATABLE,
   businessError,
@@ -143,28 +143,30 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // to someone means they own it now. If multi-assignee ever needs to
         // be expressible from chat it gets its own argument, rather than
         // this one quietly meaning two things.
-        const data = await callOrch<{
-          work_item: { id: string; name: string; state?: string };
-        }>(ctx, "patch", `/api/pm/work-items/${encodeURIComponent(recordId)}`, {
-          name: title,
-          state_id: state,
-          assignees: assignee === undefined ? undefined : [assignee],
-        });
+        const data = await callOrch<{ work_item: Parameters<typeof toPlaneWorkItem>[0] }>(
+          ctx,
+          "patch",
+          `/api/pm/work-items/${encodeURIComponent(recordId)}`,
+          {
+            name: title,
+            state_id: state,
+            assignees: assignee === undefined ? undefined : [assignee],
+          },
+        );
+        // The route answers with the full ApiWorkItem, whose `state` is an
+        // ApiState OBJECT (`{id, projectId, name, group, …}`), and `callOrch`
+        // does no runtime validation. `toPlaneWorkItem` is what turns that
+        // into the state's NAME on the read path; going through it here
+        // keeps the two paths from disagreeing about what a state looks like.
+        const w = toPlaneWorkItem(data.work_item);
         return {
           ok: true,
-          data: {
-            updated: {
-              entity,
-              id: data.work_item.id,
-              name: data.work_item.name,
-              state: data.work_item.state ?? null,
-            },
-          },
+          data: { updated: { entity, id: w.id, name: w.name, state: w.state ?? null } },
         };
       }
     }
   } catch (err) {
-    return businessError(err);
+    return businessError(err, entity);
   }
 }
 

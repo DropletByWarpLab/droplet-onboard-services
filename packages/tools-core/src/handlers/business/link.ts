@@ -109,7 +109,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       },
     };
   } catch (err) {
-    return businessError(err);
+    // Both live edges are a deal PATCH under `/api/crm`, so the CRM is the
+    // module named if the 404 turns out to be a switch.
+    return businessError(err, "deal");
   }
 }
 

@@ -29,7 +29,6 @@
  */
 
 import type { ToolResult } from "../../types.js";
-import { OrchPmError } from "../pm/pm-orch.js";
 
 /**
  * Everything `business_create` can bring into being.
@@ -105,31 +104,14 @@ export function refuseEntity(verb: "business_create" | "business_update"): ToolR
 }
 
 /**
- * One error mapping for all three verbs, over BOTH back ends.
- *
- * `callOrch` throws `OrchPmError` whatever the target, so one mapper covers
- * the PM and CRM routes alike. A non-`OrchPmError` is rethrown rather than
- * flattened: a programming mistake dressed as a tidy tool failure is a
- * mistake nobody ever finds.
- *
- * 404 lets the model say "I couldn't find that deal" instead of "something
- * went wrong". 422 keeps its message verbatim, because the orchestrator's
- * 422s (`invalid_stage`, `amount_needs_currency`, `invalid_state`) name a
- * mistake the model can correct on the next turn; collapsing them into one
- * code makes them unrecoverable.
+ * One error mapping for all three verbs, over BOTH back ends — and it is the
+ * READ path's, re-exported, not a second copy. A copy is how the write path
+ * once shipped without the `module_disabled` branch and answered "that
+ * record does not exist" when a module was merely switched off. The mapping
+ * itself, and why 404 / 422 / `module_disabled` are kept apart, is in
+ * `_graph.ts`.
  */
-export function businessError(err: unknown): ToolResult {
-  if (err instanceof OrchPmError) {
-    const code =
-      err.status === 404
-        ? "BUSINESS_NOT_FOUND"
-        : err.status === 400 || err.status === 422
-          ? "BUSINESS_INVALID_REQUEST"
-          : "BUSINESS_API_ERROR";
-    return { ok: false, status: "error", error: { code, message: err.message } };
-  }
-  throw err;
-}
+export { businessError } from "./_graph.js";
 
 // ── The link graph ──────────────────────────────────────────────────────────
 

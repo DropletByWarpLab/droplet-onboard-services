@@ -6,7 +6,7 @@
  * `pm_add_work_item_comment` and `crm_log_activity`, and ADDS the customer
  * and deal creation the CRM has never had a tool for — four tools' worth of
  * capability, plus two new ones, for less serialized budget than the four
- * cost (measured: 812 chars against 977 + 705 + 507 + 573).
+ * cost (measured: 1,024 chars against 977 + 705 + 507 + 573).
  *
  * WHY ONE VERB. The four it replaces were four schemas the model had to
  * choose between before it could act, and three of them were excluded from
@@ -74,6 +74,11 @@ const inputSchema = {
       type: "string",
       description: "Note on a customer or deal: call, meeting, task or email. Default note.",
     },
+    description: { type: "string", description: "Longer body for a task or a project." },
+    identifier: {
+      type: "string",
+      description: "Project only: key prefix for its tasks, letters and digits up to 10, e.g. ROOF.",
+    },
   },
   required: ["entity", "name"],
   additionalProperties: false,
@@ -85,7 +90,33 @@ interface Args {
   parent_entity?: string;
   parent_id?: string;
   note_kind?: string;
+  description?: string;
+  identifier?: string;
 }
+
+/**
+ * The route's own bound on `name`, per entity, so an over-long one comes back
+ * as a message the model can act on instead of an opaque 400 from zod:
+ * `companyCreateSchema.name` 300, `dealCreateSchema.title` 300,
+ * `projectCreateSchema.name` 200, `workItemCreateSchema.name` 500,
+ * `activityCreateSchema.summary` 1000 (a note on a task becomes a comment,
+ * bounded far higher; 1000 is the tighter of the two and what a "one-line
+ * summary" should meet anyway). ONE table, consulted before the switch: a
+ * single shared gate at 500 once ran first and made the note bound dead code.
+ */
+const NAME_MAX: Record<CreatableEntity, number> = {
+  customer: 300,
+  deal: 300,
+  project: 200,
+  task: 500,
+  note: 1000,
+};
+
+/** `projectCreateSchema.description` / `workItemCreateSchema.description_html`. */
+const DESCRIPTION_MAX = { project: 10_000, task: 100_000 } as const;
+
+/** `projectCreateSchema.identifier`: 1–10 letters or digits. */
+const IDENTIFIER_RE = /^[A-Za-z0-9]{1,10}$/;
 
 /** What every branch returns: the id the caller needs to act next, and
  *  nothing else. A creator does not need the whole row read back, and a
@@ -94,15 +125,20 @@ function created(entity: string, id: string, name: string): ToolResult {
   return { ok: true, data: { created: { entity, id, name } } };
 }
 
-function requireParent(entity: string, parentId: unknown): string | ToolResult {
+function requireParent(
+  entity: string,
+  parentId: unknown,
+  why = `is required when creating a ${entity}`,
+): string | ToolResult {
   if (typeof parentId !== "string" || parentId.trim().length === 0) {
-    return invalidArgs(`parent_id is required when creating a ${entity}.`);
+    return invalidArgs(`parent_id ${why}.`);
   }
   return parentId.trim();
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const { entity, name, parent_entity, parent_id, note_kind } = args as unknown as Args;
+  const { entity, name, parent_entity, parent_id, note_kind, description, identifier } =
+    args as unknown as Args;
 
   if (typeof entity !== "string" || !(CREATABLE as readonly string[]).includes(entity)) {
     return refuseEntity("business_create");
@@ -111,10 +147,29 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (title.length === 0) {
     return invalidArgs("name is required and must be a non-empty string.");
   }
-  // Mirrors the route's own bound so an over-long title comes back as a
-  // message the model can act on instead of an opaque 400 from zod.
-  if (title.length > 500) {
-    return invalidArgs("name must be at most 500 characters.");
+  if (title.length > NAME_MAX[entity]) {
+    return invalidArgs(`name must be at most ${NAME_MAX[entity]} characters for a ${entity}.`);
+  }
+  // Neither optional field is ever silently dropped — the same rule as
+  // `note_kind` on a task. An argument that meant nothing is refused by name
+  // so the model can fix the call, rather than told "done".
+  if (description !== undefined) {
+    if (entity !== "task" && entity !== "project") {
+      return invalidArgs("description applies to a task or a project.");
+    }
+    if (typeof description !== "string" || description.length > DESCRIPTION_MAX[entity]) {
+      return invalidArgs(
+        `description must be a string of at most ${DESCRIPTION_MAX[entity]} characters.`,
+      );
+    }
+  }
+  if (identifier !== undefined) {
+    if (entity !== "project") {
+      return invalidArgs("identifier applies to a project.");
+    }
+    if (typeof identifier !== "string" || !IDENTIFIER_RE.test(identifier)) {
+      return invalidArgs("identifier must be 1-10 characters, letters and digits only.");
+    }
   }
 
   try {
@@ -134,8 +189,27 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // its account does is a real thing, and refusing it here would make
         // "log the enquiry from the trade show" impossible. Attach the
         // customer later with business_link.
-        const companyId =
-          parent_entity === "customer" && typeof parent_id === "string" ? parent_id : undefined;
+        //
+        // But a parent that IS named must be a customer — refused otherwise,
+        // as the task branch refuses a non-project — and must be a real id.
+        // `createDeal` treats `companyId: ""` as "skip the exists check" and
+        // then WRITES the empty string (`input.companyId ?? null`: "" is not
+        // null), which is neither a customer nor the absent state.
+        if (parent_entity !== undefined && parent_entity !== "customer") {
+          return invalidArgs(
+            "a deal hangs off a customer; set parent_entity to customer, or leave both parent fields out for a deal with no customer yet.",
+          );
+        }
+        let companyId: string | undefined;
+        if (parent_entity !== undefined || parent_id !== undefined) {
+          const customerId = requireParent(
+            "deal",
+            parent_id,
+            "must be the customer's id when a parent is given",
+          );
+          if (typeof customerId !== "string") return customerId;
+          companyId = customerId;
+        }
         const data = await callOrch<{ deal: { id: string; title: string } }>(
           ctx,
           "post",
@@ -153,7 +227,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           ctx,
           "post",
           "/api/pm/projects",
-          { name: title },
+          { name: title, description, identifier },
         );
         return created("project", data.project.id, data.project.name);
       }
@@ -164,11 +238,18 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         }
         const projectId = requireParent("task", parent_id);
         if (typeof projectId !== "string") return projectId;
+        // `labels` is NOT carried, and `business_update` does not take it
+        // either. The route wants label IDS (`label_ids`), and no tool reads
+        // a project's labels — `GET /pm/projects/:id/labels` has nothing
+        // behind it — so from chat the property could only ever be filled
+        // with an invented value: schema budget spent advertising an
+        // argument that cannot be right. It returns the day a label read
+        // exists, resolved from names here, in the same change.
         const data = await callOrch<{ work_item: { id: string; name: string } }>(
           ctx,
           "post",
           `/api/pm/projects/${encodeURIComponent(projectId)}/work-items`,
-          { name: title },
+          { name: title, description_html: description },
         );
         return created("task", data.work_item.id, data.work_item.name);
       }
@@ -197,9 +278,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         if (parent_entity !== "customer" && parent_entity !== "deal") {
           return invalidArgs("a note hangs off a customer, a deal or a task; set parent_entity.");
         }
-        if (title.length > 1000) {
-          return invalidArgs("a note summary must be at most 1000 characters.");
-        }
 
         const kind = (typeof note_kind === "string" ? note_kind.trim().toUpperCase() : "NOTE") as NoteKind;
         if (!(NOTE_KINDS as readonly string[]).includes(kind)) {
@@ -226,7 +304,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
     }
   } catch (err) {
-    return businessError(err);
+    return businessError(err, entity);
   }
 }
 
