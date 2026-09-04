@@ -58,13 +58,13 @@ fi
 # ordering, so a whole-file grep would pass on prose alone.
 CODE_NUM="$(grep -nvE '^[[:space:]]*#' "$RESET")"
 
-if printf '%s\n' "$CODE_NUM" | grep -qF 'lib/secrets-wipe.sh'; then
+if grep -qF 'lib/secrets-wipe.sh' <<<"$CODE_NUM"; then
   pass "factory-reset sources the secrets-wipe library"
 else
   fail "factory-reset does not source scripts/lib/secrets-wipe.sh"
 fi
 
-if printf '%s\n' "$CODE_NUM" | grep -qE '^[0-9]+:secw_wipe_live_secrets '; then
+if grep -qE '^[0-9]+:secw_wipe_live_secrets ' <<<"$CODE_NUM"; then
   pass "factory-reset calls secw_wipe_live_secrets"
 else
   fail "factory-reset never calls secw_wipe_live_secrets — the live secrets survive the reset"
@@ -107,7 +107,7 @@ fi
 # the link-side .env.* purge and after the data/secrets rm (otherwise it reds on
 # files the reset is about to remove), and it has to run after the device-bridge
 # cleanup (aborting earlier would leave MORE on the box, not less).
-if printf '%s\n' "$CODE_NUM" | grep -qE '^[0-9]+:if ! secw_verify_wipe '; then
+if grep -qE '^[0-9]+:if ! secw_verify_wipe ' <<<"$CODE_NUM"; then
   pass "factory-reset gates on secw_verify_wipe"
 else
   fail "factory-reset never verifies the wipe — a survivor is only a warning"
@@ -211,8 +211,8 @@ echo "--- Phase 2: a relocated box's live secrets are actually destroyed ---"
   # relocate_secrets_to_data's contract: install user, dirs 0750
   # (scripts/lib/luks.sh:109-114). Anything tighter locks the non-root
   # install user out of its own re-provision.
-  m1="$(stat -f '%Lp' "$TMP/data/droplet/env" 2>/dev/null || stat -c '%a' "$TMP/data/droplet/env")"
-  m2="$(stat -f '%Lp' "$SECRETS_TARGET" 2>/dev/null || stat -c '%a' "$SECRETS_TARGET")"
+  m1="$(stat -c '%a' "$TMP/data/droplet/env" 2>/dev/null || stat -f '%Lp' "$TMP/data/droplet/env")"
+  m2="$(stat -c '%a' "$SECRETS_TARGET" 2>/dev/null || stat -f '%Lp' "$SECRETS_TARGET")"
   [ "$m1" = "750" ] && [ "$m2" = "750" ]
 ) && pass "both containers are re-created 0750 (the mode setup.sh expects)" \
   || fail "the re-created /data containers do not carry mode 0750"
@@ -340,8 +340,8 @@ echo "--- Phase 5: a plain (non-relocated) .env still works, and the repo is not
   # shellcheck disable=SC1090
   source "$LIB"
   secw_wipe_live_secrets "$TMP/repo/.env" "$TMP/repo/data/secrets" >/dev/null 2>&1
-  m1="$(stat -f '%Lp' "$TMP/repo" 2>/dev/null || stat -c '%a' "$TMP/repo")"
-  m2="$(stat -f '%Lp' "$TMP/repo/data/secrets" 2>/dev/null || stat -c '%a' "$TMP/repo/data/secrets")"
+  m1="$(stat -c '%a' "$TMP/repo" 2>/dev/null || stat -f '%Lp' "$TMP/repo")"
+  m2="$(stat -c '%a' "$TMP/repo/data/secrets" 2>/dev/null || stat -f '%Lp' "$TMP/repo/data/secrets")"
   [ "$m1" = "755" ] && [ "$m2" = "700" ]
 ) && pass "repo-side paths are never re-created or chmodded (the checkout is untouched)" \
   || fail "the re-create step chmodded a path inside the repo checkout"
