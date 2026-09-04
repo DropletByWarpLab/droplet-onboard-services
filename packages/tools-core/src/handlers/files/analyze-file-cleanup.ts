@@ -59,7 +59,6 @@ import {
   isDotfile,
   junkReason,
   walkTree,
-  type CleanupEntry,
   type FileCategory,
 } from "./_cleanup.js";
 
