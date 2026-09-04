@@ -234,12 +234,29 @@ function defaultConnectorFor(conn: ConnRow): Connector {
  * `INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE` calls it NEEDS_RECONNECT — the
  * portal refuses every call until a current super admin re-creates the app and
  * the new token is pasted here. One vocabulary across both classifiers.
+ *
+ * ## Why a `Map` and not an object literal
+ *
+ * A bare `obj[code]` walks the prototype chain, and `code` is a string that
+ * arrived from a connector. `READ_REASON_BY_CODE["constructor"]` would answer
+ * with `Object` — truthy, so the branch below is taken, and not a reason. The
+ * read then returns `connected: true` with a FUNCTION in `reason`, which
+ * `JSON.stringify` drops on the way out of `routes/erp.ts`, leaving the owner's
+ * browser holding `{ connected: true, rows: [] }`: the empty success ADR-041
+ * forbids and this very ticket exists to remove, minted by an error whose code
+ * happened to be an ordinary-looking word.
+ *
+ * A `Map` has no inherited keys to find, so the hazard cannot be reintroduced
+ * by a later edit the way an `Object.hasOwn` guard at the call site could be.
+ * It also reads like `CAPABILITY_LIMITED_CODES` below — one lookup vocabulary
+ * for the two tables this classifier consults.
  */
-const READ_REASON_BY_CODE: Readonly<Record<string, "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED">> = {
-  QUOTA_EXHAUSTED: "QUOTA_EXHAUSTED",
-  REAUTHORIZE_REQUIRED: "REAUTHORIZE_REQUIRED",
-  USER_DOES_NOT_HAVE_PERMISSIONS: "REAUTHORIZE_REQUIRED",
-};
+const READ_REASON_BY_CODE: ReadonlyMap<string, "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED"> =
+  new Map([
+    ["QUOTA_EXHAUSTED", "QUOTA_EXHAUSTED"],
+    ["REAUTHORIZE_REQUIRED", "REAUTHORIZE_REQUIRED"],
+    ["USER_DOES_NOT_HAVE_PERMISSIONS", "REAUTHORIZE_REQUIRED"],
+  ]);
 
 /**
  * The codes that mean "this connection works and exactly one dataset is
@@ -662,7 +679,7 @@ export function createErpService(
       // owner-facing state, because the actions they call for are opposite:
       // one resolves itself next period, the other never resolves without a
       // person.
-      const cloudReason = code === undefined ? undefined : READ_REASON_BY_CODE[code];
+      const cloudReason = code === undefined ? undefined : READ_REASON_BY_CODE.get(code);
       if (cloudReason) {
         // Deliberately not logged at error level, for the same reason
         // DATASET_NOT_SERVED is not: an operator scanning red logs would find a

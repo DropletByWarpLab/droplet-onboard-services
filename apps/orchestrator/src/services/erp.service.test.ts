@@ -1216,4 +1216,87 @@ describe("erp.service — connector errors classify by code, not by class (WARP-
       expect(broken.connected).toBe(false);
     });
   });
+
+  /**
+   * A code that names an `Object.prototype` member is NOT a classification.
+   *
+   * Keying on `code` replaced an `instanceof` chain, and it brought one hazard
+   * the chain did not have: a bare index into an object LITERAL walks the
+   * prototype chain, so `READ_REASON_BY_CODE["constructor"]` answers with
+   * `Object` — truthy, and not a reason. The read then returns
+   * `connected: true` with a non-string `reason`, and `JSON.stringify` DROPS a
+   * function value outright, so the wire body an owner's browser receives is
+   * `{ connected: true, rows: [] }` with no reason at all.
+   *
+   * That is precisely the empty success ADR-041 forbids and this ticket exists
+   * to prevent, reachable by a connector whose error carries one of five
+   * ordinary-looking strings. The sibling `CAPABILITY_LIMITED_CODES` is a
+   * `Set` and has never had the hole; this table is asserted to match it.
+   *
+   * Asserted at BOTH layers on purpose: the service return value, and the
+   * serialised body, because the second is where the reason disappears and the
+   * first alone would pass on `__proto__` (an object survives stringify).
+   */
+  describe("a code inherited from Object.prototype is not a reason", () => {
+    /** Every member a bare `obj[key]` lookup can reach without the object
+     *  declaring it. `__proto__` resolves to an OBJECT rather than a function,
+     *  which is why the wire-level assertion below checks the type rather than
+     *  merely the key's presence. */
+    const INHERITED = [
+      "constructor",
+      "toString",
+      "valueOf",
+      "hasOwnProperty",
+      "isPrototypeOf",
+      "__proto__",
+    ] as const;
+
+    /** Shaped exactly like every ADR-041 connector error the classifier reads:
+     *  an `Error` with a string `code`. Only the STRING is unusual. */
+    function connectorErrorWithCode(code: string): Error {
+      const err = new Error(`the connector refused the read (${code})`);
+      Object.defineProperty(err, "code", { value: code, enumerable: true });
+      return err;
+    }
+
+    it.each(INHERITED)(
+      "code=%s is contained as a typed failure, never a truthy prototype member",
+      async (code) => {
+        const err = connectorErrorWithCode(code);
+        // The classifier's only input really is the string under test.
+        expect((err as { code?: unknown }).code).toBe(code);
+
+        const res = await serviceThatReadsWith(err).getArSummary(OWNER);
+
+        // Unrecognised is unrecognised: the safe default at the bottom of the
+        // classifier, the same one a `TypeError` takes.
+        expect(res.connected).toBe(false);
+        expect(res.reason).toBe("ERROR");
+        // Belt and braces — a non-string reason is the defect's signature.
+        expect(typeof res.reason).toBe("string");
+      },
+    );
+
+    it.each(INHERITED)(
+      "code=%s cannot reach the wire as a success with no reason",
+      async (code) => {
+        const res = await cloudServiceThatReadsWith(
+          connectorErrorWithCode(code),
+        ).queryDataset({ dataset: "audience_member", params: {} }, OWNER);
+
+        // What `routes/erp.ts` actually sends. A function-valued reason is
+        // silently dropped here, which is how the empty success is minted.
+        const wire = JSON.parse(JSON.stringify(res)) as {
+          connected: boolean;
+          reason?: unknown;
+          rows: unknown[];
+        };
+
+        expect(wire.rows).toEqual([]);
+        expect(typeof wire.reason).toBe("string");
+        expect(wire.reason).toBe("ERROR");
+        expect(wire.connected).toBe(false);
+      },
+    );
+  });
 });
