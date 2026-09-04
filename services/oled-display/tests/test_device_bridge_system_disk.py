@@ -313,3 +313,82 @@ def test_discovery_returns_nothing_when_the_os_disk_is_unknown(monkeypatch, tmp_
     bridge = _load_bridge(monkeypatch)
     _stub_host(bridge, monkeypatch, tmp_path)
     assert bridge._os_disk_filesystems({}, "") == ([], True)
+
+
+def test_discovery_does_not_depend_on_proc_mounts_ordering(monkeypatch, tmp_path):
+    # Code review (WARP-2098): the root bind-mount alias listed BEFORE the
+    # canonical mount, and statvfs failing on the canonical one. The old loop
+    # had already recorded the alias's good reading, then let the later failure
+    # flag the disk incomplete — a real measurement sat in the map while the
+    # caller refused to publish it. A reading belongs to the DEVICE: whichever
+    # alias measures counts, the preferred mount still names the row, and the
+    # order /proc/mounts lists them in is invisible in the result.
+    bridge = _load_bridge(monkeypatch)
+    _stub_host(bridge, monkeypatch, tmp_path)
+    real_bytes_for = bridge._bytes_for
+
+    def flaky(path):
+        if path == "/":
+            return 0, 0, 0
+        return real_bytes_for(path)
+
+    monkeypatch.setattr(bridge, "_bytes_for", flaky)
+
+    lines = _PROC_MOUNTS.splitlines()
+    root = next(l for l in lines if l.split()[1] == "/")
+    alias = next(l for l in lines if l.split()[1] == "/mnt/droplet")
+    lines.remove(alias)
+    lines.insert(lines.index(root), alias)
+    (tmp_path / "mounts").write_text("\n".join(lines) + "\n")
+
+    rows, complete = bridge._os_disk_filesystems({}, "nvme0n1")
+    assert complete is True
+    mounts = [r["mount"] for r in rows]
+    assert mounts.count("/") == 1
+    assert "/mnt/droplet" not in mounts
+    assert next(r for r in rows if r["mount"] == "/")["size_bytes"] == 100 * GB
+
+    # Canonical-first — the shape the live box has — gives the SAME answer.
+    (tmp_path / "mounts").write_text(_PROC_MOUNTS)
+    assert bridge._os_disk_filesystems({}, "nvme0n1") == (rows, complete)
+
+
+# ---------------------------------------------------------------------------
+# _collapse_by_device — ONE tie-break, shared with drives_snapshot
+# ---------------------------------------------------------------------------
+
+def test_collapse_prefers_fstab_then_the_shortest_mount_and_keeps_ejectability(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    rows = bridge._collapse_by_device([
+        {"device": "/dev/sdb1", "mount": "/mnt/droplet/data-a0f10a84",
+         "source": "automount", "removable": True},
+        {"device": "/dev/sdb1", "mount": "/mnt/droplet/data",
+         "source": "fstab", "removable": False},
+        {"device": "/dev/sdc1", "mount": "/mnt/droplet/zz"},
+        {"device": "/dev/sdc1", "mount": "/mnt/droplet/aa"},
+    ])
+    by_dev = {r["device"]: r for r in rows}
+    assert set(by_dev) == {"/dev/sdb1", "/dev/sdc1"}
+    assert by_dev["/dev/sdb1"]["mount"] == "/mnt/droplet/data"
+    assert by_dev["/dev/sdb1"]["removable"] is True
+    # Equal length: the name breaks the tie, so the result is deterministic.
+    assert by_dev["/dev/sdc1"]["mount"] == "/mnt/droplet/aa"
+
+
+def test_discovery_collapses_through_the_shared_helper(monkeypatch, tmp_path):
+    # Structural: the dedupe in _os_disk_filesystems must BE the one
+    # drives_snapshot uses, so a tie-break fix lands in both or in neither.
+    bridge = _load_bridge(monkeypatch)
+    _stub_host(bridge, monkeypatch, tmp_path)
+    real = bridge._collapse_by_device
+    seen = []
+
+    def spy(entries):
+        entries = list(entries)
+        seen.append(entries)
+        return real(entries)
+
+    monkeypatch.setattr(bridge, "_collapse_by_device", spy)
+    rows, _complete = bridge._os_disk_filesystems({}, "nvme0n1")
+    assert seen, "_os_disk_filesystems deduplicated on its own"
+    assert len(rows) == 3

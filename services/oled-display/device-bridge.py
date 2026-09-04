@@ -1680,6 +1680,35 @@ def _walk_block_children(node):
         yield from _walk_block_children(child)
 
 
+def _collapse_by_device(entries):
+    """WARP-827: ONE entry per backing device.
+
+    A drive can be mounted at more than one path — a friendly /mnt/droplet/data
+    beside the automount /mnt/droplet/data-<uuid>, or "/" bind-mounted at
+    /mnt/droplet — and every path is the same bytes. Listing each shows the
+    disk twice; summing each counts it twice. Keep the friendliest mount (fstab
+    first, then the shortest path, then the name so ties are deterministic) and
+    preserve ejectability if any losing duplicate was removable.
+
+    Shared by drives_snapshot and _os_disk_filesystems so the tie-break is ONE
+    rule: a fix to it cannot land in the drive cards and miss the system disk,
+    or the reverse (code review, WARP-2098).
+    """
+    ordered = sorted(
+        entries,
+        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
+    )
+    by_device = {}
+    for e in ordered:
+        dev = e.get("device") or e.get("mount")
+        if dev in by_device:
+            if e.get("removable"):
+                by_device[dev]["removable"] = True
+            continue
+        by_device[dev] = e
+    return list(by_device.values())
+
+
 def _os_disk_filesystems(mount_meta, os_disk):
     """WARP-2098 — every mounted filesystem that physically lives on `os_disk`,
     measured, ONE row per backing device. Feeds system_disk_info; kept separate
@@ -1692,11 +1721,19 @@ def _os_disk_filesystems(mount_meta, os_disk):
     the root disk answers correctly on every box shape, including the one where
     root, /boot and /data are three LVs on one NVMe.
 
-    Deduplicated by BACKING DEVICE, keeping the shortest mount path. This is
-    load-bearing, not tidiness: the automounter bind-mounts "/" at
-    /mnt/droplet, so the root filesystem appears in /proc/mounts twice with
-    identical statvfs numbers. Summing both would report double the used bytes —
-    the same phantom-capacity mistake WARP-1960 fixed in camera storage.
+    Deduplicated by BACKING DEVICE through _collapse_by_device — the same
+    tie-break the drive cards use. This is load-bearing, not tidiness: the
+    automounter bind-mounts "/" at /mnt/droplet, so the root filesystem appears
+    in /proc/mounts twice with identical statvfs numbers. Summing both would
+    report double the used bytes — the same phantom-capacity mistake WARP-1960
+    fixed in camera storage.
+
+    A reading belongs to the DEVICE, not to the mount it was taken through:
+    whichever alias statvfs answers on supplies the numbers, and the preferred
+    mount still names the row. So the result does not depend on the order
+    /proc/mounts lists the aliases in, and a failure on one alias cannot
+    discard a good reading already taken through another (code review,
+    WARP-2098).
 
     `mount_meta` is the /proc/mounts pass the caller already did, keyed by mount
     point. Mounts whose statvfs fails are dropped rather than reported as zero —
@@ -1706,12 +1743,13 @@ def _os_disk_filesystems(mount_meta, os_disk):
     defect this ticket exists to fix. If /data is unmeasurable while / is fine,
     the surviving rows still sum to a real, non-null number — a root-only
     figure that understates a full disk, with nothing marking it partial.
-    `complete` is False when any qualifying mount was dropped or the walk
+    `complete` is False when any qualifying device was dropped or the walk
     aborted, and system_disk_info refuses to publish a total from it.
     """
     if not os_disk:
         return [], True
-    by_device = {}
+    candidates = []  # every qualifying mount, in /proc/mounts order
+    readings = {}  # device -> (total, used, free), from whichever alias measured
     complete = True
     try:
         with open("/proc/mounts") as f:
@@ -1726,29 +1764,35 @@ def _os_disk_filesystems(mount_meta, os_disk):
                     continue
                 if _whole_disk(dev) != os_disk:
                     continue
-                previous = by_device.get(dev)
-                if previous is not None and len(previous["mount"]) <= len(mp):
-                    continue
+                candidates.append({"device": dev, "mount": mp})
+                if dev in readings:
+                    continue  # already measured through another alias
                 total, used, free = _bytes_for(mp)
-                if total <= 0:
-                    # Unmeasurable, not empty. Record the gap so the caller
-                    # cannot mistake the survivors for the whole disk.
-                    complete = False
-                    continue
-                fs, _ro = mount_meta.get(mp, ("", True))
-                by_device[dev] = {
-                    "mount": mp,
-                    "fs": fs,
-                    "size_bytes": total,
-                    "used_bytes": used,
-                    "free_bytes": free,
-                }
+                if total > 0:
+                    readings[dev] = (total, used, free)
     except Exception:                                                  # noqa: BLE001
         # Best-effort, exactly like the drive-enumeration passes above — but a
         # walk that aborted part-way has an arbitrary prefix of the mounts, so
         # it is partial by definition.
         complete = False
-    return sorted(by_device.values(), key=lambda r: r["mount"]), complete
+    rows = []
+    for c in _collapse_by_device(candidates):
+        reading = readings.get(c["device"])
+        if reading is None:
+            # Unmeasurable on every alias — not empty. Record the gap so the
+            # caller cannot mistake the survivors for the whole disk.
+            complete = False
+            continue
+        total, used, free = reading
+        fs, _ro = mount_meta.get(c["mount"], ("", True))
+        rows.append({
+            "mount": c["mount"],
+            "fs": fs,
+            "size_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
+        })
+    return sorted(rows, key=lambda r: r["mount"]), complete
 
 
 def system_disk_info(lsblk_tree, os_disk, os_filesystems,
@@ -2095,25 +2139,9 @@ def drives_snapshot(invalidate=False):
     except Exception:
         pass
 
-    # WARP-827: one card per PHYSICAL drive. A drive can be mounted at more than
-    # one path (e.g. a friendly /mnt/droplet/data + the automount
-    # /mnt/droplet/data-<uuid>), which otherwise shows the same disk twice.
-    # Collapse by backing device, keeping the friendliest mount (fstab first,
-    # then the shortest path), and preserve ejectability if any duplicate was
-    # removable.
-    ordered = sorted(
-        by_mount.values(),
-        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
-    )
-    by_device = {}
-    for e in ordered:
-        dev = e.get("device") or e.get("mount")
-        if dev in by_device:
-            if e.get("removable"):
-                by_device[dev]["removable"] = True
-            continue
-        by_device[dev] = e
-    mounts = list(by_device.values())
+    # WARP-827: one card per PHYSICAL drive. The tie-break lives in
+    # _collapse_by_device, which the system-disk discovery below shares.
+    mounts = _collapse_by_device(by_mount.values())
 
     # One lsblk walk feeds both the inventory and the system-disk lookup —
     # the classifier used to call this inline, which would now run lsblk twice
