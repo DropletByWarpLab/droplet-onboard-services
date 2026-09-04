@@ -595,7 +595,11 @@ describe("end to end — the row the connect flow wrote reaches the vendor's too
   it("refuses with ZERO bridge calls while the row is not yet CONNECTED", async () => {
     // A row mid-write — the credential cleared, or an operator having disabled
     // it. `status` is read as the explicit enum, never as "a row exists".
-    const row = { ...connect(GOOD_SUBMISSION), status: "DISABLED" };
+    // `as const` rather than a bare string: #1960 (WARP-2623) narrowed
+    // `SaasConnectionRow.status` from `string` to `IntegrationStatusName`, so a
+    // widened literal here would be a test asserting on a status the column
+    // cannot hold. The narrowing is the guarantee — this fixture opts into it.
+    const row = { ...connect(GOOD_SUBMISSION), status: "DISABLED" as const };
     const h = stack(row, ["atlassian"]);
 
     const result = await h.attach();
