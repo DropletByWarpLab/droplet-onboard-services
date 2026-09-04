@@ -13,76 +13,85 @@
 --
 -- WHY A BASELINE INSTEAD OF AN EMPTY DIFF
 -- ---------------------------------------
--- main already carried this delta when the gate was added (measured on
--- 479f2569). Two of the entries can NEVER be closed — Prisma has no datamodel
--- syntax for a GENERATED column expression or a GIN index, so `migrate diff`
--- reports them on every run by construction. Demanding an empty diff would
--- have reddened main on day one. Freezing the measured delta gates every
--- FUTURE divergence without pretending the existing one isn't there.
+-- main already carried a six-entry delta when the gate was added (measured on
+-- 479f2569). WARP-2634 closed the four closable entries; what remains can
+-- NEVER be closed — Prisma has no datamodel syntax for a GENERATED column
+-- expression, a GIN index, or an index on an `Unsupported()` vector column, so
+-- `migrate diff` reports these three statements on every run by construction.
+-- A gate demanding an empty diff would therefore be red forever. Freezing the
+-- measured delta gates every FUTURE divergence without pretending the
+-- permanent one isn't there.
 --
 -- THE ENTRIES, ANNOTATED
 -- ----------------------
--- Classification is either PRISMA-INEXPRESSIBLE (permanent, by construction)
--- or OPEN DRIFT (closable; needs its own ticket, migration and QA — a CI
--- ticket is the wrong place to change appliance behaviour).
+-- Everything still below the sentinel is PRISMA-INEXPRESSIBLE: permanent, by
+-- construction, and must never be "fixed".
 --
---  1. ToolRunStatus is missing `pending` and `running`; ToolRun.status
---     defaults to 'ok' in SQL and `pending` in the datamodel.
---     -> OPEN DRIFT. 20260528100000_warp_462_tool_spec created the enum with
---        only ('ok','failed','cancelled'). Latent today: tool-spec-runner
---        .service.ts only ever writes 'ok' or 'failed', and it always passes
---        `status` explicitly, so the differing column default is never
---        exercised. It bites the first time any code omits `status` (Prisma
---        would leave the column out and Postgres would silently write 'ok'
---        where the datamodel promises 'pending') or writes 'running'.
---        Closing it needs TWO migrations: Postgres will not accept a new enum
---        value and a DEFAULT that USES that value in the same transaction.
---
---  2. Department_parentId_fkey is ON DELETE RESTRICT in SQL, ON DELETE SET
---     NULL in the datamodel.
---     -> OPEN DRIFT, and the one with real behavioural consequences:
---        20260711000000_warp_1255_departments hand-wrote RESTRICT, while
---        Prisma's default for an optional self-relation is SET NULL. On a
---        migrated box, deleting a parent department ERRORS; the datamodel says
---        it should null the children's parentId. Which one is correct is a
---        product decision, not a CI decision — hence a ticket, not a drive-by
---        fix in this PR.
---
---  3. Department_parentId_idx exists in SQL, absent from the datamodel.
---     -> OPEN DRIFT, harmless. The migration creates the index; schema.prisma
---        has no `@@index([parentId])`. Postgres does not auto-index FK
---        columns, so the index is doing real work — the datamodel should
---        declare it rather than the index being dropped.
---
---  4. AssistantPersona.updatedAt / BusinessProfile.updatedAt / TlsCert
---     .updatedAt carry DEFAULT CURRENT_TIMESTAMP in SQL, none in the
---     datamodel.
---     -> OPEN DRIFT, harmless. `@updatedAt` is application-managed, so Prisma
---        emits no column default; the hand-written migrations added one
---        anyway. The default is only reachable by a non-Prisma writer.
---
---  5. FileContentChunk.text_tsv loses its generated expression, and
+--  A. FileContentChunk.text_tsv loses its generated expression, and
 --     FileContentChunk_text_tsv_idx is dropped.
---     -> PRISMA-INEXPRESSIBLE, permanent. text_tsv is `Unsupported("tsvector")`
---        with a `GENERATED ALWAYS AS (...)` expression (WARP-286, reshaped by
---        WARP-242 so sensitive chunks index as NULL), indexed with GIN. Prisma
---        has no datamodel syntax for either, so `migrate diff` proposes
---        removing both on every run, forever. These two statements must never
---        be "fixed" — doing so would drop the lexical-search index and the
+--     -> text_tsv is `Unsupported("tsvector")` with a `GENERATED ALWAYS AS
+--        (...)` expression (WARP-286, reshaped by WARP-242 so sensitive chunks
+--        index as NULL), indexed with GIN. Prisma has no datamodel syntax for
+--        either, so `migrate diff` proposes removing both on every run,
+--        forever. Applying them would drop the lexical-search index and the
 --        crypto-shred guarantee that rides on it.
 --
---  6. FileContentChunk_embedding_hnsw_idx is dropped.
---     -> PRISMA-INEXPRESSIBLE, permanent. WARP-2193 gave the vector arm an
---        HNSW index (`USING hnsw (embedding vector_cosine_ops)`, migration
---        20260826120000). `embedding` is `Unsupported("vector(384)")` and
---        Prisma has no datamodel syntax for an index on one, let alone for
---        the hnsw access method — so `migrate diff` proposes removing it on
---        every run, forever, exactly as it already does for the GIN index in
---        entry 5. It must never be "fixed": doing so drops the only ANN index
---        on the corpus and returns every semantic search to a sequential
---        scan. That is not hypothetical — it is what happened between
---        20260425220000 (which dropped the predecessor IVFFlat index as
---        generated collateral) and WARP-2193, unnoticed for four months.
+--  B. FileContentChunk_embedding_hnsw_idx is dropped.
+--     -> WARP-2193 gave the vector arm an HNSW index (`USING hnsw (embedding
+--        vector_cosine_ops)`, migration 20260826120000). `embedding` is
+--        `Unsupported("vector(384)")` and Prisma has no datamodel syntax for
+--        an index on one, let alone for the hnsw access method. Applying it
+--        drops the only ANN index on the corpus and returns every semantic
+--        search to a sequential scan. That is not hypothetical — it is what
+--        happened between 20260425220000 (which dropped the predecessor
+--        IVFFlat index as generated collateral) and WARP-2193, unnoticed for
+--        four months.
+--
+-- CLOSED BY WARP-2634 (2026-09-02) — kept here so the history is readable
+-- ----------------------------------------------------------------------
+-- These four were carried as OPEN DRIFT from WARP-1542 until WARP-2634. Each
+-- one meant that replaying every migration into an empty database produced a
+-- schema the generated client disagreed with, i.e. a fresh box (or `migrate
+-- reset`) differed from a box that had been migrated in place.
+--
+--  1. ToolRunStatus was missing `pending` and `running`; ToolRun.status
+--     defaulted to 'ok' in SQL and `pending` in the datamodel.
+--     -> CLOSED, migration side. 20260903020000 adds both enum members
+--        (BEFORE 'ok', matching the datamodel's declaration order) and
+--        20260903020100 sets the column default. Two files because Postgres
+--        will not accept a new enum value and a DEFAULT that USES it in one
+--        transaction. Additive: tool-spec-runner.service.ts:410 is the only
+--        writer and always passes `status` explicitly, so no runtime behaviour
+--        moved — but the client had been accepting `status: "running"` for a
+--        value no box's enum contained.
+--
+--  2. Department_parentId_fkey was ON DELETE RESTRICT in SQL, ON DELETE SET
+--     NULL in the datamodel.
+--     -> CLOSED, schema side: `onDelete: Restrict` is now declared explicitly.
+--        RESTRICT is what 20260711000000_warp_1255_departments created and
+--        what every migrated box has always done; SET NULL was only Prisma's
+--        implicit default for an optional relation leaking into the datamodel.
+--        Declaring the truth changes no behaviour — nothing row-deletes a
+--        Department (`DELETE /api/departments/:id` archives). Whether RESTRICT
+--        or SET NULL is the right PRODUCT behaviour is still an open question
+--        and still not a CI decision; it now just has to be answered by
+--        changing both sides deliberately instead of by noticing the gap.
+--
+--  3. Department_parentId_idx existed in SQL, absent from the datamodel.
+--     -> CLOSED, schema side: `@@index([parentId])` declared. The index has
+--        always existed; Postgres does not auto-index FK columns and the
+--        datamodel was simply not describing one that was doing real work.
+--
+--  4. AssistantPersona.updatedAt / BusinessProfile.updatedAt / TlsCert
+--     .updatedAt carried DEFAULT CURRENT_TIMESTAMP in SQL, none in the
+--     datamodel.
+--     -> CLOSED, migration side: 20260903020100 drops all three defaults.
+--        `@updatedAt` is application-managed and Prisma emits no DB default
+--        for it, so the datamodel was right and the hand-written migrations
+--        had added something extra. Declaring `@default(now())` instead would
+--        have moved the lie rather than removed it. Safe: all three tables are
+--        written only through Prisma, which always supplies the column, and
+--        the two singleton seeds pass CURRENT_TIMESTAMP explicitly.
 --
 -- UPDATING THIS FILE
 -- ------------------
@@ -91,23 +100,6 @@
 -- then read the resulting diff and record WHY it moved in the list above.
 -- =============================================================================
 -- ===== GENERATED BASELINE BELOW: regenerate with check-schema-drift.sh --update =====
--- AlterEnum
--- This migration adds more than one value to an enum.
--- With PostgreSQL versions 11 and earlier, this is not possible
--- in a single migration. This can be worked around by creating
--- multiple migrations, each migration adding only one value to
--- the enum.
-
-
-ALTER TYPE "ToolRunStatus" ADD VALUE 'pending';
-ALTER TYPE "ToolRunStatus" ADD VALUE 'running';
-
--- DropForeignKey
-ALTER TABLE "Department" DROP CONSTRAINT "Department_parentId_fkey";
-
--- DropIndex
-DROP INDEX "Department_parentId_idx";
-
 -- DropIndex
 DROP INDEX "FileContentChunk_embedding_hnsw_idx";
 
@@ -115,19 +107,5 @@ DROP INDEX "FileContentChunk_embedding_hnsw_idx";
 DROP INDEX "FileContentChunk_text_tsv_idx";
 
 -- AlterTable
-ALTER TABLE "AssistantPersona" ALTER COLUMN "updatedAt" DROP DEFAULT;
-
--- AlterTable
-ALTER TABLE "BusinessProfile" ALTER COLUMN "updatedAt" DROP DEFAULT;
-
--- AlterTable
 ALTER TABLE "FileContentChunk" ALTER COLUMN "text_tsv" DROP DEFAULT;
 
--- AlterTable
-ALTER TABLE "TlsCert" ALTER COLUMN "updatedAt" DROP DEFAULT;
-
--- AlterTable
-ALTER TABLE "ToolRun" ALTER COLUMN "status" SET DEFAULT 'pending';
-
--- AddForeignKey
-ALTER TABLE "Department" ADD CONSTRAINT "Department_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "Department"("id") ON DELETE SET NULL ON UPDATE CASCADE;

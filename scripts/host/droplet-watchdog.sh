@@ -112,7 +112,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -152,7 +152,15 @@ WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-ho
 WD_RELAY_DNS_BIN="${DROPLET_WATCHDOG_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
 WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns"
+# WARP-2666 — the client-app download surface. The auditor is NOT installed to
+# /usr/local: it reads the checkout's own data/app-downloads, so it must run
+# from the checkout (an installed copy would be stale in exactly the case being
+# caught). Empty by default and resolved from the box's own droplet.service,
+# the same derived source droplet-host-units uses, so it stays right on a box
+# whose checkout lives somewhere unusual.
+WD_APP_DOWNLOADS_AUDIT="${DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT:-}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -718,6 +726,126 @@ wd_check_host_artefacts() {
 
   CHECK_OUTCOME=heal_failed
   CHECK_MESSAGE="this box is not running what its checkout declares — ${parts}: ${names}a host feature merged and was never installed here, so it is inert no matter what the repo says. Fix: sudo ./scripts/setup.sh (detail: $WD_HOST_UNITS_BIN audit)"
+  return 0
+}
+
+# --- app_downloads -------------------------------------------------------------
+# WARP-2666. `/downloads` is the page a customer opens to install the client
+# app for the box in front of them. Every box that has ever shipped served it
+# empty, and NOTHING noticed: the API answers `catalog_missing` as HTTP 200
+# with available:false (routes/app-downloads.ts classifies it benign, which is
+# right for the API), so an empty page is green to /api/health, to every uptime
+# probe and to all seven of this watchdog's other checks. Exactly the WARP-2574
+# shape one layer up — a thing that was never installed has no failing signal
+# to notice, only a missing success.
+#
+# Detect-and-report only. There is no heal: the fix is a human copying an
+# installer onto the box, which is not something a 3-minute timer should do.
+#
+# Reads the HOST's files, never the API: /api/app-downloads is auth-gated, and
+# a 200 would be the wrong signal anyway.
+wd_resolve_app_downloads_audit() {
+  [ -n "$WD_APP_DOWNLOADS_AUDIT" ] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local exec_start token dir
+  exec_start="$(systemctl show droplet.service -p ExecStart 2>/dev/null)"
+  [ -n "$exec_start" ] || return 1
+  # Pull absolute paths out of the property and walk up from each until one
+  # looks like the checkout. Same derivation as droplet-host-units, kept small
+  # here because the watchdog only needs one unit's worth of it.
+  for token in $(printf '%s' "$exec_start" | tr ' ;' '\n\n' | grep '^/' ); do
+    [ -e "$token" ] || continue
+    dir="$(dirname "$token")"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+      if [ -f "$dir/scripts/app-downloads/audit.sh" ]; then
+        WD_APP_DOWNLOADS_AUDIT="$dir/scripts/app-downloads/audit.sh"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+  done
+  return 1
+}
+
+wd_check_app_downloads() {
+  if ! wd_resolve_app_downloads_audit; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="could not locate this box's checkout to run scripts/app-downloads/audit.sh — no verdict; point at it with DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT=<path>"
+    return 0
+  fi
+  if [ ! -r "$WD_APP_DOWNLOADS_AUDIT" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads auditor not readable at $WD_APP_DOWNLOADS_AUDIT — no verdict"
+    return 0
+  fi
+
+  local out rc=0
+  out="$(bash "$WD_APP_DOWNLOADS_AUDIT" 2>&1)" || rc=$?
+
+  if [ "$rc" = 0 ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="every client app this release declares is staged and verifies against its catalog"
+    return 0
+  fi
+
+  # 3 = clean, but platforms are deliberately blocked and ticketed. Nothing
+  # here is broken and nothing is healable, so this is not_applicable — but
+  # the MESSAGE names every blocked platform and its ticket, because a silent
+  # "n/a" is the shape this whole check exists to end.
+  #
+  # Deliberately not a new outcome. This machine's vocabulary is
+  # ok|healed|heal_failed|not_applicable and widening it would change `overall`
+  # for every box. The gate that must go RED for a release with nothing staged
+  # is the BUILD (scripts/image/build-iso.sh pre-flight, scripts/test/ship-check.sh)
+  # — that is where a human can still decide. A box already in the field cannot
+  # fix this, so nagging it is noise; recording it plainly is not.
+  if [ "$rc" = 3 ]; then
+    local blocked
+    blocked="$(printf '%s\n' "$out" | awk '$1 == "BLOCKED" { print $2 "(" $3 ")" }' | head -6 | tr '\n' ' ')"
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="/downloads is intentionally short: ${blocked}declared blocked in data/app-downloads/EXPECTED, so customers on those platforms get no app from this box (detail: bash $WD_APP_DOWNLOADS_AUDIT)"
+    return 0
+  fi
+
+  # 4 = could not look. Never 'ok' — that collapse is the bug being fixed.
+  if [ "$rc" = 4 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads audit reached no verdict (missing EXPECTED, staging root or python3) — inspect 'bash $WD_APP_DOWNLOADS_AUDIT'"
+    return 0
+  fi
+
+  if [ "$rc" != 1 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads audit could not run (exit $rc) — inspect 'bash $WD_APP_DOWNLOADS_AUDIT'"
+    return 0
+  fi
+
+  # Column 1 is a whitespace-free label and column 2 the platform — a contract
+  # pinned by tests/app-downloads-audit.test.sh, so this awk cannot silently
+  # read the wrong field if the report is reformatted.
+  local n_missing n_stale n_unverif names extra parts
+  n_missing="$(printf '%s\n' "$out" | awk '$1 == "MISSING" { n++ } END { print n + 0 }')"
+  n_stale="$(printf '%s\n' "$out" | awk '$1 == "STALE" { n++ } END { print n + 0 }')"
+  n_unverif="$(printf '%s\n' "$out" | awk '$1 == "UNVERIFIABLE" { n++ } END { print n + 0 }')"
+
+  parts=""
+  [ "$n_missing" -gt 0 ] && parts="$parts, $n_missing missing"
+  [ "$n_stale" -gt 0 ]   && parts="$parts, $n_stale stale"
+  [ "$n_unverif" -gt 0 ] && parts="$parts, $n_unverif unverifiable"
+  parts="${parts#, }"
+
+  # Name the first few only: this string lands in status.json, and an
+  # unbounded list writes a multi-kilobyte value nothing can read.
+  names="$(printf '%s\n' "$out" \
+    | awk '$1 == "MISSING" || $1 == "STALE" || $1 == "UNVERIFIABLE" { print $2 }' \
+    | head -6 | tr '\n' ' ')"
+  extra=$(( n_missing + n_stale + n_unverif - 6 ))
+  if [ "$extra" -gt 0 ]; then
+    names="${names}(+$extra more) "
+  fi
+
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="/downloads does not carry what this release declares — ${parts}: ${names}a customer opening 'Get the app' is shown nothing for those platforms. Fix: stage the installer (./scripts/app-downloads/stage.sh) — detail: bash $WD_APP_DOWNLOADS_AUDIT"
   return 0
 }
 

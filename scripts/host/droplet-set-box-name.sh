@@ -7,9 +7,10 @@
 # device-bridge's auth-gated POST /host/box-name) once the owner has CHOSEN a
 # name in the wizard's "name your box" step (WARP-979). It does one thing:
 #
-#   1. Idempotently writes DROPLET_BOX_NAME=<slug> into the repo .env
-#      (sed-replace-or-append), so the next orchestrator boot reads the chosen
-#      name directly and tls-issuance sends it to HQ as `requested_name`.
+#   1. Idempotently writes DROPLET_BOX_NAME=<slug> into the repo .env via the
+#      canonical _upsert_env_kv (scripts/lib/secrets.sh) — symlink-preserving
+#      and literal-safe (WARP-2537) — so the next orchestrator boot reads the
+#      chosen name directly and tls-issuance sends it to HQ as `requested_name`.
 #
 # Deliberately NO DNS legs — unlike droplet-set-public-fqdn.sh, the name's DNS
 # (`<slug>.droplet-us.com`) is owned by HQ, not the box; the box only records
@@ -74,22 +75,41 @@ export REPO_ROOT
 
 ENV_FILE="${DROPLET_BOX_NAME_ENV_FILE:-$REPO_ROOT/.env}"
 
-# --- Idempotent .env write-back (sed-replace-or-append) ---------------------
+# --- Idempotent .env write-back (canonical upsert — WARP-2537) --------------
+# This used to stage a temp file and `mv` it over $ENV_FILE. On a box where
+# relocate_secrets_to_data has run, $ENV_FILE is a SYMLINK into the encrypted
+# /data — mv REPLACED the link with a plain file on the unencrypted boot disk,
+# moving the secrets back outside the LUKS boundary and breaking the compose
+# `../.env` env_file (the WARP-232 regression class, closed for
+# droplet-set-nvr-media.sh by WARP-2522).
+#
+# _upsert_env_kv (scripts/lib/secrets.sh) is the repo's one .env writer with the
+# right discipline: it resolves a symlinked $ENV_FILE and renames onto the REAL
+# target so the link survives, strips-and-appends with printf (no sed, so every
+# byte of the value lands literally), normalizes a missing trailing newline
+# first, and stages under umask 077 + chmod 600. Hard-fail when the lib cannot
+# be found rather than fall back to a clobbering writer — same "refuse loudly"
+# posture as the validation above. The LIB_DIR fallback chain mirrors
+# droplet-set-public-fqdn.sh: the repo-checkout location first, then
+# $REPO_ROOT/scripts/lib for the /usr/local/sbin installed copy.
+LIB_DIR="$SCRIPT_DIR/../lib"
+if [ ! -f "$LIB_DIR/secrets.sh" ]; then
+  LIB_DIR="$REPO_ROOT/scripts/lib"
+fi
+[ -f "$LIB_DIR/secrets.sh" ] || die "secrets.sh not found under $LIB_DIR — refusing to rewrite ${ENV_FILE} without the canonical symlink-preserving writer"
+# shellcheck source=../lib/secrets.sh
+. "$LIB_DIR/secrets.sh"
+
 # Create the file if missing so a brand-new box can still record the name.
 [ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 0600 "$ENV_FILE"; }
 
 _desired="DROPLET_BOX_NAME=${NAME}"
 if grep -qxF "$_desired" "$ENV_FILE"; then
   : # already current — no rewrite (keeps re-runs byte-identical)
-elif grep -qE '^[[:space:]]*#?[[:space:]]*DROPLET_BOX_NAME=' "$ENV_FILE"; then
-  # Replace an existing (possibly commented / empty) line in place. Use a tmp
-  # file + mv so a crash mid-write can't truncate .env.
-  _tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
-  sed -E "s|^[[:space:]]*#?[[:space:]]*DROPLET_BOX_NAME=.*|${_desired}|" \
-    "$ENV_FILE" > "$_tmp"
-  mv "$_tmp" "$ENV_FILE"
 else
-  printf '%s\n' "$_desired" >> "$ENV_FILE"
+  # _upsert_env_kv targets $ENV_FILE when set — which this script always sets
+  # (the DROPLET_BOX_NAME_ENV_FILE test hook included).
+  _upsert_env_kv DROPLET_BOX_NAME "$NAME"
 fi
 printf 'DROPLET_BOX_NAME persisted to %s\n' "$ENV_FILE"
 

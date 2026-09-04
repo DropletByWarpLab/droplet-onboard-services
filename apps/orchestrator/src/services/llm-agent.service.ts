@@ -37,9 +37,9 @@ import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type {
   McpCallContext,
-  McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
+import type { McpClientPort } from "./mcp-client.port.js";
 import {
   parseToolResultPayload,
   toolResultPayloadValue,
@@ -72,7 +72,10 @@ import {
   validateAnswerAgainstTrace,
   describeToolUseVerdict,
 } from "./tool-use-validation.js";
-import { assertToolAdvertisementFitsBudget } from "./tool-budget.service.js";
+import {
+  assertToolAdvertisementFitsBudget,
+  ToolBudgetExceededError,
+} from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
   OUTPUT_RESERVE,
@@ -135,7 +138,16 @@ export interface CitationDeps {
 export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
 
 export interface AgentDeps {
-  mcp: McpClientService;
+  /**
+   * WARP-2391 — the PORT, not the stdio supervisor. The loop needs
+   * `listTools` / `callTool` / `isStarted` and nothing else; typing it as
+   * `McpClientService` meant it also depended on a child process, a
+   * `StdioClientTransport` and a `start()`/`stop()` lifecycle it never
+   * touches. Production passes the multiplexer
+   * (`mcp-client.singleton.ts`), which is the local child plus N remote
+   * servers behind the same three members.
+   */
+  mcp: McpClientPort;
   /**
    * WARP-2469 — turns an interceptor challenge into something a human
    * can approve, and an approval into the token the re-issued call
@@ -1951,18 +1963,76 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             call.function.name,
             ...domainNames,
           ]);
-          tools = filtered.filter((t) => keep.has(t.name)).map(toSpec);
-          advertisedNames = new Set(tools.map((t) => t.function.name));
-          availableToolList = tools.map((t) => t.function.name).join(", ");
-          const heal = {
-            status: "error" as const,
-            error: {
-              code: "TOOL_NOW_AVAILABLE",
-              message:
-                `The tool '${call.function.name}' is now available. ` +
-                `Call it again with the same arguments.`,
-            },
-          };
+          // 🔴 Re-assert the budget on the HEALED advertisement.
+          //
+          // `assertToolAdvertisementFitsBudget` runs once before this loop,
+          // against the INITIAL selection. This branch admits a whole extra
+          // domain's schemas mid-loop and `keep` is monotonic — it seeds from
+          // the previous `advertisedNames`, so every heal is additive and
+          // never shrinks. Without a second check the widened array goes
+          // straight onto the next wire request unmeasured: the in-loop
+          // context guard deliberately excludes tool schemas, and the
+          // route-side `degradeToFit` ran once before `runAgent` against the
+          // initial set. Its own comment points here as the gate that sees
+          // the fully assembled advertisement — and that gate never re-ran.
+          //
+          // Over-budget must stay a typed, LOGGED failure and never a quietly
+          // shortened `tools[]`, which is what tool-budget.service.ts exists
+          // to guarantee. So the candidate is built first and only committed
+          // if it fits; if it does not, the heal is refused and the turn
+          // continues on the advertisement it already had, with
+          // `tool_budget_exceeded` already emitted by the assert.
+          const candidate = filtered
+            .filter((t) => keep.has(t.name))
+            .map(toSpec);
+          let healed = true;
+          if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+            try {
+              assertToolAdvertisementFitsBudget({
+                specs: candidate,
+                contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+                logContext: {
+                  model: req.model,
+                  selectionMode: req.tool_selection_mode,
+                  poolSize: filtered.length,
+                  phase: "self_heal",
+                  healedTool: call.function.name,
+                },
+              });
+            } catch (err) {
+              if (!(err instanceof ToolBudgetExceededError)) throw err;
+              healed = false;
+            }
+          }
+          if (healed) {
+            tools = candidate;
+            advertisedNames = new Set(tools.map((t) => t.function.name));
+            availableToolList = tools.map((t) => t.function.name).join(", ");
+          }
+          const heal = healed
+            ? {
+                status: "error" as const,
+                error: {
+                  code: "TOOL_NOW_AVAILABLE",
+                  message:
+                    `The tool '${call.function.name}' is now available. ` +
+                    `Call it again with the same arguments.`,
+                },
+              }
+            : {
+                // Refused, and the model is told so plainly rather than being
+                // invited to retry a tool it still cannot see. Inviting the
+                // retry would loop: the next call re-enters this branch, the
+                // budget refuses again, and nothing advances.
+                status: "error" as const,
+                error: {
+                  code: "TOOL_UNAVAILABLE",
+                  message:
+                    `The tool '${call.function.name}' cannot be made available ` +
+                    `on this turn. Use one of the tools already listed, or ` +
+                    `answer without a tool.`,
+                },
+              };
           trace.push({
             tool_call_id: call.id,
             tool: call.function.name,

@@ -42,4 +42,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Run CI coverage audit
-        run: bash scripts/check-ci-coverage.sh
+        # Two audits, one step, one job name — the job name `ci-coverage` is a
+        # branch-protection wire contract, so nothing here may be renamed or
+        # split into a new job (docs/ci-required-checks.md).
+        #
+        # WARP-2647 added the second: check-ci-coverage.sh audits
+        # service/app DIRECTORIES against `<name>-tests.yml`, which by
+        # construction cannot see a loose `tests/*.test.sh` that no workflow
+        # names. Two factory-reset regression guards written after real
+        # incidents ran in no workflow for months, and a third suite over the
+        # orchestrator's migration entrypoint had never run either. Both
+        # scripts are pure greps of the tree — ~1 s together.
+        run: |
+          bash scripts/check-ci-coverage.sh
+          bash scripts/check-test-wiring.sh

@@ -12,6 +12,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   CRM_ERRORS,
   createDeal,
+  deleteCompany,
+  deleteDeal,
   getPipelineSummary,
   listDeals,
   moveDealStage,
@@ -666,6 +668,33 @@ describe("listDeals idleDays", () => {
     expect(where.OR[1].activities.every.occurredAt.lt).toBeInstanceOf(Date);
   });
 
+  it("guards the every-arm with `some`, so it cannot match a deal with no timeline", async () => {
+    // THE POINT OF THIS FILE'S idleDays BLOCK, and the assertion it was
+    // missing. The comment above named the vacuous-`every` pitfall and then
+    // only checked that `every` was PRESENT — which is equally true of the
+    // broken filter, so it passed against it for the whole life of the code.
+    //
+    // Prisma compiles `every` to `NOT EXISTS (… AND NOT cond)`, which is TRUE
+    // at zero rows. Without `some: {}` the second arm matches every
+    // activity-less deal regardless of age, and arm one's `createdAt` test
+    // never gets to reject it — so a deal created five minutes ago comes back
+    // from `idle_days=90`.
+    //
+    // MUTATION: drop `some: {}` from crm.service.ts and this goes red. That is
+    // the whole difference between this assertion and the one above.
+    const findMany = vi.fn().mockResolvedValue([]);
+    const prisma = { crmDeal: { findMany, count: async () => 0 } } as never;
+
+    await listDeals(prisma, { idleDays: 90 });
+    const where = findMany.mock.calls[0][0].where;
+    expect(
+      where.OR[1].activities.some,
+      "the every-arm must be restricted to deals that HAVE activity",
+    ).toEqual({});
+    // And the two arms stay disjoint on the empty case: arm one owns it.
+    expect(where.OR[0].activities).toEqual({ none: {} });
+  });
+
   it("filters by outcome class rather than by stage name", async () => {
     // "Won" is a name an owner can rename to "Closed — signed". Anything that
     // matched on the string would stop working the day they did.
@@ -674,5 +703,84 @@ describe("listDeals idleDays", () => {
 
     await listDeals(prisma, { kind: "WON" });
     expect(findMany.mock.calls[0][0].where.stage).toEqual({ kind: "WON" });
+  });
+});
+
+describe("deleting a synced CRM row (WARP-2554 parity)", () => {
+  // There were ZERO tests on deleteCompany and deleteDeal before this. The
+  // refusal they now carry is the one deleteContact has enforced since
+  // WARP-2554: a synced row deleted here comes straight back on the next
+  // incremental tick, and on the way out the CrmActivity cascade takes the
+  // owner's own LOCAL notes with it. Archive is the action that works.
+
+  it("refuses to delete an EXTERNAL company, and names archive as the way out", async () => {
+    const del = vi.fn();
+    const prisma = {
+      crmCompany: {
+        findUnique: async () => ({ id: "c1", origin: "EXTERNAL" }),
+        delete: del,
+      },
+    } as never;
+
+    await expect(deleteCompany(prisma, "c1")).rejects.toThrow(
+      CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD,
+    );
+    // MUTATION: drop the guard and this is what goes red — the refusal has to
+    // happen BEFORE the write, not merely be reported after it.
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("still deletes a LOCAL company", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const prisma = {
+      crmCompany: {
+        findUnique: async () => ({ id: "c2", origin: "LOCAL" }),
+        delete: del,
+      },
+    } as never;
+
+    await expect(deleteCompany(prisma, "c2")).resolves.toBeUndefined();
+    expect(del).toHaveBeenCalledWith({ where: { id: "c2" } });
+  });
+
+  it("refuses to delete an EXTERNAL deal, and names archive as the way out", async () => {
+    const del = vi.fn();
+    const prisma = {
+      crmDeal: {
+        findUnique: async () => ({ id: "d1", origin: "EXTERNAL" }),
+        delete: del,
+      },
+    } as never;
+
+    await expect(deleteDeal(prisma, "d1")).rejects.toThrow(
+      CRM_ERRORS.DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD,
+    );
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("still deletes a LOCAL deal", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const prisma = {
+      crmDeal: {
+        findUnique: async () => ({ id: "d2", origin: "LOCAL" }),
+        delete: del,
+      },
+    } as never;
+
+    await expect(deleteDeal(prisma, "d2")).resolves.toBeUndefined();
+    expect(del).toHaveBeenCalledWith({ where: { id: "d2" } });
+  });
+
+  it("selects `origin` on the deal read, or the guard reads undefined and never fires", async () => {
+    // deleteDeal's find was `select: { id: true }`. A guard on a column the
+    // query does not fetch is a guard that silently never fires — the failure
+    // mode is invisible, so it is pinned here rather than left to review.
+    const findUnique = vi.fn().mockResolvedValue({ id: "d3", origin: "LOCAL" });
+    const prisma = {
+      crmDeal: { findUnique, delete: vi.fn().mockResolvedValue({}) },
+    } as never;
+
+    await deleteDeal(prisma, "d3");
+    expect(findUnique.mock.calls[0][0].select).toMatchObject({ origin: true });
   });
 });

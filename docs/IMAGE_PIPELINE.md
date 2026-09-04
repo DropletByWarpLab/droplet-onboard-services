@@ -212,8 +212,25 @@ hardware — this is the documented manual acceptance gate, NOT a CI step:
    confirm the autoinstall completes, the box clones the repo, the
    `droplet-firstboot` unit runs `setup.sh --single-box --systemd`, the stack
    comes up, and the dashboard is reachable.
+3. **`/downloads` matches what the release declares** (WARP-2666). Open the
+   dashboard's *Get the app* page on the booted box and confirm it shows what
+   `data/app-downloads/EXPECTED` says it should — then actually **run** the
+   installer it offers, on a clean machine, and confirm the app launches and
+   pairs with the box.
 
-Sign-off on these two is required before the **first** publish.
+   This one is manual because no automated gate can see it. The build
+   pre-flight proves a catalog exists and its digests match; only a human can
+   catch a catalog that is present, valid and digest-correct while describing
+   the **wrong build**. Every appliance ISO before this gate existed shipped
+   an empty page, and nothing — CI, `/api/health`, the watchdog — said so,
+   because "no apps staged" answers HTTP 200.
+
+   ⚠ Installers do **not** survive a reimage: they are git-ignored and the
+   ISO carries no repo payload, so a freshly flashed box starts blank and
+   must be re-staged (`./scripts/app-downloads/stage.sh`). They *do* survive
+   a factory reset.
+
+Sign-off on these three is required before the **first** publish.
 
 ## Bumping the pinned Ubuntu base
 
