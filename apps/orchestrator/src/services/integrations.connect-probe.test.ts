@@ -176,7 +176,10 @@ describe("connect() probes a cloud credential with health()", () => {
     const cases: Array<[string, () => Promise<{ ok: boolean }>, string]> = [
       ["stripe", async () => { throw new StripeReauthorizationRequiredError("x"); }, "NEEDS_RECONNECT"],
       ["hubspot", async () => { throw new HubSpotSuperAdminRevokedError("x"); }, "NEEDS_RECONNECT"],
-      ["mailchimp", async () => { throw new MailchimpCapabilityMissingError("lists", "plan"); }, "ERROR"],
+      // WARP-2623 — this row read "ERROR" until the persisted enum grew a
+      // member for it. The probe SUCCEEDED and one dataset is refused by the
+      // account's plan, so the row must not persist as "Can't connect".
+      ["mailchimp", async () => { throw new MailchimpCapabilityMissingError("lists", "plan"); }, "CAPABILITY_LIMITED"],
       ["stripe", async () => { throw new StripeAccessPolicyError("x"); }, "ERROR"],
       ["hubspot", async () => { throw new HubSpotSearchRateLimitedError(5, "x"); }, "DEGRADED"],
     ];

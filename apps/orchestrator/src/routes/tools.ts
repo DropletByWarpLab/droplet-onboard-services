@@ -35,10 +35,11 @@ import {
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   resolveToolAccessScope,
-  WRITE_TOOLS,
+  writeToolsIn,
 } from "../services/tool-access.service.js";
-import { nextFireFromRrule } from "../utils/rrule.js";
+import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -111,14 +112,15 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
  * writes — which is also what keeps a future non-dispatching kind correct here
  * without touching this function.
  *
- * `WRITE_TOOLS` is derived from each tool's `requiresWrite` in
- * `@droplet/tools-core`, so a write tool added to the registry is classified
- * here without anyone remembering to update a list.
+ * `writeToolsIn` is the classification the ticker's gate and the miner read
+ * too, against `WRITE_TOOLS` — derived from each tool's `requiresWrite` in
+ * `@droplet/tools-core` — so a write tool added to the registry is classified
+ * everywhere without anyone remembering to update a list.
  */
 function writeToolNamesIn(
   steps: ReadonlyArray<{ kind: string; args: unknown }>,
 ): string[] {
-  return plannedToolNames(steps).filter((tool) => WRITE_TOOLS.has(tool));
+  return writeToolsIn(plannedToolNames(steps));
 }
 
 /** Parsed request steps in the stored `{kind, args}` shape `plannedToolNames` reads. */
@@ -543,21 +545,17 @@ export function createToolsRouter(
               description: parsed.data.description,
               share: parsed.data.share,
               safety: parsed.data.safety,
-              // WARP-2665 — a PATCH may only RAISE the write classification
-              // implicitly; lowering it takes an explicit `writes: false`,
-              // which the reconcile above has already checked against the
-              // steps. Re-deriving unconditionally would let an unrelated
-              // description edit quietly clear a `writes: true` an author set
-              // deliberately (the flag is conservative — it can only add a
-              // confirmation and hold the scheduler off). `undefined` is a
-              // Prisma skip, so a patch that touches neither steps nor the
-              // flag leaves the column exactly as it was.
-              writes:
-                parsed.data.writes !== undefined
-                  ? reconciled.writes
-                  : parsed.data.steps
-                    ? existing.writes || reconciled.writes
-                    : undefined,
+              // WARP-2665 — an explicit `writes` wins (the reconcile above
+              // has already refused one the steps contradict); otherwise a
+              // PATCH may only RAISE the flag: `existing.writes ||
+              // reconciled.writes` lets the derivation add a write flag and
+              // never clears a conservative `writes: true` an author set by
+              // hand. Always persisted, never a Prisma skip — the body that
+              // promotes a mined suggestion is a bare `{"status":"live"}`,
+              // and the WARP-464 miner used to mint those rows `writes:
+              // false`, so a skip here published a spec whose own steps
+              // contradicted the flag the ticker's gate trusts.
+              writes: parsed.data.writes ?? (existing.writes || reconciled.writes),
               reversible: parsed.data.reversible,
               status: parsed.data.status as any,
               version: { increment: 1 },
@@ -613,7 +611,16 @@ export function createToolsRouter(
         // we refuse with 409 + a confirmation token shape the dashboard
         // can re-POST. This keeps imperative run-now in lockstep with
         // the C2 scheduler's `safeRun` skip-and-warn posture.
-        if (spec.writes && !spec.reversible) {
+        //
+        // WARP-2665 — "writes" is the stored column OR what the steps call,
+        // the same derivation the ticker's gate reads. A spec stored before
+        // the derivation existed (or seeded outside the routes) can carry
+        // `writes: false` while its steps call a write tool; trusting the
+        // column alone here would let a person fire that spec from the Live
+        // tab without the confirmation the ticker would have withheld.
+        const effectiveWrites =
+          spec.writes || hasWriteTool(plannedToolNames(spec.steps));
+        if (effectiveWrites && !spec.reversible) {
           const confirmed =
             String(req.query.confirm ?? "").toLowerCase() === "true";
           if (!confirmed) {
@@ -623,7 +630,8 @@ export function createToolsRouter(
                 "this spec writes and is not reversible — re-POST with ?confirm=true",
               specId: spec.id,
               slug: spec.slug,
-              writes: spec.writes,
+              writes: effectiveWrites,
+              writesSource: spec.writes ? "stored" : "derived",
               reversible: spec.reversible,
             });
             return;
@@ -797,21 +805,29 @@ export function createToolsRouter(
   /**
    * Compute the first fire, and in doing so validate the rule.
    *
-   * `nextFireFromRrule` returns null for anything this box cannot actually
-   * fire — an unsupported FREQ, a malformed segment, an unknown IANA zone.
-   * The ticker's response to such a rule is to disable the schedule and
-   * audit it; refusing at write time means the operator finds out while
-   * they are still looking at the field they typed it into.
+   * `isSupportedRrule` goes first, and it is not a courtesy check: it is the
+   * DAILY/WEEKLY, INTERVAL=1 subset `routes/scenes.ts` accepts, and it is
+   * what BOUNDS the computation below. `nextFireFromRrule` walks
+   * 8 x INTERVAL candidate days for a WEEKLY rule, synchronously, so an
+   * INTERVAL taken from the request body (`INTERVAL=100000000` is 40 bytes,
+   * well inside the 512-char cap) would hold the event loop for minutes.
+   *
+   * `nextFireFromRrule` then returns null for anything this box cannot
+   * actually fire — a malformed segment, an unknown IANA zone. The ticker's
+   * response to such a rule is to disable the schedule and audit it;
+   * refusing at write time means the operator finds out while they are
+   * still looking at the field they typed it into.
    */
   function firstFire(rrule: string, timezone: string): Date | null {
+    if (!isSupportedRrule(rrule)) return null;
     return nextFireFromRrule(rrule, new Date(), timezone);
   }
 
   const UNSUPPORTED_RULE = {
     error: "Unsupported schedule rule",
     detail:
-      "FREQ must be DAILY or WEEKLY (optionally with BYDAY/BYHOUR/BYMINUTE), " +
-      "and timezone must be a valid IANA zone",
+      "FREQ must be DAILY or WEEKLY (optionally with BYDAY/BYHOUR/BYMINUTE, " +
+      "no INTERVAL), and timezone must be a valid IANA zone",
   };
 
   router.get(
@@ -850,6 +866,18 @@ export function createToolsRouter(
         }
         const found = await resolveSchedule(req, res);
         if (!found) return;
+
+        // Same rule as run-now: a draft or a suggestion cannot be put on a
+        // timer. The ticker already skips a non-live spec, but silently —
+        // an operator who scheduled a draft would otherwise wait for a fire
+        // that never comes with nothing telling them why.
+        if (found.spec.status !== "live") {
+          res.status(400).json({
+            error: "Only live specs can be scheduled",
+            status: found.spec.status,
+          });
+          return;
+        }
 
         const timezone = parsed.data.timezone ?? "UTC";
         const nextFireAt = firstFire(parsed.data.rrule, timezone);

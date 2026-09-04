@@ -341,6 +341,67 @@ describe("WARP-2665 — writes is derived from the steps, not declared", () => {
     expect(prisma.specs.get("already-writes")!.writes).toBe(true);
   });
 
+  // The miner (WARP-464) writes `suggested` specs with `writes: false`
+  // hardcoded, and an operator promotes one with the bare body the
+  // dashboard's Accept button sends: `{ "status": "live" }`. No `steps`, no
+  // `writes`. If that path does not re-derive, the spec goes live carrying a
+  // `writes: false` its own steps contradict, and the ticker's
+  // `writes && !reversible` gate reads the lie and fires it unattended.
+  it("PROMOTION re-derives — a bare status-only patch cannot publish a mis-marked write spec", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({
+        slug: "mined-notify",
+        status: "suggested",
+        category: "suggested",
+        ownerId: null,
+        writes: false,
+        reversible: false,
+        steps: [
+          {
+            id: "spec-seed-s0",
+            specId: "spec-seed",
+            idx: 0,
+            kind: "call",
+            args: { tool: WRITE_TOOL, args: {} },
+          },
+        ],
+      }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .patch("/api/tools/mined-notify")
+      .send({ status: "live" });
+    expect(res.status).toBe(200);
+    expect(res.body.writes).toBe(true);
+    // The column, not just the projection — the ticker reads the row.
+    expect(prisma.specs.get("mined-notify")!.writes).toBe(true);
+  });
+
+  // Same hole, reached without `status`: nothing about the derivation is
+  // specific to promotion, so a metadata-only edit must repair the flag too.
+  it("a metadata-only PATCH raises writes to match the STORED steps", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({
+        slug: "mismarked",
+        writes: false,
+        steps: [
+          {
+            id: "spec-seed-s0",
+            specId: "spec-seed",
+            idx: 0,
+            kind: "call",
+            args: { tool: WRITE_TOOL, args: {} },
+          },
+        ],
+      }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .patch("/api/tools/mismarked")
+      .send({ description: "just a note" });
+    expect(res.status).toBe(200);
+    expect(res.body.writes).toBe(true);
+    expect(prisma.specs.get("mismarked")!.writes).toBe(true);
+  });
+
   it("an unrelated PATCH never silently lowers a conservative writes:true", async () => {
     const prisma = createPrismaMock([mkSpec({ slug: "cautious", writes: true })]);
     const res = await request(buildApp(prisma, mkUser("owner")))
@@ -455,6 +516,33 @@ describe("WARP-2665 — ToolSchedule finally has a write path", () => {
     expect(prisma.schedules.get(created.body.id)!.rrule).toBe(RRULE);
   });
 
+  it("refuses an unbounded INTERVAL before computing anything", async () => {
+    // 40 bytes, well under the 512-char cap, and `nextFireFromRrule` walks
+    // 8 x INTERVAL candidate days for a WEEKLY rule, synchronously: this one
+    // holds the event loop for minutes, for every other request on the box.
+    // The 2s budget is the assertion; a guard that refuses AFTER computing
+    // is not a guard.
+    const HUGE = "FREQ=WEEKLY;BYDAY=MO;INTERVAL=100000000";
+    const prisma = createPrismaMock([mkSpec({ slug: "daily-report" })]);
+    const app = buildApp(prisma, mkUser("owner"));
+    const created = await request(app)
+      .post("/api/tools/daily-report/schedules")
+      .send({ rrule: RRULE });
+
+    const posted = await request(app)
+      .post("/api/tools/daily-report/schedules")
+      .send({ rrule: HUGE });
+    expect(posted.status).toBe(400);
+
+    const patched = await request(app)
+      .patch(`/api/tools/daily-report/schedules/${created.body.id}`)
+      .send({ rrule: HUGE });
+    expect(patched.status).toBe(400);
+
+    expect(prisma.schedules.size).toBe(1);
+    expect(prisma.schedules.get(created.body.id)!.rrule).toBe(RRULE);
+  }, 2_000);
+
   it("deletes a schedule", async () => {
     const prisma = createPrismaMock([mkSpec({ slug: "daily-report" })]);
     const app = buildApp(prisma, mkUser("owner"));
@@ -498,5 +586,63 @@ describe("WARP-2665 — ToolSchedule finally has a write path", () => {
       .post("/api/tools/daily-report/schedules")
       .send({ rrule: RRULE });
     expect(res.status).toBe(403);
+  });
+});
+
+// ── the gates read the DERIVED classification, not the column alone ──
+describe("WARP-2665 — run-now and scheduling trust the steps, not a stale column", () => {
+  const RRULE = "FREQ=DAILY;BYHOUR=9;BYMINUTE=0";
+
+  /** Stored before WARP-2665: the column says false, the steps say otherwise. */
+  const legacyWriteSpec = () =>
+    mkSpec({
+      slug: "legacy-notify",
+      writes: false,
+      reversible: false,
+      steps: [
+        {
+          id: "spec-seed-s0",
+          specId: "spec-seed",
+          idx: 0,
+          kind: "call",
+          args: { tool: WRITE_TOOL, args: {} },
+        },
+      ],
+    });
+
+  it("run-now 409s an unconfirmed legacy writes:false spec whose steps write", async () => {
+    const prisma = createPrismaMock([legacyWriteSpec()]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/legacy-notify/runs")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("confirmation_required");
+    // The refusal reports what the gate decided, and where it got it from.
+    expect(res.body.writes).toBe(true);
+    expect(res.body.writesSource).toBe("derived");
+  });
+
+  it("run-now still names a stored writes:true as stored", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({ slug: "declared", writes: true, reversible: false }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/declared/runs")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.writesSource).toBe("stored");
+  });
+
+  it("refuses to schedule a spec that is not live, the way run-now refuses to run one", async () => {
+    for (const status of ["draft", "suggested"] as const) {
+      const prisma = createPrismaMock([mkSpec({ slug: `not-live-${status}`, status })]);
+      const res = await request(buildApp(prisma, mkUser("owner")))
+        .post(`/api/tools/not-live-${status}/schedules`)
+        .send({ rrule: RRULE });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Only live specs can be scheduled");
+      expect(res.body.status).toBe(status);
+      expect(prisma.schedules.size).toBe(0);
+    }
   });
 });

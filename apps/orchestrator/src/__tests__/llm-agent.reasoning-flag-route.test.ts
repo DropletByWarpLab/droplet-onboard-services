@@ -29,6 +29,19 @@ import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — `new PrismaClient()` here resolves to the shared in-memory
+// double from src/__tests__/setup.ts, which has no `assistantPersona`,
+// `businessProfile` or `workspace` model. Both block composers therefore threw
+// on every turn and the route's fail-open swallowed it. See the helper header.
+guardComposerFailOpen();
+
 // Stub auth so we can flip roles via x-test-role header. Mirrors the
 // pattern from `llm.test.ts` so this file slots into the same testing
 // regime.
@@ -112,7 +125,9 @@ describe("POST /api/llm/chat — WARP-458 captureReasoning flag", () => {
   beforeAll(() => {
     const prisma = new PrismaClient();
     initDeviceService(prisma);
-    app = createApp(prisma);
+    // WARP-2652 — the three delegates the prompt-block composers need,
+    // layered on for THIS suite only.
+    app = createApp(withPromptBlockDelegates(prisma));
   });
 
   beforeEach(() => {
@@ -156,6 +171,48 @@ describe("POST /api/llm/chat — WARP-458 captureReasoning flag", () => {
       }),
     };
   }
+
+  /** WARP-2652 — the outbound gateway payload's system message. The route
+   *  hands the assembled prompt to the agent loop, which serializes it into
+   *  the ai-gateway request; capturing it there is the honest read of what a
+   *  turn in this suite actually sends. */
+  function captureSystemPrompt(): () => string {
+    let sys = "";
+    mockChat.mockImplementationOnce(
+      async (req: { messages?: { role: string; content: unknown }[] }) => {
+        const first = req.messages?.[0];
+        sys = first && typeof first.content === "string" ? first.content : "";
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { role: "assistant", content: "ok" } }],
+          }),
+        };
+      },
+    );
+    return () => sys;
+  }
+
+  // WARP-2652 — the fixture floor. Not a test of the persona or business
+  // feature (llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts
+  // own those); it is the statement that the turns measured in the rest of
+  // this file run against the prompt the product assembles, blocks included.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const systemPrompt = captureSystemPrompt();
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "owner")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      });
+
+    expect(res.status).toBe(200);
+    expect(systemPrompt()).toContain(PERSONA_BLOCK_PREFIX);
+    expect(systemPrompt()).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
 
   it("captureReasoning=true persists reasoning AND surfaces it in the agent result", async () => {
     mockChat.mockResolvedValueOnce(reasoningResponse());
