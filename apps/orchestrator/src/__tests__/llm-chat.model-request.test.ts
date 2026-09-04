@@ -461,11 +461,27 @@ describe("the 50-row continuity window, at its boundary (WARP-2643)", () => {
    * turn self-heals for an iteration with nothing saying why. #1966 named this
    * as gap 1; these two cases are its edge.
    *
-   * The seed is `LIMIT` filler rows carrying a CORE tool (which adds no
-   * domain, so it cannot mask the subject) plus one cameras row placed either
-   * just inside or just outside the window. The limit is IMPORTED — a literal
-   * `50` here would keep passing if the product's `take` changed, which is the
-   * only failure mode a boundary test exists to prevent.
+   * The seed is `LIMIT` filler rows carrying `search_content`, plus one
+   * cameras row placed either just inside or just outside the window. The
+   * limit is IMPORTED — a literal `50` here would keep passing if the
+   * product's `take` changed, which is the only failure mode a boundary test
+   * exists to prevent.
+   *
+   * #1955 — the filler is NOT domain-free, and the first cut of this comment
+   * claimed it was ("a CORE tool, which adds no domain, so it cannot mask the
+   * subject"). Core-ness and domain membership are independent:
+   * `search_content` is in the `files` domain (`tools-core/src/catalog.ts`
+   * `TOOL_DOMAINS.files`) AND in `CORE_TOOL_NAMES`, and
+   * `selectAdvertisedTools` adds a domain for EVERY name in
+   * `conversationToolNames` regardless of core-ness
+   * (`tool-selection.service.ts` — the `for (const name of
+   * opts.conversationToolNames)` loop runs before the core check). So the
+   * filler admits the whole files domain in both cases below.
+   *
+   * That does not weaken the boundary — files and cameras are disjoint, so
+   * the filler cannot mask `list_cameras` either way — and the OUTSIDE case
+   * now DEPENDS on it: an admitted NON-core files tool is the only positive
+   * evidence available that the continuity read ran at all.
    */
   function seedWithCameraRowAt(position: number): TraceRow[] {
     // `position` counts back from the newest row (0 = newest). The filler
@@ -494,11 +510,21 @@ describe("the 50-row continuity window, at its boundary (WARP-2643)", () => {
     expect(res.status).toBe(200);
     const names = advertisedNames();
     expect(names).not.toContain("list_cameras");
-    // The filler rows ARE inside the window, so this is a window boundary and
-    // not simply a continuity read that failed: `search_content` is core and
-    // always present, so assert the read happened at all by its effect —
-    // exactly one row was excluded, and it is the one past the cutoff.
-    expect(names).toContain("search_content");
+    // The filler rows ARE inside the window, so this is a WINDOW boundary and
+    // not simply a continuity read that failed — and that distinction needs a
+    // name only the read can put on the wire. `search_files` is it: files
+    // domain, NOT in `CORE_TOOL_NAMES`, so it is advertised only because the
+    // filler rows' `search_content` admitted its domain.
+    //
+    // #1955 — this line asserted `search_content` itself, which is core and
+    // therefore advertised unconditionally. Had the continuity read broken
+    // outright (throw → fail-open → `priorToolNames: []`) that assertion
+    // passed, `not.toContain("list_cameras")` passed with it, and this whole
+    // OUTSIDE case went green for the wrong reason, resting entirely on its
+    // INSIDE sibling.
+    expect(names).toContain("search_files");
+    expect(CORE_TOOL_NAMES.has("search_files")).toBe(false);
+    // …and the excluded row's domain is absent WHOLE, not just the one tool.
     expect(names).not.toContain("list_camera_events");
   });
 });
