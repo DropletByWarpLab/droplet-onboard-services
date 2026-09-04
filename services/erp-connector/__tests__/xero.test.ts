@@ -24,6 +24,7 @@ import {
   XeroReauthorizationRequiredError,
   XeroScopeMissingError,
   XeroVariantNotImplementedError,
+  XERO_ACCESS_TOKEN_TTL_MS,
   XERO_ALLOWED_API_HOSTS,
   XERO_API_BASE_URL,
   XERO_CREDENTIAL_VARIANTS,
@@ -388,6 +389,163 @@ describe("the minted access token", () => {
     clock = NOW + 90_000;
     await connector.connect();
     expect(calls).toHaveLength(4);
+  });
+
+  /**
+   * A connector on a test-driven clock behind a URL-ROUTED fetch double.
+   *
+   * Deliberately not the scripted `recorder` queue the rest of this file uses.
+   * These five tests are about how MANY times the token endpoint is dialled,
+   * and a queue answers the buggy path's extra mint with whatever response was
+   * scripted next — so the wrong-shaped body, not the extra call, is what the
+   * test reports. Routing by URL gives both paths a well-formed answer and
+   * leaves the call COUNT as the only thing that can differ.
+   */
+  function tokenProbe(
+    tokenBody: Record<string, unknown>,
+    opts: { raw?: boolean } = {},
+  ) {
+    const calls: Call[] = [];
+    let clock = NOW;
+    // `raw` skips the JSON round-trip and hands `mint()` the object straight
+    // out of `res.json()`. Needed for exactly one value: `JSON.stringify(NaN)`
+    // is `null`, so a NaN written into a fixture body arrives as null and the
+    // test silently becomes a duplicate of the null case. See the fallback
+    // test for why NaN is worth pinning even though JSON cannot carry it.
+    const tokenRes = () =>
+      opts.raw
+        ? ({ ok: true, status: 200, headers: new Headers(), json: async () => tokenBody } as never)
+        : json(tokenBody);
+    const fetchImpl = async (url: string, init?: Record<string, unknown>) => {
+      calls.push({
+        url,
+        method: String(init?.method ?? "GET"),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: init?.body as string | undefined,
+      });
+      return url.includes("/connect/token") ? tokenRes() : json({ Organisations: [{}] });
+    };
+    const connector = new XeroConnector(
+      {
+        connectionId: CONNECTION_ID,
+        clientId: CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: fetchImpl as never,
+        now: () => clock,
+        resolveSecret: async () => CLIENT_SECRET,
+      },
+    );
+    const mints = () => calls.filter((c) => c.url.includes("/connect/token")).length;
+    return { calls, connector, mints, at: (ms: number) => { clock = ms; } };
+  }
+
+  it("treats a zero expires_in as absent rather than as an already-dead token", async () => {
+    // The finding on #1946. `Number.isFinite(0)` is TRUE, so a literal
+    // `"expires_in": 0` used to be multiplied to 0 ms and stored as
+    // `expiresAt === now`. Every subsequent read then failed the early-mint
+    // comparison and minted AGAIN — one identity call for every API call,
+    // against a per-organisation ceiling of sixty calls a minute and the
+    // fleet-wide app ceiling that allowed-egress.yaml names as the binding
+    // one. A token Xero states no life for is given the documented life,
+    // which is already what an omitted field gets.
+    //
+    // Mutation: put `Number.isFinite(parsed.expires_in)` back in place of the
+    // `> 0` test -> two mints, red.
+    const probe = tokenProbe({ access_token: ACCESS_TOKEN, expires_in: 0 });
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(1);
+    probe.at(NOW + 60_000);
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(1);
+  });
+
+  it("treats a negative expires_in the same way, not as a token expired in the past", async () => {
+    // Same class, one step worse: a negative value put `expiresAt` BEFORE
+    // `now`, so the cached entry was simultaneously unusable and re-minted
+    // around on every read. Mutation: drop the `> 0` half of the guard -> two
+    // mints, red.
+    const probe = tokenProbe({ access_token: ACCESS_TOKEN, expires_in: -3600 });
+    await probe.connector.connect();
+    probe.at(NOW + 60_000);
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(1);
+  });
+
+  it("clamps an over-long expires_in down to the documented life", async () => {
+    // Xero's documented Custom Connection token life is thirty minutes. A
+    // response claiming a year is either a vendor change nobody has read yet
+    // or a response that should not have been trusted; believing it means a
+    // token Xero has already stopped accepting is presented for a year of
+    // reads, each one a 401 this connector reports as REAUTHORIZE_REQUIRED —
+    // an ask the owner cannot act on. The clamp errs toward one extra mint
+    // rather than a connection that looks broken.
+    //
+    // Mutation: drop the Math.min -> the token survives past the documented
+    // life and the second connect() serves it from cache, so mints stays 1,
+    // red.
+    const probe = tokenProbe({ access_token: ACCESS_TOKEN, expires_in: 31_536_000 });
+    await probe.connector.connect();
+    probe.at(NOW + XERO_ACCESS_TOKEN_TTL_MS + 1);
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(2);
+  });
+
+  it("falls back to the documented life when expires_in is absent or not a number", async () => {
+    // The pre-existing contract, pinned so the new guard cannot quietly move
+    // it. Mutation: make the fallback 0 -> the cache never answers and every
+    // read mints, red.
+    for (const body of [
+      { access_token: ACCESS_TOKEN },
+      { access_token: ACCESS_TOKEN, expires_in: "1800" },
+      { access_token: ACCESS_TOKEN, expires_in: null },
+      { access_token: ACCESS_TOKEN, expires_in: true },
+      { access_token: ACCESS_TOKEN, expires_in: { seconds: 1800 } },
+    ]) {
+      __resetXeroTokenCacheForTest();
+      const probe = tokenProbe(body);
+      await probe.connector.connect();
+      probe.at(NOW + XERO_ACCESS_TOKEN_TTL_MS - XERO_TOKEN_EARLY_MINT_MS - 1);
+      await probe.connector.connect();
+      expect(probe.mints()).toBe(1);
+    }
+  });
+
+  it("rejects a NaN expires_in — the guard is a positive test, not a negated one", async () => {
+    // Why this is its own test with `raw`: `JSON.stringify(NaN)` is `null`, so
+    // a NaN in a fixture body arrives as null and pins nothing. Handing the
+    // object straight to `mint()` is the only way to exercise the value.
+    //
+    // Why pin an input JSON cannot carry: `NaN` is the single value that tells
+    // `stated > 0` apart from `!(stated <= 0)`, and the negated form is the
+    // natural way to write this guard. Under it, NaN passes, `Math.min(NaN,
+    // …)` is NaN, `expiresAt` is NaN, and every `expiresAt - now > margin`
+    // comparison is false — which is the unbounded-minting failure this whole
+    // block exists to prevent, reintroduced by a refactor that looks like a
+    // simplification. It is also one `Number(header)` away from reachable.
+    //
+    // Mutation: `stated > 0` -> `!(stated <= 0)` -> two mints, red. That exact
+    // mutant SURVIVED the first pass of this suite, which is how the fixture
+    // above was found to be testing null twice.
+    const probe = tokenProbe({ access_token: ACCESS_TOKEN, expires_in: Number.NaN }, { raw: true });
+    await probe.connector.connect();
+    probe.at(NOW + XERO_ACCESS_TOKEN_TTL_MS - XERO_TOKEN_EARLY_MINT_MS - 1);
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(1);
+  });
+
+  it("still follows a SHORTER expires_in — the clamp is a ceiling, not a floor", async () => {
+    // The clamp must not collapse into "always thirty minutes". A vendor that
+    // shortens its tokens is still followed. Mutation: replace the Math.min
+    // with XERO_ACCESS_TOKEN_TTL_MS -> the 60-second token is held for half an
+    // hour, the second connect() does not re-mint, mints stays 1, red.
+    const probe = tokenProbe({ access_token: ACCESS_TOKEN, expires_in: 60 });
+    await probe.connector.connect();
+    probe.at(NOW + 90_000);
+    await probe.connector.connect();
+    expect(probe.mints()).toBe(2);
   });
 
   it("has no refresh path at all — a Custom Connection issues no refresh token", async () => {

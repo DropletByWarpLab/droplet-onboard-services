@@ -376,9 +376,16 @@ const SCOPE_BY_RESOURCE: Readonly<Record<string, string>> = {
 /**
  * Documented life of a Custom Connection access token (ADR-042 §2).
  *
- * Used only as the FALLBACK when Xero's token response omits `expires_in`. The
- * response's own value wins — a vendor that shortens its tokens must not find
- * this constant asserting they are still good for half an hour.
+ * Two jobs, both bounds on what a token response is allowed to claim:
+ *
+ *  • the FALLBACK when the response omits `expires_in`, states it as something
+ *    other than a number, or states a value that is not positive; and
+ *  • the CEILING on a stated value, since a response claiming more than the
+ *    documented life is not a life Xero will honour.
+ *
+ * It is not a floor. A SHORTER `expires_in` still wins — a vendor that
+ * shortens its tokens must not find this constant asserting they are good for
+ * half an hour regardless. See `mint()` for why both bounds are load-bearing.
  */
 export const XERO_ACCESS_TOKEN_TTL_MS = 30 * 60_000;
 
@@ -1101,12 +1108,32 @@ export class XeroConnector implements Connector {
       // there is nothing the owner can do about Xero's response shape.
       throw this.blocked(op, "Xero returned a token response with no access_token");
     }
-    // Xero's own `expires_in` wins; the documented 30 minutes is only the
-    // fallback, so a vendor that shortens its tokens is followed rather than
-    // contradicted.
+    // Xero's own `expires_in` wins, BOUNDED ON BOTH SIDES — the documented 30
+    // minutes is the fallback and the ceiling, not a second opinion.
+    //
+    // The lower bound is the finding on #1946. `Number.isFinite` admits `0`
+    // and negatives, and either one lands `expiresAt` at or before `now`, so
+    // the early-mint check in `token()` can never be satisfied: the cache
+    // holds an entry that is never served, and EVERY read mints a fresh token
+    // first. That is one identity call per API call against a ceiling of sixty
+    // calls a minute per organisation and — the limit allowed-egress.yaml
+    // names as the binding one — ten thousand a minute for the whole app
+    // across every box in the fleet. One customer's malformed token response
+    // would spend a budget shared with every other customer.
+    //
+    // The upper bound is the same argument in the other direction. Cached past
+    // the real expiry, a token Xero has already stopped accepting is presented
+    // on read after read, and each 401 is reported as REAUTHORIZE_REQUIRED —
+    // asking an owner to fix a credential that was never broken.
+    //
+    // A SHORTER value is still followed: this is a ceiling, not a floor, so a
+    // vendor that shortens its tokens is obeyed. `> 0` also rejects `NaN`,
+    // which is why the guard is written as a positive test rather than as a
+    // negated `<= 0`.
+    const stated = parsed.expires_in;
     const expiresIn =
-      typeof parsed.expires_in === "number" && Number.isFinite(parsed.expires_in)
-        ? parsed.expires_in * 1000
+      typeof stated === "number" && stated > 0
+        ? Math.min(stated * 1000, XERO_ACCESS_TOKEN_TTL_MS)
         : XERO_ACCESS_TOKEN_TTL_MS;
     this.observedState = "connected";
     return { accessToken, expiresAt: this.now() + expiresIn };
