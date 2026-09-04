@@ -233,7 +233,15 @@ function defaultConnectorFor(conn: ConnRow): Connector {
  * super admin) is reauth-class for the same reason
  * `INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE` calls it NEEDS_RECONNECT — the
  * portal refuses every call until a current super admin re-creates the app and
- * the new token is pasted here. One vocabulary across both classifiers.
+ * the new token is pasted here.
+ *
+ * "One vocabulary across both classifiers" is a claim this module used to make
+ * and not keep: the capability codes below rendered `CAPABILITY_LIMITED` here
+ * while the status table still called them `ERROR`, so the hub drew a red tile
+ * over a connection the assistant was simultaneously calling healthy. #1960
+ * (WARP-2623) closed that by giving `IntegrationStatus` a real
+ * `CAPABILITY_LIMITED` member, and the agreement is now asserted in
+ * `erp.service.test.ts` rather than asserted in a comment.
  *
  * ## Why a `Map` and not an object literal
  *
@@ -291,8 +299,22 @@ const READ_REASON_BY_CODE: ReadonlyMap<string, "QUOTA_EXHAUSTED" | "REAUTHORIZE_
  * Listed rather than pattern-matched on the substring "CAPABILITY": a code is
  * capability-class because somebody decided it is, and a `startsWith` would
  * silently enrol whatever a future vendor happens to name that way.
+ *
+ * ## The other classifier reads the same four codes
+ *
+ * `INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE` maps exactly these to the
+ * persisted `CAPABILITY_LIMITED` status (WARP-2623, #1960). The two are
+ * different KINDS of answer — a read's `reason` and a row's `status` — but
+ * they are one classification, and a code that is capability-class to one and
+ * `ERROR` to the other is a connection the hub draws red while the assistant
+ * calls it healthy in the same breath.
+ *
+ * Exported for the same reason `CONNECTOR_BLOCKED_CODE` is: the agreement is
+ * asserted against THIS set rather than a second hand-written copy of it, so
+ * adding a fifth code here without adding it there is a red test, not a
+ * divergence nobody notices until a customer sees both renderings at once.
  */
-const CAPABILITY_LIMITED_CODES: ReadonlySet<string> = new Set([
+export const CAPABILITY_LIMITED_CODES: ReadonlySet<string> = new Set([
   "CAPABILITY_MISSING",
   "CAPABILITY_NOT_AVAILABLE",
   "SCOPE_MISSING",

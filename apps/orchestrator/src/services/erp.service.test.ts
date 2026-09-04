@@ -13,7 +13,11 @@
  *  • an audit row on every read AND every write transition.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { createErpService } from "./erp.service.js";
+import { createErpService, CAPABILITY_LIMITED_CODES } from "./erp.service.js";
+import {
+  INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE,
+  integrationStatusForHealthFailure,
+} from "./cloud-connection-state.js";
 import {
   ConnectorBlockedError,
   QuotaExhaustedError,
@@ -1298,5 +1302,65 @@ describe("erp.service — connector errors classify by code, not by class (WARP-
         expect(wire.connected).toBe(false);
       },
     );
+  });
+
+  /**
+   * The read classifier and the persisted-status classifier must not disagree
+   * about the capability class (WARP-2610 + WARP-2623).
+   *
+   * These are two different KINDS of answer — the `reason` on a read, and the
+   * `IntegrationStatus` stored on the row — and they are consumed by two
+   * different surfaces at the same moment. When they disagreed, a Mailchimp
+   * account on a plan without a resource drew a red "Can't connect" tile in the
+   * integrations hub while the assistant, reading the same connection through
+   * `queryDataset`, reported it healthy and said only the plan withheld the
+   * dataset. Both were rendered from the same vendor error, and the owner had
+   * no way to tell which was lying.
+   *
+   * Asserted against the EXPORTED set rather than a second list written here,
+   * so a fifth capability code added to one classifier and not the other is a
+   * red test rather than a divergence that reaches a customer.
+   */
+  describe("the capability class means the same thing to both classifiers", () => {
+    it.each([...CAPABILITY_LIMITED_CODES])(
+      "%s is capability-class on the read path AND on the persisted status",
+      async (code) => {
+        const err = new Error(`the vendor withheld the dataset (${code})`);
+        Object.defineProperty(err, "code", { value: code, enumerable: true });
+
+        const read = await serviceThatReadsWith(err).getArSummary(OWNER);
+        // The connection WORKS; one dataset is refused.
+        expect(read.connected).toBe(true);
+        expect(read.reason).toBe("CAPABILITY_LIMITED");
+
+        // ...and the row the hub renders says the same thing. `ERROR` here is
+        // the defect: it draws "Can't connect" over a working connection and
+        // stops sync, which also stops the datasets that DO read.
+        expect(integrationStatusForHealthFailure(err)).toBe("CAPABILITY_LIMITED");
+        expect(integrationStatusForHealthFailure(err)).not.toBe("ERROR");
+      },
+    );
+
+    it("neither classifier holds a capability code the other does not", () => {
+      const persisted = Object.entries(INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE)
+        .filter(([, status]) => status === "CAPABILITY_LIMITED")
+        .map(([code]) => code)
+        .sort();
+
+      // Set equality in BOTH directions. A code added to the read path alone
+      // renders a healthy read over a red tile; a code added to the status
+      // table alone renders a calm tile over a read that says ERROR.
+      expect(persisted).toEqual([...CAPABILITY_LIMITED_CODES].sort());
+    });
+
+    it("the docstring's claim is the tested one: no capability code is ERROR", () => {
+      // `erp.service.ts` claims "one vocabulary across both classifiers". This
+      // is that sentence as an assertion — before #1960 it was false for
+      // exactly this code class, and it was false in the direction that shows a
+      // customer two contradictory answers at once.
+      for (const code of CAPABILITY_LIMITED_CODES) {
+        expect(INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE[code]).toBe("CAPABILITY_LIMITED");
+      }
+    });
   });
 });

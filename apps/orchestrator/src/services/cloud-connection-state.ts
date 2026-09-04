@@ -123,6 +123,14 @@ export const INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE: Readonly<
   // it is not a credential. Keyed on the code like every other row here, so
   // the fifth vendor to throw one of these is classified the day it lands.
   //
+  // These four are `CAPABILITY_LIMITED_CODES` in `erp.service.ts`, which
+  // renders the same errors as a read `reason` (WARP-2610). The two tables are
+  // different kinds of answer and one classification: a code that is
+  // capability-class to one and `ERROR` to the other shows the owner a red hub
+  // tile and a healthy assistant answer about the same connection at the same
+  // moment. Kept in step by a test that compares the two sets directly, so a
+  // fifth code added to one is red rather than silent.
+  //
   // Mailchimp: the plan does not include the resource.
   CAPABILITY_MISSING: "CAPABILITY_LIMITED",
   // HubSpot: the hub tier does not include the object (e.g. quotes needs Sales
