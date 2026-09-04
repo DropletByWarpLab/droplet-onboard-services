@@ -51,6 +51,7 @@ function makeSystemDisk(overrides: Partial<SystemDiskInfo> = {}): SystemDiskInfo
     model: "Samsung SSD 980",
     serial: "S64ANS0T1",
     bus: "nvme",
+    measurement: "complete",
     filesystems: [
       { mount: "/", role: "root", fs: "ext4", size_bytes: 64 * GB, used_bytes: 20 * GB, free_bytes: 44 * GB },
       { mount: "/boot/efi", role: "boot", fs: "vfat", size_bytes: 1 * GB, used_bytes: 0, free_bytes: 1 * GB },
@@ -152,13 +153,49 @@ describe("Storage screen — System drive card (WARP-2098)", () => {
     // meter would claim a pristine empty disk.
     setup({
       drives: [makeDrive()],
-      systemDisk: makeSystemDisk({ used_bytes: null, free_bytes: null, filesystems: [] }),
+      systemDisk: makeSystemDisk({ measurement: "unavailable", used_bytes: null, free_bytes: null, filesystems: [] }),
     });
     render(<DrivesPanel />);
     const section = await screen.findByRole("list", { name: "System drive" });
     expect(within(section).getByText("Usage unavailable.")).toBeTruthy();
     // Capacity is still stated — the disk is real.
     expect(within(section).getByText(/512 GB/)).toBeTruthy();
+  });
+
+  it("says when only PART of the disk could be read — that is not the same as none of it", async () => {
+    // The bridge reports WHY there is no meter as an explicit state. Deriving
+    // it from used_bytes being null collapsed "half the disk was unreadable"
+    // into "nothing was" — and hid that the readable half is still listed.
+    setup({
+      drives: [makeDrive()],
+      systemDisk: makeSystemDisk({
+        measurement: "partial",
+        used_bytes: null,
+        free_bytes: null,
+        filesystems: makeSystemDisk().filesystems.filter((f) => f.role !== "data"),
+      }),
+    });
+    render(<DrivesPanel />);
+    const section = await screen.findByRole("list", { name: "System drive" });
+    expect(within(section).getByText(/part of this disk couldn.t be read/i)).toBeTruthy();
+    expect(within(section).queryByText("Usage unavailable.")).toBeNull();
+    // No total — but what WAS readable still shows.
+    expect(within(section).queryByText(/of 512 GB/)).toBeNull();
+    expect(within(section).getByText("System software")).toBeTruthy();
+  });
+
+  it("branches on the bridge's state, not on the nulls", async () => {
+    // Mutation guard: a payload whose state says "unavailable" renders as
+    // unavailable even though used_bytes carries a number. If the card went
+    // back to `used_bytes !== null`, this would render a meter.
+    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk({ measurement: "unavailable" }) });
+    render(<DrivesPanel />);
+    const section = await screen.findByRole("list", { name: "System drive" });
+    expect(within(section).getByText("Usage unavailable.")).toBeTruthy();
+    expect(within(section).queryByText(/of 512 GB/)).toBeNull();
+    // And the breakdown follows the state too: "nothing was measured" must
+    // never sit above a populated table (code review, WARP-2098).
+    expect(within(section).queryByText("System software")).toBeNull();
   });
 
   it("renders nothing at all on a bridge that does not report a system disk", async () => {
@@ -270,10 +307,28 @@ describe("Files screen — System drive tile (WARP-2098)", () => {
   it("shows capacity without a meter when usage is unavailable", () => {
     setup({
       drives: [makeDrive()],
-      systemDisk: makeSystemDisk({ used_bytes: null, free_bytes: null, filesystems: [] }),
+      systemDisk: makeSystemDisk({ measurement: "unavailable", used_bytes: null, free_bytes: null, filesystems: [] }),
     });
     render(<VolumesPanel />);
     expect(screen.getByText("Usage unavailable")).toBeTruthy();
+  });
+
+  it("says partly unreadable when only part of the disk measured", () => {
+    setup({
+      drives: [makeDrive()],
+      systemDisk: makeSystemDisk({ measurement: "partial", used_bytes: null, free_bytes: null }),
+    });
+    render(<VolumesPanel />);
+    expect(screen.getByText("Partly unreadable")).toBeTruthy();
+    expect(screen.queryByText("Usage unavailable")).toBeNull();
+    expect(screen.queryByText(/of 512 GB/)).toBeNull();
+  });
+
+  it("branches on the bridge's state, not on the nulls", () => {
+    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk({ measurement: "unavailable" }) });
+    render(<VolumesPanel />);
+    expect(screen.getByText("Usage unavailable")).toBeTruthy();
+    expect(screen.queryByText(/of 512 GB/)).toBeNull();
   });
 });
 

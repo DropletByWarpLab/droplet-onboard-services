@@ -74,6 +74,7 @@ const SYSTEM_DISK = {
   model: "Samsung SSD 980",
   serial: "S64ANS0T1",
   bus: "nvme",
+  measurement: "complete",
   filesystems: [
     { mount: "/", role: "root", fs: "ext4", size_bytes: 64 * GB, used_bytes: 20 * GB, free_bytes: 44 * GB },
     { mount: "/data", role: "data", fs: "ext4", size_bytes: 400 * GB, used_bytes: 100 * GB, free_bytes: 300 * GB },
@@ -290,6 +291,7 @@ describe("GET /api/storage/drives — system disk passthrough (WARP-2098)", () =
       ...bootDiskSnapshot,
       system_disk: {
         ...SYSTEM_DISK,
+        measurement: "unavailable",
         used_bytes: null,
         free_bytes: null,
         filesystems: [],
@@ -298,6 +300,28 @@ describe("GET /api/storage/drives — system disk passthrough (WARP-2098)", () =
     const res = await request(buildApp()).get("/api/storage/drives");
     expect(res.body.system_disk.used_bytes).toBeNull();
     expect(res.body.system_disk.size_bytes).toBe(512 * GB);
+    expect(res.body.system_disk.measurement).toBe("unavailable");
+  });
+
+  it("passes the bridge's measurement state through — a partial reading is not an unreadable one", async () => {
+    // The bridge says WHY there is no total: "partial" (some filesystems
+    // unreadable, the readable ones still listed) vs "unavailable" (nothing
+    // measured). The dashboard renders those differently, so the state must
+    // cross the boundary as the explicit enum, not be re-derived from nulls.
+    stubBridge({
+      ...bootDiskSnapshot,
+      system_disk: {
+        ...SYSTEM_DISK,
+        measurement: "partial",
+        used_bytes: null,
+        free_bytes: null,
+        filesystems: SYSTEM_DISK.filesystems.filter((f) => f.role !== "data"),
+      },
+    });
+    const res = await request(buildApp()).get("/api/storage/drives");
+    expect(res.body.system_disk.measurement).toBe("partial");
+    expect(res.body.system_disk.used_bytes).toBeNull();
+    expect(res.body.system_disk.filesystems.map((f: { mount: string }) => f.mount)).toEqual(["/"]);
   });
 });
 
@@ -314,6 +338,19 @@ describe("GET /api/storage — the headline (WARP-2098)", () => {
     // The install disk rides alongside the headline, never inside it.
     expect(res.body.system_disk).toEqual(SYSTEM_DISK);
     expect(res.body.total).not.toBe(SYSTEM_DISK.size_bytes);
+  });
+
+  it("totals the SAME drives GET /storage/drives returns — one filter, not two copies", async () => {
+    // Code review (WARP-2098): the data-drive filter used to be written out in
+    // each handler separately. Same snapshot in, identical totals out — and
+    // the drives list shows the filter did its job on both.
+    stubBridge(bootDiskSnapshot);
+    const app = buildApp();
+    const overview = await request(app).get("/api/storage");
+    const drives = await request(app).get("/api/storage/drives");
+    expect(overview.body.totals).toEqual(drives.body.totals);
+    expect(drives.body.totals.drive_count).toBe(1);
+    expect(drives.body.drives.map((d: { uuid: string }) => d.uuid)).toEqual(["U-DATA-REAL"]);
   });
 
   it("still reports the Nextcloud account quota, under a name that says so", async () => {

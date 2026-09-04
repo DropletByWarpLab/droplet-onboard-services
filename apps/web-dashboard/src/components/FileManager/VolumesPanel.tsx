@@ -117,8 +117,10 @@ function VolumeTile({
  * being the disk Nextcloud actually writes uploads to.
  */
 function SystemVolumeTile({ system }: { system: SystemDiskInfo }) {
-  // null = identified but unmeasurable. Show capacity, no meter, no fake 0%.
-  const measured = system.used_bytes !== null;
+  // Branch on the bridge's explicit state, never on the nulls: "partial" and
+  // "unavailable" both carry null usage and are different things to say. No
+  // meter for either — no fake 0%, and no undercount dressed as a total.
+  const measured = system.measurement === "complete";
   const p = measured ? usagePctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
   return (
     <div role="listitem" className="card relative">
@@ -130,7 +132,11 @@ function SystemVolumeTile({ system }: { system: SystemDiskInfo }) {
           System drive
         </span>
         <span className="cm">
-          {measured ? `${formatBytes(system.free_bytes ?? 0)} free` : "Usage unavailable"}
+          {measured
+            ? `${formatBytes(system.free_bytes ?? 0)} free`
+            : system.measurement === "partial"
+              ? "Partly unreadable"
+              : "Usage unavailable"}
         </span>
       </div>
 

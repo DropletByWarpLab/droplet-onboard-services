@@ -1619,10 +1619,20 @@ export interface SystemDiskInfo {
   /** The PHYSICAL disk. `used_bytes` sums `filesystems`, so unallocated LVM
    *  extents count as free rather than disappearing. */
   size_bytes: number;
-  /** null when the disk was identified but nothing on it could be measured.
-   *  Render the capacity with no meter — 0 would claim an empty disk. */
+  /** null whenever the bridge could not publish an honest total — see
+   *  `measurement` for which case. Render the capacity with no meter; 0 would
+   *  claim an empty disk. */
   used_bytes: number | null;
   free_bytes: number | null;
+  /** Why the pair above is or is not a number — the bridge's explicit state,
+   *  never re-derived from the nulls (a "partial" and an "unavailable" disk
+   *  both carry null, and the owner should be told which).
+   *    complete    — every filesystem measured; the pair is real.
+   *    partial     — some measured (listed in `filesystems`), not all; a
+   *                  total would undercount, so the pair is null.
+   *    unavailable — nothing measurable; the pair is null and `filesystems`
+   *                  is empty. */
+  measurement: "complete" | "partial" | "unavailable";
   model: string;
   serial: string;
   bus: string;

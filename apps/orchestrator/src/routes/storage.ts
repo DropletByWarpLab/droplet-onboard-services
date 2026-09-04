@@ -222,8 +222,10 @@ interface BridgeDrivesSnapshot {
   disks?: BridgeDisk[];
   /** WARP-2098: the appliance's OWN install disk, reported by the bridge in a
    *  key of its own. Absent on an older bridge, and absent when the bridge
-   *  could not measure the root filesystem — never null, never zeroed, so
-   *  "nothing to say" stays distinguishable from "empty". */
+   *  could not IDENTIFY the disk (no whole-disk node for it in the lsblk
+   *  tree). That is the only omission: a disk that is identified but cannot
+   *  be measured still arrives, with null usage and `measurement` saying why
+   *  — never zeroed, so "nothing to say" stays distinguishable from "empty". */
   system_disk?: BridgeSystemDisk;
   snapshot_at: string;
 }
@@ -240,8 +242,9 @@ interface BridgeDrivesSnapshot {
  * Nextcloud's data directory lives on it while the storage pool is attached
  * to Nextcloud only as external storage.
  *
- * `used_bytes`/`free_bytes` are `null` when the bridge identified the disk but
- * could not measure anything on it. Rendering that as 0 would claim a pristine
+ * `used_bytes`/`free_bytes` are `null` whenever the bridge could not publish an
+ * honest total — and `measurement` says which case that is, so no consumer has
+ * to infer it back from the nulls. Rendering null as 0 would claim a pristine
  * empty disk, so the UI shows capacity with no meter instead.
  */
 interface BridgeSystemDisk {
@@ -253,6 +256,15 @@ interface BridgeSystemDisk {
   size_bytes: number;
   used_bytes: number | null;
   free_bytes: number | null;
+  /** Why the pair above is or is not a number. "complete": every filesystem
+   *  on the disk was measured and the pair is real. "partial": some were
+   *  measured (they are in `filesystems`) but not all, so a total would be an
+   *  undercount and the pair is null. "unavailable": nothing on the disk
+   *  could be measured; the pair is null and `filesystems` is empty. The
+   *  bridge sets it on every reply (same change that introduced this object)
+   *  and it is forwarded verbatim — the dashboard branches on it, never on
+   *  the nulls. */
+  measurement: "complete" | "partial" | "unavailable";
   model: string;
   serial: string;
   bus: string;

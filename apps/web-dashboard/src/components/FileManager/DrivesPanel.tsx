@@ -901,9 +901,12 @@ function systemFsLabel(role: SystemDiskInfo["filesystems"][number]["role"]): str
  * on a drive.
  */
 function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
-  // null means "identified the disk, could not measure it" — show the capacity
-  // and say so, rather than a 0% meter that reads as a pristine empty disk.
-  const measured = system.used_bytes !== null;
+  // The bridge says WHY there is or is not a total, as an explicit state —
+  // branch on that, never on `used_bytes !== null`. "partial" and "unavailable"
+  // both carry null, and they are different things to tell the owner: one has
+  // a readable breakdown under it, the other has nothing. Neither gets a meter
+  // (a 0% bar reads as a pristine empty disk).
+  const measured = system.measurement === "complete";
   const p = measured ? usagePctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
   const model = (system.model || "").replace(/[-_]+/g, " ").trim();
   // Startup partitions are tiny and there can be two of them (/boot, /boot/efi);
@@ -959,6 +962,11 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
             <span>of {fmtBytes(system.size_bytes)}</span>
           </div>
         </div>
+      ) : system.measurement === "partial" ? (
+        <p className="mt-3" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          Part of this disk couldn&rsquo;t be read, so there&rsquo;s no total.
+          What could be read is listed below.
+        </p>
       ) : (
         <p className="mt-3" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
           Usage unavailable.
@@ -966,8 +974,11 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
       )}
 
       {/* The breakdown is the useful part: it shows the owner that uploaded
-          files land here, on the Droplet's own disk, rather than on the pool. */}
-      {(rows.length > 0 || boot.length > 0) && (
+          files land here, on the Droplet's own disk, rather than on the pool.
+          Gated on the STATE as well as the rows: "unavailable" means nothing
+          was measured, and the card must never say so above a populated
+          table (code review, WARP-2098). */}
+      {system.measurement !== "unavailable" && (rows.length > 0 || boot.length > 0) && (
         <ul
           className="mt-3 flex flex-col gap-1"
           style={{ fontSize: "12px", color: "var(--text-muted)" }}
