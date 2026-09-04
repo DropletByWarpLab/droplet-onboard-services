@@ -21,10 +21,23 @@
  *
  * The mocks are keyed off a mutable `state` so both halves render the REAL
  * page component rather than a second implementation of its conditions.
+ *
+ * WARP-2667 follow-up (pr-reviewer, #1987) — the first cut of half 2 keyed the
+ * suppression off `interviewConversation`, which is `conversationId ===
+ * bizProfile.interviewChatId`. Both sides of that comparison move on their own
+ * clock: `onboardingState` leaves `not_started` the moment the profile refresh
+ * lands, while `conversationId` only catches up when the URL-driven
+ * `loadConversation` round trip resolves. In between, the intro-card branch is
+ * already false and the interview branch is not yet true — and the generic
+ * empty state paints inside the session the click just created, which is the
+ * very bug this file exists to prevent. The three tests above cannot see it:
+ * they hand `useChat` a `conversationId` that already equals the interview id
+ * on first render, so the transition never happens. The two below hold the
+ * page IN that window.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 
 const INTERVIEW_CHAT_ID = "conv-interview-fresh";
 
@@ -34,10 +47,34 @@ const INTERVIEW_CHAT_ID = "conv-interview-fresh";
 const OPENING_TURN =
   "[topic 1/7] To start — in a sentence or two, what does your business do?";
 
-const { state } = vi.hoisted(() => ({
-  state: {
-    messages: [] as Array<{ id: string; role: string; content: string }>,
+const { state, push, fetchBusinessProfile, startBusinessOnboarding } = vi.hoisted(
+  () => {
+    const state = {
+      messages: [] as Array<{ id: string; role: string; content: string }>,
+      // `useChat`'s id. Settable to null on purpose: that is the value it
+      // actually holds for the whole `loadConversation` round trip after a
+      // `router.push`, and the window the fix has to survive.
+      conversationId: null as string | null,
+      // The live `?c=` bag. `router.push` rewrites it, exactly as the real
+      // router does — a static mock would make the transition untestable.
+      params: new URLSearchParams(),
+      profile: {} as Record<string, unknown>,
+    };
+    return {
+      state,
+      push: vi.fn((url: string) => {
+        state.params = new URLSearchParams(url.split("?")[1] ?? "");
+      }),
+      fetchBusinessProfile: vi.fn(async () => state.profile),
+      startBusinessOnboarding: vi.fn(),
+    };
   },
+);
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/chat",
+  useRouter: () => ({ push, replace: vi.fn(), back: vi.fn() }),
+  useSearchParams: () => state.params,
 }));
 
 vi.mock("@/lib/hooks/useChat", () => ({
@@ -57,9 +94,9 @@ vi.mock("@/lib/hooks/useChat", () => ({
     attach: vi.fn(),
     removeAttachment: vi.fn(),
     clearAttachments: vi.fn(),
-    // The interview session is OPEN — this is the state the owner lands in
-    // one navigation after clicking Start.
-    conversationId: INTERVIEW_CHAT_ID,
+    // Whatever the test parks it at: the interview id (the settled frame,
+    // one navigation after Start) or null (the in-flight frame).
+    conversationId: state.conversationId,
     loadConversation: vi.fn(async () => true),
     messagesEpoch: 0,
   }),
@@ -89,22 +126,29 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
-  return {
-    ...actual,
-    fetchBusinessProfile: vi.fn(async () => ({
-      onboardingState: "in_progress",
-      interviewChatId: INTERVIEW_CHAT_ID,
-      interviewResumable: true,
-      workspaceType: "BUSINESS",
-    })),
-  };
+  return { ...actual, fetchBusinessProfile, startBusinessOnboarding };
 });
+
+const IN_PROGRESS = {
+  onboardingState: "in_progress",
+  interviewChatId: INTERVIEW_CHAT_ID,
+  interviewResumable: true,
+  workspaceType: "BUSINESS",
+} as const;
 
 import ChatPage from "@/app/chat/page";
 
 describe("chat /chat — a started interview opens with its first question", () => {
   beforeEach(() => {
     state.messages = [];
+    // The settled frame the first three tests were written against, kept
+    // byte-for-byte: interview session loaded, no `?c=` in the bag.
+    state.conversationId = INTERVIEW_CHAT_ID;
+    state.params = new URLSearchParams();
+    state.profile = { ...IN_PROGRESS };
+    push.mockClear();
+    fetchBusinessProfile.mockClear();
+    startBusinessOnboarding.mockReset();
   });
   afterEach(() => cleanup());
 
@@ -148,6 +192,75 @@ describe("chat /chat — a started interview opens with its first question", () 
     // The interview chrome proves the page settled into the interview…
     expect(await screen.findByTestId("interview-progress")).toBeTruthy();
     // …and the generic chat empty state is absent.
+    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+  });
+
+  // ── the transition, not the settled frame ────────────────────────────────
+  // Everything above renders a page whose `conversationId` is ALREADY the
+  // interview id. These two hold it at null — which is what it is for the
+  // whole `loadConversation` round trip that follows `router.push` — and
+  // assert that no frame in that window belongs to the generic empty state.
+
+  it("never falls back to the generic empty state between the Start click and the session loading", async () => {
+    // Before the click: an untouched BUSINESS box on a plain /chat.
+    state.conversationId = null;
+    state.params = new URLSearchParams();
+    state.profile = {
+      onboardingState: "not_started",
+      interviewChatId: null,
+      interviewResumable: false,
+      workspaceType: "BUSINESS",
+    };
+    // The server moves during the call — session created, profile pointed at
+    // it — exactly as `startOnboarding` does in one transaction.
+    startBusinessOnboarding.mockImplementation(async () => {
+      state.profile = { ...IN_PROGRESS };
+      return {
+        conversationId: INTERVIEW_CHAT_ID,
+        state: "in_progress",
+        created: true,
+      };
+    });
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith(
+        `/chat?c=${encodeURIComponent(INTERVIEW_CHAT_ID)}`,
+      ),
+    );
+    // Next re-renders the tree off its own router state on a push; the mock
+    // has no way to, so drive the frame the push produces. `conversationId`
+    // deliberately stays null — this IS the window.
+    rerender(<ChatPage />);
+
+    // The intro card has retired (the profile is off `not_started`)…
+    expect(screen.queryByTestId("interview-intro-card")).toBeNull();
+    // …and what replaced it is the interview, NOT "Ask Droplet anything"
+    // plus four prompts about dimming the living-room lights.
+    expect(screen.queryByText("Ask Droplet anything")).toBeNull();
+  });
+
+  it("never falls back to the generic empty state between Resume and the session loading", async () => {
+    // `handleResumeOpen` pushes with no await at all, so the same window
+    // opens on the parked-interview path.
+    state.conversationId = null;
+    state.params = new URLSearchParams();
+    state.profile = { ...IN_PROGRESS };
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+    expect(push).toHaveBeenCalledWith(
+      `/chat?c=${encodeURIComponent(INTERVIEW_CHAT_ID)}`,
+    );
+    rerender(<ChatPage />);
+
+    // The banner does not sit inside the session it just opened…
+    expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
+    // …and neither does the generic empty state.
     expect(screen.queryByText("Ask Droplet anything")).toBeNull();
   });
 });

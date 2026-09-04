@@ -162,15 +162,40 @@ export default function ChatPage() {
     },
   });
 
+  // The `?c=<id>` currently in the URL. Read HERE, above the interview
+  // derivations, because it is the only id that moves in the same tick as
+  // `router.push` — `conversationId` trails it by a whole `loadConversation`
+  // round trip.
+  const searchParams = useSearchParams();
+  const urlConversationId = searchParams?.get("c") ?? null;
+
   // WARP-1121 — is the open conversation the onboarding-interview session at
   // all? True across the WHOLE lifecycle (in_progress / re_running /
   // completed): `interviewChatId` keeps pointing at the session after commit —
   // only the deletion hook clears it. Message SHAPING (marker stripping +
   // ReviewCard for the fenced proposal) keys off THIS so a just-completed
   // session still renders the card and never leaks raw fenced JSON or
-  // `[topic n/7]` markers as plain text.
+  // `[topic n/7]` markers as plain text — it is a statement about the
+  // transcript actually on screen, so it must NOT run ahead of the load.
   const interviewConversation =
     Boolean(conversationId) && bizProfile?.interviewChatId === conversationId;
+
+  // WARP-2667 — the interview session is open OR opening. Which surface owns
+  // an empty /chat cannot be decided by `interviewConversation` alone: the two
+  // halves of it move on different clocks. `onboardingState` leaves
+  // `not_started` the instant the profile refresh lands, retiring the intro
+  // card; `conversationId` only catches up when the URL-driven
+  // `loadConversation` resolves. In between, neither branch claims the screen
+  // and the generic "Ask Droplet anything" empty state paints INSIDE the
+  // session the user just started — the exact defect this ticket closes, in a
+  // narrower window (pr-reviewer, #1987). `handleResumeOpen` opens the same
+  // window: it pushes with no await at all. The URL is authoritative from the
+  // instant of the push, so reading it closes the gap from the other side.
+  // Every surface that must not straddle it keys off THIS.
+  const interviewSessionOpen =
+    interviewConversation ||
+    (Boolean(urlConversationId) &&
+      bizProfile?.interviewChatId === urlConversationId);
   // …the LIVE interview is the active subset — it flips false the moment
   // onboardingState settles. This drives the genuinely-active-only chrome
   // (progress dots, topic chips, wrap-up auto-send), NOT the message shaping.
@@ -189,9 +214,8 @@ export default function ChatPage() {
   // when the user clicks a row; we react to that by loading the thread.
   // Conversely, when conversationId changes for any other reason (new chat
   // minted server-side, message sent, clearMessages), we mirror it into the
-  // URL so a refresh restores the same thread.
-  const searchParams = useSearchParams();
-  const urlConversationId = searchParams?.get("c") ?? null;
+  // URL so a refresh restores the same thread. (`urlConversationId` itself is
+  // read further up — the interview derivations need it.)
 
   // URL → state: when ?c=<id> changes (sidebar click, deep link, browser
   // back/forward), rehydrate that conversation. When `c` is removed (e.g.
@@ -802,6 +826,7 @@ export default function ChatPage() {
               Typing normally still works (composer stays live); the card
               returns on the next empty visit until started or skipped. */}
           {messages.length === 0 &&
+            !interviewSessionOpen &&
             isPrivileged &&
             isBusinessBox &&
             bizProfile?.onboardingState === "not_started" && (
@@ -843,7 +868,7 @@ export default function ChatPage() {
               end. If it is not accessible, it is not shown. */}
           {messages.length === 0 &&
             isPrivileged &&
-            !interviewActive &&
+            !interviewSessionOpen &&
             interviewResumable &&
             (bizProfile?.onboardingState === "in_progress" ||
               bizProfile?.onboardingState === "re_running") && (
@@ -860,11 +885,12 @@ export default function ChatPage() {
               frame of it (the beat before the transcript loads, or a
               self-healed session) reading "Ask Droplet anything · Dim the
               living-room lights" is precisely the "it dropped me back into a
-              chat" report. Keyed off `interviewConversation` — the whole
-              lifecycle, like the message shaping below — so a finished
-              interview reopened after its history is gone stays quiet too. */}
+              chat" report. Keyed off `interviewSessionOpen` — the whole
+              lifecycle AND the navigation into it — so a finished interview
+              reopened after its history is gone stays quiet too, and so does
+              the beat between `router.push` and the transcript arriving. */}
           {messages.length === 0 &&
-            !interviewConversation &&
+            !interviewSessionOpen &&
             !(
               isPrivileged &&
               isBusinessBox &&
