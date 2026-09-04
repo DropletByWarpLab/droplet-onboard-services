@@ -149,6 +149,33 @@ async function readProfile(db: Db) {
 }
 
 /**
+ * Append a SERVER-AUTHORED assistant turn to an interview session.
+ *
+ * The lifecycle writes three of these — the opener on a fresh start (§9.2),
+ * the opener on a self-healed session, and the closing turn on commit — and
+ * they are one shape, not three: copy that ships verbatim from this module
+ * rather than depending on the model to reproduce it, written as an ordinary
+ * ChatMessage so reopening the session simply shows it, and always inside the
+ * caller's transaction so a lost race rolls the turn back with whatever it was
+ * appended to.
+ *
+ * One helper because the contract is the part that moves. An explicit
+ * provenance / system-turn column is the obvious next thing to want here, and
+ * hand-copied call sites drift quietly: the copy string is the only visible
+ * difference between them, so a divergence reads as a wording change rather
+ * than a missed edit (pr-reviewer, #1987).
+ */
+async function appendServerAuthoredTurn(
+  db: Db,
+  sessionId: string,
+  content: string,
+): Promise<void> {
+  await db.chatMessage.create({
+    data: { sessionId, role: "assistant", content },
+  });
+}
+
+/**
  * The llm.ts overlay probe (§9.3): is `conversationId` the live interview?
  * One indexed read; returns the state so the caller can also distinguish
  * in_progress from re_running if it ever needs to.
@@ -203,9 +230,7 @@ export async function startOnboarding(
       const healed = await tx.chatSession.create({
         data: { userId, title: INTERVIEW_SESSION_TITLE },
       });
-      await tx.chatMessage.create({
-        data: { sessionId: healed.id, role: "assistant", content: OPENING_TURN },
-      });
+      await appendServerAuthoredTurn(tx, healed.id, OPENING_TURN);
       await tx.businessProfile.update({
         where: { id: BUSINESS_PROFILE_SINGLETON_ID },
         data: { interviewChatId: healed.id },
@@ -224,9 +249,7 @@ export async function startOnboarding(
     // The opener goes in with the session, inside the same transaction: a
     // lost race below rolls BOTH back, so a losing start can never leave a
     // stray "what does your business do?" in somebody's sidebar.
-    await tx.chatMessage.create({
-      data: { sessionId: session.id, role: "assistant", content: OPENING_TURN },
-    });
+    await appendServerAuthoredTurn(tx, session.id, OPENING_TURN);
     const moved = await tx.businessProfile.updateMany({
       where: {
         id: BUSINESS_PROFILE_SINGLETON_ID,
@@ -433,15 +456,8 @@ export async function commitOnboarding(
       });
     }
 
-    // The server-authored closing turn (§9.2) — verbatim copy, appended as
-    // an ordinary assistant message so reopening the session shows it.
-    await tx.chatMessage.create({
-      data: {
-        sessionId: interviewChatId,
-        role: "assistant",
-        content: CLOSING_TURN,
-      },
-    });
+    // The server-authored closing turn (§9.2).
+    await appendServerAuthoredTurn(tx, interviewChatId, CLOSING_TURN);
     await tx.chatSession.update({
       where: { id: interviewChatId },
       data: { updatedAt: new Date() },
