@@ -61,8 +61,8 @@ import { ncHeaders } from "./_render.js";
 import {
   DEGRADED_LISTING_CAVEAT,
   FILE_AUTH_REQUIRED_MESSAGE,
-  parseEntries,
-  type CleanupEntry,
+  readListing,
+  type Listing,
 } from "./_cleanup.js";
 
 export const DELETE_FILES_MAX_PATHS = 100;
@@ -82,13 +82,6 @@ const inputSchema = {
 
 function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
-}
-
-interface Listing {
-  ok: boolean;
-  status: number;
-  byPath: Map<string, CleanupEntry>;
-  empty: boolean;
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -124,12 +117,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   async function listDir(dir: string): Promise<Listing> {
     const cached = listings.get(dir);
     if (cached) return cached;
-    const res = await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers });
-    const byPath = new Map<string, CleanupEntry>();
-    if (res.ok) {
-      for (const e of parseEntries(await res.json().catch(() => null))) byPath.set(e.path, e);
-    }
-    const listing: Listing = { ok: res.ok, status: res.status, byPath, empty: res.ok && byPath.size === 0 };
+    const listing = await readListing(
+      await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(dir)}`, { headers }),
+    );
     listings.set(dir, listing);
     return listing;
   }
@@ -137,7 +127,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const deleted: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
   const failed: Array<{ path: string; reason: string }> = [];
-  let sawEmptyListing = false;
+  let possiblyDegraded = false;
 
   for (const target of targets) {
     if (ctx.signal.aborted) {
@@ -153,8 +143,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       });
       continue;
     }
-    if (listing.empty) sawEmptyListing = true;
-    const entry = listing.byPath.get(target);
+    if (listing.possiblyDegraded) possiblyDegraded = true;
+    const entry = listing.entries.find((e) => e.path === target);
     if (!entry) {
       failed.push({ path: target, reason: "not found" });
       continue;
@@ -182,9 +172,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       failed,
       counts: { deleted: deleted.length, skipped: skipped.length, failed: failed.length },
       note: "Deleted items are in the Nextcloud trash and can be restored from the dashboard.",
-      // Only when it could actually explain a result: a "not found" that is
-      // really an outage looks identical to a file that is genuinely gone.
-      ...(sawEmptyListing && failed.length > 0 ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
+      // A parent is only listed for a target inside it, so an empty listing
+      // always means a "not found" that an outage would explain just as well.
+      ...(possiblyDegraded ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
 }

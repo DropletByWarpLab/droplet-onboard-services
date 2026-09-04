@@ -214,10 +214,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           note: "Only files directly inside this folder move; subfolders and hidden files stay put. Apply with organize_files.",
         };
 
-  // A result the outage could explain must not read as a clean drive.
-  const nothingFound = walk.entries.length === 0;
-  const someFolderRead = walk.emptyDirectories.length > 0;
-
   return {
     ok: true,
     data: {
@@ -267,7 +263,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       },
       organize_plan,
       unreadable_directories: walk.errors,
-      ...(nothingFound || someFolderRead ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
+      // A result the outage could explain must not read as a clean drive.
+      ...(walk.possiblyDegraded ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
 }

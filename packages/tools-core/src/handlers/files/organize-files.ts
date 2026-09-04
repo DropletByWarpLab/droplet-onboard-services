@@ -39,8 +39,8 @@ import {
   ORGANIZE_MAX_MOVES,
   ORGANIZE_RULES,
   isOrganizeRule,
-  parseEntries,
   planOrganize,
+  readListing,
 } from "./_cleanup.js";
 
 /** Per-list caps on the result, so a 500-move run cannot blow the 8,000-char
@@ -84,12 +84,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
 
   const headers = ncHeaders(ctx);
-  const listing = await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(v.path)}`, {
-    headers,
-  });
+  const listing = await readListing(
+    await ctx.http.nextcloud.get(`/?path=${encodeURIComponent(v.path)}`, { headers }),
+  );
   if (listing.status === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (!listing.ok) return err("LIST_FAILED", `nextcloud returned ${listing.status}`);
-  const entries = parseEntries(await listing.json().catch(() => null));
+  const entries = listing.entries;
   const plan = planOrganize(v.path, entries, rule, ORGANIZE_MAX_MOVES);
 
   // Destinations that already exist as a direct child, so `created_folders`
@@ -196,7 +196,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       note: noteFor({ hadNothingToMove, movedCount, aborted, hiddenSkipped: plan.skipped.length }),
       // An empty listing is equally consistent with an outage, so "nothing
       // to organize" must not be reported as a tidy folder.
-      ...(entries.length === 0 ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
+      ...(listing.possiblyDegraded ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
     },
   };
 }

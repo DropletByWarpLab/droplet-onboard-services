@@ -96,6 +96,26 @@ export function parseEntries(raw: unknown): CleanupEntry[] {
   return out;
 }
 
+/** One `GET /api/files?path=` answer, read the same way by every cleanup tool. */
+export interface Listing {
+  ok: boolean;
+  status: number;
+  /** Empty when `ok` is false. */
+  entries: CleanupEntry[];
+  /**
+   * An OK answer with no entries — which is also exactly what the route
+   * returns during an outage (see {@link DEGRADED_LISTING_CAVEAT}). Decided
+   * HERE, once, so the three tools caveat on the same signal; before PR
+   * #1985 each re-derived it its own way, with nothing holding them equal.
+   */
+  possiblyDegraded: boolean;
+}
+
+export async function readListing(res: Response): Promise<Listing> {
+  const entries = res.ok ? parseEntries(await res.json().catch(() => null)) : [];
+  return { ok: res.ok, status: res.status, entries, possiblyDegraded: res.ok && entries.length === 0 };
+}
+
 /** Clamp an LLM-supplied number to an integer in [min, max], or a default. */
 export function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -415,6 +435,8 @@ export interface WalkResult {
    * report labels these accordingly, and nothing acts on them destructively.
    */
   emptyDirectories: string[];
+  /** Some listing (the root's included) was {@link Listing.possiblyDegraded}. */
+  possiblyDegraded: boolean;
   /** Listing calls made, root included. */
   listed: number;
   /** A bound stopped the walk with folders still unread; the report covers what was reached, not the tree. */
@@ -439,6 +461,7 @@ export async function walkTree(
   const result: WalkResult = {
     entries: [],
     emptyDirectories: [],
+    possiblyDegraded: false,
     listed: 0,
     truncated: false,
     errors: [],
@@ -457,17 +480,19 @@ export async function walkTree(
     }
     const next = queue.shift();
     if (!next) break;
-    const res = await list(next.dir);
+    const listing = await readListing(await list(next.dir));
     result.listed++;
-    if (next.dir === root) result.rootStatus = res.status;
-    if (!res.ok) {
+    if (next.dir === root) result.rootStatus = listing.status;
+    if (!listing.ok) {
       if (next.dir === root) return result;
-      result.errors.push({ path: next.dir, status: res.status });
+      result.errors.push({ path: next.dir, status: listing.status });
       continue;
     }
-    const entries = parseEntries(await res.json().catch(() => null));
-    if (entries.length === 0 && next.dir !== root) result.emptyDirectories.push(next.dir);
-    for (const entry of entries) {
+    if (listing.possiblyDegraded) {
+      result.possiblyDegraded = true;
+      if (next.dir !== root) result.emptyDirectories.push(next.dir);
+    }
+    for (const entry of listing.entries) {
       result.entries.push(entry);
       if (entry.isDirectory && next.depth < opts.maxDepth) {
         queue.push({ dir: entry.path, depth: next.depth + 1 });

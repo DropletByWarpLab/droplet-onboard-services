@@ -14,6 +14,7 @@ import {
   normalizeCopyName,
   parseEntries,
   planOrganize,
+  readListing,
   walkTree,
   type CleanupEntry,
 } from "../../../src/handlers/files/_cleanup.js";
@@ -260,6 +261,35 @@ describe("parseEntries", () => {
   });
 });
 
+describe("readListing", () => {
+  it("reads entries from an OK answer and flags an empty one as possibly degraded", async () => {
+    const full = await readListing(new Response(JSON.stringify([{ path: "/D/a.txt", name: "a.txt" }]), { status: 200 }));
+    expect(full).toEqual({
+      ok: true,
+      status: 200,
+      entries: [expect.objectContaining({ path: "/D/a.txt" })],
+      possiblyDegraded: false,
+    });
+    const empty = await readListing(new Response("[]", { status: 200 }));
+    expect(empty).toEqual({ ok: true, status: 200, entries: [], possiblyDegraded: true });
+  });
+
+  it("a failed answer has no entries and is a failure, not a degrade", async () => {
+    expect(await readListing(new Response("nope", { status: 502 }))).toEqual({
+      ok: false,
+      status: 502,
+      entries: [],
+      possiblyDegraded: false,
+    });
+  });
+
+  it("an unparseable OK body reads as empty, and therefore as possibly degraded", async () => {
+    const r = await readListing(new Response("<html>", { status: 200 }));
+    expect(r.entries).toEqual([]);
+    expect(r.possiblyDegraded).toBe(true);
+  });
+});
+
 describe("clampInt / humanBytes", () => {
   it("clampInt truncates and clamps, falling back on non-numbers", () => {
     expect(clampInt(3.9, 0, 8, 3)).toBe(3);
@@ -320,6 +350,18 @@ describe("walkTree", () => {
     expect(r.listed).toBe(3);
     expect(r.truncated).toBe(false);
     expect(r.rootStatus).toBe(200);
+    // /D/empty read as empty, and an empty listing is what an outage returns.
+    expect(r.possiblyDegraded).toBe(true);
+  });
+
+  // PR #1985 review: the "may be an outage" signal is decided once, in
+  // readListing, and OR'd across the walk — not re-derived per handler.
+  it("possiblyDegraded is false when every listing had entries, true when the root itself read empty", async () => {
+    const full = await walkTree("/D", lister({ "/D": [{ path: "/D/a.txt" }] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100 });
+    expect(full.possiblyDegraded).toBe(false);
+    const empty = await walkTree("/D", lister({ "/D": [] }).list, { maxDepth: 1, maxEntries: 100, maxListings: 100 });
+    expect(empty.possiblyDegraded).toBe(true);
+    expect(empty.emptyDirectories).toEqual([]); // the root is reported via the flag, not as an empty subfolder
   });
 
   it("depth 0 lists only the root", async () => {
