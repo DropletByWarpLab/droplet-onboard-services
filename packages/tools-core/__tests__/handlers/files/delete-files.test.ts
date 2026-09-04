@@ -244,9 +244,9 @@ describe("delete_files", () => {
       expect(del).not.toHaveBeenCalled();
     });
 
-    // delete_file is requiresConfirmation:false AND recursive for directories,
-    // so naming it here would turn this refusal into a signpost to an
-    // UNCONFIRMED recursive delete.
+    // delete_file is confirmation-gated since WARP-2669 but still recursive
+    // for directories, and this layer cannot verify what a folder holds, so
+    // the refusal must not route the model to it.
     it("does not point the model at delete_file", async () => {
       const r = await deleteFiles.handler(
         { paths: ["/Downloads/Full"] },

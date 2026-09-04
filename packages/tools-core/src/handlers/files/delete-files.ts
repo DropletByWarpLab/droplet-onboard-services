@@ -43,10 +43,12 @@
  * before it goes.
  *
  * The refusal deliberately does NOT name `delete_file` as the way around it.
- * That tool is `requiresConfirmation: false` and its own description says
- * "Recursive for directories" — telling the model to switch to it would make
- * this handler's refusal a signpost to an UNCONFIRMED recursive delete rather
- * than a control.
+ * That tool has been confirmation-gated since WARP-2669, but it is still
+ * recursive for directories, and what a folder would take with it is exactly
+ * what this layer cannot verify — the degrade above. A refusal that routes
+ * the model to a recursive delete would make this handler's control a
+ * signpost; the Files app is where a person sees the contents before the
+ * folder goes.
  *
  * Confirmation is the generic interceptor's (`docs/tool-confirmation-contract.md`
  * §12): no `confirmed` boolean in the schema, so a token a human minted is the
