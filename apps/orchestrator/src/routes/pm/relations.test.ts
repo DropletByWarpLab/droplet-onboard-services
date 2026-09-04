@@ -96,7 +96,13 @@ function makeFake() {
         if (!r) return null;
         return include ? { ...r, from: end(r.fromId), to: end(r.toId) } : { ...r };
       },
-      create: async ({ data }: { data: Omit<RelRow, "id" | "createdAt"> }) => {
+      create: async ({
+        data,
+        include,
+      }: {
+        data: Omit<RelRow, "id" | "createdAt">;
+        include?: unknown;
+      }) => {
         if (hooks.createCode) {
           const code = hooks.createCode;
           hooks.createCode = undefined;
@@ -117,7 +123,7 @@ function makeFake() {
         }
         const row: RelRow = { id: uid("rel"), createdAt: new Date(), ...data };
         relations.push(row);
-        return { ...row };
+        return include ? { ...row, from: end(row.fromId), to: end(row.toId) } : { ...row };
       },
       delete: async ({ where }: { where: { id: string } }) => {
         const i = relations.findIndex((r) => r.id === where.id);
@@ -135,6 +141,10 @@ function makeFake() {
       create: async ({ data }: { data: Record<string, unknown> }) => {
         activity.push({ ...data });
         return { ...data };
+      },
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        for (const row of data) activity.push({ ...row });
+        return { count: data.length };
       },
     },
   };

@@ -73,6 +73,7 @@
 
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
+import { isPrismaCode } from "./pm.service.js";
 import { PM_ERRORS } from "./pm.service.js";
 
 /** A Prisma client OR an interactive-transaction handle — helpers that run
@@ -176,10 +177,6 @@ export interface ApiWorkItemRelation {
 /** Structural Prisma error-code check. Same shape as pm.service.ts's, matching
  *  both the real PrismaClientKnownRequestError and the repo's test stand-ins
  *  (`name === "PrismaClientKnownRequestError"` + a string `code`). */
-function isPrismaCode(err: unknown, code: "P2002" | "P2025" | "P2003"): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
-}
-
 /**
  * Put a symmetric pair in canonical order; leave BLOCKS alone.
  *
@@ -277,18 +274,18 @@ async function writeRelationActivity(
   },
 ): Promise<void> {
   const added = input.verb === "relation_added";
-  for (const end of input.ends) {
-    await db.pmActivity.create({
-      data: {
-        workItemId: end.workItemId,
-        actorId: input.actorId,
-        verb: input.verb,
-        field: "relation",
-        oldValue: added ? null : `${input.kind}:${end.otherId}`,
-        newValue: added ? `${input.kind}:${end.otherId}` : null,
-      },
-    });
-  }
+  // One statement for both ends: this runs inside the SERIALIZABLE write, and
+  // every extra round trip there widens the P2034 window.
+  await db.pmActivity.createMany({
+    data: input.ends.map((end) => ({
+      workItemId: end.workItemId,
+      actorId: input.actorId,
+      verb: input.verb,
+      field: "relation",
+      oldValue: added ? null : `${input.kind}:${end.otherId}`,
+      newValue: added ? `${input.kind}:${end.otherId}` : null,
+    })),
+  });
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -304,12 +301,19 @@ async function writeRelationActivity(
 export async function listRelationsFor(
   db: Db,
   workItemId: string,
+  opts: {
+    /** The caller has just resolved the item itself (the detail route does);
+     *  skip the second existence query. */
+    itemChecked?: boolean;
+  } = {},
 ): Promise<ApiWorkItemRelation[]> {
-  const item = await db.pmWorkItem.findUnique({
-    where: { id: workItemId },
-    select: { id: true },
-  });
-  if (!item) throw new Error(PM_RELATION_ERRORS.WORK_ITEM_NOT_FOUND);
+  if (!opts.itemChecked) {
+    const item = await db.pmWorkItem.findUnique({
+      where: { id: workItemId },
+      select: { id: true },
+    });
+    if (!item) throw new Error(PM_RELATION_ERRORS.WORK_ITEM_NOT_FOUND);
+  }
 
   const rows = await db.pmWorkItemRelation.findMany({
     where: { OR: [{ fromId: workItemId }, { toId: workItemId }] },
@@ -348,9 +352,9 @@ export async function createRelation(
 
   const canonical = canonicalise(input.kind, input.fromId, input.toId);
 
-  let createdId: string;
+  let created: RelationRow;
   try {
-    createdId = await prisma.$transaction(async (tx) => {
+    created = await prisma.$transaction(async (tx) => {
       // Only BLOCKS can cycle. A symmetric edge has no direction to follow.
       if (!isSymmetricKind(input.kind)) {
         if (await blocksPathExists(tx, canonical.toId, canonical.fromId)) {
@@ -358,6 +362,9 @@ export async function createRelation(
         }
       }
 
+      // Read back with the include here rather than in a third round trip
+      // after the commit: the row is what the caller gets, and the write
+      // path already holds the SERIALIZABLE transaction open.
       const row = await tx.pmWorkItemRelation.create({
         data: {
           fromId: canonical.fromId,
@@ -365,7 +372,7 @@ export async function createRelation(
           kind: input.kind,
           createdById: actorId,
         },
-        select: { id: true },
+        include: RELATION_INCLUDE,
       });
 
       await writeRelationActivity(tx, {
@@ -378,7 +385,7 @@ export async function createRelation(
         ],
       });
 
-      return row.id;
+      return row;
     }, SERIALIZABLE_TX);
   } catch (err) {
     // The @@unique is on three NOT NULL columns, so — unlike a compound unique
@@ -391,12 +398,7 @@ export async function createRelation(
     throw err;
   }
 
-  const row = await prisma.pmWorkItemRelation.findUnique({
-    where: { id: createdId },
-    include: RELATION_INCLUDE,
-  });
-  if (!row) throw new Error(PM_RELATION_ERRORS.RELATION_NOT_FOUND);
-  return mapRelation(row, input.fromId);
+  return mapRelation(created, input.fromId);
 }
 
 /**

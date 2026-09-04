@@ -113,7 +113,13 @@ function makeFake() {
         if (!r) return null;
         return include ? { ...r, from: end(r.fromId), to: end(r.toId) } : { ...r };
       },
-      create: async ({ data }: { data: Omit<RelRow, "id" | "createdAt"> }) => {
+      create: async ({
+        data,
+        include,
+      }: {
+        data: Omit<RelRow, "id" | "createdAt">;
+        include?: unknown;
+      }) => {
         // The database's real guards, modelled: the unique triple and the
         // canonical-order CHECK. Without them this fake would happily accept
         // the exact rows Postgres rejects, and the suite would prove nothing
@@ -139,7 +145,7 @@ function makeFake() {
         }
         const row: RelRow = { id: uid("rel"), createdAt: new Date(), ...data };
         relations.push(row);
-        return { ...row };
+        return include ? { ...row, from: end(row.fromId), to: end(row.toId) } : { ...row };
       },
       delete: async ({ where }: { where: { id: string } }) => {
         const i = relations.findIndex((r) => r.id === where.id);
@@ -158,6 +164,10 @@ function makeFake() {
       create: async ({ data }: { data: ActRow }) => {
         activity.push({ ...data });
         return { ...data };
+      },
+      createMany: async ({ data }: { data: ActRow[] }) => {
+        for (const row of data) activity.push({ ...row });
+        return { count: data.length };
       },
     },
   };

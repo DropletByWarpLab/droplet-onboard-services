@@ -236,6 +236,10 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           activityRows.push(data);
           return data;
         },
+        createMany: async ({ data }: { data: Row[] }) => {
+          activityRows.push(...data);
+          return { count: data.length };
+        },
       },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
@@ -279,6 +283,10 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           activityCreated = true;
           return {};
         },
+        createMany: async () => {
+          activityCreated = true;
+          return { count: 0 };
+        },
       },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
@@ -293,6 +301,83 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     await deleteWorkItem(prisma, null, "leaf-1");
 
     expect(activityCreated).toBe(false);
+  });
+
+  // WARP-2586 (review): the relation audit is the part worth a test of its
+  // own -- an audit obligation standing in for a silent FK cascade.
+  it("emits relation_removed on the SURVIVING end of every edge, before the delete, at SERIALIZABLE", async () => {
+    const audit: Row[] = [];
+    let deleted = false;
+    let txOptions: unknown;
+    const tx = {
+      pmWorkItem: {
+        findMany: async () => [],
+        delete: async () => {
+          // Audit rows first; the cascade must never be the only record.
+          expect(audit).toHaveLength(2);
+          deleted = true;
+          return {};
+        },
+      },
+      pmActivity: {
+        create: async ({ data }: { data: Row }) => {
+          audit.push(data);
+          return data;
+        },
+        createMany: async ({ data }: { data: Row[] }) => {
+          audit.push(...data);
+          return { count: data.length };
+        },
+      },
+      pmWorkItemRelation: {
+        findMany: async ({ where }: { where: Row }) => {
+          expect(where).toEqual({ OR: [{ fromId: "x" }, { toId: "x" }] });
+          return [
+            { fromId: "x", toId: "other-1", kind: "BLOCKS" },
+            { fromId: "other-2", toId: "x", kind: "RELATES" },
+          ];
+        },
+      },
+    };
+    const prisma = {
+      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      $transaction: async (fn: (t: typeof tx) => unknown, options?: unknown) => {
+        txOptions = options;
+        return fn(tx);
+      },
+    } as never;
+
+    await deleteWorkItem(prisma, "actor-1", "x");
+
+    expect(deleted).toBe(true);
+    // A relation committed between the audit read and the delete must abort
+    // this transaction, not slip through the cascade unrecorded.
+    expect(txOptions).toEqual({ isolationLevel: "Serializable" });
+    expect(audit).toEqual([
+      expect.objectContaining({
+        workItemId: "other-1",
+        actorId: "actor-1",
+        verb: "relation_removed",
+        field: "relation",
+        oldValue: "BLOCKS:x",
+        newValue: null,
+      }),
+      expect.objectContaining({
+        workItemId: "other-2",
+        verb: "relation_removed",
+        oldValue: "RELATES:x",
+      }),
+    ]);
+  });
+
+  it("reports the SERIALIZABLE loser as concurrent_mutation, never a 500", async () => {
+    const prisma = {
+      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      $transaction: async () => {
+        throw Object.assign(new Error("could not serialize access"), { code: "P2034" });
+      },
+    } as never;
+    await expect(deleteWorkItem(prisma, null, "x")).rejects.toThrow("concurrent_mutation");
   });
 });
 

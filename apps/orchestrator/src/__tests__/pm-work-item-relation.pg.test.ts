@@ -37,10 +37,10 @@ const RUN =
 describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WARP-2586)", () => {
   let prisma: PrismaClient;
 
-  // Every fixture is namespaced `warp2607-`: the pg-gated suites share one
+  // Every fixture is namespaced `warp2586-`: the pg-gated suites share one
   // throwaway database and run in the same lane, so an unscoped deleteMany()
   // would eat another suite's rows.
-  const OURS = { startsWith: "warp2607-" } as const;
+  const OURS = { startsWith: "warp2586-" } as const;
 
   let projectA = "";
   let projectB = "";
@@ -67,22 +67,22 @@ describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WAR
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
 
     const ws = await prisma.pmWorkspace.create({
-      data: { slug: `warp2607-ws-${Date.now()}`, name: "warp2607-ws" },
+      data: { slug: `warp2586-ws-${Date.now()}`, name: "warp2586-ws" },
     });
     const a = await prisma.pmProject.create({
-      data: { workspaceId: ws.id, name: "warp2607-alpha", identifier: "W26A" },
+      data: { workspaceId: ws.id, name: "warp2586-alpha", identifier: "W26A" },
     });
     const b = await prisma.pmProject.create({
-      data: { workspaceId: ws.id, name: "warp2607-bravo", identifier: "W26B" },
+      data: { workspaceId: ws.id, name: "warp2586-bravo", identifier: "W26B" },
     });
     projectA = a.id;
     projectB = b.id;
     seq = 0;
   });
 
-  const item = (projectId: string, name = "warp2607-item") =>
+  const item = (projectId: string, name = "warp2586-item") =>
     prisma.pmWorkItem.create({
-      data: { projectId, sequenceId: ++seq, name: `warp2607-${name}` },
+      data: { projectId, sequenceId: ++seq, name: `warp2586-${name}` },
     });
 
   // ── the CHECK constraints ────────────────────────────────────────────────
@@ -156,9 +156,9 @@ describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WAR
     const upserted = await prisma.pmWorkItemRelation.upsert({
       where: { fromId_toId_kind: { fromId: a.id, toId: b.id, kind: "BLOCKS" } },
       create: { fromId: a.id, toId: b.id, kind: "BLOCKS" },
-      update: { createdById: "warp2607-upsert-proof" },
+      update: { createdById: "warp2586-upsert-proof" },
     });
-    expect(upserted.createdById).toBe("warp2607-upsert-proof");
+    expect(upserted.createdById).toBe("warp2586-upsert-proof");
     expect(
       await prisma.pmWorkItemRelation.count({ where: { fromId: a.id, toId: b.id } }),
     ).toBe(1);
@@ -183,7 +183,7 @@ describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WAR
         data: {
           projectId: projectA,
           sequenceId: ++seq,
-          name: "warp2607-child",
+          name: "warp2586-child",
           parentId: parentInB.id,
         },
       }),
@@ -207,7 +207,7 @@ describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WAR
       data: {
         projectId: projectA,
         sequenceId: ++seq,
-        name: "warp2607-child",
+        name: "warp2586-child",
         parentId: parent.id,
       },
     });
@@ -224,7 +224,7 @@ describe.skipIf(!RUN)("PmWorkItemRelation — the database's own guarantees (WAR
       data: {
         projectId: projectA,
         sequenceId: ++seq,
-        name: "warp2607-child",
+        name: "warp2586-child",
         parentId: parent.id,
       },
     });

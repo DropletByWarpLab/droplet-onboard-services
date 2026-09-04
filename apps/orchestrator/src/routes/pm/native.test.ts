@@ -334,6 +334,10 @@ function makeFake(hooks: Hooks = {}) {
         db.activity.push(a);
         return a;
       },
+      createMany: async ({ data }: { data: Row[] }) => {
+        for (const row of data) db.activity.push({ id: uid("ac"), createdAt: new Date(), ...row });
+        return { count: data.length };
+      },
     },
 
     // WARP-2586: consulted by the composed work-item detail read and by

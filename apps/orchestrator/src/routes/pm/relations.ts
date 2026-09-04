@@ -26,6 +26,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../../middleware/auth.js";
+import { actorOf } from "./actor.js";
 import { isConcurrencyConflict } from "../../services/role-mutation-guard.service.js";
 import {
   createRelation,
@@ -37,14 +38,6 @@ import {
   type ApiRelationKind,
 } from "../../services/pm/pm-relations.service.js";
 
-/** Actor for attribution — the local User.id UUID (WARP-485 invariant), or
- *  null for the MCP service principal / unauthenticated dev sessions. Same
- *  helper shape as routes/pm/native.ts. */
-function actor(req: Request): string | null {
-  const id = req.user?.id;
-  if (!id || id === "_service:mcp") return null;
-  return id;
-}
 
 /**
  * `z.enum` here is a ROUTE validator, not a tool schema. WARP-1839's ban on
@@ -136,7 +129,7 @@ export function createPmRelationsRouter(prisma: PrismaClient): Router {
     try {
       const parsed = relationCreateSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(res, parsed);
-      const relation = await createRelation(prisma, actor(req), {
+      const relation = await createRelation(prisma, actorOf(req), {
         fromId: req.params.id,
         toId: parsed.data.to_work_item_id,
         // The zod enum and the Prisma enum are the same three literals; the
@@ -155,7 +148,7 @@ export function createPmRelationsRouter(prisma: PrismaClient): Router {
   // relation is removed by the same call from either side.
   router.delete("/pm/relations/:relationId", requireRole(...WRITE), async (req, res, next) => {
     try {
-      await deleteRelation(prisma, actor(req), req.params.relationId);
+      await deleteRelation(prisma, actorOf(req), req.params.relationId);
       res.json({ deleted: req.params.relationId });
     } catch (err) {
       if (mapRelationError(err, res)) return;
