@@ -46,15 +46,24 @@
  *     a typo'd account id without retyping a key they may not still have.
  */
 import {
+  credentialExpiryVerdict,
   credentialFieldsFor,
   credentialSecretFieldsFor,
   parseProviderConfigWith,
   providerConfigVariantId,
   providerDescriptor,
+  setupGuideHrefFor,
   validateCredentialFieldValue,
   CREDENTIAL_VARIANT_FIELD,
+  type CredentialExpiryVerdict,
   type CredentialFieldDef,
   type ProviderDescriptor,
+  // WARP-2639 — the ONE `IntegrationStatus`, imported under the name this
+  // module has always exported it as. Re-exported below.
+  type IntegrationStatus as IntegrationStatusName,
+  // WARP-2633 — the ONE `SaasConnectionState`. Re-exported below so this
+  // module stays the name every existing caller imports it under.
+  type SaasConnectionState,
 } from "@droplet/shared-types";
 
 import {
@@ -66,59 +75,53 @@ import {
 } from "./column-crypto.service.js";
 import { credentialsPurgedFor } from "./integrations.service.js";
 
-/** The `IntegrationStatus` values this service reads and writes. Mirrors the
- *  Prisma enum; kept as a local union so the service is testable against a
- *  structural stub rather than a generated client. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  // WARP-2458 — the persisted enum finally carries what `SaasConnectionState`
-  // below could only derive, so the two unions in this file now agree.
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The `IntegrationStatus` values this service reads and writes. Kept as a
+ * union rather than the generated Prisma enum so the service stays testable
+ * against a structural stub rather than a generated client.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the same enum. Same move, and for the same
+ * reason, as `SaasConnectionState` below.
+ */
+export type { IntegrationStatusName };
 
 /**
  * What the configurator tells a person about a connection.
  *
- * Modelled on `M365ConnectionState` (`schema.prisma:4990-5012`), whose docstring
- * requires NEEDS_RECONNECT stay distinguishable from DISCONNECTED, because the
- * two look identical to a "does a token decrypt?" check and mean opposite
- * things to a human: one asks them to sign in, the other says nothing is wrong.
+ * WARP-2633 — the definition moved to `@droplet/shared-types`
+ * (`saas-connection-state.ts`) and is re-exported here, because this module
+ * was one of TWO hand-maintained copies (the other was the dashboard's
+ * `lib/api.ts`) with nothing asserting they agreed. The member docs and the
+ * `NON_CONNECTION_INTEGRATION_STATUSES` exclusion live with the definition;
+ * the Prisma-parity gate is `__tests__/integration-status.schema.test.ts`.
  *
- * The same distinction is what this configurator exists to protect. A credential
- * the vendor REJECTED is not "not configured" — the admin pasted something and
- * it is present — and it is emphatically not CONNECTED. Collapsing either way
- * produces the failure mode the story is named for: a silent empty result
- * standing in for a broken connection.
+ * Re-exported rather than left to callers to import from the package, so the
+ * dozen existing `from "./saas-credential.service.js"` imports keep working
+ * and the move stays a refactor rather than a rename of the whole surface.
  *
- * Derived from two EXPLICIT persisted facts — the `status` enum column and
- * whether the credential column holds a blob — never from a null standing in
- * for a state. This is the same derivation `m365-auth.service.ts` `toView` does
- * for an expired pending flow.
+ * The properties the state carries have not changed. It is still modelled on
+ * `M365ConnectionState` (`schema.prisma:4990-5012`), whose docstring requires
+ * NEEDS_RECONNECT stay distinguishable from DISCONNECTED — the two look
+ * identical to a "does a token decrypt?" check and mean opposite things to a
+ * human. And it is still derived from two EXPLICIT persisted facts, the
+ * `status` enum column and whether the credential column holds a blob, never
+ * from a null standing in for a state.
  */
-export type SaasConnectionState =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "NEEDS_RECONNECT"
-  // WARP-2458 — present since NEEDS_RECONNECT stopped being inferred from it.
-  // Terminal in the sense the enum's docstring means: reconnecting will not
-  // fix it, so the view must be able to say so rather than folding it into an
-  // instruction to paste a new key.
-  | "ERROR"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "DISABLED";
+export type { SaasConnectionState };
 
 /** The row columns this service touches. Structural, so tests pass a literal. */
 export interface SaasConnectionRow {
   id: string;
   provider: string;
-  status: string;
+  /**
+   * The Prisma `IntegrationStatus` enum column, typed as the enum. It was
+   * `string`, which is what let `saasConnectionState`'s `default` arm stay
+   * unreachable-by-gate: a `string` cannot be narrowed to `never`, so the
+   * compiler had nothing to say about a status the switch had not learned.
+   */
+  status: IntegrationStatusName;
   /** ADR-042 §5 — where a customer-supplied credential lives. */
   providerTokensEnc: string | null;
   /**
@@ -201,6 +204,34 @@ export interface SaasCredentialView {
   /** Current values of the NON-secret fields only. Secrets never appear here. */
   values: Record<string, string | number>;
   updatedAt: string | null;
+  /**
+   * WARP-2650 — where the customer reads how to mint this credential, or
+   * `null` when the provider declares none.
+   *
+   * This page is the one place in the product where somebody is asked to go to
+   * a vendor console and come back with a value, and it was the only surface
+   * rendering a descriptor that could not link the guide the descriptor already
+   * declares — the hub tile and the connect wizard both do (WARP-2342), and an
+   * `mcp` track has neither of those. Read through `setupGuideHrefFor` so all
+   * three surfaces resolve it the same way.
+   */
+  setupGuideHref: string | null;
+  /**
+   * WARP-2650 — the credential's expiry verdict, or `null` when the provider
+   * declares no {@link CredentialExpiryPolicy}.
+   *
+   * `null` is "this credential has no expiry concept" and is a different answer
+   * from `{status: "EXPIRY_UNKNOWN"}`, which is "it does, and no date was
+   * recorded, so no warning can ever fire". Collapsing the two would put every
+   * Stripe connection in a warning state it can never leave.
+   *
+   * Carried ALONGSIDE `state` rather than folded into it: `IntegrationStatus`
+   * has no EXPIRING_SOON member (WARP-2353 modelled the window read-time only,
+   * and adding an enum value is a migration on its own ticket), and a token
+   * twelve days from a hard stop is genuinely CONNECTED *and* genuinely needs
+   * action. Two facts, two fields — never one field guessing at both.
+   */
+  credentialExpiry: CredentialExpiryVerdict | null;
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The
@@ -295,7 +326,7 @@ export function openSaasCredentials(
  *     until one of them works, which is the opposite of actionable.
  */
 export function saasConnectionState(
-  status: string,
+  status: IntegrationStatusName,
   hasCredentials: boolean,
 ): SaasConnectionState {
   if (status === "DISABLED") return "DISABLED";
@@ -305,16 +336,43 @@ export function saasConnectionState(
       return "CONNECTED";
     case "NEEDS_RECONNECT":
       return "NEEDS_RECONNECT";
+    case "CAPABILITY_LIMITED":
+      return "CAPABILITY_LIMITED";
     case "ERROR":
       return "ERROR";
     case "DEGRADED":
       return "DEGRADED";
     case "DRIFT_LOCKED":
       return "DRIFT_LOCKED";
-    default:
-      // NOT_CONFIGURED / PROVISIONING with a credential present: we hold
-      // something and have not yet proved it works.
+    // Both mean "we hold something and have not yet proved it works" — the
+    // only two statuses this function deliberately RENAMES, and they are
+    // spelled out rather than left to `default` so that arm can be a
+    // never-check.
+    case "NOT_CONFIGURED":
+    case "PROVISIONING":
       return "PROVISIONING";
+    default: {
+      // The gate the parity test could not be. `integration-status.schema.test.ts`
+      // set-compares the ARRAYS against the Prisma enum, which is a claim about
+      // two lists and says nothing about this function: a status added to both
+      // lists passed every gate in the repo and still fell through the old
+      // `default` to "PROVISIONING", telling an owner a working connection was
+      // "Setting up...". That is exactly how `CAPABILITY_LIMITED` came to ship
+      // a case with no test.
+      //
+      // Typing the parameter `IntegrationStatusName` and assigning the
+      // fallthrough to `never` moves the decision to COMPILE time: the next
+      // member added to `INTEGRATION_STATUSES` breaks the build here until
+      // somebody says what a person should be told about it. It cannot be
+      // answered by omission, which is the "no guessing state" rule applied to
+      // a switch.
+      const unhandled: never = status;
+      // Runtime arm kept for the value that cannot exist in the type but can
+      // exist in a column an older box wrote. "Unproven" is the honest answer
+      // for a status this build has never heard of — it claims nothing.
+      void unhandled;
+      return "PROVISIONING";
+    }
   }
 }
 
@@ -331,6 +389,9 @@ export function saasConnectionState(
 export function buildCredentialView(
   descriptor: ProviderDescriptor,
   row: SaasConnectionRow | null,
+  /** Injected so the expiry verdict is testable without freezing a clock
+   *  process-wide. Defaults to now, like every other read of the time here. */
+  now: Date = new Date(),
 ): SaasCredentialView {
   const storedSecrets: Record<string, string> = (() => {
     if (!row?.providerTokensEnc) return {};
@@ -427,6 +488,30 @@ export function buildCredentialView(
     fields,
     values,
     updatedAt: row?.updatedAt ? row.updatedAt.toISOString() : null,
+    setupGuideHref: setupGuideHrefFor(descriptor) ?? null,
+    // Read off the SAME parsed config the form's `values` come from, so the
+    // date an admin can see and the date the warning is computed from are one
+    // value. A second read of `row.providerConfig` here could disagree with the
+    // form after a failed parse.
+    //
+    // GATED ON A STORED CREDENTIAL. `credentialExpiryVerdict` is handed a
+    // descriptor and a config, so it cannot tell "connected, no date recorded"
+    // from "never connected" — both read EXPIRY_UNKNOWN. The dashboard renders
+    // that as "No expiry date recorded — Droplet can't warn you before this
+    // credential stops working", which on a provider nobody has connected is a
+    // warning about a thing that does not exist, and it would sit on the card
+    // permanently with no action that clears it.
+    //
+    // "No credential stored" and "credential stored, no expiry date" are
+    // different states with different remedies, and only the second is a
+    // warning. WARP-2353's `atlassian-token-expiry.ts` held that rule and had
+    // no production callers; this is where it belongs, on the path that ships.
+    // The first state is already answered by `state` and `hasCredentials` on
+    // this same payload, so `null` here is not silence — it is the expiry
+    // question not applying yet.
+    credentialExpiry: hasCredentials
+      ? (credentialExpiryVerdict(descriptor, config, now) ?? null)
+      : null,
   };
 }
 
@@ -637,8 +722,36 @@ export function resolveCredentialUpdate(
  *
  * Explicit-enum, per the house rule: the status is a value we choose and write,
  * never something a later reader infers from whether a column is null.
+ *
+ * ## Why the `mcp` track lands on CONNECTED and every other track does not
+ *
+ * PROVISIONING means "a credential is present and the connection is being
+ * established", and the enum's own docstring adds the rule that makes it
+ * honest: *"A row may NOT rest here after a completed probe."* For a `cloud` or
+ * `lan` track something completes that probe — `connect()` dials the vendor and
+ * writes the verdict.
+ *
+ * For an `mcp` track nothing does, and nothing CAN, because the probe would be
+ * an outbound MCP session and ADR-043 §5 puts that behind
+ * `remote-mcp-gateway.service.ts`, whose third gate is `status === "CONNECTED"`
+ * on this very row. A probe-before-CONNECTED design is therefore circular: the
+ * row would rest at PROVISIONING forever, and a status no writer can advance is
+ * worse than a wrong one — it is a state the product can never leave, which the
+ * hub and this page would both render as "checking the connection" for the life
+ * of the box.
+ *
+ * So the paste IS the connection for this track, and CONNECTED says exactly
+ * that: the customer supplied a complete credential set. The first outbound
+ * call is the probe, and its failure is not swallowed — it lands as the
+ * bridge's explicit `auth_rejected` session state plus a `provider_error` audit
+ * row, and `attachAtlassianRemote` refuses rather than half-attaching. That is
+ * a weaker claim than a cloud track's CONNECTED, and it is written down here
+ * rather than left for a reader to assume.
+ *
+ * The DISABLED and no-credential rules are unchanged and apply to every track.
  */
 export function statusAfterCredentialUpdate(
+  descriptor: ProviderDescriptor,
   current: string,
   hasSecret: boolean,
 ): IntegrationStatusName {
@@ -646,6 +759,7 @@ export function statusAfterCredentialUpdate(
   // A row that was DISABLED stays DISABLED — pasting a key is not the same
   // gesture as turning the connector back on.
   if (current === "DISABLED") return "DISABLED";
+  if (descriptor.track === "mcp") return "CONNECTED";
   // A fresh credential deserves a fresh verdict: whatever the vendor said about
   // the OLD key is no longer evidence about this one.
   return "PROVISIONING";

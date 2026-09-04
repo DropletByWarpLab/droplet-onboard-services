@@ -60,6 +60,10 @@ import {
   MAILCHIMP_PROVIDER,
   HUBSPOT_TRACK_REMEDIATION,
   MAILCHIMP_TRACK_REMEDIATION,
+  // WARP-2296 — the fourth WARP-2214 SaaS track.
+  ShopifyConnector,
+  SHOPIFY_PROVIDER,
+  SHOPIFY_TRACK_REMEDIATION,
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
@@ -147,8 +151,14 @@ export function loadOperatorExportProfiles(): { profiles: ExportProfile[]; error
 export function isKnownErpProvider(provider: string): boolean {
   // Read the registry live rather than the import-time snapshot above, so a
   // descriptor registered at runtime is admitted without a restart.
+  //
+  // WARP-2650 — an explicit `lan | cloud` allow-list, matching
+  // `buildableProviderIds()`. It was `!== "catalog"`, which was the same set
+  // while three tracks existed; the `mcp` track is a valid connection provider
+  // with no connector at all, so the negative form would have answered "yes,
+  // this factory can build it" and then thrown.
   const descriptor = providerDescriptor(provider);
-  if (descriptor) return descriptor.track !== "catalog";
+  if (descriptor) return descriptor.track === "lan" || descriptor.track === "cloud";
   if (!vendorFromExportProvider(provider)) return false;
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
@@ -608,6 +618,14 @@ async function persistCloudTokens(connectionId: string, tokens: unknown): Promis
  * trust store. There is deliberately no "skip verification" path: a box we
  * cannot verify is a box we refuse, and that refusal is asserted by
  * erp-connector's live-box suite.
+ *
+ * WARP-2626 — this Agent comes from the npm `undici`, and a dispatcher is only
+ * honoured by the undici that minted it. The connector therefore routes any
+ * dispatcher-carrying request through that same package's `fetch` rather than
+ * the runtime's built-in one (`api-auth.ts:resolveFetch`), so this trust model
+ * survives a Node major bump instead of degrading into a bare `fetch failed`
+ * that reads as an unreachable box. Nothing extra is needed here — but do NOT
+ * "simplify" the connector back onto `globalThis.fetch`; that is the defect.
  */
 export function dispatcherForCa(caPem: string | undefined): unknown {
   if (!caPem) return undefined;
@@ -837,6 +855,41 @@ registerConnectorFactory(MAILCHIMP_PROVIDER, ({ selector: sel, config: cfg }) =>
       baseUrl: providerConfigString(cfg, "baseUrl"),
     },
     { resolveApiKey: resolve ? () => resolve("apiKey") : undefined },
+  );
+});
+
+registerConnectorFactory(SHOPIFY_PROVIDER, ({ selector: sel, config: cfg }) => {
+  const shopDomain = providerConfigString(cfg, "shopDomain");
+  // The store domain SELECTS THE HOST — for the API *and* for the token mint,
+  // because Shopify's client-credentials grant posts to the store's own origin
+  // rather than to a central OAuth host. Without it there is no destination at
+  // all, and guessing one would mean assembling a URL whose first label is the
+  // string "undefined". Read from `providerConfig`, never derived from the
+  // credentials, so answering "where does this dial?" never decrypts a secret.
+  //
+  // Refused HERE rather than inside the connector, for the QuickBooks reason:
+  // the row is known to be unconfigured at this point, and a
+  // ConnectorBlockedError degrades to ERP_NOT_CONNECTED like every other
+  // absent-material path instead of surfacing as a fault.
+  if (!shopDomain) {
+    throw new ConnectorBlockedError(
+      "construct (no Shopify store domain configured)",
+      SHOPIFY_TRACK_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new ShopifyConnector(
+    {
+      credentialsSecretRef: sel.secretRef ?? "",
+      shopDomain,
+      connectionId: sel.connectionId ?? "",
+      baseUrl: providerConfigString(cfg, "baseUrl"),
+    },
+    // Both halves of the pair come through the SAME generic seam, named by
+    // descriptor field name and nothing else. `resolveCredential` is left
+    // undefined when nothing is sealed, so the connector keeps
+    // `blockedShopifyCredentialResolver` and says what is missing.
+    { resolveCredential: resolve ? (field) => resolve(field) : undefined },
   );
 });
 

@@ -47,6 +47,11 @@ const MODULE_IDS: readonly AccessModuleId[] = [
   "team_chat",
   "contacts",
   "crm",
+  // WARP-2581 — the money module. Added here deliberately, which is what this
+  // fixture is for: it is the second copy that turns red when AccessModuleId
+  // grows, so a new id cannot reach the nav without someone confirming it is
+  // nav-able. /money is gated on it in the Business group.
+  "money",
 ];
 
 /** Every `requiresModule` in the tree, parents and children alike. */

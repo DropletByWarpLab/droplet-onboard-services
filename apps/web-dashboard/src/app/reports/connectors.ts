@@ -15,12 +15,17 @@ export interface PillSpec {
 }
 
 /**
- * All eight states get their own treatment. Collapsing DEGRADED into ERROR,
+ * All nine states get their own treatment. Collapsing DEGRADED into ERROR,
  * or DISABLED into NOT_CONFIGURED, loses the distinction that tells a user
  * whether to fix something or whether they turned it off on purpose.
  */
 export const PILL: Record<IntegrationStatusName, PillSpec> = {
   CONNECTED: { label: "Connected", tone: "ok", icon: "check" },
+  // WARP-2623 — connected, one dataset refused. Same wording as the hub tile
+  // (`connector-visuals.tsx`) so one connection reads the same in both places.
+  // `warn`, not `bad`: nothing is broken, and a red pill on a connector that
+  // is syncing correctly is the "Can't connect" lie this ticket removed.
+  CAPABILITY_LIMITED: { label: "Connected · limited", tone: "warn", icon: "warn" },
   DEGRADED: { label: "Needs attention", tone: "warn", icon: "warn" },
   DRIFT_LOCKED: { label: "Locked — schema changed", tone: "bad", icon: "lock" },
   NEEDS_RECONNECT: { label: "Paste a new key", tone: "warn", icon: "key" },
@@ -42,10 +47,15 @@ const WEIGHT: Record<IntegrationStatusName, number> = {
   // never does — it waits for a person, so it is the more urgent of the two.
   NEEDS_RECONNECT: 2,
   DEGRADED: 3,
-  CONNECTED: 4,
-  PROVISIONING: 5,
-  DISABLED: 6,
-  NOT_CONFIGURED: 7,
+  // WARP-2623 — below the problems and above CONNECTED. It is not a problem:
+  // the connection works and no retry, key or support call changes it. But it
+  // is the one healthy state that still carries a fact the owner has not seen,
+  // so it sorts ahead of the connectors with nothing to say.
+  CAPABILITY_LIMITED: 4,
+  CONNECTED: 5,
+  PROVISIONING: 6,
+  DISABLED: 7,
+  NOT_CONFIGURED: 8,
 };
 
 export function statusWeight(s: IntegrationStatusName): number {

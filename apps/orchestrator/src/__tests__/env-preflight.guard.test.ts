@@ -22,8 +22,10 @@ import {
   isCosignDependent,
   majorFromRange,
   nodeMismatchMessage,
+  nodePinVerdict,
   nodeWarningIfMismatched,
   requiredNodeRange,
+  runningInCi,
   resolveCosignBin,
   toOrchestratorRelative,
 } from "./env-preflight.js";
@@ -143,5 +145,58 @@ describe("env preflight guard (WARP-1872)", () => {
     const msg = nodeMismatchMessage("20.x", "v24.15.0");
     expect(msg).toMatch(/does NOT cause signature-test failures/);
     expect(msg).toMatch(/check cosign, not your Node version/);
+  });
+
+  // WARP-2626 — the pin stopped being advisory-only. Four implementers lost
+  // time to the same Node-major symptom because nothing named the pin or the
+  // class of failure it hides, and nothing failed when a runner drifted off it.
+  describe("Node pin enforcement (WARP-2626)", () => {
+    it("names the pin, how to switch, and the failure class it hides", () => {
+      const msg = nodeMismatchMessage("20.x", "v26.0.0");
+      expect(msg, "must name every place the pin is declared").toMatch(/\.nvmrc/);
+      expect(msg).toMatch(/engines\.node/);
+      expect(msg, "must say how to switch, not just that it is wrong").toMatch(/nvm use/);
+      expect(
+        msg,
+        "must name the dispatcher/fetch class — a bare version warning is what " +
+          "everyone already ignored",
+      ).toMatch(/UND_ERR_INVALID_ARG/);
+      expect(msg).toMatch(/WARP-2626/);
+    });
+
+    it("recognises CI, and ignores a falsy CI a developer may have exported", () => {
+      expect(runningInCi({ CI: "true" })).toBe(true);
+      expect(runningInCi({ CI: "1" })).toBe(true);
+      for (const CI of ["", "0", "false"]) expect(runningInCi({ CI })).toBe(false);
+      expect(runningInCi({})).toBe(false);
+    });
+
+    it("is silent on a matching Node, in CI and out", () => {
+      expect(nodePinVerdict("20.11.0", { CI: "true" })).toBeNull();
+      expect(nodePinVerdict("20.11.0", {})).toBeNull();
+    });
+
+    it("warns locally but FAILS in CI on a mismatched major", () => {
+      // Locally: advisory. A contributor with no nvm/fnm must still be able
+      // to run the suite — the pin-sensitive behaviour is asserted directly
+      // by api-auth.dispatcher.test.ts, not by the runtime version.
+      expect(nodePinVerdict("26.0.0", {})).toMatchObject({ fatal: false });
+      // In CI: fatal. Runners are pinned by setup-node, so a mismatch means
+      // a workflow drifted from .nvmrc/engines.node — the exact drift that
+      // ships a Node-major-sensitive defect to the field.
+      expect(nodePinVerdict("26.0.0", { CI: "true" })).toMatchObject({ fatal: true });
+    });
+
+    it("globalSetup throws on the fatal verdict rather than only logging", () => {
+      // The verdict is worthless if the caller prints it either way.
+      const src = readFileSync(
+        path.join(ORCHESTRATOR_ROOT, "src/__tests__/env-preflight.globalSetup.ts"),
+        "utf8",
+      );
+      expect(src, "globalSetup must consume the verdict, not the raw warning").toMatch(
+        /nodePinVerdict/,
+      );
+      expect(src, "a fatal verdict must abort the run").toMatch(/throw new Error/);
+    });
   });
 });

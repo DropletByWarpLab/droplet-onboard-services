@@ -13,6 +13,10 @@
  * count — "the full registry does not fit the window", "adding a remote
  * catalog makes it strictly worse" — not about literals that rot.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect, vi } from "vitest";
 import { TOOLS, TOOL_CATALOG } from "@droplet/tools-core";
 import {

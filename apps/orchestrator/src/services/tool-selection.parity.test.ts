@@ -12,6 +12,10 @@
  * apart again: the source-level assertions below fail if either site goes back
  * to deriving the advertised set for itself.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
