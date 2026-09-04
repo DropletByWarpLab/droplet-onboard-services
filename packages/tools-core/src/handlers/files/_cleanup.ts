@@ -417,7 +417,7 @@ export interface WalkResult {
   emptyDirectories: string[];
   /** Listing calls made, root included. */
   listed: number;
-  /** A bound was hit; the report covers what was reached, not the tree. */
+  /** A bound stopped the walk with folders still unread; the report covers what was reached, not the tree. */
   truncated: boolean;
   /** Folders below root whose listing failed (status), skipped and noted. */
   errors: Array<{ path: string; status: number }>;
@@ -446,6 +446,11 @@ export async function walkTree(
   };
   const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   while (queue.length > 0) {
+    // Only ever declared with a folder still queued (the loop condition), so
+    // a scan that read everything — including one folder holding more than
+    // `maxEntries` files, all of which land in `entries` — reports complete,
+    // because it is. An earlier cut re-checked the cap after each listing and
+    // flagged exactly that scan as truncated (PR #1985 review).
     if (result.listed >= opts.maxListings || result.entries.length >= opts.maxEntries) {
       result.truncated = true;
       break;
@@ -467,16 +472,6 @@ export async function walkTree(
       if (entry.isDirectory && next.depth < opts.maxDepth) {
         queue.push({ dir: entry.path, depth: next.depth + 1 });
       }
-    }
-    // Check the entry cap HERE as well as at the top of the loop. The
-    // top-of-loop check only fires when there is another directory to list,
-    // so a single folder holding more than `maxEntries` files would otherwise
-    // drain the queue and report `truncated: false` — presenting a partial
-    // scan as a complete one, which is the one thing this flag exists to
-    // prevent.
-    if (result.entries.length >= opts.maxEntries) {
-      result.truncated = true;
-      break;
     }
   }
   return result;

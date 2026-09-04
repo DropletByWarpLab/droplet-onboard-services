@@ -315,11 +315,29 @@ describe("analyze_file_cleanup", () => {
   });
 
   it("flags a truncated scan rather than presenting it as complete", async () => {
+    // The cap is reached with a subfolder still unread, so the report does
+    // not cover the tree.
+    const many = Array.from({ length: ANALYZE_MAX_ENTRIES + 10 }, (_, i) => row(`/Big/f${i}.txt`, { size: 1 }));
+    const tree = {
+      "/Big": [...many, row("/Big/More", { isDirectory: true, size: 0, mimeType: null })],
+      "/Big/More": [row("/Big/More/x.txt")],
+    };
+    const r = await analyzeFileCleanup.handler({ path: "/Big" }, ctxWith(treeGet(tree)));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.data as any).scanned.truncated).toBe(true);
+  });
+
+  // PR #1985 review: one flat folder holding more than the cap is read whole
+  // — every file is in the report — so the scan is complete, not truncated.
+  it("does not flag a flat folder that merely exceeds the cap, since every file was read", async () => {
     const many = Array.from({ length: ANALYZE_MAX_ENTRIES + 10 }, (_, i) => row(`/Big/f${i}.txt`, { size: 1 }));
     const r = await analyzeFileCleanup.handler({ path: "/Big" }, ctxWith(treeGet({ "/Big": many })));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect((r.data as any).scanned.truncated).toBe(true);
+    const d = r.data as Record<string, any>;
+    expect(d.scanned.files).toBe(ANALYZE_MAX_ENTRIES + 10);
+    expect(d.scanned.truncated).toBe(false);
   });
 
   it("caveats a scan that found nothing at all", async () => {

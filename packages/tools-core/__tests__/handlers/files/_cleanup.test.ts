@@ -342,6 +342,21 @@ describe("walkTree", () => {
     expect(r.listed).toBe(1);
   });
 
+  // PR #1985 review: `truncated` claims folders went UNREAD. A scan that
+  // reached the cap with nothing left to list read everything, so it is
+  // complete — flagging it sent the user a false "this may be incomplete".
+  it("a scan that reaches maxEntries with nothing left to list is complete, not truncated", async () => {
+    const flat: Tree = { "/E": [{ path: "/E/a" }, { path: "/E/b" }, { path: "/E/c" }] };
+    const exact = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 3, maxListings: 100 });
+    expect(exact.entries).toHaveLength(3);
+    expect(exact.truncated).toBe(false);
+    // One folder's worth is always read whole, so overrunning the cap inside
+    // a single listing is still a complete read of that folder.
+    const over = await walkTree("/E", lister(flat).list, { maxDepth: 3, maxEntries: 2, maxListings: 100 });
+    expect(over.entries).toHaveLength(3);
+    expect(over.truncated).toBe(false);
+  });
+
   it("a failed subfolder is recorded and skipped, the walk goes on", async () => {
     const { list } = lister({ ...tree, "/D/sub": 500 });
     const r = await walkTree("/D", list, { maxDepth: 2, maxEntries: 100, maxListings: 100 });
