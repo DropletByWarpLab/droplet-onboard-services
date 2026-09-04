@@ -107,9 +107,10 @@ merge or rebase that touches a leaf workspace or the Prisma schema.
 
   (no args)   prisma generate -> rm -rf the five leaf dist/ -> build them in
               dependency order.
-  --check     Exit non-zero if the Prisma client is still Prisma's placeholder
-              or any leaf dist/ is missing. Prints the one command that fixes
-              it. Does not change anything.
+  --check     Exit non-zero if the Prisma client is still Prisma's placeholder,
+              any leaf dist/ is missing, or any leaf dist/ is stale (carries an
+              emitted .js whose source is gone). Prints the one command that
+              fixes it. Does not change anything.
   --help      This text.
 
 Exit codes:
@@ -131,10 +132,54 @@ _prisma_client_is_stub() {
   grep -q '^export declare const PrismaClient: any' "$REPO_ROOT/$PRISMA_CLIENT_DTS"
 }
 
+# Emit one path per file in <leaf>/dist that no source under <leaf>/src could
+# have produced. Empty output means that dist/ is not stale.
+#
+# This is the THIRD failure mode, and until WARP-2620's follow-up `--check`
+# could not see it: it tested `[ ! -d <leaf>/dist ]`, i.e. existence only. A
+# stale dist/ EXISTS. `tsc` emits, it never prunes, so a rebase that moves
+# `src/handlers/pm/pm-orch.test.ts` under `__tests__/` leaves
+# `dist/handlers/pm/pm-orch.test.js` behind forever — which is precisely what
+# reds the WARP-2515 guard
+# (`packages/tools-core/__tests__/no-tests-in-dist.guard.test.ts`) on a tree
+# that is otherwise clean. `bootstrap:check` printing OK there, and the root
+# `pretest` passing, is how a developer ends up reading that red as "stage is
+# broken".
+#
+# Orphan detection rather than an mtime comparison. Every one of the five
+# leaves compiles `rootDir: ./src` -> `outDir: ./dist`, so `dist/<x>.js` has
+# exactly one possible origin, `src/<x>.ts` (or .tsx); absence of both is a
+# fact, not a heuristic. Newest-src-vs-oldest-dist would fire on every
+# in-progress edit — `--check` runs in the root `pretest`, so that noise would
+# be paid on every `npm test` — and it reads as clean straight after a clone,
+# where git stamps every file with the same checkout time.
+#
+# Only `*.js` is inspected. The `.d.ts`, `.js.map` and `.d.ts.map` beside an
+# orphan are orphans too; naming the `.js` is enough to condemn the directory,
+# and the fix is the same `rm -rf` either way. `.json` is skipped on purpose:
+# `resolveJsonModule` copies it through, so it has no `.ts` counterpart.
+_orphan_dist_files() {
+  local leaf="$1"
+  local dist="$REPO_ROOT/$leaf/dist" src="$REPO_ROOT/$leaf/src"
+  [ -d "$dist" ] || return 0
+  [ -d "$src" ] || return 0
+
+  # `find | while read` rather than an array: bash 3.2 has no `mapfile`
+  # (see the LEAF_PKGS note above, WARP-2449).
+  local js rel stem
+  find "$dist" -type f -name '*.js' -print | LC_ALL=C sort | while IFS= read -r js; do
+    rel="${js#"$dist"/}"
+    stem="${rel%.js}"
+    [ -f "$src/$stem.ts" ] && continue
+    [ -f "$src/$stem.tsx" ] && continue
+    printf '%s/dist/%s\n' "$leaf" "$rel"
+  done
+}
+
 # Emit one "    | <line>" per reason the tree is not bootstrapped. Empty
 # output means it is.
 _bootstrap_reasons() {
-  local i
+  local i orphans n
   if _prisma_client_is_stub; then
     printf '    | %s is still the Prisma placeholder (PrismaClient: any) —\n' "$PRISMA_CLIENT_DTS"
     printf '    |   every ctx.prisma.<model> call site type-checks as any/TS7031\n'
@@ -143,6 +188,20 @@ _bootstrap_reasons() {
     if [ ! -d "$REPO_ROOT/${LEAF_DIRS[$i]}/dist" ]; then
       printf '    | %s/dist is missing — %s cannot resolve\n' \
         "${LEAF_DIRS[$i]}" "${LEAF_PKGS[$i]}"
+      continue
+    fi
+    orphans="$(_orphan_dist_files "${LEAF_DIRS[$i]}")"
+    if [ -n "$orphans" ]; then
+      n="$(printf '%s\n' "$orphans" | wc -l | tr -d ' ')"
+      printf '    | %s/dist is stale — %s emitted file(s) have no source under\n' \
+        "${LEAF_DIRS[$i]}" "$n"
+      printf '    |   %s/src, so a move or a delete left them behind (tsc emits,\n' \
+        "${LEAF_DIRS[$i]}"
+      printf '    |   it never prunes):\n'
+      printf '%s\n' "$orphans" | head -5 | sed 's/^/    |     /'
+      if [ "$n" -gt 5 ]; then
+        printf '    |     … and %s more\n' "$((n - 5))"
+      fi
     fi
   done
 }
@@ -151,7 +210,7 @@ run_check() {
   local reasons
   reasons="$(_bootstrap_reasons)"
   if [ -z "$reasons" ]; then
-    printf "  ${_GREEN}OK${_RESET}    workspace bootstrap (prisma client generated, %d leaf dist/ present)\n" \
+    printf "  ${_GREEN}OK${_RESET}    workspace bootstrap (prisma client generated, %d leaf dist/ present and unstale)\n" \
       "${#LEAF_DIRS[@]}"
     return 0
   fi
@@ -165,6 +224,9 @@ run_check() {
   printf '    | errors in product code (TS7031 in tools-core, "Failed to resolve\n' >&2
   printf '    | entry for package @droplet/fips-selftest" in the orchestrator\n' >&2
   printf '    | suite). Those are symptoms of the install, not of the tree.\n' >&2
+  printf '    | A STALE dist/ presents differently again: the WARP-2515 guard\n' >&2
+  printf '    | reds on a dist/**/*.test.js whose source has moved, on a tree\n' >&2
+  printf '    | that is otherwise perfectly clean.\n' >&2
   return 1
 }
 

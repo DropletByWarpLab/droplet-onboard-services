@@ -273,7 +273,9 @@ npm run bootstrap     # prisma generate → clean stale dist/ → build the five
   carries a `*.test.js` whose `*.test.ts` has since moved reds the WARP-2515
   guard on a tree that is perfectly clean.
 - `npm run bootstrap:check` answers "is this tree bootstrapped?" in one line and
-  exits non-zero if not. The root `npm run test` runs it first (`pretest`).
+  exits non-zero if not — including the stale case, where a leaf `dist/` still
+  carries an emitted `.js` whose source has moved or been deleted. The root
+  `npm run test` runs it first (`pretest`).
 - The five leaves and their dependency order live in `scripts/bootstrap.sh` —
   the single list, also used by ship-check's `tsc-full`. Don't re-derive it.
   CI keeps its own explicit per-suite steps on purpose; don't replace them.
