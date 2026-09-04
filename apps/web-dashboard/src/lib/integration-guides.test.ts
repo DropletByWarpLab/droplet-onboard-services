@@ -275,7 +275,17 @@ describe("page furniture", () => {
   it("agrees with the shell checker's slugify, case for case", () => {
     const tsv = readRepoFile("scripts/fixtures/heading-slug-cases.tsv");
     const cases = tsv
-      .split("\n")
+      // `/\r?\n/`, not `"\n"`. The fixture carried no `.gitattributes` pin, so a
+      // Windows clone with `core.autocrlf=true` materialized it as CRLF and
+      // every `expected` field arrived with a trailing CR. The assertion then
+      // failed between two VISUALLY IDENTICAL strings — the worst shape a
+      // fixture failure can take. The pin guarded below is the root fix; this
+      // split stays because it also holds on a clone that predates the pin
+      // (git does not re-checkout a file merely because its attributes
+      // changed). Same belt-and-braces as the migration SQL, which is pinned
+      // in `.gitattributes` AND read with `/\r?\n/` by
+      // file-edit-session.schema.test.ts.
+      .split(/\r?\n/)
       .filter((line) => line.trim() !== "" && !line.startsWith("#"))
       .map((line) => line.split("\t"));
 
@@ -283,6 +293,39 @@ describe("page furniture", () => {
     for (const [heading, expected] of cases) {
       expect(headingSlug(heading), `heading: ${heading}`).toBe(expected);
     }
+  });
+
+  /**
+   * The TSV is the shared statement of the slug rule and BOTH consumers parse
+   * it field-wise: this test splits on `\t`, and `check-setup-guides.sh` reads
+   * it with `while IFS=<tab> read -r heading expected`. `read` keeps a trailing
+   * CR inside `$expected`, so a CRLF checkout breaks the shell's self-check
+   * exactly as it broke this one — and that half only ever runs on Linux,
+   * where nobody would see it. Tolerating CRLF at the TypeScript call site
+   * fixes one of the two; pinning the bytes fixes both.
+   *
+   * Guard the PIN, not the on-disk bytes: a byte assertion would go red on
+   * every clone that predates the pin, because git does not re-checkout a
+   * file whose attributes changed — and a red on an existing Windows
+   * checkout is precisely what this branch exists to remove. Same shape as
+   * WARP-1567's `*.snap` pin guard in snapshot-eol.test.ts.
+   *
+   * Mutation: delete `*.tsv text eol=lf` from `.gitattributes` → red.
+   */
+  it("`.gitattributes` pins the shared slug fixture to LF", () => {
+    const pinned = readRepoFile(".gitattributes")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .some((line) => /^\*\.tsv\s+.*\btext\b.*\beol=lf\b/.test(line));
+
+    expect(
+      pinned,
+      "`.gitattributes` must carry a `*.tsv text eol=lf` rule — without it a " +
+        "Windows checkout materializes scripts/fixtures/heading-slug-cases.tsv " +
+        "as CRLF, and check-setup-guides.sh's slugify self-check then compares " +
+        "every expected slug against one carrying a trailing CR.",
+    ).toBe(true);
   });
 
   /** Trimming, which the TSV cannot express — trailing spaces in a fixture
