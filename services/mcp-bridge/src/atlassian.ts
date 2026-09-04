@@ -54,7 +54,7 @@ import {
   type RemoteMcpConnectionFactory,
   type RemoteToolCallOutcome,
 } from "./remote-session.js";
-import { RemoteCallScheduler } from "./call-scheduler.js";
+import { RemoteCallScheduler, pickRateLimitHeaders } from "./call-scheduler.js";
 import { assertSafeMcpUrl } from "./safe-url.js";
 import { assertNotTruncated } from "./truncation.js";
 
@@ -254,8 +254,17 @@ export function withAtlassianGuards(
   };
 }
 
-/** Decorate a connection so every call runs under the concurrency ceiling and
- *  any `Retry-After` / `X-RateLimit-*` the server sends is honoured. */
+/**
+ * Decorate a connection so every call runs under the concurrency ceiling and
+ * any `Retry-After` / `X-RateLimit-*` the server sends is honoured.
+ *
+ * The ceiling is enforced HERE. The headers are NOT read here — see
+ * {@link rateLimitHeadersOf}, which cannot see them on the pinned SDK. They are
+ * read in `streamable-http.ts`'s fetch wrapper, the last place in the process
+ * that holds the `Response`, and delivered to the same scheduler instance by
+ * `session-profiles.ts`'s `createAtlassianSessionFactory`. The `catch` below is
+ * the second source, not the first.
+ */
 export function withScheduler(
   inner: RemoteMcpConnection,
   scheduler: RemoteCallScheduler,
@@ -354,18 +363,36 @@ export function assertStructuredContentPresent(
   }
 }
 
-/** Pull the rate-limit headers off whatever the transport threw, without
- *  reading (or retaining) any other header. Rule 19. */
+/**
+ * Pull the rate-limit headers off whatever the transport threw, without
+ * reading (or retaining) any other header. Rule 19.
+ *
+ * **INERT ON THE PINNED SDK, AND KNOWN TO BE.** This was the ONLY feed into the
+ * #171 pause until WARP-2300 review, and it never fired on a box:
+ * `@modelcontextprotocol/sdk` 1.30.0 rejects a rate-limited call with
+ * `StreamableHTTPError`, which is `constructor(code, message)` and DISCARDS the
+ * `Response` — no `headers`, so this returns `null` for every real 429. The
+ * whole mitigation was dead while `call-scheduler.test.ts` stayed green,
+ * because all four of its rate-limit tests call `noteRateLimitHeaders`
+ * directly. The live feed is now `streamable-http.ts`'s
+ * `onRateLimitHeaders`, which reads the response where the response still
+ * exists.
+ *
+ * Kept anyway, as a SECOND source rather than the only one: it costs nothing,
+ * it is the correct reading for any transport that does attach headers to its
+ * errors, and `rate-limit-seam.test.ts` pins the SDK's current error shape — so
+ * an SDK bump that starts attaching them turns that pin red and this path live
+ * in the same commit.
+ */
 function rateLimitHeadersOf(err: unknown): Record<string, string> | null {
   if (typeof err !== "object" || err === null) return null;
   const raw = (err as { headers?: unknown }).headers;
   if (typeof raw !== "object" || raw === null) return null;
-  const wanted = ["retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"];
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (wanted.includes(k.toLowerCase()) && typeof v === "string") out[k] = v;
-  }
-  return Object.keys(out).length > 0 ? out : null;
+  const entries = Object.entries(raw as Record<string, unknown>);
+  return pickRateLimitHeaders((name) => {
+    const hit = entries.find(([k]) => k.toLowerCase() === name);
+    return typeof hit?.[1] === "string" ? hit[1] : undefined;
+  });
 }
 
 /** Re-exported so a caller wiring the real transport does not have to know
