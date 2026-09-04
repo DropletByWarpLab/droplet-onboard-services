@@ -193,6 +193,12 @@ What gets deleted:
   - Internal-CA service TLS bundles + legacy MQTT password file
   - Setup logs
   - Accumulated device-backup tarballs (unless --backup is passed)
+  - The restic backup repository at the default /var/lib/droplet/restic-repo
+    (unless --backup is passed). Its password is derived from the
+    DEVICE_SECRET_KEY this reset destroys, so leaving it behind strands the
+    prior owner's pg dumps on the boot disk AND breaks every later backup.
+    A DROPLET_BACKUP_TARGET pointing elsewhere is NOT removed — the reset
+    names it and leaves it to you
   - Droplet-managed bulk storage: every md pool is stopped and its members'
     superblocks + filesystems wiped, and every drive adopted under
     /mnt/droplet is wiped (unless --keep-storage is passed)
@@ -353,10 +359,17 @@ fi
 
 _DEREGISTER_FQDN=""
 _DEREGISTER_DEVICE_ID=""
+# WARP-2621 — the restic repository target, read HERE for the same reason as
+# the two keys above: Phase 4 shreds .env, so by the time the repository is
+# removed this operator knob is unreadable and the reset would fall back to the
+# default on a box that had overridden it. See the Phase 4 block for what it is
+# used for.
+_RESET_BACKUP_TARGET=""
 if [ -f "$REPO_ROOT/.env" ]; then
-  # Read the two keys without sourcing the whole .env (avoids executing it).
+  # Read the keys without sourcing the whole .env (avoids executing it).
   _DEREGISTER_FQDN="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
   _DEREGISTER_DEVICE_ID="$(grep -E '^DROPLET_DEVICE_ID=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  _RESET_BACKUP_TARGET="$(grep -E '^DROPLET_BACKUP_TARGET=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
 
 # Gate on the FQDN *or* the device id: a zero-touch box (ADR-023 PR-1) issues a
@@ -1012,6 +1025,52 @@ if [ "$DO_BACKUP" != "true" ] && [ -d "$DEVICE_BACKUP_DIR" ]; then
     log_success "Removed $DEVICE_BACKUP_DIR (prior device backups)"
   else
     log_warn "Could not remove $DEVICE_BACKUP_DIR — remove it manually (it holds the prior owner's data)"
+  fi
+fi
+
+# The restic repository (WARP-2621). Sibling of the tarball dir above and, until
+# now, the half nothing removed. Its default target is on the BOOT disk, which
+# no phase of this reset touches, and its password is HKDF(DEVICE_SECRET_KEY)
+# (scripts/host/droplet-backup-lib.sh) — the key secw_wipe_live_secrets just
+# shredded. So it fails in both directions at once:
+#
+#   - the previous tenant's pg dumps stay on the boot disk of a box that has
+#     just reported a clean factory reset;
+#   - the NEXT owner's first backup fails permanently. droplet_backup_ensure_repo
+#     finds a repository whose derived password no longer opens it and stops
+#     with "wrong password or no key found", needing a manual
+#     `mv ... .orphaned-*` that nothing in this transcript ever mentioned. That
+#     is new for relocated boxes, i.e. every shipping one.
+#
+# Kept in step with droplet-backup-lib.sh's own `${target:-...}` fallback;
+# tests/factory-reset-secrets-wipe.test.sh asserts the two strings are equal, so
+# moving either without the other turns the storage leg red.
+RESTIC_REPO_DEFAULT="/var/lib/droplet/restic-repo"
+_restic_repo="${_RESET_BACKUP_TARGET:-$RESTIC_REPO_DEFAULT}"
+if [ "$_restic_repo" != "$RESTIC_REPO_DEFAULT" ]; then
+  # An operator-set target can be anywhere — including a pool this run was told
+  # to keep (--keep-storage). This script has not inspected that path and will
+  # not rm -rf it; naming it is the honest outcome.
+  log_warn "Restic repository NOT removed: DROPLET_BACKUP_TARGET points at $_restic_repo"
+  log_warn "  It holds the prior owner's pg dumps, and its password (derived from the"
+  log_warn "  DEVICE_SECRET_KEY this reset destroyed) no longer opens it. Remove it, or"
+  log_warn "  move it aside so the next backup can initialize a fresh one:"
+  log_warn "    mv $_restic_repo $_restic_repo.orphaned-\$(date +%Y%m%d)"
+elif [ "$DO_BACKUP" = "true" ]; then
+  # --backup means the operator explicitly asked for a recovery point, and the
+  # repository is one — openable only with the pre-reset DEVICE_SECRET_KEY. Same
+  # contract as DEVICE_BACKUP_DIR above: keep it, and say what that costs.
+  log_warn "Restic repository at $_restic_repo KEPT (--backup)."
+  log_warn "  It is now keyed to a DEVICE_SECRET_KEY that no longer exists on this box, so"
+  log_warn "  the next backup will fail until it is moved aside:"
+  log_warn "    mv $_restic_repo $_restic_repo.orphaned-\$(date +%Y%m%d)"
+elif [ -d "$_restic_repo" ]; then
+  if sudo rm -rf "$_restic_repo" 2>/dev/null || rm -rf "$_restic_repo" 2>/dev/null; then
+    log_success "Removed $_restic_repo (restic repository — pg dumps keyed to the shredded DEVICE_SECRET_KEY)"
+  else
+    log_warn "Could not remove $_restic_repo — remove it manually (it holds the prior owner's"
+    log_warn "  pg dumps, and it will break the next backup):"
+    log_warn "    mv $_restic_repo $_restic_repo.orphaned-\$(date +%Y%m%d)"
   fi
 fi
 

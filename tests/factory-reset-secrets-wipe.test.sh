@@ -691,6 +691,101 @@ make_orphaned_container_fixture() {
   || fail "the 4th argument breaks the happy path"
 
 # =============================================================================
+# Phase 8: the restic repository outlives the key that opens it (WARP-2621)
+# =============================================================================
+# The reset removes /var/lib/droplet/backups (the device-backup tarballs) but
+# never the restic repository, whose default DROPLET_BACKUP_TARGET is
+# /var/lib/droplet/restic-repo — on the BOOT disk, which no phase of the reset
+# touches — and whose password is HKDF(DEVICE_SECRET_KEY)
+# (scripts/host/droplet-backup-lib.sh), the key this stack shreds.
+#
+# Two consequences, both new for relocated (i.e. every shipping) boxes:
+#   1. the previous tenant's pg dumps stay on the boot disk of a box that just
+#      reported a clean factory reset;
+#   2. every post-reset box's next backup fails PERMANENTLY at
+#      droplet_backup_ensure_repo — the repository is present but the derived
+#      password no longer opens it — and needs a manual
+#      `mv ... .orphaned-*`, with nothing in the reset transcript to say why.
+#
+# The target has to be captured in Phase 0b, from the same early .env read that
+# already lifts DROPLET_PUBLIC_FQDN and DROPLET_DEVICE_ID: by Phase 4 the .env
+# has been shredded and the operator knob is unreadable.
+echo ""
+echo "--- Phase 8: the restic repository the shredded key used to open ---"
+
+# The default must be the SAME string droplet-backup-lib.sh falls back to. If
+# either side moves, the reset silently starts skipping the real repository
+# while still reporting a clean wipe — so this is a cross-file invariant, not a
+# style check.
+BACKUP_LIB="$REPO_ROOT_REAL/scripts/host/droplet-backup-lib.sh"
+RESTIC_DEFAULT_LIB="$(grep -oE 'RESTIC_REPOSITORY="\$\{target:-[^}"]+' "$BACKUP_LIB" 2>/dev/null | head -n 1 | sed 's/.*:-//' || true)"
+RESTIC_DEFAULT_RESET="$(grep -oE '^RESTIC_REPO_DEFAULT="[^"]+"' "$RESET" 2>/dev/null | head -n 1 | cut -d'"' -f2 || true)"
+if [ -n "$RESTIC_DEFAULT_LIB" ] && [ "$RESTIC_DEFAULT_LIB" = "$RESTIC_DEFAULT_RESET" ]; then
+  pass "the reset and droplet-backup-lib.sh agree on the default repository path"
+else
+  fail "reset default [${RESTIC_DEFAULT_RESET:-none}] != backup-lib default [${RESTIC_DEFAULT_LIB:-none}]"
+fi
+
+# Captured EARLY. .env is shredded in Phase 4; a Phase 4 read gets nothing and
+# the reset would silently fall back to the default on a box that overrode it.
+CAPTURE_LINE="$(grep -E '^[0-9]+:[[:space:]]*_RESET_BACKUP_TARGET="\$\(grep' <<<"$CODE_NUM" | head -n 1 | cut -d: -f1 || true)"
+if [ -n "$CAPTURE_LINE" ] && [ -n "$WIPE_LINE" ] && [ "$CAPTURE_LINE" -lt "$WIPE_LINE" ]; then
+  pass "DROPLET_BACKUP_TARGET is read from .env BEFORE the wipe shreds it"
+else
+  fail "DROPLET_BACKUP_TARGET is not captured before the .env wipe"
+fi
+
+# The read has to sit in the SAME early block as the other two keys, i.e. above
+# Phase 1 — not merely above the wipe.
+HQ_READ_LINE="$(grep -E '^[0-9]+:[[:space:]]*_DEREGISTER_DEVICE_ID="\$\(grep' <<<"$CODE_NUM" | head -n 1 | cut -d: -f1 || true)"
+if [ -n "$CAPTURE_LINE" ] && [ -n "$HQ_READ_LINE" ] \
+   && [ "$((CAPTURE_LINE - HQ_READ_LINE))" -ge 0 ] && [ "$((CAPTURE_LINE - HQ_READ_LINE))" -le 6 ]; then
+  pass "it rides the existing Phase 0b .env read rather than opening a second one"
+else
+  fail "DROPLET_BACKUP_TARGET is read somewhere other than the Phase 0b block"
+fi
+
+# The boot-disk default is REMOVED.
+RESTIC_RM_BLOCK="$(grep -n 'RESTIC_REPO_DEFAULT' "$RESET" | tail -n 1 | cut -d: -f1 || true)"
+if grep -qE 'rm -rf "\$_restic_repo"' "$RESET"; then
+  pass "the reset removes the restic repository at the boot-disk default"
+else
+  fail "the restic repository is never removed — the prior tenant's pg dumps stay on the boot disk"
+fi
+
+# A target somewhere else is NOT removed. --keep-storage on a pool-backed
+# repository must not be silently destroyed by a path this script never
+# inspected, so the branch has to WARN and name it.
+if grep -qF 'Restic repository NOT removed' "$RESET"; then
+  pass "a non-default DROPLET_BACKUP_TARGET is warned about, never silently destroyed"
+else
+  fail "a non-default backup target is not distinguished — it would be wiped or ignored in silence"
+fi
+
+# The warn has to name the path; "some repository elsewhere" is not actionable.
+if grep -E 'Restic repository NOT removed' "$RESET" | grep -qF '$_restic_repo'; then
+  pass "the warning names the path it did not remove"
+else
+  fail "the non-default warning does not name the repository path"
+fi
+
+# The operator has to learn WHY their next backup will fail. This is the whole
+# second half of the defect: without it the failure surfaces days later as an
+# opaque restic error on the box.
+if grep -qiE 'orphaned-' "$RESET"; then
+  pass "the transcript gives the mv ... .orphaned-* remedy for a stranded repository"
+else
+  fail "nothing tells the operator how to unstick the next backup"
+fi
+
+# --help must say it, same as every other class the reset destroys.
+if "$RESET" --help 2>/dev/null | grep -qiF 'restic'; then
+  pass "--help lists the restic repository among what a reset deletes"
+else
+  fail "--help does not mention the restic repository"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
