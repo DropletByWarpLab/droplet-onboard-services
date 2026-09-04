@@ -559,7 +559,8 @@ unmounted_wipe() {
 ( make_fixture
   # `command -v` first: without it a MISSING function exits 127 and the `!`
   # would report a pass — a guard that cannot fail.
-  command -v secw_volume_unreachable >/dev/null \n    && ! secw_volume_unreachable "$TMP/repo" "$(resolve_env_target "$TMP/repo/.env")"
+  command -v secw_volume_unreachable >/dev/null \
+    && ! secw_volume_unreachable "$TMP/repo" "$(resolve_env_target "$TMP/repo/.env")"
 ) && pass "it does NOT fire on a normally-mounted relocated box" \
   || fail "the predicate fires on a healthy relocated box — every reset would abort"
 
@@ -570,7 +571,8 @@ unmounted_wipe() {
   export SECW_SUDO SECW_OWNER SECW_REPO_ROOT
   # shellcheck disable=SC1090
   source "$LIB"
-  command -v secw_volume_unreachable >/dev/null \n    && ! secw_volume_unreachable "$TMP/repo" "$TMP/repo/.env"
+  command -v secw_volume_unreachable >/dev/null \
+    && ! secw_volume_unreachable "$TMP/repo" "$TMP/repo/.env"
 ) && pass "it does NOT fire on a plain (never-relocated) box — .env is no symlink" \
   || fail "the predicate fires on a non-relocated box"
 
@@ -746,7 +748,6 @@ else
 fi
 
 # The boot-disk default is REMOVED.
-RESTIC_RM_BLOCK="$(grep -n 'RESTIC_REPO_DEFAULT' "$RESET" | tail -n 1 | cut -d: -f1 || true)"
 if grep -qE 'rm -rf "\$_restic_repo"' "$RESET"; then
   pass "the reset removes the restic repository at the boot-disk default"
 else

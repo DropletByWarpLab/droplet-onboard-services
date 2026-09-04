@@ -124,6 +124,7 @@ SECW_LEFTOVER_COUNT=0
 # treated as failure, but the operator needs to be told which one it was — one
 # says "shred it again", the other says "unlock the volume".
 SECW_VERIFY_BLOCKED=0
+# shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
 SECW_VERIFY_BLOCKED_REASON=""
 
 _secw_warn() { printf '  ! %s\n' "$*" >&2; }
@@ -350,6 +351,7 @@ secw_verify_wipe() {
 
   if [ "$_pre_missing" = "1" ]; then
     SECW_VERIFY_BLOCKED=1
+    # shellcheck disable=SC2034  # read by factory-reset.sh's gate, not in this file
     SECW_VERIFY_BLOCKED_REASON="$(dirname "$_env_target") did not exist before the wipe — the volume behind it was not mounted, so an empty re-scan proves nothing about what is on it"
   fi
 
