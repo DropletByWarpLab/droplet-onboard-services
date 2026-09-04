@@ -409,6 +409,14 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     // With an honest prompt it overshoots and `degradeToFit` drops a block.
     // Pin that, or the next fixture change hides it again just as silently.
     const drops = composers.degradations();
+    // WARP-2697 — this list is expected to CHANGE. `degradeToFit` reports
+    // `historyTrimNeeded` when a request still overflows after both optional
+    // blocks are gone (`context-budget.service.ts:174`) and NOTHING reads it:
+    // the route consumes `degraded.personaBlock` / `degraded.businessBlock`
+    // and sends the turn anyway. So the exact-equality below pins TODAY'S
+    // behaviour, correctly — but the real fix, when the history/attachment
+    // trim this flag was meant to trigger is wired up, will arrive looking
+    // like a regression here. Do not "restore" it; re-derive it.
     expect(drops.map((d) => d.block)).toEqual(["persona"]);
 
     const [personaDrop] = drops;
@@ -491,6 +499,14 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.status).toBe(200);
 
     const drops = composers.degradations();
+    // WARP-2697 — this list is expected to CHANGE. `degradeToFit` reports
+    // `historyTrimNeeded` when a request still overflows after both optional
+    // blocks are gone (`context-budget.service.ts:174`) and NOTHING reads it:
+    // the route consumes `degraded.personaBlock` / `degraded.businessBlock`
+    // and sends the turn anyway. So the exact-equality below pins TODAY'S
+    // behaviour, correctly — but the real fix, when the history/attachment
+    // trim this flag was meant to trigger is wired up, will arrive looking
+    // like a regression here. Do not "restore" it; re-derive it.
     expect(drops.map((d) => d.block)).toEqual(["business", "persona"]);
     // Rank 1 re-estimates before rank 2 runs, so the second reading is the
     // smaller one — the sequence is monotonically shrinking, which is the
