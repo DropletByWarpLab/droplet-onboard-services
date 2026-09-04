@@ -341,6 +341,67 @@ describe("WARP-2665 — writes is derived from the steps, not declared", () => {
     expect(prisma.specs.get("already-writes")!.writes).toBe(true);
   });
 
+  // The miner (WARP-464) writes `suggested` specs with `writes: false`
+  // hardcoded, and an operator promotes one with the bare body the
+  // dashboard's Accept button sends: `{ "status": "live" }`. No `steps`, no
+  // `writes`. If that path does not re-derive, the spec goes live carrying a
+  // `writes: false` its own steps contradict, and the ticker's
+  // `writes && !reversible` gate reads the lie and fires it unattended.
+  it("PROMOTION re-derives — a bare status-only patch cannot publish a mis-marked write spec", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({
+        slug: "mined-notify",
+        status: "suggested",
+        category: "suggested",
+        ownerId: null,
+        writes: false,
+        reversible: false,
+        steps: [
+          {
+            id: "spec-seed-s0",
+            specId: "spec-seed",
+            idx: 0,
+            kind: "call",
+            args: { tool: WRITE_TOOL, args: {} },
+          },
+        ],
+      }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .patch("/api/tools/mined-notify")
+      .send({ status: "live" });
+    expect(res.status).toBe(200);
+    expect(res.body.writes).toBe(true);
+    // The column, not just the projection — the ticker reads the row.
+    expect(prisma.specs.get("mined-notify")!.writes).toBe(true);
+  });
+
+  // Same hole, reached without `status`: nothing about the derivation is
+  // specific to promotion, so a metadata-only edit must repair the flag too.
+  it("a metadata-only PATCH raises writes to match the STORED steps", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({
+        slug: "mismarked",
+        writes: false,
+        steps: [
+          {
+            id: "spec-seed-s0",
+            specId: "spec-seed",
+            idx: 0,
+            kind: "call",
+            args: { tool: WRITE_TOOL, args: {} },
+          },
+        ],
+      }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .patch("/api/tools/mismarked")
+      .send({ description: "just a note" });
+    expect(res.status).toBe(200);
+    expect(res.body.writes).toBe(true);
+    expect(prisma.specs.get("mismarked")!.writes).toBe(true);
+  });
+
   it("an unrelated PATCH never silently lowers a conservative writes:true", async () => {
     const prisma = createPrismaMock([mkSpec({ slug: "cautious", writes: true })]);
     const res = await request(buildApp(prisma, mkUser("owner")))
