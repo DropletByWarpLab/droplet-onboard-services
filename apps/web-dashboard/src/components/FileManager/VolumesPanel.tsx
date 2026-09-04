@@ -18,23 +18,11 @@ import {
   driveContentsHref,
   driveDisplayName,
   drivePoolName,
+  formatBytes,
   isPoolBackedDevice,
   poolBackingDrive,
   usagePctOf,
 } from "./drive-display";
-
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  // WARP-2098: the index is CLAMPED. Unclamped, a volume of 1 PiB or more
-  // indexed past the end of the array and rendered "1.0 undefined" — the
-  // sibling formatter in DrivesPanel has always clamped, so the two disagreed
-  // on exactly the sizes a pool can reach.
-  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const value = bytes / Math.pow(1024, i);
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
-}
-
 
 function pct(d: DriveInfo): number {
   return usagePctOf(d.used_bytes, d.size_bytes);

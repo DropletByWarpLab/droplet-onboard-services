@@ -66,6 +66,7 @@ import {
   driveContentsHref,
   driveDisplayName,
   drivePoolName,
+  formatBytes,
   isPoolBackedDevice,
   poolBackingDrive,
   sanitizeFsLabel,
@@ -73,15 +74,6 @@ import {
   uniqueFsLabel,
   usagePctOf,
 } from "./drive-display";
-
-// Binary units, matching the rest of the dashboard (VolumesPanel etc.).
-function fmtBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const v = bytes / Math.pow(1024, i);
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
 
 // Customer-facing name: friendly displayName, then FS label, then the
 // GUID-guarded mount tail — never the raw device path or a machine id, since
@@ -107,7 +99,6 @@ function poolName(pool: PoolInfo): string {
 // Customer-chosen drive names are 1–64 chars, trimmed, non-empty — mirrors the
 // orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
 const DRIVE_NAME_MAX = 64;
-
 
 function usagePct(d: DriveInfo): number {
   return usagePctOf(d.used_bytes, d.size_bytes);
@@ -769,7 +760,7 @@ export function DrivesPanel() {
         confirmLabel="Erase & adopt"
         confirmedIdentifier={
           adoptPending
-            ? `${diskTitle(adoptPending.disk)} · ${fmtBytes(adoptPending.disk.size_bytes)} · ${adoptPending.disk.name}`
+            ? `${diskTitle(adoptPending.disk)} · ${formatBytes(adoptPending.disk.size_bytes)} · ${adoptPending.disk.name}`
             : ""
         }
         variant="destructive"
@@ -814,7 +805,7 @@ export function DrivesPanel() {
         }
         affectedSummary={
           reclaimPending
-            ? `${diskTitle(reclaimPending.disk)} · ${fmtBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
+            ? `${diskTitle(reclaimPending.disk)} · ${formatBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
             : ""
         }
         confirmPhrase={reclaimPending ? diskTitle(reclaimPending.disk) : ""}
@@ -864,9 +855,9 @@ function DataStorageHeadline({ totals }: { totals: DataStorageTotals }) {
         style={{ fontSize: "13px", color: "var(--text-muted)" }}
       >
         <span style={{ color: "var(--text)", fontWeight: 600 }}>
-          {fmtBytes(totals.used_bytes)}
+          {formatBytes(totals.used_bytes)}
         </span>
-        <span>of {fmtBytes(totals.size_bytes)} used across your drives</span>
+        <span>of {formatBytes(totals.size_bytes)} used across your drives</span>
       </div>
       <div style={{ marginTop: "6px" }}>
         <Meter pct={p} kind={meterKind(p)} />
@@ -937,7 +928,7 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
             className="tabular-nums"
             style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}
           >
-            {fmtBytes(system.size_bytes)} ·{" "}
+            {formatBytes(system.size_bytes)} ·{" "}
             <span style={{ fontFamily: "var(--font-mono)" }}>{system.name}</span>
           </p>
         </div>
@@ -957,9 +948,9 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
             }}
           >
             <span style={{ color: "var(--text)" }}>
-              {fmtBytes(system.used_bytes ?? 0)}
+              {formatBytes(system.used_bytes ?? 0)}
             </span>
-            <span>of {fmtBytes(system.size_bytes)}</span>
+            <span>of {formatBytes(system.size_bytes)}</span>
           </div>
         </div>
       ) : system.measurement === "partial" ? (
@@ -987,7 +978,7 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
             <li key={f.mount} className="flex items-center justify-between gap-3">
               <span className="truncate">{systemFsLabel(f.role)}</span>
               <span className="tabular-nums flex-none" style={{ fontFamily: "var(--font-mono)" }}>
-                {fmtBytes(f.used_bytes)} of {fmtBytes(f.size_bytes)}
+                {formatBytes(f.used_bytes)} of {formatBytes(f.size_bytes)}
               </span>
             </li>
           ))}
@@ -995,8 +986,8 @@ function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
             <li className="flex items-center justify-between gap-3">
               <span className="truncate">{systemFsLabel("boot")}</span>
               <span className="tabular-nums flex-none" style={{ fontFamily: "var(--font-mono)" }}>
-                {fmtBytes(boot.reduce((n, f) => n + f.used_bytes, 0))} of{" "}
-                {fmtBytes(boot.reduce((n, f) => n + f.size_bytes, 0))}
+                {formatBytes(boot.reduce((n, f) => n + f.used_bytes, 0))} of{" "}
+                {formatBytes(boot.reduce((n, f) => n + f.size_bytes, 0))}
               </span>
             </li>
           )}
@@ -1072,7 +1063,7 @@ function AvailableDiskCard({
             className="tabular-nums"
             style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}
           >
-            {fmtBytes(disk.size_bytes)} ·{" "}
+            {formatBytes(disk.size_bytes)} ·{" "}
             <span style={{ fontFamily: "var(--font-mono)" }}>{disk.name}</span>
           </p>
         </div>
@@ -1300,10 +1291,10 @@ function DriveCard({
           style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}
         >
           <span>
-            <span style={{ color: "var(--text)" }}>{fmtBytes(d.used_bytes)}</span> of{" "}
-            {fmtBytes(d.size_bytes)}
+            <span style={{ color: "var(--text)" }}>{formatBytes(d.used_bytes)}</span> of{" "}
+            {formatBytes(d.size_bytes)}
           </span>
-          <span>{fmtBytes(d.free_bytes)} free</span>
+          <span>{formatBytes(d.free_bytes)} free</span>
         </div>
         <Meter pct={p} kind={meterKind(p)} />
       </div>
@@ -1634,11 +1625,11 @@ function PoolCard({
           >
             <span>
               <span style={{ color: "var(--text)" }}>
-                {fmtBytes(backingDrive.used_bytes)}
+                {formatBytes(backingDrive.used_bytes)}
               </span>{" "}
-              of {fmtBytes(backingDrive.size_bytes)}
+              of {formatBytes(backingDrive.size_bytes)}
             </span>
-            <span>{fmtBytes(backingDrive.free_bytes)} free</span>
+            <span>{formatBytes(backingDrive.free_bytes)} free</span>
           </div>
           <Meter pct={usedPct} kind={meterKind(usedPct)} />
         </div>
