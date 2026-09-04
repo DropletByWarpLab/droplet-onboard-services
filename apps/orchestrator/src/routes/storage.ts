@@ -584,53 +584,53 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // try/catch so one degrading never takes the other's result with it,
       // which is why this is not a single try around both.
       const cloudRead = (async (): Promise<StorageStats | null> => {
-      let cloud: StorageStats | null = null;
-      try {
-        const token = await resolveNcToken(req);
-        // No resolvable credential is the orphan-session case (a session that
-        // pre-dates the NC-session store), not an error.
-        const quota = token ? await ncGetUserQuota(token) : null;
-        if (quota) {
-          const total = quota.total ?? 0;
-          const used = quota.used ?? 0;
-          const available = quota.free ?? Math.max(0, total - used);
-          cloud = {
-            used,
-            total,
-            available,
-            percentage: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
-          };
+        let cloud: StorageStats | null = null;
+        try {
+          const token = await resolveNcToken(req);
+          // No resolvable credential is the orphan-session case (a session that
+          // pre-dates the NC-session store), not an error.
+          const quota = token ? await ncGetUserQuota(token) : null;
+          if (quota) {
+            const total = quota.total ?? 0;
+            const used = quota.used ?? 0;
+            const available = quota.free ?? Math.max(0, total - used);
+            cloud = {
+              used,
+              total,
+              available,
+              percentage: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
+            };
+          }
+        } catch (err) {
+          logger.warn({ err }, "Failed to fetch Nextcloud quota");
         }
-      } catch (err) {
-        logger.warn({ err }, "Failed to fetch Nextcloud quota");
-      }
-      return cloud;
+        return cloud;
       })();
 
       const bridgeRead = (async (): Promise<{
         totals: DataStorageTotals | null;
         system: BridgeSystemDisk | undefined;
       }> => {
-      let totals: DataStorageTotals | null = null;
-      let system: BridgeSystemDisk | undefined;
-      try {
-        const snap = await fetchBridgeDrives();
-        // SAME filter as GET /storage/drives — the OS disk is excluded here by
-        // construction, not by a second rule that could drift from the first.
-        totals = computeDataTotals(userDataDrivesOf(snap));
-        system = snap.system_disk;
-      } catch (err) {
-        // The bridge is optional (OLED/display profile) and host-side. Without
-        // it we have no honest drive figures — so report zeroes and say why,
-        // rather than falling back to the Nextcloud number, which is the exact
-        // boot-disk figure this ticket removed.
-        if (isBridgeConnectionError(err)) {
-          logger.info({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable; no storage totals");
-        } else {
-          logger.warn({ err }, "Failed to fetch drives from device-bridge");
+        let totals: DataStorageTotals | null = null;
+        let system: BridgeSystemDisk | undefined;
+        try {
+          const snap = await fetchBridgeDrives();
+          // SAME filter as GET /storage/drives — the OS disk is excluded here by
+          // construction, not by a second rule that could drift from the first.
+          totals = computeDataTotals(userDataDrivesOf(snap));
+          system = snap.system_disk;
+        } catch (err) {
+          // The bridge is optional (OLED/display profile) and host-side. Without
+          // it we have no honest drive figures — so report zeroes and say why,
+          // rather than falling back to the Nextcloud number, which is the exact
+          // boot-disk figure this ticket removed.
+          if (isBridgeConnectionError(err)) {
+            logger.info({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable; no storage totals");
+          } else {
+            logger.warn({ err }, "Failed to fetch drives from device-bridge");
+          }
         }
-      }
-      return { totals, system };
+        return { totals, system };
       })();
 
       // Both already swallow their own failures, so this cannot reject.
