@@ -135,8 +135,47 @@ your handler is wrong; they only tell you it is wired.
 | `apps/orchestrator/src/routes/network-firewall.routes.ts` | This route confirms Tier 2/3 operations itself. If your tool calls it, the ROUTE owns the prompt: declare `confirmationOwner: "route"` rather than letting the interceptor add a second one. |
 | `apps/orchestrator/src/routes/network-phone-home.routes.ts` | Same ownership as the firewall routes — the confirmation lives here, so a pass-through tool must not re-ask. |
 | `apps/orchestrator/src/services/erp.service.ts` | `CLOUD_DATASET_READ_ROLES` and the dataset dispatch the cloud e2e gate drives. The service re-checks the role after MCP admission by design — do not "simplify" the double check away to make a tool test pass. |
+| `apps/orchestrator/src/__tests__/helpers/test-paths.ts` | Test-only path resolution. `apps/orchestrator/src/services/tool-selection.parity.test.ts` reads the route and the agent loop as SOURCE, and resolves both through this helper (WARP-2654) rather than from the runner's cwd — resolved from cwd it threw at import from the repo root and the gate reported "no tests", so all 23 of its assertions ran zero times. Nothing about a new tool goes in here; it is listed because the gate reads it. |
 
 <!-- add-llm-tool:sites:end -->
+
+## How a gate declares itself (WARP-2612)
+
+The table above is not hand-written. `add-llm-tool-skill.test.ts` derives it by
+finding the gates and collecting the repo files each one reads — so a gate has
+to be findable. **A gate declares itself with a one-line pragma near the top of
+the file:**
+
+```ts
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+```
+
+Every file that test imports is then demanded of the site block above. So put
+the pragma on a test only if an agent adding a tool would have to edit what it
+reads.
+
+**If your test reads `TOOLS` for some other reason, take the opt-out:**
+
+```ts
+// add-llm-tool:not-a-gate — reads the registry for <reason>, not to gate
+// adding a tool; its imports are not add-a-tool sites.
+```
+
+Neither pragma? Then a test that imports `TOOLS` **and** reads the whole thing
+(`TOOLS.keys()` / `.values()` / `.size`) fails `add-llm-tool-skill.test.ts` with
+a message naming which of the two it takes the file for and why. A test that
+only looks a name up (`TOOLS.has("list_files")`) is left alone and needs
+nothing. The classification is made from the PARSED CODE, so prose, a test
+name, or an assertion message quoting `TOOLS.values()` never counts — do not
+contort a test to dodge this file.
+
+That contortion is the WARP-2612 finding: the first shape of this gate
+classified any test that enumerated `TOOLS`, so PR #1944's outbound-MCP test
+was told to add `mcp-multiplexer.service.ts`, `remote-mcp-servers.ts` and
+`runtime-tool-registry.service.ts` to the table above — files a tool author
+must never touch (runtime tools live outside `TOOLS`, ADR-043).
 
 ## What still happens automatically
 

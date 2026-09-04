@@ -17,8 +17,13 @@
  * jsdom does not apply the stylesheet, so this is a source-level guard on
  * globals.css that reads the real token values and computes the real ratio —
  * the same approach as `remote-access.orange-contrast.test.ts` and the
- * WARP-1277 drift gate, one step stronger (measured, not matched). CommonJS
- * `__dirname` is the Windows-safe pattern those guards use.
+ * WARP-1277 drift gate, one step stronger (measured, not matched).
+ *
+ * Path resolution uses `__dirname`, the one anchoring idiom this package uses
+ * (WARP-2654) — see `src/__tests__/helpers/test-paths.ts` for why it is
+ * spelled this way here. It is NOT that `import.meta.url` is unsafe on
+ * Windows: `fileURLToPath` converts it correctly, and only
+ * `new URL(...).pathname` yields the `/C:/...` that `path.resolve` doubles.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
