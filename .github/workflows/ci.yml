@@ -242,11 +242,21 @@ jobs:
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
             # PR time, not only via storage-pool-tests.yml's manual dispatch.
+            # WARP-2629 adds the live-secrets wipe to the same leg: same shape
+            # (fixture tree + stub binaries, <3s, no root/disks/Docker), same
+            # class — a default-ON destructive path whose FAILURE MODE IS
+            # SILENT. A reset that quietly stops wiping /data still prints
+            # "Factory reset complete" and ships the previous tenant's keys
+            # with the box, so it has to be caught at PR time. The leg already
+            # fires on scripts/factory-reset.sh, so the marginal spend is the
+            # rare PR touching only the library: ~1 billable min/run.
             storage:
               - "scripts/lib/storage-wipe.sh"
+              - "scripts/lib/secrets-wipe.sh"
               - "scripts/factory-reset.sh"
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
+              - "tests/factory-reset-secrets-wipe.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
               # WARP-2647: the other two factory-reset guards. Both are static
               # greps of scripts/factory-reset.sh — already in this filter — so
@@ -865,6 +875,15 @@ jobs:
 
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
+
+      # WARP-2629 — the live-secrets wipe on /data. Deliberately here and not
+      # in the factory-reset suite's own job: that suite shells out to
+      # `docker compose version` and cannot run on a box whose daemon is down,
+      # which is exactly a box a factory reset has to work on. (Named without
+      # its path on purpose — scripts/check-test-wiring.sh harvests every
+      # tests/*.test.sh token in this block, comments included.)
+      - name: Run factory-reset live-secrets wipe unit tests
+        run: bash tests/factory-reset-secrets-wipe.test.sh
 
       # WARP-2647: the two factory-reset guards that ran in NO workflow at all.
       # Both were written after a real incident — the WARP-605 project-name bug
