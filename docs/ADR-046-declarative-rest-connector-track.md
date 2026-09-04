@@ -11,7 +11,7 @@
 
 ### The measurement that prompted this
 
-A survey of 341 business-tool APIs (2026-09-02) found **130 vendors** whose account owner can mint a credential in their own console and paste it into the box — the ADR-042 model-3 shape, with no Warp Lab app registration, no vendor review, and nothing of ours in the trust path. A follow-up pass (2026-09-03) took 34 of those and produced a **buildable** spec for each: exact endpoint paths, the literal watermark parameter, pagination shape, rate ceiling, SDK licence. Every spec was then handed to a second agent whose only instruction was to refute it against the vendor's own documentation.
+A survey of 341 business-tool APIs (2026-09-02) found **130 vendors** whose account owner can mint a credential in their own console and paste it into the box — the ADR-042 model-3 shape, with no Warp Lab app registration, no vendor review, and nothing of ours in the trust path. A follow-up pass (2026-09-03) took 34 of those and produced a **buildable** spec for each: exact endpoint paths, the literal watermark parameter, pagination shape, rate ceiling, SDK licence. Every spec was then handed to a second agent whose only instruction was to refute it against the vendor's own documentation. Across the 34 refutations: **179 claims refuted, 677 confirmed, 288 must-fix items**, and two verdicts overturned (Notion → NOT_FREE, Typeform → FREE_WITH_GATES). *(An earlier commit message on this branch cited 147 refuted claims; that figure was computed before the last eight refutations landed. 179 is the count over the complete set.)*
 
 The shapes that came back are the reason for this ADR:
 
