@@ -129,18 +129,31 @@ describe("test path resolution is anchored to the owning file", () => {
    * Mutation: put `process.cwd()` back into any dashboard test, into a
    * `__tests__/helpers/` module, or into `__tests__/setup.ts` → red, naming
    * the file.
+   *
+   * Explicit timeout, because vitest's 5 s default is sized for a unit test
+   * and this one stats and reads ~545 files. Measured in the full 544-file
+   * dashboard run on Windows: 2.9 s on a lightly loaded run, 5.6 s on a
+   * saturated one — a coin flip against the default, and a timeout here reads
+   * exactly like the real assertion failing. A path guard that goes red at
+   * random teaches developers to ignore it, which is the one thing a guard
+   * cannot afford. (Its sibling `dashboard-classes-guard.test.ts` has the same
+   * problem and is out of scope here — see WARP-2613's PR notes.)
    */
-  it("no test file resolves a path from the cwd", () => {
-    const offenders = testFiles(SRC)
-      .filter((f) => rel(f) !== SELF)
-      .filter((f) => code(readFileSync(f, "utf8")).includes("process.cwd("))
-      .map(rel);
+  it(
+    "no test file resolves a path from the cwd",
+    () => {
+      const offenders = testFiles(SRC)
+        .filter((f) => rel(f) !== SELF)
+        .filter((f) => code(readFileSync(f, "utf8")).includes("process.cwd("))
+        .map(rel);
 
-    expect(
-      offenders,
-      "Resolve paths from the owning file, not the runner's cwd — " +
-        "import PACKAGE_ROOT / REPO_ROOT / readPackageFile / readRepoFile from " +
-        "src/__tests__/helpers/test-paths (WARP-2632).",
-    ).toEqual([]);
-  });
+      expect(
+        offenders,
+        "Resolve paths from the owning file, not the runner's cwd — " +
+          "import PACKAGE_ROOT / REPO_ROOT / readPackageFile / readRepoFile from " +
+          "src/__tests__/helpers/test-paths (WARP-2632).",
+      ).toEqual([]);
+    },
+    30_000,
+  );
 });
