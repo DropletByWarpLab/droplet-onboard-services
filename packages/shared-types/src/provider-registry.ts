@@ -756,11 +756,16 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     datasets: [],
     credentialExpiry: {
       field: "tokenExpiresAt",
-      // WARP-2353's number, mirrored from `ATLASSIAN_TOKEN_EXPIRY_WARNING_DAYS`
-      // and asserted equal to it (`provider-registry.test.ts`) rather than
-      // imported: this module is bundled into the dashboard and that one is
-      // orchestrator-only.
+      // WARP-2353's number, and since WARP-2300 the only copy of it: the
+      // orchestrator-only module it used to be mirrored from had no production
+      // callers and was deleted rather than kept in step by an assertion.
+      //
+      // 30 days is sized so the warning outlasts a holiday or a handover —
+      // creating a replacement is a customer-admin action in a console the box
+      // does not control, and Atlassian offers no grace period and sends no
+      // reminder of its own.
       warningDays: 30,
+      // Atlassian's documented maximum API-token lifetime.
       maxLifetimeDays: 365,
     },
     setupGuideHref: "/help/integrations/atlassian",

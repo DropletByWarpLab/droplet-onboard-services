@@ -466,7 +466,25 @@ export function buildCredentialView(
     // date an admin can see and the date the warning is computed from are one
     // value. A second read of `row.providerConfig` here could disagree with the
     // form after a failed parse.
-    credentialExpiry: credentialExpiryVerdict(descriptor, config, now) ?? null,
+    //
+    // GATED ON A STORED CREDENTIAL. `credentialExpiryVerdict` is handed a
+    // descriptor and a config, so it cannot tell "connected, no date recorded"
+    // from "never connected" — both read EXPIRY_UNKNOWN. The dashboard renders
+    // that as "No expiry date recorded — Droplet can't warn you before this
+    // credential stops working", which on a provider nobody has connected is a
+    // warning about a thing that does not exist, and it would sit on the card
+    // permanently with no action that clears it.
+    //
+    // "No credential stored" and "credential stored, no expiry date" are
+    // different states with different remedies, and only the second is a
+    // warning. WARP-2353's `atlassian-token-expiry.ts` held that rule and had
+    // no production callers; this is where it belongs, on the path that ships.
+    // The first state is already answered by `state` and `hasCredentials` on
+    // this same payload, so `null` here is not silence — it is the expiry
+    // question not applying yet.
+    credentialExpiry: hasCredentials
+      ? (credentialExpiryVerdict(descriptor, config, now) ?? null)
+      : null,
   };
 }
 
