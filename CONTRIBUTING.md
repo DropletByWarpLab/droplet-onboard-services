@@ -90,7 +90,10 @@ npm ci
 
 # Make the checkout buildable: prisma generate, then build the leaf
 # workspaces (see "Workspace builds come first" — skipping this is the usual
-# cause of a "broken" fresh checkout). Takes ~7 s.
+# cause of a "broken" fresh checkout). One prisma generate plus five tsc
+# builds: seconds on a warm Mac, minutes on Windows or a loaded machine. Let
+# it finish — it clears all five leaf dist/ before rebuilding them, so a
+# half-run tree is worse off than an untouched one.
 npm run bootstrap
 
 # Set up the AI Gateway Python environment

@@ -260,7 +260,10 @@ leaf workspaces that resolve through `dist/` have not been built (`Failed to
 resolve entry for package "@droplet/fips-selftest"` when the orchestrator suite
 collects `fips.test.ts`; `TS2305`/`TS2724` from `@droplet/erp-connector`).
 
-One step, ~7 s:
+One step — but not a quick one. It is `prisma generate` plus five `tsc` builds:
+seconds on a warm Mac, minutes on Windows or on a loaded machine. **Let it
+finish.** Killing it partway leaves the checkout worse than it found it, because
+it removes all five leaf `dist/` before it rebuilds them.
 
 ```bash
 npm ci
