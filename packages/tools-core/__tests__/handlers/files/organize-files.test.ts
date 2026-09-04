@@ -287,16 +287,35 @@ describe("organize_files", () => {
     });
   });
 
-  it("a failed mkdir is not fatal (the folder usually already exists on a re-run)", async () => {
-    const post = vi.fn(async (url: string, _body?: unknown, _opts?: Opts) =>
-      new Response("{}", { status: url === "/mkdir" ? 500 : 200 }),
+  // PR #1985 review: POST /files/mkdir answers 200 for "already exists"
+  // (ncCreateDirectory treats MKCOL 405 as success), so a non-2xx is a real
+  // failure — permissions, quota, a 5xx. It used to be dropped silently, and
+  // every move into that folder then failed with "the destination may
+  // already hold a file with that name": a plausible reason that was wrong.
+  it("a failed mkdir is reported as its own reason, and nothing is moved into that folder", async () => {
+    const post = vi.fn(async (url: string, body?: unknown, _opts?: Opts) =>
+      new Response("{}", {
+        status: url === "/mkdir" && (body as { path: string }).path === "/Downloads/Documents" ? 507 : 200,
+      }),
     );
     const r = await organizeFiles.handler({ path: "/Downloads" }, ctxWith({ get: listingOf(DOWNLOADS), post }));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
-    expect(d.created_folders).toEqual([]);
-    expect(d.moved_count).toBe(3);
+    expect(d.created_folders).toEqual(["/Downloads/Images"]);
+    expect(d.moved_count).toBe(2);
+    expect(d.skipped).toEqual([
+      { path: "/Downloads/.hidden", reason: "hidden file" },
+      { path: "/Downloads/Documents", reason: "could not be created (nextcloud returned 507)" },
+      { path: "/Downloads/a.pdf", reason: "destination /Downloads/Documents could not be created (nextcloud returned 507)" },
+    ]);
+    // No move was fired at a folder that does not exist, and nothing blamed
+    // a name clash for it.
+    const moves = post.mock.calls.filter((c) => c[0] === "/move").map((c) => (c[1] as { to: string }).to);
+    expect(moves).toEqual(["/Downloads/Images/b.JPG", "/Downloads/Images/c.png"]);
+    expect(JSON.stringify(d.skipped)).not.toMatch(/may already hold a file/);
+    // Blocked files are named as skipped, NOT rolled into `remaining`.
+    expect(d.remaining).toBe(0);
   });
 
   describe("nothing-to-do notes say which nothing it was", () => {

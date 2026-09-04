@@ -103,6 +103,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const collidesWithFile = new Set(entries.filter((e) => !e.isDirectory).map((e) => e.path));
 
   const created: string[] = [];
+  /** Destinations this call could not create, with the reason every move into them is skipped. */
+  const uncreatable = new Map<string, string>();
   const moved: Array<{ from: string; to: string }> = [];
   const skipped = [...plan.skipped];
   let movedCount = 0;
@@ -128,6 +130,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         path: folder,
         reason: "a file already has this name, so the destination folder cannot be created",
       });
+      uncreatable.set(folder, "is blocked by a file of the same name");
       continue;
     }
     const mk = await unlessAborted(ctx.signal, () =>
@@ -137,9 +140,17 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       aborted = true;
       break;
     }
-    // Not fatal: the folder usually already exists on a re-run. A folder
-    // that is truly missing fails the move into it, reported per file.
-    if (mk.ok && !existingChildren.has(folder)) created.push(folder);
+    if (!mk.ok) {
+      // A real failure — permissions, quota, a 5xx — not a re-run: the route
+      // answers 200 for "already exists" (see above). Reported once here, and
+      // every move into it is skipped with this reason rather than fired and
+      // then blamed on a name clash (PR #1985 review).
+      const reason = `could not be created (nextcloud returned ${mk.status})`;
+      skipped.push({ path: folder, reason });
+      uncreatable.set(folder, reason);
+      continue;
+    }
+    if (!existingChildren.has(folder)) created.push(folder);
   }
 
   if (aborted) {
@@ -159,15 +170,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         skipped.push({ path: move.from, reason: `unsafe destination path (${dest.ok ? "normalized away" : dest.error})` });
         continue;
       }
-      if (collidesWithFile.has(move.folder)) {
-        // The destination is blocked by a same-named FILE (reported once
-        // above). Say so per file rather than letting them fall into
-        // `remaining`, which would read as "a later run will pick these up"
-        // when in fact nothing will until the collision is resolved.
-        skipped.push({
-          path: move.from,
-          reason: `destination ${move.folder} is blocked by a file of the same name`,
-        });
+      const blocked = uncreatable.get(move.folder);
+      if (blocked) {
+        // The destination could not be created (reported once above). Say so
+        // per file rather than letting them fall into `remaining`, which
+        // would read as "a later run will pick these up" when in fact nothing
+        // will until the cause is resolved.
+        skipped.push({ path: move.from, reason: `destination ${move.folder} ${blocked}` });
         continue;
       }
       const res = await unlessAborted(ctx.signal, () =>
