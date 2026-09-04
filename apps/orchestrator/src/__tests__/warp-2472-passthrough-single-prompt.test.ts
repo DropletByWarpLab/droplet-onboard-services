@@ -37,6 +37,10 @@
  *   - make `PATCH /network/phone-home` answer 202 → the class-(c) count
  *     goes 1 → 2
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createServer as createHttpServer, type Server as NodeServer } from "node:http";
