@@ -167,10 +167,12 @@ function pairWhere(
   return { ncFileId, [SUBJECT_COLUMN[subjectType]]: subjectId };
 }
 
+function isPrismaCode(err: unknown, code: "P2002" | "P2003" | "P2025"): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
+}
+
 function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002"
-  );
+  return isPrismaCode(err, "P2002");
 }
 
 /**
@@ -295,6 +297,10 @@ export async function linkFileToRecord(
     });
     return linkToApi(row);
   } catch (err) {
+    // `assertSubjectExists` ran, but the subject can be deleted between that
+    // read and this write; the FK then fails as P2003. Same answer as the
+    // pre-check gives: the record is gone, 404 -- not a driver error as 500.
+    if (isPrismaCode(err, "P2003")) throw new Error(ENTITY_LINK_ERRORS.SUBJECT_NOT_FOUND);
     if (!isUniqueViolation(err)) throw err;
     await prisma.entityLink.updateMany({ where, data: mutable });
     const row = await prisma.entityLink.findFirst({ where });
@@ -381,10 +387,13 @@ export async function listLinksForFile(
   prisma: PrismaClient,
   viewer: SpaceAccessCaller,
   ncFileId: number,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; role?: EntityLinkRoleValue } = {},
 ): Promise<EntityLinkListing> {
   const where: Prisma.EntityLinkWhereInput = { ncFileId };
   if (!opts.includeArchived) where.isArchived = false;
+  // Same option set as the subject listing: a `role` the route accepts on
+  // both modes must filter on both, never silently apply to one.
+  if (opts.role) where.role = opts.role;
   const rows = await prisma.entityLink.findMany({
     where,
     orderBy: { createdAt: "desc" },
@@ -438,8 +447,16 @@ export async function updateLink(
     data.isArchived = patch.archived;
     data.archivedAt = patch.archived ? new Date() : null;
   }
-  const row = await prisma.entityLink.update({ where: { id }, data });
-  return linkToApi(row);
+  try {
+    const row = await prisma.entityLink.update({ where: { id }, data });
+    return linkToApi(row);
+  } catch (err) {
+    // Deleted between the visibility read above and this write (two requests
+    // racing on one link). Prisma's P2025 is the same fact the read would
+    // have reported a moment earlier; answer the same way.
+    if (isPrismaCode(err, "P2025")) throw new Error(ENTITY_LINK_ERRORS.LINK_NOT_FOUND);
+    throw err;
+  }
 }
 
 export async function deleteLink(
@@ -448,5 +465,10 @@ export async function deleteLink(
   id: string,
 ): Promise<void> {
   await getLink(prisma, viewer, id);
-  await prisma.entityLink.delete({ where: { id } });
+  try {
+    await prisma.entityLink.delete({ where: { id } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error(ENTITY_LINK_ERRORS.LINK_NOT_FOUND);
+    throw err;
+  }
 }

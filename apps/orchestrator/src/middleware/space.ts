@@ -448,3 +448,27 @@ export function requireSpaceAccess(
     }
   };
 }
+
+/**
+ * A resolved departmentId in the WIRE space vocabulary `/files?space=`
+ * understands: the seeded HOUSEHOLD department is addressed as the legacy
+ * `"shared"` literal there; every other department/team is `dept:<uuid>`.
+ * `routes/files.ts` translates `"shared"` back to the gate's `"household"` at
+ * its own boundary, so this stays on the UI side of that seam.
+ *
+ * This is the INVERSE of `parseSpaceValue` / `checkSpaceAccess`, which read a
+ * wire token into a department. Both directions live here on purpose: the
+ * HOUSEHOLD alias rule (WARP-1898) was duplicated verbatim in two routers, and a
+ * change to it had to be applied twice by hand with nothing enforcing the
+ * second copy.
+ */
+export async function departmentSpaceToken(
+  prisma: PrismaClient,
+  departmentId: string,
+): Promise<string> {
+  const dept = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: { kind: true },
+  });
+  return dept?.kind === "HOUSEHOLD" ? "shared" : `dept:${departmentId}`;
+}

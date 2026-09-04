@@ -425,6 +425,24 @@ describe.skipIf(!RUN)("EntityLink -- real Postgres (WARP-2585)", () => {
     expect(await prisma.entityLink.count({ where: { companyId: company.id } })).toBe(1);
   });
 
+  it("POST refuses a traversal path before any PROPFIND, and stores nothing (400)", async () => {
+    const alice = await mkUser("alice", "family");
+    const company = await mkCompany();
+    ncGetFileId.mockClear();
+
+    for (const filePath of ["../../owner/files/secret.pdf", "docs/%2e%2e/%2e%2e/owner/secret.pdf"]) {
+      const res = await request(buildApp(asActor(alice)))
+        .post("/api/crm/entity-links")
+        .send({ filePath, subjectType: "COMPANY", subjectId: company.id, role: "CONTRACT" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_request");
+    }
+    // The gate's step 1 never ran: a PROPFIND as the caller against a path
+    // outside their namespace is exactly what the check exists to prevent.
+    expect(ncGetFileId).not.toHaveBeenCalled();
+    expect(await prisma.entityLink.count({ where: { filePath: OURS } })).toBe(0);
+  });
+
   it("404s on a subject that does not exist, rather than surfacing an FK error", async () => {
     const alice = await mkUser("alice", "family");
     const res = await request(buildApp(asActor(alice)))

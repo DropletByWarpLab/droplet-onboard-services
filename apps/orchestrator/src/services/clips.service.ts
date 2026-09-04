@@ -174,7 +174,7 @@ function fromB64url(s: string): Buffer {
 /** Defense-in-depth path validation. Reject traversal markers (raw and
  *  percent-decoded) so a caller can't sign a token whose ncPath escapes the
  *  signing user's Nextcloud namespace. Mirrors PR #1's validateNcPath. */
-function assertSafeNcPath(ncPath: string): string {
+export function assertSafeNcPath(ncPath: string): string {
   if (typeof ncPath !== "string") throw new Error("nc_path must be a string");
   if (ncPath.length === 0) throw new Error("nc_path is required");
   if (ncPath.length > 4096) throw new Error("nc_path too long");

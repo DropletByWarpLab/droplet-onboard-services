@@ -47,7 +47,12 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole } from "../middleware/auth.js";
-import { checkSpaceAccess, type SpaceAccessCaller } from "../middleware/space.js";
+import {
+  checkSpaceAccess,
+  departmentSpaceToken,
+  type SpaceAccessCaller,
+} from "../middleware/space.js";
+import { assertSafeNcPath } from "../services/clips.service.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncGetFileId } from "../services/nextcloud.client.js";
@@ -137,7 +142,9 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
     const includeArchived = archived === "1" || archived === "true";
     try {
       if (nc_file_id !== undefined) {
-        res.json(await links.listLinksForFile(prisma, viewerOf(req), nc_file_id, { includeArchived }));
+        res.json(
+          await links.listLinksForFile(prisma, viewerOf(req), nc_file_id, { includeArchived, role }),
+        );
         return;
       }
       if (!subject_type || !subject_id) {
@@ -185,7 +192,18 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "nextcloud_session_required" });
         return;
       }
-      const filePath = `/${body.filePath}`.replace(/\/+/g, "/");
+      // The same traversal defence every other caller-supplied Nextcloud path
+      // gets (tools-core `validateNcPath`, clips `assertSafeNcPath`,
+      // cameras): `webdavUrl()` percent-encodes each segment but does not
+      // reject `..`, so without this a path could PROPFIND -- and then sign a
+      // link against -- a file outside the caller's own namespace.
+      let filePath: string;
+      try {
+        filePath = assertSafeNcPath(body.filePath).replace(/\/+/g, "/");
+      } catch (e) {
+        res.status(400).json({ error: "invalid_request", details: (e as Error).message });
+        return;
+      }
       const ncFileId = await ncGetFileId(token, ncUser, filePath);
       if (ncFileId === null) {
         res.status(404).json({ error: "file_not_found" });
@@ -211,7 +229,7 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
       // claim is the fallback for unregistered files and widens nothing.
       const fileSpace =
         departmentId !== null
-          ? await departmentSpaceId(prisma, departmentId)
+          ? await departmentSpaceToken(prisma, departmentId)
           : (body.space ?? "personal");
 
       const link = await links.linkFileToRecord(
@@ -261,18 +279,3 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
   return router;
 }
 
-/**
- * A resolved departmentId in the WIRE space vocabulary `/files?space=`
- * understands: the seeded HOUSEHOLD department is addressed as the legacy
- * `"shared"` literal there; every other department/team is `dept:<uuid>`.
- * Same shape as `routes/team-chat.ts:departmentSpaceId` -- duplicated rather
- * than exported across routers because it is four lines and the two callers
- * have no other seam in common.
- */
-async function departmentSpaceId(prisma: PrismaClient, departmentId: string): Promise<string> {
-  const dept = await prisma.department.findUnique({
-    where: { id: departmentId },
-    select: { kind: true },
-  });
-  return dept?.kind === "HOUSEHOLD" ? "shared" : `dept:${departmentId}`;
-}

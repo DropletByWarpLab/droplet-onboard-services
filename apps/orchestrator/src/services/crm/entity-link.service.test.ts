@@ -12,9 +12,12 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   ENTITY_LINK_ERRORS,
+  deleteLink,
   fileNameFromPath,
   filterVisibleLinks,
   linkFileToRecord,
+  listLinksForFile,
+  updateLink,
 } from "./entity-link.service.js";
 
 const INPUT = {
@@ -145,16 +148,18 @@ describe("linkFileToRecord", () => {
   });
 
   it("rethrows a non-P2002 create failure rather than swallowing it as an update", async () => {
+    // P2003 (the subject vanished) has its own 404 mapping now; anything the
+    // service does not recognise must still surface as itself.
     const prisma = prismaWith({
       entityLink: {
         updateMany: vi.fn(async () => ({ count: 0 })),
         create: vi.fn(async () => {
-          throw Object.assign(new Error("fk"), { code: "P2003" });
+          throw Object.assign(new Error("connection reset"), { code: "P1017" });
         }),
         findFirst: async () => null,
       },
     });
-    await expect(linkFileToRecord(prisma, INPUT, "u1")).rejects.toThrow("fk");
+    await expect(linkFileToRecord(prisma, INPUT, "u1")).rejects.toThrow("connection reset");
   });
 });
 
@@ -191,5 +196,98 @@ describe("filterVisibleLinks", () => {
     } as never;
     const out = await filterVisibleLinks(prisma, { id: "u1", role: "family" }, [link(1), link(2)]);
     expect(out.map((r) => r.ncFileId)).toEqual([1]);
+  });
+});
+
+// ── review findings (WARP-2585) ───────────────────────────────────────────
+const VIEWER = { id: "u1", role: "family" };
+const ROW = {
+  id: "l1",
+  ncFileId: 42,
+  fileName: "msa.pdf",
+  filePath: "/Contracts/acme/msa.pdf",
+  fileSpace: "personal",
+  subjectType: "COMPANY",
+  companyId: "co-1",
+  contactId: null,
+  dealId: null,
+  projectId: null,
+  workItemId: null,
+  role: "CONTRACT",
+  linkedBy: "MANUAL",
+  confidence: null,
+  note: null,
+  isArchived: false,
+  archivedAt: null,
+  createdById: "u1",
+  createdAt: new Date("2026-09-01T00:00:00Z"),
+  updatedAt: new Date("2026-09-01T00:00:00Z"),
+};
+
+describe("listLinksForFile", () => {
+  it("applies the role filter the route accepts, instead of silently returning every role", async () => {
+    const findMany = vi.fn(async (_args: { where: Record<string, unknown> }) => []);
+    const prisma = prismaWith({ entityLink: { findMany }, file: { findMany: async () => [] } });
+    await listLinksForFile(prisma, VIEWER, 42, { role: "CONTRACT" });
+    expect(findMany.mock.calls[0]?.[0].where).toMatchObject({ ncFileId: 42, role: "CONTRACT" });
+    await listLinksForFile(prisma, VIEWER, 42, {});
+    expect(findMany.mock.calls[1]?.[0].where).not.toHaveProperty("role");
+  });
+});
+
+describe("a link deleted between the visibility read and the write", () => {
+  const visible = {
+    entityLink: {
+      findUnique: async () => ROW,
+      update: async () => {
+        throw Object.assign(new Error("Record to update not found."), { code: "P2025" });
+      },
+      delete: async () => {
+        throw Object.assign(new Error("Record to delete does not exist."), { code: "P2025" });
+      },
+    },
+    // Unregistered file -> visible without a department query.
+    file: { findMany: async () => [] },
+  };
+
+  it("updateLink answers link_not_found, not a 500-shaped driver error", async () => {
+    await expect(updateLink(prismaWith(visible), VIEWER, "l1", { role: "INVOICE" })).rejects.toThrow(
+      ENTITY_LINK_ERRORS.LINK_NOT_FOUND,
+    );
+  });
+
+  it("deleteLink answers link_not_found the same way", async () => {
+    await expect(deleteLink(prismaWith(visible), VIEWER, "l1")).rejects.toThrow(
+      ENTITY_LINK_ERRORS.LINK_NOT_FOUND,
+    );
+  });
+
+  it("any other driver error still surfaces as itself", async () => {
+    const prisma = prismaWith({
+      entityLink: {
+        findUnique: async () => ROW,
+        update: async () => {
+          throw Object.assign(new Error("connection reset"), { code: "P1017" });
+        },
+      },
+      file: { findMany: async () => [] },
+    });
+    await expect(updateLink(prisma, VIEWER, "l1", { role: "INVOICE" })).rejects.toThrow("connection reset");
+  });
+});
+
+describe("a subject deleted between the existence check and the create", () => {
+  it("maps the FK violation (P2003) to subject_not_found instead of a 500", async () => {
+    const prisma = prismaWith({
+      entityLink: {
+        updateMany: async () => ({ count: 0 }),
+        create: async () => {
+          throw Object.assign(new Error("Foreign key constraint failed"), { code: "P2003" });
+        },
+      },
+    });
+    await expect(linkFileToRecord(prisma, { ...INPUT, role: "CONTRACT" }, "u1")).rejects.toThrow(
+      ENTITY_LINK_ERRORS.SUBJECT_NOT_FOUND,
+    );
   });
 });
