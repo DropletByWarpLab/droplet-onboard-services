@@ -57,6 +57,19 @@ function code(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
 }
 
+/**
+ * `*.test.ts(x)` anywhere under `src/`, plus EVERY file under
+ * `src/__tests__/` — not just `__tests__/helpers/`, which is what this used to
+ * collect. The clause that mattered most was the one missing: `setup.ts` is
+ * the `setupFiles` entry in `vitest.config.ts`, so it is loaded by every suite
+ * in the package and is the single highest-blast-radius place to reintroduce a
+ * cwd walk-up — and it matches neither `*.test.ts(x)` nor the helpers prefix.
+ * The header states the invariant over "no dashboard test"; enforce that, not
+ * a subset of it. `+ sep` so a future sibling named `__tests__something` is
+ * not swept in by a bare prefix match.
+ */
+const TESTS_DIR = join(SRC, "__tests__") + sep;
+
 function testFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -64,7 +77,7 @@ function testFiles(dir: string, out: string[] = []): string[] {
       testFiles(full, out);
       continue;
     }
-    if (/\.test\.tsx?$/.test(entry) || full.startsWith(join(SRC, "__tests__", "helpers"))) {
+    if (/\.test\.tsx?$/.test(entry) || full.startsWith(TESTS_DIR)) {
       out.push(full);
     }
   }
@@ -83,8 +96,9 @@ describe("test path resolution is anchored to the owning file", () => {
   });
 
   /**
-   * Mutation: put `process.cwd()` back into any dashboard test (or into a
-   * `__tests__/helpers/` module) → red, naming the file.
+   * Mutation: put `process.cwd()` back into any dashboard test, into a
+   * `__tests__/helpers/` module, or into `__tests__/setup.ts` → red, naming
+   * the file.
    */
   it("no test file resolves a path from the cwd", () => {
     const offenders = testFiles(SRC)
