@@ -379,13 +379,28 @@ async function bridgePoolCommand(
 }
 
 /**
+ * WARP-2098 — the data drives in a bridge snapshot: the ONE place the
+ * isUserDataDrive rule is applied to a snapshot.
+ *
+ * GET /storage (the headline totals) and GET /storage/drives (the list) both
+ * go through this. The two used to write the same filter expression out
+ * separately, which kept them agreeing only for as long as both copies were
+ * edited in lockstep (code review). Now a change to what counts as a data
+ * drive lands in one function and reaches both endpoints, or neither.
+ */
+function userDataDrivesOf(snap: BridgeDrivesSnapshot): BridgeDrive[] {
+  return (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk));
+}
+
+/**
  * WARP-2098 — totals over an ALREADY-FILTERED data-drive list.
  *
  * Takes the filtered array as its argument rather than the raw snapshot, on
  * purpose: the only way this figure can be wrong is by being computed one step
  * too early, so the function is given no way to reach the unfiltered list. Both
  * GET /storage and GET /storage/drives call it with the output of
- * isUserDataDrive, which is what keeps the two endpoints agreeing.
+ * userDataDrivesOf above — one filter, called once per endpoint — which is
+ * what keeps the two endpoints agreeing.
  *
  * Returns null for an empty list — "there is nothing to total", which a client
  * renders as an empty state. A zeroed object would read as "you have drives and
@@ -602,9 +617,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         const snap = await fetchBridgeDrives();
         // SAME filter as GET /storage/drives — the OS disk is excluded here by
         // construction, not by a second rule that could drift from the first.
-        totals = computeDataTotals(
-          (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk)),
-        );
+        totals = computeDataTotals(userDataDrivesOf(snap));
         system = snap.system_disk;
       } catch (err) {
         // The bridge is optional (OLED/display profile) and host-side. Without
@@ -727,7 +740,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // at the orchestrator boundary so the home-user only ever sees real data
       // drives. See isUserDataDrive() for the documented rule. Done BEFORE the
       // Drive-table join so we never query labels for junk.
-      const dataDrives = (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk));
+      const dataDrives = userDataDrivesOf(snap);
 
       // Single batched lookup — Drive table is tiny (one row per
       // physical drive the customer has named), so an unfiltered
