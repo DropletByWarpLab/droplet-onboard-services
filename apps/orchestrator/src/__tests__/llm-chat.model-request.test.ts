@@ -1,3 +1,7 @@
+// add-llm-tool:not-a-gate — reads TOOLS only to mock listTools() and to
+// compute the expected selection pool; it asserts on chat-request tool
+// SELECTION (WARP-2643), not on a site an agent edits when adding a tool.
+
 /**
  * WARP-2643 — the first route-to-model assertion for `/api/llm/chat`.
  *
