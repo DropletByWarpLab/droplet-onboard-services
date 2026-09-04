@@ -599,6 +599,11 @@ describe("entries are the union of the catalog and the response", () => {
       "Mailchimp",
       // WARP-2296 — Shopify, same story: one descriptor, one tile.
       "Shopify",
+      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, same story again: one
+      // descriptor each, one tile each, no hub code change.
+      "Brevo",
+      "Klaviyo",
+      "Pipedrive",
     ]);
   });
 
@@ -632,6 +637,11 @@ describe("entries are the union of the catalog and the response", () => {
       "HubSpot",
       "Mailchimp",
       "Shopify",
+      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, same story again: one
+      // descriptor each, one tile each, no hub code change.
+      "Brevo",
+      "Klaviyo",
+      "Pipedrive",
       "Generic Export",
       "M365",
     ]);
@@ -656,10 +666,10 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Eight catalog tiles (four original + the four WARP-2214 vendors) absorb
-    // four of the rows; the two the catalog knows nothing about each get their
-    // own.
-    expect(tiles(container)).toHaveLength(10);
+    // Eleven catalog tiles (four original, the four WARP-2214 vendors, and the
+    // three wave-1 vendors) absorb four of the rows; the two the catalog knows
+    // nothing about each get their own.
+    expect(tiles(container)).toHaveLength(13);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -669,6 +679,9 @@ describe("entries are the union of the catalog and the response", () => {
       "HubSpot",
       "Mailchimp",
       "Shopify",
+      "Brevo",
+      "Klaviyo",
+      "Pipedrive",
       "M365",
       "Something Nobody Wrote A Tile For",
     ]) {

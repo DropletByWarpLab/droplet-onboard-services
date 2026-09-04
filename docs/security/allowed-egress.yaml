@@ -1086,6 +1086,25 @@ entries:
     review_by: 2027-09-03
     code_refs: [services/erp-connector/src/pipedrive/connector.ts]
 
+  - id: ref-pipedrive-host-suffix
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination and NOT a wildcard grant. The box never dials
+      # pipedrive.com itself — the dialled host is <companyDomain>.pipedrive.com,
+      # per-connection, governed by pipedrive-api above and by
+      # assertSafePipedriveBaseUrl(). This entry exists because the connector
+      # carries ".pipedrive.com" as a whole-string literal for that guard to
+      # anchor on (PIPEDRIVE_API_HOST_SUFFIX), and the WARP-2467 bare-host scan
+      # rightly reads a bare name out of it. Exact name only, so a sampled
+      # tenant literal is still denied — which is the point.
+      hosts: [pipedrive.com]
+    purpose: the anchored host-suffix constant behind the Pipedrive exact-host guard, named in code as the guard's anchor — not a connection the box makes
+    ticket: WARP-2710
+    added: 2026-09-03
+    review_by: 2027-09-03
+    code_refs: [services/erp-connector/src/pipedrive/connector.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress
