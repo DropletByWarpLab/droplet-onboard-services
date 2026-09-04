@@ -1,7 +1,7 @@
 # Durable agent runs — design (WARP-2176)
 
-**Status:** Accepted for child 1 (WARP-2177); §6–§9 describe children 2–4 as
-scoped in their tickets and are updated as each lands.
+**Status:** As built — all four children (WARP-2177 … WARP-2180) are described
+as landed; §9 lists what the epic left out on purpose.
 **Tickets:** epic WARP-2176; WARP-2177 (this document's as-built half),
 WARP-2178 (tool-result summarisation), WARP-2179 (Tier-2 park-and-confirm),
 WARP-2180 (API, Activity view, scheduling, LLM tools).
@@ -319,18 +319,60 @@ ticket's own follow-up; it must not become a single "allow all"), and any
 allow-list of Tier-2 tools that may auto-confirm in a run (needs its own ADR
 and Romain's sign-off, as ADR-014 §③ required for desktop tools).
 
-## 8. API, Activity view, scheduling, LLM tools (WARP-2180) — scoped
+## 8. API, Activity view, scheduling, LLM tools (WARP-2180)
 
-`POST /api/agent-runs`, `GET /api/agent-runs`, `GET /api/agent-runs/:id`,
-`POST /api/agent-runs/:id/cancel`, `POST /api/agent-runs/:id/confirm`, all
-owner/admin-gated via `requireRoleOrMcpService`; a user sees only their own
-runs. Recurring runs reuse `ToolSchedule`'s RRULE vocabulary on
-`cronRuntime.scheduleInterval` with a distinct lock key — no second clock.
-Runs appear under **Activity**, grouped by `refs.agentRunId`, not as a nav
-item. `start_agent_run` (Tier-2 — it spends compute unattended) and
-`list_agent_runs` (Tier-1) in `packages/tools-core`, in a `DOMAIN_GROUPS`
-entry so domain selection can find them; a run whose goal is to start runs is
-refused explicitly.
+**API** — `apps/orchestrator/src/routes/agent-runs.ts`: `POST /api/agent-runs`,
+`GET /api/agent-runs` (status filter, cursor = the tail row's `createdAt`),
+`GET /api/agent-runs/:id` (with the trace and the parked call's PHI-free
+summary), `POST /api/agent-runs/:id/cancel`, `POST /api/agent-runs/:id/confirm`
+(`{ decision: "approved" | "denied" }` → `decideAgentRun`), and
+`/api/agent-runs/schedules` (GET / POST / DELETE). Every route is
+`requireRoleOrMcpService("owner", "admin")`. The mcp principal never acts as
+itself: it names the person it acts for (`onBehalfOf`, or the
+`X-Nextcloud-User` header the mcp-server's orchestrator client already
+stamps), that person's role is what is checked, and the run is attributed
+to them — so a `family` member cannot start a run from chat and an `admin`
+who can gets a run that reaches only what they reach (no privilege
+laundering by delegation; route test). A person sees only their own runs;
+another's is a 404, a wrong role a 403.
+
+**Scheduling** — `AgentRunSchedule` (RRULE + IANA timezone, the
+`ToolSchedule` / `SceneSchedule` vocabulary) and
+`agent-run-schedule-ticker.service.ts` on `cronRuntime.scheduleInterval`
+with lock key `droplet:agent-run-schedule-ticker`. A due row **enqueues** a
+run (never executes one); the worker claims it and re-resolves the creator's
+reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
+disables the schedule with a `system` row. No second clock.
+
+**Completion** — a terminal status notifies the owner over the same
+`droplet/notifications/<username>` topic the park uses, with the result
+summary (or the error).
+
+**Dashboard** — `AgentRunsPanel` on `/admin/audit`, the signed activity log,
+which is the Activity surface (`/admin/claude-activity` under the "Activity"
+nav label is the unrelated engineer feed). Not a nav item. List on the left
+with state pills; the selected run on the right: goal, state, step count,
+result or error, the trace, and — when parked — the confirm prompt with
+provenance: the run's goal, the tool, the PHI-free argument summary, when it
+parked, and "Nothing has been done yet". Approve / Deny post to the confirm
+route; Cancel to the cancel route. `?run=<id>` deep-links a run. One
+component, two data sources: a finished run reads its trace once; a live run
+is re-read every three seconds until it settles — the persisted trace *is*
+the progress, since a background run has no browser attached. The grid is
+one column by default and gains a second at `md:`, every cell `min-w-0`, so
+the phone viewport wraps instead of scrolling sideways.
+
+**LLM tools** — `start_agent_run` (Tier-2: it spends compute unattended;
+the interceptor challenges it and chat approves it, so the very first thing
+a chat-started run does is prompt — measured before it is softened, and
+softened with an ADR, not a default flip) and `list_agent_runs` (Tier-1), in
+their own `agent_runs` domain with a `DOMAIN_RULES` entry so selection finds
+the pair on a "do this in the background" turn. Through every add-llm-tool
+site: handler, registry, catalog + home copy, `TOOL_ROUTES`, `INVENTORY.md`,
+`registry.test.ts`, the domain rule. **A run may not start a run:** the
+worker keeps `start_agent_run` out of every run's pool (structural) and the
+handler refuses when `ctx.agentRunId` is set (the mcp-server maps the
+stdio-trusted `_meta.agentRunId` onto the context for exactly this check).
 
 ## 9. Out of scope for the epic
 
