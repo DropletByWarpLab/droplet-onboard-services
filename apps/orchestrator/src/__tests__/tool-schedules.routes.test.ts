@@ -588,3 +588,61 @@ describe("WARP-2665 — ToolSchedule finally has a write path", () => {
     expect(res.status).toBe(403);
   });
 });
+
+// ── the gates read the DERIVED classification, not the column alone ──
+describe("WARP-2665 — run-now and scheduling trust the steps, not a stale column", () => {
+  const RRULE = "FREQ=DAILY;BYHOUR=9;BYMINUTE=0";
+
+  /** Stored before WARP-2665: the column says false, the steps say otherwise. */
+  const legacyWriteSpec = () =>
+    mkSpec({
+      slug: "legacy-notify",
+      writes: false,
+      reversible: false,
+      steps: [
+        {
+          id: "spec-seed-s0",
+          specId: "spec-seed",
+          idx: 0,
+          kind: "call",
+          args: { tool: WRITE_TOOL, args: {} },
+        },
+      ],
+    });
+
+  it("run-now 409s an unconfirmed legacy writes:false spec whose steps write", async () => {
+    const prisma = createPrismaMock([legacyWriteSpec()]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/legacy-notify/runs")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("confirmation_required");
+    // The refusal reports what the gate decided, and where it got it from.
+    expect(res.body.writes).toBe(true);
+    expect(res.body.writesSource).toBe("derived");
+  });
+
+  it("run-now still names a stored writes:true as stored", async () => {
+    const prisma = createPrismaMock([
+      mkSpec({ slug: "declared", writes: true, reversible: false }),
+    ]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/declared/runs")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.writesSource).toBe("stored");
+  });
+
+  it("refuses to schedule a spec that is not live, the way run-now refuses to run one", async () => {
+    for (const status of ["draft", "suggested"] as const) {
+      const prisma = createPrismaMock([mkSpec({ slug: `not-live-${status}`, status })]);
+      const res = await request(buildApp(prisma, mkUser("owner")))
+        .post(`/api/tools/not-live-${status}/schedules`)
+        .send({ rrule: RRULE });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Only live specs can be scheduled");
+      expect(res.body.status).toBe(status);
+      expect(prisma.schedules.size).toBe(0);
+    }
+  });
+});

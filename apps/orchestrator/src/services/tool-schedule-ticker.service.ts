@@ -4,17 +4,17 @@
  * Every 60s scans ToolSchedule rows whose `nextFireAt <= now()` and:
  *   1. Resolves the parent spec (must be status=live).
  *   2. Safety gate — when the spec WRITES and is not `reversible` we DO NOT
- *      auto-fire. "Writes" is `spec.writes || derived-from-steps`, never the
- *      stored column alone: rows authored before WARP-2665 were never checked
- *      against their steps, so the column can say false while the spec calls a
- *      write tool. Deriving here cannot go stale (see the note at the gate).
- *      auto-fire; the run is skipped, an ActivityRow is emitted, and
- *      `nextFireAt` still advances so the schedule doesn't loop. This
- *      keeps "destructive + unreliable to undo" specs from running
- *      unattended; a future pending-confirmation queue can resurface
- *      them. Per the §7 contract: "write-tier specs that aren't
- *      `reversible:true && !writes` emit a confirm_action card and
- *      pause until accept" — v1 pause = skip + audit + advance.
+ *      auto-fire: the run is skipped, an ActivityRow is emitted, and
+ *      `nextFireAt` still advances so the schedule doesn't loop. "Writes"
+ *      is `spec.writes || derived-from-steps`, never the stored column
+ *      alone — rows authored before WARP-2665 were never checked against
+ *      their steps, so the column can say false while the spec calls a
+ *      write tool, and deriving here cannot go stale (see the note at the
+ *      gate). This keeps "destructive + unreliable to undo" specs from
+ *      running unattended; a future pending-confirmation queue can
+ *      resurface them. Per the §7 contract: "write-tier specs that aren't
+ *      `reversible:true && !writes` emit a confirm_action card and pause
+ *      until accept" — v1 pause = skip + audit + advance.
  *   3. ACCESS gate (WARP-1580, WARP-1621) — resolves the spec's ATTRIBUTED
  *      principal and skips the fire when that identity may not invoke the
  *      spec's tools, on EITHER axis: the ADR-004 write tier or its §3

@@ -35,6 +35,7 @@ import {
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   resolveToolAccessScope,
   writeToolsIn,
 } from "../services/tool-access.service.js";
@@ -544,29 +545,17 @@ export function createToolsRouter(
               description: parsed.data.description,
               share: parsed.data.share,
               safety: parsed.data.safety,
-              // WARP-2665 — a PATCH may only RAISE the write classification
-              // implicitly; lowering it takes an explicit `writes: false`,
-              // which the reconcile above has already checked against the
-              // steps. `existing.writes || reconciled.writes` is that rule in
-              // one expression: the derivation can add a write flag, and only
-              // a deliberate declaration can take one away. That keeps a
-              // conservative `writes: true` an author set by hand from being
-              // cleared by an unrelated description edit (the flag can only
-              // add a confirmation and hold the scheduler off).
-              //
-              // It is written WITHOUT a `parsed.data.steps` arm on purpose.
-              // The previous shape skipped the column entirely (`undefined`
-              // is a Prisma skip) on a body carrying neither `steps` nor
-              // `writes` — and the body that promotes a mined suggestion is
-              // exactly that: `{"status":"live"}`. The WARP-464 miner writes
-              // its suggestions with `writes: false`, so such a spec went
-              // live still claiming it does not write, and the ticker's
-              // `writes && !reversible` gate, reading that stored value,
-              // scheduled it unattended. `reconciled.writes` was already
-              // derived from `existing.steps` a few lines up; persist it.
-              writes: parsed.data.writes !== undefined
-                ? reconciled.writes
-                : existing.writes || reconciled.writes,
+              // WARP-2665 — an explicit `writes` wins (the reconcile above
+              // has already refused one the steps contradict); otherwise a
+              // PATCH may only RAISE the flag: `existing.writes ||
+              // reconciled.writes` lets the derivation add a write flag and
+              // never clears a conservative `writes: true` an author set by
+              // hand. Always persisted, never a Prisma skip — the body that
+              // promotes a mined suggestion is a bare `{"status":"live"}`,
+              // and the WARP-464 miner used to mint those rows `writes:
+              // false`, so a skip here published a spec whose own steps
+              // contradicted the flag the ticker's gate trusts.
+              writes: parsed.data.writes ?? (existing.writes || reconciled.writes),
               reversible: parsed.data.reversible,
               status: parsed.data.status as any,
               version: { increment: 1 },
@@ -622,7 +611,16 @@ export function createToolsRouter(
         // we refuse with 409 + a confirmation token shape the dashboard
         // can re-POST. This keeps imperative run-now in lockstep with
         // the C2 scheduler's `safeRun` skip-and-warn posture.
-        if (spec.writes && !spec.reversible) {
+        //
+        // WARP-2665 — "writes" is the stored column OR what the steps call,
+        // the same derivation the ticker's gate reads. A spec stored before
+        // the derivation existed (or seeded outside the routes) can carry
+        // `writes: false` while its steps call a write tool; trusting the
+        // column alone here would let a person fire that spec from the Live
+        // tab without the confirmation the ticker would have withheld.
+        const effectiveWrites =
+          spec.writes || hasWriteTool(plannedToolNames(spec.steps));
+        if (effectiveWrites && !spec.reversible) {
           const confirmed =
             String(req.query.confirm ?? "").toLowerCase() === "true";
           if (!confirmed) {
@@ -632,7 +630,8 @@ export function createToolsRouter(
                 "this spec writes and is not reversible — re-POST with ?confirm=true",
               specId: spec.id,
               slug: spec.slug,
-              writes: spec.writes,
+              writes: effectiveWrites,
+              writesSource: spec.writes ? "stored" : "derived",
               reversible: spec.reversible,
             });
             return;
@@ -867,6 +866,18 @@ export function createToolsRouter(
         }
         const found = await resolveSchedule(req, res);
         if (!found) return;
+
+        // Same rule as run-now: a draft or a suggestion cannot be put on a
+        // timer. The ticker already skips a non-live spec, but silently —
+        // an operator who scheduled a draft would otherwise wait for a fire
+        // that never comes with nothing telling them why.
+        if (found.spec.status !== "live") {
+          res.status(400).json({
+            error: "Only live specs can be scheduled",
+            status: found.spec.status,
+          });
+          return;
+        }
 
         const timezone = parsed.data.timezone ?? "UTC";
         const nextFireAt = firstFire(parsed.data.rrule, timezone);
