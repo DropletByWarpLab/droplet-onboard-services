@@ -71,7 +71,8 @@ export const SESSION_FACTORIES: Readonly<Record<string, SessionFactory>> =
       }),
   });
 
-/** The ids {@link SESSION_FACTORIES} serves, sorted. Rendered by `/health`. */
+/** The ids {@link SESSION_FACTORIES} serves, sorted. Rendered by the
+ *  bearer-gated `GET /sessions`, and by the `UNKNOWN_SERVER_ID` refusal. */
 export function knownServerIds(
   factories: Readonly<Record<string, SessionFactory>> = SESSION_FACTORIES,
 ): string[] {

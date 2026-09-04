@@ -165,7 +165,98 @@ describe("bridge bearer (WARP-2627)", () => {
     const h = harness({ serviceToken: "" });
     const res = await handleBridgeRequest({ method: "GET", path: "/health" }, h.opts);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "ok", knownServers: ["atlassian"] });
+    expect(res.body).toEqual({ status: "ok" });
+  });
+});
+
+/**
+ * The exempt route answers a CONSTANT, and everything that describes this box
+ * is behind the bearer.
+ *
+ * `/health` is reachable by every container on the compose bridge network —
+ * Nextcloud, Frigate, Redis, mosquitto and any third-party image among them —
+ * with no credential at all, because the compose healthcheck has no secret to
+ * present. So whatever it returns is PUBLIC to the box's own service mesh.
+ *
+ * It used to return `knownServerIds()` and `store.healthAll()`, which is the
+ * WARP-2111 shape one layer down: an unauthenticated reader learned which
+ * vendors this box knows, whether the customer has connected Atlassian, and —
+ * from `state`/`reason`/`consecutiveFailures` — whether their credential is
+ * being REJECTED. None of that is liveness.
+ */
+describe("unauthenticated /health leaks nothing about this box (WARP-2300)", () => {
+  it("carries neither knownServers nor sessions, open session or not", async () => {
+    const h = harness();
+    await openSession(h);
+    const res = await handleBridgeRequest({ method: "GET", path: "/health" }, h.opts);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "ok" });
+    expect(res.body).not.toHaveProperty("knownServers");
+    expect(res.body).not.toHaveProperty("sessions");
+    // Nothing about the vendor, the session state or the credential verdict
+    // survives into the unauthenticated body.
+    expect(JSON.stringify(res.body)).not.toContain("atlassian");
+    expect(JSON.stringify(res.body)).not.toContain("ready");
+  });
+
+  it("still answers 200 with no token provisioned, so the probe keeps working", async () => {
+    const h = harness({ serviceToken: "" });
+    const res = await handleBridgeRequest({ method: "GET", path: "/health" }, h.opts);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "ok" });
+  });
+});
+
+describe("GET /sessions — the inventory, behind the bearer (WARP-2300)", () => {
+  it("serves knownServers and every open session's health to an authorised caller", async () => {
+    const h = harness();
+    await openSession(h);
+    const res = await handleBridgeRequest(req({ method: "GET", path: "/sessions" }), h.opts);
+    expect(res.status).toBe(200);
+    const body = res.body as { knownServers: string[]; sessions: { serverId: string; state: string }[] };
+    expect(body.knownServers).toEqual(["atlassian"]);
+    expect(body.sessions).toHaveLength(1);
+    expect(body.sessions[0]!.serverId).toBe("atlassian");
+    expect(body.sessions[0]!.state).toBe("ready");
+  });
+
+  it("serves the inventory with no session open — an empty list, not a 409", async () => {
+    const h = harness();
+    const res = await handleBridgeRequest(req({ method: "GET", path: "/sessions" }), h.opts);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ knownServers: ["atlassian"], sessions: [] });
+  });
+
+  it("401s an unauthenticated reader — this is the route the leak moved to", async () => {
+    const h = harness();
+    await openSession(h);
+    const res = await handleBridgeRequest({ method: "GET", path: "/sessions" }, h.opts);
+    expect(res.status).toBe(401);
+    expect((res.body as { error: { code: string } }).error.code).toBe("UNAUTHORIZED");
+    expect(JSON.stringify(res.body)).not.toContain("atlassian");
+  });
+
+  it("401s a wrong bearer", async () => {
+    const h = harness();
+    const res = await handleBridgeRequest(
+      req({ method: "GET", path: "/sessions", authorization: "Bearer wrong" }),
+      h.opts,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("503s when no token is provisioned — fails CLOSED like every other route", async () => {
+    const h = harness({ serviceToken: "" });
+    const res = await handleBridgeRequest(req({ method: "GET", path: "/sessions" }), h.opts);
+    expect(res.status).toBe(503);
+    expect((res.body as { error: { code: string } }).error.code).toBe("AUTH_NOT_CONFIGURED");
+  });
+
+  it("405s a write method rather than routing it to the close handler", async () => {
+    const h = harness();
+    const res = await handleBridgeRequest(req({ method: "DELETE", path: "/sessions" }), h.opts);
+    expect(res.status).toBe(405);
+    expect((res.body as { error: { code: string } }).error.code).toBe("METHOD_NOT_ALLOWED");
   });
 });
 
