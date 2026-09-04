@@ -8249,6 +8249,24 @@ export interface SaasCredentialView {
   /** Non-secret field values only. */
   values: Record<string, string | number>;
   updatedAt: string | null;
+  /**
+   * WARP-2650 — where the customer reads how to mint this credential.
+   *
+   * OPTIONAL for the same reason `credentialsPurged` is: this interface mirrors
+   * a JSON payload rather than being one, so a box that predates the field must
+   * render as "no guide declared" rather than as an empty link.
+   */
+  setupGuideHref?: string | null;
+  /**
+   * WARP-2650 — the credential's expiry verdict, for a provider whose token has
+   * a hard stop. `null` (or absent) means the provider declares no expiry
+   * concept, which is NOT the same as `EXPIRY_UNKNOWN` — that one means it does
+   * and no date was recorded, so no warning can ever fire.
+   */
+  credentialExpiry?: {
+    status: "VALID" | "EXPIRING_SOON" | "EXPIRED" | "EXPIRY_UNKNOWN";
+    daysRemaining: number | null;
+  } | null;
 }
 
 export async function fetchSaasCredentials(): Promise<SaasCredentialView[]> {

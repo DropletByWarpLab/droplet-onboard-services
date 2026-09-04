@@ -92,6 +92,7 @@ jobs:
       fips-suites: ${{ steps.plan.outputs.fips-suites }}
       hadolint-suites: ${{ steps.plan.outputs.hadolint-suites }}
       ship-check-suites: ${{ steps.plan.outputs.ship-check-suites }}
+      mcp-bridge-suites: ${{ steps.plan.outputs.mcp-bridge-suites }}
     steps:
       - uses: actions/checkout@v7
 
@@ -314,6 +315,17 @@ jobs:
             ship-check:
               - "scripts/test/**"
               - ".claude/skills/preflight/**"
+            # WARP-2398 — the OUTBOUND MCP session component (ADR-043 §5),
+            # the one workspace allowed to construct an MCP client transport.
+            # Its own leg rather than a step on the node matrix because it is
+            # the only node workspace with no Prisma, no dashboard and no
+            # `@droplet/*` dependency: it needs a bare `npm ci` and nothing
+            # else, so folding it into the node leg would make it wait on
+            # build steps it does not use. Scoped to its own directory — a PR
+            # that does not touch it runs no extra job, so this adds ~0 to PR
+            # spend and one ~2-minute job per main push (docs/ci-cost-budget.md).
+            mcp-bridge:
+              - "services/mcp-bridge/**"
 
       - name: Decide which legs run
         id: plan
@@ -331,6 +343,7 @@ jobs:
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'
           ALL_SHIP_CHECK: '["ship-check"]'
+          ALL_MCP_BRIDGE: '["mcp-bridge"]'
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
@@ -341,6 +354,7 @@ jobs:
             fips=$(jq -c . <<<"$ALL_FIPS")
             hadolint=$(jq -c . <<<"$ALL_HADOLINT")
             ship_check=$(jq -c . <<<"$ALL_SHIP_CHECK")
+            mcp_bridge=$(jq -c . <<<"$ALL_MCP_BRIDGE")
           else
             if jq -e 'index("node-global")' <<<"$CHANGED" >/dev/null; then
               node=$(jq -c . <<<"$ALL_NODE")
@@ -374,6 +388,11 @@ jobs:
             else
               ship_check="[]"
             fi
+            if jq -e 'index("mcp-bridge")' <<<"$CHANGED" >/dev/null; then
+              mcp_bridge=$(jq -c . <<<"$ALL_MCP_BRIDGE")
+            else
+              mcp_bridge="[]"
+            fi
           fi
           # Attach the per-service matrix extras (sysdeps / reqs / extra_pip /
           # needs_pythonpath) so the python job's include matrix keeps the
@@ -399,6 +418,7 @@ jobs:
             echo "fips-suites=$fips"
             echo "hadolint-suites=$hadolint"
             echo "ship-check-suites=$ship_check"
+            echo "mcp-bridge-suites=$mcp_bridge"
           } >> "$GITHUB_OUTPUT"
           echo "node legs: $node"
           echo "python legs: $python"
@@ -406,6 +426,7 @@ jobs:
           echo "fips legs: $fips"
           echo "hadolint legs: $hadolint"
           echo "ship-check legs: $ship_check"
+          echo "mcp-bridge legs: $mcp_bridge"
 
   node:
     name: node / ${{ matrix.suite }}
@@ -862,6 +883,55 @@ jobs:
       - name: Run factory-reset purge-scope unit tests
         run: bash tests/factory-reset-purge-scope.test.sh
 
+  # WARP-2398 / ADR-043 §5 — the OUTBOUND MCP session component.
+  #
+  # `services/mcp-bridge` is the ONLY workspace permitted to construct an MCP
+  # client transport: ADR-043 §5 states that seeing `StreamableHTTPClientTransport`
+  # or `SSEClientTransport` in orchestrator product code is a breach. Its own
+  # leg rather than a step on the node matrix because it is the only node
+  # workspace needing neither Prisma nor any `@droplet/*` dist — a bare
+  # `npm ci` is the whole setup, so folding it in would make it wait on build
+  # steps it does not use.
+  #
+  # `build` runs alongside `test` deliberately: vitest transforms via esbuild
+  # and never typechecks, so a signature break against the pinned SDK
+  # (`^1.30.0`, docs/mcp-client-sdk-version.md) would otherwise reach `stage`
+  # under a green suite. That is the WARP-1011 class, in the one workspace
+  # where the counterparty is a vendor's server rather than our own code.
+  #
+  # COST (docs/ci-cost-budget.md): scoped to `services/mcp-bridge/**`, a path
+  # that did not exist before this PR, so no PR that previously ran zero legs
+  # now runs one — PR-side delta is 0. Main pushes run the full leg list, so
+  # this adds ONE ~2-minute ubuntu job per merge: at ~60 merges/month that is
+  # ~120 minutes/month, well under the 2,000-minute callout threshold. It runs
+  # no Docker build and no matrix.
+  mcp-bridge:
+    name: mcp-bridge / outbound MCP session
+    needs: detect
+    # Same empty-list guard as the node/python/storage jobs above.
+    if: needs.detect.outputs.mcp-bridge-suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      # Typecheck (vitest does not) — see the leg comment above.
+      - name: Build @droplet/mcp-bridge
+        run: npm run -w @droplet/mcp-bridge build
+
+      - name: Test @droplet/mcp-bridge
+        run: npm run -w @droplet/mcp-bridge test
+
   # WARP-229 FIPS 140-3 static SOURCE lint (scripts/test-fips.sh), moved here
   # from test-fips.yml under WARP-2481. It lived in its own path-filtered
   # workflow, which meant the job went red and the merge went through anyway:
@@ -1189,7 +1259,7 @@ jobs:
     name: ci-summary
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint, shipcheck]
+    needs: [detect, node, python, storage, fips, semgrep, gitleaks, hadolint, shipcheck, mcp-bridge]
     if: always()
     steps:
       - name: Report leg results
@@ -1214,6 +1284,8 @@ jobs:
           HADOLINT_SUITES: ${{ needs.detect.outputs.hadolint-suites }}
           SHIPCHECK_RESULT: ${{ needs.shipcheck.result }}
           SHIPCHECK_SUITES: ${{ needs.detect.outputs.ship-check-suites }}
+          MCP_BRIDGE_RESULT: ${{ needs['mcp-bridge'].result }}
+          MCP_BRIDGE_SUITES: ${{ needs.detect.outputs.mcp-bridge-suites }}
         run: |
           set -eu
           fail=0
@@ -1249,5 +1321,6 @@ jobs:
           check_leg gitleaks "$GITLEAKS_RESULT" '["gitleaks"]'
           check_leg hadolint "$HADOLINT_RESULT" "$HADOLINT_SUITES"
           check_leg ship-check "$SHIPCHECK_RESULT" "$SHIPCHECK_SUITES"
+          check_leg mcp-bridge "$MCP_BRIDGE_RESULT" "$MCP_BRIDGE_SUITES"
           [ "$fail" -eq 0 ] || exit 1
           echo "ci-summary — every triggered leg succeeded"

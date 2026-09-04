@@ -1018,6 +1018,35 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
+  // REMOTE_MCP_SERVER_ALLOWLIST — WARP-2418 / ADR-043. Comma-separated ids of
+  // the OUTBOUND MCP servers an operator has enabled on this box (e.g.
+  // "atlassian"). EMPTY BY DEFAULT and empty means "no remote server may
+  // attach", so a box that has never been configured advertises nothing
+  // remote and can dial nothing remote.
+  //
+  // Empty is not merely the safe default, it is the only correct one today:
+  // ADR-043's Consequences record that the full LOCAL registry already
+  // exceeds the shipping context window, so an unopted-in remote catalog
+  // would degrade every turn (per-turn selection, WARP-2348, is what gates
+  // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
+  // OffLanChannelKey in ADR-043 §4, which is a schema change and a separate
+  // ticket. This variable says which servers MAY exist; the channel says
+  // whether any session may run.
+  REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
+
+  // MCP_BRIDGE_URL — WARP-2627 / ADR-043 §5. Compose-internal base URL of the
+  // services/mcp-bridge container, which is the ONLY component allowed to open
+  // a session to a remote MCP server. The orchestrator reaches it through the
+  // gate -> audit front in `remote-mcp-gateway.service.ts`, the same shape
+  // `routes/web.ts` puts in front of web-fetch.
+  MCP_BRIDGE_URL: z.string().default("http://mcp-bridge:9096"),
+  // MCP_BRIDGE_SERVICE_TOKEN — outbound bearer for that hop. Minted by
+  // scripts/lib/secrets.sh (generate_env on a fresh install, migrate_env
+  // backfill on an existing box). When EMPTY the gateway refuses WITHOUT
+  // dialling and mcp-bridge 503s every non-/health route — both ends fail
+  // closed, the doc-render posture.
+  MCP_BRIDGE_SERVICE_TOKEN: z.string().default(""),
+
   // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
   // presents on POST /api/email/_ingest/* and PATCH
   // /api/email/_ingest/drafts/:id. authMiddleware's matchServiceToken

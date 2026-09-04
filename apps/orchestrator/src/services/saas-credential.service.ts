@@ -46,13 +46,16 @@
  *     a typo'd account id without retyping a key they may not still have.
  */
 import {
+  credentialExpiryVerdict,
   credentialFieldsFor,
   credentialSecretFieldsFor,
   parseProviderConfigWith,
   providerConfigVariantId,
   providerDescriptor,
+  setupGuideHrefFor,
   validateCredentialFieldValue,
   CREDENTIAL_VARIANT_FIELD,
+  type CredentialExpiryVerdict,
   type CredentialFieldDef,
   type ProviderDescriptor,
   // WARP-2639 — the ONE `IntegrationStatus`, imported under the name this
@@ -201,6 +204,34 @@ export interface SaasCredentialView {
   /** Current values of the NON-secret fields only. Secrets never appear here. */
   values: Record<string, string | number>;
   updatedAt: string | null;
+  /**
+   * WARP-2650 — where the customer reads how to mint this credential, or
+   * `null` when the provider declares none.
+   *
+   * This page is the one place in the product where somebody is asked to go to
+   * a vendor console and come back with a value, and it was the only surface
+   * rendering a descriptor that could not link the guide the descriptor already
+   * declares — the hub tile and the connect wizard both do (WARP-2342), and an
+   * `mcp` track has neither of those. Read through `setupGuideHrefFor` so all
+   * three surfaces resolve it the same way.
+   */
+  setupGuideHref: string | null;
+  /**
+   * WARP-2650 — the credential's expiry verdict, or `null` when the provider
+   * declares no {@link CredentialExpiryPolicy}.
+   *
+   * `null` is "this credential has no expiry concept" and is a different answer
+   * from `{status: "EXPIRY_UNKNOWN"}`, which is "it does, and no date was
+   * recorded, so no warning can ever fire". Collapsing the two would put every
+   * Stripe connection in a warning state it can never leave.
+   *
+   * Carried ALONGSIDE `state` rather than folded into it: `IntegrationStatus`
+   * has no EXPIRING_SOON member (WARP-2353 modelled the window read-time only,
+   * and adding an enum value is a migration on its own ticket), and a token
+   * twelve days from a hard stop is genuinely CONNECTED *and* genuinely needs
+   * action. Two facts, two fields — never one field guessing at both.
+   */
+  credentialExpiry: CredentialExpiryVerdict | null;
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The
@@ -358,6 +389,9 @@ export function saasConnectionState(
 export function buildCredentialView(
   descriptor: ProviderDescriptor,
   row: SaasConnectionRow | null,
+  /** Injected so the expiry verdict is testable without freezing a clock
+   *  process-wide. Defaults to now, like every other read of the time here. */
+  now: Date = new Date(),
 ): SaasCredentialView {
   const storedSecrets: Record<string, string> = (() => {
     if (!row?.providerTokensEnc) return {};
@@ -454,6 +488,30 @@ export function buildCredentialView(
     fields,
     values,
     updatedAt: row?.updatedAt ? row.updatedAt.toISOString() : null,
+    setupGuideHref: setupGuideHrefFor(descriptor) ?? null,
+    // Read off the SAME parsed config the form's `values` come from, so the
+    // date an admin can see and the date the warning is computed from are one
+    // value. A second read of `row.providerConfig` here could disagree with the
+    // form after a failed parse.
+    //
+    // GATED ON A STORED CREDENTIAL. `credentialExpiryVerdict` is handed a
+    // descriptor and a config, so it cannot tell "connected, no date recorded"
+    // from "never connected" — both read EXPIRY_UNKNOWN. The dashboard renders
+    // that as "No expiry date recorded — Droplet can't warn you before this
+    // credential stops working", which on a provider nobody has connected is a
+    // warning about a thing that does not exist, and it would sit on the card
+    // permanently with no action that clears it.
+    //
+    // "No credential stored" and "credential stored, no expiry date" are
+    // different states with different remedies, and only the second is a
+    // warning. WARP-2353's `atlassian-token-expiry.ts` held that rule and had
+    // no production callers; this is where it belongs, on the path that ships.
+    // The first state is already answered by `state` and `hasCredentials` on
+    // this same payload, so `null` here is not silence — it is the expiry
+    // question not applying yet.
+    credentialExpiry: hasCredentials
+      ? (credentialExpiryVerdict(descriptor, config, now) ?? null)
+      : null,
   };
 }
 
@@ -664,8 +722,36 @@ export function resolveCredentialUpdate(
  *
  * Explicit-enum, per the house rule: the status is a value we choose and write,
  * never something a later reader infers from whether a column is null.
+ *
+ * ## Why the `mcp` track lands on CONNECTED and every other track does not
+ *
+ * PROVISIONING means "a credential is present and the connection is being
+ * established", and the enum's own docstring adds the rule that makes it
+ * honest: *"A row may NOT rest here after a completed probe."* For a `cloud` or
+ * `lan` track something completes that probe — `connect()` dials the vendor and
+ * writes the verdict.
+ *
+ * For an `mcp` track nothing does, and nothing CAN, because the probe would be
+ * an outbound MCP session and ADR-043 §5 puts that behind
+ * `remote-mcp-gateway.service.ts`, whose third gate is `status === "CONNECTED"`
+ * on this very row. A probe-before-CONNECTED design is therefore circular: the
+ * row would rest at PROVISIONING forever, and a status no writer can advance is
+ * worse than a wrong one — it is a state the product can never leave, which the
+ * hub and this page would both render as "checking the connection" for the life
+ * of the box.
+ *
+ * So the paste IS the connection for this track, and CONNECTED says exactly
+ * that: the customer supplied a complete credential set. The first outbound
+ * call is the probe, and its failure is not swallowed — it lands as the
+ * bridge's explicit `auth_rejected` session state plus a `provider_error` audit
+ * row, and `attachAtlassianRemote` refuses rather than half-attaching. That is
+ * a weaker claim than a cloud track's CONNECTED, and it is written down here
+ * rather than left for a reader to assume.
+ *
+ * The DISABLED and no-credential rules are unchanged and apply to every track.
  */
 export function statusAfterCredentialUpdate(
+  descriptor: ProviderDescriptor,
   current: string,
   hasSecret: boolean,
 ): IntegrationStatusName {
@@ -673,6 +759,7 @@ export function statusAfterCredentialUpdate(
   // A row that was DISABLED stays DISABLED — pasting a key is not the same
   // gesture as turning the connector back on.
   if (current === "DISABLED") return "DISABLED";
+  if (descriptor.track === "mcp") return "CONNECTED";
   // A fresh credential deserves a fresh verdict: whatever the vendor said about
   // the OLD key is no longer evidence about this one.
   return "PROVISIONING";

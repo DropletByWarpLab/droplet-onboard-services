@@ -16,7 +16,7 @@
  * file references it can call `search_content` etc. via the same MCP
  * registry the chat loop uses; the route doesn't force a search.
  */
-import type { McpClientService } from "./mcp-client.service.js";
+import type { McpClientPort } from "./mcp-client.port.js";
 import { runAgent } from "./llm-agent.service.js";
 import { contentToText } from "../types/index.js";
 import * as aiGateway from "./ai-gateway.client.js";
@@ -158,7 +158,9 @@ function extractJson(text: string): unknown {
 }
 
 export function createEmailAnalysisFn(
-  mcp: McpClientService,
+  // WARP-2391 — the port, so this caller sees the same MCP surface the
+  // agent loop does (the multiplexer in production).
+  mcp: McpClientPort,
 ): EmailAnalysisFn {
   // LLM_MODEL is the model the box actually hosts (single-box.sh writes
   // it to .env); the historic mistral fallback is not pulled in

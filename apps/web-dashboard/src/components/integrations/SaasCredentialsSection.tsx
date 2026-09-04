@@ -153,6 +153,48 @@ function secretPlaceholder(field: SaasCredentialField): string {
 }
 
 /**
+ * WARP-2650 — the expiry line, for a credential with a hard stop.
+ *
+ * Returns null for the two states that have nothing to say: a provider with no
+ * expiry concept (the field is absent or `null`) and a date comfortably in the
+ * future. `EXPIRY_UNKNOWN` is NOT one of those — a stored credential with no
+ * recorded date means no warning can ever fire, and the owner is the only one
+ * who can fix that, so it gets a line.
+ *
+ * Deliberately separate from `stateCopyFor`: `state` answers "does this
+ * connection work" and the expiry answers "for how much longer". A token twelve
+ * days from a hard stop is genuinely CONNECTED and genuinely needs action, and
+ * one field cannot say both without lying about one of them.
+ */
+export function expiryCopyFor(
+  view: SaasCredentialView,
+): { label: string; tone: "warn" | "idle" } | null {
+  const expiry = view.credentialExpiry;
+  if (!expiry) return null;
+  const days = expiry.daysRemaining;
+  switch (expiry.status) {
+    case "VALID":
+      return null;
+    case "EXPIRY_UNKNOWN":
+      return {
+        label:
+          "No expiry date recorded — Droplet can't warn you before this credential stops working.",
+        tone: "idle",
+      };
+    case "EXPIRING_SOON":
+      return {
+        label: `Expires in ${days} day${days === 1 ? "" : "s"} — create a replacement and paste it in.`,
+        tone: "warn",
+      };
+    case "EXPIRED":
+      return {
+        label: `Expired ${Math.abs(days ?? 0)} day${Math.abs(days ?? 0) === 1 ? "" : "s"} ago — every call is being refused.`,
+        tone: "warn",
+      };
+  }
+}
+
+/**
  * WARP-2518 — whether this provider's card offers Disconnect.
  *
  * The mirror of `ConnectorCard`'s rule, over `SaasConnectionState` instead of
@@ -204,6 +246,7 @@ function ProviderForm({
   const busy = status.kind === "saving" && status.provider === view.provider;
   const justSaved = status.kind === "saved" && status.provider === view.provider;
   const stateCopy = stateCopyFor(view);
+  const expiryCopy = expiryCopyFor(view);
 
   async function submit() {
     const fields: Record<string, string> = {};
@@ -262,6 +305,32 @@ function ProviderForm({
           {stateCopy.label}
         </span>
       </div>
+
+      {expiryCopy && (
+        <p
+          className={`type-caption-1 ${expiryCopy.tone === "warn" ? "text-system-red" : ""}`}
+          style={expiryCopy.tone === "idle" ? { color: "var(--text-muted)" } : undefined}
+          data-testid={`expiry-${view.provider}`}
+        >
+          {expiryCopy.label}
+        </p>
+      )}
+
+      {/* WARP-2650 — the click-path, at the moment it is needed. This page asks
+          a person to go to a vendor console and come back with a value, and it
+          was the one descriptor-rendering surface that could not link the guide
+          the descriptor already declares. The hub tile and the connect wizard
+          both do (WARP-2342); an MCP track has neither. */}
+      {view.setupGuideHref && (
+        <a
+          className="type-caption-1 underline"
+          style={{ color: "var(--brand)" }}
+          href={view.setupGuideHref}
+          data-testid={`guide-${view.provider}`}
+        >
+          How to create this credential
+        </a>
+      )}
 
       {view.fields.length === 0 ? (
         <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
