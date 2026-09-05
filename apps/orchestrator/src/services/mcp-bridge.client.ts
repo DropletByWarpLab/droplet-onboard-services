@@ -165,6 +165,19 @@ export interface McpBridgeClientOptions {
  */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The shape a server id may have — the bridge's `SERVER_ID_PATTERN`
+ * (`http-api.ts`) and the multiplexer's, restated.
+ *
+ * Checked at construction because every path this client builds interpolates
+ * `serverId`, and one caller hands over an id it READ FROM THE BRIDGE'S
+ * RESPONSE rather than a constant: the reconciler's orphan sweep, which
+ * `DELETE`s whatever `GET /sessions` listed. The bridge is ours and behind the
+ * bearer, but a path segment is a path segment — refuse before dialling rather
+ * than trust the wire to only ever say `atlassian`.
+ */
+const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
 export class McpBridgeClient implements McpClientPort {
   readonly serverId: string;
   readonly #baseUrl: string;
@@ -194,6 +207,14 @@ export class McpBridgeClient implements McpClientPort {
   #lastAdvertised: readonly string[] = [];
 
   constructor(opts: McpBridgeClientOptions) {
+    if (!SERVER_ID_PATTERN.test(opts.serverId)) {
+      // Names the rule, never the value: the id came off the wire.
+      throw new McpBridgeError(
+        "INVALID_SERVER_ID",
+        "serverId is not a valid bridge server id (lowercase letters, digits and hyphens; at most 32).",
+        0,
+      );
+    }
     this.serverId = opts.serverId;
     this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.#serviceToken = opts.serviceToken;

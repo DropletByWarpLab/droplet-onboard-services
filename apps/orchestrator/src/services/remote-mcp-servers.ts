@@ -482,7 +482,20 @@ export async function attachAtlassianRemote(
     ...(deps.registry ? { registry: deps.registry } : {}),
   });
   const vettedTools = client.lastAdvertisedToolNames();
-  settle("attached", null, { vettedTools, bridgeHop: "succeeded" });
+  // An EMPTY list here is not a vetted surface. `lastAdvertisedToolNames()` is
+  // set only by a listing that succeeded, and the multiplexer swallows a
+  // failed remote `tools/list` as `REMOTE_CATALOG_UNAVAILABLE` rather than
+  // failing the attach — so this attach can complete with nothing listed.
+  // Recording `[]` then would overwrite the baseline a previous attach DID
+  // vet, and the next re-open would carry no `knownTools`: drift detection
+  // silently off for exactly one re-open, which is all the window a moved
+  // surface needs. Omitting the field keeps the stored baseline (`record()`
+  // keeps the previous value when none is given) — the same rule the open
+  // path applies by refusing to send `[]` as a baseline.
+  settle("attached", null, {
+    ...(vettedTools.length > 0 ? { vettedTools } : {}),
+    bridgeHop: "succeeded",
+  });
   return { attached: true, serverId, sync, vettedTools };
 }
 

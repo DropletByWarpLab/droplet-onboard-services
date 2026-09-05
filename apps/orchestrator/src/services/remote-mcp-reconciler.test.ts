@@ -13,7 +13,7 @@
  * Credential fixtures are obviously fake (`ATATT-FAKE-000000000000`).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { McpBridgeClient } from "./mcp-bridge.client.js";
+import { McpBridgeClient, McpBridgeError } from "./mcp-bridge.client.js";
 import { McpToolMultiplexer, type RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
 import {
@@ -78,6 +78,8 @@ function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
     /** When set, the bridge's `open` does not answer until it resolves — a
      *  slow vendor inside `session.connect()`. */
     stallOpen: null as Promise<void> | null,
+    /** The vendor does not answer the NEXT `tools/list`; cleared once used. */
+    toolsFailOnce: false,
   };
 
   const health = (id: string, s: FixtureSession) => ({
@@ -152,6 +154,15 @@ function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
       });
     }
     if (action === "tools") {
+      if (state.toolsFailOnce) {
+        // The multiplexer swallows this as REMOTE_CATALOG_UNAVAILABLE and the
+        // attach completes with nothing listed.
+        state.toolsFailOnce = false;
+        return json(502, {
+          error: { code: "REMOTE_CALL_FAILED", message: "The remote MCP call failed." },
+          state: health(id, session),
+        });
+      }
       const names = new Set(state.tools.map((t) => t.name));
       if (session.baseline !== null) {
         const removed = [...session.baseline].filter((n) => !names.has(n));
@@ -719,5 +730,85 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
     await a;
     expect(opens(h)).toHaveLength(2);
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+  });
+});
+
+describe("an id the bridge reports is validated before it becomes a path", () => {
+  it("refuses to DELETE a session whose id could not be a server id, and still sweeps the rest", async () => {
+    const h = harness();
+    await h.attach();
+    // What `GET /sessions` says is data off the wire, not a constant. Two
+    // orphans: one hostile, one honest.
+    h.bridge.sessions.set("../sessions", { state: "ready", baseline: null, toolCount: 0 });
+    h.bridge.sessions.set("compass", { state: "ready", baseline: null, toolCount: 3 });
+    const before = h.bridge.calls.length;
+
+    const result = await h.tick();
+
+    expect(result.orphansClosed).toEqual(["compass"]);
+    // The hostile id reached no request — not as a path segment, not at all —
+    // and the honest orphan was still closed.
+    expect(h.bridge.calls.slice(before).some((c) => c.path.includes(".."))).toBe(false);
+    expect(h.bridge.calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
+      "/sessions/compass",
+    ]);
+    expect(h.bridge.sessions.has("compass")).toBe(false);
+    expect(h.bridge.sessions.has(ATLASSIAN_REMOTE_SERVER_ID)).toBe(true);
+  });
+
+  it("McpBridgeClient refuses to construct for such an id, before any dial", () => {
+    const fetchImpl = vi.fn();
+    for (const serverId of ["../sessions", "Atlassian", "a b", "", "x".repeat(33)]) {
+      expect(
+        () =>
+          new McpBridgeClient({
+            baseUrl: BRIDGE_URL,
+            serviceToken: BRIDGE_TOKEN,
+            serverId,
+            fetchImpl: fetchImpl as unknown as typeof fetch,
+          }),
+      ).toThrow(McpBridgeError);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("the drift baseline survives a re-open whose own listing failed", () => {
+  it("keeps the previously vetted baseline instead of recording an empty one", async () => {
+    const h = harness();
+    await h.attach();
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.vettedTools).toEqual([
+      "getJiraIssue",
+      "getConfluencePage",
+    ]);
+
+    // The bridge restarts, and on the re-open the vendor does not answer
+    // tools/list. The multiplexer swallows that rather than failing the box's
+    // own catalog, so the attach completes — with nothing listed.
+    h.bridge.sessions.clear();
+    h.bridge.state.toolsFailOnce = true;
+    const result = await h.tick();
+    expect(result.reattached).toEqual([ATLASSIAN_REMOTE_SERVER_ID]);
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+    // The baseline a previous attach vetted is still the baseline: an empty
+    // listing is not "we vetted an empty surface".
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.vettedTools).toEqual([
+      "getJiraIssue",
+      "getConfluencePage",
+    ]);
+
+    // So the NEXT re-open still carries it — and still detects drift.
+    h.bridge.sessions.clear();
+    h.bridge.state.tools = TOOLS_DRIFTED;
+    await h.tick();
+    const open = h.bridge.calls.filter((c) => c.path.endsWith("/open")).at(-1);
+    expect((open?.body as { knownTools?: string[] }).knownTools).toEqual([
+      "getJiraIssue",
+      "getConfluencePage",
+    ]);
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({
+      state: "detached",
+      reason: "catalog_changed",
+    });
   });
 });
