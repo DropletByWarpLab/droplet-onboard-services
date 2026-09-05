@@ -36,6 +36,47 @@ export function isMachineTail(tail: string): boolean {
   return UUID_TAIL.test(tail) || HEX_SERIAL_TAIL.test(tail) || PREFIXED_HEX_TAIL.test(tail);
 }
 
+/**
+ * WARP-2098 — ONE usage-meter percentage, shared by the Storage screen's
+ * DrivesPanel (drive cards, pool card, system-drive card) and the Files
+ * screen's VolumesPanel tiles.
+ *
+ * These were byte-identical private copies (`usagePctOf` / `pctOf`) added in
+ * the same change — the same duplication-drift class as the byte formatter
+ * below, which this ticket also collapsed into one export. Two meters for the
+ * same volume must not be able to disagree.
+ *
+ * A zero or absent capacity yields 0, not NaN: NaN renders as an empty bar,
+ * which reads as "0% used" rather than "unknown".
+ */
+export function usagePctOf(used: number, size: number): number {
+  if (!size) return 0;
+  return Math.max(0, Math.min(100, (used / size) * 100));
+}
+
+/**
+ * WARP-2098 — ONE byte formatter for the Storage screen's cards and the Files
+ * screen's tiles. These were two private copies (`fmtBytes` / `formatBytes`),
+ * and the second had drifted: it never clamped its unit index, so a volume of
+ * 1 PiB or more rendered "1.0 undefined". Patching the copy to match was not
+ * the fix — nothing stopped a third divergence (code review). One export.
+ *
+ * Binary units. One decimal below 10 of a unit ("1.5 KB", "3.0 TB"), whole
+ * numbers from 10 up ("512 GB"): the meter rows are read at a glance, and the
+ * VolumesPanel tests pin this shape. That is also why this is not a re-export
+ * of lib/format-bytes.ts, which always keeps one decimal ("14.6 KB", "3 TB")
+ * — moving both panels onto it changes rendered strings on two screens, a
+ * decision of its own rather than a review fix. Clamped at TB, so a pool that
+ * outgrows the table still renders a real unit ("1024 TB"), never undefined.
+ */
+export function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const v = bytes / Math.pow(1024, i);
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
 /** True when a volume's backing device is an md array (or a partition of
  *  one) — i.e. the volume is pool-backed, so its nameless fallback should
  *  read "Storage pool" rather than "Drive". */

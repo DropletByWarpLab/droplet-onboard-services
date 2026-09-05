@@ -6,7 +6,10 @@
 
 import { useId, useState, type JSX } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
+import { stageRecordPinHandoff } from "@/lib/pin-handoff";
+import type { BusinessContextPinKind } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { SafetyChip } from "@/components/projects/bits";
@@ -306,9 +309,15 @@ export function RecordDrawer({
   onClose: () => void;
 }): JSX.Element {
   const titleId = useId();
+  const router = useRouter();
   const { toast } = useToast();
   const actions = useCrmActions();
   const { activities, isLoading, mutate } = useTimeline(subject);
+  // WARP-2582 — COMPANY -> `customer` and DEAL -> `deal`. CONTACT maps to
+  // nothing, and `null` is the explicit "this subject has no pin kind" rather
+  // than a fallthrough that would pin a person as a customer.
+  const pinKind: BusinessContextPinKind | null =
+    subject.type === "COMPANY" ? "customer" : subject.type === "DEAL" ? "deal" : null;
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -352,6 +361,27 @@ export function RecordDrawer({
               <Link className="pm-btn ghost sm" href={`/customers/${subject.id}`}>
                 <PmIcon name="board" size={14} /> Full record
               </Link>
+            )}
+            {/* WARP-2582 — the per-record hand-off, beside the record link
+                rather than instead of it: one goes to the page, the other
+                takes the record into a conversation. This drawer is the ONLY
+                place a customer/deal id is in hand, which is why the pin
+                action lives here and not on the page header (that one is
+                list-scoped and has no ref). CONTACT is excluded deliberately:
+                there is no `contact` pin kind, and inventing one would mean a
+                tenth enum value with no tool behind it. */}
+            {pinKind && (
+              <button
+                className="pm-btn ghost sm"
+                type="button"
+                onClick={() => {
+                  stageRecordPinHandoff({ kind: pinKind, id: subject.id, name: title });
+                  router.push("/chat");
+                }}
+              >
+                <PmIcon name="msg" size={14} />{" "}
+                {pinKind === "customer" ? "Ask AI about this customer" : "Ask AI about this deal"}
+              </button>
             )}
             <button className="pm-btn ghost sm" type="button" onClick={onClose} aria-label="Close">
               <PmIcon name="x" size={14} />

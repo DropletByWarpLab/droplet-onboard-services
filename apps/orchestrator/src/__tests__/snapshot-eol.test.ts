@@ -22,35 +22,15 @@
  * assert the contract.
  */
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT, packagePath } from "./helpers/test-paths.js";
 
-function findRepoRoot(): string {
-  // Vitest runs with cwd=apps/orchestrator (workspace script) or the repo
-  // root (root-level invocation) — support both, same as the schema tests.
-  const candidates = [
-    resolve(process.cwd(), "..", ".."),
-    resolve(process.cwd()),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, ".gitattributes"))) return candidate;
-  }
-  throw new Error(`Could not locate the repo root .gitattributes from ${process.cwd()}`);
-}
-
-function findOrchestratorSrc(): string {
-  const candidates = [
-    join(process.cwd(), "src"),
-    join(process.cwd(), "apps", "orchestrator", "src"),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return resolve(candidate);
-  }
-  throw new Error(`Could not locate apps/orchestrator/src from ${process.cwd()}`);
-}
-
-const REPO_ROOT = findRepoRoot();
-const ORCH_SRC = findOrchestratorSrc();
+// Both roots are anchored to this test file, not searched for from the
+// runner's cwd (WARP-2654): the old candidate lists accepted the first
+// directory that happened to hold a `.gitattributes` or a `src`, which a
+// second checkout of this repo does.
+const ORCH_SRC = packagePath("src");
 
 /** Every `__snapshots__/*.snap` under the orchestrator source tree. */
 function snapshotFiles(): string[] {

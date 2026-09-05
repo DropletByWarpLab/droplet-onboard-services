@@ -66,7 +66,6 @@ describe("read_file", () => {
     "/Notes/%2e%2e/admin/x",
     "/Notes/%252e%252e/admin/x",
     "/Notes/..\\admin",
-    "/Notes/%zz",
   ]) {
     it(`rejects malformed path ${JSON.stringify(bad)} with INVALID_PATH`, async () => {
       const get = vi.fn();
@@ -76,6 +75,18 @@ describe("read_file", () => {
       expect(get).not.toHaveBeenCalled();
     });
   }
+
+  // PR #1985 review: a malformed percent escape is a literal, not an error.
+  it("downloads a path holding a bare % as written", async () => {
+    const get = vi.fn().mockResolvedValue(
+      new Response("hi", { status: 200, headers: { "content-type": "text/plain" } }),
+    );
+    await readFile.handler({ path: "/Reports/50% Off Report.txt" }, ctxWith(get));
+    expect(get).toHaveBeenCalledWith(
+      `/download?path=${encodeURIComponent("/Reports/50% Off Report.txt")}`,
+      expect.anything(),
+    );
+  });
 
   it("attaches the Nextcloud auth headers on the download call", async () => {
     const get = vi.fn().mockResolvedValue(

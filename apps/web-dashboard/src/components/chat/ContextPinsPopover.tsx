@@ -11,7 +11,19 @@
  * conversationId exists (the first turn mints one).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, File, Folder, Mail, Pin, Plus, X } from "lucide-react";
+import {
+  Building2,
+  Camera,
+  CircleDot,
+  File,
+  Folder,
+  FolderKanban,
+  Handshake,
+  Mail,
+  Pin,
+  Plus,
+  X,
+} from "lucide-react";
 import {
   createContextPin,
   deleteContextPin,
@@ -25,12 +37,46 @@ const KIND_ICON: Record<ContextPin["kind"], typeof Folder> = {
   email_thread: Mail,
   camera: Camera,
   camera_window: Camera,
+  // WARP-2582 — the business kinds. This Record is exhaustive over the kind
+  // union on purpose: growing ContextPinKind without deciding what the pill
+  // looks like is a compile error, not a silent fallback icon.
+  customer: Building2,
+  deal: Handshake,
+  project: FolderKanban,
+  work_item: CircleDot,
 };
 
 /** Kinds the popover lets the user add by hand. Email threads and camera
  *  windows are pinned from their own surfaces (mail view / camera grid)
- *  where the refs are picked, not typed. */
+ *  where the refs are picked, not typed.
+ *
+ *  WARP-2582 — the four business kinds are DELIBERATELY absent. Their `ref` is
+ *  a uuid, and a text box asking a user to type one is not an affordance. They
+ *  arrive from the record surfaces (the CRM record drawer, the project header)
+ *  where the id is already in hand. */
 const ADDABLE_KINDS: ContextPin["kind"][] = ["folder", "file", "camera"];
+
+/**
+ * WARP-2582 — what a row says. The `ref` fallback is what keeps a folder pin
+ * reading exactly as it did before this ticket, and what keeps a business pin
+ * from ever rendering a bare uuid at a human.
+ */
+function pinLabel(pin: ContextPin): string {
+  const r = pin.resolved;
+  if (!r) return pin.ref;
+  if (r.state === "missing") return "No longer available";
+  if (r.state === "unavailable") return "Not available on this box";
+  const sub = r.sublabel ? ` · ${r.sublabel}` : "";
+  const archived = r.state === "archived" ? " (archived)" : "";
+  return `${r.label ?? pin.ref}${sub}${archived}`;
+}
+
+/** A pin whose target the assistant will NOT see. Shown, not hidden, so the
+ *  user can remove it — a pin that silently stopped working is worse than one
+ *  that says so. */
+function isStale(pin: ContextPin): boolean {
+  return pin.resolved?.state === "missing" || pin.resolved?.state === "unavailable";
+}
 
 export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
@@ -77,7 +123,12 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
     setError(null);
     try {
       const { pin } = await createContextPin(sessionId, { kind, ref: trimmed });
-      setPins((prev) => [...(prev ?? []), pin]);
+      // WARP-2582 — a duplicate pin now returns 200 with the EXISTING row
+      // rather than 201 with a new one, so append must dedupe by id or the
+      // list grows a phantom the server does not have.
+      setPins((prev) =>
+        (prev ?? []).some((p) => p.id === pin.id) ? prev! : [...(prev ?? []), pin],
+      );
       setRef("");
     } catch (err) {
       setError((err as Error).message);
@@ -151,13 +202,17 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                       aria-hidden="true"
                       className="flex-none text-[var(--text-muted)]"
                     />
-                    <span className="type-footnote truncate flex-1 text-[var(--text)]">
-                      {pin.ref}
+                    <span
+                      className="type-footnote truncate flex-1"
+                      style={{ color: isStale(pin) ? "var(--text-muted)" : "var(--text)" }}
+                      title={pin.ref}
+                    >
+                      {pinLabel(pin)}
                     </span>
                     <button
                       type="button"
                       onClick={() => void handleRemove(pin)}
-                      aria-label={`Remove ${pin.ref}`}
+                      aria-label={`Remove ${pinLabel(pin)}`}
                       className="flex-none p-1 rounded-sm text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]"
                     >
                       <X size={12} aria-hidden="true" />

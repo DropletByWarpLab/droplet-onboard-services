@@ -37,6 +37,10 @@
  *   - make `PATCH /network/phone-home` answer 202 → the class-(c) count
  *     goes 1 → 2
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createServer as createHttpServer, type Server as NodeServer } from "node:http";
@@ -254,11 +258,20 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // through), and not a pass-through — the roster below is unchanged, which
     // is the distinction this count exists to keep visible.
     //
-    // RECONCILIATION NOTE: PR #1985 (WARP-2664) takes this same line to 42 for
-    // `organize_files` + `delete_files`. Both changes are independent and both
-    // are correct; whichever lands second must resolve the conflict to 43, not
-    // pick a side.
-    expect(confirming).toHaveLength(41);
+    // 42 as of WARP-2180: `start_agent_run`. Tier-2 because it spends the
+    // box's compute unattended — the interceptor challenges it and chat
+    // approves it, exactly like any other flag-gated tool. Not a pass-through
+    // (it never calls passThroughConfirmation; the route it posts to has no
+    // gate of its own), so the roster below is unchanged, which is the
+    // distinction this count exists to keep visible.
+    //
+    // 44 as of WARP-2664 landing beside WARP-2180: `organize_files` and `delete_files`. Same shape —
+    // flag-gated by the interceptor, no `confirmed` boolean in either schema,
+    // neither a pass-through. This is the reconciliation origin/stage's note
+    // asked for: WARP-2669's `delete_file` (40→41) and WARP-2664's two
+    // (41→43) are independent and both correct, so the count is the UNION of
+    // both, not either side's number.
+    expect(confirming).toHaveLength(44);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

@@ -79,10 +79,6 @@ describe("validateNcPath traversal guard (WARP-938) is unaffected", () => {
     expect(validateNcPath("")).toEqual({ ok: false, error: "path is required" });
     expect(validateNcPath("/" + "a".repeat(4096))).toEqual({ ok: false, error: "path too long" });
     expect(validateNcPath("/x\0y")).toEqual({ ok: false, error: "null byte in path" });
-    expect(validateNcPath("/Notes/%zz")).toEqual({
-      ok: false,
-      error: "malformed percent-encoding in path",
-    });
   });
 
   it("does not let a trailing slash smuggle a hidden dot-dot past decoding", () => {
@@ -91,5 +87,50 @@ describe("validateNcPath traversal guard (WARP-938) is unaffected", () => {
     const v = validateNcPath("/Notes/%2e%2e%2f");
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.error).toBe("path traversal not allowed");
+  });
+});
+
+// PR #1985 review (WARP-2664): a bare "%" is a character people put in
+// filenames ("50% Off Report.pdf"), not an encoding error. Refusing it made
+// delete_files abort a whole batch on one benign name and organize_files
+// skip the file with a reason that blamed the name. A malformed escape now
+// means "this path is not percent-encoded", and the string is taken as
+// written from that point on.
+describe("validateNcPath treats a malformed percent escape as a literal, not an error", () => {
+  it.each([
+    "/Reports/50% Off Report.pdf",
+    "/Reports/100% Done.txt",
+    "/Notes/%zz",
+    "/Sales/Q3 %",
+  ])("accepts %s as written", (p) => {
+    expect(okPath(p)).toBe(p);
+  });
+
+  it("still decodes a well-formed escape, so both spellings reach the same file", () => {
+    expect(okPath("/Reports/50%25 Off Report.pdf")).toBe("/Reports/50% Off Report.pdf");
+    expect(okPath("/Reports/My%20File.pdf")).toBe("/Reports/My File.pdf");
+  });
+
+  // THE case a naive "just stop decoding" fix opens: Sabre/DAV decodes
+  // leniently (PHP rawurldecode), so "%2e%2e" next to a bare "%" still
+  // reaches the server as "..". The guard has to be at least as willing to
+  // decode as the server is.
+  for (const bad of [
+    "/Notes/%2e%2e/%zz",
+    "/Notes/%2e%2e/50% off",
+    "/50%/%2e%2e/x",
+    "/Notes/%252e%252e/%",
+    "/Notes/%2e%2e%2f%zz",
+  ]) {
+    it(`still refuses traversal beside a malformed escape: ${JSON.stringify(bad)}`, () => {
+      const v = validateNcPath(bad);
+      expect(v.ok).toBe(false);
+      if (!v.ok) expect(v.error).toBe("path traversal not allowed");
+    });
+  }
+
+  it("a null byte hidden behind an escape is still refused", () => {
+    expect(validateNcPath("/x/%00y")).toEqual({ ok: false, error: "null byte in path" });
+    expect(validateNcPath("/x/%00y/%zz")).toEqual({ ok: false, error: "null byte in path" });
   });
 });
