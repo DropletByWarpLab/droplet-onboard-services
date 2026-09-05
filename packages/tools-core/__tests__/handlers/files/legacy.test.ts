@@ -108,7 +108,6 @@ describe("validateNcPath via tools", () => {
     "/Notes/%2E%2E/admin/x",
     "/Notes/%252e%252e/admin/x",
     "/Notes/..\\admin",
-    "/Notes/%zz",
   ]) {
     it(`write_file rejects malformed path ${JSON.stringify(bad)}`, async () => {
       const { ctx, ncPost } = makeCtx();
@@ -125,6 +124,15 @@ describe("validateNcPath via tools", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toBe("path too long");
     expect(ncPost).not.toHaveBeenCalled();
+  });
+
+  // PR #1985 review: a malformed percent escape is a literal, not an error.
+  it("write_file accepts a path holding a bare % as written", async () => {
+    const { ctx, ncPost } = makeCtx();
+    const res = await runTool("write_file", { path: "/Reports/50% Off.md", content: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.data as { written: string }).written).toBe("/Reports/50% Off.md");
+    expect(ncPost).toHaveBeenCalledTimes(1);
   });
 
   it("write_file accepts a relative-looking path by prepending '/'", async () => {

@@ -76,6 +76,9 @@
  */
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+// WARP-2582 — the pin block's domains. `context-pin-prompt` imports nothing
+// but a tools-core type, so this direction cannot cycle.
+import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
 
 export type ToolSelectionMode = "off" | "domains";
 
@@ -151,13 +154,21 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * TWO-LAYER NOTE (WARP-2448): matching a domain here does not by itself make
  * a tool reachable. `chat-tool-scope.ts` removes whole groups from the POOL
  * before selection runs, so a rule can match a domain whose local tools were
- * all excluded upstream and legitimately advertise nothing — `pm` is exactly
- * that case today, and `erp`/`switch` have no rules at all. The two layers
- * answer different questions (policy vs relevance) and the interaction is
- * asserted by `chat-tool-scope.test.ts` rather than left for someone to
+ * all excluded upstream and legitimately advertise nothing — `notifications`
+ * is exactly that case today, and `erp`/`switch` have no rules at all. The two
+ * layers answer different questions (policy vs relevance) and the interaction
+ * is asserted by `chat-tool-scope.test.ts` rather than left for someone to
  * rediscover. Remote tools registered into such a domain are NOT affected:
  * the exclusion list names local tools, so an Atlassian `pm` tool matched by
- * the `pm` rule is advertised even though every local `pm_*` tool is not.
+ * the `pm` rule is advertised even though nine of ten local `pm_*` tools are not.
+ *
+ * ⚠ WARP-2580 — this paragraph named `pm` as the dead-rule example and had
+ * been wrong since 2026-08-17, when `pm_create_project` landed and was not
+ * added to the exclusion block beside its nine siblings. `pm` is NOT dead:
+ * exactly one local tool survives in it. `chat-tool-scope.test.ts` has pinned
+ * that ("the pm rule is NOT dead — WARP-2058's comment is stale") since before
+ * this correction; the comment simply never followed. `notifications` is the
+ * genuine dead-rule case and is what that test's `deadRules` set contains.
  *
  * WARP-1921 — vocabulary widened from the original WARP-1207 cut, which was
  * written from the TOOL NAMES rather than from how people talk. The tell:
@@ -180,6 +191,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // to Kitchen" names the target only by its label, so the verb is the
   // ONLY signal. A false-positive domain is cheap (see the rule comment).
   { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
+  // WARP-2664 — the CLEANUP vocabulary. "what's cluttering my drive, get rid
+  // of the junk" names no file, folder or document; without these verbs the
+  // turn advertised the core four and none of the cleanup tools.
+  { pattern: /\b(organi[sz](e|ed|es|ing)|clean(s|ed|ing)?[ -]?up|cleanup|tid(y|ied|ying)|declutter(ed|ing)?|clutter(ed|ing)?|duplicates?|junk|free up|disk space|storage space|taking up space)\b/i, domains: ["files"] },
   // WARP-2454 — DOCUMENTS NAMED BY WHAT THEY ARE, not by a container word.
   //
   // THE DESIGN LIMIT, WRITTEN DOWN. The rule above lists CONTAINERS
@@ -439,12 +454,24 @@ export function selectAdvertisedTools(opts: {
   conversationToolNames: string[];
   /** WARP-2443 — runtime-registered tools with no TOOL_CATALOG entry. */
   runtimeTools?: readonly RuntimeToolDescriptor[];
+  /**
+   * WARP-2582 — domains admitted for a reason that is not the SENTENCE.
+   *
+   * The relevance rules read the last user message, and a context pin is not
+   * one. So "summarise the last month" with a customer pinned matched no rule,
+   * the `crm` domain went unadvertised, and the model was handed a customer id
+   * with no tool to spend it on. Seeded into the same set the rules write to,
+   * so a pin's domain behaves exactly like a matched one — admitted WHOLE,
+   * still filtered by `pool`, and therefore still unable to widen past the
+   * RBAC/chat-scope ceiling this layer must never breach.
+   */
+  extraDomains?: readonly ToolDomain[];
 }): { advertised: string[]; matchedDomains: ToolDomain[] } {
   if (opts.mode === "off") {
     return { advertised: opts.pool, matchedDomains: [] };
   }
   const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
-  const domains = new Set<ToolDomain>();
+  const domains = new Set<ToolDomain>(opts.extraDomains ?? []);
   for (const rule of DOMAIN_RULES) {
     if (rule.pattern.test(opts.userMessage)) {
       for (const d of rule.domains) domains.add(d);
@@ -553,6 +580,15 @@ export function effectiveAdvertisedToolNames(opts: {
     pool: [...opts.pool],
     conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
     runtimeTools: opts.runtimeTools,
+    // WARP-2582 — derived HERE, from `messages`, rather than passed in by each
+    // caller. That is the whole reason it is safe: the pin block is spliced
+    // onto `agentMessages`, and `agentMessages` is what BOTH routes/llm.ts
+    // (budget estimate) and llm-agent.service.ts (wire payload) hand in as
+    // `messages`. A new PARAMETER would have needed both sites to pass it and
+    // would have re-opened the WARP-2552 split the moment one of them didn't.
+    // Deriving it inside the one shared function makes the parity invariant
+    // structural instead of a convention.
+    extraDomains: pinnedToolDomainsFromMessages(opts.messages),
   });
   return new Set(advertised);
 }

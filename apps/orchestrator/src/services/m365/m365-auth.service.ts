@@ -368,6 +368,45 @@ async function persistFailure(
   });
 }
 
+// --- Needs reconnect, discovered by the box ---------------------------------
+
+/**
+ * Move a CONNECTED link to NEEDS_RECONNECT because Graph refused a token that
+ * had refreshed fine.
+ *
+ * The refresh path above only ever sees a refresh fail. A live 401/403 on a
+ * delta call — resource access revoked, a conditional-access policy, a tenant
+ * that changed under the grant — never reaches it, so without this seam the
+ * sync engine would back the cursor off forever while the row the dashboard
+ * reads kept saying CONNECTED. The stored cache is kept: the person may only
+ * need to consent again, and dropping it would force a full sign-in for a
+ * policy hiccup. Idempotent — a second cursor hitting the same wall in the
+ * same tick writes nothing new.
+ */
+export async function markNeedsReconnect(
+  prisma: PrismaClient,
+  userId: string,
+  reason: string,
+): Promise<void> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  if (!row || row.state !== "CONNECTED") return;
+
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: { state: "NEEDS_RECONNECT", lastError: reason },
+  });
+  await auditM365({
+    what: "Microsoft 365 needs reconnect",
+    state: "NEEDS_RECONNECT",
+    userId,
+    severity: "warn",
+    reason,
+    userInitiated: false,
+  });
+}
+
 // --- Disconnect -----------------------------------------------------------
 
 /**

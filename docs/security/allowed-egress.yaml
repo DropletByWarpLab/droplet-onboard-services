@@ -428,15 +428,15 @@ entries:
     # scan never reads — the ADR that PROPOSED this host was keeping the entry
     # green. Repointed at the sync-engine files the Graph client will live in.
     # The ADR remains the authorising document; it is just not evidence of use.
-    code_refs: [apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
-    no_code_literal: >-
-      Registered ahead of its caller: the WARP-2118 sync engine has no HTTP
-      client yet, so nothing in apps/ or services/ names this host —
-      @microsoft/microsoft-graph-client is not a dependency, and the only
-      occurrences in the repo are .test.ts fixtures, which are out of the
-      scanner's scope. Self-pruning: the moment WARP-2118 lands a
-      graph.microsoft.com literal in a code_refs file, the gate fails on
-      this entry until this declaration is deleted. (WARP-2468 / WARP-2118)
+    #
+    # WARP-2118: the client now EXISTS, and this entry is backed by real code
+    # for the first time. `graph-client.ts` carries the host as a whole-string
+    # literal (GRAPH_API_BASE_URL) precisely so the scanner extracts it, so the
+    # `no_code_literal` declaration that stood here has been deleted — which is
+    # exactly the self-pruning that declaration prescribed for this moment.
+    # It is metadata only: `driveItem: get content` answers 302 to a per-tenant
+    # preauthenticated download host, and nothing here follows that redirect.
+    code_refs: [apps/orchestrator/src/services/m365/graph-client.ts, apps/orchestrator/src/services/m365/graph-resources.ts, apps/orchestrator/src/services/m365/m365-sync.service.ts, apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
 
   - id: m365-entra-login
     kind: egress
@@ -1067,6 +1067,101 @@ entries:
     added: 2026-09-02
     review_by: 2027-09-02
     code_refs: [packages/shared-types/src/provider-registry.ts]
+
+  - id: brevo-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.brevo.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Brevo API v3 — the contacts, lists and email-campaign cloud connector
+      (WARP-2708), plus the companies, deals and e-commerce orders Brevo
+      carries alongside them. Read-only, GET only. Carries the customer's own
+      marketing and CRM records, fetched on request under a key the account
+      owner created in their own Brevo profile and pasted into the box; never
+      ambient, never a background crawl, and off until the owner connects.
+      ONE FIXED HOST, unlike Mailchimp and Pipedrive — so this is a plain
+      registered destination and the connector's base URL is a whole-string
+      literal the scanner reads directly.
+    ticket: WARP-2708
+    added: 2026-09-03
+    review_by: 2027-09-03
+    code_refs: [services/erp-connector/src/brevo/connector.ts]
+
+  - id: klaviyo-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [a.klaviyo.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Klaviyo API — the profiles, lists, campaigns and events cloud connector
+      (WARP-2709). Read-only. Carries the customer's own marketing profiles and
+      the engagement events behind their campaigns, fetched on request under a
+      private key (pk_...) the account owner created in their own Klaviyo
+      settings; never ambient, off until the owner connects. Fixed host, so a
+      plain registered destination. Every request also carries a dated
+      `revision` header, which Klaviyo requires — it is an API-version pin, not
+      a destination, and does not affect this registration.
+    ticket: WARP-2709
+    added: 2026-09-03
+    review_by: 2027-09-03
+    code_refs: [services/erp-connector/src/klaviyo/connector.ts]
+
+  # kind: dynamic, NOT egress — same reasoning as mailchimp-marketing-api and
+  # shopify-admin-api. The dialled host is <companyDomain>.pipedrive.com, chosen
+  # per connection, so there is no name this file can register and the static
+  # scan cannot see it. Filing it as `kind: egress` over a sampled tenant would
+  # be worse than useless: a green gate over a destination nothing constrains.
+  - id: pipedrive-api
+    kind: dynamic
+    service: erp-connector
+    config_key: IntegrationConnection.providerConfig.companyDomain (the customer's own Pipedrive subdomain, collected at connect and validated against PIPEDRIVE_COMPANY_DOMAIN_PATTERN)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Pipedrive API v2 — the sales-pipeline cloud connector (WARP-2710).
+      Read-only: persons, organizations, deals with their stage and value, the
+      activity log against them, and the product catalogue deals are priced
+      from. Carries the customer's own CRM records, fetched on request under a
+      personal API token the owner minted in their own Pipedrive settings. The
+      host is per-connection because Pipedrive routes by company domain to the
+      data centre holding that account, so the code-side exact-host guard
+      (assertSafePipedriveBaseUrl) is the ENFORCEMENT and this entry is the
+      registration and review record. Deliberately never dials
+      api.pipedrive.com, the documented bootstrap host for discovering a domain
+      you do not yet know: the connect flow collects the domain from the owner,
+      so the box has no reason to ask.
+    ticket: WARP-2710
+    added: 2026-09-03
+    review_by: 2027-09-03
+    code_refs: [services/erp-connector/src/pipedrive/connector.ts]
+
+  - id: ref-pipedrive-host-suffix
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination and NOT a wildcard grant. The box never dials
+      # pipedrive.com itself — the dialled host is <companyDomain>.pipedrive.com,
+      # per-connection, governed by pipedrive-api above and by
+      # assertSafePipedriveBaseUrl(). This entry exists because the connector
+      # carries ".pipedrive.com" as a whole-string literal for that guard to
+      # anchor on (PIPEDRIVE_API_HOST_SUFFIX), and the WARP-2467 bare-host scan
+      # rightly reads a bare name out of it. Exact name only, so a sampled
+      # tenant literal is still denied — which is the point.
+      hosts: [pipedrive.com]
+    purpose: the anchored host-suffix constant behind the Pipedrive exact-host guard, named in code as the guard's anchor — not a connection the box makes
+    ticket: WARP-2710
+    added: 2026-09-03
+    review_by: 2027-09-03
+    code_refs: [services/erp-connector/src/pipedrive/connector.ts]
 
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
