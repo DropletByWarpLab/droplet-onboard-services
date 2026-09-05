@@ -20,7 +20,8 @@
  *
  * Component tests over an SWR fixture, matching `integrations-hub.test.tsx`:
  * the real `useIntegrations`, the real `connectors.ts` derivation and the real
- * shared descriptors run; only `fetchIntegrations` and the router are stubbed.
+ * shared descriptors run; only `fetchIntegrations`, `disconnectProvider`, the
+ * session and the router are stubbed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
@@ -31,8 +32,26 @@ import type { IntegrationConnection, IntegrationStatus } from "@/lib/erp-types";
 import { CONNECTORS, MCP_CONNECTORS } from "@/lib/connectors";
 import { PROVIDER_DESCRIPTORS } from "@/components/integrations/provider-descriptors";
 
+/**
+ * WARP-2518 — stage's `ConnectorCard` mounts `DisconnectControl` on every
+ * reported non-`NOT_CONFIGURED` row, and that control reads `useAuth`, which
+ * throws outside an `AuthProvider`. The session is stubbed the way the hub
+ * suite stubs it — a mutable role in a hoisted holder — so the control's own
+ * admin gate is something these tests can exercise rather than merely
+ * satisfy.
+ */
+const { session, disconnectProviderMock } = vi.hoisted(() => ({
+  session: { role: "owner" as string | undefined },
+  disconnectProviderMock: vi.fn(),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: session.role ? { id: "u-1", role: session.role } : null }),
+}));
+
 vi.mock("@/lib/api.erp", () => ({
   fetchIntegrations: vi.fn(),
+  disconnectProvider: disconnectProviderMock,
 }));
 
 const push = vi.fn();
@@ -118,6 +137,8 @@ async function settled(container: HTMLElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  session.role = "owner";
+  disconnectProviderMock.mockReset().mockResolvedValue({});
 });
 
 describe("the card is derived from the mcp track, not from a catalog block", () => {
@@ -193,8 +214,7 @@ describe("the card's affordances are the credential configurator's, not the ERP 
     const { container } = renderHub();
     await settled(container);
 
-    const button = within(mcpTile(container)).getByRole("button");
-    expect(button.textContent).toBe("Open");
+    const button = within(mcpTile(container)).getByRole("button", { name: "Open" });
     fireEvent.click(button);
 
     expect(push).toHaveBeenCalledWith(CREDENTIALS_ROUTE);
@@ -214,8 +234,7 @@ describe("the card's affordances are the credential configurator's, not the ERP 
     const { container } = renderHub();
     await settled(container);
 
-    const button = within(mcpTile(container)).getByRole("button");
-    expect(button.textContent).toBe("Connect");
+    const button = within(mcpTile(container)).getByRole("button", { name: "Connect" });
     fireEvent.click(button);
 
     expect(push).toHaveBeenCalledWith(CREDENTIALS_ROUTE);
@@ -236,8 +255,15 @@ describe("the card's affordances are the credential configurator's, not the ERP 
     for (const absent of ["Sync now", "Resume setup", "Fix connection", "Retry"]) {
       expect(within(card).queryByText(absent)).toBeNull();
     }
-    // Exactly one action, so there is no second button to be a wizard.
-    expect(within(card).getAllByRole("button")).toHaveLength(1);
+    // The button SET, named, rather than counted: a connected tile carries
+    // exactly its primary action and stage's WARP-2518 Disconnect control, and
+    // nothing else that could be a wizard, a probe or a sync. Counting would
+    // let a second primary action hide behind a missing Disconnect.
+    expect(
+      within(card)
+        .getAllByRole("button")
+        .map((b) => (b.textContent ?? "").trim()),
+    ).toEqual(["Open", `Disconnect ${MCP_CONNECTORS[0]!.name}`]);
     expect(card.querySelector("input")).toBeNull();
   });
 
