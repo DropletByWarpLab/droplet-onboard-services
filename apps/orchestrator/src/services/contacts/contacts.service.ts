@@ -36,6 +36,11 @@ export const CONTACT_ERRORS = {
   /// does — archive it. A caller that cannot tell the two apart can only
   /// render a flat "no", which is the dead end this ticket removes.
   CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD: "contact_is_external_archive_instead",
+  /// ADR-048 — a contact Droplet filed by itself may never carry a date of
+  /// birth. The extraction schema has no field that could produce one, so this
+  /// can only fire if a future caller passes both `filing` and `birthday`;
+  /// refusing is cheaper than discovering it in a pg_dump.
+  FILED_CONTACT_HAS_BIRTHDAY: "filed_contact_has_birthday",
   EMAIL_NOT_FOUND: "contact_email_not_found",
   PHONE_NOT_FOUND: "contact_phone_not_found",
   DUPLICATE_EMAIL: "contact_email_duplicate",
@@ -251,11 +256,27 @@ function pickPrimary<T extends { isPrimary?: boolean }>(items: T[]): Array<T & {
   return items.map((item, i) => ({ ...item, isPrimary: i === primaryIndex }));
 }
 
+/**
+ * ADR-048 (WARP-2730) — provenance for a contact Droplet filed by itself.
+ *
+ * 🔴 A filed contact NEVER carries a `birthday`. The column exists on this
+ * model and the filing extraction schema has no field that could populate it —
+ * a date of birth is the single most identifying thing on a practice box, and
+ * `CREATE_CONTACT` is review-only in every mode partly because of it. If a
+ * future caller passes `input.birthday` alongside `filing`, that is a bug, and
+ * the guard below refuses rather than trusting the caller.
+ */
+export interface ContactFilingProvenance {
+  proposalId: string;
+}
+
 export async function createContact(
   prisma: PrismaClient,
   userId: string,
   input: ContactInput,
+  filing?: ContactFilingProvenance,
 ): Promise<ApiContact> {
+  if (filing && input.birthday) throw new Error(CONTACT_ERRORS.FILED_CONTACT_HAS_BIRTHDAY);
   const emails = pickPrimary(input.emails ?? []);
   const phones = pickPrimary(input.phones ?? []);
   const displayName = deriveDisplayName({ ...input, emails });
@@ -271,7 +292,8 @@ export async function createContact(
   const row = await prisma.contact.create({
     data: {
       userId,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
+      proposalId: filing?.proposalId ?? null,
       displayName,
       givenName: input.givenName ?? null,
       familyName: input.familyName ?? null,

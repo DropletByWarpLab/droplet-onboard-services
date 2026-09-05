@@ -90,14 +90,66 @@ describe("WARP-2729 — filing migrations exist and are self-consistent", () => 
     expect(statements).toHaveLength(2);
   });
 
-  it("sorts after every migration already on stage", () => {
+  /**
+   * The last migration on `origin/stage` when this slice was cut.
+   *
+   * 🔴 NAMED, not computed. The first cut of this test derived the predecessor
+   * as "every folder that is not mine", which is the same claim as "mine sort
+   * last" — and WARP-2730's own migration falsified it one slice later,
+   * exactly as the comment then warned. A predecessor is a fact about history;
+   * deriving it from the present tense makes every future migration a failure.
+   */
+  const PREDECESSOR_ON_STAGE = "20260904140400_warp_2582_context_pin_unique";
+
+  it("WARP-2730's added reasons are alone in their own file too", () => {
+    // Same rule as the origin widening above, and the reason it is asserted
+    // per-migration rather than once: `ALTER TYPE ... ADD VALUE` adds a label
+    // that cannot be USED until its transaction commits, and Prisma runs one
+    // transaction per file. A later migration that folds a new reason in
+    // beside a statement using it fails only when it RUNS — on a customer's
+    // box, during an upgrade.
+    const dirs = readdirSync(MIGRATIONS).filter((d) => d.includes("warp_2730"));
+    expect(dirs).toHaveLength(1);
+    const sql = stripComments(readFileSync(join(MIGRATIONS, dirs[0], "migration.sql"), "utf8"));
+    const statements = sql.split(";").map((x) => x.trim()).filter(Boolean);
+    expect(statements).toHaveLength(2);
+    for (const st of statements) {
+      expect(st).toMatch(/^ALTER TYPE "ExtractReason" ADD VALUE IF NOT EXISTS '\w+'$/);
+    }
+  });
+
+  it("sorts after every migration that was already on stage", () => {
     const all = readdirSync(MIGRATIONS).filter((d) => /^\d{14}_/.test(d)).sort();
+    expect(all).toContain(PREDECESSOR_ON_STAGE);
     const ours = all.filter((d) => d.includes("warp_2729"));
-    const others = all.filter((d) => !d.includes("warp_2729"));
-    const lastOther = others[others.length - 1];
-    // Pins the PREDECESSOR, not "mine sort last" — a test asserting the latter
-    // is wrong by construction and the next migration falsifies it.
-    expect(ours.every((d) => d > lastOther)).toBe(true);
+    expect(ours.length).toBeGreaterThan(0);
+    expect(ours.every((d) => d > PREDECESSOR_ON_STAGE)).toBe(true);
+  });
+
+  it("🔴 the enum widening applies before the tables that store its values", () => {
+    // The ordering that actually matters, and the only one this feature can
+    // assert without speaking for the whole repo: Prisma applies in
+    // folder-name order, so the `ALTER TYPE ... ADD VALUE` must sort BEFORE
+    // the tables whose columns use those values. Getting it wrong is not a
+    // test failure — it is an upgrade that dies partway through on a
+    // customer's box, ledger migrated and proposal tables not.
+    //
+    // Written as a relation between the three, NOT as a list of the folders
+    // that exist: a membership assertion is the same "wrong by construction"
+    // shape as the predecessor derivation above, and slice 3's first migration
+    // would falsify it.
+    const all = readdirSync(MIGRATIONS).filter((d) => /^\d{14}_/.test(d)).sort();
+    const find = (needle: string) => {
+      const hit = all.find((d) => d.includes(needle));
+      expect(hit, `no migration matching ${needle}`).toBeTruthy();
+      return hit as string;
+    };
+    const ledger = find("warp_2729_filing_ledger");
+    const enumWidening = find("warp_2729_extracted_origin");
+    const tables = find("warp_2729_filing_tables");
+
+    expect(ledger < enumWidening).toBe(true);
+    expect(enumWidening < tables).toBe(true);
   });
 });
 

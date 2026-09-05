@@ -1209,6 +1209,13 @@ enum ExtractReason {
   backlog
   /// The content fingerprint was unchanged since the last extraction.
   unchanged
+  /// WARP-2730 — indexed, but with no readable body: the extractor chain
+  /// produced nothing, or every chunk was header. Nothing to retry.
+  no_text
+  /// WARP-2730 — at least one chunk is WARP-233 `sensitive` and holds a `dcv1:`
+  /// blob rather than text. Extracting from ciphertext would produce confident
+  /// nonsense.
+  encrypted_content
 }
 
 enum FileIndexState {

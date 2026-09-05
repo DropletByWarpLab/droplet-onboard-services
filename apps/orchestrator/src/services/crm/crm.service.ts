@@ -629,10 +629,24 @@ export async function getCompany(prisma: PrismaClient, id: string): Promise<ApiC
   return companyToApi(prisma, row, counts.get(id) ?? 0);
 }
 
+/**
+ * ADR-048 (WARP-2730) — provenance for a row Droplet filed by itself.
+ *
+ * Passed ONLY by the filing apply path. Both halves move together on purpose:
+ * `origin: "EXTRACTED"` is what the "Created by Droplet" chip reads (never
+ * `createdById IS NULL` — state is not derived from a NULL), and `proposalId`
+ * is the back-pointer that makes the row answer "which document filed you?"
+ * without a join through `IngestProposal`.
+ */
+export interface FilingProvenance {
+  proposalId: string;
+}
+
 export async function createCompany(
   prisma: PrismaClient,
   input: CompanyInput & { name: string },
   actorId: string | null,
+  filing?: FilingProvenance,
 ): Promise<ApiCrmCompany> {
   const row = await prisma.crmCompany.create({
     data: {
@@ -649,14 +663,31 @@ export async function createCompany(
       country: input.country ?? null,
       note: input.note ?? null,
       ownerId: input.ownerId ?? null,
+      // Never null for a filed row: `createdById` is the OWNER who enabled
+      // filing, a real `User.id`, because "who is accountable for this row"
+      // must have an answer even when nobody typed it.
       createdById: actorId,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
+      proposalId: filing?.proposalId ?? null,
       activities: {
         create: {
           subjectType: "COMPANY",
           kind: "CREATED",
+          // 🔴 NO FILENAME HERE, EVER. Filenames are PHI (WARP-1983) and a
+          // CrmActivity summary is rendered on the customer timeline for every
+          // reader of the CRM. The document's identity lives on the
+          // `EntityLink` row, which is access-checked; this line is not.
           summary: `Customer created: ${input.name}`,
           actorId,
+          // 🔴 A BOX-WRITTEN ROW IS NOT A HUMAN NOTE. `CrmActivity.origin`
+          // defaults to LOCAL, and two things downstream read LOCAL as "a
+          // person typed this": `landed-purge.ts`'s survival test
+          // (`where: { origin: "LOCAL", [subject]: id }`) and ADR-048's undo
+          // predicate, which deletes a filed record that carries only its own
+          // CREATED row and ARCHIVES one a human has since annotated. Left at
+          // the default, every filed customer would look annotated from the
+          // moment it was created, and undo could never clean one up.
+          origin: filing ? "EXTRACTED" : "LOCAL",
         },
       },
     },

@@ -1,0 +1,171 @@
+/*
+ * WARP-2730 (ADR-048) — "Needs a look".
+ *
+ * Scoped under `.pm-scope` like every other CRM surface, and built out of the
+ * tokens `projects.css` already defines rather than new colours: this is a page
+ * inside the CRM, not a second design language. The two-panel card is the only
+ * new shape here, and it collapses to one column below 720px — the review is
+ * done on a phone as often as at a desk (WARP-2412's mobile-web conventions).
+ */
+
+.pm-scope .filing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pm-scope .filing-card {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pm-scope .filing-card h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.pm-scope .filing-card h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.pm-scope .filing-panes {
+  display: grid;
+  /* The evidence panel is narrower but never squeezed out: it is the half that
+     makes the other half checkable. */
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 18px;
+}
+
+@media (max-width: 720px) {
+  .pm-scope .filing-panes {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+}
+
+.pm-scope .filing-where {
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .pm-scope .filing-where {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: 12px;
+  }
+}
+
+.pm-scope .filing-fields {
+  margin: 10px 0 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.pm-scope .filing-fields > div {
+  display: contents;
+}
+
+.pm-scope .filing-fields dt {
+  color: var(--text-4);
+  white-space: nowrap;
+}
+
+.pm-scope .filing-fields dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.pm-scope .filing-why {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.pm-scope .filing-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.pm-scope .filing-quotes {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pm-scope .filing-quotes li {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-2);
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+  overflow-wrap: anywhere;
+}
+
+.pm-scope .filing-choices {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.pm-scope .filing-choices label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.pm-scope .filing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The banner on /customers. Quiet by default — it is only there when there is
+   something to do, so it does not need to shout to be noticed. */
+.filing-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-canvas));
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.filing-banner:hover {
+  border-color: var(--border-strong);
+}
+
+.filing-banner-go {
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}

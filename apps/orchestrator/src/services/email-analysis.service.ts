@@ -18,6 +18,7 @@
  */
 import type { McpClientPort } from "./mcp-client.port.js";
 import { runAgent } from "./llm-agent.service.js";
+import { extractJson } from "./llm-json.js";
 import { contentToText } from "../types/index.js";
 import * as aiGateway from "./ai-gateway.client.js";
 import type {
@@ -102,59 +103,6 @@ function coerceAnalysis(raw: unknown): EmailAnalysis {
       tools: relatedArr("tools"),
     },
   };
-}
-
-/**
- * Extract a JSON object from `text`. The model may wrap its output in
- * ```json fences``` or include explanatory prose before/after.
- *
- * The naive "first `{` to last `}`" approach breaks when the prose
- * contains another `}` of its own (e.g. "the field {foo} means..."),
- * which is common with smaller instruction-tuned models like
- * mistral:7b-instruct. Strip fences first, then walk character-by-
- * character with a depth counter to find the first balanced object.
- */
-function extractJson(text: string): unknown {
-  // Strip ``` ... ``` fences if present (optional `json` tag).
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const haystack = fenced ? fenced[1] : text;
-
-  const start = haystack.indexOf("{");
-  if (start === -1) return null;
-
-  // Walk forward with a brace depth counter, honoring string literals
-  // so a `}` inside a string doesn't fool us.
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < haystack.length; i++) {
-    const ch = haystack[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (ch === "\\" && inString) {
-      escape = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        try {
-          return JSON.parse(haystack.slice(start, i + 1));
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
 }
 
 export function createEmailAnalysisFn(
