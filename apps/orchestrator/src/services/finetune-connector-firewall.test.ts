@@ -182,12 +182,13 @@ describe("the erp-sync landing seam has nothing to firewall", () => {
     // red, and ADR-041 §4 is violated at the same moment (WARP-2028 is open,
     // so the model's promised encryption does not exist).
     const { execFileSync } = await import("node:child_process");
-    const { resolve } = await import("node:path");
-    // `process.cwd()` rather than `import.meta.url`: this workspace's tsc
-    // targets CommonJS, where `import.meta` is a compile error (TS1470), and
-    // `tool-scope-claim-trust.guard.test.ts` already resolves its scan root
-    // this way. Vitest's root is `apps/orchestrator`.
-    const srcRoot = resolve(process.cwd(), "src");
+    const { packagePath } = await import("../__tests__/helpers/test-paths.js");
+    // WARP-2654: the scan root is anchored to this workspace by the shared
+    // helper, never to the runner's cwd (the guard in test-paths.guard.test.ts
+    // refuses cwd-relative lookups). `import.meta.url` is unavailable here —
+    // this workspace's tsc targets CommonJS (TS1470) — which is what the
+    // helper exists for.
+    const srcRoot = packagePath("src");
     let out = "";
     try {
       out = execFileSync(
