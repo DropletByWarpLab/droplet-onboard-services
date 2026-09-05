@@ -69,7 +69,11 @@ export type ToolDomain =
   | "data"
   // WARP-1685 — Messages (member-to-member team chat). Slug matches the
   // `team_chat` ModuleId so the module toggle gates the domain.
-  | "team_chat";
+  | "team_chat"
+  // WARP-2180 — durable background runs (epic WARP-2176): start one, list
+  // yours. Its own domain so selection can find the pair on a "do this in
+  // the background" turn without dragging a whole vertical along.
+  | "agent_runs";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -254,6 +258,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
+  // WARP-2180 — durable background runs.
+  agent_runs: ["start_agent_run", "list_agent_runs"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -472,6 +478,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Background runs (WARP-2180)
+  start_agent_run: "Hand Droplet a longer task to work on in the background",
+  list_agent_runs: "See your background tasks and how they went",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

@@ -170,6 +170,15 @@ export function createServer(
       meta.userRole.length > 0
         ? meta.userRole
         : undefined;
+    // WARP-2180 — the durable run this dispatch belongs to. Trusted-stdio
+    // only, like userRole: an HTTP client cannot claim to be a run.
+    const metaAgentRunId =
+      trustedPrincipal &&
+      meta &&
+      typeof meta.agentRunId === "string" &&
+      meta.agentRunId.length > 0
+        ? meta.agentRunId
+        : undefined;
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -186,6 +195,7 @@ export function createServer(
       metaUserId,
       metaEnhancement,
       metaUserRole,
+      metaAgentRunId,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

@@ -128,6 +128,13 @@ export const AGENT_RUN_LOCK_KEY = "droplet:agent-run-worker";
 export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notification"]);
 
 /**
+ * WARP-2180 — tools a run may never see. `start_agent_run` is how a chat
+ * turn hands work off; inside a run it is how one prompt spawns a fleet that
+ * saturates the model. Structural refusal here; the handler refuses too.
+ */
+export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+
+/**
  * The pool a run starts from, before per-principal narrowing: the chat pool
  * (chat-tool-scope.ts) plus {@link RUN_READMITTED_TOOLS}. Confirming (Tier-2)
  * tools are IN — the interceptor challenges them and the run parks
@@ -136,7 +143,9 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  */
 export function runToolPool(): string[] {
   return TOOL_CATALOG.filter(
-    (t) => RUN_READMITTED_TOOLS.has(t.name) || !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+    (t) =>
+      !RUN_EXCLUDED_TOOLS.has(t.name) &&
+      (RUN_READMITTED_TOOLS.has(t.name) || !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
   ).map((t) => t.name);
 }
 
@@ -1008,7 +1017,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         { iteration: base + (result?.iterations ?? 0), stopReason: "cancelled" },
         ["cancelled"],
       );
-      await audit(runId, run.userId, "cancelled", "Agent run cancelled");
+      await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
+        user ? { username: user.username, goal: run.goal } : undefined);
       return;
     }
     if (reason === "parked" && park.request) {
@@ -1066,13 +1076,15 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         stopReason: reason,
         error,
       });
-      await audit(runId, run.userId, "failed", "Agent run failed", error);
+      await audit(runId, run.userId, "failed", "Agent run failed", error,
+        user ? { username: user.username, goal: run.goal } : undefined);
       return;
     }
     if (threw !== null || result === null) {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000) });
-      await audit(runId, run.userId, "failed", "Agent run failed", error);
+      await audit(runId, run.userId, "failed", "Agent run failed", error,
+        user ? { username: user.username, goal: run.goal } : undefined);
       return;
     }
 
@@ -1090,7 +1102,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           result: text,
           error: null,
         });
-        await audit(runId, run.userId, "succeeded", "Agent run completed");
+        await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
+          user ? { username: user.username, goal: run.goal, result: text } : undefined);
         return;
       }
       case "iteration_limit": {
@@ -1102,7 +1115,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           stopReason: result.stop_reason,
           error,
         });
-        await audit(runId, run.userId, "failed", "Agent run failed", error);
+        await audit(runId, run.userId, "failed", "Agent run failed", error,
+          user ? { username: user.username, goal: run.goal } : undefined);
         return;
       }
       case "error":
@@ -1115,7 +1129,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           stopReason: result.stop_reason,
           error,
         });
-        await audit(runId, run.userId, "failed", "Agent run failed", error);
+        await audit(runId, run.userId, "failed", "Agent run failed", error,
+          user ? { username: user.username, goal: run.goal } : undefined);
         return;
       }
     }
@@ -1127,7 +1142,32 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     status: "succeeded" | "failed" | "cancelled",
     what: string,
     error?: string,
+    // WARP-2180 — on a terminal status the owner is told over the same
+    // ws-bridge topic the park notification uses, with the result summary.
+    notify?: { username: string; goal: string; result?: string | null },
   ): Promise<void> {
+    if (notify) {
+      const goal = notify.goal.length > 80 ? `${notify.goal.slice(0, 77)}…` : notify.goal;
+      const body =
+        status === "succeeded"
+          ? (notify.result ?? "").slice(0, 300) || "Finished."
+          : status === "cancelled"
+            ? "Cancelled."
+            : `Failed: ${(error ?? "unknown error").slice(0, 300)}`;
+      await sendNotification(prisma, {
+        userId: notify.username,
+        kind: "ai",
+        title:
+          status === "succeeded"
+            ? `Background run finished: ${goal}`
+            : status === "cancelled"
+              ? `Background run cancelled: ${goal}`
+              : `Background run failed: ${goal}`,
+        body,
+      }).catch((err) => {
+        logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
+      });
+    }
     await recordActivity({
       kind: "tool_run",
       severity: status === "succeeded" ? "ok" : status === "cancelled" ? "info" : "err",

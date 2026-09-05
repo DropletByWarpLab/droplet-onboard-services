@@ -289,8 +289,11 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
         refs: expect.objectContaining({ agentRunId: id, name: "delete_file", confirmation: "confirmed" }),
       }),
     );
-    // Resume did not re-park.
-    expect(sendNotificationMock).toHaveBeenCalledTimes(1);
+    // Resume did not re-park: one "approval needed" at park, then one
+    // "finished" on the terminal status (WARP-2180), nothing else.
+    const titles = sendNotificationMock.mock.calls.map((c) => (c[1] as { title: string }).title);
+    expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(1);
+    expect(titles.filter((t) => t.startsWith("Background run finished"))).toHaveLength(1);
   });
 
   it("deny → resume: the model gets CONFIRMATION_DENIED as a tool result, adapts, and the tool never runs", async () => {
@@ -415,7 +418,7 @@ describe("agent runs — Tier-3 is refused, never parked (WARP-2179)", () => {
     expect(db.row(id).status).toBe("succeeded");
     expect(db.row(id).pendingTool).toBeNull();
     expect(mcp.callTool).not.toHaveBeenCalled();
-    expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(sendNotificationMock.mock.calls.some((c) => (c[1] as { title: string }).title.startsWith("Approval needed"))).toBe(false);
   });
 
   it("a tool the interceptor's deny tier blocks is a tool error, not a park", async () => {
@@ -433,6 +436,6 @@ describe("agent runs — Tier-3 is refused, never parked (WARP-2179)", () => {
     expect(db.row(id).status).toBe("succeeded");
     expect(db.row(id).pendingTool).toBeNull();
     expect(mcp.executed).toHaveLength(0);
-    expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(sendNotificationMock.mock.calls.some((c) => (c[1] as { title: string }).title.startsWith("Approval needed"))).toBe(false);
   });
 });

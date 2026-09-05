@@ -258,21 +258,27 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // It reached 41 on stage with `delete_file` (WARP-2669), then 43 with
     // WARP-2664's `organize_files` and `delete_files` (flag-gated by the
     // interceptor, no `confirmed` boolean in either schema, neither a
-    // pass-through). ADR-045 slice D then removed SEVEN confirming tools
+    // pass-through), then 44 with WARP-2180's `start_agent_run` — Tier-2
+    // because it spends the box's compute unattended; the interceptor
+    // challenges it and chat approves it, exactly like any other flag-gated
+    // tool, and it is not a pass-through either (it never calls
+    // passThroughConfirmation; the route it posts to has no gate of its own).
+    //
+    // ADR-045 slice D then removed SEVEN confirming tools
     // (`pm_create_project`, `pm_create_work_item`, `pm_update_work_item`,
     // `pm_transition_work_item`, `pm_add_work_item_comment`,
     // `crm_log_activity`, `crm_move_deal_stage`) and added THREE
     // (`business_create`, `business_update`, `business_link`):
-    // 43 − 7 + 3 = 39. The arithmetic is written out because a SHRINKING count
+    // 44 − 7 + 3 = 40. The arithmetic is written out because a SHRINKING count
     // is exactly what a dropped flag looks like, and the two must stay
     // tellable apart — a tool that quietly lost `requiresConfirmation` would
-    // move this number the same direction. The deltas are independent and
-    // both correct, so the count is the UNION of both branches, not either
-    // side's number.
+    // move this number the same direction. Stage's +1 (WARP-2180, 43→44) and
+    // this branch's −4 (ADR-045, 43→39) are independent and both correct, so
+    // the count is the UNION of both branches — 40 — not either side's number.
     //
-    // The pass-through roster below is again unchanged: none of the twelve
+    // The pass-through roster below is again unchanged: none of the thirteen
     // touched tools relays a 202.
-    expect(confirming).toHaveLength(39);
+    expect(confirming).toHaveLength(40);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
