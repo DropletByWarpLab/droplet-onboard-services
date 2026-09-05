@@ -612,12 +612,15 @@ const xeroTokenCache = new Map<string, XeroAccessToken>();
 /**
  * Drop one connection's minted token.
  *
- * Three callers, and the third was missing until #1946's review found it: the
- * two 401 paths (a token Xero has stopped accepting is worse than no token,
- * because it costs a call to learn that again), `decommission()`, and
- * `integrations.service.disconnect()`. Without that last one the DB row was
+ * Four callers, and #1946's review found the last two missing: the two 401
+ * paths (a token Xero has stopped accepting is worse than no token, because
+ * it costs a call to learn that again), `decommission()`,
+ * `integrations.service.disconnect()`, and the credential PATCH in
+ * `routes/saas-credentials.ts`. Without the disconnect call the DB row was
  * purged while a live bearer token for the account sat in this map for up to
- * {@link XERO_ACCESS_TOKEN_TTL_MS} plus the prune cron's lag.
+ * {@link XERO_ACCESS_TOKEN_TTL_MS} plus the prune cron's lag; without the
+ * PATCH call a re-pasted secret kept serving the token minted under the old
+ * one, so the connect probe passed without ever exercising the new secret.
  */
 export function forgetXeroToken(connectionId: string): void {
   xeroTokenCache.delete(connectionId);
@@ -984,8 +987,18 @@ export class XeroConnector implements Connector {
   private readonly variant: XeroCredentialVariant;
 
   private fingerprint: string | null = null;
-  /** The last state an actual exchange with Xero established. An explicit
-   *  value, never derived from a NULL or from a read returning nothing. */
+  /**
+   * The state the last exchange with Xero established — or, before any
+   * exchange, the optimistic `connected` this starts at. That default is the
+   * same one the QuickBooks track's `state()` (`online-connector.ts`) answers
+   * once its tokens resolve, and it is honest for the same reason: nothing
+   * reads this field without going through `currentState()`, which resolves
+   * the credential first and answers `disconnected` itself when there is
+   * none. So a never-configured connection reports `disconnected` from the
+   * resolver, never `connected` from here. Every later value is set by an
+   * actual response — an explicit value, never derived from a NULL or from a
+   * read returning nothing.
+   */
   private observedState: XeroConnectionState = "connected";
   /** Whether a credential has ever resolved on this instance. Reported as a
    *  boolean and never as a value (rule 19). */
@@ -1194,11 +1207,15 @@ export class XeroConnector implements Connector {
     if (res.status === 304) return {};
 
     if (res.status === 401) {
-      // The cached token is dead — drop it so the next call mints rather than
-      // replaying a rejected one. This is the ONE place a 401 is not
-      // immediately terminal: an expired token that raced the early-mint
-      // window looks identical to a revoked credential from here, and the
-      // distinction is made by the retry, not by guessing.
+      // The cached token is dead — drop it so the NEXT call mints rather than
+      // replaying a rejected one. There is no retry here: this read throws
+      // REAUTHORIZE_REQUIRED at once and the sync flags `needsReconnect`. An
+      // expired token that raced the early-mint window looks identical to a
+      // revoked credential from this response, and the two separate on the
+      // read AFTER this one — it mints fresh, and either succeeds (the token
+      // had merely expired) or the mint itself is refused (the credential is
+      // gone). Guessing which from a single 401 would be the inferred-from-
+      // absence failure ADR-041 §5 forbids.
       forgetXeroToken(this.config.connectionId);
       this.observedState = "needs_reconnect";
       throw new XeroReauthorizationRequiredError("Xero returned 401");
@@ -1353,7 +1370,7 @@ export class XeroConnector implements Connector {
       throw new XeroReauthorizationRequiredError("the stored client credential is not usable");
     }
     if (state === "scope_missing") {
-      throw new XeroScopeMissingError("this organisation", "accounting.transactions.read");
+      throw new XeroScopeMissingError("this organisation", SCOPE_TRANSACTIONS);
     }
     if (state === "rate_limited") {
       throw new XeroRateLimitedError("this organisation", null);
@@ -1649,7 +1666,15 @@ export class XeroConnector implements Connector {
    * QuickBooks track reproduced once inside the very field meant to prevent it.
    */
   private async currentState(): Promise<XeroConnectionState> {
-    if (xeroTokenCache.has(this.config.connectionId)) return this.observedState;
+    if (xeroTokenCache.has(this.config.connectionId)) {
+      // A token in the cache was minted from this connection's credential, so
+      // the credential is known to resolve even though THIS instance never
+      // resolved it. Without this a fresh connector on a connection that has
+      // a live token reported `hasCredential: false` beside
+      // `hasAccessToken: true` — a token minted from no credential.
+      this.credentialResolved = true;
+      return this.observedState;
+    }
     try {
       await this.resolveSecret("clientSecret");
       this.credentialResolved = true;

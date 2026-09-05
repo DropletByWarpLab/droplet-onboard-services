@@ -981,6 +981,38 @@ describe("the failure states are distinct and none of them is an empty result", 
     expect(status.hasAccessToken).toBe(true);
     expect(status.clientId).toBe(CLIENT_ID);
   });
+
+  it("reports hasCredential on a FRESH instance that finds a cached token", async () => {
+    // `erp.service` builds a connector per read, so the instance that reports
+    // status is rarely the one that minted. A token in the cache was minted
+    // from this connection's credential; an object saying `hasAccessToken:
+    // true, hasCredential: false` describes a token minted from nothing.
+    // Mutation: drop the `credentialResolved = true` on the cached branch of
+    // `currentState()` → red, with zero I/O either way.
+    const first = build([tokenResponse(), json({ Organisations: [{}] })]);
+    await first.connector.connect();
+
+    const fresh = build([]);
+    const status = await fresh.connector.status();
+    expect(status.hasAccessToken).toBe(true);
+    expect(status.hasCredential).toBe(true);
+    expect(status.state).toBe("connected");
+    expect(fresh.calls).toHaveLength(0);
+  });
+
+  it("names a missing scope through the constant the scope set is built from", async () => {
+    // Mutation: hardcode the literal back into `health()` → this still passes
+    // today, and goes red the day `SCOPE_TRANSACTIONS` changes; the assertion
+    // is that the two cannot drift, which is what the comment there claims.
+    const { connector } = build([
+      tokenResponse(),
+      json({ Type: "ValidationException" }, { status: 403 }),
+    ]);
+    await expect(connector.runRead("get_open_invoices", {})).rejects.toThrow(
+      XeroScopeMissingError,
+    );
+    await expect(connector.health()).rejects.toThrow(XERO_SCOPES[0]);
+  });
 });
 
 // ===========================================================================
