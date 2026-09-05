@@ -21,6 +21,8 @@ const duplicateAccessRoleMock = vi.fn();
 const archiveAccessRoleMock = vi.fn();
 const restoreAccessRoleMock = vi.fn();
 const assignAccessRoleMock = vi.fn();
+const listRoleTemplatesMock = vi.fn();
+const createRoleFromTemplateMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
@@ -31,6 +33,11 @@ vi.mock("@/lib/api", () => ({
   archiveAccessRole: (...a: any[]) => archiveAccessRoleMock(...a),
   restoreAccessRole: (...a: any[]) => restoreAccessRoleMock(...a),
   assignAccessRole: (...a: any[]) => assignAccessRoleMock(...a),
+  // WARP-2738 — the gallery reads the catalogue and the panel instantiates
+  // from it. A named export missing from this factory throws on first access,
+  // so the mock moves with the component's imports.
+  listRoleTemplates: (...a: any[]) => listRoleTemplatesMock(...a),
+  createRoleFromTemplate: (...a: any[]) => createRoleFromTemplateMock(...a),
 }));
 
 vi.mock("framer-motion", async () => {
@@ -38,10 +45,40 @@ vi.mock("framer-motion", async () => {
   return { ...actual, useReducedMotion: () => true };
 });
 
-import { RolesAccessPanel } from "./RolesAccessPanel";
+import { RolesAccessPanel, roleBuilderSheetKey } from "./RolesAccessPanel";
 import { ToastProvider } from "@/components/Toast";
 import { ACCESS_COPY } from "./copy";
-import type { AccessRole, RosterUser } from "@/lib/types";
+import { blankRoleDraft, templateToDraft } from "@/lib/access";
+import type { AccessRole, RoleTemplate, RosterUser } from "@/lib/types";
+
+/** A small made-up catalogue. The SERVER owns the real one (and pins it in
+ *  `access-role-templates.test.ts`); these fixtures exist only to drive the
+ *  panel's two create paths. */
+function tpl(overrides: Partial<RoleTemplate> = {}): RoleTemplate {
+  return {
+    id: "front-desk",
+    name: "Front Desk",
+    description: "Reception and front-of-house.",
+    startingPoint: "family",
+    featureGrants: [
+      { moduleId: "files", level: "act" },
+      { moduleId: "calendar", level: "manage" },
+    ],
+    toolGrants: [{ domain: "files", level: "view" }],
+    connectorGrants: [],
+    cloudModelsAllowed: false,
+    mayOperateLocks: false,
+    storageQuotaBytes: null,
+    maxUploadSizeMb: null,
+    llmDailyMessageCap: null,
+    ...overrides,
+  };
+}
+
+const TEMPLATES = {
+  roleTemplates: [tpl(), tpl({ id: "bookkeeper", name: "Bookkeeper", startingPoint: "admin" })],
+  enforcedModuleIds: ["files", "knowledge", "docs", "cameras", "network", "smart_home", "crm", "money"],
+};
 
 function role(overrides: Partial<AccessRole> = {}): AccessRole {
   return {
@@ -96,6 +133,7 @@ function renderPanel(props: Partial<React.ComponentProps<typeof RolesAccessPanel
 beforeEach(() => {
   vi.clearAllMocks();
   listAccessRolesMock.mockResolvedValue({ roles: [role()] });
+  listRoleTemplatesMock.mockResolvedValue(TEMPLATES);
 });
 
 afterEach(() => {
@@ -753,5 +791,303 @@ describe("WARP-1576 — retainedQuotaCount is surfaced, not swallowed", () => {
     await waitFor(() =>
       expect(screen.queryByText(ACCESS_COPY.retainedQuota(2))).not.toBeInTheDocument(),
     );
+  });
+});
+
+// ── WARP-2738: the role-template gallery, wired into both entry points ──
+//
+// ADR-032 shipped the engine and nothing to start from. Two things had to be
+// fixed for a template to be usable, and both fail SILENTLY when they break:
+//
+//   1. the empty state holds the ONLY create CTA on a fresh box (the header's
+//      New-role button is conditioned on there already being roles), so the
+//      gallery has to live there, without displacing the blank path;
+//   2. the builder computes `dirty` as a JSON diff against `base`, so a sheet
+//      pre-filled FROM base is born non-dirty and Save is disabled — a
+//      complete-looking role with a greyed button and no reason given.
+describe("WARP-2738 — the template gallery", () => {
+  it("renders in the §4.1 empty state, WITHOUT orphaning the blank New role path", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument());
+    // The gallery is present…
+    expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
+    expect(screen.getByText("Front Desk")).toBeInTheDocument();
+    // …and starting from nothing is still reachable, in the same card.
+    expect(screen.getByRole("button", { name: /New role/ })).toBeInTheDocument();
+  });
+
+  it("keeps the all-archived empty copy honest with the gallery beside it", async () => {
+    // "No custom roles yet" would be a lie when one exists and is filed away.
+    listAccessRolesMock.mockResolvedValue({
+      roles: [role({ id: "r-old", name: "Locum", slug: "locum", state: "archived", peopleCount: 0 })],
+    });
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.emptyRolesAllArchived)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(ACCESS_COPY.emptyRoles)).not.toBeInTheDocument();
+    expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
+  });
+
+  it("offers 'Start from a template' beside New role once roles exist, and opens the dialog", async () => {
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    // Not fetched until asked for — the catalogue read follows the click.
+    expect(listRoleTemplatesMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("access-template-gallery")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: ACCESS_COPY.templatesOpen }));
+    expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
+    await waitFor(() => expect(listRoleTemplatesMock).toHaveBeenCalled());
+    // The blank path keeps the filled accent; the template path is the ghost.
+    expect(screen.getByRole("button", { name: /New role/ }).className).toContain("primary");
+  });
+
+  it("one-click: confirms the consequence, POSTs { templateId }, refreshes BOTH role lists", async () => {
+    const onRolesChanged = vi.fn();
+    createRoleFromTemplateMock.mockResolvedValue({
+      role: role({ id: "r-fd", name: "Front Desk", slug: "front-desk", peopleCount: 0 }),
+      syncState: "synced",
+    });
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel({ onRolesChanged });
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesUse })[0]!);
+
+    const dialog = await screen.findByRole("dialog", { name: ACCESS_COPY.templateCreateHeading });
+    // Never a silent write: the narrowing and the deliberately-unset extras
+    // are both stated before anything is created.
+    expect(within(dialog).getByText(ACCESS_COPY.templatesNarrowing)).toBeInTheDocument();
+    expect(within(dialog).getByText(ACCESS_COPY.templatesNoExtras)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: ACCESS_COPY.templateCreateSubmit }));
+
+    // No rename typed → `{ templateId }` alone, and never a slug.
+    await waitFor(() =>
+      expect(createRoleFromTemplateMock).toHaveBeenCalledWith("front-desk", undefined),
+    );
+    // The panel's own list AND the page's copy (roster chips, role pickers).
+    await waitFor(() => expect(listAccessRolesMock.mock.calls.length).toBeGreaterThan(1));
+    expect(onRolesChanged).toHaveBeenCalled();
+  });
+
+  it("sends the optional rename when the operator changes the name", async () => {
+    createRoleFromTemplateMock.mockResolvedValue({
+      role: role({ id: "r-fd", name: "Reception" }),
+      syncState: "synced",
+    });
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesUse })[0]!);
+    const dialog = await screen.findByRole("dialog", { name: ACCESS_COPY.templateCreateHeading });
+    fireEvent.change(within(dialog).getByLabelText(ACCESS_COPY.templateCreateNameLabel), {
+      target: { value: "Reception" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: ACCESS_COPY.templateCreateSubmit }));
+    await waitFor(() =>
+      expect(createRoleFromTemplateMock).toHaveBeenCalledWith("front-desk", "Reception"),
+    );
+  });
+
+  it("a 409 CONCURRENT_MUTATION re-issues the IDENTICAL call instead of reporting a failure", async () => {
+    // Nothing was applied: the write lost a SERIALIZABLE race on the derived
+    // slug. Rendering that as an error teaches the operator to fear a
+    // duplicate that does not exist.
+    const raced = Object.assign(new Error("Another change landed first — try again."), {
+      status: 409,
+      code: "CONCURRENT_MUTATION",
+    });
+    createRoleFromTemplateMock
+      .mockRejectedValueOnce(raced)
+      .mockResolvedValueOnce({ role: role({ id: "r-fd", name: "Front Desk" }), syncState: "synced" });
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    render(
+      <ToastProvider>
+        <RolesAccessPanel
+          people={PEOPLE}
+          actingTier="owner"
+          connectors={[]}
+          onOpenPerson={vi.fn()}
+          onOpenDepartments={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesUse })[0]!);
+    const dialog = await screen.findByRole("dialog", { name: ACCESS_COPY.templateCreateHeading });
+    fireEvent.click(within(dialog).getByRole("button", { name: ACCESS_COPY.templateCreateSubmit }));
+
+    await waitFor(() => expect(createRoleFromTemplateMock).toHaveBeenCalledTimes(2));
+    // Identical arguments — a retry, not a different request.
+    expect(createRoleFromTemplateMock.mock.calls[0]).toEqual(
+      createRoleFromTemplateMock.mock.calls[1],
+    );
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.templateCreated("Front Desk"))).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(ACCESS_COPY.templateRaceRetry)).not.toBeInTheDocument();
+  });
+
+  it("a race that loses TWICE says so, and says nothing was created", async () => {
+    const raced = Object.assign(new Error("Another change landed first — try again."), {
+      status: 409,
+      code: "CONCURRENT_MUTATION",
+    });
+    createRoleFromTemplateMock.mockRejectedValue(raced);
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    render(
+      <ToastProvider>
+        <RolesAccessPanel
+          people={PEOPLE}
+          actingTier="owner"
+          connectors={[]}
+          onOpenPerson={vi.fn()}
+          onOpenDepartments={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesUse })[0]!);
+    const dialog = await screen.findByRole("dialog", { name: ACCESS_COPY.templateCreateHeading });
+    fireEvent.click(within(dialog).getByRole("button", { name: ACCESS_COPY.templateCreateSubmit }));
+    await waitFor(() =>
+      expect(screen.getByText(ACCESS_COPY.templateRaceRetry)).toBeInTheDocument(),
+    );
+    // Retried once, not looped: a second race is a signal, not noise.
+    expect(createRoleFromTemplateMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("REGRESSION: 'Customize first' opens a PRE-FILLED sheet whose Save is live", async () => {
+    // The whole reason `initialDirty` exists. Without it the sheet renders a
+    // complete role and a disabled Save, and the only way out is to nudge a
+    // field the operator did not want to change.
+    createAccessRoleMock.mockResolvedValue({ role: role({ id: "r-fd" }), syncState: "synced" });
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesCustomize })[0]!);
+
+    // Pre-filled: create mode, with the template's name already in the field.
+    const name = await screen.findByPlaceholderText("Name this role");
+    expect((name as HTMLInputElement).value).toBe("Front Desk");
+    const save = screen.getByRole("button", { name: "Save role" });
+    expect(save).toBeEnabled();
+
+    fireEvent.click(save);
+    await waitFor(() => expect(createAccessRoleMock).toHaveBeenCalled());
+    const payload = createAccessRoleMock.mock.calls[0][0];
+    expect(payload.name).toBe("Front Desk");
+    expect(payload.startingPoint).toBe("family");
+    // The template's grants survive the round trip — not a blank draft with a
+    // name poured in (`templateToDraft` carries the tool rows verbatim).
+    expect(payload.featureGrants).toEqual(
+      expect.arrayContaining([{ moduleId: "files", level: "act" }]),
+    );
+    expect(payload.toolGrants).toEqual([{ domain: "files", level: "view" }]);
+  });
+
+  it("a blank New role is still NOT saveable until it is named", async () => {
+    // `initialDirty` must not have leaked into the ordinary create path.
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /New role/ }));
+    await screen.findByPlaceholderText("Name this role");
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+
+  it("customizing a SECOND template shows that template, not the first", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesCustomize })[0]!);
+    expect(((await screen.findByPlaceholderText("Name this role")) as HTMLInputElement).value).toBe(
+      "Front Desk",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close role builder" }));
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesCustomize })[1]!);
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("Name this role") as HTMLInputElement).value).toBe(
+        "Bookkeeper",
+      ),
+    );
+  });
+
+  it("the sheet's remount key separates two templates that share mode and (absent) id", () => {
+    // Source-level on purpose. The shipped key was `${mode}-${id ?? "new"}` —
+    // the CONSTANT "create-new" for every create — so two templates shared a
+    // key and React would keep the first sheet's `useState` draft while the
+    // panel handed it a second `base` it never re-reads. Nothing in the UI can
+    // reach that today (the sheet is modal, and opening it closes the gallery
+    // dialog), so a DOM test would only pretend; this pins the contract that
+    // keeps it safe when a future affordance makes the switch reachable.
+    const a = roleBuilderSheetKey({
+      mode: "create",
+      base: templateToDraft(tpl()),
+      templateId: "front-desk",
+    });
+    const b = roleBuilderSheetKey({
+      mode: "create",
+      base: templateToDraft(tpl({ id: "bookkeeper", name: "Bookkeeper" })),
+      templateId: "bookkeeper",
+    });
+    expect(a).not.toBe(b);
+    // …and a blank create keeps its own identity, distinct from both.
+    const blank = roleBuilderSheetKey({ mode: "create", base: blankRoleDraft("family") });
+    expect(blank).not.toBe(a);
+    expect(blank).not.toBe(b);
+  });
+});
+
+// ── WARP-2738: the tool axis on the detail pane ──────────────────────
+//
+// T8's detail pane summarised Features, Usage and "Off the box" and left the
+// TOOL axis off entirely — the one axis that is genuinely fail-closed (a
+// domain absent is a domain the assistant cannot call, with no nav-only half
+// measure), and the entire value of a read-only profile.
+describe("WARP-2738 — the detail pane names the tool grants", () => {
+  it("lists the granted domains with their levels", async () => {
+    listAccessRolesMock.mockResolvedValue({
+      roles: [
+        role({
+          startingPoint: "admin",
+          toolGrants: [
+            { domain: "money", level: "use" },
+            { domain: "files", level: "view" },
+          ],
+        }),
+      ],
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    const detail = screen.getByTestId("access-role-detail");
+    expect(within(detail).getByText(ACCESS_COPY.toolsAxis)).toBeInTheDocument();
+    expect(within(detail).getByText(/money · use/)).toBeInTheDocument();
+    expect(within(detail).getByText(/files · view/)).toBeInTheDocument();
+    // Admin keeps its write tools, so the read-only caveat stays off.
+    expect(within(detail).queryByText(ACCESS_COPY.toolsReadOnlyBelowAdmin)).not.toBeInTheDocument();
+  });
+
+  it("says a Staff-based role's tools are read-only whatever the level claims", async () => {
+    // `tierKeepsWriteTools` admits owner and admin only — below that, a `use`
+    // grant IS a `view` grant, and the chip alone would imply otherwise.
+    listAccessRolesMock.mockResolvedValue({
+      roles: [role({ startingPoint: "family", toolGrants: [{ domain: "files", level: "use" }] })],
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    const detail = screen.getByTestId("access-role-detail");
+    expect(within(detail).getByText(ACCESS_COPY.toolsReadOnlyBelowAdmin)).toBeInTheDocument();
+  });
+
+  it("renders the absence honestly when a role grants no tools at all", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [role({ toolGrants: [] })] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
+    const detail = screen.getByTestId("access-role-detail");
+    expect(within(detail).getByText(ACCESS_COPY.noToolsGranted)).toBeInTheDocument();
   });
 });

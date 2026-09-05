@@ -18,6 +18,8 @@ import {
   getAccessRole,
   createAccessRole,
   duplicateAccessRole,
+  listRoleTemplates,
+  createRoleFromTemplate,
   updateAccessRole,
   archiveAccessRole,
   restoreAccessRole,
@@ -173,5 +175,94 @@ describe("WARP-1532 — assignment + person access", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       exceptions: [{ moduleId: "cameras", effect: "allow", level: "act" }],
     });
+  });
+});
+
+describe("WARP-2738 — role templates", () => {
+  it("listRoleTemplates reads GET /api/access/role-templates", async () => {
+    // `enforcedModuleIds` passes through UNTOUCHED — it is derived server-side
+    // from the live layer-2 gate roster and is the only honest source for
+    // which grants actually narrow what a person reaches. Never sorted, never
+    // reconstructed here.
+    authFetchMock.mockResolvedValue(
+      res({
+        roleTemplates: [{ id: "front-desk" }],
+        enforcedModuleIds: ["files", "knowledge", "docs", "cameras"],
+      }),
+    );
+    const out = await listRoleTemplates();
+    expect(authFetchMock.mock.calls[0][0]).toMatch(/\/api\/access\/role-templates$/);
+    expect(out.enforcedModuleIds).toEqual(["files", "knowledge", "docs", "cameras"]);
+    expect(out.roleTemplates[0].id).toBe("front-desk");
+  });
+
+  it("createRoleFromTemplate POSTs { templateId } and never a slug", async () => {
+    authFetchMock.mockResolvedValue(res({ role: { id: "r9" }, syncState: "synced" }));
+    const out = await createRoleFromTemplate("front-desk");
+    const [url, init] = authFetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/access\/roles$/);
+    expect(init.method).toBe("POST");
+    // No `name` key at all when there is no rename — the server takes the
+    // template's own name, and the slug is always derived server-side.
+    expect(JSON.parse(init.body as string)).toEqual({ templateId: "front-desk" });
+    expect(out.syncState).toBe("synced");
+  });
+
+  it("createRoleFromTemplate sends the optional rename when one is given", async () => {
+    authFetchMock.mockResolvedValue(res({ role: { id: "r9" } }));
+    await createRoleFromTemplate("front-desk", "Reception");
+    const [, init] = authFetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      templateId: "front-desk",
+      name: "Reception",
+    });
+  });
+
+  it("a 409 CONCURRENT_MUTATION carries status + code so the caller can RETRY", async () => {
+    // The refusal this ticket makes routine: two operators clicking the same
+    // card derive the same slug base, one loses the SERIALIZABLE race, and
+    // NOTHING was applied. A panel that could only read `message` would render
+    // a retryable race as a failure.
+    authFetchMock.mockResolvedValue(
+      res({ error: "Another change landed first — try again.", code: "CONCURRENT_MUTATION" }, false, 409),
+    );
+    const err = await createRoleFromTemplate("front-desk").catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error & { status?: number }).status).toBe(409);
+    expect((err as Error & { code?: string }).code).toBe("CONCURRENT_MUTATION");
+    expect((err as Error).message).toMatch(/try again/);
+  });
+
+  it("a well-formed id naming no template surfaces the server's 404", async () => {
+    authFetchMock.mockResolvedValue(res({ error: "Role template not found" }, false, 404));
+    const err = await createRoleFromTemplate("no-such-template").catch((e) => e);
+    expect((err as Error).message).toBe("Role template not found");
+    expect((err as Error & { status?: number }).status).toBe(404);
+    // No `code` on this one — terminal, and there is nothing to dispatch on.
+    expect((err as Error & { code?: string }).code).toBeUndefined();
+  });
+
+  it("createAccessRole carries the same 409 shape (one handler for both paths)", async () => {
+    // The hand-authored create races on the same derived slug base, so the
+    // panel's retry has to work there too — otherwise "customize, then create"
+    // is the one path where a retryable race reads as an error.
+    authFetchMock.mockResolvedValue(
+      res({ error: "Another change landed first — try again.", code: "CONCURRENT_MUTATION" }, false, 409),
+    );
+    const err = await createAccessRole({
+      name: "Front Desk",
+      description: null,
+      startingPoint: "family",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      featureGrants: [],
+      toolGrants: [],
+      connectorGrants: [],
+    }).catch((e) => e);
+    expect((err as Error & { status?: number }).status).toBe(409);
+    expect((err as Error & { code?: string }).code).toBe("CONCURRENT_MUTATION");
   });
 });
