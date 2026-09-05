@@ -577,6 +577,54 @@ describe("the minted access token", () => {
     forgetXeroToken(CONNECTION_ID);
     expect((await connector.status()).hasAccessToken).toBe(false);
   });
+
+  it("does not re-cache a token whose mint was in flight when the connection was forgotten", async () => {
+    // The residual race on the disconnect fix (#1946): a sync tick that read
+    // the row before the purge committed mints AFTER the `Map.delete` and
+    // puts a live token back for a purged id. The identity call is held at a
+    // gate, the connection is forgotten while it waits, then the gate opens.
+    // Mutation: drop the epoch compare in `token()` (always `set`) → red.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = [tokenResponse(), json({ Organisations: [{}] })];
+    const connector = new XeroConnector(
+      {
+        connectionId: CONNECTION_ID,
+        clientId: CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async (url: string) => {
+          if (url.includes("/connect/token")) await gate;
+          const next = queue.shift();
+          if (!next) throw new Error(`unscripted request: ${url}`);
+          return next;
+        }) as never,
+        now: () => NOW,
+        resolveSecret: async () => CLIENT_SECRET,
+      },
+    );
+
+    const inFlight = connector.connect();
+    // Every step before the identity call is a resolved microtask, so by the
+    // next macrotask the mint is parked at the gate.
+    await new Promise((resolve) => setImmediate(resolve));
+    forgetXeroToken(CONNECTION_ID);
+    release();
+    await inFlight;
+
+    // The read completed on the token it minted; the cache did not keep it.
+    expect((await connector.status()).hasAccessToken).toBe(false);
+    // And a forget with no mint in flight still leaves a later mint cacheable.
+    __resetXeroTokenCacheForTest();
+    const later = build([tokenResponse(), json({ Organisations: [{}] })]);
+    forgetXeroToken(CONNECTION_ID);
+    await later.connector.connect();
+    expect((await later.connector.status()).hasAccessToken).toBe(true);
+  });
 });
 
 // ===========================================================================

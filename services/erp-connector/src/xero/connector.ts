@@ -610,6 +610,19 @@ export interface XeroAccessToken {
 const xeroTokenCache = new Map<string, XeroAccessToken>();
 
 /**
+ * Per-connection forget epoch, bumped by {@link forgetXeroToken}.
+ *
+ * Closes the race the cache alone leaves open (raised on #1946): a read that
+ * started its mint BEFORE a forget — a sync tick that read the row before the
+ * disconnect purge committed, say, or before a rotated secret was written —
+ * would `set` its token AFTER the `delete`, putting a live token back for a
+ * purged or superseded connection. `token()` reads the epoch before it mints
+ * and caches only if nobody forgot in between. The in-flight read still
+ * completes on the token it minted: that is one read, not thirty minutes.
+ */
+const xeroTokenEpoch = new Map<string, number>();
+
+/**
  * Drop one connection's minted token.
  *
  * Four callers, and #1946's review found the last two missing: the two 401
@@ -624,6 +637,7 @@ const xeroTokenCache = new Map<string, XeroAccessToken>();
  */
 export function forgetXeroToken(connectionId: string): void {
   xeroTokenCache.delete(connectionId);
+  xeroTokenEpoch.set(connectionId, (xeroTokenEpoch.get(connectionId) ?? 0) + 1);
 }
 
 /**
@@ -654,6 +668,7 @@ export function pruneExpiredXeroTokens(now: number = Date.now()): number {
 /** Test seam: clear every cached token between cases. */
 export function __resetXeroTokenCacheForTest(): void {
   xeroTokenCache.clear();
+  xeroTokenEpoch.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1048,8 +1063,13 @@ export class XeroConnector implements Connector {
       this.credentialResolved = true;
       return cached.accessToken;
     }
+    const epoch = xeroTokenEpoch.get(this.config.connectionId) ?? 0;
     const minted = await this.mint(op);
-    xeroTokenCache.set(this.config.connectionId, minted);
+    // Cache only if nothing forgot this connection while the mint was in
+    // flight — see `xeroTokenEpoch`.
+    if ((xeroTokenEpoch.get(this.config.connectionId) ?? 0) === epoch) {
+      xeroTokenCache.set(this.config.connectionId, minted);
+    }
     return minted.accessToken;
   }
 
