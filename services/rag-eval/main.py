@@ -37,6 +37,8 @@ import asyncio
 import logging
 import os
 import sys
+import time
+from pathlib import Path
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -173,10 +175,67 @@ def cmd_bootstrap(n_runs: int) -> int:
     return 0
 
 
+def cmd_run_extraction() -> int:
+    """ADR-048's extraction canary (WARP-2732).
+
+    🔴 A SEPARATE ENTRY POINT rather than a flag threaded through
+    `runner.run_once`, because it is a different kind of run: RAGAS scores
+    RETRIEVAL against a judge, this scores what the filing worker WROTE by
+    reading the box's own Postgres afterwards. Sharing the plumbing would mean
+    one of them pretending to be the other, and the honest version of that
+    pretence is two functions.
+
+    Needs `DATABASE_URL` and the model tag the box is actually serving. The
+    model is not inferred: a canary that guessed which model it measured would
+    record a pass against the wrong name, and the pass is what unlocks auto
+    mode for that model specifically.
+    """
+    import subprocess
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        # Fail loudly. A canary that silently degrades to "no database, so no
+        # failures found" is exactly the shape of WARP-1860's fifteen green
+        # all-zero nightly runs.
+        logger.error("extraction canary needs DATABASE_URL; refusing to run blind")
+        return 2
+    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL")
+    if not model:
+        logger.error(
+            "extraction canary needs FILING_CANARY_MODEL (or LLM_MODEL) — the pass is "
+            "recorded AGAINST a model, so it cannot be guessed"
+        )
+        return 2
+
+    script = Path(__file__).resolve().parent / "tests" / "extraction-eval" / "extraction_runner.py"
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    out = Path(RESULTS_DIR) / f"extraction-{stamp}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "--database-url", db_url, "--model", model,
+         "--out", str(out)],
+        check=False,
+    )
+    logger.info("extraction canary finished rc=%s → %s", proc.returncode, out)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="rag-eval service entry point")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("run-once", help="Run RAGAS once and exit")
+    once = sub.add_parser("run-once", help="Run an eval once and exit")
+    once.add_argument(
+        "--suite",
+        choices=("ragas", "extraction"),
+        default="ragas",
+        help=(
+            "ragas (default) = the WARP-436 retrieval suite. "
+            "extraction = ADR-048's filing canary, which GATES auto mode: "
+            "`AutoFilingSetting` carries a CHECK refusing mode='auto' until a "
+            "pass has been recorded on this box's own model (WARP-2732)."
+        ),
+    )
     boot = sub.add_parser(
         "bootstrap",
         help="Run RAGAS N times then aggregate into baselines.candidate.json",
@@ -192,7 +251,7 @@ def main() -> int:
     if args.command is None:
         return cmd_schedule()
     if args.command == "run-once":
-        return cmd_run_once()
+        return cmd_run_extraction() if args.suite == "extraction" else cmd_run_once()
     if args.command == "bootstrap":
         return cmd_bootstrap(args.runs)
     parser.error(f"unknown command: {args.command}")

@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,6 +158,68 @@ def _run_once_blocking(run_id: str) -> None:
         return
     STORE.finish(run_id, RunStatus.SUCCEEDED)
     logger.info("HTTP-triggered run complete (run_id=%s)", run_id)
+
+
+def _extraction_blocking(run_id: str) -> None:
+    """Executor-thread body for /run-extraction (WARP-2732, ADR-048).
+
+    🔴 A FAILED canary is a SUCCEEDED run with a failing verdict, not a failed
+    run — and the distinction is the whole point. `RunStatus.FAILED` means the
+    harness broke; a canary that scored below its floors ran perfectly and
+    answered "no". Collapsing the two would let somebody read a red canary as
+    "the eval is flaky, try again", which is exactly the reading that gets a
+    gate switched off.
+
+    The verdict lives in the results file the runner wrote; this only records
+    whether the measurement HAPPENED.
+    """
+    import subprocess
+    import sys as _sys
+
+    script = (
+        Path(__file__).resolve().parent / "tests" / "extraction-eval" / "extraction_runner.py"
+    )
+    db_url = os.environ.get("DATABASE_URL")
+    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL")
+    if not db_url or not model:
+        # Refuse rather than run blind: a canary that quietly measured nothing
+        # is WARP-1860's fifteen green all-zero nightly runs.
+        STORE.finish(
+            run_id,
+            RunStatus.FAILED,
+            error="extraction canary needs DATABASE_URL and FILING_CANARY_MODEL/LLM_MODEL",
+        )
+        return
+
+    out = Path(config.RESULTS_DIR) / f"extraction-{run_id}.json"
+    try:
+        proc = subprocess.run(
+            [
+                _sys.executable, str(script),
+                "--database-url", db_url,
+                "--model", model,
+                "--out", str(out),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("extraction canary failed to start (run_id=%s)", run_id)
+        STORE.finish(run_id, RunStatus.FAILED, error=str(exc))
+        return
+
+    # rc 2 is "could not run at all" (no psycopg, no database). rc 1 is a
+    # measured FAIL, which is a successful run.
+    if proc.returncode >= 2:
+        STORE.finish(run_id, RunStatus.FAILED, error=(proc.stderr or "")[-2000:])
+        return
+    STORE.finish(run_id, RunStatus.SUCCEEDED)
+    logger.info(
+        "extraction canary complete (run_id=%s verdict=%s)",
+        run_id,
+        "PASS" if proc.returncode == 0 else "FAIL",
+    )
 
 
 def _bootstrap_blocking(run_id: str, n_runs: int) -> None:
@@ -316,6 +379,32 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=202,
             content={"runId": run_id, "startedAt": started_at},
+        )
+
+    @app.post("/run-extraction")
+    async def post_run_extraction() -> JSONResponse:
+        """ADR-048's extraction canary (WARP-2732).
+
+        Shares the one in-process busy flag with /run and /bootstrap: the box
+        has one model and one corpus, and two evals reading the same tables at
+        once measure each other.
+        """
+        run_id = runner._utc_stamp()
+        admitted, current = STORE.try_begin(run_id, kind="extraction")
+        if not admitted:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "run_in_progress", "runId": current},
+            )
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _extraction_blocking, run_id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "runId": run_id,
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+                "suite": "extraction",
+            },
         )
 
     @app.post("/bootstrap")

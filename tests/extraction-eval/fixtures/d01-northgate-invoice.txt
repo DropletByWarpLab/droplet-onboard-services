@@ -1,0 +1,16 @@
+BRIGHTWELL LABORATORY LTD
+brightwell-lab.example
+accounts@brightwell-lab.example
+
+INVOICE  BW-7781
+Date: 2026-03-02
+
+To:  Northgate Dental Practice Ltd
+     18 Northgate Street
+
+  Crown, full ceramic                     245.00
+  Bite raising appliance                  180.00
+
+  TOTAL (GBP)                             425.00
+
+Terms: 30 days.

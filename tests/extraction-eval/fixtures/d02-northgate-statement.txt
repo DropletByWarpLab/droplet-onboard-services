@@ -1,0 +1,14 @@
+Brightwell Laboratory
+brightwell-lab.example
+
+STATEMENT OF ACCOUNT
+2026-03-31
+
+Customer: Northgate Dental Practice, Ltd.
+
+  02 Mar   Invoice BW-7781                   425.00
+  19 Mar   Invoice BW-7802                   310.00
+
+  BALANCE OUTSTANDING (GBP)                  735.00
+
+Please remit to accounts@brightwell-lab.example.
