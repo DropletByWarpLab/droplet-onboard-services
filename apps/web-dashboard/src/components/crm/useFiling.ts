@@ -73,12 +73,53 @@ export interface FilingProposal {
   evidence: { quote: string; chunkIdx?: number }[];
 }
 
+/**
+ * WARP-2731 — the Health block.
+ *
+ * Two SILENCES, not two successes. `hoursSinceLastIndex` catches a corpus the
+ * indexer can no longer embed (every new file lands failed before filing ever
+ * sees it); `lastTickAt` catches a worker registered but never firing. A
+ * feature whose health panel reports only what it did looks healthiest once it
+ * has stopped.
+ */
+export interface FilingHealth {
+  pending: number;
+  failed: number;
+  hoursSinceLastIndex: number | null;
+  lastTickAt: string | null;
+  paused: boolean;
+  pausedReason: string | null;
+}
+
 export interface FilingSummary {
   mode: "off" | "propose" | "auto";
   level: "links_only" | "also_create";
   vertical: "general" | "healthcare";
   enabled: boolean;
   pending: number;
+  health?: FilingHealth;
+}
+
+export interface FilingRule {
+  id: string;
+  keyKind: "EMAIL_ADDRESS" | "EMAIL_DOMAIN" | "NAME" | "NC_FOLDER";
+  keyValue: string;
+  verdict: "NOT_SAME" | "ALWAYS_HERE" | "IGNORE_SOURCE";
+  companyId: string | null;
+  companyName: string | null;
+  /** Built server-side: the phrasing IS the product, and three clients each
+   *  inventing their own is how one rule ends up described three ways. */
+  sentence: string;
+  createdAt: string;
+}
+
+export interface SkippedItem {
+  sourceRef: string;
+  sourceKind: "FILE" | "EMAIL";
+  reason: string | null;
+  explanation: string;
+  skippedAt: string;
+  reopenable: boolean;
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -151,7 +192,50 @@ export interface FilingActions {
   apply: (id: string, chooseCompanyId?: string) => Promise<void>;
   reject: (id: string) => Promise<void>;
   notSame: (id: string, companyId: string) => Promise<void>;
+  undo: (id: string) => Promise<void>;
+  revokeRule: (id: string) => Promise<void>;
   setMode: (mode: FilingSummary["mode"], extra?: Partial<FilingSummary>) => Promise<void>;
+}
+
+/** The decided list, for the "Recently filed — Undo" strip. */
+export function useFilingDecided(enabled: boolean): {
+  proposals: FilingProposal[] | undefined;
+  mutate: () => Promise<unknown>;
+} {
+  const { data, mutate } = useSWR<{ proposals: FilingProposal[] }>(
+    enabled ? "/api/crm/filing/proposals?status=decided" : null,
+    getJson,
+    { shouldRetryOnError: false },
+  );
+  return { proposals: data?.proposals, mutate };
+}
+
+export function useFilingRules(enabled: boolean): {
+  rules: FilingRule[] | undefined;
+  error: unknown;
+  isLoading: boolean;
+  mutate: () => Promise<unknown>;
+} {
+  const { data, error, isLoading, mutate } = useSWR<{ rules: FilingRule[] }>(
+    enabled ? "/api/crm/filing/rules" : null,
+    getJson,
+    { shouldRetryOnError: false },
+  );
+  return { rules: data?.rules, error, isLoading, mutate };
+}
+
+export function useFilingSkipped(enabled: boolean): {
+  items: SkippedItem[] | undefined;
+  error: unknown;
+  isLoading: boolean;
+  mutate: () => Promise<unknown>;
+} {
+  const { data, error, isLoading, mutate } = useSWR<{ items: SkippedItem[] }>(
+    enabled ? "/api/crm/filing/skipped" : null,
+    getJson,
+    { shouldRetryOnError: false },
+  );
+  return { items: data?.items, error, isLoading, mutate };
 }
 
 export function useFilingActions(): FilingActions {
@@ -173,6 +257,14 @@ export function useFilingActions(): FilingActions {
     });
   }, []);
 
+  const undo = useCallback(async (id: string) => {
+    await send(`/api/crm/filing/proposals/${encodeURIComponent(id)}/undo`, "POST");
+  }, []);
+
+  const revokeRuleAction = useCallback(async (id: string) => {
+    await send(`/api/crm/filing/rules/${encodeURIComponent(id)}`, "DELETE");
+  }, []);
+
   const setMode = useCallback(
     async (mode: FilingSummary["mode"], extra?: Partial<FilingSummary>) => {
       await send("/api/crm/filing/settings", "PATCH", {
@@ -184,5 +276,5 @@ export function useFilingActions(): FilingActions {
     [],
   );
 
-  return { apply, reject, notSame, setMode };
+  return { apply, reject, notSame, undo, revokeRule: revokeRuleAction, setMode };
 }
