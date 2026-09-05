@@ -383,6 +383,48 @@ describe("business_update", () => {
     expect(updated.state).toBe("Done");
   });
 
+  it("carries a description to a task as description_html, and refuses it elsewhere", async () => {
+    // The deleted pm_update_work_item could rewrite a task's body; the first
+    // cut of this verb dropped that with no note (#2005 review, finding 5).
+    // Same route field and bound as create.ts. MUTATION: drop
+    // `description_html` from the PATCH body -> the first assertion goes red.
+    patch.mockResolvedValueOnce(
+      res(true, 200, {
+        work_item: {
+          id: "w1",
+          name: "Fix it",
+          descriptionHtml: "<p>Ridge tiles, 40 boxes.</p>",
+          stateId: null,
+          state: null,
+          assignees: [],
+          labels: [],
+          createdAt: "2026-08-01T00:00:00.000Z",
+          updatedAt: "2026-08-02T00:00:00.000Z",
+        },
+      }),
+    );
+    const out = await businessUpdate.handler(
+      { entity: "task", id: "w1", description: "<p>Ridge tiles, 40 boxes.</p>" },
+      ctx,
+    );
+    expect(out.ok).toBe(true);
+    expect(patch.mock.calls[0][0]).toBe("/api/pm/work-items/w1");
+    expect(patch.mock.calls[0][1]).toMatchObject({
+      description_html: "<p>Ridge tiles, 40 boxes.</p>",
+    });
+    // `labels` stays out on purpose, on BOTH verbs, until a tool can read a
+    // project's labels - the header says why. Pinned so it cannot creep back
+    // on one verb and not the other.
+    expect(Object.keys(patch.mock.calls[0][1])).not.toContain("label_ids");
+    expect(Object.keys(patch.mock.calls[0][1])).not.toContain("labels");
+
+    // A deal's free text is a note (a timeline entry), not a field.
+    const deal = await businessUpdate.handler({ entity: "deal", id: "d1", description: "x" }, ctx);
+    expect(errorOf(deal).code).toBe("INVALID_ARGS");
+    expect(errorOf(deal).message).toContain("description");
+    expect(patch).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses a no-op patch rather than spending an approval on nothing", async () => {
     const out = await businessUpdate.handler({ entity: "deal", id: "d1" }, ctx);
     expect(errorOf(out).code).toBe("INVALID_ARGS");

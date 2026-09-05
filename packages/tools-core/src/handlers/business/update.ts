@@ -32,6 +32,16 @@
  * would work. A `project` branch would ship registered and 403ing. See
  * `write-shared.ts`.
  *
+ * WHAT A TASK CAN AND CANNOT CHANGE FROM HERE. `pm_update_work_item` took
+ * `name`, `description_html`, `assignees` and `labels`. This verb carries
+ * the first three (`description` -> `description_html`, the same field and
+ * bound `create.ts` uses, so "rewrite the body of that ticket" is not a
+ * capability the collapse quietly lost — #2005's review caught that it had
+ * been). `labels` is deliberately absent on BOTH verbs, for the reason
+ * `create.ts` gives at its task branch: the route wants label IDS and no
+ * tool reads a project's labels, so a model has nothing to pass. When a
+ * read exists the argument lands on create and update in one commit.
+ *
  * CONFIRMATION + ERROR SHAPE: as `create.ts` — generic interceptor, no
  * handler-side prompt, and no `details` on any failure.
  */
@@ -58,6 +68,7 @@ const inputSchema = {
       description: "Person id to own the customer or deal, or to be assigned the task.",
     },
     name: { type: "string", description: "New name or title." },
+    description: { type: "string", description: "Task only: replaces the longer body." },
   },
   required: ["entity", "id"],
   additionalProperties: false,
@@ -69,10 +80,16 @@ interface Args {
   state?: string;
   assignee?: string;
   name?: string;
+  description?: string;
 }
 
+/** `workItemPatchSchema.description_html` — the bound `create.ts` mirrors
+ *  for the same field, checked here so an over-long body comes back as a
+ *  sentence rather than an opaque 400 from zod. */
+const TASK_DESCRIPTION_MAX = 100_000;
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const { entity, id, state, assignee, name } = args as unknown as Args;
+  const { entity, id, state, assignee, name, description } = args as unknown as Args;
 
   if (typeof entity !== "string" || !(UPDATABLE as readonly string[]).includes(entity)) {
     return refuseEntity("business_update");
@@ -86,11 +103,23 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (title !== undefined && title.length === 0) {
     return invalidArgs("name must be a non-empty string when supplied.");
   }
-  if (state === undefined && assignee === undefined && title === undefined) {
+  const body = typeof description === "string" ? description : undefined;
+  if (description !== undefined && body === undefined) {
+    return invalidArgs("description must be a string when supplied.");
+  }
+  if (body !== undefined && entity !== "task") {
+    // A customer's and a deal's free text are their notes, which are
+    // timeline entries (`business_create({entity:"note"})`), not a field.
+    return invalidArgs("description applies to a task.");
+  }
+  if (body !== undefined && body.length > TASK_DESCRIPTION_MAX) {
+    return invalidArgs(`description must be at most ${TASK_DESCRIPTION_MAX} characters.`);
+  }
+  if (state === undefined && assignee === undefined && title === undefined && body === undefined) {
     // A PATCH with no fields is a write the user approved for nothing.
     // Refusing costs one turn; a silent no-op costs the user's trust in
     // every subsequent "done".
-    return invalidArgs("supply at least one of state, assignee or name.");
+    return invalidArgs("supply at least one of state, assignee, name or description.");
   }
   if (state !== undefined && entity === "customer") {
     // A customer has no workflow. The archive flag is deliberately not
@@ -143,12 +172,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // to someone means they own it now. If multi-assignee ever needs to
         // be expressible from chat it gets its own argument, rather than
         // this one quietly meaning two things.
+        //
+        // `label_ids` is NOT sent — see the header. The omission is a
+        // decision shared with `create.ts`, not a field this branch forgot.
         const data = await callOrch<{ work_item: Parameters<typeof toPlaneWorkItem>[0] }>(
           ctx,
           "patch",
           `/api/pm/work-items/${encodeURIComponent(recordId)}`,
           {
             name: title,
+            description_html: body,
             state_id: state,
             assignees: assignee === undefined ? undefined : [assignee],
           },
@@ -173,7 +206,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "business_update",
   description:
-    "Change a customer, deal or task: move it to a new stage or state, reassign it, or rename it.",
+    "Change a customer, deal or task: move it to a new stage or state, reassign it, rename it, " +
+    "or rewrite a task's description.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
