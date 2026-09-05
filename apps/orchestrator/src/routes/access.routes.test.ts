@@ -8,6 +8,13 @@
  * obligation), BigInts as strings, server-derived slugs, authoritative §9
  * re-clamps, and every mutation through the T2 guard rails + Activity.
  *
+ * WARP-2738 adds the role-template surface: GET /access/role-templates (the
+ * catalogue plus the ENFORCED-module set the panel labels with) and
+ * POST /access/roles { templateId }, which must run the SAME rails a
+ * hand-authored create runs — including the rank rail the duplicate branch
+ * skips — and land an ordinary, editable AccessRole row. It also closes the
+ * 500 this suite used to pin on a lost serialization race.
+ *
  * Harness mirrors people-invite.route.test.ts: real router + real guard
  * service behind a synthetic req.user; in-memory Prisma stub; leaf effect
  * modules (sessions / NC / reconciler / activity) mocked.
@@ -52,6 +59,36 @@ vi.mock("../services/department-reconciler.service.js", () => ({
   kickReconcile: kickReconcileMock,
 }));
 
+/**
+ * WARP-2738 — a PASS-THROUGH mock of the guard service, not a stub: every
+ * export keeps its real identity and behaviour (`RoleMutationRefusedError`
+ * included, so `instanceof` in the route still matches) and
+ * `assertAssignableForCreate` merely records that it ran.
+ *
+ * Recording is the only observable rail 3 has on THIS surface. Every route
+ * here is `requireRole("owner","admin")`, and the rail permits equal rank, so
+ * no actor who gets past layer 1 can be refused by it for an admin-, family-
+ * or guest-based starting point — there is no 403 to assert. That does not
+ * make the rail decorative: it is the reason a template cannot become a way
+ * around the rank cap if this surface ever widens, and the DUPLICATE branch
+ * (which skips it — a known wart) is the live proof that skipping is possible.
+ */
+const { rankRailSpy } = vi.hoisted(() => ({ rankRailSpy: vi.fn() }));
+
+vi.mock("../services/role-mutation-guard.service.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../services/role-mutation-guard.service.js")>();
+  return {
+    ...actual,
+    assertAssignableForCreate: (
+      args: Parameters<typeof actual.assertAssignableForCreate>[0],
+    ) => {
+      rankRailSpy(args);
+      return actual.assertAssignableForCreate(args);
+    },
+  };
+});
+
 import { createAccessRouter } from "./access.js";
 import { SERIALIZABLE_TX } from "../services/role-mutation-guard.service.js";
 import { AccessPreconditionError } from "../lib/access-precondition.js";
@@ -60,6 +97,13 @@ import {
   expectAllTransactionsAt,
   gate,
 } from "../__tests__/helpers/prisma-tx-harness.js";
+import {
+  ROLE_TEMPLATES,
+  ROLE_TEMPLATE_BY_ID,
+  roleTemplateCreatePayload,
+  type RoleTemplateId,
+} from "../services/access-role-templates.js";
+import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 
 // ── in-memory prisma stub ──────────────────────────────────────────
 
@@ -353,7 +397,15 @@ beforeEach(() => {
   recordActivityMock.mockClear();
   revokeAllSessionsMock.mockClear();
   kickReconcileMock.mockClear();
+  rankRailSpy.mockClear();
 });
+
+/** The catalogue entry for `id`, or a named failure — never a bare `!`. */
+function template(id: RoleTemplateId) {
+  const found = ROLE_TEMPLATE_BY_ID.get(id);
+  if (!found) throw new Error(`no such role template: ${id}`);
+  return found;
+}
 
 // ── transaction isolation (review B1/T1) ───────────────────────────
 
@@ -409,12 +461,16 @@ describe("concurrent same-name creates (WARP-1570 — isolation is load-bearing)
     expect(new Set(slugs).size).toBe(slugs.length);
     expectAllSerializable(prisma);
 
-    // NOTE (handoff, not this ticket): the aborted request currently falls
-    // through to `next(err)`, so the client sees a generic 500 rather than a
-    // retry or a 409. Asserting "exactly one 200" instead of the loser's
-    // exact status keeps this a regression guard on the INVARIANT without
-    // pinning that mapping as correct.
-    expect(responses.filter((r) => r.status !== 200)).toHaveLength(1);
+    // WARP-2738 FIXED the mapping this used to leave open. The abort is BY
+    // DESIGN — SERIALIZABLE exists precisely so the second writer loses — so
+    // falling through to `next(err)` turned a retryable outcome into a generic
+    // 500 and told the operator their request had failed. It is a 409
+    // CONCURRENT_MUTATION now, the same answer people.ts and auth.ts have
+    // given since WARP-1526.
+    const losers = responses.filter((r) => r.status !== 200);
+    expect(losers).toHaveLength(1);
+    expect(losers[0].status).toBe(409);
+    expect(losers[0].body.code).toBe("CONCURRENT_MUTATION");
   });
 
   it("REGRESSION CANARY — dropping the isolation option lets both creates commit the same slug", async () => {
@@ -437,6 +493,70 @@ describe("concurrent same-name creates (WARP-1570 — isolation is load-bearing)
   });
 });
 
+// ── WARP-2738: the race templates make routine ─────────────────────
+//
+// The create race above needs two operators to type the same NAME at the same
+// moment, which is rare. Template instantiation needs them to click the same
+// CARD, which is not: the name is fixed by the catalogue, so every pair of
+// concurrent "Front Desk" clicks lands on the same slug base and the same
+// range read. Same window, far higher traffic — which is why the 409 mapping
+// ships with the templates rather than after them.
+
+describe("concurrent instantiations of the SAME template (WARP-2738)", () => {
+  /** Park both requests in deriveUniqueSlug's range read, as above. */
+  function raceTwoInstantiations(prisma: any) {
+    const app = buildApp(prisma);
+    const bothRead = gate(2);
+    const realFindMany = prisma.accessRole.findMany;
+    prisma.accessRole.findMany = vi.fn(async (args: any) => {
+      const rows = await realFindMany(args);
+      if (args?.where?.slug?.startsWith !== undefined) {
+        await bothRead.arriveAndWait();
+      }
+      return rows;
+    });
+    return Promise.all([
+      request(app).post("/api/access/roles").send({ templateId: "front-desk" }),
+      request(app).post("/api/access/roles").send({ templateId: "front-desk" }),
+    ]);
+  }
+
+  it("SERIALIZABLE: exactly one role lands and the loser is a 409, not a 500", async () => {
+    const prisma = createPrismaMock();
+    const responses = await raceTwoInstantiations(prisma);
+
+    expect(prisma._seam().conflicts()).toBe(1);
+    expect(responses.filter((r) => r.status === 200)).toHaveLength(1);
+
+    const slugs = [...prisma._roles().values()].map((r: any) => r.slug);
+    expect(slugs).toEqual(["front-desk"]);
+    expectAllSerializable(prisma);
+
+    const losers = responses.filter((r) => r.status !== 200);
+    expect(losers).toHaveLength(1);
+    expect(losers[0].status).toBe(409);
+    expect(losers[0].body.code).toBe("CONCURRENT_MUTATION");
+  });
+
+  it("REGRESSION CANARY — dropping the isolation option lets both instantiations commit the same slug", async () => {
+    // Exactly the regression, nothing else changed: the call site loses
+    // SERIALIZABLE_TX and inherits Postgres' default, READ COMMITTED.
+    const prisma = createPrismaMock();
+    const serializable = prisma.$transaction;
+    prisma.$transaction = (fn: any) => serializable(fn);
+
+    await raceTwoInstantiations(prisma);
+
+    expect(prisma._seam().conflicts()).toBe(0);
+    const slugs = [...prisma._roles().values()].map((r: any) => r.slug);
+    // Both rows claim "front-desk" — in Postgres the @unique then 500s the
+    // loser instead of handing it "front-desk-2". Neither operator gets the
+    // 409 that tells them to retry, because there was no conflict to detect.
+    expect(slugs).toEqual(["front-desk", "front-desk"]);
+    expect(new Set(slugs).size).toBeLessThan(slugs.length);
+  });
+});
+
 describe("every mutating route opens its transaction at SERIALIZABLE", () => {
   // Postgres SSI only serializes transactions that are THEMSELVES
   // serializable: a READ COMMITTED transaction is invisible to conflict
@@ -455,6 +575,15 @@ describe("every mutating route opens its transaction at SERIALIZABLE", () => {
   it("POST /access/roles (create) — slug derivation is a range-read-then-insert", async () => {
     const prisma = createPrismaMock();
     const res = await request(buildApp(prisma)).post("/api/access/roles").send(payload());
+    expect(res.status).toBe(200);
+    expectAllSerializable(prisma);
+  });
+
+  it("POST /access/roles (instantiate a template) — the same range-read-then-insert", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "front-desk" });
     expect(res.status).toBe(200);
     expectAllSerializable(prisma);
   });
@@ -522,6 +651,14 @@ describe("route guards", () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: "fam-1", username: "fam", role: "family" });
     expect((await request(app).get("/api/access/roles")).status).toBe(403);
+    // WARP-2738 — rbac.test.ts covers NO /api/access route, so this sweep is
+    // the ONLY authz guard on the two new entry points. The catalogue is not
+    // secret, but it is part of the Access panel: a family caller has no use
+    // for it and no business instantiating a role from it.
+    expect((await request(app).get("/api/access/role-templates")).status).toBe(403);
+    expect(
+      (await request(app).post("/api/access/roles").send({ templateId: "front-desk" })).status,
+    ).toBe(403);
     expect((await request(app).post("/api/access/roles").send(payload())).status).toBe(403);
     expect((await request(app).patch("/api/access/roles/r1").send({ name: "x" })).status).toBe(403);
     expect((await request(app).delete("/api/access/roles/r1")).status).toBe(403);
@@ -718,6 +855,240 @@ describe("POST /api/access/roles (duplicate via sourceRoleId)", () => {
   it("404s an unknown sourceRoleId", async () => {
     const res = await request(buildApp(createPrismaMock())).post("/api/access/roles").send({ sourceRoleId: "nope" });
     expect(res.status).toBe(404);
+  });
+});
+
+// ── role templates (WARP-2738) ─────────────────────────────────────
+
+describe("GET /api/access/role-templates", () => {
+  it("serves the catalogue in presentation order, cached like the other static catalogs", async () => {
+    const res = await request(buildApp(createPrismaMock())).get("/api/access/role-templates");
+    expect(res.status).toBe(200);
+    expect(res.headers["cache-control"]).toBe("private, max-age=300");
+    // Order is the product decision (front-of-house first, temp last) and is
+    // the catalogue's, not the route's — so it is compared to the catalogue.
+    expect(res.body.roleTemplates.map((t: any) => t.id)).toEqual(ROLE_TEMPLATES.map((t) => t.id));
+    expect(res.body.roleTemplates).toHaveLength(ROLE_TEMPLATES.length);
+  });
+
+  it("ships each card whole: identity, starting point, both grant axes", async () => {
+    const res = await request(buildApp(createPrismaMock())).get("/api/access/role-templates");
+    const card = res.body.roleTemplates.find((t: any) => t.id === "office-manager");
+    const source = template("office-manager");
+    expect(card.name).toBe(source.name);
+    expect(card.description).toBe(source.description);
+    expect(card.startingPoint).toBe("admin");
+    expect(card.featureGrants).toEqual(roleTemplateCreatePayload(source).featureGrants);
+    expect(card.toolGrants).toEqual(roleTemplateCreatePayload(source).toolGrants);
+  });
+
+  it("advertises NO connector grants and NO usage caps on any template — the panel must not imply either", async () => {
+    const res = await request(buildApp(createPrismaMock())).get("/api/access/role-templates");
+    for (const card of res.body.roleTemplates) {
+      // Provider slugs are box-specific; a template naming one this box has
+      // not configured would store dead config the roles list then renders as
+      // reach. The operator adds connector access after creating.
+      expect(card.connectorGrants).toEqual([]);
+      // llmDailyMessageCap is stored and rendered but NOT enforced, so no
+      // template advertises a limit the box does not keep.
+      expect(card.storageQuotaBytes).toBeNull();
+      expect(card.maxUploadSizeMb).toBeNull();
+      expect(card.llmDailyMessageCap).toBeNull();
+      expect(card.cloudModelsAllowed).toBe(false);
+    }
+    // Locks are the one deliberate exception, and only where smart_home rides
+    // in the same payload.
+    const withLocks = res.body.roleTemplates.filter((t: any) => t.mayOperateLocks);
+    expect(withLocks.map((t: any) => t.id)).toEqual(["it-facilities"]);
+  });
+
+  it("ships the ENFORCED module set so the panel can label honestly — derived, never restated", async () => {
+    const res = await request(buildApp(createPrismaMock())).get("/api/access/role-templates");
+    // Straight from the composition that mounts the layer-2 gate. The set has
+    // moved twice (knowledge/docs, then crm/money); a dashboard-side copy
+    // would go stale silently and label a grant "enforced" that isn't.
+    expect(res.body.enforcedModuleIds).toEqual([...FEATURE_GATED_MODULES]);
+  });
+
+  it("…and the split is real: templates grant modules the box does NOT gate per person", async () => {
+    const res = await request(buildApp(createPrismaMock())).get("/api/access/role-templates");
+    const enforced = new Set<string>(res.body.enforcedModuleIds);
+    const granted = new Set(
+      ROLE_TEMPLATES.flatMap((t) => t.featureGrants.map((g) => g.moduleId as string)),
+    );
+    const navOnly = [...granted].filter((id) => !enforced.has(id));
+    // If this ever empties, the field stopped carrying information and the
+    // honest-labelling story in the panel is over — either every module got a
+    // real gate (good, say so) or the derivation broke (bad).
+    expect(navOnly.length).toBeGreaterThan(0);
+    // Spot-check the two ends of the split rather than restating either set:
+    // a narrowed person genuinely 404s on files, and genuinely still reaches
+    // /api/calendar while the menu entry hides.
+    expect(enforced.has("files")).toBe(true);
+    expect(enforced.has("calendar")).toBe(false);
+  });
+});
+
+describe("POST /api/access/roles (instantiate via templateId — WARP-2738)", () => {
+  it("lands the template's grant rows with a server-derived slug, and audits the template id", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "front-desk" });
+    expect(res.status).toBe(200);
+
+    const source = template("front-desk");
+    const expected = roleTemplateCreatePayload(source);
+    expect(res.body.role.name).toBe("Front Desk");
+    expect(res.body.role.slug).toBe("front-desk");
+    expect(res.body.role.description).toBe(source.description);
+    expect(res.body.role.startingPoint).toBe("family");
+    expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
+    expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+    expect(res.body.role.connectorGrants).toEqual([]);
+    expect(res.body.role.peopleCount).toBe(0);
+    expect(res.body.syncState).toBe("synced");
+
+    // `templateId` mirrors the `duplicatedFrom` slot: provenance in the audit
+    // trail, nothing the row itself carries.
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield",
+        what: "Access role created",
+        sub: "Front Desk",
+        refs: expect.objectContaining({
+          templateId: "front-desk",
+          duplicatedFrom: null,
+          startingPoint: "family",
+        }),
+      }),
+    );
+  });
+
+  it("every template in the catalogue instantiates UNCHANGED — the server re-clamp is a no-op on all eight", async () => {
+    // The catalogue's unit test proves the templates survive the clamps in
+    // isolation. This proves the ROUTE applies those same clamps to them and
+    // still stores what the card advertised: no silent clamp-down between the
+    // panel and the row.
+    for (const t of ROLE_TEMPLATES) {
+      const prisma = createPrismaMock();
+      const res = await request(buildApp(prisma))
+        .post("/api/access/roles")
+        .send({ templateId: t.id });
+      expect(res.status).toBe(200);
+      const expected = roleTemplateCreatePayload(t);
+      expect(res.body.role.startingPoint).toBe(t.startingPoint);
+      expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
+      expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+      expect(res.body.role.connectorGrants).toEqual([]);
+      expect(res.body.role.mayOperateLocks).toBe(t.mayOperateLocks);
+      expect(res.body.role.storageQuotaBytes).toBeNull();
+      expect(res.body.role.maxUploadSizeMb).toBeNull();
+      expect(res.body.role.llmDailyMessageCap).toBeNull();
+      expect(res.body.role.cloudModelsAllowed).toBe(false);
+    }
+  });
+
+  it("keeps mayOperateLocks on IT & Facilities — smart_home rides in the SAME payload", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "it-facilities" });
+    expect(res.status).toBe(200);
+    // The AND lives in `normalizeGrants`: locks survive only because the
+    // smart_home grant is in the same request. Assert the pair, not the flag.
+    expect(res.body.role.featureGrants.some((g: any) => g.moduleId === "smart_home")).toBe(true);
+    expect(res.body.role.mayOperateLocks).toBe(true);
+    expect(prisma._roles().get(res.body.role.id).mayOperateLocks).toBe(true);
+  });
+
+  it("accepts a rename at instantiation — and STILL derives the slug server-side", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "front-desk", name: "  Reception Desk  " });
+    expect(res.status).toBe(200);
+    expect(res.body.role.name).toBe("Reception Desk");
+    expect(res.body.role.slug).toBe("reception-desk");
+    // Everything else still comes from the template.
+    expect(res.body.role.description).toBe(template("front-desk").description);
+    expect(res.body.role.startingPoint).toBe("family");
+  });
+
+  it("produces an ORDINARY row: it lists, and it edits like any other role", async () => {
+    const prisma = createPrismaMock();
+    const created = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "contractor-temp" });
+    expect(created.status).toBe(200);
+
+    const list = await request(buildApp(prisma)).get("/api/access/roles");
+    expect(list.body.roles.map((r: any) => r.id)).toContain(created.body.role.id);
+
+    const patched = await request(buildApp(prisma))
+      .patch(`/api/access/roles/${created.body.role.id}`)
+      .send({ name: "Locum, week 3", featureGrants: [{ moduleId: "files", level: "view" }] });
+    expect(patched.status).toBe(200);
+    expect(patched.body.role.name).toBe("Locum, week 3");
+    expect(patched.body.role.featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+    // The slug is a stable identifier, so the rename does not move it.
+    expect(patched.body.role.slug).toBe(created.body.role.slug);
+  });
+
+  it("runs the rank rail — which the duplicate branch, deliberately not copied, skips", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ id: "r1", name: "Reception", slug: "reception", startingPoint: "family" }],
+    });
+    const app = buildApp(prisma, { id: "admin-1", username: "adm", role: "admin" });
+
+    const res = await request(app).post("/api/access/roles").send({ templateId: "office-manager" });
+    expect(res.status).toBe(200);
+    // Office Manager is ADMIN-based (Money at manage requires it), so an admin
+    // actor instantiating it is the equal-rank case the rail permits — but the
+    // rail still has to RUN, or a template becomes a path around rail 7 too.
+    expect(rankRailSpy).toHaveBeenCalledWith({
+      actorRole: "admin",
+      requestedRole: "admin",
+      rankMessage: "You cannot create a role above your own rank",
+    });
+
+    rankRailSpy.mockClear();
+    const dup = await request(app).post("/api/access/roles").send({ sourceRoleId: "r1" });
+    expect(dup.status).toBe(200);
+    // The wart this branch does NOT inherit (access.ts, duplicate branch).
+    expect(rankRailSpy).not.toHaveBeenCalled();
+  });
+
+  it("404s an unknown templateId — a well-formed id that names nothing is a missing resource", async () => {
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/access/roles")
+      .send({ templateId: "night-porter" });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Role template not found");
+  });
+
+  it("400s a body carrying BOTH templateId and sourceRoleId — never silently picks one", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ id: "r1", name: "Reception", slug: "reception", startingPoint: "family" }],
+    });
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send({ templateId: "front-desk", sourceRoleId: "r1" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid request");
+    expect(res.body.details).toBeTruthy();
+    // Nothing was written on either interpretation.
+    expect([...prisma._roles().keys()]).toEqual(["r1"]);
+  });
+
+  it("a non-string templateId is not a template request — it falls to the payload schema", async () => {
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/access/roles")
+      .send({ templateId: 7 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid request");
   });
 });
 
