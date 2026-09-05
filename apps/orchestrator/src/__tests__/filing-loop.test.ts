@@ -53,6 +53,9 @@ import { notSameKey } from "../services/filing/apply.service.js";
 import {
   domainFromEmail,
   isPublicEmailDomain,
+  longestSignificantWord,
+  NAME_CANDIDATE_CAP,
+  normalizeCompanyName,
   type MatchOutcome,
 } from "../services/filing/match.js";
 
@@ -866,6 +869,38 @@ describe("🔴 free mail providers are never a match key", () => {
     expect(seen).toEqual(["someone@gmail.com"]);
     expect(domainFromEmail("someone@gmail.com")).toBe("gmail.com");
     expect(isPublicEmailDomain(domainFromEmail("someone@gmail.com"))).toBe(true);
+  });
+});
+
+describe("the NAME narrowing keeps the right row in the page", () => {
+  it("MUTATION: narrow on the FIRST word — a generic one drops the real match", () => {
+    // "The Northgate Dental Practice" narrows on `the` if you take the first
+    // word, and on a box with more companies than the page cap the real row
+    // never reaches the exact comparison. The miss is invisible: no error, a
+    // new customer proposed instead of a match, and a duplicate found weeks
+    // later.
+    expect(longestSignificantWord(normalizeCompanyName("The Northgate Dental Practice"))).toBe(
+      "northgate",
+    );
+    // `Ltd` is already stripped by `normalizeCompanyName`, leaving
+    // "acme dental supply" — `dental` and `supply` tie at six, and the tie
+    // rule keeps the first. Either narrows far better than `acme` would.
+    expect(longestSignificantWord(normalizeCompanyName("ACME Dental Supply Ltd"))).toBe("dental");
+  });
+
+  it("skips words too short to narrow anything", () => {
+    expect(longestSignificantWord("a b cd")).toBeNull();
+  });
+
+  it("is deterministic on a tie — the first of the longest", () => {
+    expect(longestSignificantWord("alpha bravo")).toBe("alpha");
+  });
+
+  it("the cap is generous enough that being stingy is not the failure mode", () => {
+    // Asserted as a relation to the review page size rather than as a number:
+    // the point is that the narrowing brings back more than a screenful, so a
+    // busy box cannot silently lose the row.
+    expect(NAME_CANDIDATE_CAP).toBeGreaterThanOrEqual(100);
   });
 });
 

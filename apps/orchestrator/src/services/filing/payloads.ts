@@ -180,3 +180,23 @@ export function parsePayload<K extends IngestProposalKind>(
   const r = schema.safeParse(value);
   return r.success ? (r.data as PayloadFor<K>) : null;
 }
+
+/**
+ * Why a payload was refused, as FIELD PATHS and messages only.
+ *
+ * 🔴 Never the values. A zod error carries the offending input by default, and
+ * this string is written to a log that more people read than the CRM — the same
+ * rule that keeps filenames out of `CrmActivity` summaries. Paths and codes are
+ * enough to find the bug; the document is not.
+ */
+export function payloadRejectionReason<K extends IngestProposalKind>(
+  kind: K,
+  value: unknown,
+): string | null {
+  const r = PAYLOAD_SCHEMAS[kind].safeParse(value);
+  if (r.success) return null;
+  return r.error.issues
+    .slice(0, 5)
+    .map((i) => `${i.path.join(".") || "(root)"}: ${i.code}`)
+    .join("; ");
+}

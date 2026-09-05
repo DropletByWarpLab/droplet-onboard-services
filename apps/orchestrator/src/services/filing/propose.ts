@@ -36,8 +36,11 @@ import type {
 import type { ExtractOut } from "./contract.js";
 import { EXTRACTOR_VERSION } from "./contract.js";
 import { classify as classifyPolicy, MENTIONS_CONFIDENCE_CAP } from "./policy.js";
+import { createLogger } from "../../lib/logger.js";
 import { matchCompany, normalizeCompanyName, type MatchOutcome } from "./match.js";
-import { parsePayload } from "./payloads.js";
+import { parsePayload, payloadRejectionReason } from "./payloads.js";
+
+const logger = createLogger("filing-propose");
 
 export interface FileSourceRef {
   sourceKind: "FILE";
@@ -152,9 +155,21 @@ export async function buildDrafts(args: {
     evidence: { quote: string; chunkIdx?: number }[],
   ) => {
     // Parse on the way in. A draft that does not satisfy its own kind's
-    // allow-list is a bug in this file, and the right time to find out is
+    // allow-list is a bug in THIS file, and the right time to find out is
     // before the row exists rather than at apply time thirty days later.
-    if (parsePayload(kind, payload) === null) return;
+    //
+    // 🔴 It is logged, not merely dropped. If this ever fires, the document
+    // silently ends up with fewer proposals — or none — and the owner sees an
+    // empty queue with nothing anywhere saying why. That is the exact shape of
+    // failure this feature is most likely to have and least likely to notice.
+    // Field PATHS and zod codes only; never the values, which are the document.
+    if (parsePayload(kind, payload) === null) {
+      logger.warn(
+        { kind, reason: payloadRejectionReason(kind, payload) },
+        "filing: dropped a draft that failed its own payload allow-list",
+      );
+      return;
+    }
     const c = cap(confidence);
     const verdict = classifyPolicy({
       kind,

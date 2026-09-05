@@ -112,6 +112,32 @@ export function normalizeCompanyName(name: string): string {
     .trim();
 }
 
+/**
+ * How many rows the NAME narrowing may bring back before the exact comparison.
+ *
+ * Deliberately generous: this is one indexed `contains` per document on a
+ * table with hundreds of rows on a real box, not thousands, and the cost of
+ * being stingy is a silent miss rather than a slow query.
+ */
+export const NAME_CANDIDATE_CAP = 200;
+
+/**
+ * The longest word in a normalised company name — the most selective needle
+ * available without a normalised column to query.
+ *
+ * `normalizeCompanyName` has already stripped the legal suffixes, so what is
+ * left is the distinctive part. Ties keep the FIRST of the longest, so the
+ * choice is deterministic for the same input.
+ */
+export function longestSignificantWord(normalized: string): string | null {
+  let best: string | null = null;
+  for (const w of normalized.split(/\s+/)) {
+    if (w.length < 3) continue;
+    if (best === null || w.length > best.length) best = w;
+  }
+  return best;
+}
+
 export interface MatchCandidate {
   companyId: string;
   name: string;
@@ -285,15 +311,23 @@ export async function matchCompany(
   // `mode: "insensitive"` rather than a normalised column, because there is no
   // normalised column: adding one would be a migration on a table this slice
   // does not otherwise touch, and the NAME key is review-only regardless. The
-  // suffix-stripped form is compared in memory below.
+  // suffix-stripped form is the actual test, compared in memory below; the
+  // query is only a NARROWING, and it must be a narrowing that keeps the right
+  // row in the page.
+  //
+  // 🔴 The needle is the LONGEST significant word, not the first. "The
+  // Northgate Dental Practice" narrows on `northgate`, where the first word
+  // would be `the` — and a generic first word on a box with more companies
+  // than the page cap silently drops the real match before the exact
+  // comparison ever runs. A miss here is invisible: it does not error, it
+  // proposes a new customer instead of matching the existing one, and the
+  // duplicate is found weeks later.
   if (input.name && nameKey) {
+    const needle = longestSignificantWord(nameKey) ?? nameKey;
     const byName = await prisma.crmCompany.findMany({
-      where: {
-        name: { contains: input.name.trim().split(/\s+/)[0], mode: "insensitive" },
-        isArchived: false,
-      },
+      where: { name: { contains: needle, mode: "insensitive" }, isArchived: false },
       select: { id: true, name: true },
-      take: 50,
+      take: NAME_CANDIDATE_CAP,
     });
     for (const c of byName) {
       if (normalizeCompanyName(c.name) === nameKey) {
