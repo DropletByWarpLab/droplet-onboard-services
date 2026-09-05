@@ -43,8 +43,8 @@
  * unbacked guide is therefore a declared state rather than an inferred one,
  * which is the same rule the repo applies to persisted status.
  */
-import { readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -53,25 +53,10 @@ import {
   providersWithSetupGuide,
   setupGuideHrefFor,
 } from "@droplet/shared-types";
+import { repoPath } from "../__tests__/helpers/test-paths.js";
 
-/** Walk up from the CWD to the repo root. `process.cwd()` rather than
- *  `import.meta.url`: this workspace compiles to CommonJS and `import.meta` is
- *  a TS1470 there — the trap `add-llm-tool-skill.test.ts` hit and
- *  `adr-043-boundary.test.ts` documents. */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      statSync(join(dir, "docker", "docker-compose.yml"));
-      return dir;
-    } catch {
-      dir = dirname(dir);
-    }
-  }
-  throw new Error("repo root not found from " + process.cwd());
-}
-
-const SCRIPT = join(repoRoot(), "scripts", "check-setup-guides.sh");
+// Anchored to this test file, not to `process.cwd()` (WARP-2654).
+const SCRIPT = repoPath("scripts", "check-setup-guides.sh");
 
 /**
  * Providers whose customer guide is on the tree ahead of their descriptor.

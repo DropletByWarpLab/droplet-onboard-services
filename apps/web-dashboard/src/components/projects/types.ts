@@ -27,6 +27,25 @@ export interface PmLabel {
   color: string | null;
 }
 
+/** ADR-045 §5.3 — the department that owns a project or work item, as the PM
+ *  API projects it.
+ *
+ *  Deliberately NOT the `Department` in `@/lib/types`: no `state`, no
+ *  `provisionError`, no `quotaBytes`, no Nextcloud group. A PM surface cannot
+ *  gate on a provisioning field it was never handed, which is how "the ticket
+ *  is invisible because the groupfolder has not converged yet" is prevented
+ *  structurally rather than by review. */
+export interface PmDepartmentRef {
+  id: string;
+  name: string;
+  kind: "HOUSEHOLD" | "DEPARTMENT" | "TEAM";
+  parentId: string | null;
+  /** `"item"` — this work item overrides its project's department.
+   *  `"project"` — inherited from the project. Always `"project"` on a
+   *  project itself. */
+  source: "item" | "project";
+}
+
 export interface PmProject {
   id: string;
   workspaceId: string;
@@ -37,6 +56,8 @@ export interface PmProject {
   icon: string | null;
   color: string | null;
   leadId: string | null;
+  /** ADR-045 §5.3 — the department that owns this project's work, or null. */
+  department: PmDepartmentRef | null;
   archived: boolean;
   openCount: number;
   doneCount: number;
@@ -57,6 +78,9 @@ export interface PmWorkItem {
   priority: Priority;
   parentId: string | null;
   cycleId: string | null;
+  /** ADR-045 §5.3 — already resolved server-side: the item's own department
+   *  overriding its project's, with `source` saying which. */
+  department: PmDepartmentRef | null;
   assignees: string[];
   labels: PmLabel[];
   startDate: string | null;

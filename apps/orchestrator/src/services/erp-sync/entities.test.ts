@@ -20,28 +20,20 @@
  * cannot drift away from the vocabulary without going red here.
  */
 import { CANONICAL_COLUMNS, getReadQuery } from "@droplet/erp-connector";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { ERP_SYNC_ENTITIES, erpSyncEntity } from "./entities.js";
+import { readPackageFile } from "../../__tests__/helpers/test-paths.js";
 
 /**
- * Resolved from `process.cwd()` rather than from `import.meta.url`: this app
- * emits CommonJS, where `import.meta` is a compile error (TS1470). Same
- * candidate-list shape the schema tests in `__tests__/` use, so the file is
- * found whether vitest runs from the app or from the repo root.
+ * Anchored to this test file, not to `process.cwd()` (WARP-2654). The old
+ * candidate list took the first base that existed, so a cwd inside a second
+ * checkout of this repo made this gate assert against that tree's entities.
+ * `readPackageFile` uses `__dirname`, not `import.meta.url`, which this app
+ * rejects at compile time (TS1470, CommonJS output).
  */
-const ENTITIES_SOURCE = (() => {
-  const relative = join("src", "services", "erp-sync", "entities.ts");
-  for (const base of [process.cwd(), join(process.cwd(), "apps", "orchestrator")]) {
-    const candidate = join(base, relative);
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(`Could not locate ${relative} from ${process.cwd()}`);
-})();
-const source = readFileSync(ENTITIES_SOURCE, "utf8");
+const source = readPackageFile("src", "services", "erp-sync", "entities.ts");
 
 describe("WARP-2509 — the entity table is a view over the canonical vocabulary", () => {
   it("points every entity at a read query that serves that very dataset", () => {

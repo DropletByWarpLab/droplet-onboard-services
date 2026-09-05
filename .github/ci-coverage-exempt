@@ -5,23 +5,13 @@
 #
 # Prefer adding tests over exempting. Exempt only when the code is pure
 # hardware glue or generated assets that can't be exercised off-device.
-
-# Hardware display service + PyPortal firmware.
 #
-# ⚠ THIS EXEMPTION IS NOW A NAMING ARTEFACT, NOT A STATEMENT ABOUT COVERAGE.
-# The original rationale — "requires physical hardware to meaningfully
-# exercise", "unit tests would mostly be mocking the serial layer" — was
-# overtaken by WARP-1640/1641: `.github/workflows/oled-display-panel-tests.yml`
-# runs the WHOLE services/oled-display/tests/ directory on every PR that
-# touches the service, with one exclusion (test_storage_pool_script.py, which
-# is coupled to the runner's disk layout). That is 850+ tests, not zero.
+# There are currently NO exemptions. `services/oled-display` was the only
+# entry and was removed in WARP-2685: its suite has run in CI since
+# WARP-1640/1641 (.github/workflows/oled-display-panel-tests.yml, the whole
+# tests/ directory bar one disk-layout-coupled file). The entry survived only
+# because the checker resolved workflows by filename and could not see the
+# `-panel-` infix; it now matches on the workflow's actual `paths:` filter.
 #
-# The line below stays only because check-ci-coverage.sh resolves workflows by
-# convention — it looks for `oled-display-tests.yml` and cannot see the
-# `-panel-` in the real filename. Deleting the exemption fails the gate for a
-# service that IS covered. The honest fix is to teach the checker about the
-# actual workflow (or rename it, which is a branch-protection change because
-# the job name is the contract) — worth its own ticket, not a drive-by.
-#
-# Do NOT read this entry as "oled-display has no CI". WARP-2668.
-services/oled-display
+# Before adding an entry here, check that the service really has no workflow —
+# not merely no workflow named `<name>-tests.yml`.

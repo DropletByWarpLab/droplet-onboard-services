@@ -515,6 +515,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // ADR-045 §5.3 — the three department-assignment refusals. Each names the
+    // situation and the way out; none mentions Nextcloud, provisioning or a
+    // groupfolder, because none of those is what the person did.
+    department_not_found:
+      "That department isn't available anymore. Refresh and try again.",
+    department_not_assignable:
+      "Household can't own work — it's the group everyone is already in. Pick a department or a team.",
+    department_archived:
+      "That department has been archived, so new work can't be assigned to it. Pick another one, or restore it first.",
     invalid_request:
       "Some of those details weren't valid. Check the form and try again.",
     NETWORK:
