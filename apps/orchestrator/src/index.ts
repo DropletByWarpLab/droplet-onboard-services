@@ -113,6 +113,8 @@ import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { runFilingTick } from "./services/filing/worker.js";
+import { runFilingReconcile } from "./services/filing/reconcile.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -1162,6 +1164,47 @@ async function main() {
       }
     },
     { lockKey: "droplet:activity-notify" },
+  );
+
+  // WARP-2730 (ADR-048) — auto-filing. Two registrations, split on purpose.
+  //
+  // 🔴 THE TICK CARRIES NO `lockKey`, AND THAT IS THE POINT. `lockKey` wraps
+  // its handler in `prisma.$transaction(…, { timeout: 60_000 })` holding
+  // `pg_try_advisory_xact_lock` for the handler's whole duration. Right for the
+  // 23 short DB sweeps that use it; wrong for this one, because a CPU-inference
+  // extraction can legitimately outlive 60 s (`completeOnce` allows 120 s per
+  // call for exactly that reason) and a handler that outlives its transaction
+  // has every write rolled back while the model keeps running.
+  //
+  // The exclusion is the durable CLAIM instead — `FOR UPDATE SKIP LOCKED` plus
+  // a guarded `updateMany` — which is strictly stronger here: it is atomic
+  // across replicas like the advisory lock, and unlike the advisory lock it
+  // SURVIVES A RESTART. A process killed mid-extraction leaves a `running` row
+  // that the reconcile below re-arms; a vanished advisory lock would leave that
+  // row stuck forever with nothing anywhere saying so. `safeRun` still
+  // supervises the handler, so the failure counter and canary are unchanged.
+  //
+  // 20 s: the DoD is "within ~90 s of the upload", and the file-indexer's own
+  // watcher debounce plus embedding already spends most of that budget.
+  cronRuntime.scheduleInterval(20_000, async () => {
+    const result = await runFilingTick(prisma);
+    if (result.status === "processed" || result.status === "blocked") {
+      logger.info(result, "filing tick");
+    }
+  });
+
+  // The stale-claim sweep. Pure DB work that finishes in milliseconds, so this
+  // one DOES carry a `lockKey` — the house pattern, and the direct analogue of
+  // the shipped `droplet:email-stale-sending-reconcile`.
+  cronRuntime.scheduleInterval(
+    5 * 60_000,
+    async () => {
+      const result = await runFilingReconcile(prisma);
+      if (result.reArmed > 0 || result.givenUp > 0 || result.retried > 0) {
+        logger.info(result, "filing stale-claim reconcile");
+      }
+    },
+    { lockKey: "droplet:filing-stale-claim-reconcile" },
   );
 
   // WARP-475's nightly camera-retention purge used to fire here at 03:30.
