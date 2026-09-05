@@ -63,6 +63,19 @@ const prisma = {
     findUnique: vi.fn().mockResolvedValue(null),
     upsert: vi.fn().mockResolvedValue({}),
   },
+  // WARP-2731 — what the Health block reads.
+  user: { findUnique: vi.fn().mockResolvedValue({ username: "stefan" }) },
+  fileIndexStatus: {
+    count: vi.fn().mockResolvedValue(0),
+    findFirst: vi.fn().mockResolvedValue(null),
+    findMany: vi.fn().mockResolvedValue([]),
+  },
+  emailMessage: { findMany: vi.fn().mockResolvedValue([]) },
+  filingDecision: {
+    findMany: vi.fn().mockResolvedValue([]),
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+  },
+  crmCompany: { findMany: vi.fn().mockResolvedValue([]) },
 } as never;
 
 function appAs(user: Principal) {
@@ -213,6 +226,74 @@ describe("bodies are strict", () => {
       .send({});
     expect(res.status).toBe(400);
     expect(markNotSameMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("🔴 the Health block makes two silences visible", () => {
+  it("reports when the tick last ran, and whether the canary has it paused", async () => {
+    const res = await request(appAs(OWNER)).get("/api/crm/filing/summary");
+    expect(res.status).toBe(200);
+    // MUTATION: drop `health` from the response — a stalled worker and a
+    // stalled corpus both present as "nothing new arrived", and the page has
+    // no way to tell the owner which.
+    expect(res.body.health).toBeTruthy();
+    expect(res.body.health).toHaveProperty("lastTickAt");
+    expect(res.body.health).toHaveProperty("hoursSinceLastIndex");
+    expect(res.body.health).toHaveProperty("paused");
+    expect(res.body.health.paused).toBe(false);
+  });
+
+  it("family cannot read it — it counts the owner's documents", async () => {
+    expect((await request(appAs(FAMILY)).get("/api/crm/filing/summary")).status).toBe(403);
+  });
+});
+
+describe("the Rules memory is owner-only, and revoking is audited", () => {
+  it("lists for an owner", async () => {
+    const res = await request(appAs(OWNER)).get("/api/crm/filing/rules");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("rules");
+  });
+
+  it("family sees neither the rules nor the skipped list", async () => {
+    expect((await request(appAs(FAMILY)).get("/api/crm/filing/rules")).status).toBe(403);
+    expect((await request(appAs(FAMILY)).get("/api/crm/filing/skipped")).status).toBe(403);
+  });
+
+  it("MUTATION: let the service principal forget a rule", async () => {
+    const res = await request(appAs(MCP)).delete("/api/crm/filing/rules/r1");
+    expect(res.status).toBe(403);
+  });
+
+  it("refuses an unknown key when teaching a rule", async () => {
+    const res = await request(appAs(OWNER))
+      .post("/api/crm/filing/rules")
+      .send({
+        keyKind: "EMAIL_DOMAIN",
+        keyValue: "northgate.example",
+        companyId: "22222222-2222-4222-8222-222222222222",
+        verdict: "ALWAYS_HERE",
+      });
+    // `verdict` is not on the body schema: this route writes NOT_SAME only.
+    // Accepting it would let a chip mint an ALWAYS_HERE rule, which is the
+    // strongest thing in the feature, from a one-click control.
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("undo is a human's decision", () => {
+  it("MUTATION: let the service principal undo", async () => {
+    const res = await request(appAs(MCP))
+      .post(`/api/crm/filing/proposals/${PROPOSAL_ID}/undo`)
+      .send({});
+    expect(res.status).toBe(403);
+  });
+
+  it("family cannot undo either", async () => {
+    const res = await request(appAs(FAMILY))
+      .post(`/api/crm/filing/proposals/${PROPOSAL_ID}/undo`)
+      .send({});
+    expect(res.status).toBe(403);
   });
 });
 

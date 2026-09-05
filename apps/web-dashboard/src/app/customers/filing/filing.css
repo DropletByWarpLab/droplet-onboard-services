@@ -313,3 +313,27 @@
     gap: 6px;
   }
 }
+
+/* The "stop filing here" correction, on the record drawer. Collapsed to a
+   single ghost button until it is wanted — a control that is always expanded
+   is one that reads as an instruction rather than an option. */
+.pm-scope .filing-stop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0 4px;
+}
+
+.pm-scope .filing-stop label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.pm-scope .filing-stop-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pm-scope .filing-stop-row .pm-input { flex: 1; min-width: 180px; }

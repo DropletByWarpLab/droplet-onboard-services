@@ -314,6 +314,95 @@ describe("🔴 a PHI skip is not re-openable from a list", () => {
   });
 });
 
+// ── The correction round-trip ──────────────────────────────────────────────
+
+describe("🔴 a NOT_SAME pair is never offered again", () => {
+  /**
+   * The AC that makes the Rules memory worth having, asserted end to end
+   * against WARP-2730's real matcher rather than against the table.
+   *
+   * A correction that does not stick is worse than no correction memory: the
+   * owner sees the same wrong suggestion tomorrow and concludes the feature
+   * does not listen. So the test drives the ACTUAL search path with the rule
+   * present, not a stub of it.
+   */
+  const company = { id: "11111111-1111-4111-8111-111111111111", name: "Northgate Dental" };
+
+  function matcherPrisma(decisions: unknown[]) {
+    return {
+      filingDecision: { findMany: vi.fn(async () => decisions) },
+      contactEmail: { findMany: vi.fn(async () => []) },
+      crmCompany: {
+        findMany: vi.fn(async () => [{ ...company, domain: "northgate.example" }]),
+        findUnique: vi.fn(async () => company),
+      },
+    } as never;
+  }
+
+  it("MUTATION: drop the NOT_SAME filter — the rejected pair comes straight back", async () => {
+    const { matchCompany } = await import("../services/filing/match.js");
+
+    // Without the rule, the domain matches.
+    const before = await matchCompany(matcherPrisma([]), {
+      name: "Northgate Dental",
+      domain: "northgate.example",
+      emails: [],
+      folder: null,
+    });
+    expect(before).toMatchObject({ kind: "MATCH", companyId: company.id });
+
+    // With the owner's correction, it does not — and there is no other
+    // candidate, so the answer is NONE and a NEW customer gets proposed.
+    const after = await matchCompany(
+      matcherPrisma([
+        {
+          id: "d1",
+          keyKind: "EMAIL_DOMAIN",
+          keyValue: "northgate.example",
+          verdict: "NOT_SAME",
+          companyId: company.id,
+        },
+      ]),
+      { name: "Northgate Dental", domain: "northgate.example", emails: [], folder: null },
+    );
+    expect(after).toEqual({ kind: "NONE" });
+  });
+
+  it("an IGNORE_SOURCE rule stops the source being read at all", async () => {
+    const { matchCompany } = await import("../services/filing/match.js");
+    const out = await matchCompany(
+      matcherPrisma([
+        {
+          id: "d2",
+          keyKind: "EMAIL_DOMAIN",
+          keyValue: "newsletter.example",
+          verdict: "IGNORE_SOURCE",
+          companyId: null,
+        },
+      ]),
+      { name: "Whoever", domain: "newsletter.example", emails: [], folder: null },
+    );
+    expect(out).toMatchObject({ kind: "IGNORED" });
+  });
+
+  it("an ALWAYS_HERE rule beats the search, and says it was taught", async () => {
+    const { matchCompany } = await import("../services/filing/match.js");
+    const out = await matchCompany(
+      matcherPrisma([
+        {
+          id: "d3",
+          keyKind: "EMAIL_DOMAIN",
+          keyValue: "northgate.example",
+          verdict: "ALWAYS_HERE",
+          companyId: company.id,
+        },
+      ]),
+      { name: "Something Else Entirely", domain: "northgate.example", emails: [], folder: null },
+    );
+    expect(out).toMatchObject({ kind: "MATCH", companyId: company.id, taught: true });
+  });
+});
+
 // ── The Rules memory ───────────────────────────────────────────────────────
 
 describe("a rule reads as a sentence an owner can judge", () => {
