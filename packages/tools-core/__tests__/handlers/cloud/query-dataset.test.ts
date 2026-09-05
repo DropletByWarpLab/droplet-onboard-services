@@ -195,7 +195,7 @@ describe("cloud_query_dataset (WARP-2497)", () => {
     }
   });
 
-  it("exports the thirteen dataset names the schema advertises, in one list", async () => {
+  it("exports the fourteen dataset names the schema advertises, in one list", async () => {
     const schema = cloudQueryDataset.inputSchema as {
       properties: { dataset: { enum: readonly string[] } };
       required: string[];
@@ -211,6 +211,11 @@ describe("cloud_query_dataset (WARP-2497)", () => {
     expect(CLOUD_QUERY_DATASETS).toEqual([
       "charge",
       "invoice",
+      // WARP-2383 — money owed BY the business, served by the Xero track.
+      // Ordered next to `invoice` rather than appended, because the two are
+      // the same shape pointed in opposite directions and a reader scanning
+      // this list should meet them together.
+      "bill",
       "contact",
       "company",
       "deal",

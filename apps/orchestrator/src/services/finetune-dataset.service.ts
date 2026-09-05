@@ -31,6 +31,36 @@
  * removes a person's name or a home address out of a calendar entry. ADR-039 §3
  * is explicit that no scrubber does, and that this is exactly why the corpus is
  * synthetic-first.
+ *
+ * ## WARP-2425 — the connector firewall, and why a scrub was not enough
+ *
+ * That last paragraph is the whole reason this section exists. A tool result is
+ * rendered into the corpus by {@link renderToolResult} with its `data` intact,
+ * scrubbed only for secret SHAPES and secret KEY NAMES. A `cloud_query_dataset`
+ * result is a page of a customer's books — counterparty names, amounts, due
+ * dates, email addresses — and NONE of that matches a secret pattern. It would
+ * have gone into a LoRA training corpus in full, and weights do not forget.
+ *
+ * WARP-2425 asked for "a provable architectural firewall between connector data
+ * and every weight-updating path". Two paths were audited and they are not in
+ * the same condition:
+ *
+ *   erp-sync landing seam   CLEAN, structurally. `erp-sync.service.ts`'s
+ *                           `runOneCursor` reads rows, extracts a POSITION and
+ *                           discards them; `ErpEntityCache` still has zero
+ *                           writers in the tree (ADR-041 §4 forbids a cloud
+ *                           connector becoming its first while WARP-2028 is
+ *                           open). Nothing lands, so nothing reaches the file
+ *                           indexer's embedder — which walks Nextcloud files
+ *                           and has no other source.
+ *   LoRA export             NOT clean. This module. Fixed by
+ *                           {@link CONNECTOR_RECORD_TOOLS} below.
+ *
+ * The fix is an EXCLUSION, not a redaction, and that choice is deliberate:
+ * redacting the values would leave a record whose tool-call shape is right and
+ * whose result teaches the model that this tool returns nothing, which is a
+ * worse training target than no record at all. Dropping the turn costs a
+ * tool-use example; keeping it costs a customer's ledger, permanently.
  */
 import { createHash } from "node:crypto";
 import { TOOLS, TOOL_CATALOG } from "@droplet/tools-core";
@@ -148,7 +178,16 @@ export type DropReason =
   /** No tool calls, and negatives were not requested. */
   | "no_tool_calls"
   /** No user message, or no assistant reply — not a trainable exchange. */
-  | "incomplete_exchange";
+  | "incomplete_exchange"
+  /**
+   * WARP-2425 — the turn read a customer's connected system of record.
+   *
+   * Its tool result carries rows from a connector (Xero invoices, HubSpot
+   * contacts, a practice's schedule) that no scrub in this module removes,
+   * because none of it looks like a secret. Excluded from every corpus this
+   * module produces, flag or no flag.
+   */
+  | "connector_records";
 
 export interface TrainingMessage {
   readonly role: "user" | "assistant" | "tool";
@@ -176,6 +215,34 @@ export interface TrainingRecord {
 export type CurationOutcome =
   | { readonly kept: true; readonly record: TrainingRecord }
   | { readonly kept: false; readonly reason: DropReason };
+
+/**
+ * WARP-2425 — the tools whose RESULTS carry a customer's system-of-record rows.
+ *
+ * DERIVED from the catalog's own `domain` axis rather than hand-listed, so a
+ * connector tool added later is inside the firewall the moment it is
+ * catalogued — which is the property a hand-written list cannot have and the
+ * reason the previous shape of this problem was invisible.
+ *
+ * Two domains, and each is the whole of its class:
+ *   `cloud`  the SaaS connectors' single read tool (`cloud_query_dataset`),
+ *            whose result is a page of Stripe / HubSpot / Mailchimp / Xero
+ *            records.
+ *   `erp`    the LAN practice-management reads. They answer ERP_NOT_CONNECTED
+ *            today (WARP-2104), so they carry nothing yet — and they are in
+ *            here precisely BECAUSE of that: the day that ticket wires them,
+ *            they start returning PHI, and a firewall that had to be widened
+ *            by hand on that day is a firewall that would not have been.
+ *
+ * NOT included, and stated so the boundary is legible rather than assumed:
+ * the `crm` domain. Those tools read `crm.service.ts`, which is box-local
+ * business data the owner entered (ADR-044), not a copy of a vendor's records.
+ * If PartyLink ever lands connector rows into those tables, this set must grow
+ * with it — that is a real follow-up, not a theoretical one.
+ */
+export const CONNECTOR_RECORD_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_CATALOG.filter((t) => t.domain === "cloud" || t.domain === "erp").map((t) => t.name),
+);
 
 export interface CurationOptions {
   /** Names in the registry the adapter will be evaluated against. */
@@ -282,6 +349,14 @@ export function curateTurn(
   if (calls.some((c) => !opts.knownTools.has(c.name))) {
     return { kept: false, reason: "unknown_tool" };
   }
+  // WARP-2425 — checked BEFORE any message is rendered, so a connector result
+  // never reaches `renderToolResult` at all. Placing it after would mean the
+  // rows had already been stringified into a `TrainingMessage` and the
+  // exclusion would rest on the record being thrown away afterwards, which is
+  // a promise rather than a boundary.
+  if (calls.some((c) => CONNECTOR_RECORD_TOOLS.has(c.name))) {
+    return { kept: false, reason: "connector_records" };
+  }
   if (calls.length === 0 && !opts.includeNoToolTurns) {
     return { kept: false, reason: "no_tool_calls" };
   }
@@ -352,6 +427,7 @@ const EMPTY_DROPS: Record<DropReason, number> = {
   unknown_tool: 0,
   no_tool_calls: 0,
   incomplete_exchange: 0,
+  connector_records: 0,
 };
 
 /** Curate a whole session's worth of messages, keeping the drop histogram. */

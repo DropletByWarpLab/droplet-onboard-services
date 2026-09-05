@@ -28,7 +28,7 @@ import type { PrismaClient } from "@prisma/client";
 // (`NullableJsonNullValueInput`). Same shape as `activity.service.ts:23-24`
 // and `routes/cameras.ts:973`.
 import { Prisma } from "@prisma/client";
-import { ConnectorBlockedError, type Connector } from "@droplet/erp-connector";
+import { ConnectorBlockedError, forgetXeroToken, type Connector } from "@droplet/erp-connector";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
@@ -1105,6 +1105,33 @@ export function createIntegrationsService(
             lastHealthyAt: null,
           },
         });
+        // WARP-2383 — the third place this connection's credential material
+        // lives, and the only one Postgres cannot reach.
+        //
+        // The Xero track holds a minted access token in a process-lifetime map
+        // keyed by connection id (`xeroTokenCache`), because `erp.service`
+        // builds and closes a connector per read and an instance-held cache
+        // would mint a token per read. The purge above nulls the columns and
+        // `pruneExpiredXeroTokens` eventually drops the token, but "eventually"
+        // is up to the 30-minute TTL plus cron lag — so without this line an
+        // owner who clicks Disconnect leaves a live bearer token for Xero in
+        // memory for half an hour. That is the same lie WARP-2453 fixed in the
+        // columns, one layer up.
+        //
+        // Called UNCONDITIONALLY rather than behind a `provider === XERO`
+        // branch: the map is keyed by connection id, so a non-Xero id is simply
+        // absent and the delete is a no-op. A branch here would be one more
+        // place for a provider key to drift out of agreement with the connector
+        // that owns it.
+        //
+        // Inside the transaction, per the review on #1946, and safe in the
+        // direction that matters: a rollback leaves a still-connected
+        // connection having to mint one fresh token, while doing it after
+        // commit would leave the token behind on any crash in between. It
+        // cannot hang or 429 — it is a `Map.delete`, not a vendor call, which
+        // is what separates it from the vendor-side revoke this deliberately
+        // does not attempt.
+        forgetXeroToken(row.id);
         const cursorsReset = await resetCursorsForConnection(tx, row.id);
         // WARP-2549 — ADR-041 §4's other binding constraint: "deletion is a
         // real operation". The credential purge above stops the box READING

@@ -40,6 +40,9 @@ import {
   __resetRegisteredProvidersForTest,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
+// WARP-2383 — the PATCH must also drop what a connector minted from the
+// previous credential; asserted against the REAL cache, see the last describe.
+import { XeroConnector, __resetXeroTokenCacheForTest } from "@droplet/erp-connector";
 
 import { createSaasCredentialsRouter } from "./saas-credentials.js";
 import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.js";
@@ -498,5 +501,150 @@ describe("the row casts stay narrow enough to keep the structural check", () => 
     // `apiCredentialsEnc` compile, and `credentialsPurgedFor` would then judge
     // a purge from a column that was never fetched.
     expect(source).not.toContain("as unknown as SaasConnectionRow");
+  });
+});
+
+/**
+ * WARP-2383 — the rotation half of the token-cache finding on #1946.
+ *
+ * The Xero track keeps the access token it minted from the client secret in a
+ * process-lifetime map keyed by connection id, for up to 30 minutes. #1946's
+ * first fix dropped it on `disconnect()`; this is the other path that replaces
+ * the credential — the owner re-pasting a rotated secret through this PATCH.
+ * Without the drop, the next `connect()` served the token minted under the OLD
+ * secret, the probe passed, and the row went CONNECTED without the new secret
+ * ever having been exercised.
+ *
+ * Asserted against the real module-level cache through a real `XeroConnector`
+ * with an injected fetch that records every URL it dials, so "mints fresh" is
+ * a count of calls to the identity host — not a spy on `forgetXeroToken`,
+ * which `forgetXeroToken(descriptor.id)` would satisfy while deleting nothing.
+ */
+describe("PATCH also drops the Xero token minted under the PREVIOUS credential", () => {
+  const XERO_CLIENT_ID = "FAKE-XERO-CLIENT-ID-0000";
+  const XERO_CLIENT_SECRET = "FAKE-XERO-CLIENT-SECRET-do-not-use-0000";
+  const XERO_ACCESS_TOKEN = "FAKE-XERO-ACCESS-TOKEN-0000";
+
+  beforeEach(() => {
+    __resetXeroTokenCacheForTest();
+  });
+
+  /**
+   * A connector on `connectionId` whose fetch records every URL and answers
+   * each with a token body — the identity call mints from it, and the
+   * `Organisation` probe `connect()` follows with happens to parse the same
+   * JSON. `mints()` is the number of identity-host calls so far.
+   */
+  function xeroConnector(connectionId: string) {
+    const urls: string[] = [];
+    const connector = new XeroConnector(
+      {
+        connectionId,
+        clientId: XERO_CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async (url: string) => {
+          urls.push(url);
+          return new Response(
+            JSON.stringify({
+              access_token: XERO_ACCESS_TOKEN,
+              expires_in: 1800,
+              token_type: "Bearer",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }) as never,
+        now: () => Date.UTC(2026, 8, 4, 12, 0, 0),
+        resolveSecret: async () => XERO_CLIENT_SECRET,
+      },
+    );
+    const mints = () => urls.filter((u) => u.includes("/connect/token")).length;
+    return { connector, mints };
+  }
+
+  async function patchCredential(fields: Record<string, string>) {
+    const prisma = createPrismaStub(seededRow());
+    const res = await request(buildApp(prisma))
+      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .send({ fields });
+    return { res, prisma };
+  }
+
+  it("a re-pasted secret drops the cached token, and the next connect() mints fresh", async () => {
+    // Mutation: delete the `forgetXeroToken(row.id)` line in the PATCH handler
+    // → the second connector is served the cached token: zero identity calls
+    // and `hasAccessToken` still true. That mutation IS the code this was
+    // reviewed at.
+    const minted = xeroConnector(ROW_ID);
+    await minted.connector.connect();
+    expect(minted.mints()).toBe(1);
+    expect((await minted.connector.status()).hasAccessToken).toBe(true);
+
+    const { res } = await patchCredential({ apiKey: "rk_live_rotated" });
+    expect(res.status).toBe(200);
+
+    expect((await minted.connector.status()).hasAccessToken).toBe(false);
+    const next = xeroConnector(ROW_ID);
+    await next.connector.connect();
+    expect(next.mints()).toBe(1);
+  });
+
+  it("keys the forget on the ROW id — the provider name would delete nothing", async () => {
+    // Mutation: `forgetXeroToken(descriptor.id)` → the cache is keyed by
+    // connection id, "fixture-billing" is not one, and the token survives.
+    // The fixture row's id and provider differ, or this proves nothing.
+    expect(ROW_ID).not.toBe(FIXTURE.id);
+    const minted = xeroConnector(ROW_ID);
+    await minted.connector.connect();
+
+    const { res } = await patchCredential({ apiKey: "rk_live_rotated" });
+    expect(res.status).toBe(200);
+
+    expect((await minted.connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("a clear drops it too — an emptied column and a live token cannot coexist", async () => {
+    const minted = xeroConnector(ROW_ID);
+    await minted.connector.connect();
+
+    const { res, prisma } = await patchCredential({ apiKey: "" });
+    expect(res.status).toBe(200);
+    expect(prisma._row()?.status).toBe("NOT_CONFIGURED");
+
+    expect((await minted.connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("does not disturb another connection's token", async () => {
+    // Mutation: `__resetXeroTokenCacheForTest()` in place of the scoped delete
+    // → every other organisation on the box re-mints on its next read.
+    const other = xeroConnector("conn_someone_else");
+    await other.connector.connect();
+    const minted = xeroConnector(ROW_ID);
+    await minted.connector.connect();
+
+    const { res } = await patchCredential({ apiKey: "rk_live_rotated" });
+    expect(res.status).toBe(200);
+
+    expect((await minted.connector.status()).hasAccessToken).toBe(false);
+    expect((await other.connector.status()).hasAccessToken).toBe(true);
+  });
+
+  it("leaves the token alone when the write is refused", async () => {
+    // The column did not change, so the token still agrees with it. Mutation:
+    // move the forget ahead of the update → a 400 that changed nothing costs a
+    // re-mint, and a validation failure becomes a way to make the box dial the
+    // identity host.
+    const minted = xeroConnector(ROW_ID);
+    await minted.connector.connect();
+
+    const { res, prisma } = await patchCredential({ apiKey: "not-a-restricted-key" });
+    expect(res.status).toBe(400);
+    expect(openSaasCredentials(ROW_ID, prisma._row()?.providerTokensEnc as string)).toEqual({
+      apiKey: SEEDED_SECRET,
+    });
+
+    expect((await minted.connector.status()).hasAccessToken).toBe(true);
   });
 });

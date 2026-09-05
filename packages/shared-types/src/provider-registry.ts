@@ -967,6 +967,141 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 10,
     },
   },
+  {
+    id: "xero",
+    displayName: "Xero",
+    category: "Accounting",
+    track: "cloud",
+    // WARP-2394 — NOTHING is shared between the two authentication paths, so
+    // `credentialFields` is empty and every field lives on a variant.
+    //
+    // Xero is the vendor `CredentialVariant` was introduced for (WARP-2451,
+    // `provider-descriptor.ts:298-320`) and it is the first descriptor to use
+    // it. The two paths are not one flow with optional extras: a Custom
+    // Connection is a paid, per-organisation app with a client SECRET and no
+    // redirect at all, while a customer-owned PKCE app has *"no option to
+    // generate a client secret"* and reaches an organisation through an
+    // authorization-code redirect. Merging them would render a form asking for
+    // a secret that cannot exist on one path and a redirect that is meaningless
+    // on the other — which is exactly ADR-042 §4's "these are disjoint
+    // variants, not optional fields".
+    credentialFields: [],
+    credentialVariants: [
+      {
+        id: "custom-connection",
+        label: "Custom Connection (implemented)",
+        description:
+          "A paid, per-organisation Xero app you create in Xero's developer portal. " +
+          "AU, NZ, UK and US only, and Xero bills you $10 AUD / £5 / $5 USD per month " +
+          "for each organisation you connect.",
+        fields: [
+          {
+            name: "clientId",
+            label: "Xero client id",
+            type: "string",
+            required: true,
+            // NOT secret, and stored where "where does this connection dial,
+            // and as whom?" can be answered without decrypting anything —
+            // ADR-042 §5's rule for non-secret connection facts. An OAuth
+            // client id is a public identifier; only the secret half is a
+            // credential.
+            secret: false,
+            storage: "providerConfig",
+            help: "Shown on the Custom Connection's page in Xero's developer portal.",
+          },
+          {
+            name: "clientSecret",
+            label: "Xero client secret",
+            type: "string",
+            required: true,
+            secret: true,
+            storage: "encrypted",
+            // Deliberately NO `pattern`. Stripe's `^rk_` and HubSpot's `^pat-`
+            // are refusals of a MORE-PRIVILEGED credential the vendor also
+            // issues (ADR-042 §4); Xero issues exactly one shape of client
+            // secret and publishes no format for it, so a regex here could
+            // only reject a valid secret a future rotation happens to produce.
+            // The variant discriminator is what makes a wrong-path credential
+            // impossible, not a shape check.
+            help:
+              "Generate it on the same page and copy it immediately — Xero shows it once. " +
+              "Rotating it is a re-paste here; Droplet cannot rotate what it did not mint.",
+          },
+        ],
+      },
+      {
+        id: "pkce-app",
+        label: "Customer-owned PKCE app (not implemented)",
+        description:
+          "Declared so the choice is visible and a row can record it, but NOT built: it " +
+          "needs an authorization-code redirect this appliance has no inbound path for. " +
+          "Choosing it is refused at connect time with a message saying so.",
+        // Client id ONLY. ADR-042 §2 records that this Xero app type has "no
+        // option to generate a client secret", and §4 makes a Path B config
+        // carrying a secret a refusal rather than a tolerated extra. Declaring
+        // no secret field is what makes that unrepresentable instead of merely
+        // discouraged.
+        fields: [
+          {
+            name: "clientId",
+            label: "Xero client id",
+            type: "string",
+            required: true,
+            secret: false,
+            storage: "providerConfig",
+            help: "This path is not implemented; see the setup guide for the supported one.",
+          },
+        ],
+      },
+    ],
+    // Both as FULL-STRING literals in the connector
+    // (`services/erp-connector/src/xero/connector.ts`), which is what the
+    // static egress scanner extracts; these bare hosts are the descriptor's
+    // half of the same registration (WARP-2399 / WARP-2403).
+    egressHosts: ["api.xero.com", "identity.xero.com"],
+    // WARP-2414 — mirrors `XERO_DATASETS`. Reconciled BY COLUMN LIST against
+    // `export-drop/profiles.ts` rather than by name, per that file's rule:
+    // an ACCREC invoice and an ACCPAY bill are the canonical `invoice`/`bill`
+    // shapes, and a Xero contact is the canonical `contact` (a party that may
+    // have bought nothing and carries no money of its own) rather than the
+    // commerce `customer`, whose `orders_count` / `total_spent_amount` /
+    // `currency` a Xero contact has no source for.
+    datasets: ["invoice", "bill", "contact"],
+    rateLimit: {
+      // Xero's per-TENANT daily ceiling. The per-minute limit (60) and the
+      // app-wide pooled one (10,000/min across the whole fleet) are real and
+      // are handled where they can be: the fleet pool by the per-box schedule
+      // jitter (`erp-sync/schedule-jitter.ts`, which names this exact number),
+      // and the minute limit by the 4-hour cadence below — a tick costs a
+      // handful of calls, so a minute is never the binding constraint.
+      // `CallBudget` models spend over a period, which is what the daily
+      // number is; expressing the minute rate here instead would make the
+      // budget refuse a healthy tick.
+      callCeiling: 5_000,
+      periodMs: 24 * 60 * 60 * 1000,
+    },
+    // WARP-2417 — four hours, and the first floor on this track that is a
+    // POLICY rather than a vendor-published number. It bounds the egress bill:
+    // Xero's daily allowance is per tenant and its minute allowance is shared
+    // across the fleet, and an accounting ledger does not change on a
+    // fifteen-minute timescale in a business small enough to buy this box.
+    // `claimDueErpCursors` enforces it, jittered per box.
+    pollIntervalFloorMs: 4 * 60 * 60 * 1000,
+    catalog: {
+      id: "xero",
+      name: "Xero",
+      category: "Accounting",
+      description:
+        "Invoices, bills and contacts read from one Xero organisation — never written to.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track. Xero
+      // needs it more than any other card: the guide is where the customer
+      // learns the connection is unavailable outside AU/NZ/UK/US and that Xero
+      // bills them per organisation. Served from `docs/integrations/xero.md`.
+      setupGuideHref: "/help/integrations/xero",
+      order: 11,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**
