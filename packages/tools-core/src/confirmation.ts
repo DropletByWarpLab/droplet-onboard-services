@@ -48,6 +48,10 @@ export async function passThroughConfirmation(res: Response): Promise<ToolResult
   const message =
     typeof body === "object" && body && "reason" in body && typeof body.reason === "string"
       ? body.reason
-      : "This action requires user confirmation in the Droplet dashboard.";
+      // WARP-2179 — surface-agnostic on purpose. This text reaches a chat
+      // chip, a paired desktop (ADR-014) and a parked background run alike;
+      // naming one surface was wrong for the other two. Each surface renders
+      // its own copy; this only has to be true everywhere.
+      : "This action requires the user's confirmation before it runs. It has not been performed.";
   return confirmationRequired(message, body);
 }

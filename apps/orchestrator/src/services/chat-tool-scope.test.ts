@@ -11,6 +11,10 @@
  * that resolution a comment cannot provide: it recomputes the overlap on every
  * run, so the documented state either stays true or CI says so.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS, TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
