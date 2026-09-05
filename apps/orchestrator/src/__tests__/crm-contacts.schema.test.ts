@@ -125,7 +125,7 @@ describe("WARP-2018 — the one contact entity", () => {
   it("states a contact's origin explicitly instead of inferring it", () => {
     // Mutation: delete `origin` and infer "external" from externalUid != NULL
     // → red. Same rule as `status` above.
-    expect(enumMembers("ContactOrigin")).toEqual(["LOCAL", "EXTERNAL"]);
+    expect(enumMembers("ContactOrigin")).toEqual(["LOCAL", "EXTERNAL", "EXTRACTED"]);
     expect(fieldLine("Contact", "origin")).toBe("origin ContactOrigin @default(LOCAL)");
   });
 
@@ -266,7 +266,7 @@ describe("WARP-2117 — CRM core", () => {
   });
 
   it("states record origin explicitly on CRM records too", () => {
-    expect(enumMembers("CrmRecordOrigin")).toEqual(["LOCAL", "EXTERNAL"]);
+    expect(enumMembers("CrmRecordOrigin")).toEqual(["LOCAL", "EXTERNAL", "EXTRACTED"]);
     for (const model of ["CrmCompany", "CrmDeal", "CrmActivity"]) {
       expect(fieldLine(model, "origin")).toBe("origin CrmRecordOrigin @default(LOCAL)");
     }

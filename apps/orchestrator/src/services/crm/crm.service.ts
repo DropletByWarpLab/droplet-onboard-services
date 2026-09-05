@@ -117,7 +117,7 @@ export interface ApiCrmCompany {
   country: string | null;
   note: string | null;
   ownerId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   /** Present on list and detail — the two numbers a customer row is read for. */
@@ -143,7 +143,7 @@ export interface ApiCrmDeal {
   closeReason: string | null;
   ownerId: string | null;
   projectId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   contactIds: string[];

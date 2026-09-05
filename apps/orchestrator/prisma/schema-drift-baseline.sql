@@ -93,6 +93,29 @@
 --        written only through Prisma, which always supplies the column, and
 --        the two singleton seeds pass CURRENT_TIMESTAMP explicitly.
 --
+--   4. ADR-048 (WARP-2729) — four PARTIAL unique indexes on `FilingDecision`
+--      and `IngestProposal`.
+--
+--      Prisma's datamodel has no syntax for a `WHERE` predicate on a unique
+--      index, so `migrate diff` reports a DROP for each of them on every run,
+--      exactly as it does for the HNSW index above. They cannot be replaced by
+--      a plain `@@unique`, because a compound unique over a NULLABLE column
+--      never collides in Postgres (NULL <> NULL) — which is the trap WARP-2549's
+--      landing code hit, and why it uses updateMany-then-create with a P2002
+--      retry instead of `upsert`.
+--
+--      What each one protects:
+--        * FilingDecision_ignore_source_key  — one "ignore this sender" rule
+--          per key, so the Rules tab cannot accumulate duplicates.
+--        * FilingDecision_always_here_key    — one "always file here" rule per
+--          (key, customer).
+--        * FilingDecision_not_same_key       — one "not the same" rule per
+--          (key, customer), so a rejected pair is remembered once.
+--        * IngestProposal_pending_dedupe_key — at most one PENDING proposal per
+--          (kind, dedupeKey). Decided rows are exempt on purpose: history
+--          accumulates, but a second document about the same customer must
+--          offer to LINK to the pending one rather than mint a duplicate.
+--
 -- UPDATING THIS FILE
 -- ------------------
 -- Do not hand-edit below the sentinel. Run:
@@ -109,3 +132,14 @@ DROP INDEX "FileContentChunk_text_tsv_idx";
 -- AlterTable
 ALTER TABLE "FileContentChunk" ALTER COLUMN "text_tsv" DROP DEFAULT;
 
+-- DropIndex
+DROP INDEX "FilingDecision_ignore_source_key";
+
+-- DropIndex
+DROP INDEX "FilingDecision_always_here_key";
+
+-- DropIndex
+DROP INDEX "FilingDecision_not_same_key";
+
+-- DropIndex
+DROP INDEX "IngestProposal_pending_dedupe_key";
