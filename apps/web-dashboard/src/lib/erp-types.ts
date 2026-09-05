@@ -42,7 +42,15 @@ export type ConnectorId =
   | "hubspot"
   | "mailchimp"
   // WARP-2296 — the fourth SaaS vendor.
-  | "shopify";
+  | "shopify"
+  // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
+  // programme. Added by hand, like every entry above: the union is the thing
+  // that makes the `as ConnectorId` cast in `connectors.ts` honest, so it has
+  // to be widened deliberately rather than derived from the descriptors it is
+  // checking.
+  | "brevo"
+  | "klaviyo"
+  | "pipedrive";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 
