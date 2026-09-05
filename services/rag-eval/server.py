@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -164,61 +165,45 @@ def _extraction_blocking(run_id: str) -> None:
     """Executor-thread body for /run-extraction (WARP-2732, ADR-048).
 
     🔴 A FAILED canary is a SUCCEEDED run with a failing verdict, not a failed
-    run — and the distinction is the whole point. `RunStatus.FAILED` means the
+    run, and the distinction is the whole point. `RunStatus.FAILED` means the
     harness broke; a canary that scored below its floors ran perfectly and
-    answered "no". Collapsing the two would let somebody read a red canary as
-    "the eval is flaky, try again", which is exactly the reading that gets a
-    gate switched off.
-
-    The verdict lives in the results file the runner wrote; this only records
+    answered "no". Collapsing the two would let a red canary read as "the eval
+    is flaky, try again" — the reading that gets a gate switched off rather
+    than investigated. The verdict lives in the results file; this records only
     whether the measurement HAPPENED.
-    """
-    import subprocess
-    import sys as _sys
 
-    script = (
-        Path(__file__).resolve().parent / "tests" / "extraction-eval" / "extraction_runner.py"
-    )
-    db_url = os.environ.get("DATABASE_URL")
-    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL")
-    if not db_url or not model:
-        # Refuse rather than run blind: a canary that quietly measured nothing
-        # is WARP-1860's fifteen green all-zero nightly runs.
-        STORE.finish(
-            run_id,
-            RunStatus.FAILED,
-            error="extraction canary needs DATABASE_URL and FILING_CANARY_MODEL/LLM_MODEL",
-        )
+    Called in-process rather than shelled out — see `cmd_run_extraction`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "tests" / "extraction-eval"))
+    try:
+        import extraction_runner  # noqa: PLC0415 — baked into the image
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("extraction canary not installed (run_id=%s)", run_id)
+        STORE.finish(run_id, RunStatus.FAILED, error=f"canary not installed: {exc}")
         return
 
+    db_url = os.environ.get("DATABASE_URL", "")
+    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL") or ""
     out = Path(config.RESULTS_DIR) / f"extraction-{run_id}.json"
     try:
-        proc = subprocess.run(
-            [
-                _sys.executable, str(script),
-                "--database-url", db_url,
-                "--model", model,
-                "--out", str(out),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("extraction canary failed to start (run_id=%s)", run_id)
+        rc = extraction_runner.run(db_url, model, out)
+    except Exception as exc:  # noqa: BLE001 — surface, never crash the loop
+        logger.exception("extraction canary raised (run_id=%s)", run_id)
         STORE.finish(run_id, RunStatus.FAILED, error=str(exc))
         return
 
-    # rc 2 is "could not run at all" (no psycopg, no database). rc 1 is a
-    # measured FAIL, which is a successful run.
-    if proc.returncode >= 2:
-        STORE.finish(run_id, RunStatus.FAILED, error=(proc.stderr or "")[-2000:])
+    if rc == extraction_runner.EXIT_CANNOT_RUN:
+        STORE.finish(
+            run_id,
+            RunStatus.FAILED,
+            error="canary could not run — check DATABASE_URL and FILING_CANARY_MODEL",
+        )
         return
     STORE.finish(run_id, RunStatus.SUCCEEDED)
     logger.info(
         "extraction canary complete (run_id=%s verdict=%s)",
         run_id,
-        "PASS" if proc.returncode == 0 else "FAIL",
+        "PASS" if rc == extraction_runner.EXIT_PASS else "FAIL",
     )
 
 

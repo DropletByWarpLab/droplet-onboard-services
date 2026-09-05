@@ -182,43 +182,36 @@ def cmd_run_extraction() -> int:
     `runner.run_once`, because it is a different kind of run: RAGAS scores
     RETRIEVAL against a judge, this scores what the filing worker WROTE by
     reading the box's own Postgres afterwards. Sharing the plumbing would mean
-    one of them pretending to be the other, and the honest version of that
-    pretence is two functions.
+    one of them pretending to be the other.
 
-    Needs `DATABASE_URL` and the model tag the box is actually serving. The
-    model is not inferred: a canary that guessed which model it measured would
-    record a pass against the wrong name, and the pass is what unlocks auto
-    mode for that model specifically.
+    Called IN-PROCESS, not shelled out. RAGAS gets a subprocess because it is
+    heavy and its imports are hostile; this is a few database reads and some
+    arithmetic, and a child process here bought nothing but an argv round-trip
+    (which semgrep's `dangerous-subprocess-use-tainted-env-args` rule correctly
+    objected to on PR #2019).
+
+    The model is read from the environment and never inferred: the pass is
+    recorded AGAINST a model, and a canary that guessed which one it measured
+    would unlock auto mode for the wrong name.
     """
-    import subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "tests" / "extraction-eval"))
+    import extraction_runner  # noqa: PLC0415 — the corpus is baked in, not a dep
 
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        # Fail loudly. A canary that silently degrades to "no database, so no
-        # failures found" is exactly the shape of WARP-1860's fifteen green
-        # all-zero nightly runs.
-        logger.error("extraction canary needs DATABASE_URL; refusing to run blind")
-        return 2
-    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL")
-    if not model:
+    db_url = os.environ.get("DATABASE_URL", "")
+    model = os.environ.get("FILING_CANARY_MODEL") or os.environ.get("LLM_MODEL") or ""
+    if not db_url or not model:
         logger.error(
-            "extraction canary needs FILING_CANARY_MODEL (or LLM_MODEL) — the pass is "
-            "recorded AGAINST a model, so it cannot be guessed"
+            "extraction canary needs DATABASE_URL and FILING_CANARY_MODEL (or LLM_MODEL) — "
+            "refusing to run blind"
         )
-        return 2
+        return extraction_runner.EXIT_CANNOT_RUN
 
-    script = Path(__file__).resolve().parent / "tests" / "extraction-eval" / "extraction_runner.py"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out = Path(RESULTS_DIR) / f"extraction-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    proc = subprocess.run(
-        [sys.executable, str(script), "--database-url", db_url, "--model", model,
-         "--out", str(out)],
-        check=False,
-    )
-    logger.info("extraction canary finished rc=%s → %s", proc.returncode, out)
-    return proc.returncode
+    rc = extraction_runner.run(db_url, model, out)
+    logger.info("extraction canary finished rc=%s → %s", rc, out)
+    return rc
 
 
 def main() -> int:

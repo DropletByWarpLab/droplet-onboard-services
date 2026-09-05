@@ -186,6 +186,52 @@ class TestLandedTables:
             assert "%s" in sql, f"{name} ignores the proposal ids it was given"
 
 
+# ── The runner's refusals ───────────────────────────────────────────────────
+
+
+class TestRunnerRefusals:
+    """The three states in which the canary must decline to measure anything.
+
+    🔴 Exit codes 1 and 2 stay distinct on purpose. A measured FAIL is a
+    SUCCESSFUL measurement that answered no; "could not run" is a broken
+    harness. Collapsing them is the reading that gets a gate retried until it
+    goes green rather than investigated.
+    """
+
+    def test_the_exit_codes_are_three_distinct_answers(self):
+        import extraction_runner as r
+
+        assert (r.EXIT_PASS, r.EXIT_FAIL, r.EXIT_CANNOT_RUN) == (0, 1, 2)
+
+    def test_MUTATION_run_with_no_database_url(self, capsys):
+        # A canary that quietly ran against no database is WARP-1860's fifteen
+        # green all-zero nightly runs.
+        import extraction_runner as r
+
+        assert r.run("", "gpt-oss:20b") == r.EXIT_CANNOT_RUN
+
+    def test_MUTATION_run_with_no_model_tag(self):
+        # The pass is recorded AGAINST a model; guessing which one would unlock
+        # auto mode for the wrong name.
+        import extraction_runner as r
+
+        assert r.run("postgres://x", "") == r.EXIT_CANNOT_RUN
+
+    def test_it_is_a_function_not_a_subprocess(self):
+        # semgrep's dangerous-subprocess-use-tainted-env-args flagged the first
+        # cut, which shelled out with an argv list built from env vars. A list
+        # without `shell=True` is not injectable, but the rule was pointing at
+        # something real: there was no reason for a child process here, and
+        # removing it removed an argv round-trip too.
+        # Asserted on the CALL, not on the word: the header explains at length
+        # why there is no child process here, and a test that banned the word
+        # would ban its own explanation.
+        src = (Path(__file__).parent / "extraction_runner.py").read_text(encoding="utf-8")
+        assert "import subprocess" not in src
+        assert "subprocess.run(" not in src
+        assert "def run(" in src
+
+
 # ── Normalisation ───────────────────────────────────────────────────────────
 
 

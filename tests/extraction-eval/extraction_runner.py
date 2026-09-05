@@ -218,6 +218,79 @@ def assert_nothing_landed_from_phi(
     return problems
 
 
+#: Exit codes, because two callers act on them and "non-zero" is not enough.
+#:
+#:   0  the canary PASSED — floors cleared, no breaker, nothing landed from PHI
+#:   1  the canary FAILED — it ran correctly and the answer is no
+#:   2  the canary COULD NOT RUN — no driver, no database, no model tag
+#:
+#: 🔴 1 and 2 must stay distinct. A measured FAIL is a successful measurement;
+#: collapsing it into "the harness broke" is the reading that gets a gate
+#: switched off and retried rather than investigated.
+EXIT_PASS = 0
+EXIT_FAIL = 1
+EXIT_CANNOT_RUN = 2
+
+
+def run(
+    database_url: str,
+    model: str,
+    out: str | Path | None = None,
+    corpus_prefix: str = "extraction-eval",
+) -> int:
+    """Run the canary in-process and return one of the EXIT_* codes.
+
+    🔴 AN ORDINARY FUNCTION, NOT A SUBPROCESS, and that is a deliberate change
+    from the first cut. Both callers — `main.py run-once --suite extraction` and
+    the server's `/run-extraction` — used to shell out with an argv list built
+    from environment variables, which semgrep's
+    `dangerous-subprocess-use-tainted-env-args` rule flagged on PR #2019.
+    Passing a list to `subprocess.run` without `shell=True` is not actually
+    injectable, but the rule is pointing at something real anyway: there was no
+    reason for a child process here. RAGAS is shelled out because it is heavy
+    and its imports are hostile; this is a few database reads and some
+    arithmetic.
+
+    Removing it removes the finding, an argv round-trip, and a whole class of
+    "did the child inherit the right environment" questions.
+    """
+    if psycopg is None:  # pragma: no cover - the box has it
+        print("psycopg is not installed — this runner only works on a box", file=sys.stderr)
+        return EXIT_CANNOT_RUN
+    if not database_url or not model:
+        # Refuse rather than measure nothing. A canary that quietly ran against
+        # no database is WARP-1860's fifteen green all-zero nightly runs.
+        print("extraction canary needs a database url and a model tag", file=sys.stderr)
+        return EXIT_CANNOT_RUN
+
+    goldens = load_goldens(Path(__file__).parent)
+
+    with psycopg.connect(database_url) as conn:
+        fixtures = collect(conn, goldens, corpus_prefix)
+        landed = assert_nothing_landed_from_phi(conn, fixtures, corpus_prefix)
+
+    verdict = evaluate(score_run(fixtures))
+    if landed:
+        # 🔴 Appended AFTER scoring, and it can only ever make the verdict
+        # worse. A PHI row in the CRM is a fail whatever the metrics said.
+        verdict.failures.extend(landed)
+        verdict.passed = False
+
+    if out:
+        report = {
+            "model": model,
+            "n_fixtures": len(fixtures),
+            "fixtures": fixtures,
+            "verdict": verdict.as_dict(),
+        }
+        Path(out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        Path(out).with_suffix(".md").write_text(
+            render_markdown(verdict, model), encoding="utf-8"
+        )
+    print(render_markdown(verdict, model))
+    return EXIT_PASS if verdict.passed else EXIT_FAIL
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ADR-048 extraction canary")
     parser.add_argument("--database-url", required=True)
@@ -229,38 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         help="path fragment identifying the seeded corpus",
     )
     args = parser.parse_args(argv)
-
-    if psycopg is None:  # pragma: no cover
-        print("psycopg is not installed — this runner only works on a box", file=sys.stderr)
-        return 2
-
-    root = Path(__file__).parent
-    goldens = load_goldens(root)
-
-    with psycopg.connect(args.database_url) as conn:
-        fixtures = collect(conn, goldens, args.corpus_prefix)
-        landed = assert_nothing_landed_from_phi(conn, fixtures, args.corpus_prefix)
-
-    verdict = evaluate(score_run(fixtures))
-    if landed:
-        # 🔴 Appended AFTER scoring, and it can only ever make the verdict
-        # worse. A PHI row in the CRM is a fail whatever the metrics said.
-        verdict.failures.extend(landed)
-        verdict.passed = False
-
-    report = {
-        "model": args.model,
-        "n_fixtures": len(fixtures),
-        "fixtures": fixtures,
-        "verdict": verdict.as_dict(),
-    }
-    if args.out:
-        Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        Path(args.out).with_suffix(".md").write_text(
-            render_markdown(verdict, args.model), encoding="utf-8"
-        )
-    print(render_markdown(verdict, args.model))
-    return 0 if verdict.passed else 1
+    return run(args.database_url, args.model, args.out, args.corpus_prefix)
 
 
 if __name__ == "__main__":  # pragma: no cover
