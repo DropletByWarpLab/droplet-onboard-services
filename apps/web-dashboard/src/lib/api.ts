@@ -123,6 +123,7 @@ import type {
   AccessStartingPoint,
   AccessExceptionInput,
   EffectiveAccess,
+  RoleTemplatesResponse,
   AppDownloadCatalog,
   ContextPinKind,
   ContextPinTarget,
@@ -7633,6 +7634,28 @@ export async function getAccessRole(id: string): Promise<{ role: AccessRole }> {
   return res.json();
 }
 
+/**
+ * WARP-2738 — the role-template catalogue (owner/admin only, 403 otherwise).
+ *
+ * Static code on the box, served with `Cache-Control: private, max-age=300`, so
+ * this is a plain read with no client-side cache of its own: the browser's is
+ * the cache, and a template list that goes stale for five minutes is a list of
+ * buttons, not state.
+ *
+ * The response's `enforcedModuleIds` is the half that matters and MUST be read
+ * from here rather than assumed — it is derived server-side from the live
+ * layer-2 gate roster, and a dashboard-side copy would silently label a grant
+ * "enforced" that isn't. Treat it as a set (see {@link RoleTemplatesResponse}).
+ */
+export async function listRoleTemplates(): Promise<RoleTemplatesResponse> {
+  const res = await authFetch(`${BASE}/api/access/role-templates`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load role templates: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function createAccessRole(
   payload: AccessRolePayload,
 ): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
@@ -7643,7 +7666,20 @@ export async function createAccessRole(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to create role: ${res.status}`);
+    // WARP-2738 — carry the status and the server's typed `code`, the
+    // `getInvite` shape used throughout this file. POST /access/roles now
+    // answers 409 CONCURRENT_MUTATION when the write loses a SERIALIZABLE
+    // race: nothing was applied and the identical POST should simply be
+    // re-issued, so a caller that can only see `message` would render a retry
+    // as a failure. Same reachable refusal as the template path, hence
+    // the same shape.
+    const err = new Error(body.error || `Failed to create role: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
   }
   return res.json();
 }
@@ -7660,7 +7696,66 @@ export async function duplicateAccessRole(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to duplicate role: ${res.status}`);
+    // Same 409 CONCURRENT_MUTATION story as the create above — a duplicate
+    // derives its name and slug from an existing role, so two operators
+    // duplicating the same row race on the same slug base.
+    const err = new Error(body.error || `Failed to duplicate role: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
+ * WARP-2738 — instantiate a template: POST /api/access/roles { templateId }.
+ *
+ * Same verb, same response and same failure vocabulary as
+ * {@link createAccessRole}, so a panel can share one handler: 200
+ * `{ role, syncState: "synced" }` with `peopleCount: 0`, and the row is an
+ * ORDINARY AccessRole from that moment — it appears in `listAccessRoles` and is
+ * edited, archived and deleted through the existing calls. Nothing stores the
+ * template id on the row.
+ *
+ * `name` is an OPTIONAL rename at instantiation (trimmed, 1–80 chars). Never
+ * send a slug: the server derives it from whichever name wins, and a collision
+ * is not an error — instantiating "Front Desk" twice yields `front-desk` then
+ * `front-desk-2`, both NAMED "Front Desk". A panel that wants unique names must
+ * offer this rename rather than dedupe client-side.
+ *
+ * Sending `sourceRoleId` alongside a template id is a 400, not a silent pick —
+ * hence the deliberately narrow parameter list here.
+ *
+ * The thrown error carries `status` and the server's typed `code` (the
+ * `getInvite` / `storageWriteError` shape used throughout this file) because
+ * one refusal on this path is RETRYABLE and must not be rendered as a failure:
+ * 409 `CONCURRENT_MUTATION` means the write lost a SERIALIZABLE race and
+ * NOTHING was applied. Templates make that routine rather than exotic — two
+ * operators clicking the same card derive the same slug base — so the caller
+ * re-issues the identical POST. The other refusals are terminal: 404 (`Role
+ * template not found`), 403 with `ROLE_RANK_EXCEEDED` / `ROLE_NOT_ASSIGNABLE`,
+ * 400 with a zod `details` flatten.
+ */
+export async function createRoleFromTemplate(
+  templateId: string,
+  name?: string,
+): Promise<{ role: AccessRole; syncState?: AccessSyncState }> {
+  const res = await authFetch(`${BASE}/api/access/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(name === undefined ? { templateId } : { templateId, name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(
+      body.error || `Failed to create role from template: ${res.status}`,
+    ) as Error & { status?: number; code?: string };
+    err.status = res.status;
+    if (typeof body.code === "string") err.code = body.code;
+    throw err;
   }
   return res.json();
 }

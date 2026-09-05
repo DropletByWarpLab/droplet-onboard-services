@@ -1368,6 +1368,103 @@ export interface AccessRolePayload {
   connectorGrants: AccessRoleConnectorGrant[];
 }
 
+// ── WARP-2738: role templates (ADR-032's missing starting points) ──
+//
+// There is no shared access types package: every type in this block is a HAND
+// MIRROR of the server. The source of truth is
+// `apps/orchestrator/src/services/access-role-templates.ts` (the catalogue and
+// its grant shapes), projected onto the wire by `serializeRoleTemplate` in
+// `apps/orchestrator/src/routes/access.ts`. Change either and this block has to
+// move with it.
+//
+// A template is NOT a role and deliberately does not share {@link AccessRole}'s
+// shape: it has no database id, no people, no state and no timestamps. It is
+// what a card renders from and posts back as `{ templateId }` — the row it
+// produces is ordinary and fully editable from the moment it lands, and nothing
+// on that row remembers which template made it (provenance lives only in the
+// creation Activity's `refs`).
+
+/** The gateable half of the feature vocabulary — the server's
+ *  `GateableModuleId`, which is `ModuleId` minus `chat`. Chat is always-on and
+ *  a hard 400 on the grant axis, so no template can name it. Derived by
+ *  exclusion, so a new module id reaches this type for free. */
+export type AccessGateableModuleId = Exclude<AccessModuleId, "chat">;
+
+/** A template's feature grant. Same shape as {@link AccessRoleFeatureGrant},
+ *  with `chat` excluded at the type level rather than by convention. */
+export interface RoleTemplateFeatureGrant {
+  moduleId: AccessGateableModuleId;
+  level: FeatureAccessLevel;
+}
+
+/**
+ * One starting point in the code-resident catalogue
+ * (GET /api/access/role-templates).
+ *
+ * Grants are ADDITIVE FROM ZERO, which is why every axis is enumerated rather
+ * than defaulted: a role that carries grants resolves to chat@act plus ONLY its
+ * explicit grants — the tier's full catalogue is used exclusively for people on
+ * a plain built-in tier. Anything absent here is not held.
+ */
+export interface RoleTemplate {
+  /** Stable kebab-case identifier ("front-desk"), posted back as `templateId`.
+   *  Typed as `string`, NOT a union of the eight shipped ids: the catalogue
+   *  lives on the box and this app must render whatever it is served, including
+   *  a template added after this build shipped. The server owns the vocabulary
+   *  and answers 404 for an id it does not know. */
+  id: string;
+  /** Becomes AccessRole.name. The slug is ALWAYS derived server-side. */
+  name: string;
+  /** Operator-facing prose (≤ 500 chars) — what the profile is for and, where a
+   *  grant is a policy choice rather than a tier limit, that it is one. */
+  description: string;
+  startingPoint: AccessStartingPoint;
+  featureGrants: RoleTemplateFeatureGrant[];
+  toolGrants: AccessRoleToolGrant[];
+  /** ALWAYS empty. Provider slugs are per-box, so a template naming one this
+   *  box has not configured would store dead config that the roles list then
+   *  advertises as reach; connector access is added after creating, in the
+   *  builder, against the providers actually connected. */
+  connectorGrants: AccessRoleConnectorGrant[];
+  /** False on every shipped template. */
+  cloudModelsAllowed: boolean;
+  /** True on exactly one template, and legal there only because that same
+   *  payload grants `smart_home` — the server ANDs this away otherwise. */
+  mayOperateLocks: boolean;
+  /** All three usage caps are null on every template, deliberately: the daily
+   *  message cap is stored and rendered but never enforced, so a template
+   *  shipping one would advertise a limit the box does not keep. */
+  storageQuotaBytes: string | null;
+  maxUploadSizeMb: number | null;
+  llmDailyMessageCap: number | null;
+}
+
+/** GET /api/access/role-templates. Owner/admin only; served with
+ *  `Cache-Control: private, max-age=300` (the catalogue is static code, and
+ *  identical on every box). */
+export interface RoleTemplatesResponse {
+  /** In PRESENTATION order — the array order IS the product order. Render as
+   *  given; never sort. */
+  roleTemplates: RoleTemplate[];
+  /**
+   * THE HONESTY FIELD, and the reason this is an endpoint rather than a
+   * constant bundled into this app. Derived server-side from the layer-2 gate
+   * roster (`FEATURE_GATED_MODULES`), which has moved twice already.
+   *
+   * Treat it as a SET, read from the response — never hardcoded, never sorted
+   * into meaning. A feature grant on a module IN this set genuinely narrows what
+   * the person reaches: the route answers 404 `module_disabled`. A grant on any
+   * module NOT in it is nav-only — the menu entry hides and the API still
+   * answers.
+   *
+   * Copy rule for anything rendered off this: "they will not see it", NEVER
+   * "they will be told they lack permission". The denial is byte-identical to
+   * the box-wide module toggle, so the person cannot tell the two apart — and
+   * neither can this dashboard.
+   */
+  enforcedModuleIds: AccessModuleId[];
+}
+
 /** One per-person exception row (feature axis only in v1 — O-3). */
 export interface AccessExceptionInput {
   moduleId: AccessModuleId;
