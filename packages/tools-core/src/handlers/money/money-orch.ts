@@ -1,8 +1,9 @@
 /**
  * Error mapping for the `money_*` tools (WARP-2581).
  *
- * Mirrors `crm-orch.ts`'s `crmError` in SHAPE and deliberately not in
- * VOCABULARY. The money tool borrowed `crmError` at first, so a ledger that
+ * Mirrors what was `crm-orch.ts`'s `crmError` (now `businessError` in
+ * `handlers/business/_graph.ts`, since ADR-045) in SHAPE and deliberately not
+ * in VOCABULARY. The money tool borrowed `crmError` at first, so a ledger that
  * could not be read told the model "CRM_NOT_FOUND" — a customer-record
  * problem, about a question nobody asked. A model handed the wrong domain in
  * the code says the wrong thing to the person who asked, and the code is the

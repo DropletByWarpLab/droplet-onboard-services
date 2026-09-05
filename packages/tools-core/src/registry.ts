@@ -162,20 +162,16 @@ import emailSend from "./handlers/email/send.js";
 // WARP-1452: contacts derived on-read from indexed mail senders (pure prisma)
 import searchContacts from "./handlers/email/search-contacts.js";
 
-// Native PM module (ADR-026) — tools dispatch through the orchestrator
-// WARP-509 — write tools
-// Project creation — completes the write surface: work items could only
-// ever be added to a project a human had already made by hand.
-// WARP-508's five PM read tools are GONE (ADR-045 slice C) — `business_find`
-// serves projects and work items now. The write tools above are untouched.
-
-// WARP-2546 — CRM tools. The differentiator a cloud CRM cannot ship: the model
-// that reads the pipeline runs on the box, so "draft a follow-up to every deal
-// idle 14+ days" never sends a customer list to a vendor.
-//
-// ADR-045 slice C removed the five CRM READS; the two write tools stay here
-// until slice D. `crm-orch.ts` survives with them and keeps the money and
-// provenance rules that `handlers/business/_graph.ts` imports.
+// Native PM module (ADR-026) and the CRM (WARP-2546): every `pm_*` and
+// `crm_*` tool is GONE (ADR-045 slices C and D). The reads collapsed into
+// `business_find` / `business_timeline` and the writes into
+// `business_create` / `business_update` / `business_link`, all imported
+// under "business" below. `handlers/pm/pm-orch.ts` (transport + PM mappers)
+// and `handlers/crm/crm-orch.ts` (CRM mappers) survive because
+// `handlers/business/_graph.ts` imports them. The differentiator is
+// unchanged: the model that reads the pipeline runs on the box, so "draft a
+// follow-up to every deal idle 14+ days" never sends a customer list to a
+// vendor.
 
 // ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
 // independent slice: handlers return ERP_NOT_CONNECTED; the live read/write

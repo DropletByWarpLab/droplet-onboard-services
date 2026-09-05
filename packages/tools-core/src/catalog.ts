@@ -209,22 +209,19 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "search_contacts",
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
-  // ADR-045 slice C — the five PM reads moved to `business_find`. The domain
-  // keeps its write tools, so the `projects` module's `toolDomains: ["pm"]`
-  // gate still resolves (module-registry.ts's unknown-domain invariant).
   // ADR-045 — EMPTY, and deliberately still declared. Slice C moved the five
   // PM reads into `business_find`/`business_timeline`; slice D moved the five
   // PM writes into `business_create`/`business_update`. The domain survives
   // because it is the slot a REMOTE tracker catalog (Atlassian, WARP-2316)
   // registers into, and its DOMAIN_RULES entry is how such a tool becomes
-  // selectable — the exclusion list names LOCAL tools only.
+  // selectable — the exclusion list names LOCAL tools only. It is also what
+  // the `projects` module's `toolDomains: ["pm"]` resolves against
+  // (module-registry.ts's unknown-domain invariant).
   pm: [],
   // WARP-2581 — money at rest. Excluded from the chat pool (see
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
-  // ADR-045 slice C — likewise the five CRM reads. The two writes stay until
-  // slice D, which is what keeps `crm`'s module gate pointing at something.
   // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
   // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
   // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
