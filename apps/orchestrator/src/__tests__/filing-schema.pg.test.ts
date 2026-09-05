@@ -240,6 +240,9 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
     });
 
     it("refuses an undone status with no undoer", async () => {
+      // The decider is supplied on purpose: UNDONE is in the decided-has-actor
+      // set (it was applied before it was reversed), so omitting it would trip
+      // THAT constraint first and this test would pass for the wrong reason.
       await expect(
         prisma.ingestProposal.create({
           data: proposal({
@@ -251,13 +254,33 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
       ).rejects.toThrow(/IngestProposal_undone_has_actor/);
     });
 
+    it("keeps the original decider on an undone proposal", async () => {
+      // The positive half of the same rule: undoing does not erase who filed
+      // it. Both names stay on the row.
+      const row = await prisma.ingestProposal.create({
+        data: proposal({
+          status: "UNDONE",
+          decidedById: `${P}owner`,
+          decidedAt: new Date(),
+          undoneById: `${P}owner`,
+          undoneAt: new Date(),
+          undoMode: "delete",
+        }),
+      });
+      expect(row.decidedById).toBe(`${P}owner`);
+      expect(row.undoneById).toBe(`${P}owner`);
+    });
+
     it("allows at most one PENDING proposal per (kind, dedupeKey)", async () => {
       await prisma.ingestProposal.create({ data: proposal() });
+      // Prisma surfaces a unique violation as P2002 naming the FIELDS, not the
+      // index — so matching the index name here would never have passed, and
+      // matching /unique/ alone would pass for any unique on the table.
       await expect(
         prisma.ingestProposal.create({
           data: proposal({ sourceRef: `${P}file:2`, ncFileId: 2 }),
         }),
-      ).rejects.toThrow(/IngestProposal_pending_dedupe_key/);
+      ).rejects.toThrow(/kind[\s\S]*dedupeKey|dedupeKey[\s\S]*kind/);
     });
 
     it("lets a decided proposal sit beside a new pending one — history accumulates", async () => {
@@ -316,8 +339,9 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
         createdById: `${P}owner`,
       };
       await prisma.filingDecision.create({ data: base });
+      // Same as above: P2002 names the fields the partial index covers.
       await expect(prisma.filingDecision.create({ data: base })).rejects.toThrow(
-        /FilingDecision_ignore_source_key/,
+        /keyKind[\s\S]*keyValue|keyValue[\s\S]*keyKind/,
       );
     });
   });
@@ -354,14 +378,21 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
       // route that WARP-2734 adds.
       const acct = await prisma.emailAccount.create({
         data: {
+          displayName: `${P}box`,
           address: `${P}box@example.test`,
           imapHost: "imap.example.test",
           smtpHost: "smtp.example.test",
+          username: `${P}box`,
           passwordEnc: "x",
-        } as never,
+        },
       });
       const thread = await prisma.emailThread.create({
-        data: { accountId: acct.id, threadKey: `${P}t1`, subject: `${P}s` } as never,
+        data: {
+          accountId: acct.id,
+          threadKey: `${P}t1`,
+          subject: `${P}s`,
+          lastMessageAt: new Date(),
+        },
       });
       const msg = await prisma.emailMessage.create({
         data: {
@@ -372,7 +403,7 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
           toAddrs: [],
           subject: `${P}s`,
           receivedAt: new Date(),
-        } as never,
+        },
       });
       await prisma.ingestProposal.create({
         data: proposal({

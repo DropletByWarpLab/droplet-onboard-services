@@ -5481,6 +5481,9 @@ model IngestProposal {
   dedupeKey        String
 
   requestedById String
+  /// Who decided, and when. Required for every decided status INCLUDING
+  /// UNDONE — an undone proposal was applied by somebody first, and undoing
+  /// it does not unmake that.
   decidedById   String?
   decidedAt     DateTime?
   appliedAt     DateTime?

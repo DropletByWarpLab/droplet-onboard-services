@@ -205,10 +205,17 @@ ALTER TABLE "IngestProposal"
 -- A decision and its decider move together, in both directions — the
 -- TeamChatMeetingReminderStatus shape, where a terminal state can never be
 -- reached without the row that explains it.
+--
+-- UNDONE is in the set deliberately. An undone proposal was APPLIED first, by
+-- somebody, and undoing it does not unmake that: the person who filed the thing
+-- stays on the record beside the person who reversed it. Leaving UNDONE out
+-- inverted the rule — it demanded that an undone proposal have NO decider, so
+-- the honest row was the one the database refused. (Caught by the pg lane on the
+-- first run; the mocked twin could never have seen it.)
 ALTER TABLE "IngestProposal"
   ADD CONSTRAINT "IngestProposal_decided_has_actor"
   CHECK (
-    ("status" IN ('APPLIED', 'REJECTED', 'NOT_SAME'))
+    ("status" IN ('APPLIED', 'REJECTED', 'NOT_SAME', 'UNDONE'))
     = ("decidedById" IS NOT NULL AND "decidedAt" IS NOT NULL)
   );
 
