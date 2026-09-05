@@ -306,6 +306,29 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/auth/users", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/display/wifi/connect", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/admin/retrieval-eval/search", allowed: ["owner", "admin"] },
+
+  // ── ADR-048 filing review (WARP-2730) — owner + admin, on READS TOO ──
+  //
+  // Narrower than the rest of the CRM, which admits `family` for writes. Two
+  // reasons, both on the router's own header: a review card carries VERBATIM
+  // QUOTES from a stored document (a document-content read wearing a CRM
+  // read's clothes, and `family` has no document grant on this box), and
+  // applying is the act that turns a machine's reading into a record other
+  // people rely on — the consent for which was given by the owner who enabled
+  // filing.
+  //
+  // `service` is rejected by every row, like every other write here. There is
+  // no confirmation-gated tool behind this surface and there is not going to
+  // be one: a model choosing which of its own extractions to apply is the loop
+  // this design exists to keep a human inside of. The real router's wiring —
+  // including the `_service:mcp` id refusal that `requireRole` alone cannot
+  // express — is proven in `crm-filing.routes.test.ts`.
+  { method: "get", path: "/api/crm/filing/summary", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/proposals", allowed: ["owner", "admin"] },
+  { method: "patch", path: "/api/crm/filing/settings", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/apply", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/reject", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/not-same", allowed: ["owner", "admin"] },
 ];
 
 /**

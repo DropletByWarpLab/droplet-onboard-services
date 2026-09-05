@@ -89,6 +89,22 @@ type MatchResolver = (input: {
   folder: string | null;
 }) => Promise<MatchOutcome>;
 
+/**
+ * `IngestMatchKind` (what kind of key matched) to `IngestKeyKind` (what kind of
+ * key a rule is written against). Two enums for two jobs, and the mapping is
+ * written once, here, rather than inline at each of its three call sites.
+ */
+export function matchedKey(
+  kind: IngestMatchKind,
+  value: string,
+): { matchedKeyKind?: string; matchedKeyValue?: string } {
+  if (!value) return {};
+  if (kind === "EMAIL") return { matchedKeyKind: "EMAIL_ADDRESS", matchedKeyValue: value };
+  if (kind === "DOMAIN") return { matchedKeyKind: "EMAIL_DOMAIN", matchedKeyValue: value };
+  if (kind === "NAME") return { matchedKeyKind: "NAME", matchedKeyValue: value };
+  return {};
+}
+
 /** The folder a file sits in, for `NC_FOLDER` decisions. Path only, never the
  *  filename — filenames are PHI (WARP-1983). */
 export function folderOf(source: SourceRef): string | null {
@@ -185,6 +201,9 @@ export async function buildDrafts(args: {
         companyId: outcome.companyId,
         companyName: outcome.companyName,
       });
+      // The key that found it, carried onto the payload so "Not this customer"
+      // has something the matcher will actually look up next time.
+      const matched = matchedKey(outcome.matchKind, outcome.matchedValue);
       const file = fileRef(source);
       if (file) {
         add(
@@ -192,7 +211,12 @@ export async function buildDrafts(args: {
           outcome.companyId,
           company.confidence,
           outcome.matchKind,
-          { companyId: outcome.companyId, companyName: outcome.companyName, file },
+          {
+            companyId: outcome.companyId,
+            companyName: outcome.companyName,
+            file,
+            ...matched,
+          },
           company.evidence,
         );
       } else if (source.sourceKind === "EMAIL") {
@@ -207,6 +231,7 @@ export async function buildDrafts(args: {
             emailMessageId: source.emailMessageId,
             ...(source.subject ? { subject: source.subject } : {}),
             ...(source.occurredAt ? { occurredAt: source.occurredAt } : {}),
+            ...matched,
           },
           company.evidence,
         );
@@ -222,6 +247,8 @@ export async function buildDrafts(args: {
         "NAME",
         {
           extractedName: company.name,
+          matchedKeyKind: "NAME",
+          matchedKeyValue: normalizeCompanyName(company.name) || company.name.toLowerCase(),
           candidates: outcome.candidates.map((c) => ({ companyId: c.companyId, name: c.name })),
           ...(fileRef(source) ? { file: fileRef(source) } : {}),
         },

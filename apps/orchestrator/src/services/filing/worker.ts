@@ -146,7 +146,7 @@ export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> 
     const claim = await claimOne(prisma, owners, settings.enabledAt);
     if (!claim) return { status: "idle", reason: "nothing_pending" };
 
-    return await processClaim(prisma, claim, settings, model.model);
+    return await processClaim(prisma, claim, settings, owners, model.model);
   } finally {
     inFlight = false;
   }
@@ -217,6 +217,9 @@ async function processClaim(
   prisma: PrismaClient,
   claim: ClaimRow,
   settings: Awaited<ReturnType<typeof readFilingSettings>>,
+  /** Resolved once per tick and passed down — the same set the claim was
+   *  scoped by, so the read cannot widen past what was claimable. */
+  owners: string[],
   model: string,
 ): Promise<TickOutcome> {
   const finish = (
@@ -230,7 +233,6 @@ async function processClaim(
     return finish("not_needed", "out_of_scope", null);
   }
 
-  const owners = await permittedOwnerIds(prisma, settings);
   const read = await readFileContent(prisma, claim.ncFileId, owners);
   if (!read.ok) {
     return finish(STATUS_FOR[read.reason], read.reason, null);

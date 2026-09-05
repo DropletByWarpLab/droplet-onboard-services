@@ -37,11 +37,27 @@ const FileRef = z
   })
   .strict();
 
+/**
+ * The key that found the match, carried on every payload that HAS a match.
+ *
+ * 🔴 This is what "Not this customer" teaches against. Without it the only
+ * thing a correction could be written against is the proposal's dedupe key,
+ * which for a `LINK_FILE` is a company UUID — and a `FilingDecision` keyed on a
+ * UUID matches nothing the matcher ever looks up. The owner's correction would
+ * silently never take effect, and the same wrong suggestion would come back
+ * tomorrow.
+ */
+const MatchedKey = {
+  matchedKeyKind: z.enum(["EMAIL_ADDRESS", "EMAIL_DOMAIN", "NAME", "NC_FOLDER"]).optional(),
+  matchedKeyValue: z.string().trim().min(1).max(320).optional(),
+};
+
 export const LinkFilePayload = z
   .object({
     companyId: z.string().uuid(),
     companyName: shortText,
     file: FileRef,
+    ...MatchedKey,
   })
   .strict();
 
@@ -53,6 +69,7 @@ export const LogEmailActivityPayload = z
     /** Rendered as the timeline caption. Screened like every persisted string. */
     subject: shortText.optional(),
     occurredAt: z.string().datetime().optional(),
+    ...MatchedKey,
   })
   .strict();
 
@@ -102,6 +119,7 @@ export const MatchReviewPayload = z
   .object({
     /** What the document called them. */
     extractedName: shortText,
+    ...MatchedKey,
     candidates: z
       .array(z.object({ companyId: z.string().uuid(), name: shortText }).strict())
       .min(2)

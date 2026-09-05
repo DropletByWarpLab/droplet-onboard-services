@@ -87,13 +87,35 @@ export interface MatchCandidate {
   name: string;
   /** Which key found it. */
   via: IngestMatchKind;
+  /**
+   * The VALUE of the key that found it — this address, this domain, this
+   * normalised name.
+   *
+   * 🔴 Carried all the way to the proposal payload, because it is what "Not
+   * this customer" has to teach. Without it the correction can only be written
+   * against the proposal's dedupe key, which for a LINK_FILE is a company
+   * UUID — a `FilingDecision` row keyed on a UUID matches nothing the matcher
+   * ever looks up, so the owner's correction would silently never take effect
+   * and the same wrong suggestion would come back tomorrow. That is worse than
+   * no correction memory at all: it teaches the owner the feature does not
+   * listen.
+   */
+  viaValue: string;
 }
 
 export type MatchOutcome =
   /** The owner has told us to ignore this source entirely. */
   | { kind: "IGNORED"; reason: string }
   /** Exactly one record, found by a key we can name. */
-  | { kind: "MATCH"; matchKind: IngestMatchKind; companyId: string; companyName: string; taught: boolean }
+  | {
+      kind: "MATCH";
+      matchKind: IngestMatchKind;
+      /** The key value that found it — see `MatchCandidate.viaValue`. */
+      matchedValue: string;
+      companyId: string;
+      companyName: string;
+      taught: boolean;
+    }
   /** More than one plausible record. A person picks; never auto-applied. */
   | { kind: "AMBIGUOUS"; candidates: MatchCandidate[] }
   /** Nothing matched. This is how a new customer gets proposed. */
@@ -154,7 +176,13 @@ export async function matchCompany(
     if (company) {
       return {
         kind: "MATCH",
-        matchKind: taught.keyKind === "EMAIL_ADDRESS" ? "EMAIL" : taught.keyKind === "EMAIL_DOMAIN" ? "DOMAIN" : "NAME",
+        matchKind:
+          taught.keyKind === "EMAIL_ADDRESS"
+            ? "EMAIL"
+            : taught.keyKind === "EMAIL_DOMAIN"
+              ? "DOMAIN"
+              : "NAME",
+        matchedValue: taught.keyValue,
         companyId: company.id,
         companyName: company.name,
         taught: true,
@@ -184,6 +212,7 @@ export async function matchCompany(
     const contacts = await prisma.contactEmail.findMany({
       where: { addressLower: { in: emails } },
       select: {
+        addressLower: true,
         contact: {
           select: {
             companyLinks: { select: { company: { select: { id: true, name: true, isArchived: true } } } },
@@ -195,7 +224,12 @@ export async function matchCompany(
     for (const row of contacts) {
       for (const link of row.contact.companyLinks) {
         if (link.company.isArchived) continue;
-        push({ companyId: link.company.id, name: link.company.name, via: "EMAIL" });
+        push({
+          companyId: link.company.id,
+          name: link.company.name,
+          via: "EMAIL",
+          viaValue: row.addressLower,
+        });
       }
     }
   }
@@ -205,10 +239,14 @@ export async function matchCompany(
   if (domains.length > 0) {
     const byDomain = await prisma.crmCompany.findMany({
       where: { domain: { in: domains }, isArchived: false },
-      select: { id: true, name: true },
+      select: { id: true, name: true, domain: true },
       take: 25,
     });
-    for (const c of byDomain) push({ companyId: c.id, name: c.name, via: "DOMAIN" });
+    for (const c of byDomain) {
+      // The company's own stored domain, already normalised on write, so the
+      // taught key and the lookup key are the same string.
+      push({ companyId: c.id, name: c.name, via: "DOMAIN", viaValue: c.domain ?? "" });
+    }
   }
   if (found.length === 1) return single(found[0]);
 
@@ -229,7 +267,7 @@ export async function matchCompany(
     });
     for (const c of byName) {
       if (normalizeCompanyName(c.name) === nameKey) {
-        push({ companyId: c.id, name: c.name, via: "NAME" });
+        push({ companyId: c.id, name: c.name, via: "NAME", viaValue: nameKey });
       }
     }
   }
@@ -243,6 +281,7 @@ function single(c: MatchCandidate): MatchOutcome {
   return {
     kind: "MATCH",
     matchKind: c.via,
+    matchedValue: c.viaValue,
     companyId: c.companyId,
     companyName: c.name,
     taught: false,

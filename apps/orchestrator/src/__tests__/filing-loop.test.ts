@@ -43,10 +43,13 @@ import { classify, AUTO_FLOOR_LINK, MENTIONS_CONFIDENCE_CAP } from "../services/
 import {
   fingerprintChunks,
   joinDeOverlapped,
+  readFileContent,
   stripChunkHeader,
 } from "../services/filing/read-content.js";
-import { isInScope } from "../services/filing/settings.js";
+import { screenPath } from "../services/filing/phi-screen.js";
+import { isInScope, permittedOwnerIds, readFilingSettings } from "../services/filing/settings.js";
 import { parsePayload } from "../services/filing/payloads.js";
+import { notSameKey } from "../services/filing/apply.service.js";
 import type { MatchOutcome } from "../services/filing/match.js";
 
 const INVOICE_TEXT =
@@ -431,6 +434,7 @@ describe("drafts: canned JSON to exact rows", () => {
       resolveMatch: async () => ({
         kind: "MATCH",
         matchKind: "DOMAIN",
+        matchedValue: "acme-dental.example",
         companyId: "11111111-1111-4111-8111-111111111111",
         companyName: "ACME Dental Supply Ltd",
         taught: false,
@@ -458,6 +462,34 @@ describe("drafts: canned JSON to exact rows", () => {
       dedupeKey: "11111111-1111-4111-8111-111111111111",
       matchKind: "DOMAIN",
     });
+    // 🔴 MUTATION: drop `matchedKey` from the payload — "Not this customer"
+    // then has only the dedupe key to write a rule against, which for a
+    // LINK_FILE is a company UUID. The rule would match nothing the matcher
+    // ever looks up, so the correction silently never takes effect and the
+    // same wrong suggestion comes back tomorrow.
+    expect(drafts[0].payload).toMatchObject({
+      matchedKeyKind: "EMAIL_DOMAIN",
+      matchedKeyValue: "acme-dental.example",
+    });
+    expect(notSameKey("LINK_FILE", drafts[0].payload as never)).toEqual({
+      keyKind: "EMAIL_DOMAIN",
+      keyValue: "acme-dental.example",
+    });
+  });
+
+  it("a CREATE_CUSTOMER teaches against the name the DOCUMENT used", () => {
+    // It matched nothing by definition, so there is no carried key — and the
+    // name is exactly what the matcher's NAME key looks up.
+    expect(
+      notSameKey("CREATE_CUSTOMER", { name: "ACME Dental Supply Ltd" } as never),
+    ).toEqual({ keyKind: "NAME", keyValue: "acme dental supply" });
+  });
+
+  it("a payload with nothing usable teaches no rule at all", () => {
+    // The rejection still holds; the RULE does not get written. A rule that
+    // matches nothing is one the owner finds on the Rules page later and
+    // cannot explain.
+    expect(notSameKey("CREATE_PROJECT", { name: "Fitout" } as never)).toBeNull();
   });
 
   it("MUTATION: delete the role==='self' skip — the box files itself as a customer", async () => {
@@ -563,12 +595,18 @@ describe("🔴 the policy table", () => {
     expect(classify({ ...base, kind: "LINK_FILE", matchKind: "NAME" }).policyClass).toBe("REVIEW");
   });
 
-  it("CREATE_CONTACT has no cell that says AUTO", () => {
+  it("MUTATION: delete CREATE_CONTACT's own branch — the reason stops being about people", () => {
+    // The class alone does NOT catch this mutation, and that is worth knowing:
+    // with the branch gone, CREATE_CONTACT falls through every later test and
+    // lands on the closing REVIEW, so the class is unchanged. What changes is
+    // the REASON on the card — from a sentence about people to a generic "ask
+    // me first" — and the reason is not decoration: it is what tells the owner
+    // this one is never automatic, no matter what else they turn on.
     for (const vertical of ["general", "healthcare"] as const) {
       for (const level of ["links_only", "also_create"] as const) {
-        expect(
-          classify({ ...base, kind: "CREATE_CONTACT", vertical, level }).policyClass,
-        ).toBe("REVIEW");
+        const v = classify({ ...base, kind: "CREATE_CONTACT", vertical, level });
+        expect(v.policyClass).toBe("REVIEW");
+        expect(v.policyReason).toBe("New people are always added by you, never automatically.");
       }
     }
   });
@@ -637,6 +675,129 @@ describe("reading content back out of the index", () => {
     expect(fingerprintChunks(["a", "b"])).toBe(fingerprintChunks(["a", "b"]));
     expect(fingerprintChunks(["a", "b"])).not.toBe(fingerprintChunks(["a", "c"]));
     expect(fingerprintChunks(["a", "b"])).not.toBe(fingerprintChunks(["a", "x", "b"]));
+  });
+});
+
+describe("🔴 the settings row fails closed", () => {
+  it("a missing row is OFF, and does not create itself", async () => {
+    // A settings row that appears because something READ it is a consent
+    // record nobody gave.
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const prisma = { autoFilingSetting: { findUnique } } as never;
+    const s = await readFilingSettings(prisma);
+    expect(s.mode).toBe("off");
+    expect(s.enabledById).toBeNull();
+  });
+
+  it("MUTATION: an emptied denylist disables the layer instead of restoring defaults", async () => {
+    // "I cleared the box" must not silently mean "look in Patients/".
+    const prisma = {
+      autoFilingSetting: {
+        findUnique: vi.fn().mockResolvedValue({
+          mode: "propose",
+          level: "links_only",
+          vertical: "general",
+          enabledById: "u-owner",
+          enabledAt: new Date(),
+          folders: [],
+          pathDenylist: [],
+          hourlyApplyCap: 50,
+          dailyCreateCap: 10,
+        }),
+      },
+    } as never;
+    const s = await readFilingSettings(prisma);
+    expect(s.pathDenylist).toContain("patient");
+    expect(screenPath("/Patients/x.pdf", s.pathDenylist).blocked).toBe(true);
+  });
+
+  it("a Json column holding something else is treated as absent, never as a wildcard", async () => {
+    const prisma = {
+      autoFilingSetting: {
+        findUnique: vi.fn().mockResolvedValue({
+          mode: "propose",
+          level: "links_only",
+          vertical: "general",
+          enabledById: "u-owner",
+          enabledAt: new Date(),
+          folders: "everything",
+          pathDenylist: 42,
+          hourlyApplyCap: 50,
+          dailyCreateCap: 10,
+        }),
+      },
+    } as never;
+    const s = await readFilingSettings(prisma);
+    expect(s.folders).toEqual([]);
+    expect(s.pathDenylist).toContain("patient");
+  });
+
+  it("no enabling owner means no permitted readers — not every reader", async () => {
+    const prisma = { user: { findUnique: vi.fn() } } as never;
+    expect(
+      await permittedOwnerIds(prisma, {
+        mode: "propose",
+        level: "links_only",
+        vertical: "general",
+        enabledById: null,
+        enabledAt: null,
+        folders: [],
+        pathDenylist: [],
+        hourlyApplyCap: 0,
+        dailyCreateCap: 0,
+      }),
+    ).toEqual([]);
+  });
+
+  it("the owner's own space plus the household share, and nothing else", async () => {
+    const prisma = {
+      user: { findUnique: vi.fn().mockResolvedValue({ username: "stefan" }) },
+    } as never;
+    expect(
+      await permittedOwnerIds(prisma, {
+        mode: "propose",
+        level: "links_only",
+        vertical: "general",
+        enabledById: "u-owner",
+        enabledAt: new Date(),
+        folders: [],
+        pathDenylist: [],
+        hourlyApplyCap: 0,
+        dailyCreateCap: 0,
+      }),
+    ).toEqual(["stefan", "__household__"]);
+  });
+});
+
+describe("🔴 the chunk reader is scoped", () => {
+  it("MUTATION: an empty owner list reads EVERY owner's chunks", async () => {
+    // The ncFileId-keyed read escapes `resolveChunkOwnerIds`. A filter that
+    // degrades to "no filter" when it cannot work one out is how an
+    // authorization bug ships looking like a convenience.
+    const queryRaw = vi.fn();
+    const prisma = { $queryRaw: queryRaw } as never;
+    const r = await readFileContent(prisma, 8891, []);
+    expect(r).toEqual({ ok: false, reason: "no_text" });
+    // The assertion that matters: it did not ASK.
+    expect(queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("refuses a document whose chunks are encrypted rather than guessing", async () => {
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([{ text: "dcv1:...", sensitivity: "sensitive" }]),
+    } as never;
+    expect(await readFileContent(prisma, 8891, ["stefan"])).toEqual({
+      ok: false,
+      reason: "encrypted_content",
+    });
+  });
+
+  it("an indexed file with no readable body is `no_text`, not a failure", async () => {
+    const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) } as never;
+    expect(await readFileContent(prisma, 8891, ["stefan"])).toEqual({
+      ok: false,
+      reason: "no_text",
+    });
   });
 });
 

@@ -33,13 +33,14 @@
  * typed before the column existed.
  */
 import { Prisma } from "@prisma/client";
-import type { PrismaClient, IngestProposal } from "@prisma/client";
+import type { PrismaClient, IngestProposal, IngestKeyKind } from "@prisma/client";
 
 import * as crm from "../crm/crm.service.js";
 import * as links from "../crm/entity-link.service.js";
 import * as contacts from "../contacts/contacts.service.js";
 import * as pm from "../pm/pm.service.js";
 
+import { normalizeCompanyName } from "./match.js";
 import { parsePayload, type AnyPayload, type PayloadFor } from "./payloads.js";
 
 export const FILING_ERRORS = {
@@ -342,11 +343,48 @@ export async function rejectProposal(
 }
 
 /**
+ * The key a "not this customer" rule is written against.
+ *
+ * 🔴 NOT the dedupe key. For a `LINK_FILE` the dedupe key is the matched
+ * COMPANY'S UUID, and a `FilingDecision` keyed on a UUID matches nothing the
+ * matcher ever looks up — the owner's correction would silently never take
+ * effect and the same wrong suggestion would come back tomorrow. That is worse
+ * than having no correction memory: it teaches the owner the feature does not
+ * listen.
+ *
+ * So the key comes from the payload, which carries the key that FOUND the
+ * match (`matchedKeyKind` / `matchedKeyValue`, set in `propose.ts`). A payload
+ * without one — a `CREATE_CUSTOMER`, which matched nothing by definition —
+ * falls back to the name the document used, which is exactly what the matcher's
+ * NAME key looks up.
+ */
+export function notSameKey(
+  kind: IngestProposal["kind"],
+  payload: AnyPayload,
+): { keyKind: IngestKeyKind; keyValue: string } | null {
+  const p = payload as Record<string, unknown>;
+  const carried = p.matchedKeyValue;
+  const carriedKind = p.matchedKeyKind;
+  if (typeof carried === "string" && carried.length > 0 && typeof carriedKind === "string") {
+    return { keyKind: carriedKind as IngestKeyKind, keyValue: carried.toLowerCase() };
+  }
+  if (kind === "CREATE_CUSTOMER" && typeof p.name === "string") {
+    return { keyKind: "NAME", keyValue: normalizeCompanyName(p.name) || p.name.toLowerCase() };
+  }
+  return null;
+}
+
+/**
  * "Not this customer" — reject, and remember.
  *
  * Writes a `FilingDecision` in the same transaction as the rejection, because
  * a correction the owner made that did not stick is worse than no correction:
  * they see the same wrong suggestion tomorrow and stop trusting the feature.
+ *
+ * A proposal whose payload carries no usable key is still REJECTED — the owner
+ * said no and that must hold — but no rule is written, because a rule that
+ * matches nothing is a rule the owner will later find on the Rules page and be
+ * unable to explain.
  */
 export async function markNotSame(
   prisma: PrismaClient,
@@ -355,6 +393,12 @@ export async function markNotSame(
   actorId: string,
 ): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    const proposal = await tx.ingestProposal.findUnique({
+      where: { id: proposalId },
+      select: { kind: true, payload: true, status: true },
+    });
+    if (!proposal) throw new Error(FILING_ERRORS.PROPOSAL_NOT_FOUND);
+
     const n = await tx.ingestProposal.updateMany({
       where: { id: proposalId, status: "PENDING" },
       data: {
@@ -366,14 +410,14 @@ export async function markNotSame(
     });
     if (n.count !== 1) throw new Error(FILING_ERRORS.NOT_PENDING);
 
-    const proposal = await tx.ingestProposal.findUnique({
-      where: { id: proposalId },
-      select: { dedupeKey: true },
-    });
+    const parsed = parsePayload(proposal.kind, proposal.payload);
+    const key = parsed === null ? null : notSameKey(proposal.kind, parsed);
+    if (!key) return;
+
     await tx.filingDecision.create({
       data: {
-        keyKind: "NAME",
-        keyValue: (proposal?.dedupeKey ?? "").toLowerCase(),
+        keyKind: key.keyKind,
+        keyValue: key.keyValue,
         verdict: "NOT_SAME",
         companyId,
         createdById: actorId,
