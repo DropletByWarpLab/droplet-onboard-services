@@ -271,66 +271,149 @@ describe("business_find — searches", () => {
 });
 
 describe("business_find — the graph edges", () => {
+  /** `GET /api/crm/companies/:id/record` (WARP-2563) — the slice the customer
+   *  branch reads. Everything defaults to empty so a case states only the edge
+   *  it is about. */
+  function recordOf(
+    slice: { openDeals?: unknown[]; closedDeals?: unknown[]; projects?: unknown[] } = {},
+  ) {
+    return res(true, 200, {
+      record: { company: apiCompany, openDeals: [], closedDeals: [], projects: [], ...slice },
+    });
+  }
+  const wonDeal = { ...apiDeal, stage: { name: "Won", kind: "WON" } };
+  const openDeal = {
+    ...apiDeal,
+    id: "d-open",
+    stage: { name: "Proposal", kind: "OPEN" },
+    closedAt: null,
+    projectId: null,
+  };
+
   it("a customer by id declares all four of the calls it makes", async () => {
     // The completeness gate checks the declared hop LIST. This asserts the
-    // handler really does make them.
+    // handler really does make them — and that the bare company read is gone:
+    // the record carries the company.
     get.mockImplementation(async (url: string) => {
-      if (url.includes("/api/crm/companies/")) return res(true, 200, { company: apiCompany });
-      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [apiDeal] });
+      if (url.endsWith("/record")) return recordOf({ openDeals: [openDeal], closedDeals: [wonDeal] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [openDeal], total: 1 });
       if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [apiContact], total: 1 });
       return res(true, 200, { projects: [apiProject] });
     });
     const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
     expect(out.ok).toBe(true);
     const urls = get.mock.calls.map((c) => c[0] as string);
-    expect(urls.some((u) => u.includes("/api/crm/companies/c1"))).toBe(true);
+    expect(urls).toContain("/api/crm/companies/c1/record");
+    expect(urls).not.toContain("/api/crm/companies/c1");
     expect(urls.some((u) => u.includes("/api/crm/deals?company=c1&kind=OPEN"))).toBe(true);
     expect(urls.some((u) => u.includes("/api/crm/contacts?company=c1"))).toBe(true);
     expect(urls.some((u) => u.includes("/api/pm/projects?"))).toBe(true);
 
     const data = expectOk(out).data as {
+      customer: { id: string; name: string };
       contacts: Array<{ name: string; title: string | null; phone: string | null }>;
+      open_deals: Array<{ id: string }>;
       projects: Array<{ id: string; name: string }>;
     };
+    expect(data.customer).toMatchObject({ id: "c1", name: "Example Roofing" });
     // Role at THIS company beats the person's own job title.
     expect(data.contacts[0].title).toBe("Signatory");
     expect(data.contacts[0].phone).toBe("+15550100");
+    expect(data.open_deals.map((d) => d.id)).toEqual(["d-open"]);
     expect(data.projects).toEqual([
       { id: "p1", name: "Roof replacement", identifier: "ROOF", workspace: "main" },
     ]);
   });
 
-  it("does NOT reach for projects when no deal became one", async () => {
+  it("returns the delivery project of a WON deal, which the OPEN page cannot see", async () => {
+    // A won deal becomes the job (`CrmDeal.projectId`, WARP-2117), so the
+    // deals that carry a project are by construction mostly CLOSED. The first
+    // cut derived `projects` from the `kind=OPEN` page and this customer came
+    // back with `projects: []` — the delivery work of a signed contract
+    // silently gone. MUTATION: derive `wanted` from `openDeals` again -> p-won
+    // is missing below.
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({ closedDeals: [{ ...wonDeal, id: "d-won", projectId: "p-won" }] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(true, 200, { projects: [{ ...apiProject, id: "p-won", name: "Signed job" }] });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const data = expectOk(out).data as {
+      open_deals: unknown[];
+      projects: Array<{ id: string; name: string }>;
+    };
+    // No open deal at all — and the project is still there.
+    expect(data.open_deals).toEqual([]);
+    expect(data.projects).toEqual([
+      { id: "p-won", name: "Signed job", identifier: "ROOF", workspace: "main" },
+    ]);
+  });
+
+  it("returns a project the customer owns directly, with no deal at all (ADR-044)", async () => {
+    // `PmProject.companyId` (WARP-2562) is the edge for work that never came
+    // through a deal — a warranty callout, anything begun before the CRM was
+    // switched on. The record reads it; so must this. MUTATION: drop the
+    // `rec.projects` loop -> p-direct is missing.
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({
+          projects: [
+            { id: "p-direct", name: "Warranty callout", identifier: "WAR", isArchived: false, dealIds: [] },
+          ],
+        });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(true, 200, {
+        projects: [
+          apiProject,
+          { ...apiProject, id: "p-direct", name: "Warranty callout", identifier: "WAR" },
+        ],
+      });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const projects = (expectOk(out).data as { projects: Array<{ id: string }> }).projects;
+    // Only the customer's project — p1 is on the listing page but is not theirs.
+    expect(projects.map((p) => p.id)).toEqual(["p-direct"]);
+  });
+
+  it("does NOT reach for projects when no deal became one and none is owned", async () => {
     // The transitive edge costs one request; it must cost ZERO when there is
     // nothing to resolve. Mutation: drop the `wanted.size > 0` guard → this
     // goes red and every customer read pays for a PM call it cannot use.
     get.mockImplementation(async (url: string) => {
-      if (url.includes("/api/crm/companies/")) return res(true, 200, { company: apiCompany });
-      if (url.includes("/api/crm/deals"))
-        return res(true, 200, { deals: [{ ...apiDeal, projectId: null }] });
+      if (url.endsWith("/record")) return recordOf({ openDeals: [openDeal] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [openDeal], total: 1 });
       return res(true, 200, { contacts: [], total: 0 });
     });
     await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
     expect(get.mock.calls.some((c) => String(c[0]).includes("/api/pm/projects"))).toBe(false);
   });
 
-  it("resolves a customer's projects in ONE call, not one per deal", async () => {
+  it("resolves a customer's projects in ONE call, not one per deal — and each project once", async () => {
     get.mockImplementation(async (url: string) => {
-      if (url.includes("/api/crm/companies/")) return res(true, 200, { company: apiCompany });
-      if (url.includes("/api/crm/deals"))
-        return res(true, 200, {
-          deals: [
-            { ...apiDeal, id: "d1", projectId: "p1" },
-            { ...apiDeal, id: "d2", projectId: "p2" },
-            { ...apiDeal, id: "d3", projectId: "p1" },
+      if (url.endsWith("/record"))
+        return recordOf({
+          openDeals: [{ ...openDeal, id: "d1", projectId: "p1" }],
+          closedDeals: [
+            { ...wonDeal, id: "d2", projectId: "p2" },
+            { ...wonDeal, id: "d3", projectId: "p1" },
+          ],
+          // Owned directly AND named by two deals: still one project.
+          projects: [
+            { id: "p1", name: "Roof replacement", identifier: "ROOF", isArchived: false, dealIds: ["d1", "d3"] },
           ],
         });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
       if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
       return res(true, 200, { projects: [apiProject, { ...apiProject, id: "p2", name: "Gutters" }] });
     });
-    await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
     const pmCalls = get.mock.calls.filter((c) => String(c[0]).includes("/api/pm/projects"));
     expect(pmCalls).toHaveLength(1);
+    const projects = (expectOk(out).data as { projects: Array<{ id: string }> }).projects;
+    expect(projects.map((p) => p.id).sort()).toEqual(["p1", "p2"]);
   });
 
   it("reads by id any linked project the listing did not return", async () => {
@@ -341,14 +424,14 @@ describe("business_find — the graph edges", () => {
     // reported "no delivery project" for one that exists. MUTATION: drop
     // the by-id fallback -> p-far is missing below.
     get.mockImplementation(async (url: string) => {
-      if (url.includes("/api/crm/companies/")) return res(true, 200, { company: apiCompany });
-      if (url.includes("/api/crm/deals"))
-        return res(true, 200, {
-          deals: [
-            { ...apiDeal, id: "d1", projectId: "p1" },
-            { ...apiDeal, id: "d2", projectId: "p-far" },
+      if (url.endsWith("/record"))
+        return recordOf({
+          closedDeals: [
+            { ...wonDeal, id: "d1", projectId: "p1" },
+            { ...wonDeal, id: "d2", projectId: "p-far" },
           ],
         });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
       if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
       if (url === "/api/pm/projects/p-far")
         return res(true, 200, { project: { ...apiProject, id: "p-far", name: "Far away" } });

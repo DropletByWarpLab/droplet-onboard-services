@@ -130,6 +130,16 @@ interface Args {
  *  by id. See the customer branch. */
 const PROJECT_LOOKUP_PAGE = 200;
 
+/** The slice of `GET /api/crm/companies/:id/record` (WARP-2563) the customer
+ *  branch reads. The route returns more — people, the timeline, party links —
+ *  for which this tool has its own reads, or `business_timeline` does. */
+interface CustomerRecordSlice {
+  company: Parameters<typeof toGraphCompany>[0];
+  openDeals?: Array<{ projectId?: string | null }>;
+  closedDeals?: Array<{ projectId?: string | null }>;
+  projects?: Array<{ id: string }>;
+}
+
 /** The deal route's maximum page (`listDeals` clamps to 200). Read whole
  *  when a free-text query has to be matched here — see the deal branch. */
 const DEAL_SEARCH_PAGE = 200;
@@ -183,13 +193,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           };
         }
         // Three reads that all depend only on `id`, so they go in parallel:
-        // awaiting the company first would cost a round trip on every call
+        // awaiting the record first would cost a round trip on every call
         // for no correctness benefit (WARP-2556 made the same fix).
-        const [company, deals, contacts] = await Promise.all([
-          callOrch<{ company: Parameters<typeof toGraphCompany>[0] }>(
+        const [record, deals, contacts] = await Promise.all([
+          callOrch<{ record: CustomerRecordSlice }>(
             ctx,
             "get",
-            `/api/crm/companies/${id}`,
+            `/api/crm/companies/${id}/record`,
           ),
           callOrch<{ deals?: Parameters<typeof toGraphDeal>[0][] }>(
             ctx,
@@ -203,16 +213,29 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           ),
         ]);
         const openDeals = (deals.deals ?? []).map(toGraphDeal);
+        const rec = record.record;
 
-        // A customer has no direct link to a project: `PmProject` carries no
-        // company column, and the schema says why — the link lives on the
-        // DEAL (`CrmDeal.projectId`, SetNull) so deleting a project leaves
-        // the commercial record intact. So delivery work is reached
-        // transitively, in ONE extra call for the whole page rather than one
-        // per deal, and only when at least one deal actually became a job.
-        const wanted = new Set(
-          openDeals.map((d) => d.project_id).filter((p): p is string => typeof p === "string"),
-        );
+        // A customer reaches its delivery work by TWO edges, and this reads
+        // both. This paragraph used to claim `PmProject` carries no company
+        // column; it does — `PmProject.companyId` (WARP-2562, ADR-044) is the
+        // DIRECT edge, for work that never came through a deal at all: a
+        // warranty callout, a second phase, anything begun before the CRM was
+        // switched on. The other edge is the deal's, `CrmDeal.projectId`
+        // (WARP-2117): a WON deal becomes the job that delivers it — so by
+        // construction the deals that carry a project are mostly CLOSED, and
+        // deriving from the OPEN page above dropped exactly those. The record
+        // route (WARP-2563) is the reader the customer page uses: every deal
+        // of the customer's, open and closed, plus the projects that name the
+        // company. Reading it here means the tool and the page cannot disagree
+        // about what work exists. What the record lacks is the project's
+        // workspace slug, which `toPlaneProject` needs, so the ids are
+        // resolved below in ONE listing call rather than one per project, and
+        // only when there is at least one to resolve.
+        const wanted = new Set<string>();
+        for (const d of [...(rec.openDeals ?? []), ...(rec.closedDeals ?? [])]) {
+          if (typeof d.projectId === "string") wanted.add(d.projectId);
+        }
+        for (const p of rec.projects ?? []) wanted.add(p.id);
         let projects: ReturnType<typeof toPlaneProject>[] = [];
         if (wanted.size > 0) {
           const page = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
@@ -226,7 +249,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           // or a job archived after its deal. Each such id is read directly
           // rather than silently left out: the model would otherwise report
           // "no delivery project" for one that exists. Rare by construction,
-          // and bounded by the customer's open deals, never by the table.
+          // and bounded by the customer's deals and projects, never by the
+          // table.
           const missing = [...wanted].filter((pid) => !listed.some((p) => p.id === pid));
           const direct = await Promise.all(
             missing.map((pid) =>
@@ -243,7 +267,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           ok: true,
           data: {
             entity,
-            customer: toGraphCompany(company.company),
+            customer: toGraphCompany(rec.company),
             contacts: (contacts.contacts ?? []).map(toGraphContact),
             open_deals: openDeals,
             projects,

@@ -401,6 +401,12 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // and an undeclared hop is how a tool ships with a route the mcp principal
   // cannot reach.
   //
+  // `/api/crm/companies/:id/record` (WARP-2563) replaced the bare
+  // `/api/crm/companies/:id` on the customer branch (WARP-2583 review): the
+  // record carries the company AND every deal of theirs, open and closed, AND
+  // the projects that name the company — the two edges a customer's delivery
+  // work hangs off. The bare read only ever saw the company.
+  //
   // `/api/crm/contacts` and `/api/crm/contacts/:id` are NEW in this change
   // (routes/crm.ts). They exist because the CRM had no way to read its own
   // people at all: `/api/contacts` is owner-scoped and 403s `_service:mcp`
@@ -410,7 +416,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     client: "orchestrator",
     hops: [
       admit("get", "/api/crm/companies"),
-      admit("get", "/api/crm/companies/:id"),
+      admit("get", "/api/crm/companies/:id/record"),
       admit("get", "/api/crm/contacts"),
       admit("get", "/api/crm/contacts/:id"),
       admit("get", "/api/crm/deals"),
