@@ -227,7 +227,16 @@ export type RemoteAttachSkipReason =
   | "bridge_unavailable";
 
 export type RemoteAttachResult =
-  | { attached: true; serverId: string; sync: RemoteCatalogSyncResult }
+  | {
+      attached: true;
+      serverId: string;
+      sync: RemoteCatalogSyncResult;
+      /** WARP-2659 — the bridge client this attach opened. The multiplexer
+       *  holds only the gated port, which has no `close`; this is the one
+       *  handle on the bridge session, kept so {@link detachRemoteServer} can
+       *  close it rather than merely forget it. */
+      client: McpBridgeClient;
+    }
   | { attached: false; serverId: string; reason: RemoteAttachSkipReason; message: string };
 
 /** The row columns the attach path reads. Structural, so a test passes a
@@ -368,7 +377,64 @@ export async function attachAtlassianRemote(
     operatorDomain: ATLASSIAN_OPERATOR_DOMAIN,
     ...(deps.registry ? { registry: deps.registry } : {}),
   });
-  return { attached: true, serverId, sync };
+  return { attached: true, serverId, sync, client };
+}
+
+export interface DetachRemoteDeps {
+  mux: McpToolMultiplexer;
+  serverId: string;
+  /** The bridge client {@link attachAtlassianRemote} opened, if this process
+   *  holds one. Absent when nothing attached — the in-process half of the
+   *  detach still runs, and is still worth running. */
+  client?: { close(): Promise<void> };
+  registry?: RemoteCatalogSyncOptions["registry"];
+}
+
+export interface DetachRemoteResult {
+  serverId: string;
+  /** Whether the multiplexer had this server attached. */
+  detached: boolean;
+  /** Whether a bridge session was told to close. `false` only when no client
+   *  was held; a bridge that could not be reached still counts as told, and
+   *  the client marks itself closed either way. */
+  sessionClosed: boolean;
+}
+
+/**
+ * WARP-2659 — the disconnect half of {@link attachAtlassianRemote}.
+ *
+ * Three things hold state after an attach, and the credential purge in
+ * `integrations.service.ts` `disconnect()` reaches none of them: the bridge
+ * session (`services/mcp-bridge`, holding the token in memory), the
+ * multiplexer entry that routes `<serverId>__*` calls to it, and the runtime
+ * tools `syncRemoteCatalog` published into selection. The per-call gate
+ * already refuses egress the moment the row leaves CONNECTED — that is why it
+ * is a function — but a refused call is still a call the model was allowed to
+ * choose, and a bridge session still holds a credential the box just said it
+ * removed. ADR-043 §4's rule for the kill switch applies here for the same
+ * reason: tear down, do not merely decline to re-establish.
+ *
+ * Bridge first, so that if this process dies mid-way the vendor-facing half is
+ * the one that went. Every step is idempotent, and a `close()` the bridge
+ * refuses is swallowed the way the attach path swallows it — the client marks
+ * itself closed regardless, and the two in-process steps must still run.
+ */
+export async function detachRemoteServer(deps: DetachRemoteDeps): Promise<DetachRemoteResult> {
+  const { serverId } = deps;
+  let sessionClosed = false;
+  if (deps.client) {
+    await deps.client.close().catch((err: unknown) => {
+      logger.warn(
+        { serverId, code: err instanceof Error ? err.message : String(err) },
+        "remote_mcp_bridge_close_failed",
+      );
+    });
+    sessionClosed = true;
+  }
+  const detached = deps.mux.detachRemote(serverId);
+  unregisterRemoteServer(serverId, deps.registry);
+  logger.info({ serverId, detached, sessionClosed }, "remote_mcp_server_detached_for_disconnect");
+  return { serverId, detached, sessionClosed };
 }
 
 /**

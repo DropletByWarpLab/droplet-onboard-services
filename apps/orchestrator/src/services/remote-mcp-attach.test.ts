@@ -17,6 +17,7 @@ import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
 import {
   ATLASSIAN_REMOTE_SERVER_ID,
   attachAtlassianRemote,
+  detachRemoteServer,
   type RemoteMcpConnectionRow,
 } from "./remote-mcp-servers.js";
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
@@ -70,6 +71,8 @@ function fixtureBridge() {
         headers: { "content-type": "application/json" },
       });
     if (path.endsWith("/open")) return json(200, { state: READY_STATE });
+    // WARP-2659 — the close. The bridge answers a session it holds with 200.
+    if (init?.method === "DELETE") return json(200, { closed: true });
     if (path.endsWith("/tools")) return json(200, { tools: WIRE_TOOLS, state: READY_STATE });
     if (path.endsWith("/call")) {
       return json(200, {
@@ -294,5 +297,81 @@ describe("the bearer is fail-closed at the orchestrator end too", () => {
     });
     expect(result).toMatchObject({ attached: false, reason: "bridge_unavailable" });
     expect(bridge.fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-2659 — the disconnect half.
+ *
+ * `disconnect()`'s purge reaches the row; it cannot reach the three things an
+ * attach leaves in this process and on the bridge. These pin that a detach
+ * reaches all three, and that it is safe to call when there is nothing to
+ * reach.
+ */
+describe("detach — the disconnect path (WARP-2659)", () => {
+  it("closes the bridge session, drops the multiplexer entry and unregisters the runtime tools", async () => {
+    const h = harness({ allowlist: ["atlassian"] });
+    const attached = await h.attach();
+    if (!attached.attached) throw new Error("fixture did not attach");
+    expect(h.registry.list().map((t) => t.name)).toEqual([
+      "atlassian__getJiraIssue",
+      "atlassian__getConfluencePage",
+    ]);
+
+    const result = await detachRemoteServer({
+      mux: h.mux,
+      serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      client: attached.client,
+      registry: h.registry,
+    });
+    expect(result).toEqual({ serverId: "atlassian", detached: true, sessionClosed: true });
+
+    // The bridge was TOLD, not merely forgotten — the session held the token.
+    // Mutation: drop the `client.close()` call → red.
+    expect(
+      h.bridge.calls.some((c) => c.method === "DELETE" && c.path === "/sessions/atlassian"),
+    ).toBe(true);
+    expect(attached.client.isStarted).toBe(false);
+    // Mutation: drop `mux.detachRemote` → red on the next two.
+    expect(h.mux.remoteServerIds()).toEqual([]);
+    expect((await h.mux.listTools()).map((t) => t.name)).toEqual(["list_files"]);
+    // Mutation: drop `unregisterRemoteServer` → red.
+    expect(h.registry.list()).toEqual([]);
+  });
+
+  it("is idempotent — a server that was never attached detaches nothing and dials nothing", async () => {
+    const h = harness({ allowlist: [] });
+    const result = await detachRemoteServer({
+      mux: h.mux,
+      serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      registry: h.registry,
+    });
+    expect(result).toEqual({ serverId: "atlassian", detached: false, sessionClosed: false });
+    expect(h.bridge.calls).toHaveLength(0);
+  });
+
+  it("still detaches in-process when the bridge cannot be reached", async () => {
+    const h = harness({ allowlist: ["atlassian"] });
+    const attached = await h.attach();
+    if (!attached.attached) throw new Error("fixture did not attach");
+    const unreachable = new McpBridgeClient({
+      baseUrl: BRIDGE_URL,
+      serviceToken: BRIDGE_TOKEN,
+      serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      fetchImpl: (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+
+    const result = await detachRemoteServer({
+      mux: h.mux,
+      serverId: ATLASSIAN_REMOTE_SERVER_ID,
+      client: unreachable,
+      registry: h.registry,
+    });
+    // Told, and refused — which is not a reason to keep advertising the tools.
+    expect(result).toEqual({ serverId: "atlassian", detached: true, sessionClosed: true });
+    expect(h.mux.remoteServerIds()).toEqual([]);
+    expect(h.registry.list()).toEqual([]);
   });
 });

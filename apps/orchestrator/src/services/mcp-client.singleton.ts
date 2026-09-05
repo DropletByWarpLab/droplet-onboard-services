@@ -28,6 +28,7 @@ import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.ser
 import {
   ATLASSIAN_REMOTE_SERVER_ID,
   attachAtlassianRemote,
+  detachRemoteServer,
   parseRemoteMcpAllowlist,
   type AttachAtlassianDeps,
   type RemoteAttachResult,
@@ -110,6 +111,15 @@ export const mcpClient = new McpToolMultiplexer(localClient, {
 
 let started = false;
 
+/**
+ * WARP-2659 — the bridge client each successful attach opened, by server id.
+ *
+ * Held so {@link detachRemoteMcp} can CLOSE the session rather than only
+ * forget it: the multiplexer holds the gated port, which has no `close`, and
+ * this module is the only one that constructs the raw client.
+ */
+const attachedClients = new Map<string, McpBridgeClient>();
+
 export async function ensureMcpStarted(): Promise<void> {
   if (started) return;
   await localClient.start();
@@ -148,10 +158,25 @@ export async function ensureRemoteMcpAttached(
       }),
   });
   if (result.attached) {
+    attachedClients.set(result.serverId, result.client);
     logger.info(
       { serverId: result.serverId, tools: result.sync.registered.length },
       "remote_mcp_attached",
     );
   }
   return result;
+}
+
+/**
+ * WARP-2659 — tear down one remote server: the disconnect path.
+ *
+ * Handed to `createIntegrationsRouter` from `app.ts` rather than imported by
+ * the integrations service (see `IntegrationsServiceDeps.remoteMcp` for the
+ * cycle that would close). Idempotent: a server that was never attached — the
+ * shipping default — detaches nothing and dials nothing.
+ */
+export async function detachRemoteMcp(serverId: string): Promise<void> {
+  const client = attachedClients.get(serverId);
+  attachedClients.delete(serverId);
+  await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
 }

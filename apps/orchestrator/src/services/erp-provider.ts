@@ -172,6 +172,34 @@ export function isKnownErpProvider(provider: string): boolean {
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
 
+/**
+ * True for a provider key that can hold an `IntegrationConnection` row.
+ *
+ * WARP-2659 — wider than {@link isKnownErpProvider} by exactly the `mcp`
+ * track, and the two are deliberately separate predicates. `isKnownErpProvider`
+ * answers "can this factory build a connector", which is the right gate for
+ * `connect()`, `test()` and the write toggle: every one of them needs a
+ * connector, and ADR-043 §3 forbids writing through an MCP track in any case.
+ * An MCP track has NO connector — it holds a row and a sealed credential
+ * (`saas-credential.service.ts`), and its session is the bridge's — so a
+ * lifecycle operation that acts on the ROW, `disconnect()`'s purge, has to
+ * admit it or ADR-043 §7's "purged on disconnect" has no implementation.
+ *
+ * An explicit allow-list, like the predicate above and for the same reason:
+ * `!== "catalog"` would admit a fifth track the day it appears, before anyone
+ * has said whether it holds a row.
+ */
+export function isConnectionProvider(provider: string): boolean {
+  const descriptor = providerDescriptor(provider);
+  if (descriptor) {
+    return (
+      descriptor.track === "lan" || descriptor.track === "cloud" || descriptor.track === "mcp"
+    );
+  }
+  // No descriptor: the export-drop family, which `isKnownErpProvider` owns.
+  return isKnownErpProvider(provider);
+}
+
 /** The connection facts both call sites share (a ConnectInput or a ConnRow).
  *  `secretRef` is a POINTER into the encrypted secret store — never cleartext. */
 export interface ConnectorSelector {

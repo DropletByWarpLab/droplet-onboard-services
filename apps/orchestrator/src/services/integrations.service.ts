@@ -56,6 +56,7 @@ import {
 import {
   connectorForProvider,
   encodeApiCredentials,
+  isConnectionProvider,
   isKnownErpProvider,
   parseRouteMap,
   EAGLESOFT_PROVIDER,
@@ -256,6 +257,23 @@ export interface TestResult {
  *  this DB-independent slice). */
 export interface IntegrationsServiceDeps {
   connectorFor?: (provider: string, input: ConnectInput) => Connector;
+  /**
+   * WARP-2659 — the remote MCP lifecycle, for the `mcp` track's disconnect.
+   *
+   * The purge stops the box READING the credential; the bridge session opened
+   * from it at boot (`attachAtlassianRemote`) and the tools that session
+   * advertised are in-process state this service does not own. Injected
+   * rather than imported: `mcp-client.singleton.ts` is the process-wide
+   * client, and `remote-mcp-servers.ts` imports `saas-credential.service.ts`,
+   * which imports THIS module — a direct import would close that cycle.
+   * Absent (every existing test, and any caller with no remote session), the
+   * purge still lands and the per-call gate still refuses egress.
+   */
+  remoteMcp?: {
+    /** Tear down one server: close its bridge session, drop it from the
+     *  multiplexer, unregister its runtime tools. Idempotent. */
+    detach(serverId: string): Promise<void>;
+  };
 }
 
 /** Minimal Prisma surface this service needs (structural — tests pass a stub). */
@@ -343,9 +361,39 @@ function resolveProvider(provider: string | undefined): string {
  * Read through `isKnownErpProvider` (live registry) rather than the
  * import-time `KNOWN_ERP_PROVIDERS` snapshot, so an operator-authored export
  * profile registered at runtime can be disconnected without a restart.
+ *
+ * WARP-2659 — serves the WRITE TOGGLE only now; `disconnect()` reads
+ * {@link requireConnectionProvider}, which is this rule over a wider set.
  */
 function requireKnownProvider(provider: string): string {
   if (!isKnownErpProvider(provider)) {
+    throw ErpError.notFound(`ERP provider "${provider}"`);
+  }
+  return provider;
+}
+
+/**
+ * WARP-2659 — the same rule as {@link requireKnownProvider} (no default, 404
+ * not 400), over the wider set: every provider that can hold a connection ROW,
+ * which is the set `disconnect()` acts on.
+ *
+ * `disconnect()` used `requireKnownProvider`, whose predicate is "can this
+ * factory build a connector" — an explicit `lan | cloud` allow-list since
+ * WARP-2650. An `mcp` track has no connector and was refused with a 404, so a
+ * connected Atlassian row could be created from the dashboard and never
+ * removed from it, while `DisconnectControl` sat on its hub tile and on the
+ * credentials page rendering an action that could not finish. The purge
+ * itself is track-agnostic: the columns it nulls are exactly where
+ * `saas-credential.service.ts` puts an MCP credential (`providerTokensEnc` +
+ * `providerConfig`), and the cursor reset and landed-record purge are no-ops
+ * for a track that syncs nothing.
+ *
+ * The write toggle KEEPS the narrower gate. ADR-043 §3 forbids invoking a
+ * remote tool in a write capacity until WARP-2305 and WARP-2321 land, and
+ * `writeEnabled: true` on an MCP row would be a flag nothing honours.
+ */
+function requireConnectionProvider(provider: string): string {
+  if (!isConnectionProvider(provider)) {
     throw ErpError.notFound(`ERP provider "${provider}"`);
   }
   return provider;
@@ -1029,7 +1077,10 @@ export function createIntegrationsService(
       // must never reach the `if (!row) return null` idempotence branch below:
       // that branch is how an unreachable provider used to look exactly like
       // an already-disconnected one.
-      const scoped = requireKnownProvider(provider);
+      //
+      // WARP-2659 — `requireConnectionProvider`, not `requireKnownProvider`:
+      // the `mcp` track holds a row and a credential this purge must reach.
+      const scoped = requireConnectionProvider(provider);
       const purge = await prisma.$transaction(async (tx) => {
         // Read inside the transaction, not before it. Outside, the row this
         // decision rests on is not covered by the isolation that protects the
@@ -1102,6 +1153,35 @@ export function createIntegrationsService(
         });
         return updated;
       }, SERIALIZABLE_TX);
+      // WARP-2659 — the `mcp` track's other half. The purge above is what
+      // stops the box READING this credential, and the gate
+      // `attachAtlassianRemote` installs re-reads `status === "CONNECTED"` on
+      // every call, so egress stops on the next call regardless of what
+      // happens here. What the purge cannot reach is in-process: the bridge
+      // session opened from this credential at boot, the multiplexer entry
+      // that routes to it, and the runtime tools it advertised into
+      // selection. A disconnected account whose tools stay advertised is a
+      // model choosing tools every one of which is then refused — and a
+      // bridge still holding a token the box just said it removed.
+      //
+      // AFTER the transaction, never inside it: a side effect on process
+      // state is not something a rolled-back transaction could undo. And the
+      // purge is the durable fact — a detach that fails is logged and the
+      // disconnect still reports what the row now says, because a completed
+      // purge must not be reported as a failed disconnect.
+      if (purge) {
+        const descriptor = providerDescriptor(scoped);
+        if (descriptor?.track === "mcp" && deps.remoteMcp) {
+          try {
+            await deps.remoteMcp.detach(descriptor.mcpServerId);
+          } catch (err) {
+            logger.warn(
+              { err, provider: scoped, serverId: descriptor.mcpServerId },
+              "remote MCP detach failed after purge; the per-call gate still refuses egress",
+            );
+          }
+        }
+      }
       // Idempotent — no row meant no write, no reset and no audit. The reply
       // still names the provider the caller ASKED about (WARP-2500): saying
       // "eaglesoft is NOT_CONFIGURED" to someone who asked about Stripe is a

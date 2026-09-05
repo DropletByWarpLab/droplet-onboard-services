@@ -106,7 +106,7 @@ import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { mcpClient } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
@@ -330,7 +330,19 @@ export function createApp(
   // WARP-1137 — Eaglesoft ERP integration control plane + data API. Reads
   // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
-  app.use("/api", createIntegrationsRouter(prisma));
+  // WARP-2659 — an `mcp` track's disconnect also tears down the remote
+  // session this process opened at boot; the service takes that lifecycle as
+  // a dependency (`IntegrationsServiceDeps.remoteMcp`) rather than importing
+  // the singleton. The binding is read LAZILY, inside the arrow, on purpose:
+  // a dozen route suites build this app with a `vi.mock` of the singleton
+  // that stubs `mcpClient` alone, and an eager `detach: detachRemoteMcp`
+  // would read a missing export at mount time in every one of them.
+  app.use(
+    "/api",
+    createIntegrationsRouter(prisma, {
+      remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) },
+    }),
+  );
   // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
   // and validates whatever `credentialFields` a provider declares.
