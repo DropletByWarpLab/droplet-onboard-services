@@ -106,24 +106,43 @@ const ARG_HINT: Record<string, string> = {
   query: "this entity has no free-text search",
 };
 
+/** The arguments that shape a SEARCH. `id` is not one of them: it is the
+ *  argument that turns a search into a node read. */
+const SEARCH_ARGS = ["query", "status", "parent_id", "idle_days"] as const;
+
 /**
  * Refuse an argument the chosen entity cannot honour, or `null` to proceed.
  *
- * `id` is deliberately NOT rejected anywhere: every entity accepts it, and it
- * is the argument that turns a search into a node read.
+ * `id` is never rejected on its own: every entity accepts it. It IS rejected
+ * ALONGSIDE a search argument, because every `id` branch in find.ts reads the
+ * record and honours none of the filters — so `{entity:"deal", id, status:
+ * "OPEN"}` used to return the deal whatever its outcome, and the model
+ * reported it open from a call that never checked (#2005 review, finding 6).
+ * That is the same lie as an unhonoured argument, from the other side, and
+ * it gets the same remedy: refused by name, once, fixed on the next turn.
  */
 export function rejectMisusedArgs(
   entity: FindEntity,
   supplied: Record<string, unknown>,
 ): ToolResult | null {
   const honoured = HONOURED_ARGS[entity];
-  for (const key of ["query", "status", "parent_id", "idle_days"]) {
+  for (const key of SEARCH_ARGS) {
     if (supplied[key] === undefined || supplied[key] === null) continue;
     if (honoured.has(key)) continue;
     return fail(
       "BUSINESS_INVALID_REQUEST",
       `${ARG_HINT[key] ?? `${key} is not accepted here`} (you asked for "${entity}")`,
     );
+  }
+  const id = supplied.id;
+  if (typeof id === "string" && id.trim().length > 0) {
+    const filters = SEARCH_ARGS.filter((k) => supplied[k] !== undefined && supplied[k] !== null);
+    if (filters.length > 0) {
+      return fail(
+        "BUSINESS_INVALID_REQUEST",
+        `id reads one ${entity} and takes no search filter; drop ${filters.join(", ")} to read it, or drop id to search`,
+      );
+    }
   }
   return null;
 }

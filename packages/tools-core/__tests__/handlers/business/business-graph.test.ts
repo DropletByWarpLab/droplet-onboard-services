@@ -119,6 +119,26 @@ describe("business_find — the discriminator", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("refuses a search filter alongside an id instead of dropping it", async () => {
+    // `id` is a node read, and a node read checks no filter. Before this, a
+    // deal read by id with `status: "OPEN"` returned the deal whatever its
+    // outcome, and the model reported it open having never asked (#2005
+    // review, finding 6). MUTATION: delete the id branch in rejectMisusedArgs
+    // -> the GET below fires and the filter is silently gone.
+    const out = await businessFind.handler({ entity: "deal", id: "d1", status: "OPEN" }, ctx);
+    expect(out.ok).toBe(false);
+    expect((out as { error: { code: string } }).error.code).toBe("BUSINESS_INVALID_REQUEST");
+    expect((out as { error: { message: string } }).error.message).toContain("status");
+    expect(get).not.toHaveBeenCalled();
+
+    // The same rule for every entity, not a deal special case: a work item by
+    // id does not take the project filter either.
+    const w = await businessFind.handler({ entity: "work_item", id: "w1", parent_id: "p1" }, ctx);
+    expect(w.ok).toBe(false);
+    expect((w as { error: { message: string } }).error.message).toContain("parent_id");
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("uppercases a lowercase status rather than passing it through", async () => {
     get.mockResolvedValue(res(true, 200, { deals: [], total: 0 }));
     await businessFind.handler({ entity: "deal", status: "open" }, ctx);
