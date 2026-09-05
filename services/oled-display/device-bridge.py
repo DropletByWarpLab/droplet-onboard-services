@@ -1680,6 +1680,237 @@ def _walk_block_children(node):
         yield from _walk_block_children(child)
 
 
+def _collapse_by_device(entries):
+    """WARP-827: ONE entry per backing device.
+
+    A drive can be mounted at more than one path — a friendly /mnt/droplet/data
+    beside the automount /mnt/droplet/data-<uuid>, or "/" bind-mounted at
+    /mnt/droplet — and every path is the same bytes. Listing each shows the
+    disk twice; summing each counts it twice. Keep the friendliest mount (fstab
+    first, then the shortest path, then the name so ties are deterministic) and
+    preserve ejectability if any losing duplicate was removable.
+
+    Shared by drives_snapshot and _os_disk_filesystems so the tie-break is ONE
+    rule: a fix to it cannot land in the drive cards and miss the system disk,
+    or the reverse (code review, WARP-2098).
+    """
+    ordered = sorted(
+        entries,
+        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
+    )
+    by_device = {}
+    for e in ordered:
+        dev = e.get("device") or e.get("mount")
+        if dev in by_device:
+            if e.get("removable"):
+                by_device[dev]["removable"] = True
+            continue
+        by_device[dev] = e
+    return list(by_device.values())
+
+
+def _os_disk_filesystems(mount_meta, os_disk):
+    """WARP-2098 — every mounted filesystem that physically lives on `os_disk`,
+    measured, ONE row per backing device. Feeds system_disk_info; kept separate
+    because this half touches the host (lsblk walks + statvfs) while that half
+    is pure.
+
+    Discovery, not a hardcoded path list: `/data` exists only after
+    droplet-luks-provision.sh has moved the docker data-root there, and an
+    operator-written daemon.json can leave it absent. Asking which mounts sit on
+    the root disk answers correctly on every box shape, including the one where
+    root, /boot and /data are three LVs on one NVMe.
+
+    Deduplicated by BACKING DEVICE through _collapse_by_device — the same
+    tie-break the drive cards use. This is load-bearing, not tidiness: the
+    automounter bind-mounts "/" at /mnt/droplet, so the root filesystem appears
+    in /proc/mounts twice with identical statvfs numbers. Summing both would
+    report double the used bytes — the same phantom-capacity mistake WARP-1960
+    fixed in camera storage.
+
+    A reading belongs to the DEVICE, not to the mount it was taken through:
+    whichever alias statvfs answers on supplies the numbers, and the preferred
+    mount still names the row. So the result does not depend on the order
+    /proc/mounts lists the aliases in, and a failure on one alias cannot
+    discard a good reading already taken through another (code review,
+    WARP-2098).
+
+    `mount_meta` is the /proc/mounts pass the caller already did, keyed by mount
+    point. Mounts whose statvfs fails are dropped rather than reported as zero —
+    an unmeasurable filesystem must not read as an empty one.
+
+    Returns (rows, complete). WARP-2098: dropping a row SILENTLY is the same
+    defect this ticket exists to fix. If /data is unmeasurable while / is fine,
+    the surviving rows still sum to a real, non-null number — a root-only
+    figure that understates a full disk, with nothing marking it partial.
+    `complete` is False when any qualifying device was dropped or the walk
+    aborted, and system_disk_info refuses to publish a total from it.
+    """
+    if not os_disk:
+        return [], True
+    candidates = []  # every qualifying mount, in /proc/mounts order
+    readings = {}  # device -> (total, used, free), from whichever alias measured
+    complete = True
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                dev, mp = parts[0], _unescape_mount(parts[1])
+                # Real block devices only: skips tmpfs/proc/sysfs/overlay, which
+                # are not on any disk and would inflate the total.
+                if not dev.startswith("/dev/") or not os.path.exists(dev):
+                    continue
+                if _whole_disk(dev) != os_disk:
+                    continue
+                candidates.append({"device": dev, "mount": mp})
+                if dev in readings:
+                    continue  # already measured through another alias
+                total, used, free = _bytes_for(mp)
+                if total > 0:
+                    readings[dev] = (total, used, free)
+    except Exception:                                                  # noqa: BLE001
+        # Best-effort, exactly like the drive-enumeration passes above — but a
+        # walk that aborted part-way has an arbitrary prefix of the mounts, so
+        # it is partial by definition.
+        complete = False
+    rows = []
+    for c in _collapse_by_device(candidates):
+        reading = readings.get(c["device"])
+        if reading is None:
+            # Unmeasurable on every alias — not empty. Record the gap so the
+            # caller cannot mistake the survivors for the whole disk.
+            complete = False
+            continue
+        total, used, free = reading
+        fs, _ro = mount_meta.get(c["mount"], ("", True))
+        rows.append({
+            "mount": c["mount"],
+            "fs": fs,
+            "size_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
+        })
+    return sorted(rows, key=lambda r: r["mount"]), complete
+
+
+def system_disk_info(lsblk_tree, os_disk, os_filesystems,
+                     filesystems_complete=True):
+    """WARP-2098 — the appliance's OWN install disk, as its own object.
+
+    WARP-827 removed the OS/boot disk from BOTH lists this bridge emits: from
+    `drives` (any mount whose whole disk is the root disk) and from `disks`
+    (classify_disks below). That is still correct and stays correct — every one
+    of those lists feeds a destructive picker somewhere above (adopt, reclaim,
+    pool-create, reformat), and the system disk must never be an option in any
+    of them.
+
+    What WARP-827 also did was make the disk INVISIBLE. The owner had no answer
+    to "what is the Droplet's own disk, and how full is it?" — and on this
+    appliance that is the disk that fills first. Nextcloud's data directory is a
+    plain named volume under the docker data-root, which droplet-luks-provision
+    points at /data: an LV on the OS disk (docs/security/at-rest-encryption.md).
+    The storage pool reaches Nextcloud only as external storage. So uploads land
+    on the install disk, and the install disk was the one thing the owner could
+    not see.
+
+    This reports it in a key of its OWN, never as a member of any list.
+
+    `os_filesystems` is every mounted filesystem the CALLER has already resolved
+    to this disk and measured — root, /boot, /boot/efi and (on a provisioned
+    box) /data. Measuring only "/" would be the wrong answer: on an LVM install
+    root is a small LV and /data holds everything, so a root-only figure reports
+    a nearly-empty disk while the box is out of room. Host lookups stay in the
+    caller so this stays pure and fixture-testable.
+
+    `used_bytes` sums those filesystems — legitimate here, unlike the pooled sum
+    ADR-019 forbids, because they are disjoint extents of ONE physical device.
+    `free_bytes` is measured against the whole disk, so unallocated LVM extents
+    correctly count as free.
+
+    `filesystems_complete` is False when the caller could not measure every
+    filesystem on the disk. A sum over the survivors is then an UNDERCOUNT that
+    looks exactly like a real reading, so used/free are published as null
+    instead — the same contract as the nothing-measurable case below, and the
+    one the dashboard already honours (`measured = used_bytes !== null`, meter
+    hidden, capacity still shown). Reporting a confident root-only figure while
+    /data is unreadable would reproduce the WARP-2098 defect itself.
+
+    Returns None (the key is then omitted entirely) when the disk cannot be
+    identified — the same fail-open contract as the WARP-827 filters.
+    """
+    if not os_disk:
+        return None
+    # `os_disk` must name a WHOLE DISK in the tree. _whole_disk() falls back to
+    # basename(device) when lsblk is unavailable, so _os_disk() can hand back a
+    # PARTITION name ("nvme0n1p2"); reporting that as the system disk would
+    # quote a partition's geometry as the disk's. Omit instead.
+    node = None
+    for dev in (lsblk_tree or {}).get("blockdevices") or []:
+        if (dev.get("type") or "") == "disk" and (dev.get("name") or "") == os_disk:
+            node = dev
+            break
+    if node is None:
+        return None
+    try:
+        disk_size = int(node.get("size") or 0)
+    except (TypeError, ValueError):
+        disk_size = 0
+
+    filesystems = []
+    for fs in os_filesystems or []:
+        mount = fs.get("mount") or ""
+        filesystems.append({
+            "mount": mount,
+            # Plain-language grouping for the UI, decided here so the dashboard
+            # never has to pattern-match host paths.
+            "role": "root" if mount == "/" else (
+                "boot" if mount == "/boot" or mount.startswith("/boot/") else "data"),
+            "fs": fs.get("fs") or "",
+            "size_bytes": fs.get("size_bytes") or 0,
+            "used_bytes": fs.get("used_bytes") or 0,
+            "free_bytes": fs.get("free_bytes") or 0,
+        })
+
+    # A total is publishable only when EVERY filesystem was measured AND the
+    # whole-disk size is known. Missing either one yields a pair the UI cannot
+    # render honestly: a partial sum understates a full disk, and a real `used`
+    # against an unknown size renders as "120 GB of 0 B".
+    if filesystems and filesystems_complete and disk_size:
+        used = sum(f["used_bytes"] for f in filesystems)
+        free = max(0, disk_size - used)
+        measurement = "complete"
+    elif filesystems:
+        # Something real was measured, but not enough to total. Null, never a
+        # number — the per-filesystem rows are still returned below so the owner
+        # sees what WAS readable.
+        used = None
+        free = None
+        measurement = "partial"
+    else:
+        # The disk is real but nothing on it could be measured (statvfs denied,
+        # no visible mounts). Report null, NEVER 0 — a zero would render as a
+        # pristine empty disk, which is a claim and a false one.
+        used = None
+        free = None
+        measurement = "unavailable"
+
+    return {
+        "name": os_disk,
+        "size_bytes": disk_size,
+        "used_bytes": used,
+        "free_bytes": free,
+        # Explicit state, not inferred from the nulls: lets a consumer say WHY
+        # there is no meter ("some filesystems unreadable" vs "nothing was").
+        "measurement": measurement,
+        "model": (node.get("model") or "").strip(),
+        "serial": (node.get("serial") or "").strip(),
+        "bus": (node.get("tran") or "").lower(),
+        "filesystems": filesystems,
+    }
+
+
 def classify_disks(lsblk_tree, os_disk):
     """Classify the lsblk -J tree into the WARP-936 `disks` list.
 
@@ -1908,25 +2139,14 @@ def drives_snapshot(invalidate=False):
     except Exception:
         pass
 
-    # WARP-827: one card per PHYSICAL drive. A drive can be mounted at more than
-    # one path (e.g. a friendly /mnt/droplet/data + the automount
-    # /mnt/droplet/data-<uuid>), which otherwise shows the same disk twice.
-    # Collapse by backing device, keeping the friendliest mount (fstab first,
-    # then the shortest path), and preserve ejectability if any duplicate was
-    # removable.
-    ordered = sorted(
-        by_mount.values(),
-        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
-    )
-    by_device = {}
-    for e in ordered:
-        dev = e.get("device") or e.get("mount")
-        if dev in by_device:
-            if e.get("removable"):
-                by_device[dev]["removable"] = True
-            continue
-        by_device[dev] = e
-    mounts = list(by_device.values())
+    # WARP-827: one card per PHYSICAL drive. The tie-break lives in
+    # _collapse_by_device, which the system-disk discovery below shares.
+    mounts = _collapse_by_device(by_mount.values())
+
+    # One lsblk walk feeds both the inventory and the system-disk lookup —
+    # the classifier used to call this inline, which would now run lsblk twice
+    # per snapshot.
+    lsblk_tree = _lsblk_disks_json()
 
     snap = {
         "drives": mounts,
@@ -1934,9 +2154,20 @@ def drives_snapshot(invalidate=False):
         "os_disk": os_disk,
         # WARP-936: whole-disk inventory with explicit states. Degrades to []
         # (never a missing key, never an error) on a host without lsblk.
-        "disks": classify_disks(_lsblk_disks_json(), os_disk),
+        "disks": classify_disks(lsblk_tree, os_disk),
         "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+    # WARP-2098: the install disk, in a key of its own. ABSENT (never null,
+    # never a zeroed object) when it can't be identified, so a consumer can tell
+    # "this bridge has nothing to say about the system disk" apart from "the
+    # system disk is empty". Added AFTER the two lists above and never merged
+    # into either — see system_disk_info.
+    os_filesystems, os_fs_complete = _os_disk_filesystems(mount_meta, os_disk)
+    system_disk = system_disk_info(
+        lsblk_tree, os_disk, os_filesystems, os_fs_complete)
+    if system_disk is not None:
+        snap["system_disk"] = system_disk
     _drives_cache["snap"] = snap
     _drives_cache["at"] = now
     return snap

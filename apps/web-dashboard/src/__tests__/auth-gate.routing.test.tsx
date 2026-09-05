@@ -3,8 +3,11 @@
  * the legacy boolean `setupRequired`.
  *
  * Behavioural test (renders AuthGate with a mocked `useAuth` + mocked
- * next/navigation) — deliberately NOT a readFileSync source-scrape, which
- * is both brittle and broken on Windows (import.meta.url → `C:\C:\...`).
+ * next/navigation) rather than a readFileSync source-scrape, which pins the
+ * shape of the code instead of what it does. The Windows half of the old
+ * reason was wrong (WARP-2654): `import.meta.url` does not yield `C:\C:\...`
+ * — `new URL(import.meta.url).pathname` does, and this package anchors paths
+ * on `__dirname` anyway. Brittleness is the reason that survives.
  *
  * Contract (docs/ONBOARDING_STATE_MACHINE.md):
  *   appliance "unclaimed"          → wizard (/setup)

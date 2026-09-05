@@ -1,0 +1,29 @@
+{
+  // WARP-2617 — `tsconfig.json` lists `__tests__` in `exclude` (and scopes
+  // `include` to `src/**/*` anyway), so none of this workspace's 9 test files
+  // were ever seen by `tsc`, and `vitest` cannot cover for it: esbuild strips
+  // types without checking them. Same WARP-329 hole `packages/tools-core` had,
+  // closed the same way (PR #1943 / WARP-2515) — and the same one
+  // `services/matter-controller` had, which is the workspace WARP-2617 set out
+  // to fix. This one landed on `stage` (WARP-2398) after that branch was cut,
+  // and the WARP-2617 self-test caught it at merge time, which is the point of
+  // that gate.
+  //
+  // Picked up by `ship-check.sh tsc-full`'s second pass, which is opt-in by
+  // this file's existence for workspaces in that check's `ws_list`, and run in
+  // CI by the `typecheck:tests` step on the `mcp-bridge` job.
+  //
+  // Extends the workspace config so tests are checked under the SAME flags the
+  // workspace actually builds with, rather than a looser set that would hide
+  // the errors this exists to catch. Overrides only `noEmit` (a check, not a
+  // build — `tsconfig.json` still owns the emit into `dist/`) and `rootDir`
+  // (widened from `./src` to `.` so `__tests__/` is not reported as TS6059
+  // "not under rootDir").
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "__tests__/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

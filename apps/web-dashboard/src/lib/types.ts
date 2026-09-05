@@ -1497,11 +1497,29 @@ export interface ShareRecipient {
 
 // --- Storage types ---
 
+/** The four-scalar storage shape (GET /api/storage). WARP-2098: the top-level
+ *  quadruple is now the box's DATA drives — the OS/boot disk excluded — and the
+ *  same shape appears again under `cloud` for the Nextcloud account quota that
+ *  the top level used to carry. */
 export interface StorageStats {
   used: number;       // bytes
   total: number;      // bytes
   available: number;  // bytes
   percentage: number; // 0-100
+}
+
+/** GET /api/storage. The headline quadruple describes the data drives; the
+ *  install disk and the Nextcloud quota are reported alongside it rather than
+ *  mixed into it. */
+export interface StorageOverview extends StorageStats {
+  /** Provenance for the quadruple above; null when the device-bridge said
+   *  nothing (unreachable, or no data drives). */
+  totals: DataStorageTotals | null;
+  /** The box's own install disk. Absent when the bridge doesn't report it. */
+  system_disk?: SystemDiskInfo;
+  /** The signed-in user's Nextcloud account quota — a cloud-account figure,
+   *  NOT a description of the box's disks. null when it can't be read. */
+  cloud: StorageStats | null;
 }
 
 export interface DriveInfo {
@@ -1585,12 +1603,84 @@ export interface DiskInfo {
   md?: string;
 }
 
+/** WARP-2098: the appliance's OWN system/install disk — the disk the Droplet
+ *  boots from, runs its software on, and (because the docker data-root lives
+ *  there) stores uploaded files on.
+ *
+ *  Deliberately NOT a `DriveInfo` and NOT a member of `drives`/`disks`. Those
+ *  arrays feed the rename/eject/browse cards, the setup wizard's poolable and
+ *  reclaimable lists, and the Settings reformat picker; the system disk must
+ *  never appear in any of them (WARP-827 keeps it out, and that stays). A
+ *  distinct type is the guardrail: nothing that iterates drives can pick this
+ *  up by accident, and passing it where a DriveInfo is expected won't compile. */
+export interface SystemDiskInfo {
+  /** Whole-disk kernel name, e.g. "nvme0n1". */
+  name: string;
+  /** The PHYSICAL disk. `used_bytes` sums `filesystems`, so unallocated LVM
+   *  extents count as free rather than disappearing. */
+  size_bytes: number;
+  /** null whenever the bridge could not publish an honest total — see
+   *  `measurement` for which case. Render the capacity with no meter; 0 would
+   *  claim an empty disk. */
+  used_bytes: number | null;
+  free_bytes: number | null;
+  /** Why the pair above is or is not a number — the bridge's explicit state,
+   *  never re-derived from the nulls (a "partial" and an "unavailable" disk
+   *  both carry null, and the owner should be told which).
+   *    complete    — every filesystem measured; the pair is real.
+   *    partial     — some measured (listed in `filesystems`), not all; a
+   *                  total would undercount, so the pair is null.
+   *    unavailable — nothing measurable; the pair is null and `filesystems`
+   *                  is empty. */
+  measurement: "complete" | "partial" | "unavailable";
+  model: string;
+  serial: string;
+  bus: string;
+  /** Every mounted filesystem on the disk, one per backing device. `role` is
+   *  assigned server-side so no surface pattern-matches host paths. */
+  filesystems: SystemDiskFilesystem[];
+}
+
+export interface SystemDiskFilesystem {
+  mount: string;
+  role: "root" | "boot" | "data";
+  fs: string;
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+}
+
+/** WARP-2098: the box's real data-storage figure — summed over the SAME
+ *  post-filter `drives` array the response carries, so the OS disk is excluded
+ *  by construction and a pool contributes its one mounted filesystem rather
+ *  than its raw members.
+ *
+ *  Never label this pool capacity. ADR-019 deleted a client-side "Total pooled
+ *  storage" byte-sum precisely because it described no disk that existed, and
+ *  drives-panel.pools.test.tsx still guards the phrase. */
+export interface DataStorageTotals {
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  drive_count: number;
+  source: "data_drives";
+}
+
 export interface DrivesResponse {
   drives: DriveInfo[];
   count: number;
+  /** WARP-2098: totals over the returned data drives. `null` means "there is
+   *  nothing to total" (no data drives, or the bridge is unreachable) — render
+   *  the empty state, never a 0 B meter. ABSENT means an older orchestrator
+   *  that predates the field, which callers treat the same way. */
+  totals?: DataStorageTotals | null;
   /** WARP-936: whole-disk inventory. Absent on an older orchestrator/bridge —
    *  callers treat that as an empty list. */
   disks?: DiskInfo[];
+  /** WARP-2098: the box's own install disk. Absent on an older bridge, or when
+   *  the bridge could not identify the disk — the UI then omits the System
+   *  drive card entirely rather than rendering an empty one. */
+  system_disk?: SystemDiskInfo;
   snapshot_at?: string;
   error?: string;
   reason?: string;
@@ -2646,7 +2736,48 @@ export interface ToolCatalogResponse {
  */
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 
-export interface PendingComposerPayload {
+/**
+ * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
+ * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
+ * contract and change together.
+ *
+ * Declared HERE rather than in api.ts because the dependency runs api.ts ->
+ * types.ts, and the hand-off payload below needs the business half of it.
+ */
+export type ContextPinKind =
+  | "folder"
+  | "file"
+  | "email_thread"
+  | "camera"
+  | "camera_window"
+  | "customer"
+  | "deal"
+  | "project"
+  | "work_item";
+
+/** The kinds whose `ref` is a RECORD ID rather than a path or a device name.
+ *  These are the ones the orchestrator resolves to a display name. */
+export type BusinessContextPinKind = "customer" | "deal" | "project" | "work_item";
+
+/**
+ * WARP-2582 — how the orchestrator reports a business pin's target on GET
+ * /api/llm/:sessionId/pins. An EXPLICIT enum, so a client never has to infer
+ * "deleted" from a null label.
+ *
+ * `unavailable` means the caller may not read this kind at all (the module is
+ * off, or their AccessRole does not grant the domain). It is shown in the
+ * Context panel only so the pin can be removed; it is never rendered into the
+ * system prompt.
+ */
+export type ContextPinTargetState = "active" | "archived" | "missing" | "unavailable";
+
+export interface ContextPinTarget {
+  state: ContextPinTargetState;
+  label: string | null;
+  sublabel: string | null;
+}
+
+export interface PendingComposerToolPayload {
   kind: "tool";
   /** Registry tool name, e.g. `block_network_device`. Identity for the chip. */
   toolName: string;
@@ -2658,6 +2789,32 @@ export interface PendingComposerPayload {
   /** Plain-language starter line dropped into the composer for the user to edit. */
   seedText: string;
 }
+
+/**
+ * WARP-2582 — the record hand-off from /customers, /projects and the CRM
+ * record drawer. The second seed source WARP-829's `kind` discriminant was
+ * built to allow.
+ *
+ * It carries BOTH halves for one reason: context pins are per-session and a
+ * session id does not exist until the first turn mints one. So `seedText`
+ * names the record on turn 1, and `pin` is applied once the id appears and
+ * covers every turn after. Neither half auto-sends.
+ *
+ * `pin` is `null` for a LIST-scoped action ("Ask AI about your customers") —
+ * a pin needs a `ref` and a list has none. Explicit null rather than an
+ * absent field, so "nothing to pin" is a stated case and not an oversight.
+ */
+export interface PendingComposerPinPayload {
+  kind: "pin";
+  /** Display name — the chip label. Never sent as `ref`. */
+  label: string;
+  pin: { kind: BusinessContextPinKind; ref: string } | null;
+  seedText: string;
+}
+
+export type PendingComposerPayload =
+  | PendingComposerToolPayload
+  | PendingComposerPinPayload;
 
 /* ─────────────────────── Client-app downloads ─────────────────────── */
 

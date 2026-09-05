@@ -25,6 +25,7 @@ import { canWrite } from "@/components/projects/types";
 import { CrmTabs, type CrmTab } from "@/components/crm/CrmTabs";
 import { CrmSurface } from "@/components/crm/CrmSurface";
 import { CrmDisabled } from "@/components/crm/CrmDisabled";
+import { stagePromptHandoff } from "@/lib/pin-handoff";
 // The CRM renders inside the PM design scope (`pm-scope` / `pm-page` and the
 // pill tablist). The stylesheet is imported here rather than duplicated —
 // splitting it would let the two surfaces drift apart visually, which is the
@@ -62,7 +63,19 @@ function CustomersWorkspace(): JSX.Element {
         // The create actions live beside the content they create, where the
         // stage or column that decides where a record lands is visible. This
         // slot is for the one action that has no such context.
-        <Link className="btn" href="/chat">
+        // WARP-2582 — this action is LIST-scoped: there is no record here, so
+        // there is no `ref` and nothing to pin. Seeding the composer is the
+        // honest whole of what it can do, and it is strictly more than the
+        // bare href it replaces, which handed the assistant nothing at all.
+        // The per-record PIN lives on the record drawer (components/crm/
+        // modals.tsx), where an id exists.
+        <Link
+          className="btn"
+          href="/chat"
+          onClick={() =>
+            stagePromptHandoff("Customers", "About my customers: ")
+          }
+        >
           <PmIcon name="msg" size={14} /> Ask AI about your customers
         </Link>
       }

@@ -72,6 +72,10 @@ function wireApi({
   users = null as Array<{ id: string; username: string; displayName: string }> | null,
 } = {}) {
   authFetchMock.mockImplementation(async (url: string) => {
+    // WARP-2180 — the page now hosts the Background runs panel, which reads
+    // /api/agent-runs on mount. Answer it empty so it neither shifts the
+    // call count below nor renders anything the assertions could trip on.
+    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
     if (url.includes("/api/auth/users")) {
       if (users) return okJson({ users });
       throw new Error("users directory unavailable");
@@ -208,6 +212,10 @@ describe("/admin/audit pagination + export", () => {
   it("appends the next page via the cursor on Load more", async () => {
     let call = 0;
     authFetchMock.mockImplementation(async (url: string) => {
+    // WARP-2180 — the page now hosts the Background runs panel, which reads
+    // /api/agent-runs on mount. Answer it empty so it neither shifts the
+    // call count below nor renders anything the assertions could trip on.
+    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -273,6 +281,10 @@ describe("/admin/audit pagination + export", () => {
     // neither append nor clobber the fresh nextCursor.
     let resolveStale: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
+    // WARP-2180 — the page now hosts the Background runs panel, which reads
+    // /api/agent-runs on mount. Answer it empty so it neither shifts the
+    // call count below nor renders anything the assertions could trip on.
+    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -318,6 +330,10 @@ describe("/admin/audit pagination + export", () => {
     // `loading` is true (and the button is disabled).
     let resolveFiltered: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
+    // WARP-2180 — the page now hosts the Background runs panel, which reads
+    // /api/agent-runs on mount. Answer it empty so it neither shifts the
+    // call count below nor renders anything the assertions could trip on.
+    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -406,6 +422,10 @@ describe("/admin/audit actor attribution (WARP-1009)", () => {
   it("downloads the sealed NDJSON bundle via POST /api/activity/export with the active filters", async () => {
     const bundleBlob = new Blob(['{"manifest":true}\n'], { type: "application/x-ndjson" });
     authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    // WARP-2180 — the page now hosts the Background runs panel, which reads
+    // /api/agent-runs on mount. Answer it empty so it neither shifts the
+    // call count below nor renders anything the assertions could trip on.
+    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });

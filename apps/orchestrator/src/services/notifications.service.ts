@@ -16,13 +16,23 @@
  * service — for now the in-app toast is the only delivery channel.)
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
 import { publish } from "./mqtt.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("notifications");
 
-export type NotificationKind = "reminder" | "event" | "system" | "ai";
+/** WARP-2587 — DERIVED from the Prisma enum, not restated. `kind` used to be a
+ *  free String column whose vocabulary lived in a comment; now the column, this
+ *  type and the route's zod enum all trace to one declaration in
+ *  schema.prisma. A new label added there is a compile error at every site
+ *  that has to handle it. */
+export type NotificationKind = $Enums.NotificationKind;
+
+/** A Prisma client OR an interactive-transaction handle. `recordNotification`
+ *  takes this so a caller can commit the log row in the SAME transaction as
+ *  whatever claim made it necessary (WARP-2587). */
+type NotificationDb = PrismaClient | Prisma.TransactionClient;
 
 export interface DispatchInput {
   userId: string;
@@ -51,13 +61,19 @@ function safePublish(topic: string, payload: Record<string, unknown>): boolean {
   }
 }
 
-export async function sendNotification(
-  prisma: PrismaClient,
-  input: DispatchInput,
-): Promise<DispatchResult> {
+/**
+ * WARP-2587 — the TRANSPORT half of a dispatch, on its own.
+ *
+ * Extracted so a caller that must write the log row transactionally can still
+ * publish the toast afterwards. Never throws: the toast is best-effort by
+ * design and the log row is the durable record.
+ */
+export function publishNotificationToast(input: DispatchInput): {
+  channels: string[];
+  errors: string[];
+} {
   const channels: string[] = [];
   const errors: string[] = [];
-
   // Channel 1: toast. Always attempted because the ws-bridge is the cheapest
   // delivery path and the user always has a dashboard tab nearby.
   const toastOk = safePublish(`droplet/notifications/${input.userId}`, {
@@ -68,6 +84,43 @@ export async function sendNotification(
   });
   if (toastOk) channels.push("toast");
   else errors.push("toast: mqtt_unavailable");
+  return { channels, errors };
+}
+
+/**
+ * WARP-2587 — the DURABLE half, writable inside somebody else's transaction.
+ *
+ * The row lands "queued": no channels, no deliveredAt. That is honest — at the
+ * time it is written nothing has been transported yet, and the caller stamps
+ * the outcome after it commits and publishes. It is also what makes the
+ * activity-notify sweep's exactly-once claim possible: the claim and the log
+ * row commit together, so a row marked `sent` can never be a notification the
+ * user is unable to find.
+ */
+export async function recordNotification(
+  db: NotificationDb,
+  input: DispatchInput,
+): Promise<{ id: string }> {
+  const row = await db.notificationLog.create({
+    data: {
+      userId: input.userId,
+      kind: input.kind,
+      title: input.title,
+      body: input.body ?? null,
+      channels: "",
+      deliveredAt: null,
+      error: null,
+    },
+    select: { id: true },
+  });
+  return row;
+}
+
+export async function sendNotification(
+  prisma: PrismaClient,
+  input: DispatchInput,
+): Promise<DispatchResult> {
+  const { channels, errors } = publishNotificationToast(input);
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({

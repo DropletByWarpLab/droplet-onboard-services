@@ -108,6 +108,36 @@ const CATALOG_WARP_2214 = [
     availability: "available",
     setupGuideHref: "/help/integrations/shopify",
   },
+  {
+    // WARP-2708 — wave 1, at catalog.order 8.
+    id: "brevo",
+    name: "Brevo",
+    category: "Marketing",
+    description:
+      "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/brevo",
+  },
+  {
+    // WARP-2709 — wave 1, at catalog.order 9.
+    id: "klaviyo",
+    name: "Klaviyo",
+    category: "Marketing",
+    description:
+      "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/klaviyo",
+  },
+  {
+    // WARP-2710 — wave 1, at catalog.order 10.
+    id: "pipedrive",
+    name: "Pipedrive",
+    category: "CRM",
+    description:
+      "People, organisations, deals, activities and products — read from your Pipedrive.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/pipedrive",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -131,11 +161,14 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     // descriptor introducing an unlisted card id goes red here instead of rendering
     // a card `useIntegrations` cannot key status onto.
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual([
+      "brevo",
       "dentrix",
       "eaglesoft",
       "hubspot",
+      "klaviyo",
       "mailchimp",
       "opendental",
+      "pipedrive",
       "quickbooks",
       "shopify",
       "stripe",
