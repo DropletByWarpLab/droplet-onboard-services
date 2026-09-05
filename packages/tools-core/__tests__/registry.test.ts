@@ -181,6 +181,11 @@ const EXPECTED_TOOL_NAMES = [
   "create_pdf_report",
   "create_word_document",
   "create_spreadsheet",
+  // WARP-2664 — file cleanup: read-only report, then organize (write +
+  // confirm) and bulk delete-to-trash (write + confirm).
+  "analyze_file_cleanup",
+  "organize_files",
+  "delete_files",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
   // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
