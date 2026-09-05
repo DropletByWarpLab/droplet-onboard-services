@@ -258,11 +258,13 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // through), and not a pass-through — the roster below is unchanged, which
     // is the distinction this count exists to keep visible.
     //
-    // RECONCILIATION NOTE: PR #1985 (WARP-2664) takes this same line to 42 for
-    // `organize_files` + `delete_files`. Both changes are independent and both
-    // are correct; whichever lands second must resolve the conflict to 43, not
-    // pick a side.
-    expect(confirming).toHaveLength(41);
+    // 43 as of WARP-2664: `organize_files` and `delete_files`. Same shape —
+    // flag-gated by the interceptor, no `confirmed` boolean in either schema,
+    // neither a pass-through. This is the reconciliation origin/stage's note
+    // asked for: WARP-2669's `delete_file` (40→41) and WARP-2664's two
+    // (41→43) are independent and both correct, so the count is the UNION of
+    // both, not either side's number.
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

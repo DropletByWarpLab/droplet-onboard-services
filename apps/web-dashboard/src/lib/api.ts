@@ -55,7 +55,7 @@ import type {
   ModelsCatalogPayload,
   NetworkCommandResult,
   NetworkOverview,
-  StorageStats,
+  StorageOverview,
   DrivesResponse,
   PoolsResponse,
   PoolInfo,
@@ -124,6 +124,8 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
   AppDownloadCatalog,
+  ContextPinKind,
+  ContextPinTarget,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -877,7 +879,10 @@ export async function transcribeNowBrainItem(
 
 // --- Storage ---
 
-export async function fetchStorage(): Promise<StorageStats> {
+/** GET /api/storage. WARP-2098: the headline quadruple is the box's DATA
+ *  drives (OS/boot disk excluded), with the install disk under `system` and the
+ *  Nextcloud account quota under `cloud`. */
+export async function fetchStorage(): Promise<StorageOverview> {
   const res = await authFetch(`${BASE}/api/storage`);
   if (!res.ok) throw new Error(`Failed to fetch storage: ${res.status}`);
   return res.json();
@@ -4503,10 +4508,24 @@ export async function setConversationProject(
 export interface ContextPin {
   id: string;
   sessionId: string;
-  kind: "folder" | "file" | "email_thread" | "camera" | "camera_window";
+  /** Canonical union lives in ./types — it is shared with the composer
+   *  hand-off payload, and two copies of it would drift. */
+  kind: ContextPinKind;
   ref: string;
   meta?: Record<string, unknown> | null;
   addedAt: string;
+  /**
+   * WARP-2582 — the resolved target for a BUSINESS pin (customer / deal /
+   * project / work_item). `null` for the five path-shaped kinds: their `ref`
+   * is self-describing and there is no record to look up. That is a property
+   * of the kind, not a state inferred from absence — the four target states
+   * are their own explicit enum.
+   *
+   * Optional on the wire so a dashboard talking to a pre-WARP-2582 box (or a
+   * cached response) degrades to showing the `ref`, which is what it did
+   * before this field existed.
+   */
+  resolved?: ContextPinTarget | null;
 }
 
 export async function listContextPins(

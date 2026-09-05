@@ -53,9 +53,12 @@ import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
+  type BusinessContextPinKind,
   type PendingComposerPayload,
+  type PendingComposerToolPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
+import { createContextPin } from "@/lib/api";
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
@@ -312,7 +315,17 @@ export default function ChatPage() {
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
   // chat" hand-off (null when the chat wasn't opened from a tool).
-  const [activeTool, setActiveTool] = useState<PendingComposerPayload | null>(null);
+  // WARP-2582 — narrowed to the TOOL variant now that the hand-off payload is a
+  // union. The chip below reads `requiresWrite` / `requiresConfirmation`, which
+  // only the tool variant carries; typing this as the union would be a compile
+  // error rather than a silent undefined.
+  const [activeTool, setActiveTool] = useState<PendingComposerToolPayload | null>(null);
+  // WARP-2582 — a record hand-off's pin, held until the first turn mints a
+  // conversation id. Pins are per-session and the id does not exist yet on the
+  // turn the user arrives; see lib/pin-handoff.ts for why that is inherent.
+  const [pendingPin, setPendingPin] = useState<
+    { kind: BusinessContextPinKind; ref: string } | null
+  >(null);
   // WARP-295: sticky-bottom auto-scroll + Jump-to-latest pill. The hook
   // owns the detach detection so the page just wires onScroll +
   // stickyScrollToBottom through.
@@ -396,7 +409,8 @@ export default function ChatPage() {
     } catch {
       payload = null;
     }
-    if (!payload || payload.kind !== "tool") return;
+    if (!payload) return;
+    if (payload.kind !== "tool" && payload.kind !== "pin") return;
     if (urlConversationId || messages.length > 0) return;
     // One-shot: clear before seeding so it can't resurface on a later mount.
     try {
@@ -404,12 +418,36 @@ export default function ChatPage() {
     } catch {
       /* ignore */
     }
-    setActiveTool(payload);
+    if (payload.kind === "tool") {
+      setActiveTool(payload);
+    } else if (payload.pin) {
+      // WARP-2582 — held, not applied. There is no session id on this render:
+      // the first turn mints it, so the pin lands in the effect below and the
+      // seed line carries the record's identity for turn 1.
+      setPendingPin(payload.pin);
+    }
     chatInputRef.current?.seed(payload.seedText);
     // Mount-only: the fresh-chat guard reads the initial url/messages, matching
     // the pendingPrompt effect's one-shot semantics.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // WARP-2582 — apply a staged record pin once the first turn has minted a
+  // conversation. Pins are per-session, so this is the earliest moment one can
+  // exist; from the SECOND turn on, the orchestrator's per-turn injection
+  // scopes the thread without the user restating the record.
+  //
+  // Cleared BEFORE the request so a re-render cannot fire it twice, and
+  // failure is silent by design: the seed line already named the record, so a
+  // pin that did not stick costs continuity, not the answer.
+  useEffect(() => {
+    if (!pendingPin || !conversationId) return;
+    const staged = pendingPin;
+    setPendingPin(null);
+    void createContextPin(conversationId, staged).catch(() => {
+      /* non-fatal — the seed line already carried the identity */
+    });
+  }, [pendingPin, conversationId]);
 
   // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
   // attached (within ~80px of the bottom). When they've scrolled up to

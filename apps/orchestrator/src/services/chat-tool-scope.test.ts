@@ -216,3 +216,116 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     }
   });
 });
+
+/**
+ * WARP-2580 — the third failure mode of the two-layer design, and the one
+ * neither existing assertion could see.
+ *
+ * The two above ask whether a tool is REACHABLE. This one asks whether what a
+ * reachable tool SAYS is true for the caller reading it. A tool schema is
+ * prompt text: when `pm_create_project` told the model its workspace came
+ * "from pm_list_workspaces", that was an instruction to call a tool the same
+ * turn could never call — a dead end the model can only discover by trying,
+ * and then only if it gets a legible refusal.
+ *
+ * Found by sweeping, not by report, and it was not one tool:
+ *
+ *   read_document_text -> list_recent_files    (a CORE tool — every turn)
+ *   pm_create_project  -> pm_list_workspaces
+ *   pm_create_project  -> pm_create_work_item
+ *   get_update_status  -> apply_update         (reviewed, kept — see below)
+ *
+ * The rule: a tool in the chat pool may not NAME a tool the chat pool omits,
+ * unless the pair is on REVIEWED_CROSS_REFERENCES with a reason. The inverse
+ * is fine and deliberately not asserted — an excluded tool describing a
+ * reachable one (`crm_move_deal_stage` -> `crm_pipeline_summary`) is a
+ * dashboard/MCP caller being told something true.
+ *
+ * Mutation: delete the `get_update_status` entry below -> red; re-add
+ * `list_recent_files` to read_document_text's path description -> red.
+ */
+const REVIEWED_CROSS_REFERENCES: ReadonlyArray<{
+  tool: string;
+  names: string;
+  why: string;
+}> = [
+  {
+    tool: "get_update_status",
+    names: "apply_update",
+    // DESCRIPTIVE, not directive: "the companion to apply_update" tells the
+    // reader what this tool is FOR. It does not instruct a call, and it is
+    // simply true for the dashboard and MCP callers that have both. Rewording
+    // it to hide a sibling from chat would make the description worse for the
+    // callers who can act on it, to save a chat turn ~14 chars.
+    why: "descriptive pairing, true for the callers that have both; not an instruction to call",
+  },
+];
+
+/** Every description string a caller actually reads: the tool's own, plus
+ *  every `description` nested anywhere in its JSON Schema. */
+function describedText(tool: { description?: string; inputSchema?: unknown }): string {
+  const parts: string[] = [tool.description ?? ""];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const rec = node as Record<string, unknown>;
+    if (typeof rec.description === "string") parts.push(rec.description);
+    for (const v of Object.values(rec)) walk(v);
+  };
+  walk(tool.inputSchema);
+  return parts.join("\n");
+}
+
+describe("WARP-2580 — a chat tool must not instruct the model to call a tool chat cannot reach", () => {
+  it("no chat-scope tool names an excluded tool, outside the reviewed list", () => {
+    const pool = chatPool();
+    const excluded = [...TOOLS.keys()].filter((n) => EXCLUDED_FROM_CHAT_TOOLS.has(n));
+    const reviewed = new Set(REVIEWED_CROSS_REFERENCES.map((r) => `${r.tool}->${r.names}`));
+
+    const dangling: string[] = [];
+    for (const name of pool) {
+      const text = describedText(TOOLS.get(name)!);
+      for (const ex of excluded) {
+        // Word-boundary, not substring: `list_files` must not match inside
+        // `list_file_versions`. Tool names are [a-z_], so \b on both ends is
+        // the whole guard — and it is the same trap DOMAIN_RULES documents
+        // ("won" inside "wondering").
+        if (!new RegExp(`\\b${ex}\\b`).test(text)) continue;
+        if (reviewed.has(`${name}->${ex}`)) continue;
+        dangling.push(`${name} -> ${ex}`);
+      }
+    }
+
+    expect(
+      dangling.sort(),
+      "these chat-scope tools name a tool the chat pool omits, so the model is " +
+        "told to call something this turn cannot reach. Reword the description " +
+        "(preferred — it is usually shorter), or add the pair to " +
+        "REVIEWED_CROSS_REFERENCES with a reason. Do NOT widen the exclusion " +
+        "list to satisfy this, and do NOT delete the reference without checking " +
+        "whether the SENTENCE still makes sense to an MCP caller.",
+    ).toEqual([]);
+  });
+
+  it("every reviewed exception is still live — the list cannot rot", () => {
+    // An entry whose tool is gone, whose target is no longer excluded, or
+    // whose text no longer mentions it, is an exception nobody is using. It
+    // would sit here granting a licence that has quietly stopped applying.
+    for (const r of REVIEWED_CROSS_REFERENCES) {
+      const tool = TOOLS.get(r.tool);
+      expect(tool, `reviewed exception names an unregistered tool: ${r.tool}`).toBeDefined();
+      expect(
+        EXCLUDED_FROM_CHAT_TOOLS.has(r.tool),
+        `${r.tool} is itself excluded now — this exception is about chat-scope tools`,
+      ).toBe(false);
+      expect(
+        EXCLUDED_FROM_CHAT_TOOLS.has(r.names),
+        `${r.names} is no longer excluded, so ${r.tool} -> ${r.names} needs no exception`,
+      ).toBe(true);
+      expect(
+        new RegExp(`\\b${r.names}\\b`).test(describedText(tool!)),
+        `${r.tool} no longer mentions ${r.names} — drop the exception`,
+      ).toBe(true);
+      expect(r.why.length, `${r.tool} -> ${r.names} has no reason written down`).toBeGreaterThan(20);
+    }
+  });
+});

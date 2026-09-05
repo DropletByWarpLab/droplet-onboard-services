@@ -12,6 +12,17 @@
  * durable, user-visible container, and the tool that creates one off the
  * back of an extracted document should not be able to litter the tracker
  * without the owner seeing it first.
+ *
+ * ⚠ WARP-2580 — READ THIS BEFORE BELIEVING THE PARAGRAPH ABOVE. The
+ * "dead-ended at the last step" claim is only true for a caller that HAS
+ * `pm_create_work_item`. In default CHAT it does not: this is the one
+ * `pm_*` tool outside `EXCLUDED_FROM_CHAT_TOOLS` (pinned deliberately by
+ * `chat-tool-scope.test.ts` — "the pm rule is NOT dead"), so a chat turn can
+ * create the project and then put nothing in it, and cannot list what
+ * already exists before creating a duplicate. The wording below no longer
+ * PROMISES that next step, which is what this ticket fixes; restoring the
+ * capability is ADR-045's `business_create`, not a wider exclusion list.
+ * Dashboard and external MCP clients get the whole suite and are unaffected.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { callOrch, OrchPmError, toPlaneProject } from "./pm-orch.js";
@@ -27,8 +38,13 @@ const inputSchema = {
     },
     workspace_slug: {
       type: "string",
+      // WARP-2580 — this named `pm_list_workspaces`, which is excluded from
+      // chat, so the one instruction it gave a chat turn was to call a tool
+      // that turn could never reach. Named by slug rather than by tool, which
+      // is true for every caller: an MCP client that HAS the listing tool can
+      // still use it; a chat turn now knows to omit the field instead.
       description:
-        "Workspace to create the project in, from pm_list_workspaces. Omit to use the default workspace.",
+        "Workspace slug to create the project in. Omit to use the default workspace.",
     },
     identifier: {
       type: "string",
@@ -98,8 +114,13 @@ async function handler(
 
 const tool: Tool = {
   name: "pm_create_project",
+  // WARP-2580 — both sentences that mentioned `pm_create_work_item` are gone.
+  // That tool is excluded from chat, so in a chat turn this description
+  // promised a next step that did not exist and described a return value in
+  // terms of a parameter the model could not spend. The capability it names
+  // is unchanged; only the dead cross-reference is.
   description:
-    "Create a new project in the user's project tracker. Use this before pm_create_work_item when the tasks belong to something that does not exist yet. Requires confirmation. Returns the created project with its id, which pm_create_work_item takes as project_id.",
+    "Create a new project in the user's project tracker. Use it when tasks belong to something that does not exist yet. Requires confirmation. Returns the created project and its id.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
