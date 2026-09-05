@@ -18,7 +18,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/yauzl": "^3.4.0",
     "jsonwebtoken": "^9.0.3",
-    "vitest": "^4.1.10",
+    "vitest": "^4.1.11",
     "yaml": "^2.9.0",
     "yauzl": "^3.4.0"
   }
