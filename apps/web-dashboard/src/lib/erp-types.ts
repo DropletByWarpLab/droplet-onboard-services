@@ -43,6 +43,12 @@ export type ConnectorId =
   | "mailchimp"
   // WARP-2296 — the fourth SaaS vendor.
   | "shopify"
+  // WARP-2383 — the fifth, and the second accounting card next to
+  // `quickbooks`. Added HERE, by hand, rather than widening the union to
+  // whatever `catalogDescriptors()` returns: deriving it would delete the
+  // tripwire above, which is the only thing that makes a descriptor landing a
+  // card the hub cannot route go red instead of silent.
+  | "xero"
   // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
   // programme. Added by hand, like every entry above: the union is the thing
   // that makes the `as ConnectorId` cast in `connectors.ts` honest, so it has

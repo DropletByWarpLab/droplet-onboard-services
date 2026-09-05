@@ -67,7 +67,6 @@ const SCRIPT = repoPath("scripts", "check-setup-guides.sh");
  * reviewable decision, which is exactly what `atlassian` never got.
  */
 const GUIDE_AHEAD_OF_DESCRIPTOR: Readonly<Record<string, string>> = Object.freeze({
-  xero: "WARP-2383 — connector + descriptor in flight",
 });
 
 /** `CLOUD_PROVIDERS="a b c"` out of the shell script, read as TEXT. */

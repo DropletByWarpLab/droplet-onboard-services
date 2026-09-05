@@ -52,7 +52,12 @@ const { recordActivityMock } = vi.hoisted(() => ({
 }));
 vi.mock("./activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 
-import { ConnectorBlockedError } from "@droplet/erp-connector";
+import {
+  ConnectorBlockedError,
+  XeroConnector,
+  pruneExpiredXeroTokens,
+  __resetXeroTokenCacheForTest,
+} from "@droplet/erp-connector";
 import { createIntegrationsService } from "./integrations.service.js";
 // WARP-2500 — the provider table is DERIVED from the live registry, never
 // hand-written here: a provider added to `provider-registry.ts` has to join
@@ -489,6 +494,129 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
     expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
     expect(detail.status).toBe("NOT_CONFIGURED");
+  });
+});
+
+/**
+ * WARP-2383 — the copy of the credential Postgres cannot reach.
+ *
+ * Raised on #1946: the Xero track keeps its minted access token in a
+ * process-lifetime `Map` keyed by connection id, because `erp.service` builds
+ * and closes a connector per read. `forgetXeroToken` existed and was called
+ * from the two 401 paths and `decommission()` — but never from
+ * `disconnect()`, so the columns were purged while a live bearer token for the
+ * organisation stayed usable in memory for up to the 30-minute TTL plus the
+ * prune cron's lag.
+ *
+ * These assert against the REAL module-level cache, through a real
+ * `XeroConnector` with an injected fetch — not against a spy on
+ * `forgetXeroToken`. A spy would only prove a function was called; the claim
+ * is that the token is gone, and a mutation that called it with the wrong key
+ * (`row.provider` instead of `row.id`, say) would satisfy the spy and leave
+ * the token exactly where it was.
+ */
+describe("disconnect() also drops the token that never reached Postgres", () => {
+  const XERO_CONNECTION_ID = "conn_1";
+  const XERO_CLIENT_ID = "FAKE-XERO-CLIENT-ID-0000";
+  const XERO_CLIENT_SECRET = "FAKE-XERO-CLIENT-SECRET-do-not-use-0000";
+
+  beforeEach(() => {
+    __resetXeroTokenCacheForTest();
+  });
+
+  /** A connector on the connection id the fixture row carries, with a token
+   *  already minted into the shared cache. */
+  async function mintedXeroToken() {
+    const connector = new XeroConnector(
+      {
+        connectionId: XERO_CONNECTION_ID,
+        clientId: XERO_CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "FAKE-XERO-ACCESS-TOKEN-0000",
+              expires_in: 1800,
+              token_type: "Bearer",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )) as never,
+        now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
+        resolveSecret: async () => XERO_CLIENT_SECRET,
+      },
+    );
+    await connector.connect();
+    expect((await connector.status()).hasAccessToken).toBe(true);
+    return connector;
+  }
+
+  it("leaves no minted Xero token behind after the purge commits", async () => {
+    // Mutation: delete the `forgetXeroToken(row.id)` line in
+    // `integrations.service.ts` `disconnect()` → red. That mutation IS the
+    // code #1946 was reviewed at.
+    const connector = await mintedXeroToken();
+    const prisma = stubPrisma(connectedRow({ provider: "xero" }));
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    expect((await connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("keys the forget on the connection id, not on the provider name", async () => {
+    // Mutation: `forgetXeroToken(row.provider)` → the cache is keyed by
+    // connection id, so "xero" deletes nothing and this stays true. The test
+    // above would still pass a spy-based assertion; only reading the cache
+    // catches it.
+    const connector = await mintedXeroToken();
+    const prisma = stubPrisma(
+      connectedRow({ id: XERO_CONNECTION_ID, provider: "xero", status: "CONNECTED" }),
+    );
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    // Nothing is left for the prune cron to find — the count it returns is the
+    // map's own answer about what it still holds.
+    expect(pruneExpiredXeroTokens(Date.UTC(2026, 8, 3, 12, 0, 0))).toBe(0);
+    expect((await connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("does not disturb another connection's token", async () => {
+    // The delete is scoped, not a `clear()`. Mutation: swap
+    // `forgetXeroToken(row.id)` for `__resetXeroTokenCacheForTest()` → red,
+    // and every other connected organisation on the box re-mints on its next
+    // read, spending a daily allowance the four-hour cadence exists to protect.
+    const other = new XeroConnector(
+      {
+        connectionId: "conn_someone_else",
+        clientId: XERO_CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "FAKE-XERO-ACCESS-TOKEN-0001",
+              expires_in: 1800,
+              token_type: "Bearer",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )) as never,
+        now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
+        resolveSecret: async () => XERO_CLIENT_SECRET,
+      },
+    );
+    await other.connect();
+    const disconnected = await mintedXeroToken();
+    const prisma = stubPrisma(connectedRow({ provider: "xero" }));
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    expect((await disconnected.status()).hasAccessToken).toBe(false);
+    expect((await other.status()).hasAccessToken).toBe(true);
   });
 });
 
