@@ -253,25 +253,32 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // and neither is a pass-through — the roster below is unchanged, which is
     // the distinction this count exists to keep visible.
     //
-    // 41 as of WARP-2669: `delete_file`. Flag-gated by the interceptor, no
-    // `confirmed` boolean in its schema (so only a human-minted token gets
-    // through), and not a pass-through — the roster below is unchanged, which
-    // is the distinction this count exists to keep visible.
+    // 37, and this is the first time the number has gone DOWN.
     //
-    // 42 as of WARP-2180: `start_agent_run`. Tier-2 because it spends the
-    // box's compute unattended — the interceptor challenges it and chat
-    // approves it, exactly like any other flag-gated tool. Not a pass-through
-    // (it never calls passThroughConfirmation; the route it posts to has no
-    // gate of its own), so the roster below is unchanged, which is the
-    // distinction this count exists to keep visible.
+    // It reached 41 on stage with `delete_file` (WARP-2669), then 43 with
+    // WARP-2664's `organize_files` and `delete_files` (flag-gated by the
+    // interceptor, no `confirmed` boolean in either schema, neither a
+    // pass-through), then 44 with WARP-2180's `start_agent_run` — Tier-2
+    // because it spends the box's compute unattended; the interceptor
+    // challenges it and chat approves it, exactly like any other flag-gated
+    // tool, and it is not a pass-through either (it never calls
+    // passThroughConfirmation; the route it posts to has no gate of its own).
     //
-    // 44 as of WARP-2664 landing beside WARP-2180: `organize_files` and `delete_files`. Same shape —
-    // flag-gated by the interceptor, no `confirmed` boolean in either schema,
-    // neither a pass-through. This is the reconciliation origin/stage's note
-    // asked for: WARP-2669's `delete_file` (40→41) and WARP-2664's two
-    // (41→43) are independent and both correct, so the count is the UNION of
-    // both, not either side's number.
-    expect(confirming).toHaveLength(44);
+    // ADR-045 slice D then removed SEVEN confirming tools
+    // (`pm_create_project`, `pm_create_work_item`, `pm_update_work_item`,
+    // `pm_transition_work_item`, `pm_add_work_item_comment`,
+    // `crm_log_activity`, `crm_move_deal_stage`) and added THREE
+    // (`business_create`, `business_update`, `business_link`):
+    // 44 − 7 + 3 = 40. The arithmetic is written out because a SHRINKING count
+    // is exactly what a dropped flag looks like, and the two must stay
+    // tellable apart — a tool that quietly lost `requiresConfirmation` would
+    // move this number the same direction. Stage's +1 (WARP-2180, 43→44) and
+    // this branch's −4 (ADR-045, 43→39) are independent and both correct, so
+    // the count is the UNION of both branches — 40 — not either side's number.
+    //
+    // The pass-through roster below is again unchanged: none of the thirteen
+    // touched tools relays a 202.
+    expect(confirming).toHaveLength(40);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

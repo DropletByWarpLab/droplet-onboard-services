@@ -26,11 +26,19 @@ const POOL = [
 /** Pool with camera tools, for the WARP-1921 phrasing cases below. */
 const CAMERA_POOL = [...POOL, "list_cameras", "list_camera_events", "list_clips"];
 
-/** Pool with tracker tools, for the WARP-2058 cases below. */
+/**
+ * Pool with tracker tools, for the WARP-2058 cases below.
+ *
+ * ADR-045 slice D — `pm_create_project` / `pm_create_work_item` no longer
+ * exist, and a pool name with no catalog domain is silently dropped by
+ * `selectAdvertisedTools`, so listing them would fail confusingly rather
+ * than informatively. The tracker's WRITE is `business_create` now, and it
+ * is reachable from a pm sentence because the pm rule claims `business`.
+ */
 const PM_POOL = [
   ...POOL,
-  "pm_create_project",
-  "pm_create_work_item",
+  "business_create",
+  "business_update",
   "pm_list_projects",
 ];
 
@@ -82,7 +90,11 @@ describe("selectAdvertisedTools (spec §3)", () => {
         r.matchedDomains,
         `"${sentence}" advertised only [${r.advertised.join(", ")}]`,
       ).toContain("pm");
-      expect(r.advertised).toContain("pm_create_project");
+      // ADR-045 slice D — the tracker WRITE is `business_create`, and the
+      // pm rule reaches it because it claims the `business` domain too.
+      // Asserting the DOMAIN alone would pass on an empty advertisement,
+      // which is exactly the hole WARP-2058 fell into.
+      expect(r.advertised).toContain("business_create");
     });
   });
 
@@ -415,14 +427,28 @@ describe("dynamic tool universe (WARP-2443)", () => {
   });
 
   it("toolNamesForDomain spans both layers, catalog first", () => {
-    const names = toolNamesForDomain("pm", [jiraSearch]);
-    expect(names).toContain("pm_create_work_item"); // local
-    expect(names).toContain("jira_search_issues"); // remote
-    expect(names.indexOf("pm_create_work_item")).toBeLessThan(
-      names.indexOf("jira_search_issues"),
-    );
+    // ADR-045 emptied the `pm` domain of local tools, so it can no longer
+    // demonstrate ORDERING — there is nothing to come first. The ordering
+    // assertion moves to a domain that still has both halves; which domain it
+    // is was never the point. `pm` keeps the empty-plus-remote case below,
+    // which is the more interesting one after the collapse.
+    const remoteFiles = { ...jiraSearch, name: "box_list_shared", domain: "files" as const };
+    const names = toolNamesForDomain("files", [remoteFiles]);
+    expect(names).toContain("list_files"); // local
+    expect(names).toContain("box_list_shared"); // remote
+    expect(names.indexOf("list_files")).toBeLessThan(names.indexOf("box_list_shared"));
     // Without the runtime list it is the catalog grouping, unchanged.
-    expect(toolNamesForDomain("pm")).not.toContain("jira_search_issues");
+    expect(toolNamesForDomain("files")).not.toContain("box_list_shared");
+  });
+
+  it("an EMPTIED domain still carries its remote tools — the ADR-045 case", () => {
+    // The reason `pm` and `crm` keep their DOMAIN_RULES entries after the
+    // collapse: a remote Atlassian catalog registers into `pm` (WARP-2316),
+    // and the exclusion list names LOCAL tools only, so the rule is the ONLY
+    // route by which that tool becomes selectable. If this goes red, a
+    // connected tracker has been silently un-reached.
+    expect(toolNamesForDomain("pm")).toEqual([]);
+    expect(toolNamesForDomain("pm", [jiraSearch])).toEqual(["jira_search_issues"]);
   });
 
   it("domainOfTool resolves remote names only when the runtime list is supplied", () => {

@@ -106,7 +106,24 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     // chat-tool-scope.ts. If this set GROWS, someone has added a rule for a
     // domain the policy layer removes entirely — document it there or drop
     // the rule.
-    expect(deadRules).toEqual(["notifications"]);
+    //
+    // ADR-045 slice D added `pm`, deliberately and with the documentation
+    // this assertion demands (see the KNOWN OVERLAP block in
+    // chat-tool-scope.ts). Every local pm WRITE collapsed into `business_*`
+    // and the reads were already excluded, so the domain is empty LOCALLY.
+    // The rule is kept because it still does two jobs: remote Atlassian pm
+    // tools (WARP-2316) reach chat through it, and it now also claims
+    // `business`, so a tracker sentence advertises the collapsed writes.
+    // ADR-045 added BOTH `crm` and `pm`, deliberately and with the
+    // documentation this assertion demands (see chat-tool-scope.ts's KNOWN
+    // OVERLAP block). Slice C moved every CRM and PM read into `business_find`
+    // / `business_timeline`; slice D moved every write into
+    // `business_create` / `business_update`. Neither domain holds a local tool
+    // any more, and both rules are retained because they are the route a
+    // REMOTE Atlassian or HubSpot catalog becomes selectable, and because they
+    // now also claim the `business` domain — "add a ticket for the broken
+    // dishwasher" is a pm sentence that has to reach `business_create`.
+    expect(deadRules).toEqual(["crm", "notifications", "pm"]);
   });
 
   it("records exactly which domains have in-scope tools but NO rule to advertise them", () => {
@@ -135,11 +152,19 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     expect(unreachable).toEqual([]);
   });
 
-  it("the pm rule is NOT dead — WARP-2058's comment is stale", () => {
-    // Recorded because the obvious reading of the exclusion list is that
-    // every pm_* tool is gone. Nine of ten are; pm_create_project is not.
+  it("the pm rule still reaches a write tool — it just is not a pm_* one any more", () => {
+    // ADR-045 slice D. The pm domain is empty LOCALLY (asserted above), so
+    // the danger is that someone reads that and deletes the rule. This is
+    // the test that goes red if they do: a tracker sentence must still put
+    // a write verb in front of the model, and after the collapse that verb
+    // lives in the `business` domain.
+    //
+    // MUTATION: drop `"business"` from the pm rule's `domains` → red, and
+    // the product regresses to an assistant that can talk about a tracker
+    // it cannot write to.
     const inScope = inScopeByDomain();
-    expect(inScope.get("pm")).toEqual(["pm_create_project"]);
+    expect(inScope.get("pm") ?? []).toEqual([]);
+    expect(inScope.get("business")).toContain("business_create");
 
     const r = selectAdvertisedTools({
       mode: "domains",
@@ -147,7 +172,19 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
       pool: chatPool(),
       conversationToolNames: [],
     });
-    expect(r.advertised).toContain("pm_create_project");
+    expect(r.matchedDomains).toContain("pm");
+    expect(r.advertised).toContain("business_create");
+    expect(r.advertised).toContain("business_update");
+    // ...and the same for the CRM half of the collapse, through the crm rule.
+    const deal = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "move the Acme deal to negotiation",
+      pool: chatPool(),
+      conversationToolNames: [],
+    });
+    expect(deal.advertised).toContain("business_update");
+    // business_link is policy-excluded, so no turn may advertise it.
+    expect(deal.advertised).not.toContain("business_link");
   });
 
   it("fully-excluded domains have no rule promising what the pool cannot deliver", () => {
@@ -155,6 +192,12 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     const fullyExcluded = TOOL_CATALOG.map((e) => e.domain).filter(
       (d, i, a) => a.indexOf(d) === i && (inScope.get(d) ?? []).length === 0,
     );
+    // ADR-045 — `crm` and `pm` are NOT in this set, and the distinction is
+    // worth stating because it looks like an omission. `fullyExcluded` is
+    // derived from TOOL_CATALOG, so it can only name a domain that HAS local
+    // tools which are all excluded. `crm` and `pm` have no catalog entries at
+    // all now — they are EMPTY, which is a different condition, and the
+    // deadRules assertion above is the one that catches it.
     expect([...fullyExcluded].sort()).toEqual([
       "erp",
       // WARP-2581 — money joins them: its one tool is excluded while the
@@ -168,6 +211,12 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
     expect(RULED_DOMAINS.has("switch")).toBe(false);
     expect(RULED_DOMAINS.has("erp")).toBe(false);
     expect(RULED_DOMAINS.has("money")).toBe(false);
+    // ADR-045 — `pm` is the deliberate exception: locally EMPTY and yet ruled,
+    // because the rule reaches remote tools and the `business` domain where
+    // the writes went. Asserting it here stops a future reader "tidying" the
+    // rule away on the strength of the emptiness above.
+    expect(RULED_DOMAINS.has("pm")).toBe(true);
+    expect(RULED_DOMAINS.has("business")).toBe(true);
   });
 
   it("the exclusion list governs LOCAL tools only — a remote tool in a stripped domain is still selectable", () => {

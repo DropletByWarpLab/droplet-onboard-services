@@ -315,6 +315,22 @@ describe("AI tools & connectors (axis 4)", () => {
     expect(within(row).getByRole("button", { name: "Use" })).toBeDisabled();
   });
 
+  it("renders Business as its own tool row, which Projects-off does not auto-off (WARP-2583)", () => {
+    // The row that used to be Projects (`pm`) gated the project and task
+    // tools. Those live in `business` now, which spans the projects AND crm
+    // modules, so one feature switch cannot honestly auto-off it: the
+    // operator narrows it with View (reads only) and the server's per-entity
+    // route gate does the rest.
+    const base = blankRoleDraft("family");
+    base.features.projects = { on: false, level: "view" };
+    renderSheet({ base });
+    expect(screen.queryByTestId("access-tools-projects")).not.toBeInTheDocument();
+    const row = screen.getByTestId("access-tools-business");
+    expect(within(row).getByText("Business")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "View" })).toBeEnabled();
+    expect(within(row).getByRole("button", { name: "Use" })).toBeEnabled();
+  });
+
   it("Escape closes only the topmost dialog — the draft survives a nested-confirm ESC (review F1)", async () => {
     const { onClose } = renderSheet();
     fireEvent.change(screen.getByPlaceholderText("Name this role"), {

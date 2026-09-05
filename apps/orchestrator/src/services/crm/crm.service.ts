@@ -746,6 +746,167 @@ export async function unlinkContactFromCompany(
   if (count === 0) throw new Error(CRM_ERRORS.CONTACT_NOT_FOUND);
 }
 
+// ── Contacts, read (ADR-045) ─────────────────────────────────────────────────
+
+/**
+ * A CRM-visible person.
+ *
+ * ## Why this is not `/api/contacts`
+ *
+ * `Contact` is OWNER-scoped (`Contact.userId`), and `routes/contacts.ts`
+ * enforces that hard: its `requireOwner` 403s any principal whose id starts
+ * with `_service:`, so the MCP service principal cannot read the address book
+ * at all. That is correct for an address book and wrong for the CRM, which is
+ * business-shared by design (this file's route header: reads open to any
+ * authenticated role, writes gated). The result was a hole: `getCompany`
+ * returns `contactCount` and nothing else, so no layer — not the dashboard,
+ * not a tool — could answer "who do I call at Acme".
+ *
+ * ## The scoping rule, and where the privacy line is
+ *
+ * A contact is CRM-visible IFF it carries at least one `CrmCompanyContact` or
+ * `CrmDealContact` row. Linking a person to a company or a deal is a
+ * deliberate act by a human with write access; everyone else in the address
+ * book stays private to their owner. The alternative — scoping by `userId` —
+ * would make a customer's contacts appear or vanish depending on which member
+ * happened to type the name in, which is not a property a customer record can
+ * have.
+ *
+ * Both link tables lead their compound unique with the parent id
+ * (`@@unique([companyId, contactId])`, `@@unique([dealId, contactId])`) and
+ * carry `@@index([contactId])`, so neither direction of this query is a scan
+ * (the WARP-845 hazard). No new index is required by this change.
+ */
+export interface ApiCrmContact {
+  id: string;
+  displayName: string;
+  organization: string | null;
+  jobTitle: string | null;
+  /** Their role at the company this listing was scoped to — `title` on the
+   *  link row, which may differ from their own `jobTitle`. NULL when the
+   *  listing was not company-scoped, so the caller can tell "no role recorded"
+   *  from "you did not ask about a company". */
+  titleAtCompany: string | null;
+  emails: Array<{ address: string; isPrimary: boolean }>;
+  phones: Array<{ number: string; isPrimary: boolean }>;
+  /** Explicit column, never inferred from `externalSystem != null`. */
+  origin: string;
+  externalSystem: string | null;
+  companyIds: string[];
+  dealIds: string[];
+}
+
+const CRM_CONTACT_SELECT = {
+  id: true,
+  displayName: true,
+  organization: true,
+  jobTitle: true,
+  origin: true,
+  externalSystem: true,
+  emails: {
+    select: { address: true, isPrimary: true },
+    orderBy: [{ isPrimary: "desc" }, { address: "asc" }],
+  },
+  phones: {
+    select: { number: true, isPrimary: true },
+    orderBy: [{ isPrimary: "desc" }, { number: "asc" }],
+  },
+  companyLinks: { select: { companyId: true, title: true } },
+  dealLinks: { select: { dealId: true } },
+} satisfies Prisma.ContactSelect;
+
+type CrmContactRow = Prisma.ContactGetPayload<{ select: typeof CRM_CONTACT_SELECT }>;
+
+function crmContactToApi(row: CrmContactRow, scopedCompanyId?: string): ApiCrmContact {
+  return {
+    id: row.id,
+    displayName: row.displayName,
+    organization: row.organization,
+    jobTitle: row.jobTitle,
+    titleAtCompany: scopedCompanyId
+      ? (row.companyLinks.find((l) => l.companyId === scopedCompanyId)?.title ?? null)
+      : null,
+    emails: row.emails,
+    phones: row.phones,
+    origin: row.origin,
+    externalSystem: row.externalSystem,
+    companyIds: row.companyLinks.map((l) => l.companyId),
+    dealIds: row.dealLinks.map((l) => l.dealId),
+  };
+}
+
+/**
+ * The people the CRM can see, optionally narrowed to one company or one deal.
+ *
+ * Archived rows are out of the default listing, filtered on the explicit
+ * `isArchived` column and never on `archivedAt IS NOT NULL` (WARP-884 /
+ * WARP-2554) — the same rule `listCompanies` and `listContacts` follow.
+ */
+export async function listCrmContacts(
+  prisma: PrismaClient,
+  opts: {
+    query?: string;
+    companyId?: string;
+    dealId?: string;
+    perPage?: number;
+    page?: number;
+  } = {},
+): Promise<{ contacts: ApiCrmContact[]; total: number }> {
+  const perPage = Math.min(Math.max(opts.perPage ?? 50, 1), 200);
+  const page = Math.max(opts.page ?? 1, 1);
+
+  // The CRM-visibility rule, expressed once. When the caller names a company
+  // or a deal, THAT link is the scope and the generic "has any link" clause
+  // would be redundant.
+  const linkScope: Prisma.ContactWhereInput = opts.companyId
+    ? { companyLinks: { some: { companyId: opts.companyId } } }
+    : opts.dealId
+      ? { dealLinks: { some: { dealId: opts.dealId } } }
+      : { OR: [{ companyLinks: { some: {} } }, { dealLinks: { some: {} } }] };
+
+  const where: Prisma.ContactWhereInput = { AND: [linkScope, { isArchived: false }] };
+  const q = opts.query?.trim();
+  if (q) {
+    (where.AND as Prisma.ContactWhereInput[]).push({
+      OR: [
+        { displayName: { contains: q, mode: "insensitive" } },
+        { organization: { contains: q, mode: "insensitive" } },
+        // The derived lowercase column, so the index is used and the match does
+        // not depend on how the caller cased their input.
+        { emails: { some: { addressLower: { contains: q.toLowerCase() } } } },
+      ],
+    });
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.contact.findMany({
+      where,
+      select: CRM_CONTACT_SELECT,
+      orderBy: { displayName: "asc" },
+      skip: (page - 1) * perPage,
+      take: perPage,
+    }),
+    prisma.contact.count({ where }),
+  ]);
+  return { contacts: rows.map((r) => crmContactToApi(r, opts.companyId)), total };
+}
+
+/** One CRM-visible person. A contact with no link reads as 404 rather than
+ *  403: the CRM must not confirm the existence of a row in somebody's private
+ *  address book, which is the same reasoning routes/contacts.ts gives for its
+ *  owner scoping. */
+export async function getCrmContact(prisma: PrismaClient, id: string): Promise<ApiCrmContact> {
+  const row = await prisma.contact.findFirst({
+    where: {
+      id,
+      OR: [{ companyLinks: { some: {} } }, { dealLinks: { some: {} } }],
+    },
+    select: CRM_CONTACT_SELECT,
+  });
+  if (!row) throw new Error(CRM_ERRORS.CONTACT_NOT_FOUND);
+  return crmContactToApi(row);
+}
+
 // ── Deals ────────────────────────────────────────────────────────────────────
 
 export interface DealInput {

@@ -172,7 +172,7 @@ export async function resolveBusinessPinTargets(
   // One batched read per kind, all on primary keys. `select` is narrow on
   // purpose: a deal's `amountMinor` is a BigInt, and pulling money into a
   // prompt-rendering path would put a BigInt on a JSON path for no benefit -
-  // the model has crm_get_deal for the figure.
+  // the model has business_find for the figure.
   const [companies, deals, projects, workItems] = await Promise.all([
     byKind.has("customer")
       ? prisma.crmCompany.findMany({

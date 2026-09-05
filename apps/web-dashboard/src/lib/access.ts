@@ -548,7 +548,27 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
     feature: "calendar",
   },
   { id: "email", label: "Email", domains: ["email"], feature: "email" },
-  { id: "projects", label: "Projects", domains: ["pm"], feature: "projects" },
+  // ADR-045 (WARP-2583) — this row was `projects`, writing the `pm` grant,
+  // and it was the row that gated every project and task tool. The collapse
+  // moved all of those, and the CRM's, into the `business` domain
+  // (`business_find`, `business_timeline`, `business_create`,
+  // `business_update`, `business_link`), which until this change sat under
+  // System below — so withholding Projects from a role changed nothing, and
+  // the broad System toggle handed out the tools that create projects, tasks,
+  // deals and notes. `business` is its own row now. `pm` and `crm` ride with
+  // it: both hold zero local tools and exist as the landing slots for a
+  // remote tracker or CRM catalog (Atlassian, HubSpot) — the same reach.
+  //
+  // No `feature`, deliberately. The domain spans TWO modules (projects, crm),
+  // so a single-module auto-off would be wrong in one direction or the other;
+  // the server treats it as unclaimed for the same reason (access-catalog.ts
+  // UNCLAIMED_DOMAINS). What a role may DO with the tools is still gated per
+  // entity, per person, at the route — `/api/pm/*` and `/api/crm/*` sit
+  // behind `requireFeatureAccess` — so a role without Projects gets a 404
+  // from `business_create({entity:"project"})` whatever this row says.
+  // `view` withholds the three writes; there is no OFF for an ungated row,
+  // exactly as for System and Cloud accounts.
+  { id: "business", label: "Business", domains: ["business", "pm", "crm"], feature: null },
   { id: "memory", label: "Memory", domains: ["memory"], feature: "knowledge" },
   // WARP-2497 — its own row rather than folded into System: the cloud
   // connectors read customer, payment and mailing-list records, a different
@@ -556,7 +576,7 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   // and an operator has to be able to withhold it on its own. No module gates
   // it (there is no connectors AccessModuleId), so `feature` stays null.
   { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
-  { id: "system", label: "System", domains: ["system", "business", "data"], feature: null },
+  { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
 
 // ── Floor clamping ─────────────────────────────────────────────────────────

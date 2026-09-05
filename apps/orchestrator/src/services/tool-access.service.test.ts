@@ -16,6 +16,7 @@ import {
   hasWriteTool,
   isLockLikeInvocation,
   lockOperationDenied,
+  narrowToolNamesForPrincipal,
   narrowToolNamesToScope,
   narrowToolsToScope,
   resolveAttributedToolAccess,
@@ -450,6 +451,43 @@ describe("firstToolDeniedForPrincipal — the composed A ∧ B pre-flight", () =
     expect(
       firstToolDeniedForPrincipal([CAMERAS_READ], "admin", scopeOf(["files"], ["files"])),
     ).toEqual({ tool: CAMERAS_READ, axis: "role_grant" });
+  });
+
+  it("a role granted System but not Business cannot reach business_create — the ADR-045 seam (WARP-2583)", () => {
+    // Before the collapse the project and task writes were `pm_*` tools
+    // behind the `pm` grant; now all of them, and the CRM's, are `business_*`
+    // behind `business`. A scope shaped like the old System toggle — `system`
+    // and `data`, with the emptied `pm` / `crm` for good measure — must reach
+    // none of them, and `view` on `business` must reach the reads only.
+    // MUTATION: exempt `business` from the domain check in
+    // `toolAllowedInScope` -> red.
+    const BUSINESS = TOOL_CATALOG.filter((t) => t.domain === "business").map((t) => t.name);
+    const WRITES = ["business_create", "business_update", "business_link"];
+    expect(BUSINESS).toEqual(
+      expect.arrayContaining([...WRITES, "business_find", "business_timeline"]),
+    );
+    const oldSystemRow = scopeOf(
+      ["system", "data", "pm", "crm"],
+      ["system", "data", "pm", "crm"],
+    );
+    expect(narrowToolNamesForPrincipal(BUSINESS, "admin", oldSystemRow)).toEqual([]);
+    expect(firstToolDeniedForPrincipal(["business_create"], "admin", oldSystemRow)).toEqual({
+      tool: "business_create",
+      axis: "role_grant",
+    });
+    // `view` keeps the reads and still refuses the three writes.
+    const view = scopeOf(["business"]);
+    expect(narrowToolNamesForPrincipal(BUSINESS, "admin", view)).toEqual(
+      BUSINESS.filter((n) => !WRITES.includes(n)),
+    );
+    expect(firstToolDeniedForPrincipal(WRITES, "admin", view)).toEqual({
+      tool: "business_create",
+      axis: "role_grant",
+    });
+    // `use` opens all of them.
+    expect(
+      narrowToolNamesForPrincipal(BUSINESS, "admin", scopeOf(["business"], ["business"])),
+    ).toEqual(BUSINESS);
   });
 
   it("returns null when every name clears both axes", () => {

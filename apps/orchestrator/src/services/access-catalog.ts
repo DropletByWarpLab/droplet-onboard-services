@@ -308,7 +308,17 @@ export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<strin
 }
 
 /** Tool domains a role may write grant rows for — the catalog union minus
- *  `erp` (connector reach is the connectors axis, never a tool grant). */
+ *  `erp` (connector reach is the connectors axis, never a tool grant).
+ *
+ *  Derived, not listed, so a domain the catalog adds is grantable the same
+ *  day — `business` (ADR-045) included, which is where every PM and CRM tool
+ *  now lives. The dashboard's row table
+ *  (apps/web-dashboard/src/lib/access.ts TOOL_DOMAIN_GROUPS) is the
+ *  hand-kept half of that pair and has to move with it: WARP-2583's review
+ *  found `business` filed under the System row there while the Projects row
+ *  still wrote a grant for the emptied `pm`. Note `business` is UNCLAIMED
+ *  (no module owns it), which is precisely why the grant axis has to hold it:
+ *  the module filter passes it unconditionally. */
 export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter(
   (d) => d !== "erp",
 );

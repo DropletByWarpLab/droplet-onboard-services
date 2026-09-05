@@ -123,10 +123,17 @@ function routeConfirmsFor(tool: Tool): boolean {
 
 describe("WARP-2472 — confirmationOwner cannot drift from the safety tier", () => {
   it("finds the pass-through roster at runtime, and it is not empty", () => {
-    // A floor rather than an equality on CONFIRMING, so a 39th confirming
+    // A floor rather than an equality on CONFIRMING, so a 37th confirming
     // tool is covered automatically — but silently DROPPING the flag to
     // make something pass still fails here.
-    expect(CONFIRMING.length).toBeGreaterThanOrEqual(38);
+    //
+    // Re-baselined 38 → 36 by ADR-045 slice D, which is the first change to
+    // move this floor DOWNWARD. Seven confirming tools collapsed into three
+    // (40 − 7 + 3 = 36); the capability is unchanged and every one of the
+    // three replacements still declares the flag. `PASS_THROUGH` is the half
+    // of this assertion that carries the WARP-2472 guarantee, and it does
+    // not move: none of the ten tools involved relays a route's 202.
+    expect(CONFIRMING.length).toBeGreaterThanOrEqual(36);
     expect(PASS_THROUGH.length).toBe(15);
   });
 

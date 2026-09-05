@@ -94,26 +94,20 @@ const EXPECTED_TOOL_NAMES = [
   "remove_device",
   "create_scene",
   "assign_device_room",
-  // WARP-509 — Plane PM write tools
-  "pm_add_work_item_comment",
-  "pm_create_project",     // WARP-2058
-  "pm_create_work_item",
-  "pm_transition_work_item",
-  "pm_update_work_item",
-  // WARP-508 — Plane PM read tools
-  "pm_get_work_item",
-  "pm_list_projects",
-  "pm_list_work_items",
-  "pm_list_workspaces",
-  "pm_search_work_items",
-  // crm (WARP-2546)
-  "crm_search_customers",
-  "crm_get_customer",
-  "crm_list_deals",
-  "crm_get_deal",
-  "crm_pipeline_summary",
-  "crm_log_activity",
-  "crm_move_deal_stage",
+  // ADR-045 — the `pm` and `crm` tool families are GONE, and that is the
+  // decision this list exists to make somebody sign.
+  //
+  // Slice C replaced WARP-508's five PM reads and WARP-2546's five CRM reads
+  // with `business_find` / `business_timeline`. Slice D replaced WARP-509's
+  // five PM writes and the two CRM writes with `business_create` /
+  // `business_update` / `business_link`. Seventeen names out, five in, all
+  // listed under business below.
+  //
+  // Both DOMAINS survive with their DOMAIN_RULES entries and hold zero local
+  // tools — that is deliberate, not leftover. A rule is the route a REMOTE
+  // catalog registered into `pm` (Atlassian, WARP-2316) or `crm` (HubSpot)
+  // becomes selectable, because the exclusion list names LOCAL tools only.
+  // `chat-tool-scope.test.ts` pins both as documented dead rules.
   // WARP-1094 — ERP-connector (Eaglesoft) tools
   "erp_get_schedule_today",
   "erp_find_patient",
@@ -121,6 +115,15 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // ADR-045 slice D — the write verbs (Tier-2: write + confirmation).
+  // Seven tools in, three out; the registry gets SMALLER by four.
+  "business_create",
+  "business_update",
+  "business_link",
+  // ADR-045 slice C — the business graph, read half. Two verbs over one typed
+  // graph, replacing ten noun-shaped CRM/PM reads. Both Tier-1.
+  "business_find",
+  "business_timeline",
   // WARP-1685 — Messages sends (Tier-2: write + two-phase confirmation)
   "team_chat_send_message",
   "team_chat_send_meeting_invite",
@@ -244,12 +247,23 @@ describe("TOOLS registry", () => {
     // tools (create / update / comment / transition) are
     // requiresWrite=true AND requiresConfirmation=true because every
     // Plane write hits a customer's tracked project state.
-    expect(TOOLS.get("pm_list_workspaces")?.requiresWrite).toBe(false);
-    expect(TOOLS.get("pm_get_work_item")?.requiresWrite).toBe(false);
-    expect(TOOLS.get("pm_create_work_item")?.requiresWrite).toBe(true);
-    expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
-    expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
-    expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
+    // ADR-045 slice C — the PM read tools are gone; the graph reads that
+    // replaced them carry the Read tier now, and they are what this pair of
+    // assertions is for (a read that is silently flagged write loses nothing
+    // visible until RBAC narrows it away for a family role).
+    expect(TOOLS.get("business_find")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_find")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresConfirmation).toBe(false);
+    // ADR-045 slice D — the tier moved with the capability: creating a task
+    // and transitioning one are both `business_*` verbs now, and both stay
+    // write + confirmation.
+    expect(TOOLS.get("business_create")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_create")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("business_update")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_update")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("business_link")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_link")?.requiresConfirmation).toBe(true);
     // WARP-1094 — ERP-connector (Eaglesoft). The three reads are Read-tier;
     // erp_schedule_appointment is Write-tier (every ERP write hits a live
     // third-party PMS through the confirmed outbox pipeline, brief §11.6).

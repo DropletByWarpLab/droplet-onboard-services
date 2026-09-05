@@ -256,7 +256,19 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // "tasks"/"to-dos" — a household to-do is not a tracker work item, and
   // both domains matching a sentence that mentions each is the intended
   // generous behaviour, not a collision.
-  { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm"] },
+  //
+  // ADR-045 slice C — this rule now opens `business` as well as `pm`, and it
+  // MUST. The project and work-item READS moved into `business_find`; leaving
+  // the rule at `["pm"]` would mean "what's left on the kitchen job" advertised
+  // the pm WRITE tools and not the one tool that can answer it — a tool
+  // registered, budgeted, and advertised on zero relevant turns, which is the
+  // WARP-2058 / WARP-2454 / WARP-2546 defect exactly.
+  //
+  // The vocabulary is NOT duplicated into the business rule above instead:
+  // `pm` still needs its own rule (pm_create_project, and the remote Atlassian
+  // catalog that registers into this domain, WARP-2316), and two rules
+  // carrying the same words is two places to keep in step.
+  { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm", "business"] },
   // WARP-2454 — `repl(y|ies|ied|ying)`, never `replied?`. The original was
   // "replie" plus an OPTIONAL "d": it matched `replied` and the non-word
   // `replie`, and missed `reply` and `replies` entirely — so "did the
@@ -287,35 +299,47 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // taken bare. The negatives in tool-selection.service.test.ts pin this.
   { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
-  // WARP-2552 — `customers` claims BOTH domains on purpose. The word is the
-  // natural way to ask either "what does Droplet know about my business"
-  // (business profile) or "show me my customers" (the CRM). A false-positive
-  // domain is cheap here, and picking one owner would make the other
-  // unreachable by the only word a human uses for it.
-  { pattern: /\b(business|company|opening hours|customers?)\b/i, domains: ["business", "crm"] },
-  // WARP-2552 — the CRM's own vocabulary. Without a rule the seven crm_* tools
-  // sit in the chat pool, are charged to the budget, and are advertised on
-  // ZERO turns — the same defect WARP-2058 fixed for `pm` and WARP-2454 fixed
-  // for `team_chat`. `chat-tool-scope.test.ts` now fails if a domain with
-  // in-scope tools has no rule, so a fourth instance cannot ship quietly.
+  // ADR-045 slice C — ONE business rule, replacing WARP-2552's pair.
   //
-  // WARP-2556 — `won` / `win` / `lost` were claimed bare and are not any more.
-  // They matched "did we win the game last night" and "I lost my keys",
-  // advertising six schemas on a turn that wanted none — the per-turn cost
-  // WARP-2552 exists to avoid. Real CRM sentences still land: "which deals did
-  // we win last quarter" matches `deals?`.
+  // WARP-2552 shipped two rules because the tools lived in two domains: a
+  // `business` rule for the profile and a `crm` rule for the seven `crm_*`
+  // tools. Slice C collapsed the CRM and PM READS into `business_find` /
+  // `business_timeline`, which live in `business` — so one vocabulary now
+  // reaches one place, and keeping two rules would mean two places to add a
+  // word and one of them silently not mattering.
   //
-  // 🔴 THE OVERLAP WITH `cloud` IS DELIBERATE, FOR NOW. That rule also claims
+  // `domains` is still BOTH. `crm` is not vestigial: `crm_log_activity` is in
+  // the chat pool and `crm_move_deal_stage` is registered, and
+  // `chat-tool-scope.test.ts` fails when a domain with in-scope tools has no
+  // rule that can advertise them. Dropping `crm` here would recreate exactly
+  // the WARP-2058 / WARP-2454 / WARP-2546 defect this rule was written to end.
+  // ADR-045 slice D is what retires the `crm` half.
+  //
+  // WARP-2552 — `customers` claimed both domains on purpose, and still does.
+  // The word is the natural way to ask either "what does Droplet know about my
+  // business" or "show me my customers"; picking one owner would make the
+  // other unreachable by the only word a human uses for it.
+  //
+  // WARP-2556 — `won` / `win` / `lost` are NOT claimed. They matched "did we
+  // win the game last night" and "I lost my keys", advertising schemas on a
+  // turn that wanted none. Real sentences still land: "which deals did we win
+  // last quarter" matches `deals?`.
+  //
+  // 🔴 THE OVERLAP WITH `cloud` IS STILL DELIBERATE. That rule also claims
   // `crm`, `deals?` and `pipelines?`, so "what deals are in the pipeline"
   // matches both. By the cloud rule's own stated test — drop a word when
-  // ANOTHER DOMAIN OWNS IT — those three should move here now that a native
-  // CRM exists. They must not move YET: until WARP-2549 lands the connector
-  // landing seam, a HubSpot customer's deals are not in Crm* at all, and
-  // `cloud_query_dataset` is the ONLY tool that can answer the question for
-  // them. Moving the words early would break that customer and turn two of
-  // WARP-2497's deliberately pinned positives red. When 2549 lands and those
-  // deals reach Crm*, move them and re-point 2497's positives.
-  { pattern: /\b(crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|follow-?ups?)\b/i, domains: ["crm"] },
+  // ANOTHER DOMAIN OWNS IT — those three should move here once the connector
+  // landing seam exists. VERIFIED at ADR-045 slice C: WARP-2549 is NOT on
+  // `stage` (no commit, no branch; docs/ADR-044 still lists it as future
+  // work), so a HubSpot customer's deals are not in Crm* and
+  // `cloud_query_dataset` is still the only tool that can answer for them.
+  // Moving the words now would break that customer and turn two of WARP-2497's
+  // pinned positives red. When 2549 lands, move them and re-point 2497's
+  // positives — not before.
+  {
+    pattern: /\b(business|company|opening hours|customers?|crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|follow-?ups?)\b/i,
+    domains: ["business", "crm"],
+  },
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //

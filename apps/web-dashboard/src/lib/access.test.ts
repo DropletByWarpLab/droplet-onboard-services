@@ -169,6 +169,28 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     const cal = TOOL_DOMAIN_GROUPS.find((g) => g.id === "calendar")!;
     expect(cal.domains).toEqual(["calendar", "reminders", "notifications"]);
   });
+
+  it("business is its own on-box row, and System no longer carries it (WARP-2583)", () => {
+    // ADR-045 collapsed every PM and CRM tool into the `business` domain. The
+    // Projects row used to write the `pm` grant — empty since — while
+    // `business` sat under System: withholding Projects changed nothing and
+    // the System toggle handed out project-creating tools. MUTATION: move
+    // `business` back under `system`, or bring the `projects` row back -> red.
+    const business = TOOL_DOMAIN_GROUPS.find((g) => g.id === "business")!;
+    expect(business).toMatchObject({ label: "Business", feature: null });
+    expect(business.domains).toEqual(["business", "pm", "crm"]);
+    expect(TOOL_DOMAIN_GROUPS.find((g) => g.id === "system")!.domains).not.toContain("business");
+    expect(TOOL_DOMAIN_GROUPS.find((g) => g.id === "projects")).toBeUndefined();
+    // And the payload proves it: Business at `view` next to System at `use`
+    // grants `use` on nothing business-shaped.
+    const draft = blankRoleDraft("admin");
+    draft.tools.business = "view";
+    draft.tools.system = "use";
+    const grants = draftToRolePayload(draft).toolGrants;
+    expect(grants).toContainEqual({ domain: "business", level: "view" });
+    expect(grants).toContainEqual({ domain: "system", level: "use" });
+    expect(grants.filter((g) => g.level === "use").map((g) => g.domain)).not.toContain("business");
+  });
 });
 
 describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => {
