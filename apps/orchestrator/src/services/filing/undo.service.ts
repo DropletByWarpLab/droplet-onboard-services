@@ -54,7 +54,20 @@ export interface UndoResult {
   companyRemoved: boolean;
   contactRemoved: boolean;
   projectRemoved: boolean;
+  /** The link survives, archived. Only possible when its subject survives. */
   linkArchived: boolean;
+  /**
+   * 🔴 The link went with its subject.
+   *
+   * `EntityLink.companyId` is `onDelete: Cascade`, so deleting the customer
+   * takes the link with it — there is no archived row left to explain
+   * anything, because there is no longer a customer for it to point at. Said
+   * as its own field rather than folded into `linkArchived`: the first cut
+   * archived the link and THEN deleted the company, and reported
+   * `linkArchived: true` for a row Postgres had already removed. The pg lane
+   * caught it; a mocked Prisma never would have.
+   */
+  linkRemoved: boolean;
   activityRemoved: boolean;
   /** True when a `NOT_SAME` rule was written so the pair is not re-offered. */
   ruleWritten: boolean;
@@ -136,22 +149,8 @@ async function reverse(
   let contactRemoved = false;
   let projectRemoved = false;
   let linkArchived = false;
+  let linkRemoved = false;
   let activityRemoved = false;
-
-  // ── The link, first ──────────────────────────────────────────────────────
-  //
-  // Archived, never deleted: the link row is the record that Droplet once
-  // filed this document here, and the Rules page needs that history to explain
-  // itself. `isArchived` and `archivedAt` move together (WARP-884) — one is
-  // the flag and the other is the audit stamp, and neither is derived from the
-  // other.
-  if (proposal.createdEntityLinkId) {
-    const n = await tx.entityLink.updateMany({
-      where: { id: proposal.createdEntityLinkId, isArchived: false },
-      data: { isArchived: true, archivedAt: new Date() },
-    });
-    linkArchived = n.count === 1;
-  }
 
   // ── The caption ──────────────────────────────────────────────────────────
   //
@@ -211,6 +210,38 @@ async function reverse(
     companyRemoved = true;
   }
 
+  // ── The link, LAST ───────────────────────────────────────────────────────
+  //
+  // 🔴 ORDER MATTERS, and getting it wrong is how the first cut of this
+  // function reported a lie. `EntityLink.companyId` is `onDelete: Cascade`, so
+  // archiving the link and then deleting its customer leaves a result saying
+  // `linkArchived: true` about a row Postgres has already removed.
+  //
+  // So the subject is decided first, and the link is only archived if the
+  // subject SURVIVED. When it did not, the link is gone with it and the result
+  // says so — there is no archived row left to explain anything, because there
+  // is no longer a customer for it to point at.
+  if (proposal.createdEntityLinkId) {
+    const still = await tx.entityLink.findUnique({
+      where: { id: proposal.createdEntityLinkId },
+      select: { id: true },
+    });
+    if (!still) {
+      linkRemoved = true;
+    } else {
+      // Archived, never deleted: the row is the record that Droplet once filed
+      // this document here, and the Rules page needs that history to explain
+      // itself. `isArchived` and `archivedAt` move together (WARP-884) — one is
+      // the flag, the other the audit stamp, and neither is derived from the
+      // other.
+      const n = await tx.entityLink.updateMany({
+        where: { id: proposal.createdEntityLinkId, isArchived: false },
+        data: { isArchived: true, archivedAt: new Date() },
+      });
+      linkArchived = n.count === 1;
+    }
+  }
+
   await tx.ingestProposal.update({
     where: { id: proposal.id },
     data: { undoMode: mode },
@@ -230,6 +261,7 @@ async function reverse(
     contactRemoved,
     projectRemoved,
     linkArchived,
+    linkRemoved,
     activityRemoved,
     ruleWritten,
   };

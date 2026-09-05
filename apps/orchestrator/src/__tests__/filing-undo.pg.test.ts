@@ -162,23 +162,53 @@ describe.skipIf(!RUN)("undo, against a real database (WARP-2731)", () => {
     expect(created.origin).toBe("EXTRACTED");
   });
 
-  it("archives the link rather than deleting it, and remembers the correction", async () => {
+  it("🔴 when the customer is DELETED, the link goes with it — and undo says so", async () => {
+    // `EntityLink.companyId` is `onDelete: Cascade`. The first cut of the undo
+    // archived the link and THEN deleted the company, and reported
+    // `linkArchived: true` about a row Postgres had already removed. A mocked
+    // Prisma has no cascade and would have agreed with it forever.
     const { proposalId, createdEntityLinkId } = await fileACustomer("d");
     const result = await undoProposal(prisma, proposalId, "u-owner");
+
+    expect(result.mode).toBe("delete");
+    expect(result.linkRemoved).toBe(true);
+    expect(result.linkArchived).toBe(false);
+    expect(
+      await prisma.entityLink.findUnique({ where: { id: createdEntityLinkId! } }),
+    ).toBeNull();
+
+    // A CREATE_CUSTOMER's record is gone, so there is nothing for a NOT_SAME
+    // rule to point at — and a rule pointing at nothing is one the owner finds
+    // later and cannot explain.
+    expect(result.ruleWritten).toBe(false);
+  });
+
+  it("when the customer SURVIVES, the link is archived rather than deleted", async () => {
+    // The other side of the same branch: the row is the record that Droplet
+    // once filed this document here, which the Rules page needs to explain
+    // itself. `isArchived` and `archivedAt` move together (WARP-884).
+    const { proposalId, createdCompanyId, createdEntityLinkId } = await fileACustomer("f");
+    await prisma.crmActivity.create({
+      data: {
+        subjectType: "COMPANY",
+        companyId: createdCompanyId!,
+        kind: "NOTE",
+        summary: `${P}spoke to them Friday`,
+        origin: "LOCAL",
+        actorId: "u-owner",
+      },
+    });
+
+    const result = await undoProposal(prisma, proposalId, "u-owner");
+    expect(result.mode).toBe("archive");
+    expect(result.linkArchived).toBe(true);
+    expect(result.linkRemoved).toBe(false);
 
     const link = await prisma.entityLink.findUniqueOrThrow({
       where: { id: createdEntityLinkId! },
     });
-    // The link row is the record that Droplet once filed this document here,
-    // which the Rules page needs to explain itself. `isArchived` and
-    // `archivedAt` move together (WARP-884).
     expect(link.isArchived).toBe(true);
     expect(link.archivedAt).not.toBeNull();
-
-    // A CREATE_CUSTOMER's record is gone or archived, so there is nothing for
-    // a NOT_SAME rule to point at — and a rule pointing at nothing is one the
-    // owner finds later and cannot explain.
-    expect(result.ruleWritten).toBe(false);
   });
 
   it("undoing twice is a 409, not a second reversal", async () => {

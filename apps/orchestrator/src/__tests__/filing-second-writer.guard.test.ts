@@ -27,10 +27,18 @@
  *   - delete `updatedAt = NOW()` from the conflict arm (the re-arm signal)
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 
-const DB_PY = join(process.cwd(), "..", "..", "services", "file-indexer", "db.py");
+import { readRepoFile, repoPath } from "./helpers/test-paths";
+
+/**
+ * 🔴 Anchored to THIS FILE, not to `process.cwd()` (WARP-2654). A cwd-relative
+ * path here would be worse than usual: every assertion below is a NEGATIVE
+ * (`includes(...) === false`), so resolving against the wrong tree — a sibling
+ * worktree, a CI scratch dir — would make the whole guard pass while reading
+ * nothing at all. `test-paths.guard.test.ts` enforces this repo-wide.
+ */
+const DB_PY = repoPath("services", "file-indexer", "db.py");
 
 /** The columns filing owns. Listed here rather than derived so that adding one
  *  without extending this guard is a visible omission in the diff. */
@@ -46,7 +54,7 @@ const ORCHESTRATOR_OWNED = [
 
 /** The body of `set_index_status`, from its `def` to the next top-level `def`. */
 function setIndexStatusSource(): string {
-  const src = readFileSync(DB_PY, "utf8");
+  const src = readRepoFile("services", "file-indexer", "db.py");
   const start = src.indexOf("def set_index_status(");
   expect(start, "set_index_status has been renamed or removed").toBeGreaterThan(-1);
   const after = src.indexOf("\ndef ", start + 1);
@@ -104,7 +112,7 @@ describe("🔴 the file-indexer is not a second writer to filing's columns", () 
     // `FileIndexStatus` row to decide a proposal has outlived its source. A
     // Python change to soft-delete instead would leave every proposal alive
     // forever, holding names and amounts for a file that is gone.
-    const src = readFileSync(DB_PY, "utf8");
+    const src = readRepoFile("services", "file-indexer", "db.py");
     const start = src.indexOf("def delete_index_status(");
     expect(start, "delete_index_status has been renamed or removed").toBeGreaterThan(-1);
     const after = src.indexOf("\ndef ", start + 1);

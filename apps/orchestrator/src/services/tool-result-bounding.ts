@@ -152,6 +152,15 @@ export const CURSOR_KEYS: ReadonlySet<string> = new Set([
   "scrollId",
   "page_token",
   "pageToken",
+  // WARP-2731 — ADR-048's Skipped list pages on a TIMESTAMP rather than an
+  // opaque token: `FileIndexStatus` has no surrogate id (`@@id([userId, path])`)
+  // and `EmailMessage` is a uuid, so the two halves share only `extractedAt`.
+  // A cursor is what the caller passes back to get the next page, whatever its
+  // shape — and dropping this one while shortening a body leaves a truncated
+  // list with no way to continue, which is the confidently-incomplete answer
+  // this registry exists to prevent.
+  "nextBefore",
+  "next_before",
 ]);
 
 /**
