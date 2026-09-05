@@ -112,6 +112,7 @@ import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
+import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -1133,6 +1134,34 @@ async function main() {
       }
     },
     { lockKey: "droplet:team-chat-meeting-reminders" },
+  );
+
+  // WARP-2587 (ADR-045 slice I) — PM + CRM notification sweep. Every 60s,
+  // projects pending PmActivity / CrmActivity rows into NotificationLog +
+  // MQTT toasts; exactly-once via the pending→sent claim inside the sweep's
+  // own transaction, coalesced to at most one notification per recipient per
+  // tick per source so a bulk import cannot fan out 200 toasts.
+  //
+  // Its own lockKey, distinct from the meeting sweep's, so the two 60s jobs
+  // never contend on one advisory lock and starve each other.
+  //
+  // The second argument is the SLICE-H SEAM: `departmentWatchers` defaults to
+  // assignees-only because PmProject has no department today. When slice H
+  // lands, pass its resolver here — that is the whole integration; nothing in
+  // activity-notify.service.ts changes.
+  //
+  // Errors propagate naked to cron-runtime's `safeRun`, matching every other
+  // handler here; only the MQTT toast and the department resolver are
+  // absorbed inside the service (leaf effects).
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      const result = await runActivityNotifySweep(prisma);
+      if (result.notificationsSent > 0 || result.pmSkipped > 0 || result.crmSkipped > 0) {
+        logger.info(result, "activity notify sweep");
+      }
+    },
+    { lockKey: "droplet:activity-notify" },
   );
 
   // WARP-475's nightly camera-retention purge used to fire here at 03:30.

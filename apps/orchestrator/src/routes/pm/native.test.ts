@@ -821,14 +821,34 @@ describe("native PM routes — identity PATCH writes no spurious activity row", 
     expect(after).toBe(before);
   });
 
-  it("CHANGING the assignee set DOES write an 'updated' activity row", async () => {
-    const before = db.activity.filter((a) => a.verb === "updated").length;
+  it("CHANGING the assignee set writes assigned/unassigned, not a generic 'updated'", async () => {
+    // WARP-2587 — this case used to pin `updated`, because assignee churn was
+    // folded into the `updated`/`fields` bucket. It is not any more: `assigned`
+    // and `unassigned` had been members of PmActivityVerb since WARP-884 with
+    // ZERO writers, and this is the change that gave them one.
+    //
+    // The test's intent is unchanged and is what still holds — an identity
+    // PATCH writes nothing, a real change writes an audit row. What changed is
+    // that the row now NAMES what happened, which is strictly more information
+    // and which the dashboard was already built to render: `detail.tsx`'s
+    // `humanizeActivity` has carried `case "assigned": "changed assignees"`
+    // all along, against a producer that did not exist. `updated` rendered as
+    // the vaguer "updated the item".
+    //
+    // Asserted per-verb rather than as a total, so this cannot pass on a
+    // future change that emits the right COUNT of the wrong rows.
+    const before = db.activity.length;
     const res = await request(makeApp(prisma, OWNER))
       .patch(`/api/pm/work-items/${wiId}`)
       .send({ assignees: ["u1", "u3"] });
     expect(res.status).toBe(200);
-    const after = db.activity.filter((a) => a.verb === "updated").length;
-    expect(after).toBe(before + 1);
+
+    const written = db.activity.slice(before);
+    // u1,u2 -> u1,u3 is exactly one departure and one arrival.
+    expect(written.filter((a) => a.verb === "unassigned")).toHaveLength(1);
+    expect(written.filter((a) => a.verb === "assigned")).toHaveLength(1);
+    // ...and NOT the generic bucket, which is the regression this replaces.
+    expect(written.filter((a) => a.verb === "updated")).toHaveLength(0);
   });
 
   it("re-PATCHing the SAME (empty) labelIds writes no 'updated' activity row", async () => {

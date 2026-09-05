@@ -1060,6 +1060,21 @@ export async function createWorkItem(
         },
       });
       await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      // WARP-2587: a create WITH assignees is an assignment, and `created`
+      // does not say who. One `assigned` row per assignee, so the notify
+      // sweep sees the same shape whether the assignment happened at create
+      // time or in a later PATCH. `actorId` is on the row, so somebody who
+      // creates an item assigned to themselves is never notified about it.
+      for (const userId of input.assignees ?? []) {
+        await writeActivity(tx, {
+          workItemId: item.id,
+          actorId,
+          verb: "assigned",
+          field: "assignees",
+          oldValue: null,
+          newValue: userId,
+        });
+      }
       return item;
     });
   } catch (err) {
@@ -1256,14 +1271,65 @@ export async function updateWorkItem(
     };
     const existingAssignees = existing.assignees.map((a) => a.userId);
     const existingLabelIds = existing.labels.map((l) => l.labelId);
+
+    // WARP-2587 — assignee churn gets its OWN verbs. `assigned`,
+    // `unassigned` and `due_date_changed` have been members of
+    // PmActivityVerb since WARP-884 with zero writers anywhere in the repo:
+    // both changes were folded into the `updated`/`fields` bucket below, so
+    // "who is on this" and "when is it due" were unrecoverable from the
+    // history feed and unnotifiable by anything downstream. The identity-PATCH
+    // guard is preserved — `setChanged` still gates the whole block, so
+    // re-sending the same assignee set writes nothing.
+    if (setChanged(fields.assignees, existingAssignees)) {
+      const next = new Set(fields.assignees ?? []);
+      const before = new Set(existingAssignees);
+      for (const userId of next) {
+        if (before.has(userId)) continue;
+        await writeActivity(tx, {
+          workItemId: id,
+          actorId,
+          verb: "assigned",
+          field: "assignees",
+          oldValue: null,
+          newValue: userId,
+        });
+      }
+      for (const userId of before) {
+        if (next.has(userId)) continue;
+        await writeActivity(tx, {
+          workItemId: id,
+          actorId,
+          verb: "unassigned",
+          field: "assignees",
+          oldValue: userId,
+          newValue: null,
+        });
+      }
+    }
+    const dueDateChanged =
+      fields.dueDate !== undefined &&
+      fields.dueDate?.toISOString() !== existing.dueDate?.toISOString();
+    if (dueDateChanged) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "due_date_changed",
+        field: "dueDate",
+        oldValue: existing.dueDate?.toISOString() ?? null,
+        newValue: fields.dueDate?.toISOString() ?? null,
+      });
+    }
+
+    // The residual. `assignees` and `dueDate` are deliberately NOT in this
+    // disjunction any more: they now have verbs that name them, and leaving
+    // them here would write a second, less informative row for the same edit
+    // — which is how the feed gets noisy and how a notifier ends up firing
+    // twice.
     const scalarChanged =
       (fields.name !== undefined && fields.name !== existing.name) ||
       (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
-      (fields.dueDate !== undefined &&
-        fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
       (fields.startDate !== undefined &&
         fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
-      setChanged(fields.assignees, existingAssignees) ||
       setChanged(fields.labelIds, existingLabelIds);
     if (scalarChanged) {
       await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
