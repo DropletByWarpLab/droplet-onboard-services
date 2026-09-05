@@ -5,21 +5,24 @@
  * DESIGNED TO DEGRADE. ADR-045 intends a graph: a deal to the project that
  * delivers it, a project to its customer, a task to the task blocking it, a
  * file to whatever it is evidence of, a task to the department that owns
- * it. On `stage` today, exactly TWO of those edges have a table behind
- * them, and both live on `CrmDeal` — `projectId` and `companyId`, from the
+ * it. On `stage` today, exactly TWO of those edges are writable by this
+ * tool, and both live on `CrmDeal` — `projectId` and `companyId`, from the
  * WARP-2117 join (`onDelete: SetNull`, so deleting the project never
- * deletes the record of the sale). `PmProject` has no `companyId` column;
- * there is no work-item relation table, no file-to-record link table, and
- * no department column on a work item.
+ * deletes the record of the sale). Two more have their column or table now
+ * (`PmProject.companyId`, `EntityLink`) but a write route that admits only
+ * a signed-in human, not the assistant's principal; there is still no
+ * work-item relation table and no department column on a work item.
+ * `LINK_EDGES`'s header in `write-shared.ts` says which is which.
  *
  * So the whole intended graph ships as DATA in `LINK_EDGES` and two
- * branches ship as CODE. An edge nobody has built yet is a row with
+ * branches ship as CODE. An edge this box cannot write yet is a row with
  * `status: "not_built"` and a `blockedBy` string, and the caller gets a
  * self-describing refusal naming both what it is waiting for and what does
  * work today — instead of a stack trace, a silent success, or a tool that
- * would not compile until four other slices land. When slice F/G/H arrive
- * they flip one word in that table and add a dispatch branch: no schema
- * change, no registry change, no budget change.
+ * would not compile until four other slices land. When a blocker clears —
+ * a table lands, or a route admits the principal — that slice flips one
+ * word in the table and adds a dispatch branch: no schema change, no
+ * registry change, no budget change.
  *
  * WHY `from_entity` / `to_entity` / `kind` ARE PLAIN STRINGS, not enums.
  * Deliberate, and the opposite call from `business_create`'s `entity`.

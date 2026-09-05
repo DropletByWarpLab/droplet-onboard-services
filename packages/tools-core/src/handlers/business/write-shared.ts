@@ -143,36 +143,46 @@ export interface LinkEdge {
  * Every edge ADR-045 intends, with the truth about each one on `stage`.
  *
  * THE DEGRADATION CONTRACT. Slice D ships the whole intended graph as DATA
- * and only two branches as CODE. An edge whose table does not exist yet is
- * a row here with `status: "not_built"` and a `blockedBy` naming the thing
- * it waits for — so `business_link` compiles today, refuses cleanly and
- * self-describingly today, and becomes capable the day slice F/G/H land by
- * flipping ONE WORD in this table plus adding its dispatch branch. No
+ * and only two branches as CODE. An edge this box cannot write yet is a row
+ * here with `status: "not_built"` and a `blockedBy` naming the thing it
+ * waits for — so `business_link` compiles today, refuses cleanly and
+ * self-describingly today, and becomes capable the day its blocker clears
+ * by flipping ONE WORD in this table plus adding its dispatch branch. No
  * schema change, no registry change, no budget change, and — because the
  * schema takes `from_entity`/`to_entity`/`kind` as plain strings rather
  * than enums — no shared enum for four slices to collide on.
+ *
+ * TWO KINDS OF BLOCKER, and each `blockedBy` says which. A missing TABLE
+ * (`task -> task`, `task -> department`) waits on a schema slice. A missing
+ * GATE is a route that exists and works for a signed-in human but does not
+ * admit the assistant's `_service:mcp` principal — flipping the word here
+ * without widening the route would ship a branch that 403s, the exact thing
+ * `business_update` refuses `project` to avoid. Two rows moved from the
+ * first kind to the second while #2005 was open, and their strings now say
+ * so rather than naming a table that exists:
+ *   - `project -> customer`: `PmProject.companyId` landed (WARP-2562,
+ *     ADR-044) and `business_find` already READS it, but the writer is
+ *     `PATCH /api/pm/projects/:id`, which is `requireRole(...WRITE)`.
+ *   - `file -> record`: the `EntityLink` table and `/api/crm/entity-links`
+ *     landed (WARP-2585), but that router is deliberately not
+ *     `requireRoleOrMcpService` — it resolves the file through the CALLER's
+ *     own Nextcloud session, a trust surface the service principal does not
+ *     carry. Its own header says the principal is admitted there, with the
+ *     asserted-user handling, when the tool half lands. A route change with
+ *     its own review, not a word flip.
  *
  * The two live rows are the WARP-2117 join, verified in the schema:
  * `CrmDeal.projectId` and `CrmDeal.companyId` (both `onDelete: SetNull`,
  * both writable through `dealPatchSchema`). Note the direction — the link
  * to a project lives on the DEAL, so that deleting the project leaves the
- * commercial record of the sale intact. `project -> customer` is listed
- * below as `not_built` because `PmProject` genuinely has no `companyId`
- * column on `stage`, whatever a branch stack elsewhere may carry.
+ * commercial record of the sale intact.
  */
 export const LINK_EDGES: readonly LinkEdge[] = [
   // ── live on `stage` ──
   { from: "deal", to: "project", kind: "delivers", status: "live" },
   { from: "deal", to: "customer", kind: "belongs_to", status: "live" },
 
-  // ── real edges this box cannot write yet ──
-  {
-    from: "project",
-    to: "customer",
-    kind: "for",
-    status: "not_built",
-    blockedBy: "PmProject has no companyId column yet",
-  },
+  // ── real edges with no table behind them yet ──
   {
     from: "task",
     to: "task",
@@ -188,18 +198,32 @@ export const LINK_EDGES: readonly LinkEdge[] = [
     blockedBy: "the work-item relation table is not built yet",
   },
   {
-    from: "file",
-    to: "record",
-    kind: "attached_to",
-    status: "not_built",
-    blockedBy: "the file-to-record link table is not built yet",
-  },
-  {
     from: "task",
     to: "department",
     kind: "owned_by",
     status: "not_built",
     blockedBy: "work items carry no department column yet",
+  },
+
+  // ── real edges whose column or table EXISTS, and whose write route admits
+  //    only a signed-in human — see the header ──
+  {
+    from: "project",
+    to: "customer",
+    kind: "for",
+    status: "not_built",
+    blockedBy:
+      "the project route does not admit the assistant yet - PmProject.companyId exists, " +
+      "but PATCH /api/pm/projects/:id is human-only",
+  },
+  {
+    from: "file",
+    to: "record",
+    kind: "attached_to",
+    status: "not_built",
+    blockedBy:
+      "the file-link route does not admit the assistant yet - the EntityLink table exists, " +
+      "but /api/crm/entity-links resolves the file through the caller's own Nextcloud session",
   },
   // Not a missing table — a missing GATE. The route exists and works for a
   // signed-in human; it just does not admit the assistant's own principal,
