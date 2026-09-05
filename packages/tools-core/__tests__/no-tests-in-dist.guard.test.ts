@@ -29,10 +29,10 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, statSync, existsSync } from "node:fs";
 import path from "node:path";
-
-// `__dirname`, not `import.meta.url`: this package builds to CommonJS, where
-// `import.meta` is a TS1470 error (WARP-2502).
-const PKG_ROOT = path.resolve(__dirname, "..");
+// Anchored to this test file, not to the runner's cwd (WARP-2654). The
+// helper uses `__dirname` — this package builds to CommonJS, where
+// `import.meta` is a TS1470 error under `tsconfig.test.json`.
+import { PACKAGE_ROOT as PKG_ROOT } from "./helpers/test-paths";
 
 /** Every file under `dir` whose name matches `pred`, relative to `dir`. */
 function walk(dir: string, pred: (name: string) => boolean): string[] {

@@ -148,6 +148,8 @@ export class McpClientService implements McpClientPort {
           name,
           userId: context?.userId,
           ok: !isError,
+          // WARP-2177 — present only for a durable run's dispatches.
+          agentRunId: context?.agentRunId,
         }),
       }).catch(() => {
         // Recorder already swallows internally; defence-in-depth.
@@ -241,6 +243,15 @@ export interface McpCallContext {
    * closes. See `docs/tool-confirmation-contract.md`.
    */
   confirmationToken?: string;
+  /**
+   * WARP-2177 — the durable agent run this dispatch belongs to. Lands on the
+   * `tool_call` ActivityRow as `refs.agentRunId` so the Activity surface can
+   * group a run's calls — no new activity kind (`KNOWN_KINDS` is a closed
+   * allow-list that throws, the same reasoning ADR-014 gave for
+   * `refs.targetDeviceId`). Rides `_meta` like every other field here; the
+   * mcp-server ignores it.
+   */
+  agentRunId?: string;
   /**
    * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
    * paraphrase vectors, filename filter, search overrides). Set by the

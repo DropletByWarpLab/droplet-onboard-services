@@ -64,5 +64,10 @@ jobs:
       - name: Build @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge build
 
+      # WARP-2617: the build above excludes `__tests__`, so this is the step
+      # that typechecks the test files — mirrors ci.yml's `mcp-bridge` job.
+      - name: Typecheck @droplet/mcp-bridge tests (tsconfig.test.json)
+        run: npm run -w @droplet/mcp-bridge typecheck:tests
+
       - name: Run @droplet/mcp-bridge vitest
         run: npm run -w @droplet/mcp-bridge test

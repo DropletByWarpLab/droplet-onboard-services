@@ -38,6 +38,11 @@ import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import {
+  AGENT_RUN_LOCK_KEY,
+  createAgentRunWorker,
+} from "./services/agent-run-worker.service.js";
+import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
@@ -563,6 +568,43 @@ async function main() {
       await tickSceneSchedules(prisma, sceneMatterDispatcher);
     },
     { lockKey: "droplet:scene-schedule-ticker" },
+  );
+
+  // WARP-2177 — durable agent-run worker (epic WARP-2176). Two ticks on the
+  // one sanctioned clock, no second scheduler:
+  //   - the claim/reclaim tick runs under its own advisory lock so only one
+  //     replica claims each queued row (the claim itself is a conditional
+  //     updateMany, so even a lost lock cannot double-claim);
+  //   - the heartbeat tick is per process and unlocked: it beats the runs
+  //     THIS process is executing. Timer-driven, not iteration-driven, so a
+  //     run sitting in a slow model call still holds its lease.
+  // The run executes OUTSIDE the tick — the lock is transaction-scoped with a
+  // 60 s timeout, which is right for a tick and wrong for a 40-minute run.
+  // NOT gated on ROUTING_MODE: runs need the model and the tool registry,
+  // neither of which depends on router supervision.
+  const agentRunWorker = createAgentRunWorker({
+    prisma,
+    agent: { mcp: mcpClient, aiGateway: { chat: aiGateway.chat } },
+  });
+  cronRuntime.scheduleInterval(
+    config.agentRuns.tickMs,
+    async () => {
+      await agentRunWorker.tickOnce();
+    },
+    { lockKey: AGENT_RUN_LOCK_KEY },
+  );
+  cronRuntime.scheduleInterval(config.agentRuns.heartbeatMs, async () => {
+    await agentRunWorker.heartbeatOnce();
+  });
+  logger.info(
+    {
+      workerId: agentRunWorker.workerId,
+      concurrency: config.agentRuns.concurrency,
+      tickMs: config.agentRuns.tickMs,
+      heartbeatMs: config.agentRuns.heartbeatMs,
+      reclaimAfterMs: config.agentRuns.reclaimAfterMs,
+    },
+    "agent run worker started",
   );
 
   // WARP-1385 (ADR-030) — direct-punch remote-access overlay connect agent.
@@ -1414,6 +1456,12 @@ async function main() {
   // Docker's restart policy brings a fresh instance back.
   const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
+    // WARP-2177 — hand in-flight runs back to `queued` (not charged as an
+    // attempt) so the restarted process resumes them from their checkpoint
+    // on its first tick instead of after the reclaim threshold.
+    await agentRunWorker.releaseAll().catch((err) => {
+      logger.warn("agent run release failed: %s", (err as Error).message);
+    });
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
     // test suites that drive `createApp()` end-to-end don't leak the

@@ -627,6 +627,14 @@ async function persistCloudTokens(connectionId: string, tokens: unknown): Promis
  * trust store. There is deliberately no "skip verification" path: a box we
  * cannot verify is a box we refuse, and that refusal is asserted by
  * erp-connector's live-box suite.
+ *
+ * WARP-2626 — this Agent comes from the npm `undici`, and a dispatcher is only
+ * honoured by the undici that minted it. The connector therefore routes any
+ * dispatcher-carrying request through that same package's `fetch` rather than
+ * the runtime's built-in one (`api-auth.ts:resolveFetch`), so this trust model
+ * survives a Node major bump instead of degrading into a bare `fetch failed`
+ * that reads as an unreachable box. Nothing extra is needed here — but do NOT
+ * "simplify" the connector back onto `globalThis.fetch`; that is the defect.
  */
 export function dispatcherForCa(caPem: string | undefined): unknown {
   if (!caPem) return undefined;
