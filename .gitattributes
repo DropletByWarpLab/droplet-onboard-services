@@ -49,6 +49,13 @@ scripts/image/keys/*.pub text eol=lf
 scripts/image/autoinstall/* text eol=lf
 scripts/image/grub-autoinstall.cfg text eol=lf
 
+# WARP-2685 — the CI-coverage exemption list. Extensionless, so nothing above
+# catches it, and scripts/check-ci-coverage.sh matches its lines with
+# `grep -qxF` against a path: a CRLF checkout makes every entry read as
+# `services/foo\r`, which matches nothing, so the exemption silently stops
+# applying. Pin to LF.
+.github/ci-coverage-exempt text eol=lf
+
 # Prisma migration SQL. file-edit-session.schema.test.ts (and the other
 # *.schema.test.ts guards) read the migration bytes and comment-strip with
 # `/--.*$/` before asserting on the DDL. `.` never matches `\r` and a

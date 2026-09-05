@@ -28,9 +28,15 @@ import {
   useSummary,
   useProjectStates,
   useProjectItems,
+  useDepartments,
   usePeople,
   pmActions,
 } from "@/components/projects/usePm";
+import {
+  DEPARTMENT_ANY,
+  departmentOptions,
+  matchesDepartment,
+} from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
@@ -82,6 +88,12 @@ function ProjectsWorkspace(): JSX.Element {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
+  // ADR-045 §5.3 — the department filter. Client-side like `savedView` and `q`:
+  // the board already holds every item for the project in one fetch, so a
+  // server round-trip buys nothing and would cost the instant saved-view
+  // counts. The server-side `?department=` filter exists for the API and the
+  // LLM's pm_list_work_items, and applies the identical rollup rule.
+  const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
   const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
@@ -90,15 +102,26 @@ function ProjectsWorkspace(): JSX.Element {
   const { summary, mutate: mutateSummary } = useSummary();
   const { states } = useProjectStates(projectId);
   const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
+  const { departments } = useDepartments();
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
 
   const allItems = items ?? [];
+  // ADR-045 §5.3 — the scoped list unioned with every department visible on
+  // this board, so an archived department (hidden from a non-admin's
+  // /api/departments) or one the caller is not a member of is still filterable.
+  const deptOptions = useMemo(
+    () => departmentOptions(allItems, departments),
+    [allItems, departments],
+  );
   const filtered = useMemo(() => {
     let list = allItems;
     if (q.trim()) list = list.filter((i) => matchQuery(i, q.trim()));
+    if (department !== DEPARTMENT_ANY) {
+      list = list.filter((i) => matchesDepartment(i, department, deptOptions));
+    }
     return applySavedView(list, savedView, user?.id);
-  }, [allItems, q, savedView, user?.id]);
+  }, [allItems, q, department, deptOptions, savedView, user?.id]);
 
   const counts: Record<SavedView, number> = useMemo(
     () => ({
@@ -111,7 +134,8 @@ function ProjectsWorkspace(): JSX.Element {
     [allItems, user?.id],
   );
 
-  const filterActive = savedView !== "all" || q.trim() !== "";
+  const filterActive =
+    savedView !== "all" || q.trim() !== "" || department !== DEPARTMENT_ANY;
   const boardDomain: Domain = itemsLoading
     ? "loading"
     : itemsErr
@@ -133,6 +157,7 @@ function ProjectsWorkspace(): JSX.Element {
     setView("board");
     setSavedView("all");
     setQ("");
+    setDepartment(DEPARTMENT_ANY);
   };
 
   const backToIndex = () => {
@@ -231,7 +256,13 @@ function ProjectsWorkspace(): JSX.Element {
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
                 <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                   <ViewSwitcher view={view} onView={(v) => setView(v)} />
-                  <FilterBar q={q} onQ={setQ} />
+                  <FilterBar
+                    q={q}
+                    onQ={setQ}
+                    departments={deptOptions}
+                    department={department}
+                    onDepartment={setDepartment}
+                  />
                 </div>
                 <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
               </div>

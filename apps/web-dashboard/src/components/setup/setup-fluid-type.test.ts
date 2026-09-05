@@ -20,8 +20,8 @@
  * WARP-2632 — that anchoring now comes from the shared
  * `__tests__/helpers/test-paths` helper, which every path-reading suite in
  * this package uses, so there is one place that knows where the package and
- * the repo are (and one place carrying the `fileURLToPath`-not-`new URL`
- * Windows caveat).
+ * the repo are (and one place carrying the note on why the anchor is spelled
+ * `__dirname` here — WARP-2654).
  */
 import { describe, it, expect } from "vitest";
 import { readPackageFile } from "@/__tests__/helpers/test-paths";

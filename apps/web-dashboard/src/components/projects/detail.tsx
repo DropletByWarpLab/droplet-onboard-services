@@ -11,6 +11,7 @@ import {
   PriorityFlag,
   StatePill,
   LabelTag,
+  DepartmentTag,
   Avatar,
   AvatarStack,
   usePerson,
@@ -233,7 +234,11 @@ function humanizeActivity(verb: string, field: string | null): string {
     case "assigned":
       return "changed assignees";
     case "updated":
-      return field === "priority" ? "changed the priority" : "updated the item";
+      if (field === "priority") return "changed the priority";
+      // ADR-045 §5.3 — re-routing work to another department is a decision
+      // about who owns it, and "updated the item" hides exactly that.
+      if (field === "department") return "changed the department";
+      return "updated the item";
     default:
       return verb.replace(/_/g, " ");
   }
@@ -347,6 +352,26 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         </PropRow>
         <PropRow icon="flag" label="Labels">
           <LabelsEditor item={item} onChanged={onChanged} />
+        </PropRow>
+        {/* ADR-045 §5.3 — the RESOLVED department, with where it came from.
+            Read-only in this slice: the picker is a write, and a write on this
+            panel owes the §8 safety-chip contract a design pass this slice has
+            not had. The API and the LLM tools can already set it. */}
+        <PropRow icon="building" label="Department">
+          {item.department ? (
+            <span className="pm-row" style={{ gap: 7 }}>
+              <DepartmentTag dept={item.department} />
+              <span style={{ fontSize: 12, color: "var(--text-4)" }}>
+                {item.department.source === "item"
+                  ? "set on this item"
+                  : "from the project"}
+              </span>
+            </span>
+          ) : (
+            <span style={{ fontSize: 12.5, color: "var(--text-4)" }}>
+              No department
+            </span>
+          )}
         </PropRow>
         <PropRow icon="cal" label="Start date">
           <span className="pm-mono" style={{ fontSize: 12.5, color: "var(--text-2)" }}>{fmtISODate(item.startDate)}</span>

@@ -1,0 +1,338 @@
+# Durable agent runs — design (WARP-2176)
+
+**Status:** Accepted for child 1 (WARP-2177); §6–§9 describe children 2–4 as
+scoped in their tickets and are updated as each lands.
+**Tickets:** epic WARP-2176; WARP-2177 (this document's as-built half),
+WARP-2178 (tool-result summarisation), WARP-2179 (Tier-2 park-and-confirm),
+WARP-2180 (API, Activity view, scheduling, LLM tools).
+**Supersedes:** the `agent-runs-design-draft.md` the tickets cite, which was
+never committed anywhere; the tickets' acceptance criteria were treated as the
+spec.
+
+## 1. The problem, in one paragraph
+
+`runAgent()` (`apps/orchestrator/src/services/llm-agent.service.ts`) runs a
+whole turn inside one HTTP request. It streams SSE and checks `req.signal`
+between iterations and before each tool dispatch. Close the laptop and the turn
+dies; redeploy the box and every in-flight turn dies with the container. That
+single property is what stops Droplet doing agentic *work* rather than agentic
+*chat*: "reconcile these invoices", "sweep last night's clips and tell me what
+changed" are 5-to-40-minute jobs, and none survives today's runtime.
+
+## 2. Decision: no agent framework
+
+Evaluated and rejected, with the reasons recorded on the epic: OpenClaw
+(disqualified on security history), Mastra (`ee/` directories under a
+non-permissive licence), LangGraph.js (a graph runtime carries none of the
+loop's value — RBAC narrowing, tiered safety, the signed activity chain — so it
+would all be re-implemented on top), Temporal (a second server and datastore
+for a problem `pg_try_advisory_xact_lock` already solves in this codebase),
+and, on 2026-09-04, **Strands Agents (TypeScript)** — licence-clean, but its
+persistence is per invocation with no lease, no lock and no mid-turn resume,
+it has no Ollama provider and no per-call MCP `_meta` (which `ncToken` rides),
+and it carries the Bedrock runtime client as a hard dependency. Its
+conversation managers are the reference shape for §6.
+
+What is built instead: **one table, one worker, one checkpoint**, on the
+scheduler the orchestrator already has. The loop is not rewritten.
+
+## 3. Shape
+
+```
+POST /api/agent-runs (WARP-2180)          cronRuntime.scheduleInterval (index.ts)
+        │                                    │                      │
+        ▼                                    ▼                      ▼
+   AgentRun row ──── queued ──▶ tickOnce() claims ──▶ execute() ◀── heartbeatOnce()
+                     ▲              (under advisory lock)   │          (per process)
+                     │                                       ▼
+                reclaim (stale heartbeat)          runAgent(…, { checkpoint })
+                                                             │
+                                          ┌──────────────────┼──────────────────┐
+                                          ▼                  ▼                  ▼
+                                    onIteration()     beforeToolCall()    afterToolCall()
+                                    {iteration,        persist intent,     persist wire
+                                     messages}         maybe REPLAY        result
+```
+
+## 4. `AgentRun` (WARP-2177)
+
+`apps/orchestrator/prisma/schema.prisma`, migration
+`20260904120000_warp_2177_agent_run`. Pattern: `ToolSpec` / `ToolRun` — same
+explicit-status, `trace` Json shape; the difference is that the steps are
+chosen by the model, not authored.
+
+| Column | Role |
+| --- | --- |
+| `status` | explicit `AgentRunStatus` enum: `queued · running · awaiting_confirmation · succeeded · failed · cancelled`. Never derived from `endedAt IS NULL`. |
+| `userId` | the attributed principal. Reach is re-resolved from it at **every** claim. |
+| `runAfter` | not-before; delay and backoff without a second queue. |
+| `claimedBy · claimedAt · heartbeatAt` | the lease. |
+| `startedAt · deadlineAt` | first claim, and the wall-clock ceiling stamped from it. A column, not `startedAt + constant`, so a config change cannot move a live run's goalposts. |
+| `attempts` | reclaim count (see §5). |
+| `maxIter · iteration · messages` | the checkpoint: `iteration` is the next iteration to execute, `messages` the complete conversation at its top. |
+| `trace` | the replay guard: every dispatched tool call, written **before** dispatch, completed after. |
+| `result · stopReason · error` | terminal outcome. |
+
+Indexes: `[status, runAfter]` (claim scan), `[status, heartbeatAt]` (reclaim
+scan), `[userId, createdAt desc]` (my runs), `[sessionId]`.
+
+### Why the iteration boundary is the checkpoint unit
+
+At the top of `for (let iter = 0; iter < maxIter; iter++)` the message array
+is a complete, valid conversation — every `tool_calls` has its `role: "tool"`
+replies. Handed back to `runAgent()` verbatim, the loop resumes with
+`maxIter − N` iterations and no reconstruction. Cost: one row update per
+iteration; typical turns finish in ~3.6 iterations.
+
+### The replay guard
+
+A checkpoint alone re-runs the interrupted iteration on resume, and the model
+re-issues its tool calls. Without a guard a redeploy mid-run silently re-sends
+every notification the run already sent. So `beforeToolCall` persists the
+call (`tool_call_id`, tool, args, absolute iteration) **before** dispatch and
+`afterToolCall` completes it with the wire result. On resume, a call for the
+same tool with the same canonical args in the same iteration whose entry is
+complete is **replayed** from the trace: the loop receives the stored text
+through the same parse, bounding, trace and SSE path as a live result, and
+`mcp.callTool` is never reached. An entry with no result (dispatched, outcome
+never recorded) is re-dispatched and logged as `agent_run_redispatch_unknown_outcome`
+— it may have had its side effect and we cannot know; re-dispatching is the
+only way to make progress, so it is loud, not silent.
+
+## 5. Worker (WARP-2177)
+
+`apps/orchestrator/src/services/agent-run-worker.service.ts`.
+
+**Two ticks on the one clock.** Both ride `cronRuntime.scheduleInterval`;
+`agent-run-worker.no-queue-dependency.guard.test.ts` asserts no queue package
+enters `package.json`.
+
+- `tickOnce()` runs under the `droplet:agent-run-worker` advisory lock:
+  reclaim stale leases, then claim queued rows up to `AGENT_RUN_CONCURRENCY`.
+- `heartbeatOnce()` runs per process, unlocked: beat every run this process is
+  executing and observe cancellation / the deadline.
+
+**The run executes outside the tick.** cron-runtime's lock is
+transaction-scoped inside a `$transaction` with a 60 s timeout — right for a
+tick, wrong for a forty-minute run. The tick claims and launches; execution is
+a tracked promise. The lock serialises *claiming* across replicas; the claim
+itself is a conditional `updateMany` on `status = queued`, so two unlocked
+racers still cannot both win a row (`agent-run-claim.pg.test.ts`, real
+Postgres).
+
+**Fencing.** Every executor write is conditioned on `claimedBy = workerId AND
+status = running`. A run reclaimed by another worker while this process was
+paused is one this process can no longer touch: its next checkpoint returns
+`count: 0`, it aborts, and the successor continues from the row.
+
+**Heartbeat and reclaim.** The heartbeat is timer-driven (`AGENT_RUN_HEARTBEAT_MS`,
+15 s) and independent of iteration length, so a run parked in a slow model
+call still holds its lease. That is what lets the reclaim threshold be derived
+from the heartbeat (`AGENT_RUN_RECLAIM_AFTER_MS`, 60 s = 4 beats; clamped to at
+least 2 beats by `resolveAgentRunLimits`) rather than from a guess at how long
+an iteration takes. `onIteration` beats too, so "at least once per iteration"
+holds as well.
+
+**`attempts` counts reclaims, not claims.** A graceful shutdown
+(`releaseAll()` on SIGTERM) hands in-flight runs back to `queued` without
+charging an attempt, so routine deploys cannot fail a healthy long run. A stale
+lease at `attempts ≥ AGENT_RUN_MAX_ATTEMPTS` (3) is failed with an error naming
+the count and the last worker, never re-queued for a fourth crash.
+
+**Whose access.** `resolveAttributedToolAccess(prisma, run.userId)` at every
+claim — the WARP-1580 ticker rule. An unresolvable principal (missing,
+deactivated, read failed) does not run: the run fails with
+`attribution_failed:<reason>` and a `tool_run` activity row, the ToolSpec
+ticker's skip-and-audit posture, rather than running at DENY_ALL reach and
+burning GPU on a turn that can call nothing. The scope passed to the loop is
+always the resolved one, never `null` standing in for "unknown".
+
+**Pool.** Tier-1 only until WARP-2179: the chat pool minus every
+`requiresConfirmation` tool, narrowed per principal across both axes
+(`narrowToolNamesForPrincipal`). One deliberate re-admission:
+`send_notification` is excluded from chat as a window-budget/UX call, not a
+safety tier; a run has no reader, so a notification is its completion channel,
+and it is Tier-1 in the catalog. A model that reaches for a Tier-2 tool hits
+the loop's unknown-tool guard; the worker turns that into a failed run naming
+the tool and WARP-2179 rather than letting the model spend iterations around
+the refusal.
+
+**Bounds.** `maxIter` (clamped to `config.agentMaxIter.capIter`, 10, because
+the loop itself clamps there — longer runs are §6's problem, as the epic says)
+**and** `deadlineAt`. Cancellation flips `status = cancelled`; the executor
+observes it at the next heartbeat or checkpoint and maps it onto the loop's
+own `AbortController`, so the existing `req.signal?.aborted` checks stop it
+before the next dispatch.
+
+**Audit.** Each dispatch carries `agentRunId` on its `McpCallContext`, and
+`mcp-client.service.ts` writes it as `refs.agentRunId` on the existing
+`tool_call` ActivityRow. No new kind: `KNOWN_KINDS` is a closed allow-list that
+throws. Terminal outcomes write a `tool_run` row with the same ref.
+
+### The one loop change
+
+`AgentRequest.checkpoint?: AgentCheckpointPort` — three awaited hooks
+(`onIteration`, `beforeToolCall`, `afterToolCall`). Absent, the loop is
+byte-for-byte what it was (`llm-agent.checkpoint-port.test.ts` asserts identical
+requests, dispatches and result). The ticket says `runAgent()` is not modified;
+this is the deliberate exception, for a reason a wrapper cannot meet: the
+iteration boundary and the `tool_call_id` both live inside the function, and a
+resume needs both.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENT_RUN_CONCURRENCY` | 1 | in-flight runs per process. Background runs yield to interactive turns; raising it is a measured latency decision. |
+| `AGENT_RUN_TICK_MS` | 5000 | claim/reclaim scan |
+| `AGENT_RUN_HEARTBEAT_MS` | 15000 | lease heartbeat |
+| `AGENT_RUN_RECLAIM_AFTER_MS` | 60000 | stale-lease threshold (≥ 2 × heartbeat, clamped) |
+| `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
+| `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
+
+## 6. Tool-result summarisation (WARP-2178)
+
+Context is the real ceiling, not durability: `OLLAMA_CONTEXT_LENGTH` is
+16384 and a run's message array grows with every tool result. Most of the
+mechanism this ticket asks for already existed when it was written, and this
+section says which half was there and which half landed here.
+
+**Already there (WARP-2203, `tool-result-bounding.ts`).** Every tool result
+over `MODEL_TOOL_RESULT_CAP_CHARS` (8000) is shortened for the model by a
+shape-driven reducer that keeps the emitted payload valid JSON, keeps paging
+cursors arithmetically honest or deletes them, and marks what was cut
+(`_orchestrator_truncation`, naming the tool and the reductions). The **full
+payload stays in `trace` and on the SSE stream**; only the `role: "tool"`
+message the model carries is shortened. The in-loop context guard (agent
+budgets spec §2) finalises a turn with `stop_reason: "context_budget"` when
+the transcript nears `window − OUTPUT_RESERVE − ITERATION_MIN_HEADROOM`.
+Both apply to interactive chat and to runs alike, because runs drive the same
+loop. And because the checkpoint stores the bounded conversation, a resumed
+run is never more expensive than the original at the same iteration
+(pinned in `agent-run-worker.test.ts`).
+
+**Landed here.**
+
+- **The cap is a knob:** `AGENT_TOOL_RESULT_CAP_CHARS` (default 8000, floor
+  1000, ceiling 8000 because `ITERATION_MIN_HEADROOM` and the gateway's
+  32,000-char message cap are calibrated against it). `boundToolResultForModel`
+  takes it as a parameter; the loop passes the configured value.
+- **Identifier fields are never cut.** `IDENTIFIER_KEYS` (`id`, `path`,
+  `name`, `url`, `href`, `key`, `uuid`, `slug`) and the conventional suffixes
+  (`_id`, `Id`, `_path`, `Path`, `_key`, `Key`, `_url`, `Url`) are excluded
+  from the reducer's string sites at any depth, so a shortened `list_files`
+  reply still lets the next iteration `read_file` a real path
+  (`tool-result-bounding.identifiers.test.ts`, including end to end through
+  the loop). A payload made only of identifiers takes the refusal rail — the
+  honest outcome, and logged.
+- **The context guard warns.** `agent_context_budget_reached` names the
+  iteration, the estimate, the threshold, the window and, for a run, the
+  `agent_run_id`. A run that hits the window ends with `stopReason:
+  "context_budget"` on its row; it never fails silently.
+- **The measurement is instrumented.** Every dispatch logs
+  `agent_tool_result_size` at debug level (`tool`, `result_chars`,
+  `bounded_chars`, `reduced`; never the payload). The threshold is chosen from
+  that distribution: run the staging suite with the orchestrator at debug
+  level and aggregate by `tool`. The lab box was unreachable when this landed,
+  so the numbers are recorded on WARP-2178 as they are gathered; until then
+  the default stays at the historical value.
+
+**Not done, deliberately.** History compaction (a sliding window or a
+summarising manager over *older* iterations, the Strands shape) is not built:
+the ACs are per-result, and with the cap at 8000 and the guard at 1536 tokens
+of headroom a 16K window carries roughly three to four full-size results
+alongside the prompt blocks. If the measured distribution shows results are
+small but numerous, compaction of older tool replies is the next lever, and
+it belongs in the same module as an extension of the ladder, not a second
+sizing path. Model-written summaries were rejected for now on the ticket's
+own grounds: an inference call per large result can cost more on CPU
+inference than the tokens it saves.
+
+## 7. Tier-2 park-and-confirm (WARP-2179)
+
+A background run is an unattended privileged actor. The user authorised a
+goal, not each destructive act the model later chose, so a confirming tool is
+**never auto-confirmed** because "the user started the run" — that is the
+trust failure the tier system exists to prevent. The run's pool now includes
+Tier-2 (`requiresConfirmation`) tools; what chat excludes on policy grounds
+stays out and is the run's Tier-3.
+
+**Park.** The WARP-2305 interceptor challenges a Tier-2 call exactly as in
+chat. The loop hands the challenge to the worker's approvals port
+(`register`, the `ChatApprovalPort` shape WARP-2469 introduced), which records
+the request and stops the loop through the same signal cancellation uses.
+After the loop returns the worker writes the park in one fenced update:
+`status = awaiting_confirmation`, the lease released (`claimedBy` null), the
+pending call in **explicit columns** bound as the interceptor binds its token
+— `pendingTool` + `pendingBindingHash = confirmationBindingHash(tool, args)` —
+plus `pendingArgs`, `pendingToolCallId`, `parkedAt`. The interceptor's token is
+**dropped**: no token exists anywhere while the run sits parked. The owner is
+notified over `droplet/notifications/<username>` (the ws-bridge topic the
+desktop app already consumes) with the run's goal, the tool and a PHI-free
+argument summary; a `tool_call` ActivityRow with `refs.agentRunId` records
+`confirmation: "parked"`. No confirmation inside any window leaves it parked.
+
+**Decide.** `decideAgentRun(prisma, { id, decision, decidedBy })` — the
+service behind `POST /api/agent-runs/:id/confirm` (§8). Only the run's owner
+or an `owner`-role principal may decide. **Approval is not an escalation
+path:** the run's attributed principal must still reach the tool now, on both
+axes (`toolAllowedForPrincipal` over `resolveAttributedToolAccess`), or the
+approval is refused and the run stays parked. A decision re-queues the run
+with `pendingDecision` set and extends `deadlineAt` by the time spent parked,
+so a day waiting for a human is not a day of wall clock. Denial needs no
+reach check.
+
+**Resume.** The run is claimed like any other and resumes from its checkpoint
+— the top of the parked iteration — so the model re-issues the call. In
+`beforeToolCall`, a call whose binding matches the decided pending call is
+consumed:
+
+- *approved* — the worker performs the interceptor handshake itself: one
+  dispatch without a token, which returns a **fresh** challenge minted now,
+  seconds after the human decided; one dispatch presenting it. The
+  interceptor stays the single gate and the token's TTL starts at human
+  attention, which is where it was designed to start. The tool runs exactly
+  once. Anything other than a challenge on the first leg (a deny-tier
+  refusal, a tool that no longer confirms, an error) is the box's honest
+  answer and is handed back as-is.
+- *denied* — the model receives a `CONFIRMATION_DENIED` tool result and
+  adapts or finishes; the tool never runs.
+
+Either way the pending columns clear, the trace entry carries
+`confirmation: "confirmed" | "denied"`, and a `tool_call` row with
+`refs.agentRunId` records the outcome. A run resumed after a box restart
+loses nothing: the park is the checkpoint plus the pending columns.
+
+**Tier-3.** A tool outside the run's pool hits the loop's unknown-tool guard;
+a tool the interceptor's deny tier refuses comes back as a `TOOL_DENIED`
+error. Neither is a challenge, so neither parks. Pinned by
+`agent-run-worker.park-and-confirm.test.ts`.
+
+**Copy.** `packages/tools-core/src/confirmation.ts` no longer promises "the
+Droplet dashboard": that text reaches a chat chip, a paired desktop (ADR-014)
+and a parked run alike, so it now says only what is true everywhere — the
+action needs the user's confirmation and has not been performed — and each
+surface renders its own copy.
+
+**Not done.** Batching several parked confirmations into one prompt (the
+ticket's own follow-up; it must not become a single "allow all"), and any
+allow-list of Tier-2 tools that may auto-confirm in a run (needs its own ADR
+and Romain's sign-off, as ADR-014 §③ required for desktop tools).
+
+## 8. API, Activity view, scheduling, LLM tools (WARP-2180) — scoped
+
+`POST /api/agent-runs`, `GET /api/agent-runs`, `GET /api/agent-runs/:id`,
+`POST /api/agent-runs/:id/cancel`, `POST /api/agent-runs/:id/confirm`, all
+owner/admin-gated via `requireRoleOrMcpService`; a user sees only their own
+runs. Recurring runs reuse `ToolSchedule`'s RRULE vocabulary on
+`cronRuntime.scheduleInterval` with a distinct lock key — no second clock.
+Runs appear under **Activity**, grouped by `refs.agentRunId`, not as a nav
+item. `start_agent_run` (Tier-2 — it spends compute unattended) and
+`list_agent_runs` (Tier-1) in `packages/tools-core`, in a `DOMAIN_GROUPS`
+entry so domain selection can find them; a run whose goal is to start runs is
+refused explicitly.
+
+## 9. Out of scope for the epic
+
+Parallel tool dispatch within an iteration; sub-agents / delegation; the
+ADR-014 client-target axis; the trigger→action automation engine (WARP-1448).
