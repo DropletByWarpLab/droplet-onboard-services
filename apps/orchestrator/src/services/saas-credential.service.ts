@@ -780,7 +780,9 @@ export function resolveCredentialUpdate(
  * a weaker claim than a cloud track's CONNECTED, and it is written down here
  * rather than left for a reader to assume.
  *
- * The DISABLED and no-credential rules are unchanged and apply to every track.
+ * The no-credential rule applies to every track. The DISABLED rule applies to
+ * every track that has a SEPARATE turn-back-on gesture — which is every track
+ * but `mcp` (WARP-2659, below).
  */
 export function statusAfterCredentialUpdate(
   descriptor: ProviderDescriptor,
@@ -788,10 +790,19 @@ export function statusAfterCredentialUpdate(
   hasSecret: boolean,
 ): IntegrationStatusName {
   if (!hasSecret) return "NOT_CONFIGURED";
-  // A row that was DISABLED stays DISABLED — pasting a key is not the same
-  // gesture as turning the connector back on.
-  if (current === "DISABLED") return "DISABLED";
+  // WARP-2659 — for an `mcp` track the paste IS the connection (above), and
+  // it is also the ONLY connect gesture the track has: `connect()` refuses it
+  // at `resolveProvider`, and nothing else writes CONNECTED. `disconnect()`
+  // now admits the track, and it is the sole writer of DISABLED — always with
+  // a purge. So a DISABLED row holding a fresh credential can only be an owner
+  // who disconnected and then pasted a new token into the one surface that
+  // takes one; keeping that row DISABLED would make Disconnect a one-way door.
+  // Ahead of the DISABLED rule for exactly that reason.
   if (descriptor.track === "mcp") return "CONNECTED";
+  // A row that was DISABLED stays DISABLED — pasting a key is not the same
+  // gesture as turning the connector back on; for these tracks that gesture is
+  // `connect()`'s probe, which writes the verdict.
+  if (current === "DISABLED") return "DISABLED";
   // A fresh credential deserves a fresh verdict: whatever the vendor said about
   // the OLD key is no longer evidence about this one.
   return "PROVISIONING";

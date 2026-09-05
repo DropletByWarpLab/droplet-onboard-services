@@ -9,7 +9,7 @@
  * host/IP, chart numbers, schema version) is rendered mono + read-only.
  */
 
-import type { IntegrationStatus } from "@droplet/shared-types";
+import type { CredentialExpiryVerdict, IntegrationStatus } from "@droplet/shared-types";
 
 /**
  * Explicit connection lifecycle — never derived from absence (arch rule 10).
@@ -138,6 +138,24 @@ export interface IntegrationConnection {
    * from a connection that is still connected, or was never configured.
    */
   credentialsPurged?: boolean;
+
+  /**
+   * WARP-2659 — the credential's expiry verdict, as the box computed it
+   * (`integrations.service.ts` `credentialExpiryFor`).
+   *
+   * `null` is a real answer — "this provider's credential cannot expire", or
+   * "there is no credential yet" — and is emphatically not `VALID`. Optional
+   * for the same reason `credentialsPurged` is: this interface mirrors a JSON
+   * payload, and a response that carries no key at all (an older box) must not
+   * be read as either answer.
+   *
+   * The verdict type is imported rather than restated so the tile, the
+   * credential configurator and the orchestrator all name one shape. Its
+   * `EXPIRING_SOON` is deliberately NOT an `IntegrationStatus` member: a token
+   * twelve days from a hard stop is genuinely CONNECTED *and* genuinely needs
+   * action, so the two facts travel in two fields.
+   */
+  credentialExpiry?: CredentialExpiryVerdict | null;
 }
 
 export function writeModeOf(c: Pick<IntegrationConnection, "writeEnabled" | "writesPaused">): WriteMode {

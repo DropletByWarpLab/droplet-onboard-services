@@ -192,6 +192,9 @@ function harness(names: string[] = ["getJiraIssue"]): Harness {
         serverId,
         sync: { serverId, registered: [], rejected: [] },
         vettedTools: knownTools,
+        // WARP-2659 — the disconnect handle attachAtlassianRemote now returns; this
+        // suite never disconnects, so a stub that closes to nothing is the honest one.
+        client: { close: async () => undefined } as never,
       };
     },
   );

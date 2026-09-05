@@ -458,8 +458,25 @@ describe("the connect flow writes the row #1964's third gate looks for", () => {
     );
   });
 
-  it("keeps a DISABLED row disabled — pasting a key is not turning it back on", () => {
-    expect(statusAfterCredentialUpdate(atlassian(), "DISABLED", true)).toBe("DISABLED");
+  /**
+   * WARP-2659 — the opposite of the cloud rule, on purpose. `disconnect()` now
+   * admits the mcp track and is the only writer of DISABLED, always with a
+   * purge; `connect()` refuses the track at `resolveProvider`; so the paste is
+   * the only way back, and a row that keeps DISABLED through a fresh token is
+   * a Disconnect with no Reconnect.
+   *
+   * Mutation: move the `current === "DISABLED"` check back ahead of the mcp
+   * arm → red.
+   */
+  it("returns a DISABLED row to CONNECTED on a fresh paste — the only connect gesture this track has", () => {
+    expect(statusAfterCredentialUpdate(atlassian(), "DISABLED", true)).toBe("CONNECTED");
+    // The cloud rule is untouched: a DISABLED Stripe row stays DISABLED,
+    // because its way back is `connect()`'s probe, which this track lacks.
+    expect(statusAfterCredentialUpdate(requireDescriptor("stripe"), "DISABLED", true)).toBe(
+      "DISABLED",
+    );
+    // And a cleared secret still lands on NOT_CONFIGURED whatever the row said.
+    expect(statusAfterCredentialUpdate(atlassian(), "DISABLED", false)).toBe("NOT_CONFIGURED");
   });
 });
 

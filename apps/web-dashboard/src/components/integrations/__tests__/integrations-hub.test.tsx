@@ -123,6 +123,9 @@ const ACME: ProviderDescriptor = {
   providerKeys: ["acme-pms", "acme-pms-export"],
   connect: { kind: "wizard", catalogId: "acme-pms" },
   open: { kind: "route", href: "/integrations/acme-pms" },
+  // A LAN-database vendor, so it syncs on a schedule like every catalog card
+  // (WARP-2659); its Connected row keeps the "synced …" clause.
+  syncs: true,
   // WARP-2568 — required rather than optional on purpose. A vendor whose
   // descriptor forgets the noun would silently render somebody else's word for
   // the people they serve, and the compiler is the only thing that catches it
@@ -592,6 +595,12 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
+      // has NO `catalog` block and no `ConnectorId` literal: it is derived
+      // from the descriptor's track by `hubCardFor`, which is why it lands
+      // last rather than at a `catalog.order`. Mutation: delete the `case
+      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      "Atlassian (Jira & Confluence)",
     ]);
   });
 
@@ -631,6 +640,12 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
+      // has NO `catalog` block and no `ConnectorId` literal: it is derived
+      // from the descriptor's track by `hubCardFor`, which is why it lands
+      // last rather than at a `catalog.order`. Mutation: delete the `case
+      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      "Atlassian (Jira & Confluence)",
       "Generic Export",
       "M365",
     ]);
@@ -657,8 +672,10 @@ describe("entries are the union of the catalog and the response", () => {
 
     // Twelve catalog tiles (four original, the five WARP-2214 vendors — Xero
     // included — and the three wave-1 vendors) absorb four of the rows; the two
-    // the catalog knows nothing about each get their own.
-    expect(tiles(container)).toHaveLength(14);
+    // the catalog knows nothing about each get their own. WARP-2659 adds the
+    // MCP-track tile, which this fixture reports no row for — it renders from
+    // the registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(15);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -672,6 +689,7 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",
     ]) {
