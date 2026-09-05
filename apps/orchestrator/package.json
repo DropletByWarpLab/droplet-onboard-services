@@ -48,7 +48,7 @@
     "multer": "^2.2.0",
     "node-cron": "^4.6.0",
     "node-forge": "^1.4.0",
-    "nodemailer": "^6.10.1",
+    "nodemailer": "^9.0.6",
     "openid-client": "^6.8.7",
     "otplib": "^13.5.0",
     "pino": "^10.0.0",
