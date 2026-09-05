@@ -124,6 +124,10 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
   AppDownloadCatalog,
+  Routine,
+  RoutineStatus,
+  RoutineRun,
+  RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
 } from "./types";
@@ -8331,4 +8335,134 @@ export async function saveSaasCredential(
     throw new Error(detail || `Failed to save credentials: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Routines (WARP-2671) — ToolSpec CRUD, runs, schedules ---
+//
+// Every call here is owner/admin on the orchestrator side except the reads,
+// which allow `family` too. The client does not re-implement that check: the
+// surface hides what a role cannot do, and the server refuses it regardless.
+
+async function routineJson<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `${what}: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchRoutines(status?: RoutineStatus): Promise<Routine[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await authFetch(`${BASE}/api/tools${qs}`);
+  const body = await routineJson<{ tools?: Routine[] } | Routine[]>(
+    res,
+    "Failed to load routines",
+  );
+  // The list route has been through two shapes; accept either rather than
+  // breaking the page on a field rename.
+  return Array.isArray(body) ? body : (body.tools ?? []);
+}
+
+export async function fetchRoutine(slug: string): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}`);
+  return routineJson<Routine>(res, "Failed to load routine");
+}
+
+export async function fetchRoutineRuns(
+  slug: string,
+  limit = 20,
+): Promise<RoutineRun[]> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/runs?limit=${limit}`,
+  );
+  const body = await routineJson<{ runs: RoutineRun[] }>(res, "Failed to load runs");
+  return body.runs ?? [];
+}
+
+export async function fetchRoutineSchedules(
+  slug: string,
+): Promise<RoutineSchedule[]> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules`,
+  );
+  const body = await routineJson<{ schedules: RoutineSchedule[] }>(
+    res,
+    "Failed to load schedules",
+  );
+  return body.schedules ?? [];
+}
+
+/** Promote a draft or accepted suggestion to `live`. */
+export async function setRoutineStatus(
+  slug: string,
+  status: RoutineStatus,
+): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  return routineJson<Routine>(res, "Failed to update routine");
+}
+
+/**
+ * Run now. A `writes && !reversible` spec answers 409 with a
+ * `confirmation_required` body; the caller re-invokes with `confirm` set
+ * rather than this helper deciding on the user's behalf.
+ */
+export async function runRoutine(
+  slug: string,
+  confirm = false,
+): Promise<{ status: number; body: unknown }> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/runs${confirm ? "?confirm=true" : ""}`,
+    { method: "POST" },
+  );
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status, body };
+}
+
+export async function createRoutineSchedule(
+  slug: string,
+  input: { rrule: string; timezone?: string },
+): Promise<RoutineSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return routineJson<RoutineSchedule>(res, "Failed to create schedule");
+}
+
+export async function updateRoutineSchedule(
+  slug: string,
+  id: string,
+  patch: { rrule?: string; timezone?: string; enabled?: boolean },
+): Promise<RoutineSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  return routineJson<RoutineSchedule>(res, "Failed to update schedule");
+}
+
+export async function deleteRoutineSchedule(
+  slug: string,
+  id: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
+  }
 }
