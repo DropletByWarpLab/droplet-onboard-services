@@ -33,6 +33,7 @@ import {
   type AttachAtlassianDeps,
   type RemoteAttachResult,
 } from "./remote-mcp-servers.js";
+import type { RemoteMcpReconcilerDeps } from "./remote-mcp-reconciler.service.js";
 
 const logger = createLogger("mcp-client-singleton");
 
@@ -145,17 +146,17 @@ export async function stopMcp(): Promise<void> {
  */
 export async function ensureRemoteMcpAttached(
   prisma: AttachAtlassianDeps["prisma"],
+  /** WARP-2651 — the catalog a previous attach vetted. Absent at boot: this
+   *  process has vetted nothing yet, and an empty baseline is not the same
+   *  claim as no baseline. */
+  knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
   const result = await attachAtlassianRemote({
     mux: mcpClient,
     prisma,
     allowlist: remoteAllowlist,
-    createClient: () =>
-      new McpBridgeClient({
-        baseUrl: config.MCP_BRIDGE_URL,
-        serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN,
-        serverId: ATLASSIAN_REMOTE_SERVER_ID,
-      }),
+    createClient: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID),
+    ...(knownTools !== undefined ? { knownTools } : {}),
   });
   if (result.attached) {
     attachedClients.set(result.serverId, result.client);
@@ -179,4 +180,44 @@ export async function detachRemoteMcp(serverId: string): Promise<void> {
   const client = attachedClients.get(serverId);
   attachedClients.delete(serverId);
   await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+}
+
+/** One bridge client for a given server id. A factory rather than a singleton
+ *  because the orphan sweep needs a client for an id this process never
+ *  attached — the whole point of WARP-2651's failure (1). */
+function createBridgeClient(serverId: string): McpBridgeClient {
+  return new McpBridgeClient({
+    baseUrl: config.MCP_BRIDGE_URL,
+    serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN,
+    serverId,
+  });
+}
+
+/**
+ * WARP-2651 — the reconciler's production wiring.
+ *
+ * Every dependency is a thin adapter onto something that already exists: the
+ * bridge client's `GET /sessions` and `DELETE`, the multiplexer's `detachRemote`, and
+ * the SAME `attachAtlassianRemote` the boot path uses — so the re-open is not a
+ * second, parallel implementation of "open a session" that could drift from the
+ * gated one.
+ */
+export function remoteMcpReconcilerDeps(
+  prisma: AttachAtlassianDeps["prisma"],
+): RemoteMcpReconcilerDeps {
+  return {
+    sessions: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID).sessions(),
+    closeSession: async (serverId) => {
+      await createBridgeClient(serverId).close();
+    },
+    detach: (serverId) => {
+      mcpClient.detachRemote(serverId);
+    },
+    // `serverId` is ignored because there is exactly one attachable server
+    // today — `SESSION_FACTORIES` has one entry and `attachAtlassianRemote` is
+    // Atlassian-specific by name. A second server is a second attach function
+    // and a switch here, NOT a generic re-open that would silently re-open
+    // Atlassian for whatever id the registry happened to hold.
+    reattach: (_serverId, knownTools) => ensureRemoteMcpAttached(prisma, knownTools),
+  };
 }

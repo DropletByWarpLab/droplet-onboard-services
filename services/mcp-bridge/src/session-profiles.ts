@@ -42,6 +42,15 @@ export interface OpenSessionInput {
   /** Overridable ONLY so a test can point at an RFC 2606 host. Screened
    *  against the profile's own allowed-host set either way. */
   url?: string;
+  /**
+   * WARP-2651 — the catalog the caller has already vetted, carried across a
+   * restart of THIS container.
+   *
+   * Not a credential and not a capability: it can only make the new session
+   * refuse to dispatch (`catalog_changed`), never widen what it will serve. It
+   * is absent on a first open, which is why it is optional rather than `[]`.
+   */
+  knownTools?: readonly string[];
 }
 
 export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
@@ -85,6 +94,16 @@ export function createAtlassianSessionFactory(
           onRateLimitHeaders: (headers) => scheduler.noteRateLimitHeaders(headers),
         }),
       ...(input.url !== undefined ? { url: input.url } : {}),
+      // WARP-2651 — the caller's vetted catalog, carried across a restart of
+      // this container. It has to be handed over HERE, inside the production
+      // builder: `http-api.ts` validates the wire field and `BridgeSessionStore`
+      // passes it to this factory, so a factory that forgot it would parse the
+      // baseline and then drop it — drift detection silently off on every
+      // re-open, which is the exact failure the 400 guard on the route exists
+      // to prevent. `catalog-baseline.test.ts` drives this factory to prove it.
+      ...(input.knownTools !== undefined
+        ? { knownToolNames: input.knownTools }
+        : {}),
     });
   };
 }

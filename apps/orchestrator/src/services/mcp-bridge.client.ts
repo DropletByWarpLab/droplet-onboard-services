@@ -115,6 +115,37 @@ export interface McpBridgeOpenInput {
   cloudId: string;
   /** Test-only override; the bridge screens it against its own host set. */
   url?: string;
+  /**
+   * WARP-2651 — the catalog this process last vetted, handed back so a
+   * RE-OPENED session can still detect that the vendor's surface moved.
+   *
+   * Omitted on a first open, and that absence is meaningful: an empty array
+   * would claim we vetted a surface with no tools in it, and every tool the
+   * server advertises would then read as `added` drift on a brand-new box.
+   */
+  knownTools?: readonly string[];
+}
+
+/**
+ * What `GET /sessions` answers: the bridge's inventory, behind the bearer.
+ *
+ * Mirrors `http-api.ts`'s `BridgeSessionsBody`, and the mirror is gated by
+ * `remote-mcp-reconciler.bridge-contract.test.ts`, which drives the bridge's
+ * REAL router for this read rather than a fixture that models it.
+ *
+ * It used to ride on the unauthenticated `/health` — and this client used to
+ * read it there — until stage commit 952e0d78 (WARP-2300 review) moved it.
+ * `/health` is readable by every container on the compose bridge network, and
+ * `sessions` says whether the customer has connected a vendor and whether
+ * their credential is being rejected. `/health` now answers the constant
+ * `{status:"ok"}` and nothing else; a reader that still expected `sessions`
+ * there gets `undefined` and throws on every tick.
+ */
+export interface BridgeSessionsBody {
+  knownServers: string[];
+  /** Every session the BRIDGE currently holds — including ones this process
+   *  does not own, which is the whole point of reading it (WARP-2651). */
+  sessions: RemoteMcpSessionHealth[];
 }
 
 export interface McpBridgeClientOptions {
@@ -134,6 +165,19 @@ export interface McpBridgeClientOptions {
  */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The shape a server id may have — the bridge's `SERVER_ID_PATTERN`
+ * (`http-api.ts`) and the multiplexer's, restated.
+ *
+ * Checked at construction because every path this client builds interpolates
+ * `serverId`, and one caller hands over an id it READ FROM THE BRIDGE'S
+ * RESPONSE rather than a constant: the reconciler's orphan sweep, which
+ * `DELETE`s whatever `GET /sessions` listed. The bridge is ours and behind the
+ * bearer, but a path segment is a path segment — refuse before dialling rather
+ * than trust the wire to only ever say `atlassian`.
+ */
+const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
 export class McpBridgeClient implements McpClientPort {
   readonly serverId: string;
   readonly #baseUrl: string;
@@ -150,7 +194,27 @@ export class McpBridgeClient implements McpClientPort {
    */
   #opened = false;
 
+  /**
+   * The tool names the BRIDGE advertised on the last successful `listTools`.
+   *
+   * WARP-2651's drift baseline, and it is the bridge's names rather than the
+   * multiplexer's vetted subset on purpose: a tool the multiplexer drops (an
+   * illegal wire name, a collision with a local tool) is still a tool the
+   * vendor advertises, so baselining on the subset would make it read as
+   * `added` drift on every re-open and pin the session in `catalog_changed`
+   * for good.
+   */
+  #lastAdvertised: readonly string[] = [];
+
   constructor(opts: McpBridgeClientOptions) {
+    if (!SERVER_ID_PATTERN.test(opts.serverId)) {
+      // Names the rule, never the value: the id came off the wire.
+      throw new McpBridgeError(
+        "INVALID_SERVER_ID",
+        "serverId is not a valid bridge server id (lowercase letters, digits and hyphens; at most 32).",
+        0,
+      );
+    }
     this.serverId = opts.serverId;
     this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.#serviceToken = opts.serviceToken;
@@ -178,7 +242,30 @@ export class McpBridgeClient implements McpClientPort {
       "GET",
       `/sessions/${this.serverId}/tools`,
     );
+    this.#lastAdvertised = body.tools.map((t) => t.name);
     return body.tools;
+  }
+
+  /** {@link #lastAdvertised}. Empty until a listing has succeeded — never a
+   *  guess about what the server would have said. */
+  lastAdvertisedToolNames(): readonly string[] {
+    return this.#lastAdvertised;
+  }
+
+  /**
+   * The bridge's inventory: every session IT holds, and the ids it can open.
+   *
+   * The reconciler's read. Deliberately a whole-component read rather than
+   * `state()` per server: case (1) of WARP-2651 is a session the orchestrator
+   * does NOT know about, and a per-server read can only ever confirm what the
+   * caller already named.
+   *
+   * `GET /sessions`, behind the bearer like every other route this client
+   * calls — NOT `/health`, which the bridge serves without one and which
+   * therefore says nothing about the customer (`http-auth.ts`).
+   */
+  async sessions(): Promise<BridgeSessionsBody> {
+    return this.#send<BridgeSessionsBody>("GET", "/sessions");
   }
 
   /**
