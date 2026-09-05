@@ -195,6 +195,123 @@ describe("§12 Sync + §10 system states", () => {
   });
 });
 
+// ── WARP-2738: the role-template catalogue ───────────────────────────
+//
+// All WARP-2738-authored (§12 predates templates entirely; flagged for packet
+// ratification in copy.ts). Pinned character-for-character like the rest, plus
+// three PROPERTIES that are the actual point of the ticket:
+//
+//   1. no string claims the person is TOLD they lack permission — the refusal
+//      is a 404 byte-identical to the box-wide module toggle, so "will not see
+//      it" is the only honest verb;
+//   2. the enforced/nav-only split is described as a real difference, not
+//      smoothed over;
+//   3. the retry sentence says NOTHING WAS CREATED, because a 409
+//      CONCURRENT_MUTATION applied nothing and an operator who doubts that
+//      will not press the button again.
+describe("§12 Role templates (WARP-2738 — authored, pending packet ratification)", () => {
+  it("chrome + affordances", () => {
+    expect(ACCESS_COPY.templatesTitle).toBe("Start from a template");
+    expect(ACCESS_COPY.templatesOpen).toBe("Start from a template");
+    expect(ACCESS_COPY.templatesUse).toBe("Use this template");
+    expect(ACCESS_COPY.templatesCustomize).toBe("Customize first");
+    expect(ACCESS_COPY.templatesLead).toBe(
+      "Ready-made starting points for the jobs a practice actually hires for. Picking one creates an ordinary role — edit, rename or delete it afterwards, exactly like one you built by hand.",
+    );
+  });
+
+  it("states the narrowing a role performs — grants are additive from zero", () => {
+    // `fullCatalogFeatures(tier)` runs ONLY on the resolver's no-role branch,
+    // so assigning a role is not "a tier minus some things".
+    expect(ACCESS_COPY.templatesNarrowing).toBe(
+      "Giving someone one of these narrows what they reach: they get chat plus exactly what the template grants, and nothing else. Someone left on a plain built-in role keeps everything that role allows.",
+    );
+  });
+
+  it("splits genuinely-enforced modules from nav-only ones, in both directions", () => {
+    expect(ACCESS_COPY.templatesEnforcedLegend).toBe("Checked per person");
+    expect(ACCESS_COPY.templatesEnforcedLegendBody).toBe(
+      "Withholding these really withholds them. Anyone without the grant will not see the page — it answers exactly as it does when the whole box has that feature switched off.",
+    );
+    expect(ACCESS_COPY.templatesNavOnlyLegend).toBe("Menu only");
+    expect(ACCESS_COPY.templatesNavOnlyLegendBody).toBe(
+      "These only change the menu. The API behind them still answers, so treat them as tidying what someone sees rather than withholding the data.",
+    );
+  });
+
+  it("never says a person is TOLD they lack permission — no such message exists", () => {
+    // The denial is `404 {"error":"module_disabled"}`, identical to the
+    // box-wide toggle. "You don't have permission" would describe a screen
+    // this box never renders.
+    const strings: string[] = [];
+    for (const value of Object.values(ACCESS_COPY)) {
+      if (typeof value === "string") strings.push(value);
+    }
+    for (const s of strings) {
+      expect(s).not.toMatch(/lack\s+permission|don'?t have permission|not permitted|access denied/i);
+    }
+    // …and the honest verb IS present where the split is explained.
+    expect(ACCESS_COPY.templatesEnforcedLegendBody).toMatch(/will not see/);
+  });
+
+  it("discloses the two things the payload cannot carry", () => {
+    // Every registry-driven gate mounts at "view"; three camera routes at
+    // "manage" are the only exception, and they are named rather than waved at.
+    expect(ACCESS_COPY.templatesLevelsNote).toBe(
+      "Levels are recorded, but the per-person checks nearly all run at view — so edit and manage shape this builder more than they shape what the box holds back. Cameras is the exception: three of its routes check for manage.",
+    );
+    expect(ACCESS_COPY.templatesNoExtras).toBe(
+      "No template carries connector access or a usage cap. Add connector access in the builder after you create the role; the storage, upload and daily-message limits are left unset on purpose.",
+    );
+  });
+
+  it("says a Staff- or Guest-based role's assistant tools are read-only", () => {
+    // `tierKeepsWriteTools` admits owner and admin only — `use` and `view` are
+    // the same grant below admin, so the card must not imply otherwise.
+    expect(ACCESS_COPY.toolsReadOnlyBelowAdmin).toBe(
+      "Staff- and Guest-based roles get read-only assistant tools, whatever the tool level says.",
+    );
+    expect(ACCESS_COPY.toolsAxis).toBe("Assistant tools");
+    expect(ACCESS_COPY.noToolsGranted).toBe("No tools on");
+    expect(ACCESS_COPY.templatesNoneGranted).toBe("None");
+  });
+
+  it("state trio bodies", () => {
+    expect(ACCESS_COPY.templatesEmpty).toBe(
+      "This Droplet is serving no templates — create a role from scratch instead.",
+    );
+    expect(ACCESS_COPY.templatesErrorBody).toBe(
+      "The templates are built into this Droplet, so this is a connection problem rather than an empty catalogue.",
+    );
+  });
+
+  it("create dialog + its outcomes", () => {
+    expect(ACCESS_COPY.templateCreateHeading).toBe("Create from a template");
+    expect(ACCESS_COPY.templateCreateBody("Front Desk")).toBe(
+      "Creates 'Front Desk' as an ordinary role. Nobody holds it until you assign someone, and you can edit or delete it any time.",
+    );
+    expect(ACCESS_COPY.templateCreateNameLabel).toBe("Role name");
+    // Slug collisions are NOT errors server-side ("Front Desk" twice yields
+    // `front-desk` then `front-desk-2`), so the hint says so instead of the
+    // dashboard de-duplicating a name the operator chose.
+    expect(ACCESS_COPY.templateCreateNameHint).toBe(
+      "Two roles can share a name — each one still gets its own slug.",
+    );
+    expect(ACCESS_COPY.templateCreateSubmit).toBe("Create role");
+    expect(ACCESS_COPY.templateCreated("Front Desk")).toBe(
+      "'Front Desk' created — assign people when you're ready.",
+    );
+  });
+
+  it("the 409 retry line says nothing was created", () => {
+    // A CONCURRENT_MUTATION refusal applied NOTHING. Without that clause an
+    // operator reads "try again" as "you may now have two".
+    expect(ACCESS_COPY.templateRaceRetry).toBe(
+      "Another change reached the box first, so nothing was created. Try again.",
+    );
+  });
+});
+
 describe("§12 Retained quota (WARP-1576)", () => {
   it("states the consequence of clearing a role's storage default", () => {
     // WARP-1576-authored from the ticket's own phrasing. Calm,

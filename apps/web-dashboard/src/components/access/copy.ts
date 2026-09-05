@@ -150,6 +150,74 @@ export const ACCESS_COPY = {
   // Surface A's roles-list section header — keep both.
   builtIn: "Built-in",
 
+  // ── Role templates (WARP-2738) ──
+  //
+  // ALL WARP-2738-AUTHORED. §12 predates the template catalogue entirely, so
+  // none of these strings exist in the design packet — same footing as
+  // `docsNeedsFiles` / `restoreRole` / `inviteRolesDegraded` above, and flagged
+  // for design-packet ratification.
+  //
+  // The wording is the point of the ticket, not decoration. Per-person
+  // enforcement is UNEVEN: eight of the fifteen gateable modules mount a
+  // layer-2 gate (the server names them in `enforcedModuleIds`); the other
+  // seven only drive the nav, and their API answers whoever asks. Where a gate
+  // does exist, the refusal is `404 module_disabled` — BYTE-IDENTICAL to the
+  // response when the whole box has the module switched off. The person cannot
+  // tell the two apart, and neither can this dashboard, so the honest verb is
+  // "will not see it". Nothing here may say a person is TOLD they lack
+  // permission: no such message exists anywhere on the box.
+  templatesTitle: "Start from a template",
+  templatesOpen: "Start from a template",
+  templatesLead:
+    "Ready-made starting points for the jobs a practice actually hires for. Picking one creates an ordinary role — edit, rename or delete it afterwards, exactly like one you built by hand.",
+  // The narrowing nobody expects: `fullCatalogFeatures(tier)` runs ONLY on the
+  // no-role branch of the resolver, so a role's grants are additive from zero
+  // rather than subtractive from the tier.
+  templatesNarrowing:
+    "Giving someone one of these narrows what they reach: they get chat plus exactly what the template grants, and nothing else. Someone left on a plain built-in role keeps everything that role allows.",
+  templatesEnforcedLegend: "Checked per person",
+  templatesEnforcedLegendBody:
+    "Withholding these really withholds them. Anyone without the grant will not see the page — it answers exactly as it does when the whole box has that feature switched off.",
+  templatesNavOnlyLegend: "Menu only",
+  templatesNavOnlyLegendBody:
+    "These only change the menu. The API behind them still answers, so treat them as tidying what someone sees rather than withholding the data.",
+  // Every registry-driven gate mounts at level "view" (modules/module-mounts.ts),
+  // so a grant above view changes what the builder shows far more than what the
+  // box withholds. The three camera routes gated at "manage" are the exception,
+  // and naming them is what keeps the sentence true rather than merely humble.
+  templatesLevelsNote:
+    "Levels are recorded, but the per-person checks nearly all run at view — so edit and manage shape this builder more than they shape what the box holds back. Cameras is the exception: three of its routes check for manage.",
+  templatesNoExtras:
+    "No template carries connector access or a usage cap. Add connector access in the builder after you create the role; the storage, upload and daily-message limits are left unset on purpose.",
+  // `tierKeepsWriteTools` admits owner and admin only, so a Staff- or
+  // Guest-based role's tool grants are read-only whatever level they carry.
+  toolsReadOnlyBelowAdmin:
+    "Staff- and Guest-based roles get read-only assistant tools, whatever the tool level says.",
+  toolsAxis: "Assistant tools",
+  noToolsGranted: "No tools on",
+  templatesNoneGranted: "None",
+  templatesUse: "Use this template",
+  templatesCustomize: "Customize first",
+  templatesEmpty:
+    "This Droplet is serving no templates — create a role from scratch instead.",
+  templatesErrorBody:
+    "The templates are built into this Droplet, so this is a connection problem rather than an empty catalogue.",
+  templateCreateHeading: "Create from a template",
+  templateCreateBody: (name: string) =>
+    `Creates '${name}' as an ordinary role. Nobody holds it until you assign someone, and you can edit or delete it any time.`,
+  templateCreateNameLabel: "Role name",
+  // Two roles may legitimately carry one name — the server derives a distinct
+  // slug (`front-desk`, then `front-desk-2`) and neither create is refused. Say
+  // so rather than silently de-duplicating a name the operator typed.
+  templateCreateNameHint:
+    "Two roles can share a name — each one still gets its own slug.",
+  templateCreateSubmit: "Create role",
+  templateCreated: (name: string) => `'${name}' created — assign people when you're ready.`,
+  // 409 CONCURRENT_MUTATION: the write lost a SERIALIZABLE race and NOTHING was
+  // applied, so this is a retry rather than a failure — and the sentence has to
+  // say that nothing landed, or an operator re-runs it fearing a duplicate.
+  templateRaceRetry: "Another change reached the box first, so nothing was created. Try again.",
+
   // ── Person editor (§6) ──
   addException: "+ Add an exception",
   exceptionsHint: "One-off grants or denials on top of the role. Most people never need one.",

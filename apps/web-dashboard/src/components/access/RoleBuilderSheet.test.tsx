@@ -519,3 +519,48 @@ describe("save (footer)", () => {
     expect(ids).not.toContain("settings");
   });
 });
+
+// ── WARP-2738: a sheet seeded from a role template ───────────────────
+//
+// `dirty` is a JSON diff against `base`, which is exactly right for editing an
+// existing role and exactly wrong for a PRE-FILLED create: `base` IS the seed,
+// so the diff is empty and a fully-populated sheet opens with Save disabled
+// and no reason on screen. `initialDirty` says so explicitly instead of
+// loosening the diff for everyone.
+describe("WARP-2738 — initialDirty", () => {
+  it("a seeded create sheet is saveable on the first render", () => {
+    const seeded = { ...blankRoleDraft("family"), name: "Front Desk" };
+    renderSheet({ base: seeded, initialDirty: true });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeEnabled();
+  });
+
+  it("emits the seed unchanged when the operator saves without touching anything", () => {
+    // The bar for a pre-filled sheet: what the card advertised is what gets
+    // written, with no edit required to unlock the button.
+    const seeded = { ...blankRoleDraft("family"), name: "Front Desk" };
+    const { onSave } = renderSheet({ base: seeded, initialDirty: true });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].name).toBe("Front Desk");
+    expect(onSave.mock.calls[0][0].startingPoint).toBe("family");
+  });
+
+  it("still refuses an unnamed seed — dirty is not the only gate", () => {
+    renderSheet({ base: blankRoleDraft("family"), initialDirty: true });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+
+  it("REGRESSION: the ordinary edit path keeps its no-op guard", () => {
+    // The fix must not have been "make everything dirty". An edit sheet that
+    // has not been touched still cannot be saved.
+    renderSheet({ mode: "edit", base: roleToDraft(makeRole()) });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+
+  it("REGRESSION: a blank create is not dirty by default either", () => {
+    renderSheet({ base: { ...blankRoleDraft("family"), name: "Typed" } });
+    // Named but untouched: `blankRoleDraft` + a name is still identical to
+    // `base`, so only an explicit `initialDirty` may unlock this.
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+});

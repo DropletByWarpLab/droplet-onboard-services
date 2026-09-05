@@ -12,6 +12,10 @@
  * the real reason — never hidden (§5.2). Save is disabled until dirty and
  * emits the ADR-032 §5 payload; the server re-clamps everything (the client
  * is never trusted).
+ *
+ * WARP-2738 adds ONE way to be dirty without an edit: a sheet seeded from a
+ * role template arrives already carrying the operator's intent, and says so
+ * with `initialDirty` rather than by loosening the diff. See the prop.
  */
 
 import { useId, useMemo, useState } from "react";
@@ -118,6 +122,26 @@ export interface RoleBuilderSheetProps {
   connectors: ConnectorOption[];
   /** Disables Save while a request is in flight. */
   busy?: boolean;
+  /**
+   * WARP-2738 — the sheet opened on a draft that is ALREADY the operator's
+   * intent (a role template seeded through `templateToDraft`), so Save is live
+   * from the first render instead of waiting for an edit.
+   *
+   * `dirty` below is a JSON diff against `base`, which is exactly right for
+   * editing an existing role — "nothing changed" must not be savable — and
+   * exactly wrong for a pre-filled create: `base` IS the seed, so the diff is
+   * empty and the fully-populated sheet is born with Save disabled. That is a
+   * silent dead end; an operator sees a complete role and a greyed button with
+   * no reason given, and the only way out is to nudge a field.
+   *
+   * Fixed with this explicit input rather than by weakening the diff: the
+   * ordinary edit path keeps its guard untouched, and the ONE caller that
+   * legitimately starts dirty says so out loud. Not derived from
+   * `mode === "create"` either — a blank create genuinely has nothing to save
+   * until the name is typed, and `canSave` still requires a non-empty name in
+   * both cases.
+   */
+  initialDirty?: boolean;
   onSave: (payload: AccessRolePayload) => void | Promise<void>;
   onClose: () => void;
   /** Files row deep-link → the Departments & teams tab (ADR-029 owns it). */
@@ -131,6 +155,7 @@ export function RoleBuilderSheet({
   actingTier,
   connectors,
   busy = false,
+  initialDirty = false,
   onSave,
   onClose,
   onOpenDepartments,
@@ -141,7 +166,12 @@ export function RoleBuilderSheet({
   const [refloorNotice, setRefloorNotice] = useState<string | null>(null);
   const [cloudConfirm, setCloudConfirm] = useState(false);
 
-  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(base), [draft, base]);
+  // A seeded sheet (WARP-2738) counts as dirty from the first render — see
+  // `initialDirty` on the props. Everything else keeps the diff.
+  const dirty = useMemo(
+    () => initialDirty || JSON.stringify(draft) !== JSON.stringify(base),
+    [draft, base, initialDirty],
+  );
   const canSave = dirty && draft.name.trim().length > 0 && !busy;
   const slugPreview = mode === "edit" && draft.slug ? draft.slug : slugifyRoleName(draft.name);
 
