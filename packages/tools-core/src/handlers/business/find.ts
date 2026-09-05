@@ -201,12 +201,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
             "get",
             `/api/crm/companies/${id}/record`,
           ),
-          callOrch<{ deals?: Parameters<typeof toGraphDeal>[0][] }>(
+          callOrch<{ deals?: Parameters<typeof toGraphDeal>[0][]; total?: number }>(
             ctx,
             "get",
             `/api/crm/deals?company=${id}&kind=OPEN&per_page=${limit}`,
           ),
-          callOrch<{ contacts?: ApiCrmContactRow[] }>(
+          callOrch<{ contacts?: ApiCrmContactRow[]; total?: number }>(
             ctx,
             "get",
             `/api/crm/contacts?company=${id}&per_page=${limit}`,
@@ -263,14 +263,28 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           );
           projects = [...listed, ...direct.map((d) => d.project)].map(toPlaneProject);
         }
+        const contactRows = (contacts.contacts ?? []).map(toGraphContact);
+        // Both lists are pages of `limit`, and each route says how big the
+        // whole set is — the same `total` every search branch in this file
+        // carries, so the model knows when it is looking at twenty of
+        // forty-one and can say so (or ask for the rest by entity) instead of
+        // answering "Acme has 20 contacts". `truncated` is the one-bit form,
+        // for a caller that only wants to know whether it saw everything.
+        // Falls back to the page length rather than to 0: a route that omits
+        // `total` must not read as "twenty rows of nothing".
+        const contactsTotal = contacts.total ?? contactRows.length;
+        const openDealsTotal = deals.total ?? openDeals.length;
         return {
           ok: true,
           data: {
             entity,
             customer: toGraphCompany(rec.company),
-            contacts: (contacts.contacts ?? []).map(toGraphContact),
+            contacts: contactRows,
+            contacts_total: contactsTotal,
             open_deals: openDeals,
+            open_deals_total: openDealsTotal,
             projects,
+            truncated: contactRows.length < contactsTotal || openDeals.length < openDealsTotal,
           },
         };
       }
@@ -460,7 +474,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "business_find",
   description:
-    "Look up business records: customers, contacts, deals, projects, work items, or the pipeline roll-up. With `id`, that one record plus what links to it; without, a search with a `total`. History lives in business_timeline. Amounts are minor-unit strings, never numbers.",
+    "Look up business records: customers, contacts, deals, projects, work items, or the pipeline roll-up. With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are minor-unit strings, never numbers.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

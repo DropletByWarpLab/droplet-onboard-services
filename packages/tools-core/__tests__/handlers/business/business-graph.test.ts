@@ -448,6 +448,60 @@ describe("business_find — the graph edges", () => {
     expect(projects.map((p) => p.id).sort()).toEqual(["p-far", "p1"]);
   });
 
+  it("says how many contacts and open deals there are when the page is not all of them", async () => {
+    // 21 rows planted on each side, `limit` left at its default. The ROUTE
+    // does the capping (`per_page`); the tool has to carry the route's
+    // `total` through, as every search branch in the file does, or the model
+    // answers "Acme has 20 contacts" for a customer with 21. MUTATION: drop
+    // `contacts_total` / `open_deals_total` / `truncated` from the response
+    // -> red.
+    const contacts = Array.from({ length: 21 }, (_, i) => ({
+      ...apiContact,
+      id: `ct${i}`,
+      displayName: `Person ${i}`,
+    }));
+    const deals = Array.from({ length: 21 }, (_, i) => ({ ...openDeal, id: `d${i}` }));
+    const perPage = (url: string) =>
+      Number(new URL(url, "http://box").searchParams.get("per_page"));
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record")) return recordOf({ openDeals: deals });
+      if (url.includes("/api/crm/deals"))
+        return res(true, 200, { deals: deals.slice(0, perPage(url)), total: deals.length });
+      if (url.includes("/api/crm/contacts"))
+        return res(true, 200, { contacts: contacts.slice(0, perPage(url)), total: contacts.length });
+      return res(true, 200, { projects: [] });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const data = expectOk(out).data as {
+      contacts: unknown[];
+      contacts_total: number;
+      open_deals: unknown[];
+      open_deals_total: number;
+      truncated: boolean;
+    };
+    expect(data.contacts).toHaveLength(20);
+    expect(data.contacts_total).toBe(21);
+    expect(data.open_deals).toHaveLength(20);
+    expect(data.open_deals_total).toBe(21);
+    expect(data.truncated).toBe(true);
+  });
+
+  it("reports a customer's lists as complete when the page is the whole set", async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record")) return recordOf({ openDeals: [openDeal] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [openDeal], total: 1 });
+      if (url.includes("/api/crm/contacts"))
+        return res(true, 200, { contacts: [apiContact], total: 1 });
+      return res(true, 200, { projects: [] });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    expect(expectOk(out).data).toMatchObject({
+      contacts_total: 1,
+      open_deals_total: 1,
+      truncated: false,
+    });
+  });
+
   it("a project by id returns the project and its open work", async () => {
     get.mockImplementation(async (url: string) =>
       url.includes("/work-items")
