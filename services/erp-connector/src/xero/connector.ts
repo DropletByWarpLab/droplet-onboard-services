@@ -1508,6 +1508,12 @@ export class XeroConnector implements Connector {
    * match, and here they do not. Recorded as a gap on WARP-2414 rather than
    * resolved by forcing it into `account` or `balance_transaction`, either of
    * which would let an arithmetic run on columns that mean something else.
+   *
+   * Consequently NOT a sync dataset and NOT promised on the customer page
+   * (`docs/integrations/xero.md`): nothing in the product calls this today.
+   * It is kept, tested, as the one journal read a Custom Connection can be
+   * granted, so the day WARP-2414 names a dataset the endpoint and its
+   * `If-Modified-Since` handling are already right.
    */
   async listManualJournals(since?: unknown): Promise<Record<string, unknown>[]> {
     return this.pull("listManualJournals", "ManualJournals", "ManualJournals", {

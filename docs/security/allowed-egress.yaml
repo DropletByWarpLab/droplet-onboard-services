@@ -691,9 +691,9 @@ entries:
     purpose: >-
       Xero accounting connector (ADR-041, ADR-042) — reads the books of ONE Xero
       organisation the owner explicitly connected: customer invoices (ACCREC),
-      supplier bills (ACCPAY), the contacts both hang off, and the manual
-      journals the bookkeeper posted by hand. Carries that financial content in
-      the response — amounts, counterparty names, due dates. Nothing box-local
+      supplier bills (ACCPAY), the contacts both hang off, and the organisation
+      record the connect probe reads. Carries that financial content in the
+      response — amounts, counterparty names, due dates. Nothing box-local
       is ever sent and nothing is sent opportunistically; the connector only
       ever dials out, because the box accepts no inbound connections and Xero
       webhooks are therefore structurally unavailable to it. This host also
@@ -706,7 +706,10 @@ entries:
       accounting.settings.read) and applyWrite refuses by construction.
       accounting.journals.read is deliberately NOT requested — Xero stopped
       granting it to new Custom Connections on 2026-04-29, so the Advanced-tier
-      /Journals ledger is unreachable and /ManualJournals is read instead. Like
+      /Journals ledger is unreachable. The connector carries a read for the
+      /ManualJournals feed a Custom Connection CAN be granted, but no product
+      path calls it: there is no canonical dataset for a journal (WARP-2414),
+      so the sync reads invoices, bills and contacts only. Like
       the QuickBooks, Stripe and HubSpot tracks and unlike the M365 one, it does
       NOT persist what it reads: reads are answered read-through, so no synced
       copy exists to encrypt and the connector does not become the first writer

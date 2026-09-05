@@ -89,13 +89,13 @@ Grant read scopes only. Droplet does not write to Xero — it never asks Xero fo
 
 | Scope | What it buys you |
 |---|---|
-| `accounting.transactions.read` | Invoices, bills and the manual journal entries your bookkeeper posts by hand — the core of "who owes us" and "what do we owe". Bills and invoices share one place in Xero, so this one scope covers both. |
+| `accounting.transactions.read` | Invoices and bills — the core of "who owes us" and "what do we owe". Bills and invoices share one place in Xero, so this one scope covers both. |
 | `accounting.contacts.read` | The customers and suppliers those transactions belong to, so an amount has a name attached. |
 | `accounting.settings.read` | The organisation's own details, which is what Droplet reads to confirm the connection is live before it reads anything else. |
 
 **`accounting.reports.read` is not on the list, and you do not need it.** Droplet reads no report endpoint, so granting it would be a permission nobody uses — and an unused permission is the opposite of what this page is trying to help you do. If you granted it on an earlier reading of this guide, nothing is broken; it simply does nothing.
 
-**There is a fourth scope you may see mentioned and cannot have.** Xero's general-ledger journals feed (`accounting.journals.read`) stopped being available to **new** Custom Connections on **2026-04-29**. Droplet does not use it — it reads your manual journal entries instead, which the transactions scope above already covers — so the retirement does not affect this connection at all. If an older guide tells you to tick it, that is why it is not on the list.
+**There is a fourth scope you may see mentioned and cannot have.** Xero's general-ledger journals feed (`accounting.journals.read`) stopped being available to **new** Custom Connections on **2026-04-29**. Droplet does not use it and reads no journal of any kind — invoices, bills and contacts are the whole of what it asks for — so the retirement does not affect this connection at all. If an older guide tells you to tick it, that is why it is not on the list.
 
 **Grant less if you want to.** A narrower connection is a working connection, and Droplet names the missing permission rather than returning an empty list.
 
@@ -111,7 +111,7 @@ Two consequences:
 1. **Droplet cannot adjust your scopes for you.** Every scope change costs you a round-trip through the Xero portal. That is a Xero constraint, not a missing Droplet feature.
 2. **Do not narrow scopes speculatively.** Grant the three above from the start. Trimming one later may not be reversible.
 
-Separately, Xero has said broad scopes end on **2027-09-13**. Droplet's three scopes are unaffected, and the journals scope it deliberately does not use is covered above.
+Separately, Xero has said broad scopes end on **2027-09-13**. Droplet's three scopes are unaffected, and the journals scope it does not use is covered above.
 
 ---
 
@@ -126,14 +126,13 @@ Read this as the capability statement it is. It describes what the box will and 
 | **Invoices** | The ones you have issued and that are not fully paid — who owes you, how much, and when it was due. |
 | **Bills** | The same, pointed the other way: who you owe. |
 | **Contacts** | The customers and suppliers those amounts belong to, so a number has a name. |
-| **Manual journals** | The adjustments your bookkeeper posted by hand. |
 
 Each read asks Xero for **only what changed since the last one**, and asks for the summary form where Xero offers it. Both are there to keep the box well inside Xero's call limits — this connection shares a fleet-wide ceiling with every other Droplet, so a box that reads more than it needs is taking it from somebody else.
 
 **What it refuses, by construction:**
 
 - **It never writes to Xero.** The three permissions above are read-only, so a write would be refused by Xero even if Droplet tried — and Droplet's own code refuses first.
-- **It never reads your full general ledger.** That is Xero's `/Journals` feed, on a plan tier and a permission that new Custom Connections cannot be granted. Droplet reads your manual journal entries instead and does not pretend the two are the same thing.
+- **It never reads your ledger.** Xero's `/Journals` feed sits on a plan tier and a permission that new Custom Connections cannot be granted, and Droplet does not read the manual-journal feed either: the three reads above are the whole of it.
 - **It never keeps a copy of your books on the box.** Every read goes to Xero and comes back; nothing is stored. That is a deliberate choice about your accounts specifically — the freshest copy of a ledger is always Xero's, and a stale local one would be worse than none.
 - **It never dials anywhere but Xero.** Two Xero addresses are registered, and the box refuses to send your credential anywhere else even if something on the box says otherwise.
 - **Nothing it reads is ever used to train anything.** See below.
