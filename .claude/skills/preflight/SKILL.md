@@ -233,6 +233,19 @@ exits **4** with a message naming the required version and the remedy.
 check ran and failed. Never record a run that exited 4 as a passing gate —
 that conflation is exactly what WARP-2449 was filed about.
 
+**Exit 77 means SKIPPED — everything that ran passed, but a check could not
+evaluate its subject here** (WARP-2646). It is not a pass either. Each skipped
+check prints its reason and the summary lists them. The two you will meet on a
+dev Mac:
+
+| Skip | Why | Fix |
+|---|---|---|
+| `compose-config` — no `.env` | `.env` is `.gitignored` and written by `setup.sh`, so a fresh clone or a new `git worktree add` has none, and `docker/docker-compose.yml` declares `env_file: ../.env`, which compose resolves whatever `--env-file` says. | `cp .env.example .env` (CI does exactly this), or run `./scripts/setup.sh`. |
+| `docker-build-smoke` — daemon unreachable | `--full` only; there is no container to smoke-test. | `colima start` / start Docker Desktop. |
+
+A stopped daemon does **not** skip `compose-config`: `docker compose config` is
+a client-side merge and needs no daemon (measured, docker 29.5.2 / compose v2).
+
 ## 7. End state
 
 Push the branch, open/update the PR (repo squash-merges with the

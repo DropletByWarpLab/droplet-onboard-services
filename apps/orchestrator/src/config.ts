@@ -225,6 +225,15 @@ const envSchema = z.object({
   // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
   // The epic sizes agentic work at 5–40 minutes.
   AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2178 — characters of ONE tool result the model is fed per call
+  // (tool-result-bounding.ts). 8000 is the value the loop has always used and
+  // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
+  // cap are calibrated against, so it is the CEILING here: lowering it makes
+  // every in-loop guard more conservative, raising it would need the budget
+  // rail re-derived. The floor keeps a page useful. Pick the value from the
+  // measured per-tool result-size distribution (`agent_tool_result_size`
+  // debug lines), not by feel.
+  AGENT_TOOL_RESULT_CAP_CHARS: z.coerce.number().int().min(1000).max(8000).default(8000),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the

@@ -19,8 +19,6 @@
  *   - `AGENT_RUN_CONCURRENCY` (1) holds a second queued run back;
  *   - the wall-clock ceiling and cancellation both stop a run before its
  *     next tool dispatch, through the loop's own `AbortController`;
- *   - a Tier-2 tool fails the run with a reason naming WARP-2179 and is
- *     never dispatched;
  *   - every dispatch carries `agentRunId` on its tool-call context.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -49,12 +47,15 @@ const { recordActivityMock } = vi.hoisted(() => ({
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
+vi.mock("../services/notifications.service.js", () => ({
+  sendNotification: vi.fn().mockResolvedValue({ id: "n", channels: ["toast"], delivered: true }),
+}));
 
 import {
   createAgentRunWorker,
   enqueueAgentRun,
   cancelAgentRun,
-  tier1ToolPool,
+  runToolPool,
   type AgentRunTraceEntry,
 } from "../services/agent-run-worker.service.js";
 import { DENY_ALL_TOOL_SCOPE } from "../services/tool-access.service.js";
@@ -299,6 +300,12 @@ describe("agent-run worker — checkpoint, crash, resume (WARP-2177)", () => {
     // calls), not the whole run (3).
     expect(b.chat).toHaveBeenCalledTimes(2);
     expect(resumed.iteration).toBe(3);
+    // WARP-2178 — a resume is never more expensive than the original at the
+    // same iteration: the checkpoint holds the already-bounded conversation,
+    // so B's first request (iteration 1) is at most the size of A's.
+    const size = (req: unknown) =>
+      JSON.stringify((req as { messages: unknown }).messages).length;
+    expect(size(b.chat.mock.calls[0]![0])).toBeLessThanOrEqual(size(a.chat.mock.calls[1]![0]));
   });
 
   it("replay guard: a send_notification that already fired is fed back from the trace, never re-sent", async () => {
@@ -408,36 +415,13 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     );
   });
 
-  it("the Tier-1 pool excludes every confirming tool and re-admits send_notification", () => {
-    const pool = tier1ToolPool();
+  it("the run pool re-admits send_notification, carries confirming tools (WARP-2179 parks them) and keeps chat's policy exclusions out", () => {
+    const pool = runToolPool();
     expect(pool).toContain("send_notification");
     expect(pool).toContain("get_current_datetime");
-    expect(pool).not.toContain("delete_file");
+    expect(pool).toContain("delete_file");
     expect(pool).not.toContain("apply_update");
-  });
-
-  it("a Tier-2 tool call fails the run with a reason naming the tool and WARP-2179, and is never dispatched", async () => {
-    const db = createAgentRunPrismaMock({ users: [OWNER] });
-    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
-    const chat = scriptedModel((replies) =>
-      replies === 0
-        ? { role: "assistant", content: null, tool_calls: [toolCall("c9", "delete_file", { path: "/x" })] }
-        : { role: "assistant", content: "worked around it" },
-    );
-    // The registry advertises it, the run's Tier-1 pool does not: the loop's
-    // unknown-tool guard refuses it and the worker turns that refusal into a
-    // failed run rather than letting the model spend iterations around it.
-    const mcp = fakeMcp(["delete_file", "get_current_datetime"]);
-    const { worker } = makeWorker(db, { chat, mcp });
-    await worker.tickOnce();
-    await settle(worker);
-    expect(mcp.callTool).not.toHaveBeenCalled();
-    expect(db.row(id).status).toBe("failed");
-    expect(db.row(id).stopReason).toBe("tier2_unsupported");
-    expect(db.row(id).error).toMatch(/delete_file requires confirmation/);
-    expect(db.row(id).error).toMatch(/WARP-2179/);
-    // The model was never asked again after the refusal.
-    expect(chat).toHaveBeenCalledTimes(1);
+    expect(pool).not.toContain("delete_clip");
   });
 
   it("cancellation stops the run before its next tool dispatch and leaves it cancelled", async () => {

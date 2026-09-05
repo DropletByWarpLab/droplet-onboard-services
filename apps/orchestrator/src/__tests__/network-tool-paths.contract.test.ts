@@ -100,28 +100,13 @@ import { createApsRouter } from "../routes/aps.js";
 import { createActivityRouter } from "../routes/activity.js";
 import { createVpnRouter } from "../routes/vpn.js";
 import { registerScheduleRoutes, type ScheduleDeps } from "../routes/network-schedules.routes.js";
+import { repoPath } from "./helpers/test-paths.js";
 
-// CJS-safe path resolution (this package builds to CommonJS — import.meta is
-// a tsc error here). Same candidates idiom as ap-device.schema.test.ts so the
-// test works whether vitest runs from apps/orchestrator or the repo root.
-function locateHandlersDir(): string {
-  const candidates = [
-    resolve(process.cwd(), "../../packages/tools-core/src/handlers/network"),
-    resolve(process.cwd(), "packages/tools-core/src/handlers/network"),
-  ];
-  for (const p of candidates) {
-    try {
-      readdirSync(p);
-      return p;
-    } catch {
-      // try next candidate
-    }
-  }
-  throw new Error(
-    `Could not locate packages/tools-core/src/handlers/network from ${process.cwd()}`,
-  );
-}
-const HANDLERS_DIR = locateHandlersDir();
+// Anchored to this test file, not to the runner's cwd (WARP-2654). The old
+// candidate list took the first entry that existed, so a cwd inside another
+// checkout resolved to that tree's handlers. `__dirname` under the hood, not
+// import.meta, which is a tsc error in this CommonJS package.
+const HANDLERS_DIR = repoPath("packages/tools-core/src/handlers/network");
 
 interface HandlerCall {
   file: string;
