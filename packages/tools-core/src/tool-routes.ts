@@ -72,6 +72,18 @@
  * Paths carry `:param` segments (e.g. `/api/cameras/events/:eventId`); the
  * cross-check matches path SHAPE (segment count + literal segments), so the
  * exact param name here is documentation, not load-bearing.
+ *
+ * ## Runtime-registered tools have no row here, on purpose (WARP-2418)
+ *
+ * A tool advertised by a remote MCP server (ADR-043) dials no orchestrator
+ * route of ours, so there is nothing for the admission suite to prove and a
+ * row would be a fiction the cross-check would then have to be taught to
+ * skip. The completeness gate is keyed off `registry.ts`, which such a tool
+ * is never in, so this needs no exemption — it needs only to be said, since
+ * "the manifest is complete" and "the manifest covers every tool the model
+ * can name" stopped being the same sentence the moment a catalog could
+ * arrive over a socket. Those tools live in
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`.
  */
 
 export type ToolClient = "orchestrator" | "nextcloud" | "none";
@@ -160,6 +172,20 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "create_pdf_report", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_word_document", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_spreadsheet", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  // WARP-2664 — file cleanup. analyze walks the tree through the same
+  // listing hop list_files uses; organize lists once then mkdir + move per
+  // file; delete_files reads the parent listing before every delete so a
+  // folder passed as a file is refused rather than trashed recursively.
+  { tool: "analyze_file_cleanup", client: "nextcloud", hops: [admit("get", "/api/files")] },
+  { tool: "organize_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("post", "/api/files/mkdir"),
+    admit("post", "/api/files/move"),
+  ] },
+  { tool: "delete_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("delete", "/api/files"),
+  ] },
   { tool: "delete_file", client: "nextcloud", hops: [admit("delete", "/api/files")] },
   { tool: "create_directory", client: "nextcloud", hops: [admit("post", "/api/files/mkdir")] },
   { tool: "rename_file", client: "nextcloud", hops: [admit("post", "/api/files/move")] },
@@ -391,4 +417,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  // WARP-2180 — background runs. The route admits the mcp principal on
+  // behalf of the named chat user (requireRoleOrMcpService).
+  { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs")] },
 ];

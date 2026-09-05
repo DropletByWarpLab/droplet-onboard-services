@@ -24,6 +24,19 @@ import { initDeviceService } from "../services/device.service.js";
 import { REASONING_STEP_SEPARATOR } from "../services/llm-agent.service.js";
 import type { ChatStreamChunk } from "../types/index.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — `new PrismaClient()` here resolves to the shared in-memory
+// double from src/__tests__/setup.ts, which has no `assistantPersona`,
+// `businessProfile` or `workspace` model. Both block composers therefore threw
+// on every turn and the route's fail-open swallowed it. See the helper header.
+guardComposerFailOpen();
+
 vi.mock("../middleware/auth.js", () => ({
   authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
     const role = req.headers["x-test-role"];
@@ -149,7 +162,9 @@ let app: ReturnType<typeof createApp>;
 beforeAll(() => {
   const prisma = new PrismaClient();
   initDeviceService(prisma);
-  app = createApp(prisma);
+  // WARP-2652 — the three delegates the prompt-block composers need, layered
+  // on for THIS suite only.
+  app = createApp(withPromptBlockDelegates(prisma));
 });
 
 /** Concatenate the `text` field of every content_delta frame, in order. */
@@ -214,6 +229,35 @@ describe("POST /api/llm/chat stream=true — WARP-1602 analysis quarantine", () 
     expect(res.status).toBe(200);
     return res.text;
   }
+
+  // WARP-2652 — the fixture floor. Every quarantine assertion below runs on a
+  // prompt this suite assembles; two of its blocks silently never composed.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    let sys = "";
+    mockChatStream.mockReset();
+    mockChatStream.mockImplementationOnce(
+      (req: { messages?: { role: string; content: unknown }[] }) => {
+        const first = req.messages?.[0];
+        sys = first && typeof first.content === "string" ? first.content : "";
+        return streamOf([
+          { choices: [{ delta: { content: ANSWER }, finish_reason: "stop" }] },
+        ]);
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("x-test-role", "owner")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
 
   it("never puts intermediate analysis on the wire as content_delta", async () => {
     const sse = await runTurn(true);

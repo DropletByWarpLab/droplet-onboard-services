@@ -19,6 +19,18 @@ import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 // WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
 // and the wire payload cannot disagree.
 import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
+// WARP-2582 — business context pins. The renderer is pure; the resolver is
+// where the module gate and the per-person tool-domain grant compose.
+import {
+  MAX_PINS_PER_SESSION,
+  isBusinessPinKind,
+  renderContextPinBlock,
+  type BusinessPinKind,
+} from "../services/context-pin-prompt.js";
+import {
+  checkBusinessPinTarget,
+  resolveBusinessPinTargets,
+} from "../services/context-pin-targets.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
@@ -1467,21 +1479,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             orderBy: { addedAt: "asc" },
           });
           if (pins.length > 0) {
-            const lines = pins.map((p: { kind: string; ref: string; meta: unknown }) => {
-              const metaSuffix =
-                p.meta && typeof p.meta === "object"
-                  ? ` ${JSON.stringify(p.meta)}`
-                  : "";
-              return `- ${p.kind}: ${p.ref}${metaSuffix}`;
+            // WARP-2582 — a business pin (customer / deal / project /
+            // work_item) carries a RECORD ID, not a path, so it has to be
+            // resolved before it can be rendered: prepending a bare uuid is
+            // worse than prepending nothing, because the model spends a turn
+            // guessing what it names or invents an answer.
+            //
+            // The resolver is also where the two authorization axes compose.
+            // `/api/llm/*` is gated on the `chat` module, NOT on `crm` or
+            // `projects` — so without this a pin would keep naming a customer
+            // on a box whose operator turned the CRM off, which is a module
+            // gate bypassed through a prompt. It runs PER TURN, not once at
+            // create, precisely because enablement changes under a live pin.
+            // `toolAccessScope` is the s3 reach already resolved above for
+            // this turn; re-resolving it here would buy a second REPEATABLE
+            // READ transaction on the chat critical path for nothing.
+            //
+            // Zero added queries on a turn with no business pin — which is
+            // nearly every turn — so this is affordable inline.
+            const targets = await resolveBusinessPinTargets(prisma, pins, {
+              scope: toolAccessScope,
             });
-            const pinSystemMessage: ChatMessage = {
-              role: "system",
-              content:
-                "Context pins for this conversation — prefer these as " +
-                "scope hints when calling retrieval tools:\n" +
-                lines.join("\n"),
-            };
-            agentMessages = [pinSystemMessage, ...agentMessages];
+            const block = renderContextPinBlock(pins, targets);
+            // `null` when nothing survived resolution (every pin unavailable,
+            // or a business pin the resolver could not reach). A header with
+            // no lines under it is prompt the model reads for nothing.
+            if (block) {
+              const pinSystemMessage: ChatMessage = { role: "system", content: block };
+              agentMessages = [pinSystemMessage, ...agentMessages];
+            }
           }
         } catch (err) {
           // Pin-load failure must NOT block chat — degrade gracefully.
@@ -2837,11 +2863,32 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // creation (today: `req.user.username`; per WARP-485+WARP-488 the
   // backfill to UUID lands separately on ChatSession in a follow-up).
   // Read both shapes so the gate works through the transition.
+  // WARP-2582 — the four business kinds join the five WARP-460 ones. A
+  // business `ref` is a record id, so it is validated as a uuid: `.uuid()`
+  // here is a ROUTE guard on user input and never reaches a model. The
+  // WARP-1839 prohibition on `pattern`/`enum`/`maxLength` is about TOOL JSON
+  // SCHEMAS, which the ai-gateway feeds to llama.cpp's GBNF compiler — this
+  // zod object is not one of those and never serialises into `tools[]`.
   const pinCreateSchema = z.object({
-    kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
+    kind: z.enum([
+      "folder",
+      "file",
+      "email_thread",
+      "camera",
+      "camera_window",
+      "customer",
+      "deal",
+      "project",
+      "work_item",
+    ]),
     ref: z.string().min(1).max(512),
     meta: z.record(z.unknown()).optional(),
   });
+
+  /** A business pin's ref must be a record id. Kept separate from the shape
+   *  above so the five path-shaped kinds keep accepting exactly what they
+   *  always did. */
+  const businessRefSchema = z.string().uuid();
 
   async function loadOwnedSession(
     sessionId: string,
@@ -2878,7 +2925,48 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           where: { sessionId: req.params.sessionId },
           orderBy: { addedAt: "asc" },
         });
-        res.json({ pins });
+        // WARP-2582 — resolve alongside the rows so the dashboard can render a
+        // NAME. Without this the Context panel would list a raw uuid, which is
+        // the same defect on the human side that the prompt resolution fixes
+        // on the model side.
+        //
+        // `resolved` is an ADDITIVE field and `null` for the five path-shaped
+        // kinds: their `ref` is self-describing and there is no record to look
+        // up. That is a property of the KIND, not a state derived from a null
+        // column — the four target states are an explicit enum
+        // (`ContextPinTargetState`), never inferred from a missing label.
+        //
+        // Same two-axis gate as the chat turn, and the same reason: this route
+        // is behind the `chat` module, not `crm`/`projects`.
+        //
+        // Resolution is BEST-EFFORT here, as it is on the chat turn: a CRM/PM
+        // read failing must not take the whole listing down, least of all for
+        // a session whose pins are all path-shaped and never touched CRM. On a
+        // failure every business pin reads `unavailable` — the same explicit
+        // state the per-target resolver uses when a module cannot answer —
+        // and the path-shaped pins are unaffected.
+        let targets: Awaited<ReturnType<typeof resolveBusinessPinTargets>> = new Map();
+        try {
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/pins] failed to resolve business pin targets:", err);
+        }
+        res.json({
+          pins: pins.map((p: { id: string; kind: string }) => ({
+            ...p,
+            resolved:
+              targets.get(p.id) ??
+              (isBusinessPinKind(p.kind)
+                ? { state: "unavailable", label: null, sublabel: null }
+                : null),
+          })),
+        });
       } catch (err) {
         next(err);
       }
@@ -2903,15 +2991,105 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           });
           return;
         }
-        const pin = await prisma.contextPin.create({
-          data: {
-            sessionId: req.params.sessionId!,
-            kind: parsed.data.kind,
-            ref: parsed.data.ref,
-            meta: parsed.data.meta as object | undefined,
-          },
+        // WARP-2582 — a business pin is only accepted for a record the caller
+        // can read RIGHT NOW. This does not make the per-turn resolution
+        // redundant and is not meant to: a module can be switched off, or a
+        // record deleted, between the pin being made and the next turn.
+        // Create-time validation exists so the failure surfaces on the button
+        // the user pressed, instead of as a pin that silently never worked.
+        if (isBusinessPinKind(parsed.data.kind)) {
+          const refOk = businessRefSchema.safeParse(parsed.data.ref);
+          if (!refOk.success) {
+            res.status(400).json({ error: "Invalid pin", details: "ref must be a record id" });
+            return;
+          }
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          const check = await checkBusinessPinTarget(
+            prisma,
+            parsed.data.kind as BusinessPinKind,
+            parsed.data.ref,
+            { scope },
+          );
+          if (!check.ok) {
+            if (check.reason === "module_disabled") {
+              // Byte-consistent with requireModuleEnabled / the feature gate:
+              // a module that is off reads as ABSENT, never as FORBIDDEN.
+              res.status(404).json({ error: "module_disabled", module: check.module });
+              return;
+            }
+            // 422, not 404: the request is well-formed and the SESSION exists
+            // — it is the referenced record that does not. 404 on this route
+            // already means "no such session", and collapsing the two would
+            // make a deleted customer read as a revoked thread.
+            res.status(422).json({ error: "pin_target_not_found" });
+            return;
+          }
+        }
+
+        // Advisory cap. The ENFORCING gate is the pin block's char budget
+        // (CONTEXT_PIN_BLOCK_MAX_CHARS), which no concurrent insert can get
+        // around; this one exists to tell a user who is over it, at the moment
+        // they go over, rather than to be race-free.
+        const existingCount = await prisma.contextPin.count({
+          where: { sessionId: req.params.sessionId },
         });
-        res.status(201).json({ pin });
+        if (existingCount >= MAX_PINS_PER_SESSION) {
+          // The cap bounds NEW pins. Re-pinning a record that is already in
+          // the set is idempotent (the P2002 branch below) and adds nothing to
+          // the block, so a full session still answers 200 with the existing
+          // row instead of refusing the one gesture that changes nothing.
+          const already = await prisma.contextPin.findFirst({
+            where: {
+              sessionId: req.params.sessionId,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+            },
+          });
+          if (already) {
+            res.status(200).json({ pin: already });
+            return;
+          }
+          res.status(409).json({ error: "too_many_pins", limit: MAX_PINS_PER_SESSION });
+          return;
+        }
+
+        try {
+          const pin = await prisma.contextPin.create({
+            data: {
+              sessionId: req.params.sessionId!,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+              meta: parsed.data.meta as object | undefined,
+            },
+          });
+          res.status(201).json({ pin });
+        } catch (err) {
+          // WARP-2582 — pinning the same record twice is IDEMPOTENT, not an
+          // error: the record-drawer action makes a double click one gesture,
+          // and the user's intent ("this thread is about Northwind") is
+          // already satisfied. Caught from the unique index rather than
+          // pre-checked with findFirst, which would be the exact
+          // findUnique-then-write TOCTOU the review patterns flag. 200, not
+          // 201, so a client can tell it created nothing.
+          if ((err as { code?: string }).code === "P2002") {
+            const existing = await prisma.contextPin.findFirst({
+              where: {
+                sessionId: req.params.sessionId,
+                kind: parsed.data.kind,
+                ref: parsed.data.ref,
+              },
+            });
+            if (existing) {
+              res.status(200).json({ pin: existing });
+              return;
+            }
+          }
+          throw err;
+        }
       } catch (err) {
         next(err);
       }

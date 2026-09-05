@@ -88,7 +88,7 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # The cloud/SaaS providers that must each have a customer setup guide.
 # Source of truth: ADR-042 §2. Space-separated (bash 3.2 — macOS ships
 # 3.2.57 and has no associative arrays; keep this script 3.2-compatible).
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero"
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -177,6 +177,65 @@ fact_pins() {
       # whole; and the key is full account access with no scope model, which
       # is the one place we cannot claim minimal access.
       printf '%s\n' '-us14' 'full account access'
+      ;;
+    atlassian)
+      # Four facts a customer acts on, and every one of them is a way the
+      # setup fails for a reason Droplet cannot fix (WARP-2316):
+      #  - 365 days is a HARD stop with no grace period and no auto-renewal.
+      #    It is the only connector on this list with an expiry the customer
+      #    must diary, and softening it produces a silent outage a year later.
+      #  - The Rovo MCP server toggle is an ORG ADMIN action in a console the
+      #    person doing the setup often cannot open. Naming the exact screen
+      #    is the difference between a one-minute ask and a support ticket.
+      #  - The Free plan cannot connect at all — a pre-sale qualification
+      #    gate, like Shopify's Grow plan and Xero's four countries.
+      #  - The IP allowlist, not the domain allowlist, is the Atlassian
+      #    control that governs this. Getting that backwards presents as a
+      #    network timeout rather than as a permission error, which is why
+      #    the distinction has to survive a copy pass.
+      printf '%s\n' '365 days' 'Rovo MCP server' 'Free plan' 'IP allowlist'
+      ;;
+    brevo)
+      # Brevo is the EXCEPTION to credential-handling.md's "these do not
+      # expire" rule, in two independent ways: the owner picks a lifetime at
+      # creation, AND an unused key is retired after a period of inactivity.
+      # A connection can therefore stop working with nothing changed, which
+      # is the support call this pin exists to pre-empt. The key also has no
+      # scope model at all - it can send mail - so the guide may not imply
+      # otherwise. Brevo's own wording is "full access to your Brevo
+      # account", so mailchimp's 'full account access' string does NOT apply
+      # here and must not be copied across.
+      printf '%s
+' '90 days' 'full access to your Brevo account' 'Authorized IPs'
+      ;;
+    klaviyo)
+      # Three facts that each change what the owner does. The prefix
+      # separates the PRIVATE key from the public site id - pasting the
+      # public one gives 401s that read as a wrong password rather than the
+      # wrong KIND of credential. Read-only is the scope we ask for and it
+      # CANNOT be changed after creation. The daily report budget is what
+      # makes campaign performance a bounded feature, not an always-on one.
+      printf '%s
+' 'pk_' 'Read-only' '225 calls a day'
+      ;;
+    pipedrive)
+      # Two facts, both of which present as "it just does not work".
+      #
+      # The token IS the person - it carries its creator's permissions exactly
+      # - so it silently stops seeing data when their access changes, and it
+      # is shared with every other tool that user has connected. Softening
+      # that to "an admin should create it" loses the reason.
+      #
+      # And API access is a per-PERMISSION-SET switch whose failure mode is
+      # SILENCE: with it off, the API page is simply absent from the menu -
+      # no error, no greyed-out button - which looks exactly like having
+      # looked in the wrong place. It is the single most likely reason a
+      # customer gets stuck, and Droplet cannot detect it in advance.
+      #
+      # The company domain is the other half of the credential: without it
+      # there is no host at all, so the guide must not present it as optional.
+      printf '%s
+' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
       ;;
     *)
       : # no pins declared for this provider

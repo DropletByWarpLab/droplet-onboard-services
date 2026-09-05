@@ -22,7 +22,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 type MockNote = {
   id: string;
@@ -86,9 +85,9 @@ function conflict(theirs: MockNote) {
   });
 }
 
-// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
-// on Windows, which path.resolve doubles into "C:\C:\...".
-const here = path.dirname(fileURLToPath(import.meta.url));
+// `__dirname`, the one anchoring idiom this package uses (WARP-2654) — see
+// src/__tests__/helpers/test-paths.ts for why it is spelled this way here.
+const here = __dirname;
 const cssPath = path.resolve(here, "../../components/home/home-widgets.css");
 
 beforeEach(() => {

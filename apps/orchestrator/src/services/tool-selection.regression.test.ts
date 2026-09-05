@@ -17,6 +17,10 @@
  * narrow, or it is decorative. `narrowToSingleTool` below is that mutation,
  * run as a test rather than described in a comment.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "@droplet/tools-core";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
@@ -104,6 +108,20 @@ const TURNS: Turn[] = [
     label: "files / find a document by what it is",
     message: "I need the invoice from the plumber, can you dig it out?",
     requires: "search_files",
+  },
+  // WARP-2664 — the cleanup conversation. The first names a folder word the
+  // files rule already knew; the second names nothing but the mess, which is
+  // how a person actually asks, and is the sentence that used to reach only
+  // the core four.
+  {
+    label: "files / a folder that needs sorting out",
+    message: "my downloads folder is a total mess, can you sort it into folders for me?",
+    requires: "organize_files",
+  },
+  {
+    label: "files / a cleanup asked for by the mess, not the files",
+    message: "what's cluttering my drive? get rid of the junk and the old copies",
+    requires: "analyze_file_cleanup",
   },
   {
     label: "cameras / the sentence a household actually types",

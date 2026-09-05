@@ -20,7 +20,7 @@
  * come out in the order callers already see. Hub ordering is separate and
  * pinned by `catalog.order`.
  */
-import type { ProviderDescriptor } from "./provider-descriptor";
+import { setupGuideHrefFor, type ProviderDescriptor } from "./provider-descriptor";
 
 /** Practice-management datasets — mirrors `PRACTICE_DATASETS` in the connector
  *  package, gated by the orchestrator's dataset-vocabulary drift test. */
@@ -652,6 +652,315 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 7,
     },
   },
+  // ── WARP-2650 — the first MCP-backed provider ────────────────────────────
+  //
+  // #1944 built the outbound MCP client, #1956 the Atlassian profile and #1964
+  // the bridge service and its three fail-closed gates. The third gate is a
+  // CONNECTED `IntegrationConnection` row holding an ADR-042-sealed credential,
+  // and NOTHING could create one: there was no `atlassian` descriptor, so the
+  // credential configurator had no provider to render, `requireDescriptor()`
+  // 404'd the PATCH, and the row had to be inserted by hand. This is that
+  // descriptor.
+  {
+    id: "atlassian",
+    displayName: "Atlassian (Jira & Confluence)",
+    category: "Project management",
+    track: "mcp",
+    // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
+    // source by `adr-043-boundary.test.ts`, which now checks four declarations.
+    mcpServerId: "atlassian",
+    credentialFields: [
+      {
+        // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly
+        // this name out of `providerConfig`. The three names below are a wire
+        // contract with that function, and `provider-registry.test.ts` asserts
+        // it rather than trusting it — a renamed field here would produce a row
+        // the attach path reports as `credential_incomplete`, which reads as a
+        // customer mistake.
+        name: "email",
+        label: "Atlassian account email",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        help:
+          "The account the API token belongs to. The token carries that person's " +
+          "full permissions, so choose an account that will outlive any one individual.",
+      },
+      {
+        name: "apiToken",
+        label: "Atlassian API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // Deliberately NO `pattern`. Atlassian's `ATATT`-prefixed format is not
+        // a documented contract the way Stripe's `rk_` is — it has changed
+        // before — and a regex that rejects a token the vendor considers valid
+        // would present as "your token is wrong" with no way for a customer to
+        // be right. The boundary rejection ADR-042 §4 asks for is not available
+        // here at all: the token is UNSCOPED by design, so there is no narrower
+        // shape to insist on. The guide says so instead.
+        // The click-path names the MENU, not the host. A bare `id.atlassian.com`
+        // literal here is read by `scripts/check-egress-allowlist.py` as an
+        // outbound destination and refused — correctly: the box never dials it,
+        // the customer's browser does. The full URL lives in the guide, which
+        // is where a person following a click-path actually is.
+        help:
+          "Account settings → Security → Create and manage API tokens. Copy it once; " +
+          "Atlassian never shows it again.",
+      },
+      {
+        name: "cloudId",
+        label: "Atlassian site (cloud) ID",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // Required, and load-bearing: the token is NOT bound to a site, so every
+        // call has to name one. `withAtlassianCloudId` forces this value onto
+        // each call LAST, overwriting anything the model supplied — an argument
+        // the model could win would be a prompt-injection path to a different
+        // site the same token can reach.
+        help: "Visit <your-site>.atlassian.net/_edge/tenant_info to read it.",
+      },
+      {
+        name: "tokenExpiresAt",
+        label: "Token expiry date",
+        type: "string",
+        // OPTIONAL, and the optionality is a stated position rather than
+        // leniency: Atlassian does not tell the box when a token expires, so
+        // this is the customer transcribing what their own console showed them.
+        // Requiring it would block a connection over a date nobody can look up
+        // after the fact. A connection without it reports `EXPIRY_UNKNOWN` —
+        // its own status, never `VALID` (see `credentialExpiry` below).
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+        help:
+          "YYYY-MM-DD, from the API tokens page. Atlassian tokens last at most 365 " +
+          "days and there is no grace period — Droplet warns 30 days ahead if it knows the date.",
+      },
+    ],
+    // `mcp.atlassian.com` is the ONE host this integration dials, registered by
+    // #1956 as `atlassian-mcp` (`kind: egress`, fixed hosted-only endpoint).
+    // Declared here as the descriptor's half of that registration even though
+    // the socket lives in `services/mcp-bridge` — ADR-043 §5 puts the transport
+    // in another process, not the egress in another repo. `auth.atlassian.com`
+    // (OAuth, a v1 non-goal) and `api.atlassian.com` are deliberately absent:
+    // nothing dials them, and a registered host nothing dials is a permanent
+    // unfalsifiable hole in a default-deny list.
+    egressHosts: ["mcp.atlassian.com"],
+    // Empty BY CONSTRUCTION — the type is `readonly []`, not "empty for now".
+    datasets: [],
+    credentialExpiry: {
+      field: "tokenExpiresAt",
+      // WARP-2353's number, and since WARP-2300 the only copy of it: the
+      // orchestrator-only module it used to be mirrored from had no production
+      // callers and was deleted rather than kept in step by an assertion.
+      //
+      // 30 days is sized so the warning outlasts a holiday or a handover —
+      // creating a replacement is a customer-admin action in a console the box
+      // does not control, and Atlassian offers no grace period and sends no
+      // reminder of its own.
+      warningDays: 30,
+      // Atlassian's documented maximum API-token lifetime.
+      maxLifetimeDays: 365,
+    },
+    setupGuideHref: "/help/integrations/atlassian",
+  },
+  {
+    id: "brevo",
+    displayName: "Brevo",
+    category: "Marketing",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Brevo API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, deliberately. Brevo publishes no documented shape for
+        // a v3 key — the `xkeysib-` prefix is widely repeated but is not a
+        // documented contract — so a regex here would be a guess that refuses
+        // valid keys the day Brevo changes the prefix. The connector ships no
+        // credential regex either, and `brevo.test.ts` pins that absence so
+        // nobody "helpfully" adds one from a blog post.
+        help:
+          "In Brevo: your account name (top right) → SMTP & API → API keys → Generate a new API key. " +
+          "Copy it immediately — Brevo shows the value once.",
+      },
+    ],
+    // One fixed host, so this is a plain registered destination and the base
+    // URL is a whole-string literal in the connector for the egress scanner to
+    // extract. Contrast Mailchimp and Pipedrive, whose hosts are per-account.
+    egressHosts: ["api.brevo.com"],
+    datasets: [
+      "contact",
+      "audience",
+      "audience_member",
+      "campaign",
+      "company",
+      "deal",
+      "ecommerce_order",
+    ],
+    // Brevo's general ceiling is documented per HOUR and differs sharply by
+    // endpoint (contacts is far higher than the default), so the number here is
+    // the CONSERVATIVE general one — the connector holds the per-endpoint
+    // detail, which a single pair of numbers cannot express.
+    rateLimit: { callCeiling: 100, periodMs: 3_600_000 },
+    catalog: {
+      id: "brevo",
+      name: "Brevo",
+      category: "Marketing",
+      description:
+        "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/brevo",
+      order: 8,
+    },
+  },
+  {
+    id: "klaviyo",
+    displayName: "Klaviyo",
+    category: "Marketing",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Klaviyo private API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `KLAVIYO_API_KEY_PATTERN`. The `pk_` prefix IS documented, and it is
+        // what separates a PRIVATE key from a public site id — pasting the
+        // public one would produce 401s that look like a wrong password rather
+        // than the wrong KIND of credential.
+        pattern: "^pk_[!-~]{8,512}$",
+        // Path kept in step with `docs/integrations/klaviyo.md`, which is the
+        // researched one: it is your organization name (bottom left) →
+        // Settings → API keys, NOT Settings → Account → API keys. The wizard
+        // shows this line and the guide shows the full path; the two
+        // disagreeing is how an owner ends up hunting for a screen.
+        help:
+          "In Klaviyo: your organization name (bottom left) → Settings → API keys → " +
+          "Create Private API Key, scope Read-only. It starts with pk_. The public " +
+          "API key (your six-character site ID) will not work.",
+      },
+      {
+        name: "conversionMetricId",
+        label: "Conversion metric ID (optional)",
+        type: "string",
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        // Declared because the SETUP GUIDE tells the owner to paste it here.
+        // Campaign send/open/click counts do not live on Klaviyo's campaign
+        // records — they come from a separate report that must be told which
+        // event counts as a sale. Without this the other four datasets work
+        // normally and campaign performance is reported as unavailable rather
+        // than shown as zero, which would read as "this campaign reached
+        // nobody". Optional on purpose: requiring it would block a connection
+        // that does not want campaign numbers at all.
+        help:
+          "Only if you want campaign send, open and click counts. In Klaviyo: " +
+          "Analytics → Metrics → open the metric that represents a sale (usually " +
+          "Placed Order) and copy its ID from the address bar.",
+      },
+    ],
+    egressHosts: ["a.klaviyo.com"],
+    datasets: ["contact", "audience", "audience_member", "campaign", "engagement"],
+    // Klaviyo publishes burst AND steady ceilings per endpoint. The steady
+    // figure is the one a poll cadence must respect; the connector carries the
+    // per-endpoint table.
+    rateLimit: { callCeiling: 150, periodMs: 60_000 },
+    catalog: {
+      id: "klaviyo",
+      name: "Klaviyo",
+      category: "Marketing",
+      description:
+        "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/klaviyo",
+      order: 9,
+    },
+  },
+  {
+    id: "pipedrive",
+    displayName: "Pipedrive",
+    category: "CRM",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiToken",
+        label: "Pipedrive API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `PIPEDRIVE_TOKEN_PATTERN` — printable ASCII, length-bounded. Loose on
+        // purpose: Pipedrive documents no token shape, so this refuses only the
+        // things that cannot be a token (empty, whitespace, control bytes).
+        pattern: "^[\x21-\x7e]{8,512}$",
+        help:
+          "In Pipedrive: your profile (top right) → Personal preferences → API → " +
+          "Your personal API token. The token inherits YOUR permissions, so create it " +
+          "from an account that can see everything the box should read.",
+      },
+      {
+        name: "companyDomain",
+        label: "Pipedrive company domain",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored apart from the token for the same ADR-042 §5
+        // reason Mailchimp's datacentre is: this value SELECTS THE HOST, so
+        // answering "where does this connection dial?" must never require
+        // decrypting a credential — and a token swapped out-of-band must not be
+        // able to silently move the destination.
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+        // NO example hostname here, deliberately. The egress scanner extracts
+        // any scheme-less host literal from tracked source and denies it, and
+        // it is RIGHT to: a sampled tenant name registered to make the gate
+        // pass would be a real destination nobody reviewed. Describe the shape
+        // instead of illustrating it.
+        help:
+          "The first part of your Pipedrive web address — the label before the dot " +
+          "when you sign in. If your address starts with acme, this is acme.",
+      },
+    ],
+    // EMPTY because the host is `<companyDomain>.pipedrive.com`, assembled from
+    // the customer's own configuration. There is no name to register and no
+    // literal for the egress scanner to find, exactly as with Mailchimp — and
+    // `check-egress-allowlist.py` contributes ZERO host patterns for the
+    // `kind: dynamic` entry this pairs with, so `assertSafePipedriveBaseUrl`
+    // in the connector is the ENTIRE control, not defence in depth.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.companyDomain",
+      registryId: "pipedrive-api",
+    },
+    datasets: ["contact", "company", "deal", "engagement", "product"],
+    // Pipedrive's limit is BURST-shaped — a small allowance over a two-second
+    // window rather than a generous hourly pool — so a poll that would be
+    // comfortable against an hourly ceiling can still trip this one.
+    rateLimit: { callCeiling: 20, periodMs: 2_000 },
+    catalog: {
+      id: "pipedrive",
+      name: "Pipedrive",
+      category: "CRM",
+      description:
+        "People, organisations, deals, activities and products — read from your Pipedrive.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/pipedrive",
+      order: 10,
+    },
+  },
   {
     id: "xero",
     displayName: "Xero",
@@ -784,7 +1093,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // learns the connection is unavailable outside AU/NZ/UK/US and that Xero
       // bills them per organisation. Served from `docs/integrations/xero.md`.
       setupGuideHref: "/help/integrations/xero",
-      order: 8,
+      order: 11,
     },
   },
 ] as const satisfies readonly ProviderDescriptor[];
@@ -834,15 +1143,51 @@ export function providerDescriptor(id: string): ProviderDescriptor | undefined {
 }
 
 /**
- * Providers with a shipped transport — the descriptor-derived replacement for
- * the hand-maintained `KNOWN_ERP_PROVIDERS`.
+ * Providers the ERP CONNECTOR FACTORY can build — the descriptor-derived
+ * replacement for the hand-maintained `KNOWN_ERP_PROVIDERS`.
  *
- * Excludes `catalog` tracks: a placeholder card is not something a connection
- * row may name.
+ * An explicit `lan | cloud` allow-list, not `!== "catalog"`. Those two were the
+ * same set while three tracks existed, and WARP-2650's `mcp` track is exactly
+ * the case that separates them: it IS a valid `IntegrationConnection.provider`
+ * (unlike `catalog`) and it has NO connector (unlike `lan`/`cloud`), so a
+ * negative filter would have admitted it here and `connectorForProvider` would
+ * have thrown the first time a real row used it. A positive list makes the next
+ * track's author classify it rather than inherit an answer.
  */
 export function buildableProviderIds(): readonly string[] {
   return providerDescriptors()
-    .filter((d) => d.track !== "catalog")
+    .filter((d) => d.track === "lan" || d.track === "cloud")
+    .map((d) => d.id);
+}
+
+/**
+ * The MCP-backed tracks (ADR-043).
+ *
+ * Kept as its own derivation for the same reason {@link cloudProviderIds} is:
+ * a caller genuinely needs to know which kind a row is. An MCP row's credential
+ * is opened by `attachAtlassianRemote`, not by a `Connector`, and it serves no
+ * dataset — so a caller that folded it into the cloud list would resolve a
+ * dataset to a connection nothing can read.
+ */
+export function mcpProviderIds(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => d.track === "mcp")
+    .map((d) => d.id);
+}
+
+/**
+ * Every provider whose credential is minted by the CUSTOMER in a vendor console
+ * and therefore ships with a setup guide — the set
+ * `scripts/check-setup-guides.sh`'s `CLOUD_PROVIDERS` must cover.
+ *
+ * Derived from `setupGuideHrefFor`, so it is the same read the tile, the
+ * wizard and the credential configurator make. A `coming-soon` cloud card
+ * declares none and is correctly absent: it has no connect flow, so there is no
+ * moment of use to link from.
+ */
+export function providersWithSetupGuide(): readonly string[] {
+  return providerDescriptors()
+    .filter((d) => setupGuideHrefFor(d) !== undefined)
     .map((d) => d.id);
 }
 

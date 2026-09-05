@@ -46,13 +46,26 @@ export const CLAIMABLE_ERP_SYNC_STATES = ["IDLE", "BACKOFF", "RESYNC_REQUIRED"] 
  *
  * `CONNECTED` is the happy path; `DEGRADED` is an explicitly transient sync
  * failure (schema.prisma:4306-4318) and is exactly the state a retry is
- * supposed to clear. Everything else is excluded on purpose:
+ * supposed to clear. `CAPABILITY_LIMITED` (WARP-2623) is a WORKING connection
+ * with one dataset refused by the vendor's plan or scope grant — the other
+ * entities read normally, and stopping the whole connection because one of
+ * them is withheld would silently take orders, products and inventory offline
+ * to punish a missing customer scope. Everything else is excluded on purpose:
  * `NOT_CONFIGURED` and `PROVISIONING` have no credential to spend,
  * `DISABLED` means an operator turned it off and polling it anyway would
  * ignore them, `DRIFT_LOCKED` froze the connection deliberately, and `ERROR`
  * needs a person.
+ *
+ * Exported and consumed by `erp-sync.service.ts`'s `registerCursors` and
+ * reconciliation sweep as well as by the claim below. Those two carried their
+ * own `["CONNECTED", "DEGRADED"]` literals until WARP-2623; three copies of
+ * one rule is how a status added to two of them stops syncing on the third.
  */
-export const POLLABLE_CONNECTION_STATUSES = ["CONNECTED", "DEGRADED"] as const;
+export const POLLABLE_CONNECTION_STATUSES = [
+  "CONNECTED",
+  "CAPABILITY_LIMITED",
+  "DEGRADED",
+] as const;
 
 export type ErpSyncStateName =
   | "IDLE"

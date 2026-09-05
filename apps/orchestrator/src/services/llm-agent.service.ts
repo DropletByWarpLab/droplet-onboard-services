@@ -37,9 +37,9 @@ import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type {
   McpCallContext,
-  McpClientService,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
+import type { McpClientPort } from "./mcp-client.port.js";
 import {
   parseToolResultPayload,
   toolResultPayloadValue,
@@ -138,7 +138,16 @@ export interface CitationDeps {
 export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
 
 export interface AgentDeps {
-  mcp: McpClientService;
+  /**
+   * WARP-2391 — the PORT, not the stdio supervisor. The loop needs
+   * `listTools` / `callTool` / `isStarted` and nothing else; typing it as
+   * `McpClientService` meant it also depended on a child process, a
+   * `StdioClientTransport` and a `start()`/`stop()` lifecycle it never
+   * touches. Production passes the multiplexer
+   * (`mcp-client.singleton.ts`), which is the local child plus N remote
+   * servers behind the same three members.
+   */
+  mcp: McpClientPort;
   /**
    * WARP-2469 — turns an interceptor challenge into something a human
    * can approve, and an approval into the token the re-issued call
@@ -417,6 +426,62 @@ export interface AgentRequest {
    * service callers (email-analysis) also pass nothing and are unaffected.
    */
   toolAccessScope?: ToolAccessScope | null;
+  /**
+   * WARP-2177 — durable-run checkpoint port (epic WARP-2176).
+   *
+   * The ONLY seam a background run needs from this loop, and the only change
+   * this loop takes for durability: the control flow, the guards, the RBAC
+   * narrowing and the SSE contract are untouched. Absent (every existing
+   * caller: chat, voice, email-analysis, the ToolSpec summariser) the loop is
+   * byte-for-byte what it was — the same optional-port shape as `approvals`,
+   * `enhancement` and `citation`.
+   *
+   * WHY A HOOK AND NOT A WRAPPER. The iteration boundary and the
+   * `tool_call_id` both live inside this function. A wrapper around
+   * `deps.mcp.callTool` sees neither, so it could persist a call only by
+   * (name, args) and could never say WHICH iteration the loop was in when
+   * the process died — which is exactly what a resume needs to know.
+   */
+  checkpoint?: AgentCheckpointPort;
+}
+
+/**
+ * WARP-2177 — what the loop tells a durable run, and what it asks back.
+ *
+ * All three are awaited: a checkpoint that could not be written is a run
+ * that cannot be resumed, so the failure must reach the worker, not be
+ * swallowed. A thrown hook aborts the turn like any other thrown await.
+ */
+export interface AgentCheckpointPort {
+  /**
+   * Top of iteration `iteration` (0-based within THIS `runAgent` call),
+   * before the model is called. `messages` is a complete, valid
+   * conversation — every prior `tool_calls` has its `role: "tool"` replies —
+   * which is why this, and not the tool boundary, is the checkpoint unit.
+   */
+  onIteration(iteration: number, messages: readonly ChatMessage[]): Promise<void>;
+  /**
+   * Immediately before a tool call is dispatched, after every guard has
+   * admitted it. The port persists the intent (`tool_call_id` before
+   * dispatch — the replay guard's whole point) and may answer with a stored
+   * result to REPLAY instead of dispatching: `text` is the raw wire payload
+   * the original dispatch produced, and it flows through the same bounding
+   * and SSE path a live result would.
+   */
+  beforeToolCall(call: {
+    tool_call_id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    iteration: number;
+  }): Promise<{ text: string; isError: boolean } | undefined>;
+  /** After a LIVE dispatch returned (never after a replay). */
+  afterToolCall(call: {
+    tool_call_id: string;
+    tool: string;
+    iteration: number;
+    text: string;
+    isError: boolean;
+  }): Promise<void>;
 }
 
 export interface AgentTraceEntry {
@@ -1496,6 +1561,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
     if (req.signal?.aborted) return abortedResult(iter);
+    // WARP-2177 — durable-run checkpoint, at the loop's natural boundary.
+    // `messages` is a valid conversation here (see AgentCheckpointPort).
+    // Awaited: a checkpoint that failed to persist must fail the run, not
+    // let it continue un-resumable.
+    if (req.checkpoint) await req.checkpoint.onIteration(iter, messages);
 
     // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
     // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
@@ -1514,14 +1584,28 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // transcript headroom at the 16k default window and cap every tool turn
     // at one iteration — the exact regression this comment exists to prevent
     // a future edit from reintroducing.
-    if (
-      iter > 0 &&
-      finalizeReason === null &&
-      toolChoice !== "none" &&
-      estimateTokensFromChars(JSON.stringify(messages).length) >
-        contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM
-    ) {
-      finalizeReason = "context_budget";
+    if (iter > 0 && finalizeReason === null && toolChoice !== "none") {
+      const estimatedTokens = estimateTokensFromChars(JSON.stringify(messages).length);
+      const thresholdTokens = contextWindow - OUTPUT_RESERVE - ITERATION_MIN_HEADROOM;
+      if (estimatedTokens > thresholdTokens) {
+        finalizeReason = "context_budget";
+        // WARP-2178 — a turn (or a durable run) that hits the window must
+        // never do so silently: name the iteration and the estimate, the
+        // same way context-budget.service.ts warns once per dropped block.
+        logger.warn(
+          {
+            turn_id: turnId,
+            iter,
+            estimated_tokens: estimatedTokens,
+            threshold_tokens: thresholdTokens,
+            context_window: contextWindow,
+            ...(req.toolCallContext?.agentRunId
+              ? { agent_run_id: req.toolCallContext.agentRunId }
+              : {}),
+          },
+          "agent_context_budget_reached",
+        );
+      }
     }
     if (finalizeReason !== null) {
       messages.push({
@@ -2184,8 +2268,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // tool. Tool-*reported* failures (`result.isError`) already flow
       // through the normal path below — this only adds the throw path.
       let result: McpToolCallResult;
+      // WARP-2177 — replay guard. The port persists `tool_call_id` BEFORE
+      // dispatch and hands back a stored result when this exact call already
+      // completed in an interrupted segment of the same iteration, so a
+      // resumed run never re-sends what the box already sent. A replayed
+      // result enters below through the same parse, bounding, trace and SSE
+      // path as a live one.
+      const replay = req.checkpoint
+        ? await req.checkpoint.beforeToolCall({
+            tool_call_id: call.id,
+            tool: call.function.name,
+            args,
+            iteration: iter,
+          })
+        : undefined;
       try {
-        result = await deps.mcp.callTool(call.function.name, args, toolContext);
+        result = replay
+          ? { isError: replay.isError, content: [{ type: "text", text: replay.text }] }
+          : await deps.mcp.callTool(call.function.name, args, toolContext);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = {
@@ -2203,6 +2303,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         };
       }
       const text = result.content[0]?.text ?? "{}";
+      // WARP-2177 — complete the trace entry with the wire result, so a
+      // resume after THIS point replays instead of re-dispatching. Skipped
+      // for a replay: the entry is already complete.
+      if (req.checkpoint && !replay) {
+        await req.checkpoint.afterToolCall({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          iteration: iter,
+          text,
+          isError: Boolean(result.isError),
+        });
+      }
       // WARP-1604 — single parse point for the tool-result wire payload.
       // `payload` carries the mcp-server contract in its type (see
       // services/tool-result-payload.ts); `parsed` is the same value widened
@@ -2368,10 +2480,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // The trace already holds `parsed` (line ~1974), the SSE event already
       // carried it (~2039) and citation extraction already ran (~2046), so
       // this step takes TEXT and returns TEXT and touches nothing else.
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: boundToolResultForModel(text, call.function.name, (refusal) => {
+      // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
+      // the historical 8000), so it can be set from a measured distribution.
+      const bounded = boundToolResultForModel(
+        text,
+        call.function.name,
+        (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
           // SSE already said `ok: true` and the trace holds the full payload,
           // while the model's history now carries none of it. Without this
@@ -2389,7 +2503,33 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             },
             "agent_tool_result_refused",
           );
-        }),
+        },
+        config.AGENT_TOOL_RESULT_CAP_CHARS,
+      );
+      // WARP-2178 — the per-tool result-size distribution, one line per
+      // dispatch at debug level (a chat turn must not pay an info line per
+      // tool). This is what the cap is meant to be chosen from: run the
+      // staging suite with LOG_LEVEL=debug and aggregate by `tool`. Sizes and
+      // names only — never the payload.
+      logger.debug(
+        {
+          tool: call.function.name,
+          tool_call_id: call.id,
+          turn_id: turnId,
+          iter,
+          result_chars: text.length,
+          bounded_chars: bounded.length,
+          reduced: bounded !== text,
+          ...(req.toolCallContext?.agentRunId
+            ? { agent_run_id: req.toolCallContext.agentRunId }
+            : {}),
+        },
+        "agent_tool_result_size",
+      );
+      messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: bounded,
       });
     }
 

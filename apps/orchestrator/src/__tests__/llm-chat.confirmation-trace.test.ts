@@ -126,6 +126,17 @@ vi.mock("../services/effective-access.service.js", async (importActual) => {
 
 import { createLlmRouter } from "../routes/llm.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — see the helper's header: without these three delegates both
+// block composers threw on every turn and the route's fail-open swallowed it.
+guardComposerFailOpen();
+
 /** The interceptor's minted secret — the thing that must never egress. */
 const SECRET = "itc-secret-256-bit-do-not-egress";
 
@@ -180,6 +191,8 @@ function buildApp() {
     next();
   });
   const prisma = {
+    // WARP-2652 — persona + business + workspace, absent here until now.
+    ...promptBlockPrismaDelegates(),
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: {
       findMany: vi.fn(async () => []),
@@ -227,6 +240,31 @@ async function postChat() {
   expect(res.status).toBe(200);
   return res;
 }
+
+
+/** WARP-2652 — the assembled base prompt the route handed the agent loop. */
+function systemPromptText(): string {
+  expect(mockRunAgent).toHaveBeenCalled();
+  const req = mockRunAgent.mock.calls.at(-1)![1] as {
+    messages: { role: string; content: unknown }[];
+  };
+  const sys = req.messages[0]!;
+  expect(sys.role).toBe("system");
+  return typeof sys.content === "string" ? sys.content : "";
+}
+
+// WARP-2652 — the fixture floor. Not a test of the persona or business
+// feature (llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts
+// own those); it is the statement that the turns measured in the rest of this
+// file run against the prompt the product assembles, blocks included.
+describe("POST /api/llm/chat — the prompt blocks this suite assumes (fixture floor)", () => {
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    await postChat();
+    const sys = systemPromptText();
+    expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
+});
 
 describe("POST /api/llm/chat (non-streaming) — interceptor challenge trace", () => {
   it("returns the challenge without the interceptor secret, and keeps it legible", async () => {

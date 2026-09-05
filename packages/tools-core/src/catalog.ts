@@ -23,6 +23,16 @@
  * suite goes red. That is the same discipline `WRITE_TOOLS` uses in the
  * orchestrator — derive from the registry, never maintain a silent
  * parallel list.
+ *
+ * WHAT IS DELIBERATELY ABSENT (WARP-2418 / ADR-043). A tool advertised at
+ * runtime by a remote MCP server has NO entry here and must never gain one:
+ * this catalog answers "what is installed on this box", and a session to a
+ * vendor's server is not an installed capability. Its domain — the one thing
+ * per-turn selection needs and a wire catalog cannot supply — lives in the
+ * parallel runtime layer,
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`, written
+ * only by `remote-mcp-servers.ts`. `tool-selection.service.ts` reads both,
+ * with THIS one winning any name collision.
  */
 
 import { TOOLS } from "./registry.js";
@@ -59,7 +69,11 @@ export type ToolDomain =
   | "data"
   // WARP-1685 — Messages (member-to-member team chat). Slug matches the
   // `team_chat` ModuleId so the module toggle gates the domain.
-  | "team_chat";
+  | "team_chat"
+  // WARP-2180 — durable background runs (epic WARP-2176): start one, list
+  // yours. Its own domain so selection can find the pair on a "do this in
+  // the background" turn without dragging a whole vertical along.
+  | "agent_runs";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -129,6 +143,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_pdf_report",
     "create_word_document",
     "create_spreadsheet",
+    // WARP-2664 — cleanup: the read-only report and the two writes it feeds.
+    "analyze_file_cleanup",
+    "organize_files",
+    "delete_files",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -227,6 +245,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   business: ["business_profile_get"],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
+  // WARP-2180 — durable background runs.
+  agent_runs: ["start_agent_run", "list_agent_runs"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -322,6 +342,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   create_pdf_report: "Write a finished PDF report and save it to your files",
   create_word_document: "Write a Word document you can keep editing",
   create_spreadsheet: "Build a spreadsheet from a table of data",
+  analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
+  organize_files: "Sort a folder's files into tidy subfolders",
+  delete_files: "Clear out a list of files you have agreed to delete",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",
@@ -447,6 +470,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Background runs (WARP-2180)
+  start_agent_run: "Hand Droplet a longer task to work on in the background",
+  list_agent_runs: "See your background tasks and how they went",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

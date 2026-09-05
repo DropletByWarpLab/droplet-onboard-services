@@ -2102,9 +2102,9 @@ fi
 # — a future "simplify" pass must not trim a pattern that an interrupted run
 # can actually strand. Writers (all stage to a `.$$`/`.<epoch>` sibling then
 # rename, leaving the sibling on interruption):
-#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_file.torn.$(date +%s)")
+#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_write_target.torn.$(date +%s)")
 #   .env.tmp.*     -> secrets.sh atomic .env write             ("$env_write_target.tmp.$$")
-#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_file.migrate.$$")
+#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_target.migrate.$$")
 #   .env.upsert.*  -> secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
 SECRETS_SH="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 SINGLEBOX_SH="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
@@ -2151,7 +2151,9 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # (ops) and fleet-agent (telemetry) are profile-gated services no default
 # provision pre-builds. inference-manager (dmr) is appended the same way —
 # WARP-2131's model-catalog sidecar, built only on a box running that runtime.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager"
+# mcp-bridge (remote-mcp) is appended the same way — WARP-2627's outbound MCP
+# session component, built only on a box that has connected a remote MCP vendor.
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

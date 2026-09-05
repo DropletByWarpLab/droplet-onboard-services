@@ -110,7 +110,37 @@ const CATALOG_WARP_2214 = [
     setupGuideHref: "/help/integrations/shopify",
   },
   {
-    // WARP-2383 — the fifth SaaS card, at catalog.order 8.
+    // WARP-2708 — wave 1, at catalog.order 8.
+    id: "brevo",
+    name: "Brevo",
+    category: "Marketing",
+    description:
+      "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/brevo",
+  },
+  {
+    // WARP-2709 — wave 1, at catalog.order 9.
+    id: "klaviyo",
+    name: "Klaviyo",
+    category: "Marketing",
+    description:
+      "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/klaviyo",
+  },
+  {
+    // WARP-2710 — wave 1, at catalog.order 10.
+    id: "pipedrive",
+    name: "Pipedrive",
+    category: "CRM",
+    description:
+      "People, organisations, deals, activities and products — read from your Pipedrive.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/pipedrive",
+  },
+  {
+    // WARP-2383 — Xero, at catalog.order 11 — after the wave-1 cards, which shipped first.
     id: "xero",
     name: "Xero",
     category: "Accounting",
@@ -152,11 +182,14 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     // adding it to the union is now a compile error, while the runtime
     // assertion below goes on pinning the DERIVED ids against it.
     const allowed: ConnectorId[] = [
+      "brevo",
       "dentrix",
       "eaglesoft",
       "hubspot",
+      "klaviyo",
       "mailchimp",
       "opendental",
+      "pipedrive",
       "quickbooks",
       "shopify",
       "stripe",
