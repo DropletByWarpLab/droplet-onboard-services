@@ -180,6 +180,50 @@ describe("recordFailure", () => {
     );
     expect((prisma.__first() as any).lastError).not.toContain("SECRETTOKENVALUE1234567890");
   });
+
+  it("never writes a driveItem delta token into lastError (WARP-2118)", async () => {
+    // driveItem's delta cursor is a BARE `token=`, not `$deltatoken=`. The
+    // Outlook-only pattern in redactSyncError could not see it, so a message
+    // carrying a files delta URL persisted the credential verbatim — the
+    // workload with the largest blast radius. redactDeltaTokens() closes it.
+    const prisma = fakePrisma([cursor()]);
+    await recordFailure(
+      prisma as never,
+      "c1",
+      {
+        statusCode: 400,
+        message:
+          "GET /me/drive/root/delta?token=DRIVESECRET1234567890 failed",
+      },
+      undefined,
+      NOW,
+    );
+    const lastError = (prisma.__first() as any).lastError as string;
+    expect(lastError).not.toContain("DRIVESECRET1234567890");
+    expect(lastError).toContain("[redacted]");
+  });
+
+  it("redacts BOTH token shapes in one message — neither pass is a superset", async () => {
+    // The guard on collapsing redactSyncError to a single call. redactDeltaTokens
+    // anchors on `?`/`&` and cannot see the bare form; the local pattern cannot
+    // see driveItem's `token=`. Drop either and exactly one of these leaks.
+    const prisma = fakePrisma([cursor()]);
+    await recordFailure(
+      prisma as never,
+      "c1",
+      {
+        statusCode: 400,
+        message:
+          "resync after $deltatoken=OUTLOOKSECRET111 then " +
+          "GET /me/drive/root/delta?token=DRIVESECRET222 failed",
+      },
+      undefined,
+      NOW,
+    );
+    const lastError = (prisma.__first() as any).lastError as string;
+    expect(lastError).not.toContain("OUTLOOKSECRET111");
+    expect(lastError).not.toContain("DRIVESECRET222");
+  });
 });
 
 describe("claimDueCursors", () => {

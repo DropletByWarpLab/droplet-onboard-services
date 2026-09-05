@@ -172,6 +172,20 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "create_pdf_report", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_word_document", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_spreadsheet", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  // WARP-2664 — file cleanup. analyze walks the tree through the same
+  // listing hop list_files uses; organize lists once then mkdir + move per
+  // file; delete_files reads the parent listing before every delete so a
+  // folder passed as a file is refused rather than trashed recursively.
+  { tool: "analyze_file_cleanup", client: "nextcloud", hops: [admit("get", "/api/files")] },
+  { tool: "organize_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("post", "/api/files/mkdir"),
+    admit("post", "/api/files/move"),
+  ] },
+  { tool: "delete_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("delete", "/api/files"),
+  ] },
   { tool: "delete_file", client: "nextcloud", hops: [admit("delete", "/api/files")] },
   { tool: "create_directory", client: "nextcloud", hops: [admit("post", "/api/files/mkdir")] },
   { tool: "rename_file", client: "nextcloud", hops: [admit("post", "/api/files/move")] },

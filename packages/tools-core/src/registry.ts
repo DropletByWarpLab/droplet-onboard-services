@@ -58,6 +58,13 @@ import createDocument from "./handlers/files/create-document.js";
 import createPdfReport from "./handlers/files/create-pdf-report.js";
 import createWordDocument from "./handlers/files/create-word-document.js";
 import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
+// WARP-2664 — file cleanup: a read-only report (what could go, what an
+// organize would do), then the two approved writes it feeds. Bulk delete is
+// its own tool rather than a loop over delete_file so ONE confirmation is
+// bound to the exact path list.
+import analyzeFileCleanup from "./handlers/files/analyze-file-cleanup.js";
+import organizeFiles from "./handlers/files/organize-files.js";
+import deleteFiles from "./handlers/files/delete-files.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -284,6 +291,9 @@ const allTools: Tool[] = [
   createPdfReport,
   createWordDocument,
   createSpreadsheet,
+  analyzeFileCleanup,
+  organizeFiles,
+  deleteFiles,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,

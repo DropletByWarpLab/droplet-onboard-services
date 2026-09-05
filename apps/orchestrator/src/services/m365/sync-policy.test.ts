@@ -25,6 +25,8 @@ import {
   extractDeltaLinks,
   graphUserAgent,
   MAX_BACKOFF_MS,
+  HANDLER_FAILED_CODE,
+  TOKEN_UNAVAILABLE_CODE,
 } from "./sync-policy.js";
 
 describe("classifySyncFailure", () => {
@@ -70,6 +72,21 @@ describe("classifySyncFailure", () => {
   it("defaults to FATAL so a genuinely broken request stops rather than hammering", () => {
     expect(classifySyncFailure({ statusCode: 400 })).toBe("FATAL");
     expect(classifySyncFailure({})).toBe("FATAL");
+  });
+
+  it("treats the engine's own page-handler failure as TRANSIENT, so the run repeats", () => {
+    // The page was READ but not STORED. A FAILED cursor is never claimed
+    // again, which would freeze the first connector that wires a handler in
+    // on its first hiccup; a backoff repeats the run from the last good
+    // deltaLink, which is what the handler contract promises.
+    expect(classifySyncFailure({ statusCode: 0, code: HANDLER_FAILED_CODE })).toBe("TRANSIENT");
+  });
+
+  it("treats a token the box could not produce for a non-auth reason as TRANSIENT, not AUTH", () => {
+    // A database read that failed is not a revoked grant. Classifying it AUTH
+    // would tell the responder to reconnect a link that is fine.
+    expect(classifySyncFailure({ statusCode: 0, code: TOKEN_UNAVAILABLE_CODE })).toBe("TRANSIENT");
+    expect(classifySyncFailure({ statusCode: 0, code: TOKEN_UNAVAILABLE_CODE })).not.toBe("AUTH");
   });
 });
 

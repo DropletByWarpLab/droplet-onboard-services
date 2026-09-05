@@ -539,3 +539,85 @@ export {
   type ShopifyProtectedDataProbe,
   type ShopifyStatus,
 } from "./shopify/connector.js";
+
+// WARP-2708 — Brevo: the contacts-lists-and-campaigns marketing track, plus the
+// CRM half (companies, deals) and e-commerce orders Brevo carries alongside it.
+// One FIXED host, so unlike Mailchimp its base URL is a whole-string literal the
+// egress scanner can extract, and its allowlist entry is a plain `kind: egress`.
+// The credential is a single `api-key` header — not `Authorization`, not
+// `Bearer` — and the track ships NO credential regex on purpose: Brevo documents
+// no key shape, so a pattern here would refuse valid keys the day the prefix
+// changes. `modifiedSince` is documented on five endpoints and ABSENT on the
+// rest; the connector refuses to send it where it is not documented rather than
+// letting Brevo ignore it and reporting a full scan as an incremental read.
+export {
+  BrevoConnector,
+  UnsafeBrevoBaseUrlError,
+  BrevoReauthorizationRequiredError,
+  BrevoIpBlockedError,
+  BrevoCapabilityMissingError,
+  assertSafeBrevoBaseUrl,
+  BREVO_PROVIDER,
+  BREVO_API_BASE_URL,
+  BREVO_ALLOWED_API_HOSTS,
+  BREVO_AUTH_HEADER,
+  BREVO_DATASETS,
+  BREVO_DELTA_PARAM,
+  BREVO_TRACK_REMEDIATION,
+  type BrevoConnectorConfig,
+  type BrevoConnectorDeps,
+  type BrevoDataset,
+} from "./brevo/connector.js";
+
+// WARP-2709 — Klaviyo: profiles, lists, campaigns and the events behind them.
+// Fixed host. TWO mandatory headers, not one: the `Klaviyo-API-Key` scheme on
+// `Authorization`, AND a dated `revision` header that is an error to omit rather
+// than a fallback to "latest". Its delta filter operators are PER ENDPOINT and
+// not uniform — copying one onto another yields a 400 or, worse, a scan that
+// reports itself as incremental — so the connector holds a filter table rather
+// than one parameter name.
+export {
+  KlaviyoConnector,
+  UnsafeKlaviyoBaseUrlError,
+  InvalidKlaviyoCredentialError,
+  KlaviyoReauthorizationRequiredError,
+  KlaviyoCapabilityMissingError,
+  assertSafeKlaviyoBaseUrl,
+  KLAVIYO_PROVIDER,
+  KLAVIYO_API_BASE_URL,
+  KLAVIYO_ALLOWED_API_HOSTS,
+  KLAVIYO_API_REVISION,
+  KLAVIYO_API_KEY_PATTERN,
+  KLAVIYO_DATASETS,
+  KLAVIYO_DELTA_FILTERS,
+  KLAVIYO_TRACK_REMEDIATION,
+  type KlaviyoConnectorConfig,
+  type KlaviyoConnectorDeps,
+  type KlaviyoDataset,
+} from "./klaviyo/connector.js";
+
+// WARP-2710 — Pipedrive: persons, organizations, deals, activities and products.
+// PER-ACCOUNT HOST (`<companyDomain>.pipedrive.com`), which puts it in the
+// Mailchimp situation: `check-egress-allowlist.py` contributes ZERO host
+// patterns for the `kind: dynamic` entry this pairs with, so
+// `assertSafePipedriveBaseUrl` is the ENTIRE control and this module carries no
+// `https://…pipedrive.com` scheme literal for the scanner to misread as an
+// unregistered host. Auth is `x-api-token`; the legacy `?api_token=` query form
+// is v1-only and would put the credential in the customer's own proxy logs.
+export {
+  PipedriveConnector,
+  UnsafePipedriveBaseUrlError,
+  InvalidPipedriveCredentialError,
+  PipedriveReauthorizationRequiredError,
+  PipedriveCapabilityMissingError,
+  assertSafePipedriveBaseUrl,
+  PIPEDRIVE_PROVIDER,
+  PIPEDRIVE_API_HOST_SUFFIX,
+  PIPEDRIVE_AUTH_HEADER,
+  PIPEDRIVE_COMPANY_DOMAIN_PATTERN,
+  PIPEDRIVE_DATASETS,
+  PIPEDRIVE_DELTA_PARAM,
+  PIPEDRIVE_TRACK_REMEDIATION,
+  type PipedriveConnectorConfig,
+  type PipedriveConnectorDeps,
+} from "./pipedrive/connector.js";

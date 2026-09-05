@@ -105,6 +105,14 @@ const SAAS_PROVIDERS_WARP_2214 = [
   // refactor, and folding a new id into one would turn a regression anchor into
   // a running total.
   "shopify",
+  // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
+  // programme, appended for the same reason and in declaration order. Two
+  // fixed-host tracks and one per-account host; all three serve only datasets
+  // that already existed in the vocabulary, which is why they could ship
+  // without widening it.
+  "brevo",
+  "klaviyo",
+  "pipedrive",
 ] as const;
 
 afterEach(() => {
@@ -878,6 +886,12 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "mailchimp",
       // WARP-2296 — Shopify, at catalog.order 7.
       "shopify",
+      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, at catalog.order 8, 9, 10.
+      // Pinned here rather than derived, so adding a card is a decision that
+      // shows up in a diff.
+      "brevo",
+      "klaviyo",
+      "pipedrive",
     ]);
   });
 });

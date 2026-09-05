@@ -109,6 +109,20 @@ const TURNS: Turn[] = [
     message: "I need the invoice from the plumber, can you dig it out?",
     requires: "search_files",
   },
+  // WARP-2664 — the cleanup conversation. The first names a folder word the
+  // files rule already knew; the second names nothing but the mess, which is
+  // how a person actually asks, and is the sentence that used to reach only
+  // the core four.
+  {
+    label: "files / a folder that needs sorting out",
+    message: "my downloads folder is a total mess, can you sort it into folders for me?",
+    requires: "organize_files",
+  },
+  {
+    label: "files / a cleanup asked for by the mess, not the files",
+    message: "what's cluttering my drive? get rid of the junk and the old copies",
+    requires: "analyze_file_cleanup",
+  },
   {
     label: "cameras / the sentence a household actually types",
     message: "did anyone come to the house while we were out on Saturday?",

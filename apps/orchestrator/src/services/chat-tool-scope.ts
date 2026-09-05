@@ -91,6 +91,14 @@
  *     accurate again, for a completely different reason.
  *   • `switch`, `erp` — fully excluded AND ruleless. Coherent: no rule
  *     promises something the pool cannot deliver.
+ *   • `pm` again, from the other direction (WARP-2582). Context pins can now
+ *     name a `project` / `work_item`, and pin domains feed selection — but
+ *     every pm READ tool is excluded above, so a pm pin can only scope
+ *     retrieval and name the record in prose; it can never become a tool call
+ *     in chat. `context-pin-prompt.ts` says so in the prompt rather than
+ *     implying a tool that is not on the wire. The `crm` half is the opposite:
+ *     six of its seven tools are in scope, so a customer pin resolves to an id
+ *     the model can spend on `crm_get_customer` the same turn.
  *
  * None of these is fixed by deleting one side. The `notifications` and `pm`
  * rules are what make REMOTE tools in those domains selectable once

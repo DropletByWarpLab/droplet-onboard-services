@@ -255,24 +255,24 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     //
     // 37, and this is the first time the number has gone DOWN.
     //
-    // It reached 41 on stage with `delete_file` (WARP-2669). ADR-045 slice D
-    // then removed SEVEN confirming tools (`pm_create_project`,
-    // `pm_create_work_item`, `pm_update_work_item`, `pm_transition_work_item`,
-    // `pm_add_work_item_comment`, `crm_log_activity`, `crm_move_deal_stage`)
-    // and added THREE (`business_create`, `business_update`, `business_link`):
-    // 41 − 7 + 3 = 37. The arithmetic is written out because a SHRINKING count
+    // It reached 41 on stage with `delete_file` (WARP-2669), then 43 with
+    // WARP-2664's `organize_files` and `delete_files` (flag-gated by the
+    // interceptor, no `confirmed` boolean in either schema, neither a
+    // pass-through). ADR-045 slice D then removed SEVEN confirming tools
+    // (`pm_create_project`, `pm_create_work_item`, `pm_update_work_item`,
+    // `pm_transition_work_item`, `pm_add_work_item_comment`,
+    // `crm_log_activity`, `crm_move_deal_stage`) and added THREE
+    // (`business_create`, `business_update`, `business_link`):
+    // 43 − 7 + 3 = 39. The arithmetic is written out because a SHRINKING count
     // is exactly what a dropped flag looks like, and the two must stay
     // tellable apart — a tool that quietly lost `requiresConfirmation` would
-    // move this number the same direction.
+    // move this number the same direction. The deltas are independent and
+    // both correct, so the count is the UNION of both branches, not either
+    // side's number.
     //
-    // (The reconciliation note this line used to carry, about PR #1985 taking
-    // it to 42 for `organize_files` + `delete_files`, is resolved: those tools
-    // are not in the registry at this SHA. If they land later the same rule
-    // applies — add their delta to 37, do not pick a side.)
-    //
-    // The pass-through roster below is again unchanged: none of the ten
+    // The pass-through roster below is again unchanged: none of the twelve
     // touched tools relays a 202.
-    expect(confirming).toHaveLength(37);
+    expect(confirming).toHaveLength(39);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
