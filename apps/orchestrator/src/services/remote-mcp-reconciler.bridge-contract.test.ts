@@ -39,13 +39,13 @@
  * reaches `StreamableHTTPClientTransport`). `adr-043-boundary.test.ts` greps
  * PRODUCT code for that transport and excludes test files, so a test loading
  * the bridge is inside the rule; loading it by a computed path at run time
- * keeps it out of `tsc`'s graph as well. `repoRoot()` is the same cwd walk
+ * keeps it out of `tsc`'s graph as well. `repoPath()` (test-paths helper) is the anchor
  * that test uses (this workspace compiles to CommonJS, where `import.meta` is
  * a TS1470).
  */
 import { describe, it, expect, vi, beforeAll } from "vitest";
-import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { repoPath } from "../__tests__/helpers/test-paths.js";
 import { pathToFileURL } from "node:url";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { RemoteMcpLifecycleRegistry } from "./remote-mcp-lifecycle.service.js";
@@ -72,20 +72,9 @@ const OPEN_BODY = {
   cloudId: "00000000-0000-4000-8000-000000000000",
 };
 
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      statSync(join(dir, "docker", "docker-compose.yml"));
-      return dir;
-    } catch {
-      dir = dirname(dir);
-    }
-  }
-  throw new Error("could not locate the repo root from " + process.cwd());
-}
-
-const BRIDGE_SRC = join(repoRoot(), "services", "mcp-bridge", "src");
+// WARP-2654: anchored to the repo by the shared helper, never to the runner's
+// cwd — the guard in test-paths.guard.test.ts refuses cwd-relative lookups.
+const BRIDGE_SRC = repoPath("services", "mcp-bridge", "src");
 
 // The bridge's own types, restated STRUCTURALLY and only as far as this file
 // touches them — the same deliberate duplication `mcp-bridge.client.ts`
