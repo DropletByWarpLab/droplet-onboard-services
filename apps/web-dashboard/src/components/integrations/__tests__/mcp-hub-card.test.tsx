@@ -27,7 +27,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
-import { providerDescriptor } from "@droplet/shared-types";
+import { mcpProviderIds, providerDescriptor } from "@droplet/shared-types";
 import type { IntegrationConnection, IntegrationStatus } from "@/lib/erp-types";
 import { CONNECTORS, MCP_CONNECTORS } from "@/lib/connectors";
 import { PROVIDER_DESCRIPTORS } from "@/components/integrations/provider-descriptors";
@@ -146,16 +146,25 @@ describe("the card is derived from the mcp track, not from a catalog block", () 
    * The premise. If this ever goes red the rest of the file is testing a
    * fixture rather than the product.
    *
+   * MEMBERSHIP, not a count. This file promises to keep working for the
+   * second MCP provider without being edited, and a `toHaveLength(1)` would
+   * have broken that promise the day it landed. The card set is asserted
+   * equal to the registry's `mcp` set, in order, so a descriptor that gains
+   * no card — or a card with no descriptor — is what goes red.
+   *
    * Mutation: delete the `atlassian` descriptor from `provider-registry.ts` →
    * `MCP_CONNECTORS` is empty and every test in this file fails.
    */
-  it("ships exactly one MCP-track card, keyed on the descriptor id", () => {
-    expect(MCP_CONNECTORS).toHaveLength(1);
-    const descriptor = providerDescriptor(MCP_ID);
-    expect(descriptor?.track).toBe("mcp");
-    // The card id IS the connection row's `provider` key, which is what lets
-    // the hub's status join work with no mapping entry.
-    expect(MCP_CONNECTORS[0]!.id).toBe(descriptor!.id);
+  it("ships one card per MCP-track descriptor, keyed on the descriptor id", () => {
+    expect(MCP_CONNECTORS.length).toBeGreaterThan(0);
+    expect(MCP_CONNECTORS.map((c) => c.id)).toEqual(mcpProviderIds());
+    for (const card of MCP_CONNECTORS) {
+      const descriptor = providerDescriptor(card.id);
+      expect(descriptor?.track).toBe("mcp");
+      // The card id IS the connection row's `provider` key, which is what lets
+      // the hub's status join work with no mapping entry.
+      expect(card.id).toBe(descriptor!.id);
+    }
   });
 
   /**
@@ -339,9 +348,13 @@ describe("state copy comes from the box, never from absence", () => {
    * box now always lists an MCP provider, exactly as it always lists
    * Eaglesoft, and this pill is the box's own answer.
    *
-   * Mutation: drop `...mcpProviderIds()` from `list()`'s provider set → a box
-   * with no Atlassian row reports nothing → the tile falls back to `absent`
-   * and renders no pill → red.
+   * NOT a gate on `list()`, and it cannot be one: this suite stubs
+   * `fetchIntegrations` and hands the hub the row directly, so dropping
+   * `...mcpProviderIds()` from `list()`'s provider set leaves every case here
+   * green. That mutation is caught by `integrations.mcp-listing.test.ts` on
+   * the orchestrator side — the only place the join between the two can be
+   * observed. What this proves is that the tile can SAY "not connected" when
+   * the box says it; never that the box says it.
    */
   it.each([
     ["CONNECTED" as const, "Connected"],
@@ -404,18 +417,85 @@ describe("state copy comes from the box, never from absence", () => {
   /**
    * …and a comfortable date is silent. A footnote on every healthy tile is
    * noise that trains an owner to ignore the one that matters.
+   *
+   * Three silences, each a different fact and each covered: a VALID verdict,
+   * an explicit `null` (the provider declares no expiry policy — every cloud
+   * and LAN row), and no key at all (a box older than the field). The last
+   * two are the "none at all" half this test used to name without
+   * exercising; `credentialExpiryCopy` treats them alike, and a tile that
+   * rendered a line for either would be a warning nothing can ever clear.
    */
-  it("renders no expiry line for a VALID verdict or none at all", async () => {
-    vi.mocked(fetchIntegrations).mockResolvedValue([
-      conn(MCP_ID, "CONNECTED", {
-        credentialExpiry: { status: "VALID", daysRemaining: 240 },
-      }),
-    ]);
+  const SILENT: ReadonlyArray<[string, Partial<IntegrationConnection>]> = [
+    ["a VALID verdict", { credentialExpiry: { status: "VALID", daysRemaining: 240 } }],
+    ["an explicit null — the provider declares no expiry policy", { credentialExpiry: null }],
+    ["no key at all — an older box that never computed one", {}],
+  ];
+  it.each(SILENT)("renders no expiry line for %s", async (_label, over) => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn(MCP_ID, "CONNECTED", over)]);
     const { container } = renderHub();
     await settled(container);
 
     expect(
       within(mcpTile(container)).queryByTestId("connector-expiry-line"),
     ).toBeNull();
+  });
+});
+
+describe("Disconnect on the MCP tile reaches the box's purge (WARP-2659)", () => {
+  /**
+   * Stage's WARP-2518 control renders on this tile as on every other, and
+   * until this PR its click 404'd: `disconnect()` gated on
+   * `isKnownErpProvider`, an explicit `lan | cloud` allow-list, so the one
+   * surface that could remove an Atlassian token rendered an action that
+   * could not finish. The box admits the track now
+   * (`integrations.disconnect-purge.test.ts`); this pins the dashboard half —
+   * the tile posts the descriptor id, which IS the row's `provider` key, and
+   * only after the confirmation.
+   *
+   * Mutation: pass `meta.id` where `ConnectorCard` passes `reported.provider`
+   * → still green here, because for this track the two are byte-equal by
+   * construction — which is the point of `providerKeys: [id]`, and is pinned
+   * above. The hub suite covers the divergent case with QuickBooks.
+   */
+  it("offers Disconnect on a connected tile and posts the descriptor id after confirmation", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn(MCP_ID, "CONNECTED")]);
+    const { container } = renderHub();
+    await settled(container);
+
+    fireEvent.click(within(mcpTile(container)).getByRole("button", { name: /^Disconnect / }));
+    // A step, not a courtesy: nothing is purged until the confirmation.
+    expect(disconnectProviderMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("disconnect-confirm").textContent).toContain(
+      "removes the stored credential",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledTimes(1));
+    expect(disconnectProviderMock).toHaveBeenCalledWith(MCP_ID);
+  });
+
+  /**
+   * The two exclusions the control inherits: nothing to disconnect on a
+   * NOT_CONFIGURED row, and nothing offered to a session the route would 403.
+   */
+  it("offers no Disconnect on a not-configured tile", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn(MCP_ID, "NOT_CONFIGURED")]);
+    const { container } = renderHub();
+    await settled(container);
+    expect(
+      within(mcpTile(container)).queryByRole("button", { name: /^Disconnect / }),
+    ).toBeNull();
+  });
+
+  it("offers no Disconnect to a non-admin session", async () => {
+    session.role = "family";
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn(MCP_ID, "CONNECTED")]);
+    const { container } = renderHub();
+    await settled(container);
+    expect(
+      within(mcpTile(container)).queryByRole("button", { name: /^Disconnect / }),
+    ).toBeNull();
+    // The primary action is untouched by the role gate.
+    expect(within(mcpTile(container)).getByRole("button", { name: "Open" })).toBeTruthy();
   });
 });
