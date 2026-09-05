@@ -22,6 +22,7 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
 import {
   DEPARTMENT_SELECT,
@@ -49,6 +50,8 @@ export const PM_ERRORS = {
   INVALID_STATE: "invalid_state",
   STATE_IS_LAST: "state_is_last",
   STATE_IS_DEFAULT: "state_is_default",
+  /** SERIALIZABLE loser -- nothing was applied, the route answers 409, retry. */
+  CONCURRENT_MUTATION: "concurrent_mutation",
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
@@ -327,7 +330,11 @@ function deriveIdentifier(name: string): string {
  *  concurrent mutation opens (between the read and the write) onto the same
  *  typed string error the happy path throws, so the route layer returns the
  *  correct HTTP status instead of leaking a raw 500. */
-function isPrismaCode(err: unknown, code: "P2002" | "P2025" | "P2003"): boolean {
+/** Shared with pm-relations.service.ts -- one Prisma-code predicate, not two copies. */
+export function isPrismaCode(
+  err: unknown,
+  code: "P2002" | "P2025" | "P2003" | "P2034",
+): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
@@ -1303,10 +1310,43 @@ export async function deleteWorkItem(
           newValue: null,
         });
       }
+      // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
+      // delete silently erases every blocks/relates/duplicates edge touching
+      // the item — including edges into OTHER projects, whose owners have no
+      // other way to learn the link is gone. Same defect class as the
+      // parent_removed case above, and the same answer: emit the audit row on
+      // the SURVIVING end BEFORE the cascade, in the same transaction, so the
+      // DB behaviour is never the only record. The transaction runs at
+      // SERIALIZABLE (below) so a relation committed between this read and
+      // the delete aborts the delete instead of being cascaded with no row.
+      const relations = await tx.pmWorkItemRelation.findMany({
+        where: { OR: [{ fromId: id }, { toId: id }] },
+        select: { fromId: true, toId: true, kind: true },
+      });
+      if (relations.length > 0) {
+        await tx.pmActivity.createMany({
+          data: relations.map((rel) => {
+            const otherId = rel.fromId === id ? rel.toId : rel.fromId;
+            return {
+              workItemId: otherId,
+              actorId,
+              verb: "relation_removed" as const,
+              field: "relation",
+              oldValue: `${rel.kind}:${id}`,
+              newValue: null,
+            };
+          }),
+        });
+      }
+
       await tx.pmWorkItem.delete({ where: { id } });
-    });
+    }, SERIALIZABLE_TX);
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    // The SERIALIZABLE loser: an edge was committed under us between the audit
+    // read and the delete. Nothing was applied -- the route answers 409 and the
+    // client retries, rather than the cascade eating an edge nobody recorded.
+    if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
 }

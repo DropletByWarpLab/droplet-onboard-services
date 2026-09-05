@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { createWorkItem, deleteState, deleteWorkItem, updateProject, updateState } from "./pm.service.js";
+import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
+// WARP-1570: pm.service.ts now declares an isolation level (deleteWorkItem's
+// relation audit), so its suites must inherit the shared seam rather than
+// hand-roll a stub that drops the options argument.
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../../__tests__/helpers/prisma-tx-harness.js";
 
 /**
  * WARP-884 / WARP-885 — PM schema hardening regression tests.
@@ -72,7 +80,7 @@ describe("createWorkItem stamps isCompleted alongside completedAt (WARP-884)", (
       pmWorkItem: { findUnique: async () => readBackRow() },
       pmState: { findUnique: async () => null },
       pmLabel: { findMany: async () => [] },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await createWorkItem(prisma, null, "p1", { name: "x" });
@@ -104,7 +112,7 @@ describe("createWorkItem stamps isCompleted alongside completedAt (WARP-884)", (
       pmWorkItem: { findUnique: async () => readBackRow() },
       pmState: { findUnique: async () => null },
       pmLabel: { findMany: async () => [] },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await createWorkItem(prisma, null, "p1", { name: "x" });
@@ -130,7 +138,7 @@ describe("updateState completion-signal cascade (WARP-884 split-brain)", () => {
     };
     const prisma = {
       pmState: { findUnique: async () => ({ id: "s1", projectId: "p1", group: "started", name: "In Progress" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateState(prisma, "s1", { group: "completed" });
@@ -156,7 +164,7 @@ describe("updateState completion-signal cascade (WARP-884 split-brain)", () => {
     };
     const prisma = {
       pmState: { findUnique: async () => ({ id: "s1", projectId: "p1", group: "completed", name: "Done" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateState(prisma, "s1", { group: "started" });
@@ -181,7 +189,7 @@ describe("updateState completion-signal cascade (WARP-884 split-brain)", () => {
     };
     const prisma = {
       pmState: { findUnique: async () => ({ id: "s1", projectId: "p1", group: "started", name: "In Progress" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateState(prisma, "s1", { name: "Doing" });
@@ -204,7 +212,7 @@ describe("updateState completion-signal cascade (WARP-884 split-brain)", () => {
     };
     const prisma = {
       pmState: { findUnique: async () => ({ id: "s1", projectId: "p1", group: "completed", name: "Done" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateState(prisma, "s1", { group: "cancelled" });
@@ -236,11 +244,19 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           activityRows.push(data);
           return data;
         },
+        createMany: async ({ data }: { data: Row[] }) => {
+          activityRows.push(...data);
+          return { count: data.length };
+        },
       },
+      // WARP-2586 — deleteWorkItem now reads the item's relations before the
+      // cascade, so it can emit a relation_removed audit row on the SURVIVING
+      // end. Empty here: these two cases are about parent_removed.
+      pmWorkItemRelation: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "parent-1" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteWorkItem(prisma, "actor-1", "parent-1");
@@ -275,16 +291,101 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           activityCreated = true;
           return {};
         },
+        createMany: async () => {
+          activityCreated = true;
+          return { count: 0 };
+        },
       },
+      // WARP-2586 — deleteWorkItem now reads the item's relations before the
+      // cascade, so it can emit a relation_removed audit row on the SURVIVING
+      // end. Empty here: these two cases are about parent_removed.
+      pmWorkItemRelation: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "leaf-1" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteWorkItem(prisma, null, "leaf-1");
 
     expect(activityCreated).toBe(false);
+  });
+
+  // WARP-2586 (review): the relation audit is the part worth a test of its
+  // own -- an audit obligation standing in for a silent FK cascade.
+  it("emits relation_removed on the SURVIVING end of every edge, before the delete, at SERIALIZABLE", async () => {
+    const audit: Row[] = [];
+    let deleted = false;
+    const tx = {
+      pmWorkItem: {
+        findMany: async () => [],
+        delete: async () => {
+          // Audit rows first; the cascade must never be the only record.
+          expect(audit).toHaveLength(2);
+          deleted = true;
+          return {};
+        },
+      },
+      pmActivity: {
+        create: async ({ data }: { data: Row }) => {
+          audit.push(data);
+          return data;
+        },
+        createMany: async ({ data }: { data: Row[] }) => {
+          audit.push(...data);
+          return { count: data.length };
+        },
+      },
+      pmWorkItemRelation: {
+        findMany: async ({ where }: { where: Row }) => {
+          expect(where).toEqual({ OR: [{ fromId: "x" }, { toId: "x" }] });
+          return [
+            { fromId: "x", toId: "other-1", kind: "BLOCKS" },
+            { fromId: "other-2", toId: "x", kind: "RELATES" },
+          ];
+        },
+      },
+    };
+    const seam = createTransactionSeam({ client: () => tx });
+    const prisma = {
+      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      $transaction: seam.$transaction,
+    } as never;
+
+    await deleteWorkItem(prisma, "actor-1", "x");
+
+    expect(deleted).toBe(true);
+    // A relation committed between the audit read and the delete must abort
+    // this transaction, not slip through the cascade unrecorded. The seam
+    // records the options argument, so dropping SERIALIZABLE_TX goes red.
+    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+    expect(audit).toEqual([
+      expect.objectContaining({
+        workItemId: "other-1",
+        actorId: "actor-1",
+        verb: "relation_removed",
+        field: "relation",
+        oldValue: "BLOCKS:x",
+        newValue: null,
+      }),
+      expect.objectContaining({
+        workItemId: "other-2",
+        verb: "relation_removed",
+        oldValue: "RELATES:x",
+      }),
+    ]);
+  });
+
+  it("reports the SERIALIZABLE loser as concurrent_mutation, never a 500", async () => {
+    const seam = createTransactionSeam({ client: () => ({}) });
+    seam.$transaction.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("could not serialize access"), { code: "P2034" });
+    });
+    const prisma = {
+      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      $transaction: seam.$transaction,
+    } as never;
+    await expect(deleteWorkItem(prisma, null, "x")).rejects.toThrow("concurrent_mutation");
   });
 });
 
@@ -379,7 +480,7 @@ describe("deleteState reassignment (WARP-885 no NULL-state limbo)", () => {
         findUnique: async () => ({ id: "s-done", projectId: "p1", group: "completed", isDefault: false }),
         count: async () => 3, // > 1 sibling -> passes the STATE_IS_LAST guard
       },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteState(prisma, "s-done");
@@ -413,7 +514,7 @@ describe("deleteState reassignment (WARP-885 no NULL-state limbo)", () => {
         findUnique: async () => ({ id: "s-backlog", projectId: "p1", group: "backlog", isDefault: false }),
         count: async () => 3,
       },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteState(prisma, "s-backlog");
@@ -444,7 +545,7 @@ describe("deleteState reassignment (WARP-885 no NULL-state limbo)", () => {
         findUnique: async () => ({ id: "s-only-nondefault", projectId: "p1", group: "started", isDefault: false }),
         count: async () => 2,
       },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteState(prisma, "s-only-nondefault");

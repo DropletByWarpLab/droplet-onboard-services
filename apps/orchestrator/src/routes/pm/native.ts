@@ -18,14 +18,9 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
 import * as pm from "../../services/pm/pm.service.js";
+import { actorOf } from "./actor.js";
+import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 
-/** Actor for attribution/activity — the local User.id UUID (WARP-485 invariant),
- *  or null for the MCP service principal / unauthenticated dev sessions. */
-function actor(req: Request): string | null {
-  const id = req.user?.id;
-  if (!id || id === "_service:mcp") return null;
-  return id;
-}
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
 function mapServiceError(err: unknown, res: Response): boolean {
@@ -60,6 +55,16 @@ function mapServiceError(err: unknown, res: Response): boolean {
       // state — deleting the last/only-default one is a conflict (409), not a
       // missing resource.
       res.status(409).json({ error: msg });
+      return true;
+    case "concurrent_mutation":
+      // SERIALIZABLE loser on deleteWorkItem's audit-then-cascade. Nothing was
+      // applied; same body shape routes/pm/relations.ts uses for the same case.
+      res.status(409).json({
+        error: msg,
+        code: "CONCURRENT_MUTATION",
+        message:
+          "Another request changed this work item at the same time. Nothing was applied — try again.",
+      });
       return true;
     default:
       return false;
@@ -223,7 +228,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       const parsed = projectCreateSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(res, parsed);
-      const project = await pm.createProject(prisma, actor(req), {
+      const project = await pm.createProject(prisma, actorOf(req), {
         workspaceSlug: parsed.data.workspace_slug,
         name: parsed.data.name,
         identifier: parsed.data.identifier,
@@ -414,7 +419,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         const parsed = workItemCreateSchema.safeParse(req.body);
         if (!parsed.success) return badRequest(res, parsed);
         const d = parsed.data;
-        const work_item = await pm.createWorkItem(prisma, actor(req), req.params.id, {
+        const work_item = await pm.createWorkItem(prisma, actorOf(req), req.params.id, {
           name: d.name,
           descriptionHtml: d.description_html,
           stateId: d.state_id,
@@ -449,9 +454,24 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // WARP-2586 — the detail read carries the item's relations alongside it, as
+  // a SIBLING key. Deliberately not a field inside `work_item`: that shape is
+  // consumed by routes/mobile/pm.ts and, through toPlaneWorkItem, by the
+  // `pm_get_work_item` MCP contract, which pm-orch.ts documents as byte-stable.
+  // An additive sibling key costs those consumers nothing.
+  //
+  // Only the DETAIL read. `listWorkItems` stays relation-free on purpose — a
+  // 200-card board must not become 200 relation queries, and the board does not
+  // render edges.
   router.get("/pm/work-items/:id", async (req, res, next) => {
     try {
-      res.json({ work_item: await pm.getWorkItem(prisma, req.params.id) });
+      // Independent reads, and getWorkItem already 404s a missing item, so the
+      // relations read skips its own existence check rather than asking twice.
+      const [work_item, relations] = await Promise.all([
+        pm.getWorkItem(prisma, req.params.id),
+        listRelationsFor(prisma, req.params.id, { itemChecked: true }),
+      ]);
+      res.json({ work_item, relations });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -466,7 +486,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         const parsed = workItemPatchSchema.safeParse(req.body);
         if (!parsed.success) return badRequest(res, parsed);
         const d = parsed.data;
-        const work_item = await pm.updateWorkItem(prisma, actor(req), req.params.id, {
+        const work_item = await pm.updateWorkItem(prisma, actorOf(req), req.params.id, {
           name: d.name,
           descriptionHtml: d.description_html,
           stateId: d.state_id,
@@ -496,7 +516,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         if (!parsed.success) return badRequest(res, parsed);
         const work_item = await pm.transitionWorkItem(
           prisma,
-          actor(req),
+          actorOf(req),
           req.params.id,
           parsed.data.state_id,
         );
@@ -510,7 +530,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
 
   router.delete("/pm/work-items/:id", requireRole(...WRITE), async (req, res, next) => {
     try {
-      await pm.deleteWorkItem(prisma, actor(req), req.params.id);
+      await pm.deleteWorkItem(prisma, actorOf(req), req.params.id);
       res.json({ deleted: req.params.id });
     } catch (err) {
       if (mapServiceError(err, res)) return;
@@ -547,7 +567,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         if (!parsed.success) return badRequest(res, parsed);
         const comment = await pm.addComment(
           prisma,
-          actor(req),
+          actorOf(req),
           req.params.id,
           parsed.data.comment_html,
         );

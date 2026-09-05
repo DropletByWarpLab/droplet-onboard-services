@@ -4228,6 +4228,18 @@ model PmWorkItem {
   /// raised off a customer conversation).
   crmActivities CrmActivity[]
 
+  /// WARP-2586 (ADR-045 slice G) — the cross-project edge, from both sides.
+  /// TWO back-relations for ONE table because Prisma cannot disambiguate two
+  /// edges from the same model to the same model without named relations.
+  /// `relationsFrom` and `relationsTo` are a STORAGE view, not a semantic one:
+  /// for the symmetric kinds (RELATES, DUPLICATES) the row is stored once in
+  /// canonical id order and neither end leads, so read them through
+  /// pm-relations.service's `listRelationsFor`, which matches on either end
+  /// and reports an explicit `direction`. Reading only `relationsFrom` shows
+  /// half the graph.
+  relationsFrom PmWorkItemRelation[] @relation("PmRelationFrom")
+  relationsTo   PmWorkItemRelation[] @relation("PmRelationTo")
+
   /// WARP-2585 — files in /files RELATED to this work item. Not the same thing
   /// as `attachments` above and not a replacement for it: a `PmAttachment` is a
   /// COPY of the bytes on the orchestrator's own volume, an `EntityLink` is a
@@ -4251,6 +4263,77 @@ model PmWorkItem {
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
+/// Edge kind between two work items (WARP-2586, ADR-045 slice G).
+///
+/// UPPERCASE, matching CrmStageKind / CrmActivityKind rather than the
+/// lowercase Pm* enums. Deliberate, and flagged so it reads as a decision:
+/// these three values are quoted verbatim inside a raw-SQL CHECK constraint
+/// (`PmWorkItemRelation_symmetric_canonical_order`) and in the service's
+/// symmetric-kind set, and SCREAMING_CASE reads unambiguously as a wire enum
+/// in both places.
+///
+/// BLOCKS is DIRECTIONAL — "A blocks B" and "B blocks A" are different claims,
+/// and together a deadlock the service refuses on write.
+/// RELATES and DUPLICATES are SYMMETRIC — one fact, therefore one row.
+enum PmRelationKind {
+  BLOCKS
+  RELATES
+  DUPLICATES
+}
+
+/// A link between two work items, which — unlike every other PM grouping — may
+/// SPAN PROJECTS (WARP-2586, ADR-045 slice G).
+///
+/// PmModule and PmCycle both carry a projectId, so an epic and a sprint stop at
+/// the project boundary. PmWorkItem.parentId can physically cross one but is
+/// not allowed to: parenting is CONTAINMENT, and as of the WARP-2586 migration
+/// a database trigger (`pmworkitem_parent_same_project`) holds it inside one
+/// project — the application layer has enforced the same rule on every write
+/// path since ADR-026 P2, and the dashboard's `useSubIssues` fetches children
+/// through a project-scoped list, so an off-project child would never render.
+/// This table is the other half of that decision: containment stays local,
+/// REFERENCE crosses freely.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — both live in raw migration
+/// SQL (see 20260904140100_warp_2586_pm_work_item_relation) and are proven
+/// against a real Postgres in `pm-work-item-relation.pg.test.ts`:
+///
+///   * `PmWorkItemRelation_no_self_edge` — CHECK ("fromId" <> "toId").
+///   * `PmWorkItemRelation_symmetric_canonical_order` —
+///     CHECK ("kind" = 'BLOCKS' OR "fromId" COLLATE "C" < "toId" COLLATE "C").
+///     A symmetric relation is stored ONCE, smaller id first. Two rows for one
+///     symmetric fact is how an edge becomes un-deletable: the drawer removes
+///     the row it rendered, the mirror survives, and the relation is back on
+///     refresh. The COLLATE "C" makes Postgres text `<` agree with the
+///     service's JavaScript `<` on a cluster with any collation.
+///
+/// Both ends Cascade rather than SetNull: an edge with one end missing is not
+/// a weaker edge, it is not an edge. `pm.service.deleteWorkItem` writes a
+/// `relation_removed` activity row on the SURVIVING end before the delete, so
+/// the cascade is always preceded by an explainable entry in that item's own
+/// history — the discipline WARP-885 established for parentId's SET NULL.
+model PmWorkItemRelation {
+  id          String         @id @default(uuid())
+  fromId      String
+  from        PmWorkItem     @relation("PmRelationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId        String
+  to          PmWorkItem     @relation("PmRelationTo", fields: [toId], references: [id], onDelete: Cascade)
+  kind        PmRelationKind
+  /// A User.id string, not an FK — the same convention every other PM
+  /// attribution column follows (see the note at the head of this section).
+  createdById String?
+  createdAt   DateTime       @default(now())
+
+  @@unique([fromId, toId, kind])
+  /// BOTH directions are indexed, with `kind` second on each. The forward
+  /// index serves the bounded BLOCKS cycle walk (one query per level,
+  /// `kind = 'BLOCKS' AND fromId IN (...)`); the reverse index serves the
+  /// incoming half of the work-item read. Postgres does not auto-index a
+  /// foreign key column, and an unindexed FK is the WARP-845 hazard.
+  @@index([fromId, kind])
+  @@index([toId, kind])
+}
+
 model PmWorkItemAssignee {
   id         String     @id @default(uuid())
   workItemId String
@@ -4447,6 +4530,14 @@ enum PmActivityVerb {
   /// so module assignments are audited from day one once that path lands.
   module_added
   module_removed
+  /// WARP-2586: emitted on BOTH ends when a PmWorkItemRelation is created or
+  /// removed — each item's own timeline has to explain what happened to it,
+  /// and for a symmetric relation there is only ONE row, so a single activity
+  /// entry would leave the other end's history silent. Also emitted on the
+  /// SURVIVING end by deleteWorkItem before the DB cascade takes the edge,
+  /// mirroring what parent_removed does for orphaned sub-issues.
+  relation_added
+  relation_removed
 }
 
 /// Append-only activity/history feed for a work item. `actorId` null = system /
