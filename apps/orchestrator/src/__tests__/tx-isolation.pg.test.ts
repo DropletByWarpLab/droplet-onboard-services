@@ -51,9 +51,8 @@ import {
   beforeEach,
   vi,
 } from "vitest";
-import { readFileSync } from "node:fs";
-import * as path from "node:path";
 import type { PrismaClient } from "@prisma/client";
+import { readPackageFile } from "./helpers/test-paths.js";
 
 // The global unit setup (src/__tests__/setup.ts) mocks @prisma/client so the
 // DB-less lane never needs Postgres. This file must talk to a REAL Postgres.
@@ -207,10 +206,8 @@ describe.skipIf(!RUN)(
     }, 40_000);
 
     it("the mirrored rail-5 predicate has not drifted from the service", () => {
-      const service = readFileSync(
-        path.resolve(process.cwd(), "src/services/role-mutation-guard.service.ts"),
-        "utf-8",
-      );
+      // Anchored to this test file, not the runner's cwd (WARP-2654).
+      const service = readPackageFile("src/services/role-mutation-guard.service.ts");
       const start = service.indexOf("async function assertNotLastOperator");
       expect(
         start,

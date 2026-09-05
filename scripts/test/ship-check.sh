@@ -76,6 +76,11 @@
 #   4  the harness itself COULD NOT RUN (interpreter too old). Deliberately
 #      distinct from 1 so no caller can read "never executed" as "executed
 #      and passed" -- see the bash version floor below (WARP-2449).
+#  77  every check that ran passed, but at least one SKIPPED -- it could not
+#      evaluate its subject for an environmental reason it names on the SKIP
+#      line. Same "did not run is not a pass" principle as 4, and the same
+#      autotools convention scripts/test/ship-check.test.sh already uses for
+#      a skipping case (WARP-2646).
 #
 # WARP-482, WARP-487, WARP-494.
 # =============================================================================
@@ -96,6 +101,11 @@ set -euo pipefail
 # you introduce a dependency on a newer bash, raise MIN_BASH_MAJOR/MIN_BASH_MINOR
 # in the SAME commit -- never leave the floor lying about what the script needs.
 EXIT_CANNOT_RUN=4
+# WARP-2646 -- "ran, everything that ran passed, but something could not be
+# evaluated here". 77 is the autotools skip convention and is already what a
+# skipping case returns in scripts/test/ship-check.test.sh (WARP-2637), so the
+# gate and its harness now speak the same code for the same idea.
+EXIT_SKIPPED=77
 MIN_BASH_MAJOR=3
 MIN_BASH_MINOR=2
 _bash_major="${BASH_VERSINFO[0]:-0}"
@@ -149,6 +159,7 @@ ALL_CHECKS=(
   lifecycle-naming
   image-pipeline
   tls-invariants
+  app-downloads
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -228,8 +239,9 @@ EXAMPLES
 CHECKS
 
   tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
-                        (orchestrator, web-dashboard, tools-core, fips-selftest,
-                        shared-types, mcp-server, erp-connector). Prisma
+                        (orchestrator, web-dashboard, auth-policy,
+                        fips-selftest, shared-types, tools-core, erp-connector,
+                        matter-controller, mcp-bridge, mcp-server). Prisma
                         generate runs first so orchestrator's `@prisma/client`
                         import resolves.
                         Prevents: WARP-329 class — test fixtures missing
@@ -241,14 +253,23 @@ CHECKS
                         config and may legitimately exclude its tests — as
                         `packages/tools-core` did, leaving all 133 of its
                         `__tests__/` files unchecked by anything, since
-                        `vitest` strips types without checking them. A
-                        workspace joins this pass by adding the file; there is
-                        no second list to keep in sync.
+                        `vitest` strips types without checking them. A listed
+                        workspace joins this pass by adding the file; the one
+                        list both passes walk is `ws_list` in
+                        run_check_tsc_full, gated against the tree by the
+                        self-test (WARP-2617).
 
   compose-config        Run `docker compose config --quiet` against
                         docker/docker-compose.yml using .env.example (falls
                         back to .env). Catches YAML breakage, missing
                         required env var refs, and malformed service defs.
+                        SKIPs (exit 77, never a pass) when it could not
+                        evaluate the tree at all: no .env at the repo root —
+                        compose resolves the merged tree's `env_file: ../.env`
+                        regardless of --env-file, and .env is .gitignored, so
+                        a fresh worktree has none — or a Docker client that
+                        cannot reach its daemon. FAILs only when compose
+                        actually rejects the file it names. WARP-2646.
 
   frigate-env-scan      Parse docker/frigate/config.yml for every {VAR}
                         substitution outside comments and assert each one
@@ -366,6 +387,9 @@ CHECKS
                         WARP-456 (missing audit-key mount) and WARP-229
                         (missing FIPS opt-out env) because those manifest at
                         boot, not at build.
+                        SKIPs (exit 77) when the Docker daemon is unreachable
+                        — there is no container to smoke-test, so a stopped
+                        daemon says nothing about setup.sh. WARP-2646.
 
 WHY THIS SCRIPT EXISTS
 
@@ -403,49 +427,67 @@ run_check_tsc_full() {
   local rc=0
   local out
 
-  # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
-  # the current schema or every Prisma-typed call site shows TS2305).
+  # Phases 1 + 2 (prisma generate, then build the leaf workspaces so their
+  # dist + .d.ts exist for downstream type resolution) are DELEGATED to
+  # scripts/bootstrap.sh — the same `npm run bootstrap` a developer runs after
+  # `npm ci`. WARP-2620: the leaf list was duplicated between this function,
+  # CONTRIBUTING.md and ci.yml and had already drifted (this copy omitted
+  # @droplet/shared-types; CONTRIBUTING's copy omitted @droplet/mcp-server),
+  # so a fresh checkout failed differently depending on which list you
+  # followed. One list now, in one file.
   #
-  # Pinned to the orchestrator workspace's `db:generate` script (WARP-492).
-  # The script body is `prisma generate`; npm resolves it through the
-  # workspace's `node_modules/.bin/prisma`, which is the `^5.14.0` pin
-  # declared in apps/orchestrator/package.json. The earlier form
-  # (`npx prisma generate`) silently fetched the LATEST published prisma
-  # (7.x at time of writing) off the npm registry whenever no local
-  # node_modules tree was present — and prisma 7 rejects this schema with
-  # P1012 ("datasource property `url` is no longer supported"), wedging
-  # ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
-  # ("prisma is not recognized" / "Missing script") when node_modules is
-  # missing instead of misleading the operator with a phantom P1012.
-  if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
-    if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
-      printf '%s\n' "$out" | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
+  # Two behaviours that live in bootstrap.sh and matter here:
+  #   - prisma generate is pinned to the orchestrator workspace's
+  #     `db:generate` script (WARP-492) rather than `npx prisma generate`,
+  #     which silently fetches the LATEST published prisma off the registry
+  #     when no local binary resolves — and prisma 7 rejects this schema with
+  #     P1012 ("datasource property `url` is no longer supported"), wedging
+  #     ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
+  #     instead. The WARP-492 self-test case still discriminates on this.
+  #   - each leaf `dist/` is removed before its build. `tsc` emits but never
+  #     prunes, so a file moved out of `src/` survives in `dist/` forever —
+  #     that is how a clean checkout reds the WARP-2515 guard on a phantom
+  #     `handlers/pm/pm-orch.test.js`.
+  if ! out="$(cd "$REPO_ROOT" && bash scripts/bootstrap.sh 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — workspace bootstrap failed (npm run bootstrap)\n" "$label"
+    printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
+    _record_result "$label" fail
+    return 1
   fi
 
-  # Phase 2: build leaf workspaces so their dist + .d.ts exist for
-  # downstream type resolution. These are the same RUN steps the
-  # orchestrator Dockerfile executes.
-  local leaf_pkg
-  for leaf_pkg in @droplet/erp-connector @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
-    if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
-      printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
-      _record_result "$label" fail
-      return 1
-    fi
-  done
+  # WARP-2617 — the ONE list of TypeScript workspaces phases 3 and 4 walk.
+  # It used to be written out twice, once per phase, and that was the bug: a
+  # workspace absent from the lists is skipped by BOTH passes, so
+  # `services/matter-controller` (6 test files, `__tests__` in its tsconfig
+  # `exclude`) and `packages/auth-policy` (3 test files) had neither their
+  # source nor their tests checked by anything — and adding a
+  # `tsconfig.test.json` to either would have changed nothing on its own.
+  # That is how the hole survived PR #1943, which closed the same class in
+  # four other workspaces.
+  #
+  # Kept explicit rather than globbed so the set under check is reviewable in
+  # the diff. `scripts/test/ship-check.test.sh` gates it against the tree: any
+  # apps/*, services/* or packages/* directory shipping a tsconfig.json that
+  # is missing here fails the self-test.
+  local ws_list=(
+    apps/orchestrator
+    apps/web-dashboard
+    packages/auth-policy
+    packages/fips-selftest
+    packages/shared-types
+    packages/tools-core
+    services/erp-connector
+    services/matter-controller
+    services/mcp-bridge
+    services/mcp-server
+  )
 
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
   local ws
   local checked=0
   local failed_workspaces=()
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
-           packages/shared-types services/mcp-server services/erp-connector; do
+  for ws in "${ws_list[@]}"; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
       continue
     fi
@@ -472,11 +514,12 @@ run_check_tsc_full() {
   # TS2322 test fixture through, and `vitest` cannot close it because esbuild
   # strips types without checking them.
   #
-  # Opt-in by file existence rather than a second hardcoded list, so a
-  # workspace joins this pass by adding the config — no edit here required.
+  # Opt-in by file existence, so a workspace ALREADY IN `ws_list` above joins
+  # this pass by adding the config — no edit here required. It has to be in
+  # that list first: WARP-2617 found `services/matter-controller` outside it,
+  # where a `tsconfig.test.json` would have been read by nobody.
   local tested=0
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest \
-           packages/shared-types services/mcp-server services/erp-connector; do
+  for ws in "${ws_list[@]}"; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
       continue
     fi
@@ -515,7 +558,23 @@ run_check_compose_config() {
     return 1
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
+    # WARP-2645: the backticks that used to be here were inside a
+    # double-quoted printf, so bash ran `compose config` as a command
+    # substitution every time this branch was taken — a gate reporting
+    # "docker is missing" was shelling out to a docker subcommand to
+    # compose its own message.
+    #
+    # WARP-2620: single-quoting the whole FORMAT string fixed that but broke
+    # the colour. printf expands backslash escapes only in the FORMAT string,
+    # and `_RED` is the literal six characters `\033[0;31m` — so
+    # passing it as a %s ARGUMENT printed those characters verbatim instead of
+    # colouring anything. Invisible in CI, where `_RED=''` because stdout is
+    # not a tty, and a literal `\033[0;31m` in front of every FAIL banner on an
+    # operator's terminal. So: the colours go back in the format string, and
+    # the prose that carried the backticks moves out into a single-quoted
+    # ARGUMENT, where nothing it ever grows can be substituted.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s\n" "$label" \
+      'docker not on PATH (required for "docker compose config")'
     _record_result "$label" fail
     return 1
   fi
@@ -535,7 +594,75 @@ run_check_compose_config() {
 
   local out
   if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
-    printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
+    # WARP-2646 — a non-zero exit here is NOT yet evidence of a bad compose
+    # file. Two environmental causes reach this same branch, and until they
+    # are separated out a perfectly good tree reads as a broken one (which is
+    # also what let the self-test's YAML-break case pass on a machine where
+    # the gate could not evaluate the mutation at all — WARP-2645).
+    #
+    # Both are matched with `case`, not grep: no subprocess, no pipefail
+    # SIGPIPE hazard, and `*` spans newlines so a multi-line `out` matches.
+
+    # (1) No `.env` at the repo root. .env is .gitignored and written by
+    #     setup.sh, so a fresh clone or a new git worktree has none — but
+    #     `docker/docker-compose.yml` still declares `env_file: ../.env` and
+    #     compose resolves it while merging, independently of --env-file.
+    #     Confirmed two ways before skipping: compose named the file, AND the
+    #     file really is absent. CI seeds one (.github/workflows/ci.yml,
+    #     "Seed .env for the compose-config case").
+    #     The pattern stops at `.env`, not `/.env`: on Windows Git Bash
+    #     compose prints `env file C:\...\.env not found`, and the separator
+    #     would have turned this skip back into the bogus FAIL it replaces.
+    #     The `-f` check below is what confirms it is OUR .env either way.
+    case "$out" in
+      *"env file "*".env not found"*)
+        if [ ! -f "$REPO_ROOT/.env" ]; then
+          printf '  %sSKIP%s  %s — no .env in this worktree, so the merged tree cannot be resolved\n' \
+            "$_YELLOW" "$_RESET" "$label"
+          printf "    | %s declares \`env_file: ../.env\`; compose resolves that\n" \
+            "${compose#"$REPO_ROOT"/}" >&2
+          printf "    | while merging, whatever --env-file says.\n" >&2
+          printf "    | Fix: run ./scripts/setup.sh, or \`cp .env.example .env\`.\n" >&2
+          _record_result "$label" skip
+          return "$EXIT_SKIPPED"
+        fi
+        ;;
+    esac
+
+    # (2) The daemon is unreachable in a way compose surfaces. NOTE the guard
+    #     is deliberately here and not a `docker info` preflight like
+    #     docker-build-smoke's: `docker compose config` is a CLIENT-SIDE
+    #     merge and does not need a daemon. Measured on docker 29.5.2 /
+    #     compose v2 (2026-09-02): with DOCKER_HOST pointed at a dead socket,
+    #     and with `docker info` shimmed to fail, this check still runs and
+    #     still PASSES. A preflight would therefore skip a check that can run
+    #     — a gate made vacuous for a reason that was never true. This branch
+    #     only fires when compose ITSELF says it could not reach the daemon.
+    case "$out" in
+      *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*|*"docker daemon is not running"*)
+        printf '  %sSKIP%s  %s — Docker daemon not reachable (colima / Docker Desktop stopped?)\n' \
+          "$_YELLOW" "$_RESET" "$label"
+        printf '%s\n' "$out" | sed 's/^/    | /' >&2
+        printf "    | \`docker compose config\` does not normally need the daemon;\n" >&2
+        printf "    | this client could not reach it at all, so nothing was validated.\n" >&2
+        _record_result "$label" skip
+        return "$EXIT_SKIPPED"
+        ;;
+    esac
+
+    # The message also has to NAME the file it rejected. Every environmental
+    # way this branch can be reached — daemon down, missing .env, docker
+    # missing at exec time — produces the same banner otherwise, which is
+    # what let a self-test assert "compose-config failed" and call that proof
+    # the planted YAML break was caught.
+    #
+    # WARP-2620 / WARP-2645: colours in the format string, prose in a
+    # single-quoted argument — see the `docker not on PATH` branch above for
+    # why both. Backticks inside a double-quoted printf here once ran a SECOND,
+    # argument-less `docker compose config` in the caller's cwd, whose "no
+    # configuration file provided" landed one line ABOVE the real diagnostic.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s %s\n" \
+      "$label" '"docker compose config" rejected' "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
     _record_result "$label" fail
@@ -800,9 +927,16 @@ run_check_shellcheck() {
   # ShellCheck will surface it loudly. (Capitalised so this line does not
   # open with the bare token `shellcheck` — see WARP-2477 and the note at
   # the head of this file.)
+  #
+  # WARP-2620 added scripts/bootstrap.sh. It is 238 lines of bash on the
+  # `tsc-full` critical path (this file runs it before every typecheck) and it
+  # is the command CLAUDE.md and CONTRIBUTING.md both tell a new implementer to
+  # run first — the same argument that put this gate's own two files on the
+  # list under WARP-2477. It is clean today; this is what keeps it that way.
   local targets=()
   local file
   for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/bootstrap.sh" \
               "$REPO_ROOT/scripts/test/ship-check.sh" \
               "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
@@ -1759,6 +1893,76 @@ run_check_image_pipeline() {
   return 0
 }
 
+run_check_app_downloads() {
+  # WARP-2666. `/downloads` is where a customer gets the client app for the box
+  # in front of them. Every box that has ever shipped served it empty, and no
+  # gate said so: an empty catalog answers HTTP 200 with available:false, which
+  # is correct for the API and invisible to everything downstream of it.
+  #
+  # ship-check is the pre-ship gate, so this is where "we are about to ship a
+  # box that can give a customer nothing" becomes a sentence someone has to
+  # read. It reports what data/app-downloads/EXPECTED declares versus what is
+  # actually staged; it never fetches or builds anything.
+  local label="app-downloads"
+  local audit="$REPO_ROOT/scripts/app-downloads/audit.sh"
+
+  if [ ! -r "$audit" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s is missing, so nothing can say what this release should carry
+"       "$label" "scripts/app-downloads/audit.sh" >&2
+    _record_result "$label" fail
+    return 1
+  fi
+
+  local out rc=0
+  out="$(bash "$audit" --dir "$REPO_ROOT/data/app-downloads" 2>&1)" || rc=$?
+
+  case "$rc" in
+    0)
+      printf "  ${_GREEN}PASS${_RESET}  %s (every platform EXPECTED declares is staged and verified)
+" "$label"
+      _record_result "$label" pass
+      return 0
+      ;;
+    3)
+      # Declared-and-ticketed absence. A checkout is the normal place for this
+      # to be true (installers are git-ignored and staged on the box), so
+      # failing here would make ship-check permanently red for every developer
+      # and train people to ignore it. Skip — but PRINT the blocked list, so
+      # "nothing to download" is never silent.
+      printf "  ${_YELLOW}SKIP${_RESET}  %s — declared blocked, nothing staged in this checkout:
+" "$label"
+      printf '%s
+' "$out" | sed -n 's/^BLOCKED  */    | blocked: /p'
+      printf "    | These platforms will have NOTHING at /downloads on an image built
+"
+      printf "    | from this tree. scripts/image/build-iso.sh refuses unless you pass
+"
+      printf "    | --allow-blank-downloads.
+"
+      _record_result "$label" skip
+      return 0
+      ;;
+    4)
+      # "Could not look" is not "it is fine" — the exact collapse this work
+      # exists to end. EXIT_CANNOT_RUN is the script's own vocabulary for it.
+      printf "  ${_RED}FAIL${_RESET}  %s — the audit reached NO VERDICT (exit %s: missing EXPECTED, staging root or python3)
+"         "$label" "$EXIT_CANNOT_RUN" >&2
+      printf '%s
+' "$out" | head -10 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+    *)
+      printf "  ${_RED}FAIL${_RESET}  %s — this release does not carry what data/app-downloads/EXPECTED declares
+" "$label" >&2
+      printf '%s
+' "$out" | head -20 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+  esac
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -1803,12 +2007,19 @@ run_check_docker_build_smoke() {
     _record_result "$label" fail
     return 1
   fi
+  # WARP-2646 — SKIP, not FAIL. Unlike compose-config, this check genuinely
+  # cannot run without a daemon (it starts an Ubuntu container), so a stopped
+  # daemon says nothing whatever about setup.sh. The line the two gates now
+  # hold in common: a missing TOOL is a FAIL, because the operator installs it
+  # once and the gate is meaningful thereafter (the same reason the shellcheck
+  # check fails rather than skips); a tool that is present but whose SUBJECT
+  # cannot be evaluated here is a SKIP, named and carrying exit 77.
   if ! docker info >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker daemon not reachable\n" "$label"
-    printf "    | On macOS: start Docker Desktop.\n" >&2
+    printf "  ${_YELLOW}SKIP${_RESET}  %s — docker daemon not reachable, so nothing was smoke-tested\n" "$label"
+    printf "    | On macOS: start Docker Desktop, or \`colima start\`.\n" >&2
     printf "    | On Linux: ensure /var/run/docker.sock is accessible.\n" >&2
-    _record_result "$label" fail
-    return 1
+    _record_result "$label" skip
+    return "$EXIT_SKIPPED"
   fi
 
   local image="ubuntu:24.04"
@@ -2007,6 +2218,7 @@ _dispatch_check() {
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;
+    app-downloads)        run_check_app_downloads ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
@@ -2016,7 +2228,14 @@ _dispatch_check() {
   esac
 }
 
-# Render the summary block. Exit code = number of FAIL results (capped at 1).
+# Render the summary block. Exit 1 if anything FAILED; else EXIT_SKIPPED (77)
+# if anything SKIPPED; else 0.
+#
+# WARP-2646 — a skip used to be invisible in the exit code, so `ship-check.sh
+# compose-config && git push` treated "could not evaluate the compose file at
+# all" as "the compose file is fine". That is the same false green WARP-2637
+# removed from the self-test, one level down. A failure still outranks a skip:
+# exit 1 is the louder signal and must not be masked.
 _summarize() {
   local pass=0 fail=0 skip=0 result i
   printf "\n"
@@ -2047,6 +2266,16 @@ _summarize() {
       fi
     done
     return 1
+  fi
+  if [ "$skip" -gt 0 ]; then
+    printf "${_YELLOW}SKIPPED${_RESET} checks (did NOT run — the SKIP line above each says why):\n" >&2
+    for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+      if [ "${CHECK_RESULT_VALUES[$i]}" = "skip" ]; then
+        printf "  - %s\n" "${CHECK_RESULT_NAMES[$i]}" >&2
+      fi
+    done
+    printf "Exit code %s means SKIPPED, not passed.\n" "$EXIT_SKIPPED" >&2
+    return "$EXIT_SKIPPED"
   fi
   return 0
 }
@@ -2119,8 +2348,17 @@ main() {
   printf "  ──────────────────────────────────\n"
 
   if [ -n "$single_check" ]; then
-    _dispatch_check "$single_check"
-    local rc=$?
+    # `|| rc=$?`, not a bare call. `set -e` is in force, so a plain
+    # `_dispatch_check` that returned non-zero exited the script on the spot:
+    # the rc capture below, the invalid-name branch and _summarize were all
+    # unreachable for every failing single-check run, which is why
+    # `ship-check.sh <check>` printed a FAIL line and no summary block.
+    # WARP-2646 — the exit code now comes from _summarize in BOTH paths, so
+    # the skip verdict is decided in one place instead of arriving here by
+    # accident of errexit. Same codes as before: 2 invalid name, 1 a check
+    # failed, 77 a check skipped, 0 all clear.
+    local rc=0
+    _dispatch_check "$single_check" || rc=$?
     if [ "$rc" -eq 2 ]; then
       return 2
     fi

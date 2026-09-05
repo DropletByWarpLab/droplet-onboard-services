@@ -30,9 +30,23 @@
  * bundler can inline. It is not TRUSTED to stay complete —
  * `integration-guides.test.ts` asserts it covers exactly
  * `docs/integrations/*.md`, so a guide added without a line here goes red.
+ *
+ * ## The `?raw` imports have no fallback, deliberately
+ *
+ * WARP-2654 — a missing or unresolvable guide file fails `next build`, and
+ * that is the wanted behaviour, not a gap: these are repo files inlined at
+ * build time, never fetched at runtime, so "missing" can only mean a deleted
+ * file, a moved `docs/` path, a narrowed vite `fs.allow` (WARP-2613) or a
+ * changed bundler rule — every one of which is a mistake to catch before an
+ * image is cut. A soft fallback would turn each into a guide page that renders
+ * an apology on a shipped appliance, on a surface `setupGuideHref` is
+ * type-REQUIRED to point at, and the box has no internet path to a hosted copy
+ * (see "Why this exists" above). Loud at build time beats degraded in the
+ * customer's hands. Do not add a `try`/default-empty around these imports.
  */
 
 import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
+import atlassian from "../../../../docs/integrations/atlassian.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
@@ -59,6 +73,7 @@ export const GUIDE_ROUTE_PREFIX = "/help/integrations";
  */
 export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "add-a-provider": addAProvider,
+  atlassian,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,

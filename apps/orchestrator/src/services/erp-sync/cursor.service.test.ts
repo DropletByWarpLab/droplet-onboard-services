@@ -173,6 +173,20 @@ describe("claimDueErpCursors", () => {
     expect((await claimDueErpCursors(prisma as never, 10, NOW)).map((c) => c.id)).toEqual(["cur-1"]);
   });
 
+  it("polls a CAPABILITY_LIMITED connection — one refused dataset is not a stop (WARP-2623)", async () => {
+    // The connection WORKS: the vendor withholds a single resource because of
+    // the account's plan or the app's granted scopes, and every other entity
+    // reads normally. These rows persisted as ERROR before WARP-2623 and were
+    // therefore excluded here, so a Basic-plan store that could read orders,
+    // products and inventory silently stopped reading any of them too.
+    //
+    // MUTATION: drop "CAPABILITY_LIMITED" from POLLABLE_CONNECTION_STATUSES →
+    // red. That is the whole assertion; the status filter itself is pinned by
+    // the DISABLED test above.
+    const prisma = fakePrisma([cursorRow()], [connRow({ status: "CAPABILITY_LIMITED" })]);
+    expect((await claimDueErpCursors(prisma as never, 10, NOW)).map((c) => c.id)).toEqual(["cur-1"]);
+  });
+
   it("never returns a FAILED cursor — it needs a person, not a retry", async () => {
     const prisma = fakePrisma([cursorRow({ state: "FAILED" })]);
     expect(await claimDueErpCursors(prisma as never, 10, NOW)).toEqual([]);

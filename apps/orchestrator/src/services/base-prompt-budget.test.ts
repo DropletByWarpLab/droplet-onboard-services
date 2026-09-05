@@ -20,6 +20,10 @@
  * gate is estimateRequestTokens/degradeToFit (context-budget.service.test.ts),
  * which additionally accounts for pins, attachments, and history.
  */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "@droplet/tools-core";
 import {
@@ -173,6 +177,77 @@ function chatToolSizes(): { name: string; chars: number }[] {
  */
 const PER_TOOL_MAX_CHARS = 2000;
 
+/**
+ * WARP-2547 — the chat-pool growth tripwire, as a FUNCTION of the registry
+ * rather than a literal.
+ *
+ * ── what this replaced, and what the literal cost ──────────────────
+ *
+ * This assertion read `poolChars < 60000` from 2026-07-08 (WARP-1118, #915)
+ * until now, and it ended up spending more than it protected: the pool grew
+ * into it. WARP-2546 left it 59 chars from red;
+ * WARP-2581 paid the bill by scoping `money_list_open_documents` out of chat
+ * entirely; WARP-2098 paid it again by compressing a `list_drives`
+ * description that had just been made MORE accurate (#1984). Three
+ * consecutive tickets spent real capability, or real precision, on a round
+ * number — which is the failure mode WARP-2547 was filed to end. Its own
+ * "Do not" section is explicit that trimming descriptions is not a lever
+ * here, so re-baselining the literal a fourth time is not either.
+ *
+ * ── why the ceiling is NOT a function of the context window ────────
+ *
+ * WARP-2547 proposed deriving it from the window ("option 3, probably
+ * right"). Right instinct, wrong denominator: the pool is not required to fit
+ * the window, and has not fitted it since WARP-1893. Measured at this SHA,
+ * using the same worst-case block caps this file asserts everywhere else:
+ *
+ *   derived tools[] ceiling   window(16384) − reserve(1024) − fixed(2950 tok)
+ *                             = 12,410 tok = 49,640 chars
+ *   full chat pool            59,985 chars = 14,997 tok → 2,587 tok OVER
+ *   `off` irreducible floor   identity + guidance + memory + pool — i.e. what
+ *                             remains after degradeToFit has dropped
+ *                             everything it CAN drop (business and persona;
+ *                             it never drops tools), with zero history and an
+ *                             empty user message:
+ *                             68,185 chars = 17,047 tok → 1,687 tok OVER
+ *
+ * A window-derived ceiling therefore lands 10,345 chars BELOW where the pool
+ * already sits and would be red on arrival. Worse, the third line means no
+ * pool size that keeps this suite green makes `off` fit the shipping window —
+ * so a window-derived number would assert a property nothing shipping has.
+ *
+ * ── what it IS a function of ───────────────────────────────────────
+ *
+ * The MEAN serialized chars per advertised tool, capped at half
+ * PER_TOOL_MAX_CHARS. That reuses one existing shipping constant instead of
+ * introducing a new hand-picked one: if the AVERAGE advertised tool has
+ * reached halfway to the individually-pathological ceiling, the pool has
+ * systemic bloat — a whole group has doubled. That is a different failure
+ * from the one PER_TOOL_MAX_CHARS catches, and it is precisely the
+ * "pathological jump (a tool group doubling)" this tripwire was kept for.
+ *
+ * The property that closes WARP-2547: adding an ordinary tool raises the
+ * ceiling by 1000 and the pool by ~723, so headroom GROWS. The next tool
+ * author is not blocked by a canary they did not trip in spirit — which was
+ * the entire complaint.
+ *
+ * Count explosion is deliberately NOT this assertion's job, and is not left
+ * unguarded: fifty new 999-char tools would keep the mean green while putting
+ * the full-registry serialization at ~152K against the 110,000 ceiling
+ * asserted below. The two lines cover size-shape and total-surface.
+ *
+ * `chat-tool-scope.ts`'s header carries the same decision for the reader who
+ * arrives via the exclusion list rather than via this file (WARP-2547 AC 2).
+ */
+const MEAN_CHAT_TOOL_CHARS_CEILING = PER_TOOL_MAX_CHARS / 2;
+
+/** The pool ceiling for a pool of `toolCount` tools. Kept as a function of
+ *  the count so the mutation test below can drive it directly rather than
+ *  believing the formula. */
+function chatPoolCeilingChars(toolCount: number): number {
+  return toolCount * MEAN_CHAT_TOOL_CHARS_CEILING;
+}
+
 describe("worst-case fixed system-block budget", () => {
   it("keeps identity + persona + business + guidance + memory + interview under BASE_PROMPT_MAX_CHARS", () => {
     const fixedBlockChars =
@@ -245,11 +320,46 @@ describe("worst-case fixed system-block budget", () => {
     // pathological jump (a tool group doubling) that the per-domain assertion
     // above could miss, and it makes the cost of `off` visible rather than
     // implicit.
+    //
+    // WARP-2547 — one step STRONGER than the note above, measured at this
+    // SHA. The accepted account of `off` (ENVIRONMENT.md, WARP-2552) is that
+    // it leans on degradeToFit and silently costs the business and persona
+    // blocks. Dropping those two is not enough: degradeToFit drops exactly
+    // them and nothing else (context-budget.service.ts) — it never drops
+    // tools — so the floor left standing is identity + guidance + memory +
+    // the pool = 68,185 chars = 17,047 tokens against a 15,360 ceiling, with
+    // zero history and an empty user message. `off` is ~1,687 tokens over
+    // before the turn carries any content, so no pool size that keeps this
+    // suite green makes it fit.
+    //
+    // Not resolved here: whether a rollback lever that cannot produce a
+    // window-sized request should still be advertised as one is a product/ops
+    // call, not a test edit. It is recorded because it is the reason this
+    // assertion is a GROWTH canary and explicitly NOT a fit check — there is
+    // no fit to check.
+    //
+    // MEASURED 2026-09-03 on stage 68f6b90d: 59,985 chars over 83 tools =
+    // mean 722.7 — 23,015 chars (27.7%) under the 83,000-char ceiling.
     const poolChars = serializeChatToolSchemas().length;
+    const poolCount = chatToolSizes().length;
+    const poolCeilingChars = chatPoolCeilingChars(poolCount);
+    const meanToolChars = poolChars / poolCount;
     expect(
       poolChars,
-      `full chat pool is ${poolChars} chars over ${chatToolSizes().length} tools`,
-    ).toBeLessThan(60000);
+      `full chat pool is ${poolChars} chars over ${poolCount} tools ` +
+        `(mean ${meanToolChars.toFixed(1)}/tool) against a ` +
+        `${poolCeilingChars}-char ceiling (${poolCount} tools × ` +
+        `${MEAN_CHAT_TOOL_CHARS_CEILING} mean) — ` +
+        `${poolCeilingChars - poolChars} chars of headroom. A red here means ` +
+        `the AVERAGE advertised tool has bloated, NOT that you added one: ` +
+        `adding an ordinary tool raises this ceiling faster than the pool. ` +
+        `Find the group that grew and trim THAT — do not re-baseline, and do ` +
+        `not shave prose (WARP-2547 "Do not"). Largest advertised tools: ` +
+        chatToolSizes()
+          .slice(0, 5)
+          .map((r) => `${r.name} (${r.chars})`)
+          .join(", "),
+    ).toBeLessThan(poolCeilingChars);
 
     // Regression ceiling on the FULL registry serialization (growth
     // tripwire for the MCP-facing surface, which advertises everything).
@@ -271,11 +381,13 @@ describe("worst-case fixed system-block budget", () => {
     // 110K leaves room for roughly one more domain of this size before the
     // next author has to make the same call consciously.
     //
-    // ⚠ The CHAT-pool assertion above is a different matter: it now sits at
-    // 59,941 of 60,000 — 59 chars of headroom. The next tool added to the chat
-    // scope WILL trip it, and that one has a real consequence (it is the wire
-    // payload of the TOOL_SELECTION_MODE=off rollback path). WARP-2547 tracks
-    // deciding between re-baselining it and excluding a vertical suite.
+    // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
+    // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
+    // to chat scope tripped it. WARP-2547 resolved that: it is now a function
+    // of the pool's tool count (mean chars/tool ≤ PER_TOOL_MAX_CHARS / 2), so
+    // ordinary growth widens its headroom instead of consuming it. See the
+    // MEAN_CHAT_TOOL_CHARS_CEILING block above for the derivation and for why
+    // the window is the wrong denominator for that particular quantity.
     const fullRegistryJson = JSON.stringify(
       Array.from(TOOLS.values()).map((t) => ({
         type: "function" as const,
@@ -287,6 +399,70 @@ describe("worst-case fixed system-block budget", () => {
       })),
     );
     expect(fullRegistryJson.length).toBeLessThan(110000);
+  });
+
+  /**
+   * WARP-2547 — proof the scaling tripwire has teeth, and proof it has the
+   * ONE property it was changed to get.
+   *
+   * A ceiling that grows with the pool is only an improvement if it still
+   * goes red on the thing it watches. Replacing a literal with a formula that
+   * can never fail would not be a fix, it would be a deletion wearing the
+   * old assertion's name — so both directions are asserted here rather than
+   * argued for in the comment above.
+   *
+   * The mutation for the real assertion is the second case: make every tool
+   * average PER_TOOL_MAX_CHARS and the pool must go red no matter how many
+   * tools there are.
+   */
+  it("[WARP-2547] the pool ceiling admits ordinary growth and rejects mean bloat", () => {
+    const poolChars = serializeChatToolSchemas().length;
+    const poolCount = chatToolSizes().length;
+    const meanToolChars = poolChars / poolCount;
+
+    // NON-VACUITY: the measured mean must be a real number well inside the
+    // ceiling. If the pool were empty or the mean already at the ceiling,
+    // every case below would pass or fail for the wrong reason.
+    expect(poolCount).toBeGreaterThan(50);
+    expect(meanToolChars).toBeGreaterThan(100);
+    expect(meanToolChars).toBeLessThan(MEAN_CHAT_TOOL_CHARS_CEILING);
+
+    // (1) THE FIX. Adding ten more tools of today's mean size must not
+    // approach the ceiling. Under the flat 60,000 line this was the standing
+    // failure WARP-2547 was filed for — one tool trips it — and it is what
+    // made #1984 red on a 449-char description edit rather than on anything
+    // pathological.
+    const grownCount = poolCount + 10;
+    const grownChars = Math.round(poolChars + 10 * meanToolChars);
+    expect(
+      grownChars,
+      `ten more average-sized tools must not trip the tripwire — that is the ` +
+        `whole point of making the ceiling a function of the count`,
+    ).toBeLessThan(chatPoolCeilingChars(grownCount));
+    // And headroom must GROW, not merely survive: a ceiling that shrinks
+    // relative to the pool on ordinary growth is the old failure mode with
+    // extra steps.
+    expect(chatPoolCeilingChars(grownCount) - grownChars).toBeGreaterThan(
+      chatPoolCeilingChars(poolCount) - poolChars,
+    );
+
+    // (2) THE MUTATION. A pool whose every tool sits at the per-tool ceiling
+    // is systemic bloat, and must be red at any count.
+    for (const count of [poolCount, poolCount + 10, poolCount * 2]) {
+      const bloated = count * PER_TOOL_MAX_CHARS;
+      expect(
+        bloated,
+        `a pool averaging ${PER_TOOL_MAX_CHARS} chars/tool over ${count} ` +
+          `tools must trip the tripwire; if it does not, this assertion ` +
+          `measures nothing`,
+      ).toBeGreaterThanOrEqual(chatPoolCeilingChars(count));
+    }
+
+    // (3) The boundary is the mean, not the total: doubling today's mean
+    // trips it even though the tool count is unchanged.
+    expect(Math.round(poolChars * 2)).toBeGreaterThanOrEqual(
+      chatPoolCeilingChars(poolCount),
+    );
   });
 
   /**

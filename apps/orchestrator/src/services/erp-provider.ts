@@ -151,8 +151,14 @@ export function loadOperatorExportProfiles(): { profiles: ExportProfile[]; error
 export function isKnownErpProvider(provider: string): boolean {
   // Read the registry live rather than the import-time snapshot above, so a
   // descriptor registered at runtime is admitted without a restart.
+  //
+  // WARP-2650 — an explicit `lan | cloud` allow-list, matching
+  // `buildableProviderIds()`. It was `!== "catalog"`, which was the same set
+  // while three tracks existed; the `mcp` track is a valid connection provider
+  // with no connector at all, so the negative form would have answered "yes,
+  // this factory can build it" and then thrown.
   const descriptor = providerDescriptor(provider);
-  if (descriptor) return descriptor.track !== "catalog";
+  if (descriptor) return descriptor.track === "lan" || descriptor.track === "cloud";
   if (!vendorFromExportProvider(provider)) return false;
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
@@ -612,6 +618,14 @@ async function persistCloudTokens(connectionId: string, tokens: unknown): Promis
  * trust store. There is deliberately no "skip verification" path: a box we
  * cannot verify is a box we refuse, and that refusal is asserted by
  * erp-connector's live-box suite.
+ *
+ * WARP-2626 — this Agent comes from the npm `undici`, and a dispatcher is only
+ * honoured by the undici that minted it. The connector therefore routes any
+ * dispatcher-carrying request through that same package's `fetch` rather than
+ * the runtime's built-in one (`api-auth.ts:resolveFetch`), so this trust model
+ * survives a Node major bump instead of degrading into a bare `fetch failed`
+ * that reads as an unreachable box. Nothing extra is needed here — but do NOT
+ * "simplify" the connector back onto `globalThis.fetch`; that is the defect.
  */
 export function dispatcherForCa(caPem: string | undefined): unknown {
   if (!caPem) return undefined;

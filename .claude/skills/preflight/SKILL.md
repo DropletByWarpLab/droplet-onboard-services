@@ -67,12 +67,18 @@ CLI is newer than the declared range.
 ## 2. Typecheck (any TS change)
 
 ```bash
-cd apps/orchestrator && npx prisma generate && npx tsc --noEmit
+npm run bootstrap                              # prisma generate + the five leaf builds
+cd apps/orchestrator && npx tsc --noEmit
 ```
 
-`prisma generate` FIRST — a stale client produces phantom
-scene-schedule `timezone`/`systemFlag` type errors. Repeat
-`npx tsc --noEmit` in web-dashboard / packages if touched.
+`npm run bootstrap` FIRST (WARP-2620) — it generates the Prisma client and
+builds the leaf workspaces that resolve through `dist/`. A stale or
+placeholder client produces phantom scene-schedule `timezone`/`systemFlag`
+type errors and `TS7031`s in `tools-core`; unbuilt leaves produce `TS2305`/
+`TS2724` from `@droplet/erp-connector` and `Failed to resolve entry for
+package "@droplet/fips-selftest"`. `npm run bootstrap:check` says in one line
+whether the tree is bootstrapped. Repeat `npx tsc --noEmit` in web-dashboard /
+packages if touched.
 
 CI typechecks too, as steps inside ci.yml's path-aware legs:
 
@@ -227,6 +233,19 @@ exits **4** with a message naming the required version and the remedy.
 check ran and failed. Never record a run that exited 4 as a passing gate —
 that conflation is exactly what WARP-2449 was filed about.
 
+**Exit 77 means SKIPPED — everything that ran passed, but a check could not
+evaluate its subject here** (WARP-2646). It is not a pass either. Each skipped
+check prints its reason and the summary lists them. The two you will meet on a
+dev Mac:
+
+| Skip | Why | Fix |
+|---|---|---|
+| `compose-config` — no `.env` | `.env` is `.gitignored` and written by `setup.sh`, so a fresh clone or a new `git worktree add` has none, and `docker/docker-compose.yml` declares `env_file: ../.env`, which compose resolves whatever `--env-file` says. | `cp .env.example .env` (CI does exactly this), or run `./scripts/setup.sh`. |
+| `docker-build-smoke` — daemon unreachable | `--full` only; there is no container to smoke-test. | `colima start` / start Docker Desktop. |
+
+A stopped daemon does **not** skip `compose-config`: `docker compose config` is
+a client-side merge and needs no daemon (measured, docker 29.5.2 / compose v2).
+
 ## 7. End state
 
 Push the branch, open/update the PR (repo squash-merges with the
@@ -242,7 +261,7 @@ instructs it for this named PR.
 |---|---|
 | "These failures look unrelated but I should fix them" | Patch/replay first (§4). The baseline reds above are documented; chasing them burns hours. |
 | "I'll just `git stash` to get a clean tree for the baseline" | The stash stack is **repo-global, not per-worktree**. Under parallel agents your `pop` can take someone else's work. Use the patch file in §4 — always. |
-| "`tools-core` won't build, so `main` must be broken" | Run `npx prisma generate` in `apps/orchestrator` first (§2). This exact misdiagnosis was reported upstream as a repo red and wasn't one. |
+| "`tools-core` won't build, so `main` must be broken" | Run `npm run bootstrap` first (§2). This exact misdiagnosis was reported upstream as a repo red and wasn't one — four more times on 2026-09-02 (WARP-2620). `npm run bootstrap:check` settles it in one line. |
 | "I'll read the source from the checkout I'm sitting in" | That checkout may be on a long-stale branch — this repo's working tree routinely is. Read from `origin/main` (`git show origin/main:<path>`) before trusting any file:line, and never symlink its `node_modules` into a worktree (§1). |
 | "The venv won't build, so I'll skip the Python tests" | The ai-gateway venv reuse (§3) exists precisely for this. |
 | "I'll `pip install -r requirements.txt` into the shared venv" | That pulls pydantic-core/cryptography source builds and fails; install only the two pinned wheels above. |

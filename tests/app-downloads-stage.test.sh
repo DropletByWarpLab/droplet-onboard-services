@@ -232,10 +232,65 @@ fi
 
 # The restart is not optional bookkeeping: store.ts memoises the catalog for
 # the life of the process, so a stage without it is invisible at /downloads.
-if grep -q "restart" "$STAGE_SH"; then
-  pass "stage.sh restarts the orchestrator"
+# Match the ACTUAL command, not the word. A bare `grep -q "restart"` matched
+# RESTART=1, --no-restart, "restarting", and this comment block itself — so
+# deleting the real `docker restart "$CID"` left the guard green. A guard that
+# cannot fail is worse than no guard, because it is credited as coverage.
+if grep -q 'docker restart' "$STAGE_SH"; then
+  pass "stage.sh restarts the orchestrator (docker restart)"
 else
-  fail "stage.sh no longer restarts the orchestrator — staging would be invisible"
+  fail "stage.sh no longer runs 'docker restart' — staging would be invisible"
+fi
+
+# Prove that guard can fail: the same grep against a copy with the call removed
+# must NOT match. Without this, the fix above is unverified in exactly the way
+# the original was.
+_no_restart="$WORK/stage-sh-without-restart"
+grep -v 'docker restart' "$STAGE_SH" > "$_no_restart"
+if grep -q 'docker restart' "$_no_restart"; then
+  fail "the restart guard still matches after the call was removed — it cannot fail"
+else
+  pass "the restart guard goes red when 'docker restart' is removed (mutation)"
+fi
+
+# -----------------------------------------------------------------------------
+# Copy honesty (WARP-2666)
+# -----------------------------------------------------------------------------
+# Three tracked files used to assert that the image build stages installers
+# into data/app-downloads. It never did — and that claim is precisely why the
+# gap survived a full build-out, because anyone opening .gitignore or the
+# README to ask "why is this empty" was told the answer was somewhere else.
+#
+# The claim has already regrown once, INSIDE the commit written to remove it,
+# so this is a grep rather than a code review note. page.test.tsx uses the same
+# technique on the customer-facing string.
+BANNED='baked into the appliance image|[Tt]he image build stages them|image is the trust root|next box update will bring'
+HONESTY_TARGETS=(
+  "$REPO_ROOT_REAL/data/app-downloads/.gitignore"
+  "$REPO_ROOT_REAL/data/app-downloads/README.md"
+  "$REPO_ROOT_REAL/docker/docker-compose.yml"
+  "$REPO_ROOT_REAL/apps/web-dashboard/src/app/downloads/page.tsx"
+)
+honesty_hits=0
+for f in "${HONESTY_TARGETS[@]}"; do
+  [ -f "$f" ] || continue
+  if grep -Eqn "$BANNED" "$f"; then
+    fail "false provenance claim in ${f#"$REPO_ROOT_REAL"/}:"
+    grep -Ein "$BANNED" "$f" | sed 's/^/      | /'
+    honesty_hits=$((honesty_hits + 1))
+  fi
+done
+if [ "$honesty_hits" -eq 0 ]; then
+  pass "no tracked file claims installers are baked into the appliance image"
+fi
+
+# Prove the grep can fail — otherwise a typo'd pattern reads as clean forever.
+_mutant="$WORK/honesty-mutant"
+printf 'Installers are BINARIES baked into the appliance image at build time.\n' > "$_mutant"
+if grep -Eq "$BANNED" "$_mutant"; then
+  pass "the copy-honesty grep catches the claim when it is reintroduced (mutation)"
+else
+  fail "the copy-honesty grep does not match the claim it exists to catch"
 fi
 
 echo ""

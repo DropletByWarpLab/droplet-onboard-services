@@ -3242,6 +3242,120 @@ enum ToolRunStatus {
   cancelled
 }
 
+/// WARP-2177 — a durable, background agent run (epic WARP-2176).
+///
+/// Everything a chat turn does inside one HTTP request, moved into a row that
+/// outlives the request, the browser tab and the container. The agent loop
+/// (`llm-agent.service.ts`) is not rewritten: `agent-run-worker.service.ts`
+/// claims a row, resumes the loop from the checkpoint below, and writes the
+/// outcome back. Design: `docs/agent-runs-design.md`.
+///
+/// `status` is an explicit enum, never derived from `endedAt IS NULL` — the
+/// CLAUDE.md "no guessing state" rule, same as `ToolRun`.
+///
+/// CHECKPOINT. `iteration` is the next loop iteration to execute and
+/// `messages` is the complete conversation at the top of that iteration. That
+/// is the loop's natural boundary: at the top of an iteration the array is a
+/// valid conversation (every `tool_calls` has its `role: "tool"` replies), so
+/// it can be handed back to `runAgent()` verbatim.
+///
+/// REPLAY GUARD. `trace` records every dispatched tool call — written BEFORE
+/// dispatch (`tool_call_id`, tool, args, iteration) and completed with the
+/// wire result after. A run resumed mid-iteration feeds a completed call's
+/// stored result back to the model instead of re-dispatching it, so a
+/// redeploy can never re-send a notification the run already sent.
+///
+/// LEASE. `claimedBy` / `claimedAt` / `heartbeatAt`. A `running` row whose
+/// heartbeat is older than `AGENT_RUN_RECLAIM_AFTER_MS` is re-queued with
+/// `attempts + 1`; past `AGENT_RUN_MAX_ATTEMPTS` it is failed with an error
+/// naming the count, so a crashing worker cannot wedge a run into infinite
+/// retry. Every executor write is fenced on `claimedBy`, so the zombie of a
+/// reclaimed run cannot clobber its successor.
+///
+/// `deadlineAt` is the wall-clock ceiling, stamped at first claim. A column
+/// rather than `startedAt + constant` so a config change cannot move the
+/// goalposts of a run already in flight. `maxIter` alone does not bound a run
+/// whose model calls are slow.
+model AgentRun {
+  id          String         @id @default(uuid())
+  /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
+  /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
+  /// run cannot outlive a role change with stale reach.
+  userId      String
+  /// The chat conversation that started the run, when one did.
+  sessionId   String?
+  goal        String
+  model       String
+  status      AgentRunStatus @default(queued)
+  /// Not before. Delay and backoff without a second queue.
+  runAfter    DateTime       @default(now())
+  claimedBy   String?
+  claimedAt   DateTime?
+  heartbeatAt DateTime?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  deadlineAt  DateTime?
+  attempts    Int            @default(0)
+  maxIter     Int
+  iteration   Int            @default(0)
+  messages    Json?
+  trace       Json?
+  /// The final assistant answer on `succeeded`.
+  result      String?
+  /// The loop's own `stop_reason` for the terminal segment.
+  stopReason  String?
+  error       String?
+  /// WARP-2179 — the parked Tier-2 call, while `status = awaiting_confirmation`.
+  /// Explicit columns, not a blob: the call is bound the way the interceptor
+  /// binds its token — tool name + `confirmationBindingHash(tool, args)` — so
+  /// what the human approves is exactly what will be redeemed, and nothing
+  /// else can be smuggled through the park. No token is stored: the
+  /// interceptor's own token is minted at resume, seconds after the human
+  /// decided, and redeemed in the same breath. `parkedAt` is what the
+  /// deadline is extended by on resume, so a day parked is not a day spent.
+  pendingTool        String?
+  pendingBindingHash String?
+  pendingArgs        Json?
+  pendingToolCallId  String?
+  parkedAt           DateTime?
+  pendingDecision    AgentRunPendingDecision?
+  pendingDecidedAt   DateTime?
+  pendingDecidedBy   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // Claim scan: `status = queued AND runAfter <= now()`.
+  @@index([status, runAfter])
+  // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
+  @@index([status, heartbeatAt])
+  // "My runs", newest first — the list route in WARP-2180.
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([sessionId])
+}
+
+/// WARP-2177 — AgentRun lifecycle. Non-terminal: `queued` (claimable),
+/// `running` (leased by a worker), `awaiting_confirmation` (parked on a
+/// Tier-2 call — WARP-2179; unused until it lands). Terminal: `succeeded`,
+/// `failed`, `cancelled`. Explicit, like `ToolRunStatus`: a row that was not
+/// transitioned to a terminal state must never read as a finished run.
+enum AgentRunStatus {
+  queued
+  running
+  awaiting_confirmation
+  succeeded
+  failed
+  cancelled
+}
+
+/// WARP-2179 — the human's decision on a parked Tier-2 call. Absent while
+/// parked; set by the confirm/deny route, consumed by the worker on resume.
+/// `approved` redeems the call once; `denied` is fed back to the model as a
+/// tool result so it can adapt or finish.
+enum AgentRunPendingDecision {
+  approved
+  denied
+}
+
 /// WARP-474 — Phase G2. Smart-home scene definition.
 ///
 /// One row per operator-created scene ("Movie night", "Goodnight").
@@ -3891,6 +4005,14 @@ model PmProject {
   icon        String?
   color       String?
   leadId      String?
+  /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
+  /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
+  /// one must never delete work, and a project with no department reads as
+  /// unassigned rather than as an error. A work item may override this per item
+  /// (`PmWorkItem.departmentId`). This is a DIMENSION, not a boundary — PM is
+  /// household-shared and every role still reads every project.
+  departmentId String?
+  department   Department? @relation("PmProjectDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   seqCounter  Int         @default(0)
   sortOrder   Int         @default(0)
   /// Canonical "is archived" signal (WARP-884) — explicit column, not
@@ -3934,6 +4056,10 @@ model PmProject {
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
+  /// WARP-845: an unindexed ON DELETE SET NULL FK makes the parent delete a
+  /// sequential scan of this table. Five such columns already shipped
+  /// unindexed on the CRM side; not repeating it here.
+  @@index([departmentId])
   /// "This customer's projects" is the customer record's own query.
   @@index([companyId, isArchived])
 }
@@ -4034,6 +4160,13 @@ model PmWorkItem {
   children        PmWorkItem[] @relation("PmSubIssues")
   cycleId         String?
   cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  /// ADR-045 §5.3 — the department that owns THIS item, OVERRIDING its
+  /// project's when set. Null means "inherit the project's", which is also
+  /// null-tolerant, so "nobody owns this" stays representable at both levels.
+  /// SetNull for the same reason as the project's: deleting a department must
+  /// never delete work, and must never be the reason work goes invisible.
+  departmentId    String?
+  department      Department?  @relation("PmWorkItemDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
@@ -4068,6 +4201,14 @@ model PmWorkItem {
   @@index([parentId])
   @@index([cycleId])
   @@index([stateId])
+  /// WARP-845 — the ON DELETE SET NULL scan index.
+  @@index([departmentId])
+  /// ADR-045 §5.3 — the board's department filter is "this project's items,
+  /// owned by department X". Neither `[departmentId]` above nor
+  /// `[projectId, stateId, sortOrder]` can serve it, so the filter gets its own
+  /// composite. Two columns only: the unfiltered board still orders off the
+  /// state index.
+  @@index([projectId, departmentId])
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -4401,6 +4542,22 @@ enum IntegrationStatus {
   PROVISIONING
   /// Usable. The last probe against the vendor succeeded.
   CONNECTED
+  /// Usable, and ONE dataset is refused. The credential is valid, the
+  /// handshake succeeded, and everything else reads — the vendor withholds a
+  /// single resource because of the account's PLAN or the app's granted
+  /// SCOPES. A Basic-plan Shopify store reads orders, products and inventory
+  /// and withholds only customer identities; a Mailchimp account on a plan
+  /// without a resource is otherwise entirely healthy.
+  ///
+  /// It is NOT ERROR, and that is the whole reason it exists: ERROR renders as
+  /// "Can't connect" and sends the owner to repair a connection with nothing
+  /// wrong with it, while hiding the one thing they CAN act on — the plan or
+  /// the scope grant, both of which live in the vendor's console. It is not
+  /// NEEDS_RECONNECT either: a new key changes nothing.
+  ///
+  /// Sync keeps running (`POLLABLE_CONNECTION_STATUSES`) — withholding one
+  /// dataset is not a reason to stop reading the others.
+  CAPABILITY_LIMITED
   /// Transient sync failure (brief §15). A health signal, not a request for
   /// human action — nobody needs to go and paste anything.
   DEGRADED
@@ -4899,7 +5056,15 @@ model Department {
   name              String                 @unique // display + groupfolder mount_point
   slug              String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
   parentId          String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent            Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
+  /// WARP-2634: `onDelete: Restrict` is declared explicitly to match what
+  /// 20260711000000_warp_1255_departments actually created. Prisma's implicit
+  /// default for an optional relation is SetNull, so leaving it off made the
+  /// datamodel promise a behaviour no migrated box has ever had. Nothing
+  /// row-deletes a Department today — `DELETE /api/departments/:id` archives
+  /// (sets `archivedAt`) — so this declaration changes no behaviour; it stops
+  /// the datamodel lying. Whether RESTRICT or SetNull is the RIGHT product
+  /// behaviour for deleting a parent department is a separate product call.
+  parent            Department?            @relation("DeptHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   teams             Department[]           @relation("DeptHierarchy")
   description       String?
   kind              DepartmentKind         @default(DEPARTMENT)
@@ -4923,8 +5088,20 @@ model Department {
   memberships       DepartmentMembership[]
   shares            DepartmentShare[]
   inviteGrants      UserInviteDepartment[]
+  /// WARP-2717 — the WORK this department owns. Back-relations only: this
+  /// model stays a Nextcloud groupfolder and knows nothing about PM. Nothing on
+  /// the storage side (provisioner, reconciler, membership service) reads
+  /// these, and nothing in PM reads `state`/`provisionError`/`quotaBytes` — the
+  /// two halves share a row and nothing else.
+  pmProjects        PmProject[]            @relation("PmProjectDepartment")
+  pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
 
   @@index([state])
+  /// WARP-2634: declared to match `Department_parentId_idx`, which
+  /// 20260711000000_warp_1255_departments has always created. Postgres does
+  /// not auto-index FK columns and the reconciler reads teams by parentId, so
+  /// the index is doing real work — the datamodel was the side that was wrong.
+  @@index([parentId])
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
@@ -5774,16 +5951,16 @@ model Contact {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  emails          ContactEmail[]
-  phones          ContactPhone[]
-  companyLinks    CrmCompanyContact[]
-  dealLinks       CrmDealContact[]
-  crmActivities   CrmActivity[]
+  emails        ContactEmail[]
+  phones        ContactPhone[]
+  companyLinks  CrmCompanyContact[]
+  dealLinks     CrmDealContact[]
+  crmActivities CrmActivity[]
   /// WARP-2562 (ADR-044) — this person's records in upstream systems.
   /// Distinct from `externalSystem`/`externalId` above, which say where this
   /// ROW came from. See the PartyLink model for why those are not the same
   /// question.
-  partyLinks      PartyLink[]
+  partyLinks    PartyLink[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
