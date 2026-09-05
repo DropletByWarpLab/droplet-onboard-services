@@ -211,6 +211,25 @@ function requiredString(body: Record<string, unknown>, key: string): string | nu
 }
 
 /**
+ * Read an optional array-of-strings field.
+ *
+ * Three outcomes, kept distinct on purpose: `undefined` (the key is absent),
+ * the array, or the sentinel `"invalid"` for a key that is present and the
+ * wrong shape. Collapsing the third into `undefined` would silently drop a
+ * malformed baseline and let the session start with no drift detection at all —
+ * the failure this field exists to prevent, arriving as a typo.
+ */
+function optionalStringArray(
+  body: Record<string, unknown>,
+  key: string,
+): string[] | undefined | "invalid" {
+  const v = body[key];
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.some((e) => typeof e !== "string")) return "invalid";
+  return v as string[];
+}
+
+/**
  * Route one request.
  *
  * Order is load-bearing and mirrors `routes/web.ts`: auth first, then
@@ -352,12 +371,24 @@ async function openSession(
     return err(400, "INVALID_REQUEST", `Missing or empty: ${missing.join(", ")}.`);
   }
   const url = requiredString(body, "url");
+  // WARP-2651 — the caller's vetted catalog, carried across a restart of THIS
+  // container. Validated to the same shape a tool name can have rather than
+  // trusted: it is the one field of this body that comes back out of the
+  // component (as `catalog_changed` drift), and an entry that is not a string
+  // would make the new session's baseline disagree with the listing it is
+  // compared against. Absent stays absent — `[]` would claim the caller vetted
+  // an empty surface, which is a different and wrong statement.
+  const knownTools = optionalStringArray(body, "knownTools");
+  if (knownTools === "invalid") {
+    return err(400, "INVALID_REQUEST", "knownTools must be an array of strings.");
+  }
   try {
     const state = await opts.store.open(serverId, {
       email,
       apiToken,
       cloudId,
       ...(url ? { url } : {}),
+      ...(knownTools !== undefined ? { knownTools } : {}),
     });
     return { status: 200, body: { state } satisfies BridgeStateBody };
   } catch (e) {

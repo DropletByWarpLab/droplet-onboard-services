@@ -64,6 +64,13 @@ import {
   type RemoteMcpGatePrisma,
 } from "./remote-mcp-gateway.service.js";
 import { openSaasCredentials } from "./saas-credential.service.js";
+import {
+  auditRemoteMcpLifecycle,
+  remoteMcpLifecycle,
+  type RemoteMcpAttachReason,
+  type RemoteMcpAttachState,
+  type RemoteMcpLifecycleRegistry,
+} from "./remote-mcp-lifecycle.service.js";
 
 const logger = createLogger("remote-mcp-servers");
 
@@ -224,10 +231,23 @@ export type RemoteAttachSkipReason =
   | "not_allowlisted"
   | "gate_refused"
   | "credential_incomplete"
-  | "bridge_unavailable";
+  | "bridge_unavailable"
+  /**
+   * WARP-2651 — the session opened, and the surface it advertised is not the
+   * one we vetted (ADR-043 §1's fourth failure state). The attach is REFUSED
+   * rather than completed, so nothing from a changed catalog reaches tool
+   * selection until a human re-vets it.
+   */
+  | "catalog_changed";
 
 export type RemoteAttachResult =
-  | { attached: true; serverId: string; sync: RemoteCatalogSyncResult }
+  | {
+      attached: true;
+      serverId: string;
+      sync: RemoteCatalogSyncResult;
+      /** What the BRIDGE advertised — the next re-open's drift baseline. */
+      vettedTools: readonly string[];
+    }
   | { attached: false; serverId: string; reason: RemoteAttachSkipReason; message: string };
 
 /** The row columns the attach path reads. Structural, so a test passes a
@@ -261,6 +281,19 @@ export interface AttachAtlassianDeps {
    *  process-wide column-crypto key. */
   openCredentials?: (connectionId: string, blob: string) => Record<string, string>;
   registry?: RemoteCatalogSyncOptions["registry"];
+  /**
+   * WARP-2651 — the catalog a previous attach vetted, handed to the bridge so
+   * a RE-open still detects a surface that moved while we were apart.
+   *
+   * Absent on the boot attach, which is the honest statement: this process has
+   * vetted nothing yet, so there is no baseline and the first listing sets one.
+   */
+  knownTools?: readonly string[];
+  /** The lifecycle registry to write transitions into. Injected so a test
+   *  drives its own instance; production passes the process-wide one. */
+  lifecycle?: RemoteMcpLifecycleRegistry;
+  /** Injected so a test asserts the audit rows without a database. */
+  auditLifecycle?: typeof auditRemoteMcpLifecycle;
 }
 
 /**
@@ -284,6 +317,23 @@ export async function attachAtlassianRemote(
   deps: AttachAtlassianDeps,
 ): Promise<RemoteAttachResult> {
   const serverId = ATLASSIAN_REMOTE_SERVER_ID;
+  const lifecycle = deps.lifecycle ?? remoteMcpLifecycle;
+  const auditLifecycle = deps.auditLifecycle ?? auditRemoteMcpLifecycle;
+
+  /** Write the state and audit only an actual TRANSITION — a tick that found
+   *  nothing changed must not append a row, or the channel becomes a heartbeat
+   *  nobody reads. */
+  const settle = (
+    state: RemoteMcpAttachState,
+    reason: RemoteMcpAttachReason | null,
+    extra: { vettedTools?: readonly string[]; bridgeHop?: "failed" | "succeeded" } = {},
+  ): void => {
+    const t = lifecycle.record({ serverId, state, reason, ...extra });
+    if (t.changed) {
+      auditLifecycle({ serverId, event: "transition", from: t.from, to: t.to, reason });
+    }
+  };
+
   const gate = await remoteMcpGate(deps.prisma, serverId, deps.allowlist);
   if (!gate.allowed) {
     // `not_allowlisted` is separated from every other refusal because it is the
@@ -291,6 +341,17 @@ export async function attachAtlassianRemote(
     const reason: RemoteAttachSkipReason =
       gate.reason === "server_not_allowlisted" ? "not_allowlisted" : "gate_refused";
     logger.info({ serverId, reason: gate.reason }, "remote_mcp_attach_skipped");
+    if (reason === "not_allowlisted") {
+      // WARP-2651: a box that has not opted in REGISTERS NOTHING. The
+      // reconciler's work list is the registry, so an empty registry is what
+      // makes "the shipping default dials nothing, ever" a property of the
+      // reconciler too and not just of this function. `unregister` rather than
+      // "do not record", because an operator who REMOVES a server from the
+      // allowlist has to stop it being reconciled on the next boot as well.
+      lifecycle.unregister(serverId);
+    } else {
+      settle("detached", "gate_refused");
+    }
     return { attached: false, serverId, reason, message: gate.message };
   }
 
@@ -302,6 +363,7 @@ export async function attachAtlassianRemote(
   // re-read is the one that returns the material. A row that vanished between
   // the two reads is a `credential_incomplete` skip, not a crash.
   if (!row?.providerTokensEnc) {
+    settle("detached", "credential_incomplete");
     return {
       attached: false,
       serverId,
@@ -310,11 +372,19 @@ export async function attachAtlassianRemote(
     };
   }
 
+  // ADR-042 seam, re-read AT THIS MOMENT and never cached between ticks. The
+  // reconciler calls this function on every re-open, so the plaintext credential
+  // exists only inside this call: it is opened here, handed to the bridge, and
+  // dropped. Holding it across ticks would put a customer's API token in a
+  // long-lived orchestrator field for the life of the process, which is exactly
+  // what the sealed column and rule 19 exist to prevent — and it would also
+  // keep using a credential the operator has since rotated.
   const credential = readAtlassianCredential(
     row,
     deps.openCredentials ?? openSaasCredentials,
   );
   if ("missing" in credential) {
+    settle("detached", "credential_incomplete");
     return {
       attached: false,
       serverId,
@@ -326,12 +396,24 @@ export async function attachAtlassianRemote(
 
   const client = deps.createClient();
   try {
-    await client.open(credential);
+    await client.open({
+      ...credential,
+      // Only when we HAVE a baseline. An always-present `knownTools: []` would
+      // tell the bridge we vetted an empty surface.
+      ...(deps.knownTools && deps.knownTools.length > 0
+        ? { knownTools: deps.knownTools }
+        : {}),
+    });
   } catch (err) {
     logger.warn(
       { serverId, code: err instanceof Error ? err.message : String(err) },
       "remote_mcp_bridge_open_failed",
     );
+    // `bridge_unreachable`, not `detached`: the hop that failed is the one to
+    // this box's own container, which is a different remedy from anything the
+    // operator can fix on the credentials page. It also arms the backoff, so a
+    // bridge that is down does not collect a dial every 30 s forever.
+    settle("bridge_unreachable", "bridge_unavailable", { bridgeHop: "failed" });
     return {
       attached: false,
       serverId,
@@ -352,6 +434,7 @@ export async function attachAtlassianRemote(
   const rejection = deps.mux.attachRemote(serverId, gated);
   if (rejection) {
     await client.close().catch(() => undefined);
+    settle("detached", "gate_refused");
     return {
       attached: false,
       serverId,
@@ -364,11 +447,80 @@ export async function attachAtlassianRemote(
   // `syncRemoteCatalog` reads it — so the listing has to happen first or the
   // sync publishes an empty catalog and the tools never reach selection.
   await deps.mux.listTools();
+
+  // WARP-2651 — the listing above is what makes the bridge compare the server's
+  // surface against the baseline we handed it at `open`. Read the session state
+  // AFTER it, because `catalog_changed` cannot exist before the first listing
+  // and the tools come back 200 either way (ADR-043 §1 forbids rendering drift
+  // as an empty list, so the drift arrives as a STATE, not as an error).
+  //
+  // A changed catalog REFUSES the attach. The alternative — sync it and carry
+  // on — is the silent acknowledgement the fourth failure state exists to
+  // prevent: an operator classified specific tools under §2, and a surface that
+  // moved has to be re-seen rather than absorbed.
+  const sessionState = await readSessionState(client, serverId);
+  if (sessionState === "catalog_changed") {
+    deps.mux.detachRemote(serverId);
+    unregisterRemoteServer(serverId, deps.registry);
+    // The bridge session is deliberately LEFT OPEN. Closing it would destroy
+    // the drift record and the `acknowledge-catalog` call that resolves it,
+    // turning "a human must re-vet this" into "it silently came back as new" on
+    // the next tick. `ownsBridgeSession` keeps the orphan sweep off it.
+    settle("detached", "catalog_changed", { bridgeHop: "succeeded" });
+    return {
+      attached: false,
+      serverId,
+      reason: "catalog_changed",
+      message:
+        `The ${serverId} tool surface changed since it was last reviewed. ` +
+        "Nothing from it is advertised until the new catalog is acknowledged.",
+    };
+  }
+
   const sync = syncRemoteCatalog(deps.mux, serverId, {
     operatorDomain: ATLASSIAN_OPERATOR_DOMAIN,
     ...(deps.registry ? { registry: deps.registry } : {}),
   });
-  return { attached: true, serverId, sync };
+  const vettedTools = client.lastAdvertisedToolNames();
+  // An EMPTY list here is not a vetted surface. `lastAdvertisedToolNames()` is
+  // set only by a listing that succeeded, and the multiplexer swallows a
+  // failed remote `tools/list` as `REMOTE_CATALOG_UNAVAILABLE` rather than
+  // failing the attach — so this attach can complete with nothing listed.
+  // Recording `[]` then would overwrite the baseline a previous attach DID
+  // vet, and the next re-open would carry no `knownTools`: drift detection
+  // silently off for exactly one re-open, which is all the window a moved
+  // surface needs. Omitting the field keeps the stored baseline (`record()`
+  // keeps the previous value when none is given) — the same rule the open
+  // path applies by refusing to send `[]` as a baseline.
+  settle("attached", null, {
+    ...(vettedTools.length > 0 ? { vettedTools } : {}),
+    bridgeHop: "succeeded",
+  });
+  return { attached: true, serverId, sync, vettedTools };
+}
+
+/**
+ * Read the bridge's session state, treating a failed read as "not drifted".
+ *
+ * Fail-OPEN here is correct and is not a gate: this read decides only whether
+ * to refuse a catalog we already listed successfully. Failing closed would mean
+ * a flaky `/state` call could park a healthy integration in `catalog_changed`,
+ * which no operator action clears. The real gates — allowlist, the CONNECTED
+ * row, the bearer — are all upstream of this line and all still fail closed.
+ */
+async function readSessionState(
+  client: McpBridgeClient,
+  serverId: string,
+): Promise<string | null> {
+  try {
+    return (await client.state()).state;
+  } catch (err) {
+    logger.warn(
+      { serverId, code: err instanceof Error ? err.message : String(err) },
+      "remote_mcp_state_read_failed",
+    );
+    return null;
+  }
 }
 
 /**

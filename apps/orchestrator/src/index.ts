@@ -31,8 +31,10 @@ import {
 import {
   ensureMcpStarted,
   ensureRemoteMcpAttached,
+  remoteMcpReconcilerDeps,
   stopMcp,
 } from "./services/mcp-client.singleton.js";
+import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -452,6 +454,22 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+
+  // WARP-2651 / ADR-043 §5 — reconcile this process's attachment against the
+  // sessions the bridge actually holds, every 30 s.
+  //
+  // Two asymmetric failures had no recovery before this: an orchestrator crash
+  // left the bridge holding an authenticated vendor connection nothing drives,
+  // and a bridge restart left this process pointing at a session that no longer
+  // exists, failing every dispatch until the ORCHESTRATOR restarted. Both are a
+  // one-tick fix here.
+  //
+  // NO `lockKey`, deliberately: unlike the firewall reconcilers below, what this
+  // converges is per-PROCESS in-memory state, so a lock would leave every
+  // replica but one permanently detached. And on the shipping default
+  // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
+  // without dialling anything at all.
+  mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
