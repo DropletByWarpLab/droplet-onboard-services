@@ -193,6 +193,10 @@ const EXPECTED_TOOL_NAMES = [
   "cloud_query_dataset",
   // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
   "money_list_open_documents",
+  // agent_runs (WARP-2180) — start is Tier-2 (it spends compute unattended),
+  // list is Tier-1. Both in the chat pool: a run is startable from chat.
+  "start_agent_run",
+  "list_agent_runs",
 ];
 
 describe("TOOLS registry", () => {
@@ -219,6 +223,11 @@ describe("TOOLS registry", () => {
     // now so a future flip back is a decision somebody has to write down.
     expect(TOOLS.get("delete_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("delete_file")?.requiresConfirmation).toBe(true);
+    // WARP-2180 — starting a background run spends compute unattended: Tier-2.
+    expect(TOOLS.get("start_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
     // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
     // gate of its own, so there is no route challenge to stand down for.
     expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();

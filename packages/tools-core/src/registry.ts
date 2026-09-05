@@ -237,6 +237,9 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+// WARP-2180: durable background runs (epic WARP-2176)
+import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
+import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
 
 const allTools: Tool[] = [
   // network
@@ -431,6 +434,10 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
+  // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
+  startAgentRun,
+  listAgentRuns,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

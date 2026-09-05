@@ -56,6 +56,7 @@ import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
+import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -427,6 +428,10 @@ export function createApp(
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
   app.use("/api", createScenesRouter(prisma, matter));
+  // WARP-2180 — durable agent runs: start / list / detail / cancel / confirm
+  // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
+  // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
+  app.use("/api", createAgentRunsRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.

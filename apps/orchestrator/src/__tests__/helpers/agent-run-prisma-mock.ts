@@ -107,6 +107,25 @@ function applyData(row: Record<string, unknown>, data: Record<string, unknown>):
   row.updatedAt = new Date();
 }
 
+/** Prisma `orderBy` — an object or an array of them — as a comparator. */
+function comparator(orderBy: unknown): (a: Record<string, unknown>, b: Record<string, unknown>) => number {
+  const clauses = (Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : []) as Array<Record<string, "asc" | "desc">>;
+  return (a, b) => {
+    for (const clause of clauses) {
+      for (const [field, dir] of Object.entries(clause)) {
+        const av = a[field];
+        const bv = b[field];
+        const an = av instanceof Date ? av.getTime() : (av as number | string);
+        const bn = bv instanceof Date ? bv.getTime() : (bv as number | string);
+        if (an === bn) continue;
+        const less = an < bn ? -1 : 1;
+        return dir === "desc" ? -less : less;
+      }
+    }
+    return 0;
+  };
+}
+
 function pick(row: Record<string, unknown>, select?: Record<string, boolean>): Record<string, unknown> {
   if (!select) return { ...row };
   const out: Record<string, unknown> = {};
@@ -180,7 +199,9 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         guard("findMany", args);
         let out = rows.filter((r) => matches(r as unknown as Record<string, unknown>, args.where));
         out = [...out].sort(
-          (a, b) => a.runAfter.getTime() - b.runAfter.getTime() || a.createdAt.getTime() - b.createdAt.getTime(),
+          args.orderBy
+            ? (a, b) => comparator(args.orderBy)(a as unknown as Record<string, unknown>, b as unknown as Record<string, unknown>)
+            : (a, b) => a.runAfter.getTime() - b.runAfter.getTime() || a.createdAt.getTime() - b.createdAt.getTime(),
         );
         if (args.take) out = out.slice(0, args.take);
         return out.map((r) => pick(r as unknown as Record<string, unknown>, args.select));
@@ -209,10 +230,54 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
       const u = users.get(args.where.id);
       return u ? pick(u as unknown as Record<string, unknown>, args.select) : null;
     }),
+    findFirst: vi.fn(async (args: { where: { username?: string }; select?: Record<string, boolean> }) => {
+      const u = [...users.values()].find((x) => x.username === args.where.username);
+      return u ? pick(u as unknown as Record<string, unknown>, args.select) : null;
+    }),
+  };
+
+  /** WARP-2180 — recurring runs. */
+  const schedules: Array<Record<string, unknown>> = [];
+  let scheduleSeq = 0;
+  const agentRunSchedule = {
+    create: vi.fn(async (args: { data: Record<string, unknown>; select?: Record<string, boolean> }) => {
+      const row = {
+        id: `sched-${++scheduleSeq}`,
+        timezone: "UTC",
+        enabled: true,
+        lastFiredAt: null,
+        createdAt: now(),
+        updatedAt: now(),
+        ...args.data,
+      };
+      schedules.push(row);
+      return pick(row, args.select);
+    }),
+    findMany: vi.fn(async (args: { where: Record<string, unknown>; take?: number; orderBy?: unknown }) => {
+      const out = schedules.filter((r) => matches(r, args.where)).sort(comparator(args.orderBy));
+      return args.take ? out.slice(0, args.take) : out;
+    }),
+    update: vi.fn(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      const row = schedules.find((r) => r.id === args.where.id);
+      if (!row) throw new Error("no schedule");
+      applyData(row, args.data);
+      return row;
+    }),
+    deleteMany: vi.fn(async (args: { where: Record<string, unknown> }) => {
+      let count = 0;
+      for (let i = schedules.length - 1; i >= 0; i--) {
+        if (matches(schedules[i]!, args.where)) {
+          schedules.splice(i, 1);
+          count += 1;
+        }
+      }
+      return { count };
+    }),
   };
 
   const prisma = {
     agentRun,
+    agentRunSchedule,
     user,
     $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
   };
@@ -221,6 +286,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     /** Typed as the real client for the service, and as the mock for tests. */
     prisma: prisma as unknown as PrismaClient & typeof prisma,
     rows,
+    schedules,
     row: (id: string) => {
       const r = rows.find((x) => x.id === id);
       if (!r) throw new Error(`no row ${id}`);
