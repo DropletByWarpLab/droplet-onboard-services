@@ -679,6 +679,15 @@ export async function createCompany(
           // `EntityLink` row, which is access-checked; this line is not.
           summary: `Customer created: ${input.name}`,
           actorId,
+          // 🔴 A BOX-WRITTEN ROW IS NOT A HUMAN NOTE. `CrmActivity.origin`
+          // defaults to LOCAL, and two things downstream read LOCAL as "a
+          // person typed this": `landed-purge.ts`'s survival test
+          // (`where: { origin: "LOCAL", [subject]: id }`) and ADR-048's undo
+          // predicate, which deletes a filed record that carries only its own
+          // CREATED row and ARCHIVES one a human has since annotated. Left at
+          // the default, every filed customer would look annotated from the
+          // moment it was created, and undo could never clean one up.
+          origin: filing ? "EXTRACTED" : "LOCAL",
         },
       },
     },

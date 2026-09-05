@@ -368,6 +368,17 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
       expect(a.summary).not.toContain("acme-invoice.pdf");
       expect(a.summary).not.toContain(".pdf");
     }
+
+    // 🔴 MUTATION: leave the CREATED row at its `LOCAL` default — a filed
+    // customer then looks annotated by a human from the moment it exists.
+    // `landed-purge.ts` keys its survival test on `origin: "LOCAL"`, and
+    // ADR-048's undo deletes a record carrying only its own CREATED row while
+    // ARCHIVING one a person has since written on. At the default, undo could
+    // never clean up a filed customer, and the owner's one-click reversal
+    // would quietly leave the row behind.
+    const created = activities.filter((a) => a.kind === "CREATED");
+    expect(created).toHaveLength(1);
+    expect(created[0].origin).toBe("EXTRACTED");
   });
 
   it("🔴 a file that moved since Droplet read it is refused, and nothing is written", async () => {
