@@ -125,6 +125,28 @@ export function createAdminRagEvalRouter(): Router {
     await proxy(res, "POST", "/run");
   });
 
+  /**
+   * WARP-2732 (ADR-048) — fire the extraction canary that GATES auto mode.
+   *
+   * 🔴 On THIS router, deliberately, and not on `admin-retrieval-eval`. That
+   * one 404s whenever `NODE_ENV === "production"`, which is every real
+   * appliance — and this canary's entire purpose is to be run on a real
+   * appliance, against the model that box actually serves. A gate you cannot
+   * reach where it matters is not a gate.
+   *
+   * The rag-eval container has no auth of its own (it binds the internal
+   * Docker network only), so this route is the wall: owner/admin, via the
+   * `isAdmin` guard the whole router already carries.
+   *
+   * 202 means the run STARTED. The verdict is in the results file — a canary
+   * that reported pass/fail in the trigger's status code would make a
+   * measured FAIL indistinguishable from a broken harness, which is the
+   * reading that gets a gate switched off rather than investigated.
+   */
+  router.post("/admin/rag-eval/run-extraction", async (_req, res) => {
+    await proxy(res, "POST", "/run-extraction");
+  });
+
   router.post("/admin/rag-eval/bootstrap", async (req, res) => {
     // Relay the operator-supplied {runs}; rag-eval clamps to 1..10.
     const runs = req.body?.runs;
