@@ -4053,6 +4053,10 @@ model PmProject {
   /// delivered for them. The job happened.
   companyId String?
   company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// WARP-2585 — files related to this job. Cascade, unlike `crmDeals`: a link
+  /// is a pointer with no independent meaning, where a deal is a commercial
+  /// record that outlives the project.
+  fileLinks EntityLink[]
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
@@ -4194,6 +4198,12 @@ model PmWorkItem {
   /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
   /// raised off a customer conversation).
   crmActivities CrmActivity[]
+
+  /// WARP-2585 — files in /files RELATED to this work item. Not the same thing
+  /// as `attachments` above and not a replacement for it: a `PmAttachment` is a
+  /// COPY of the bytes on the orchestrator's own volume, an `EntityLink` is a
+  /// pointer at a file that lives in /files and stays there.
+  fileLinks EntityLink[]
 
   @@unique([projectId, sequenceId])
   @@index([projectId, stateId, sortOrder])
@@ -5961,6 +5971,8 @@ model Contact {
   /// ROW came from. See the PartyLink model for why those are not the same
   /// question.
   partyLinks    PartyLink[]
+  /// WARP-2585 — files related to this person (an ID scan, a signed form).
+  fileLinks       EntityLink[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -6130,6 +6142,10 @@ model CrmCompany {
 
   @@unique([connectionId, externalId])
   @@index([connectionId])
+  /// WARP-2585 — files in /files that BELONG to this customer. Pointers, not
+  /// copies; deleting the company deletes the links and none of the files.
+  fileLinks EntityLink[]
+
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
@@ -6436,6 +6452,9 @@ model CrmDeal {
 
   @@unique([connectionId, externalId])
   @@index([connectionId])
+  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
+  fileLinks EntityLink[]
+
   @@index([pipelineId, stageId])
   @@index([stageId])
   @@index([companyId])
@@ -6562,4 +6581,154 @@ model CrmActivity {
   @@index([emailMessageId])
   @@index([calendarEventId])
   @@index([workItemId])
+}
+
+// ============================================================================
+// WARP-2585 (ADR-045 slice 6) — a file belongs to a business record.
+// ============================================================================
+
+/// Which record a file link hangs off. Exactly one of the five id columns on
+/// `EntityLink` is non-NULL, and this names WHICH — an explicit discriminator,
+/// never five IS-NULL tests (CLAUDE.md "No guessing, ever"). Agreement between
+/// the two is enforced by a CHECK constraint in the migration; Prisma cannot
+/// express it. Mirrors `CrmActivitySubject`.
+enum EntityLinkSubject {
+  COMPANY
+  CONTACT
+  DEAL
+  PROJECT
+  WORK_ITEM
+}
+
+/// WHY this file is attached — a closed vocabulary the customer record groups
+/// documents by, and the thing an extractor classifies into. Explicit, never
+/// guessed from a filename or a MIME type.
+enum EntityLinkRole {
+  CONTRACT
+  INVOICE
+  QUOTE
+  SCAN
+  CORRESPONDENCE
+  OTHER
+}
+
+/// HOW the link was made. `MANUAL` is a human's act and carries no confidence —
+/// a score on a link somebody made by hand is a number nobody computed.
+/// `SUGGESTED` (a matcher proposed it) and `EXTRACTED` (a document extractor
+/// found the reference) both require one, so a review queue can rank and
+/// threshold. The all-or-nothing pairing is a CHECK in the migration, the same
+/// shape as `CrmDeal_amount_needs_currency`.
+enum EntityLinkOrigin {
+  MANUAL
+  SUGGESTED
+  EXTRACTED
+}
+
+/// A file in /files, related to a business record.
+///
+/// NOT an upload. `PmAttachment` COPIES bytes onto a work item under its own
+/// `storageKey @unique`; this is a POINTER and the two coexist. A link grants
+/// no byte access — /files re-runs its own gate on every read.
+///
+/// Keyed on `ncFileId` (oc:fileid, resolved via `ncGetFileId`) because
+/// `FileComment`'s docstring already adjudicated the three incompatible file
+/// identities this box ships: oc:fileid SURVIVES a rename/move and
+/// `FileCitation.filePath` does not. `fileName`/`filePath`/`fileSpace` are a
+/// DISPLAY CACHE only (the `TeamChatMessage.sharedFile*` precedent), so a link
+/// whose file was later deleted in Nextcloud renders as a name a human can act
+/// on instead of a bare integer.
+///
+/// THERE IS NO FK TO `File`, AND THERE CANNOT BE. The registry is deliberately
+/// incomplete — `upsertFileRegistryEntry` never throws, and an absent row is a
+/// supported state every metadata route branches on — so an FK would reject a
+/// link to any unregistered file, which is most of them. A dangling link is a
+/// state this table tolerates and the UI shows. No column pretends to track it:
+/// a `fileState` nothing maintains is a column that always lies.
+///
+/// IDOR: `createdById` is the LOCAL `User.id` UUID (`req.user.id`), NEVER the
+/// Nextcloud username. FileComment records the real bug from storing one and
+/// filtering on the other. Here it is PROVENANCE ONLY and gates nothing — the
+/// `FileTag.addedByUserId` posture, because a link is business-shared like
+/// every other CRM row.
+///
+/// VISIBILITY is the question a link raises that a comment does not: the row
+/// carries a file NAME, so an unfiltered listing tells a reader that a file
+/// they cannot open exists. `entity-link.service.ts` drops rows whose file is
+/// registered to a department the viewer cannot read, using the same
+/// registry+space composition `routes/files.ts` and `routes/team-chat.ts` run.
+///
+/// Uniqueness is FIVE PARTIAL unique indexes in the migration, one per subject
+/// column — deliberately NOT a compound `@@unique` over all five. Four of the
+/// five are NULL on every row and NULL never equals NULL, so a compound index
+/// would reject nothing and P2002 would never fire. Because Prisma cannot
+/// address a partial index, the write path is updateMany-then-create with a
+/// P2002 retry.
+model EntityLink {
+  id String @id @default(uuid())
+
+  /// oc:fileid — survives rename/move. Resolve via `ncGetFileId`.
+  ncFileId Int
+
+  /// Display cache, refreshed on every re-link. Derived from `filePath`
+  /// server-side, never accepted as client prose.
+  fileName String
+  filePath String
+
+  /// WARP-1898 — the Files space `filePath` is relative to ("personal" |
+  /// "shared" | "dept:<uuid>"). Without it a reader's link falls through to
+  /// /files' silent personal-space default and resolves the LINKER's path
+  /// inside the READER's namespace. Registry-derived where a row exists.
+  fileSpace String
+
+  /// Which of the five columns below is populated. Explicit, so a query can
+  /// filter without five IS-NULL tests and the CHECK has something to check.
+  subjectType EntityLinkSubject
+
+  /// All five Cascade, and they have to be: `EntityLink_subject_exactly_one`
+  /// forbids an orphan, so a subject column cannot be SetNull. Deleting the
+  /// record deletes its links — it does NOT delete the files.
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  dealId String?
+  deal   CrmDeal? @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  projectId String?
+  project   PmProject? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  workItemId String?
+  workItem   PmWorkItem? @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+
+  role     EntityLinkRole   @default(OTHER)
+  linkedBy EntityLinkOrigin @default(MANUAL)
+
+  /// 0–100, and meaningful ONLY when `linkedBy` is not MANUAL. Integer, not a
+  /// float, mirroring `CrmPipelineStage.probability`.
+  confidence Int?
+
+  note String?
+
+  /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
+  /// (WARP-884). `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  /// LOCAL `User.id` UUID. Provenance; it does NOT gate reads.
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// The subject column LEADS each composite, so one index serves both the
+  /// CASCADE delete (Postgres does not index an FK for you — WARP-845, and
+  /// `crm.service.ts` shipped five unindexed) and the "unarchived documents on
+  /// this record" listing.
+  @@index([ncFileId])
+  @@index([companyId, isArchived])
+  @@index([contactId, isArchived])
+  @@index([dealId, isArchived])
+  @@index([projectId, isArchived])
+  @@index([workItemId, isArchived])
 }
