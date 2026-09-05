@@ -12,10 +12,12 @@
     "test:watch": "vitest",
     "lint": "eslint src/"
   },
+  "dependencies": {
+    "undici": "^6"
+  },
   "devDependencies": {
     "@types/node": "^20.12.12",
     "typescript": "^5.4.5",
-    "undici": "^6.28.0",
     "vitest": "^3.2.6"
   }
 }

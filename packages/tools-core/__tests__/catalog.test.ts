@@ -14,6 +14,10 @@
  * the live `Tool` object — only `domain` is new metadata.
  */
 
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "../src/registry.js";
 import {

@@ -59,6 +59,13 @@ SKIPPED_IDS=()
 # node_modules-gated cases skipped and the job went green).
 _SKIP_RC=77
 
+# The code ship-check.sh ITSELF exits when every check that ran passed but one
+# could not run (WARP-2646). Same number, same autotools convention, different
+# subject: _SKIP_RC is a case of this suite declining to run, _GATE_SKIP_RC is
+# the gate under test declining to evaluate. Kept as two names because they can
+# appear in the same assertion and conflating them would read as a tautology.
+_GATE_SKIP_RC=77
+
 _pass() { PASSED=$((PASSED + 1)); printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; }
 # $1 = stable skip id, $2 = display name.
 _skip() {
@@ -180,6 +187,66 @@ _assert_check_passes() {
     return 1
   fi
   return 0
+}
+
+# _assert_check_skips_matching <root> <check> <ERE> [<ERE>…]
+#
+# The SKIP counterpart of _assert_check_fails_matching (WARP-2646). Asserts
+# that ship-check.sh CHECK_NAME exits with the gate's skip code AND says why in
+# a way the patterns pin. Both halves are load-bearing:
+#
+#   - the CODE, because a skip that exits 0 is a false green in every caller
+#     (`ship-check.sh compose-config && git push`), which is the whole reason
+#     the gate has a distinct code at all;
+#   - the REASON, because "skipped" without a named cause is indistinguishable
+#     from a gate that has quietly stopped evaluating anything — the WARP-2637
+#     / WARP-2645 defect, one level down.
+_assert_check_skips_matching() {
+  local synthetic_root="$1" check_name="$2"
+  shift 2
+  if [ "$#" -eq 0 ]; then
+    printf "    _assert_check_skips_matching called with no pattern\n" >&2
+    return 1
+  fi
+
+  local output rc
+  output="$(REPO_ROOT="$synthetic_root" bash "$SHIP_CHECK" "$check_name" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne "$_GATE_SKIP_RC" ]; then
+    printf "    expected the gate's skip exit %d, got %d\n" "$_GATE_SKIP_RC" "$rc" >&2
+    printf '%s\n' "$output" | sed 's/^/    | /' >&2
+    return 1
+  fi
+
+  local pattern
+  for pattern in "$@"; do
+    if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
+      printf "    %s skipped, but NOT for the reason under test\n" "$check_name" >&2
+      printf "    expected the output to match /%s/\n" "$pattern" >&2
+      printf '%s\n' "$output" | sed 's/^/    | /' >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Build a throwaway REPO_ROOT holding just what `compose-config` reads, and
+# echo its path. Deliberately a COPY, not a symlink: `docker compose` resolves
+# `env_file: ../.env` against the directory of the -f argument as given, so a
+# symlinked docker/ would send it back to the real repo root and the case would
+# silently test the developer's machine instead of the fixture.
+#
+# `.git` is a plain file — ship-check's precondition only tests existence, and
+# a file keeps the fixture from being mistaken for a checkout by anything else.
+# The caller decides whether to put a `.env` in it; that choice IS the fixture.
+_make_compose_only_root() {
+  local root
+  root="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-composeroot.XXXXXX")" || return 1
+  mkdir -p "$root/docker" || return 1
+  cp "$REPO_ROOT_REAL/docker/docker-compose.yml" "$root/docker/docker-compose.yml" || return 1
+  cp "$REPO_ROOT_REAL/.env.example" "$root/.env.example" || return 1
+  : > "$root/.git" || return 1
+  printf '%s\n' "$root"
 }
 
 # --- Isolated git index (WARP-2479) ------------------------------------------
@@ -384,9 +451,23 @@ test_compose_config_catches_yaml_breakage() {
   # shellcheck disable=SC2064
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: passes on the unmutated tree.
-  if ! _assert_check_passes "$REPO_ROOT_REAL" compose-config; then
+  # 1. Sanity: passes on the unmutated tree — with a third outcome. WARP-2646
+  #    gave the gate a skip verdict for the two environmental causes that used
+  #    to red it here (no `.env` at the repo root, an unreachable daemon), and
+  #    on a host in either state this case cannot evaluate its mutation at all.
+  #    That is a SKIP of the case, not a pass and not a red: asking the gate is
+  #    also how the reason gets reported, so the two do not drift apart.
+  local baseline rc
+  baseline="$(REPO_ROOT="$REPO_ROOT_REAL" bash "$SHIP_CHECK" compose-config 2>&1)" \
+    && rc=0 || rc=$?
+  if [ "$rc" -eq "$_GATE_SKIP_RC" ]; then
+    printf "    ${_YELLOW}SKIP${_RESET}  compose-config cannot evaluate this worktree; the gate says why:\n"
+    printf '%s\n' "$baseline" | sed 's/^/          | /'
+    return "$_SKIP_RC"
+  fi
+  if [ "$rc" -ne 0 ]; then
     printf "    baseline compose-config failed against unmodified real repo\n" >&2
+    printf '%s\n' "$baseline" | sed 's/^/    | /' >&2
     return 1
   fi
 
@@ -409,6 +490,119 @@ test_compose_config_catches_yaml_breakage() {
   _assert_check_fails_matching "$REPO_ROOT_REAL" compose-config \
     'rejected docker/docker-compose\.yml' \
     "could not find expected ':'"
+}
+
+# =============================================================================
+# Test: compose-config SKIPS (does not fail) when the worktree has no .env
+# =============================================================================
+#
+# WARP-2646. `.env` is .gitignored and written by scripts/setup.sh, so a fresh
+# clone — and every new `git worktree add` — has none. The gate reads
+# `.env.example` for VALUES, but `docker/docker-compose.yml` also declares
+# `env_file: ../.env`, and compose resolves that while merging the tree no
+# matter what `--env-file` says. The result was
+#
+#   FAIL  compose-config — "docker compose config" rejected docker/docker-compose.yml
+#     | env file /…/.env not found: stat /…/.env: no such file or directory
+#
+# — a green tree reported as a broken compose file, and the first thing a
+# developer meets on their first run of the mandated pre-PR gate. CI never saw
+# it because the workflow seeds .env from .env.example before the suite runs.
+#
+# The fixture is a throwaway root holding only the compose file and
+# .env.example, so the assertion holds whether or not the developer running
+# this suite happens to have a .env. What it pins is not "the gate skipped" but
+# "the gate skipped, said .env was the reason, and exited with the code that
+# means skipped" — a fail-open regression (exit 0) is as wrong as the old red.
+test_compose_config_skips_when_env_missing() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local root
+  root="$(_make_compose_only_root)" || {
+    printf "    could not build the compose-only fixture root\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$root'" RETURN EXIT
+
+  if [ -f "$root/.env" ]; then
+    printf "    fixture root unexpectedly has a .env — the case would prove nothing\n" >&2
+    return 1
+  fi
+
+  _assert_check_skips_matching "$root" compose-config \
+    'SKIP.*compose-config.*no \.env in this worktree' \
+    'env_file: \.\./\.env'
+}
+
+# =============================================================================
+# Test: compose-config SKIPS (does not fail) when the Docker client cannot
+# reach its daemon
+# =============================================================================
+#
+# WARP-2646's other environmental cause. Note what is NOT being asserted: that
+# a stopped daemon breaks this check. It does not. `docker compose config` is a
+# client-side merge, and the measurements behind this case (docker 29.5.2 /
+# compose v2, 2026-09-02) are that with DOCKER_HOST pointed at a dead socket,
+# and again with `docker info` shimmed to fail while compose still works, the
+# check RUNS and PASSES. That is precisely why the gate does not carry a
+# `docker info` preflight like docker-build-smoke's: a preflight would skip a
+# check that can run, manufacturing the vacuous gate WARP-2645 spent a PR
+# removing.
+#
+# What can still happen is a client that cannot reach the daemon for ANY call,
+# compose included — a broken context, a socket that vanished under it. Then
+# compose says so and the gate has validated nothing, so it must not report a
+# rejected compose file. The shim reproduces exactly that and nothing more, and
+# it is a PATH shim precisely so the real daemon (and the other cases that need
+# it) are left alone.
+test_compose_config_skips_when_daemon_unreachable() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local shim_dir
+  shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-dockershim.XXXXXX")" || {
+    printf "    could not create the shim directory\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$shim_dir'" RETURN EXIT
+
+  cat > "$shim_dir/docker" <<'SHIM'
+#!/usr/bin/env bash
+# Every call, `compose` included, fails the way a Docker client that cannot
+# reach its daemon fails. Verbatim wording from the real CLI — the gate
+# classifies on that sentence, so paraphrasing it here would test nothing.
+echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+exit 1
+SHIM
+  chmod 755 "$shim_dir/docker"
+
+  local root
+  root="$(_make_compose_only_root)" || {
+    printf "    could not build the compose-only fixture root\n" >&2
+    return 1
+  }
+  # The fixture needs a .env so that a skip can only be attributed to the
+  # daemon: without one, the .env branch above would fire first and this case
+  # would pass while asserting the wrong thing.
+  cp "$root/.env.example" "$root/.env" || return 1
+
+  local saved_path="$PATH" rc
+  PATH="$shim_dir:$PATH"
+  _assert_check_skips_matching "$root" compose-config \
+    'SKIP.*compose-config.*Docker daemon not reachable' \
+    'Cannot connect to the Docker daemon' \
+    && rc=0 || rc=$?
+  PATH="$saved_path"
+
+  rm -rf "$root"
+  return "$rc"
 }
 
 # =============================================================================
@@ -582,6 +776,51 @@ test_shellcheck_catches_local_outside_function() {
 # the unmutated-baseline pass (it's already exercised by
 # `bash scripts/test/ship-check.sh --full`) to keep this test at one
 # container run, not two.
+# =============================================================================
+# Test: docker-build-smoke SKIPS (does not fail) when the daemon is unreachable
+# =============================================================================
+#
+# WARP-2646's sweep half. This check genuinely cannot run without a daemon — it
+# starts an Ubuntu container — so a stopped colima says nothing whatever about
+# setup.sh, and reporting it as a FAIL made a developer's machine state look
+# like a defect in the installer.
+#
+# Costs no container time: the guard returns before `docker run`, which is also
+# why this case can afford to exist next to the five-minute one below.
+test_docker_build_smoke_skips_when_daemon_unreachable() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return "$_SKIP_RC"
+  fi
+
+  local shim_dir
+  shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-check-infoshim.XXXXXX")" || {
+    printf "    could not create the shim directory\n" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # capture the path at trap-set time
+  trap "rm -rf '$shim_dir'" RETURN EXIT
+
+  # Only `docker info` fails — the faithful shape of a stopped daemon with the
+  # CLI still installed. Nothing else is delegated because nothing else should
+  # be reached: if the guard ever stops returning early, the shim's fail-closed
+  # default makes that loud rather than starting a real container.
+  cat > "$shim_dir/docker" <<'SHIM'
+#!/usr/bin/env bash
+echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+exit 1
+SHIM
+  chmod 755 "$shim_dir/docker"
+
+  local saved_path="$PATH" rc
+  PATH="$shim_dir:$PATH"
+  _assert_check_skips_matching "$REPO_ROOT_REAL" docker-build-smoke \
+    'SKIP.*docker-build-smoke.*daemon not reachable, so nothing was smoke-tested' \
+    && rc=0 || rc=$?
+  PATH="$saved_path"
+  return "$rc"
+}
+
 test_docker_build_smoke_shim_rejects_unknown_subcommand() {
   if ! command -v docker >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
@@ -1232,6 +1471,118 @@ test_tsc_full_uses_workspace_pinned_prisma() {
   #    the nine swept workspaces, or a tree that was never bootstrapped.
   _assert_check_fails_matching "$REPO_ROOT_REAL" tsc-full \
     'Missing script: "db:generate"'
+}
+
+# =============================================================================
+# Test: tsc-full's workspace list covers every TS workspace (WARP-2617)
+# =============================================================================
+#
+# Original bug: `run_check_tsc_full` walked a hardcoded workspace list, and a
+# workspace absent from it was skipped ENTIRELY — phase 3 (source) and phase 4
+# (tests) both. `services/matter-controller` and `packages/auth-policy` each
+# ship a `tsconfig.json` and neither was ever listed, so 9 test files and both
+# workspaces' source were type-checked by nothing. `vitest` cannot cover for
+# it: esbuild strips types without checking them.
+#
+# The failure was SILENT in the worst way — the check printed PASS and even
+# reported a workspace count, but the count only ever counted the workspaces
+# someone had remembered to type into the list. Nothing compared that list to
+# the tree, so a new TypeScript workspace joins the repo unchecked and looks
+# exactly like a covered one.
+#
+# This is a drift gate, not a mutation test: it re-derives the set of
+# TypeScript workspaces from the filesystem and asserts the list in
+# ship-check.sh matches it in both directions (nothing missing, nothing
+# stale) — and then, for every listed workspace, that its tests are actually
+# reachable by SOME tsconfig (the third check below; being listed was
+# necessary, not sufficient). Cheap — no tsc run — so unlike the two tsc-full
+# tests above it also runs on a CI runner that has no node_modules.
+test_tsc_full_workspace_list_covers_tree() {
+  # Parse the single `ws_list=( … )` array out of the check. Deliberately
+  # textual: sourcing ship-check.sh would execute it.
+  local listed
+  listed="$(sed -n '/^  local ws_list=(/,/^  )/p' "$SHIP_CHECK" \
+    | sed -e '1d' -e '$d' -e 's/[[:space:]]//g' \
+    | grep -v '^$' | sort)"
+
+  if [ -z "$listed" ]; then
+    printf "    could not parse 'local ws_list=(' out of %s\n" "$SHIP_CHECK" >&2
+    printf "    (renamed or reformatted? this gate parses it textually)\n" >&2
+    return 1
+  fi
+
+  # Re-derive from the tree: every apps/*, services/*, packages/* directory
+  # that ships a tsconfig.json is a TypeScript workspace tsc-full must walk.
+  local actual
+  actual="$(cd "$REPO_ROOT_REAL" && \
+    for d in apps/*/ services/*/ packages/*/; do
+      [ -f "${d}tsconfig.json" ] && printf '%s\n' "${d%/}"
+    done | sort)"
+
+  if [ -z "$actual" ]; then
+    printf "    found no tsconfig.json under apps/, services/ or packages/\n" >&2
+    return 1
+  fi
+
+  local missing stale
+  missing="$(comm -13 <(printf '%s\n' "$listed") <(printf '%s\n' "$actual"))"
+  stale="$(comm -23 <(printf '%s\n' "$listed") <(printf '%s\n' "$actual"))"
+
+  local rc=0
+  if [ -n "$missing" ]; then
+    printf "    these workspaces ship a tsconfig.json but tsc-full never walks them:\n" >&2
+    printf '%s\n' "$missing" | sed 's/^/      /' >&2
+    printf "    add them to ws_list in run_check_tsc_full (scripts/test/ship-check.sh)\n" >&2
+    rc=1
+  fi
+  if [ -n "$stale" ]; then
+    printf "    these are in ws_list but no longer ship a tsconfig.json:\n" >&2
+    printf '%s\n' "$stale" | sed 's/^/      /' >&2
+    printf "    remove them from ws_list, or the list stops describing the tree\n" >&2
+    rc=1
+  fi
+
+  # Third check (WARP-2617 review): being on the list is necessary, not
+  # sufficient. The shape that actually caused the bug was a workspace whose
+  # BUILD config cannot see its tests — `exclude: ["__tests__"]`, or an
+  # `include` scoped to `src/**/*` — shipping no `tsconfig.test.json` for
+  # phase 4 to pick up. Such a workspace is listed, passes both checks above,
+  # and still has its tests typechecked by nothing: the same silent hole, one
+  # generation later. So for every listed workspace with a top-level
+  # `__tests__/`, either its `tsconfig.json` reaches that directory or a
+  # `tsconfig.test.json` must exist. Textual and JSONC-tolerant (`//` comments
+  # stripped), still no tsc run.
+  #
+  # `packages/auth-policy` keeps its tests in `src/__tests__/`: no top-level
+  # `__tests__/`, so its bare `"__tests__"` exclude matches nothing and it is
+  # correctly out of scope here. `services/mcp-bridge` was the first catch —
+  # it landed on stage in exactly matter-controller's shape while this branch
+  # was open.
+  local ws cfg body reason unreachable=""
+  for ws in $listed; do
+    [ -d "$REPO_ROOT_REAL/$ws/__tests__" ] || continue
+    [ -f "$REPO_ROOT_REAL/$ws/tsconfig.test.json" ] && continue
+    cfg="$REPO_ROOT_REAL/$ws/tsconfig.json"
+    body="$(sed -e 's#//.*$##' "$cfg" | tr -d '\n')"
+    reason=""
+    if printf '%s' "$body" | grep -qE '"exclude"[[:space:]]*:[[:space:]]*\[[^]]*"__tests__"'; then
+      reason='tsconfig.json excludes "__tests__"'
+    elif printf '%s' "$body" | grep -qE '"include"[[:space:]]*:' \
+      && ! printf '%s' "$body" \
+        | grep -qE '"include"[[:space:]]*:[[:space:]]*\[[^]]*"(\*\*|__tests__|\./\*\*|\./__tests__|\.")'; then
+      reason='tsconfig.json "include" never reaches __tests__/'
+    fi
+    [ -n "$reason" ] || continue
+    unreachable="${unreachable}      ${ws} — ${reason}"$'\n'
+  done
+  if [ -n "$unreachable" ]; then
+    printf "    these listed workspaces have a __tests__/ their build config cannot see, and no tsconfig.test.json:\n" >&2
+    printf '%s' "$unreachable" >&2
+    printf "    add <ws>/tsconfig.test.json in services/matter-controller's shape (extends ./tsconfig.json;\n" >&2
+    printf "    noEmit; rootDir '.'; include __tests__/**/*), plus a typecheck:tests script and a CI step\n" >&2
+    rc=1
+  fi
+  return "$rc"
 }
 
 # =============================================================================
@@ -1919,9 +2270,21 @@ _run_test "tsc-full-prisma-pin" \
   "tsc-full uses workspace-pinned prisma (WARP-492)" \
   test_tsc_full_uses_workspace_pinned_prisma
 
+_run_test "tsc-full-workspace-list-covers-tree" \
+  "tsc-full's workspace list covers every TS workspace (WARP-2617)" \
+  test_tsc_full_workspace_list_covers_tree
+
 _run_test "compose-config-yaml-breakage" \
   "compose-config catches YAML breakage in docker-compose.yml" \
   test_compose_config_catches_yaml_breakage
+
+_run_test "compose-config-skips-without-env" \
+  "compose-config skips with a reason when the worktree has no .env (WARP-2646)" \
+  test_compose_config_skips_when_env_missing
+
+_run_test "compose-config-skips-without-daemon" \
+  "compose-config skips with a reason when the Docker client cannot reach its daemon (WARP-2646)" \
+  test_compose_config_skips_when_daemon_unreachable
 
 _run_test "frigate-env-scan-unresolved-var" \
   "frigate-env-scan catches unresolved {VAR} substitution" \
@@ -1942,6 +2305,10 @@ _run_test "shellcheck-lints-the-gate" \
 _run_test "shellcheck-reports-findings" \
   "shellcheck check reports its findings, not just a non-zero exit (WARP-2492)" \
   test_shellcheck_reports_findings_not_just_exit_code
+
+_run_test "docker-build-smoke-skips-without-daemon" \
+  "docker-build-smoke skips with a reason when the daemon is unreachable (WARP-2646)" \
+  test_docker_build_smoke_skips_when_daemon_unreachable
 
 _run_test "docker-build-smoke-shim-allowlist" \
   "docker-build-smoke shim rejects unknown docker subcommand" \

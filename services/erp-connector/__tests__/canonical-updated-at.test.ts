@@ -22,9 +22,7 @@
  * Every test names the mutation that must turn it red.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import {
   CANONICAL_COLUMNS,
@@ -34,9 +32,11 @@ import {
   type DatasetName,
 } from "../src/export-drop/profiles.js";
 import { NATURAL_KEY } from "../src/export-drop/scan.js";
+import { readPackageFile } from "./helpers/test-paths.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PROFILES_SOURCE = readFileSync(join(HERE, "../src/export-drop/profiles.ts"), "utf8");
+// Anchored to this test file, not the runner's cwd, through the one helper
+// this package's roots live in (WARP-2654).
+const PROFILES_SOURCE = readPackageFile("src/export-drop/profiles.ts");
 
 // ── the pinned decision: which datasets have a vendor source, and which do not ──
 

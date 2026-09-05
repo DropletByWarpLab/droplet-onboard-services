@@ -324,6 +324,34 @@ const MAX_PROBES_TOTAL = MAX_REDUCTION_ITERATIONS * MAX_PROBES_PER_ITERATION;
  * "is this sibling big enough to be a competing BODY" in the cursor pass.
  */
 export const MIN_REDUCIBLE_STRING = 40;
+
+/**
+ * WARP-2178 — keys whose string values are NEVER a reduction site, at any
+ * depth, however long. These are the fields a follow-up call is built from:
+ * a `list_files` entry's `path` is the argument of the next `read_file`, an
+ * `id` is the argument of the next `get_*`. Cutting one leaves the model a
+ * value that looks complete and dereferences to nothing — the confidently
+ * wrong run the ticket names as the risk. Exact keys plus the conventional
+ * suffixes; shape-driven like `CURSOR_KEYS`, not a per-tool table. A
+ * payload made ONLY of protected strings is then irreducible and takes the
+ * refusal rail, which is the honest outcome for it.
+ */
+export const IDENTIFIER_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "path",
+  "name",
+  "url",
+  "href",
+  "key",
+  "uuid",
+  "slug",
+]);
+const IDENTIFIER_KEY_SUFFIXES = ["_id", "Id", "_path", "Path", "_key", "Key", "_url", "Url"] as const;
+
+export function isIdentifierKey(key: string): boolean {
+  if (IDENTIFIER_KEYS.has(key)) return true;
+  return IDENTIFIER_KEY_SUFFIXES.some((suffix) => key.length > suffix.length && key.endsWith(suffix));
+}
 /** Deeper than this we stop looking for sites (and stop copying). */
 const MAX_WALK_DEPTH = 12;
 /** Marker size bounds. */
@@ -456,7 +484,10 @@ function findSites(root: unknown): Site[] {
   const visit = (node: unknown, path: JsonPath, depth: number): void => {
     if (depth > MAX_WALK_DEPTH) return;
     if (typeof node === "string") {
-      if (node.length >= MIN_REDUCIBLE_STRING) {
+      // WARP-2178 — an identifier is never a site (see IDENTIFIER_KEYS).
+      const parentKey = path[path.length - 1];
+      const protectedId = typeof parentKey === "string" && isIdentifierKey(parentKey);
+      if (node.length >= MIN_REDUCIBLE_STRING && !protectedId) {
         sites.push({ path, kind: "string", len: node.length, weight: node.length + 2 });
       }
       return;
@@ -1022,10 +1053,15 @@ export function boundToolResultForModel(
   text: string,
   toolName: string,
   onRefusal?: (r: BoundingRefusal) => void,
+  // WARP-2178 — the per-result threshold, now a knob
+  // (config.AGENT_TOOL_RESULT_CAP_CHARS) so it can be set from a measured
+  // distribution rather than inherited. Defaults to the historical value, so
+  // every caller that passes nothing is byte-for-byte unchanged.
+  cap: number = MODEL_TOOL_RESULT_CAP_CHARS,
 ): string {
-  if (text.length <= MODEL_TOOL_RESULT_CAP_CHARS) return text;
+  if (text.length <= cap) return text;
   try {
-    return reduceToFit(text, toolName, onRefusal, MODEL_TOOL_RESULT_CAP_CHARS);
+    return reduceToFit(text, toolName, onRefusal, cap);
   } catch (err) {
     // No outer try/catch was the majors' finding, and it is what actually
     // makes "every payload the model receives is valid JSON" TRUE. The old
@@ -1037,7 +1073,7 @@ export function boundToolResultForModel(
       inputChars: text.length,
       detail: err instanceof Error ? err.message : String(err),
     });
-    return refusalEnvelope(toolName, text.length, "exception", MODEL_TOOL_RESULT_CAP_CHARS);
+    return refusalEnvelope(toolName, text.length, "exception", cap);
   }
 }
 

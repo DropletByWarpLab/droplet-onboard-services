@@ -2102,9 +2102,9 @@ fi
 # — a future "simplify" pass must not trim a pattern that an interrupted run
 # can actually strand. Writers (all stage to a `.$$`/`.<epoch>` sibling then
 # rename, leaving the sibling on interruption):
-#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_file.torn.$(date +%s)")
+#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_write_target.torn.$(date +%s)")
 #   .env.tmp.*     -> secrets.sh atomic .env write             ("$env_write_target.tmp.$$")
-#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_file.migrate.$$")
+#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_target.migrate.$$")
 #   .env.upsert.*  -> secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
 SECRETS_SH="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 SINGLEBOX_SH="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
