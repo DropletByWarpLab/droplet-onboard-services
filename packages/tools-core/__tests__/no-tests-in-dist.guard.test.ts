@@ -17,6 +17,9 @@
  * Mutation this is written to catch:
  *   - put any `*.test.ts` back under `src/`, rebuild → `dist/` grows a
  *     `*.test.js` and this reds.
+ *   - drop a `*.test.js` into `dist/` with no `*.test.ts` beside it in `src/`
+ *     → this reds too, and says STALE dist rather than blaming `src/`
+ *     (WARP-2620).
  *
  * Asserted against the SOURCE tree, not `dist/`, so the guard is meaningful in
  * a checkout that has never run `npm run build` (a stale or absent `dist/`
@@ -26,10 +29,10 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, statSync, existsSync } from "node:fs";
 import path from "node:path";
-
-// `__dirname`, not `import.meta.url`: this package builds to CommonJS, where
-// `import.meta` is a TS1470 error (WARP-2502).
-const PKG_ROOT = path.resolve(__dirname, "..");
+// Anchored to this test file, not to the runner's cwd (WARP-2654). The
+// helper uses `__dirname` — this package builds to CommonJS, where
+// `import.meta` is a TS1470 error under `tsconfig.test.json`.
+import { PACKAGE_ROOT as PKG_ROOT } from "./helpers/test-paths";
 
 /** Every file under `dir` whose name matches `pred`, relative to `dir`. */
 function walk(dir: string, pred: (name: string) => boolean): string[] {
@@ -65,6 +68,31 @@ describe("no test file is compiled into dist/ (WARP-2515)", () => {
       return;
     }
     const emitted = walk(dist, (n) => /\.test\.jsx?$/.test(n));
-    expect(emitted, `compiled test files found in dist/: ${emitted.join(", ")}`).toEqual([]);
+
+    // Name the cause, not just the symptom. `tsc` EMITS but never PRUNES, so
+    // a `dist/` built before `src/handlers/pm/pm-orch.test.ts` moved under
+    // `__tests__/` keeps `dist/handlers/pm/pm-orch.test.js` forever — the
+    // guard then reds on a checkout whose `src/` is clean, and the reader has
+    // no way to tell that from a real regression. WARP-2620: four implementers
+    // hit exactly that on 2026-09-02 and read it as a broken `stage`.
+    // Distinguish by asking whether a matching source file still exists.
+    const orphaned = emitted.filter(
+      (rel) =>
+        !existsSync(path.join(PKG_ROOT, "src", rel.replace(/\.jsx?$/, ".ts"))) &&
+        !existsSync(path.join(PKG_ROOT, "src", rel.replace(/\.jsx?$/, ".tsx"))),
+    );
+    const cause =
+      orphaned.length === emitted.length
+        ? `STALE dist/ — no matching *.test.ts exists under src/ for any of them, ` +
+          `so this build predates their move to __tests__/. Your tree is fine; the ` +
+          `build output is not. Fix: npm run bootstrap  (or, for this package alone, ` +
+          `rm -rf packages/tools-core/dist && npm run build -w packages/tools-core)`
+        : `a *.test.ts under src/ is being emitted by tsconfig.json's ` +
+          `include: ["src/**/*"], shipping a vitest require into the image. ` +
+          `Move it to __tests__/`;
+
+    expect(emitted, `compiled test files found in dist/: ${emitted.join(", ")} — ${cause}`).toEqual(
+      [],
+    );
   });
 });

@@ -33,8 +33,10 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { packagePath } from "./helpers/test-paths.js";
 
-const SRC = path.resolve(process.cwd(), "src");
+// Anchored to this test file, not the runner's cwd (WARP-2654).
+const SRC = packagePath("src");
 const HARNESS = "prisma-tx-harness";
 
 function walk(dir: string, out: string[] = []): string[] {

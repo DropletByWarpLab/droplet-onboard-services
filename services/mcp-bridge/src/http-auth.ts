@@ -19,11 +19,25 @@
  * somebody sets on a box.
  *
  * `/health` is exempt so the compose healthcheck works without a secret. It
- * returns a constant and reads nothing.
+ * returns the constant `{status:"ok"}` and reads nothing — and that claim is
+ * now enforced by `http-api.test.ts`, because it was FALSE from #1964 until
+ * WARP-2300 review: the handler also returned `knownServerIds()` and
+ * `store.healthAll()`, so any container on the compose bridge network could
+ * read which vendors the box knows plus every session's `state`, `toolCount`,
+ * `consecutiveFailures`, `lastReadyAt` and `reason` — i.e. whether the customer
+ * has connected Atlassian and whether their credential is being rejected — with
+ * no credential at all. That is WARP-2111's shape one layer down.
+ *
+ * ANY new exempt path inherits that constraint: an exemption is a decision to
+ * publish the body to every container on the bridge network, so the route must
+ * answer something that is true of the process and says nothing about the
+ * customer, their vendors or their credentials. The inventory lives at
+ * `GET /sessions`, behind the bearer.
  */
 import { timingSafeEqual } from "node:crypto";
 
-/** Paths served without a bearer. One entry, and it answers a constant. */
+/** Paths served without a bearer. One entry, and it answers `{status:"ok"}`
+ *  and nothing else — see the note above before adding a second. */
 export const AUTH_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/health"]);
 
 export type BridgeAuthVerdict =

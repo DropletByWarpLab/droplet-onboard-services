@@ -24,7 +24,7 @@
  *
  * `node:http` and a switch, rather than Express. This workspace's ONLY
  * dependency is `@modelcontextprotocol/sdk`, and its CI leg's cost argument
- * (`ci.yml`) rests on it needing "a bare `npm ci` and nothing else". Six routes
+ * (`ci.yml`) rests on it needing "a bare `npm ci` and nothing else". Seven routes
  * with no middleware, no templating and no static assets do not buy back the
  * dependency.
  *
@@ -109,6 +109,21 @@ export interface BridgeCallBody {
 
 export interface BridgeStateBody {
   state: RemoteMcpSessionHealth;
+}
+
+/**
+ * `GET /sessions` — the inventory, and the one route that describes THIS BOX
+ * rather than one named session.
+ *
+ * It lives behind the bearer because that is what it is: `knownServers` says
+ * which vendors this build can reach, and `sessions` says whether the customer
+ * has connected one and whether their credential is being rejected. Both used
+ * to ride on the unauthenticated `/health`, where every container on the
+ * compose bridge network could read them with no credential at all.
+ */
+export interface BridgeSessionsBody {
+  knownServers: string[];
+  sessions: RemoteMcpSessionHealth[];
 }
 
 /**
@@ -249,19 +264,39 @@ async function route(
     if (req.method !== "GET") {
       return err(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed on /health.`);
     }
-    return {
-      status: 200,
-      body: {
-        status: "ok",
-        knownServers: knownServerIds(),
-        sessions: opts.store.healthAll(),
-      },
-    };
+    // A CONSTANT, and deliberately nothing else. This is the one route served
+    // without a bearer (`http-auth.ts`), which makes its body readable by every
+    // container on the compose bridge network — Nextcloud, Frigate, Redis,
+    // mosquitto and any third-party image among them. It answered
+    // `knownServerIds()` and `store.healthAll()` until WARP-2300 review, which
+    // told an unauthenticated reader which vendors this box knows, whether the
+    // customer has connected Atlassian, and from `reason`/`consecutiveFailures`
+    // whether their credential is being REJECTED. That is WARP-2111's shape one
+    // layer down. The inventory moved to `GET /sessions`, behind the bearer.
+    //
+    // The compose healthcheck reads the STATUS CODE and discards the body
+    // (`docker-compose.yml`: `wget -q -O - … >/dev/null`), so it is unaffected.
+    return { status: 200, body: { status: "ok" } };
   }
 
   const parts = req.path.split("/").filter((p) => p.length > 0);
-  if (parts[0] !== "sessions" || parts.length < 2 || parts.length > 3) {
+  if (parts[0] !== "sessions" || parts.length < 1 || parts.length > 3) {
     return err(404, "NOT_FOUND", `No route for ${req.path}.`);
+  }
+
+  if (parts.length === 1) {
+    // `GET /sessions` — what `/health` used to leak, now behind the bearer the
+    // auth check above has already enforced.
+    if (req.method !== "GET") {
+      return err(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed on ${req.path}.`);
+    }
+    return {
+      status: 200,
+      body: {
+        knownServers: knownServerIds(),
+        sessions: opts.store.healthAll(),
+      } satisfies BridgeSessionsBody,
+    };
   }
   const serverId = parts[1]!;
   const action = parts[2];

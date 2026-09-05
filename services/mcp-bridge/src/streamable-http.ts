@@ -22,6 +22,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { pickRateLimitHeaders } from "./call-scheduler.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import type {
   RemoteMcpConnection,
@@ -54,6 +55,28 @@ export interface StreamableHttpConnectionOptions {
    * and adopt any of its five supported versions.
    */
   pinnedProtocolVersion?: string;
+  /**
+   * Called with a response's rate-limit headers, and ONLY those
+   * ({@link pickRateLimitHeaders}), for every response the transport receives.
+   *
+   * This is the seam that makes upstream #171's mitigation real. The scheduler
+   * knows how to pause; until WARP-2300 review nothing fed it, because the only
+   * feed was `rateLimitHeadersOf(err)` in `atlassian.ts` reading `err.headers`
+   * off whatever `client.callTool` rejected with — and the pinned SDK throws
+   * `StreamableHTTPError`, which is constructed from a code and a message and
+   * DISCARDS the `Response` (`streamableHttp.js`, the `throw` at the end of the
+   * `!response.ok` branch). No `headers`, so no pause, ever, on a real box.
+   * `call-scheduler.test.ts` stayed green throughout because all four of its
+   * rate-limit tests call `noteRateLimitHeaders` directly.
+   *
+   * Fired on EVERY response, not only on a 429: `X-RateLimit-Remaining: 0` on
+   * a 200 is the signal that lets the scheduler slow down BEFORE the vendor
+   * starts refusing, which is the whole point of the header. The scheduler
+   * ignores a positive remaining and caps any honoured pause at
+   * `MAX_HONOURED_PAUSE_MS`, so a chatty or hostile header set cannot wedge a
+   * session.
+   */
+  onRateLimitHeaders?: (headers: Record<string, string>) => void;
 }
 
 /**
@@ -87,6 +110,42 @@ export const noRedirectFetch: FetchLike = (url, init) =>
   fetch(url, { ...init, redirect: "error" });
 
 /**
+ * {@link noRedirectFetch}, plus the one thing only this layer can see.
+ *
+ * The transport's `fetch` is the LAST place in this process that holds the
+ * live `Response`. The SDK reads what it needs and throws the rest away, so a
+ * rate-limit header observed anywhere further out is a header that no longer
+ * exists. Reading it here is not a convenience — it is the only correct place.
+ *
+ * Rule 19 is enforced by construction: {@link pickRateLimitHeaders} is handed
+ * a lookup, and the callback receives a map that can contain nothing but
+ * {@link RATE_LIMIT_HEADER_NAMES}. The rest of the response's headers are
+ * never materialised, so an `Authorization` echo or a `Set-Cookie` is out of
+ * reach rather than merely unread.
+ *
+ * The observer is invoked in a `try`/`catch` that swallows: a throwing sink
+ * must not turn a healthy response into a transport failure, and must not turn
+ * a 429 into a different error than the one the session classifies.
+ */
+export function createObservingFetch(
+  onRateLimitHeaders?: (headers: Record<string, string>) => void,
+): FetchLike {
+  if (!onRateLimitHeaders) return noRedirectFetch;
+  return async (url, init) => {
+    const response = await fetch(url, { ...init, redirect: "error" });
+    const picked = pickRateLimitHeaders((name) => response.headers.get(name));
+    if (picked) {
+      try {
+        onRateLimitHeaders(picked);
+      } catch {
+        // See above. The response is the caller's business either way.
+      }
+    }
+    return response;
+  };
+}
+
+/**
  * Build a live Streamable-HTTP connection to a remote MCP server.
  *
  * `input.url` MUST already have passed `assertSafeMcpUrl` — this factory does
@@ -103,8 +162,10 @@ export const createStreamableHttpConnection = async (
     // long-lived holds the material.
     requestInit: { headers: { ...input.headers } },
     // ADR-043 §6's exact-host guard is registration-time only; this is what
-    // keeps it true for the life of the session. See `noRedirectFetch`.
-    fetch: noRedirectFetch,
+    // keeps it true for the life of the session. See `noRedirectFetch`. The
+    // same wrapper is where the rate-limit headers are read, because it is the
+    // last place the `Response` exists — see `onRateLimitHeaders`.
+    fetch: createObservingFetch(opts.onRateLimitHeaders),
     reconnectionOptions: { ...TRANSPORT_RECONNECTION },
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   });

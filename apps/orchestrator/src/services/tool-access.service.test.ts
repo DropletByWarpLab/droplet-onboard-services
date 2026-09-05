@@ -13,6 +13,7 @@ import {
   DENY_ALL_TOOL_SCOPE,
   firstForbiddenToolName,
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesToScope,
@@ -20,6 +21,8 @@ import {
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
+  WRITE_TOOLS,
+  writeToolsIn,
   type ToolAccessScope,
 } from "./tool-access.service.js";
 
@@ -42,6 +45,29 @@ const nameOf = (domain: string, write: boolean): string => {
   if (!entry) throw new Error(`no ${write ? "write" : "read"} tool in ${domain}`);
   return entry.name;
 };
+
+describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classification", () => {
+  const read = nameOf("files", false);
+  const write = nameOf("files", true);
+
+  it("names the write tools in a list, in order, and nothing else", () => {
+    expect(writeToolsIn([read, write, read])).toEqual([write]);
+    expect(writeToolsIn([read])).toEqual([]);
+    expect(writeToolsIn([])).toEqual([]);
+  });
+
+  it("hasWriteTool is true iff writeToolsIn is non-empty", () => {
+    expect(hasWriteTool([read])).toBe(false);
+    expect(hasWriteTool([read, write])).toBe(true);
+    expect(hasWriteTool([])).toBe(false);
+  });
+
+  it("agrees with WRITE_TOOLS for every registered tool, so no consumer can drift", () => {
+    for (const { name } of TOOL_CATALOG) {
+      expect(hasWriteTool([name])).toBe(WRITE_TOOLS.has(name));
+    }
+  });
+});
 
 describe("toolAllowedInScope — the shared narrowing predicate", () => {
   it("`view` on a domain keeps its read tools and drops its write tools", () => {

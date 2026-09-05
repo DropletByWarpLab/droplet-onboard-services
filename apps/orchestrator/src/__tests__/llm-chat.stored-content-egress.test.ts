@@ -140,6 +140,18 @@ import {
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — see the helper's header. This file asserts on the WHOLE
+// outbound message array, so two blocks that never composed were two blocks
+// whose egress was never checked either.
+guardComposerFailOpen();
+
 const USER_ID = "person-uuid";
 const OWNER_ID = "owner-uuid";
 
@@ -148,6 +160,8 @@ const PHI_TEXT = "Patient J. Smith — perio charting 2026-03-11";
 
 function createPrismaMock() {
   return {
+    // WARP-2652 — persona + business + workspace, absent here until now.
+    ...promptBlockPrismaDelegates(),
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: {
       findMany: vi.fn(async () => [
@@ -257,6 +271,20 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
 });
 
 describe("POST /api/llm/chat — a cloud turn carries no stored content", () => {
+  // WARP-2652 — the fixture floor for every outbound-text assertion below.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "llama3:8b", messages: [{ role: "user", content: "hi" }] });
+
+    expect(res.status).toBe(200);
+    const sent = outboundText();
+    expect(sent).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sent).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
+
   it("withholds the Drive and brain tools from a cloud turn", async () => {
     // Owner, so this pairs like-for-like with the local test below: same
     // principal, same registry, only the provider differs. An unprivileged

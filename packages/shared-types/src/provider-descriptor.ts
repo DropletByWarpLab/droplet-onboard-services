@@ -533,9 +533,19 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  *
  *  • Days are **floored**, never rounded. Rounding puts 30.6 days at 31 and
  *    keeps a connection green on the first day it should have been warning.
- *    `atlassian-token-expiry.ts` (WARP-2353) states the same rule for the same
- *    reason, and `atlassian-provider.test.ts` asserts the two agree across the
- *    boundary rather than trusting them to.
+ *    `atlassian-provider.test.ts` pins the case that separates the two.
+ *
+ * This is the ONLY implementation of the rule. WARP-2353 shipped a second one
+ * (`atlassian-token-expiry.ts`), vendor-named and orchestrator-only, with no
+ * production callers; the two were held in step by an assertion, which is the
+ * arrangement to avoid, so it was deleted in WARP-2300 and this one kept — it
+ * is the wired one, both apps can import it, and it takes its numbers from the
+ * descriptor instead of hardcoding a vendor.
+ *
+ * It answers "how long has this credential got", NOT "is one stored". A caller
+ * that has not checked for a stored credential first will render
+ * `EXPIRY_UNKNOWN` on a provider nobody has ever connected — see the gate in
+ * `saas-credential.service.ts`.
  *  • A bare `YYYY-MM-DD` parses as **midnight UTC**, i.e. the START of the
  *    stated day. The customer transcribes a date, not an instant, and the
  *    vendor's actual cut-off within that day is unknown — so the connection

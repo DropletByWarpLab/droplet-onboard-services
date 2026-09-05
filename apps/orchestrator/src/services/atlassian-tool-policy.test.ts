@@ -130,6 +130,83 @@ describe("the table itself", () => {
       expect(v1ReadToolsOf([genuine]).has("getJiraIssue")).toBe(true);
     });
   });
+
+  /**
+   * The OTHER direction, and the one that was actually broken.
+   *
+   * `classifyAtlassianRow` refused `v1: "excluded"` and any non-read grade, and
+   * nothing else — so the `blocked-write` disposition was ignored for a row
+   * whose grade says `read`. The enforcement path never consulted
+   * `ATLASSIAN_V1_READ_TOOLS` or `v1ReadToolsOf` at all; both were reachable
+   * only from tests and `atlassian-tool-snapshot.ts`, while this file's own
+   * docstrings claimed the read set was "the ONLY names
+   * `createAtlassianRemoteCallPolicy` will allow" and that the grade check was
+   * "the second of two independent layers". Neither was true.
+   *
+   * A row a future maintainer marks `{grade: "read", v1: "blocked-write"}` —
+   * say a Jira tool whose read is fine in principle but is held back pending
+   * WARP-2321 — was DISPATCHED TO THE VENDOR while
+   * `docs/security/atlassian-mcp-tool-surface.json`, the reviewed security
+   * artefact, said it was not.
+   */
+  describe("a read row the operator held back is refused (WARP-2300)", () => {
+    const heldBack = {
+      name: "getJiraIssue",
+      product: "jira",
+      grade: "read",
+      v1: "blocked-write",
+      note: "synthetic fixture — a read an operator deliberately held back",
+    } as const;
+
+    it("the derivation drops it, because the disposition is checked too", () => {
+      expect(v1ReadToolsOf([heldBack]).has("getJiraIssue")).toBe(false);
+    });
+
+    it("dispatch refuses it — the disposition is enforced, not merely recorded", () => {
+      expect(
+        classifyAtlassianRow(heldBack, "atlassian__getJiraIssue", API_TOKEN),
+      ).toMatchObject({ kind: "deny", code: ATLASSIAN_DENY_CODES.writeBlocked });
+    });
+
+    it("an excluded read row keeps its OWN code, so the two remedies stay apart", () => {
+      const excludedRead = { ...heldBack, v1: "excluded" } as const;
+      expect(
+        classifyAtlassianRow(excludedRead, "atlassian__getJiraIssue", API_TOKEN),
+      ).toMatchObject({ kind: "deny", code: ATLASSIAN_DENY_CODES.excluded });
+    });
+
+    it("fails CLOSED on a disposition nobody has taught it about yet", () => {
+      // A fourth `AtlassianV1Disposition` added without touching the
+      // enforcement switch must deny, not fall through to allow.
+      const future = { ...heldBack, v1: "quarantined" } as unknown as
+        (typeof ATLASSIAN_TOOL_CLASSIFICATIONS)[number];
+      expect(
+        classifyAtlassianRow(future, "atlassian__getJiraIssue", API_TOKEN),
+      ).toMatchObject({ kind: "deny" });
+    });
+  });
+
+  /**
+   * The binding assertion: the set the security artefact is derived from and
+   * the set dispatch actually allows are THE SAME SET.
+   *
+   * This is what makes the two stay in step without an operator reading both.
+   * It runs over the shipped table in both auth modes, so no row can be
+   * callable-but-undocumented or documented-but-refused.
+   */
+  it("allows exactly ATLASSIAN_V1_READ_TOOLS, on the reachable auth mode, and nothing else", () => {
+    for (const row of ATLASSIAN_TOOL_CLASSIFICATIONS) {
+      for (const authMode of ["api-token", "oauth"] as const) {
+        const reachable = ATLASSIAN_PRODUCT_AUTH_MODES[row.product].includes(authMode);
+        const decision = classifyAtlassianRow(row, `atlassian__${row.name}`, authMode);
+        const shouldAllow = reachable && ATLASSIAN_V1_READ_TOOLS.has(row.name);
+        expect(
+          decision.kind === "allow",
+          `${row.name} (${authMode}): dispatch says ${decision.kind}, the read set says ${shouldAllow}`,
+        ).toBe(shouldAllow);
+      }
+    }
+  });
 });
 
 describe("WARP-2346 — updateConfluencePage is excluded from v1", () => {

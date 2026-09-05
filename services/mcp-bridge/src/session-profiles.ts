@@ -22,7 +22,8 @@ import {
   ATLASSIAN_SERVER_ID,
   createAtlassianMcpSession,
 } from "./atlassian.js";
-import type { RemoteMcpConnectionFactory, RemoteMcpSession } from "./remote-session.js";
+import { RemoteCallScheduler } from "./call-scheduler.js";
+import type { RemoteMcpSession } from "./remote-session.js";
 import { createStreamableHttpConnection } from "./streamable-http.js";
 
 /**
@@ -54,13 +55,58 @@ export interface OpenSessionInput {
 
 export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
 
-/** The production Atlassian transport: SDK Streamable HTTP, the #213 client
- *  name, and the pinned protocol version. */
-const atlassianConnect: RemoteMcpConnectionFactory = (input) =>
-  createStreamableHttpConnection(input, {
-    clientInfo: ATLASSIAN_MCP_CLIENT_INFO,
-    pinnedProtocolVersion: ATLASSIAN_MCP_PROTOCOL_VERSION,
-  });
+/**
+ * Build the production Atlassian session factory.
+ *
+ * ONE scheduler per session, wired to BOTH ends of the rate-limit path:
+ *
+ *   - `createAtlassianMcpSession` gates every call through it (the #171
+ *     concurrency ceiling), and
+ *   - the transport's fetch feeds it the response's rate-limit headers.
+ *
+ * The second half is why this is a builder rather than the two-line literal it
+ * used to be. The scheduler has to be in scope where the transport is
+ * constructed, and it was not: the factory was a module-level constant, the
+ * scheduler was created inside `createAtlassianMcpSession`, and the only thing
+ * connecting them was `rateLimitHeadersOf(err)` reading a `headers` property
+ * the pinned SDK does not put on its errors. The mitigation was inert.
+ *
+ * `makeScheduler` is injected ONLY so `rate-limit-seam.test.ts` can hold the
+ * scheduler it is asserting counters on. Everything else — the client info the
+ * #213 workaround makes load-bearing, the protocol pin, the guard stack, the
+ * no-redirect fetch — is the shipped path, so that test exercises production
+ * rather than a re-composition of it.
+ */
+export function createAtlassianSessionFactory(
+  makeScheduler: () => RemoteCallScheduler = () => new RemoteCallScheduler(),
+): SessionFactory {
+  return (input: OpenSessionInput) => {
+    const scheduler = makeScheduler();
+    return createAtlassianMcpSession({
+      email: input.email,
+      apiToken: input.apiToken,
+      cloudId: input.cloudId,
+      scheduler,
+      connect: (connectInput) =>
+        createStreamableHttpConnection(connectInput, {
+          clientInfo: ATLASSIAN_MCP_CLIENT_INFO,
+          pinnedProtocolVersion: ATLASSIAN_MCP_PROTOCOL_VERSION,
+          onRateLimitHeaders: (headers) => scheduler.noteRateLimitHeaders(headers),
+        }),
+      ...(input.url !== undefined ? { url: input.url } : {}),
+      // WARP-2651 — the caller's vetted catalog, carried across a restart of
+      // this container. It has to be handed over HERE, inside the production
+      // builder: `http-api.ts` validates the wire field and `BridgeSessionStore`
+      // passes it to this factory, so a factory that forgot it would parse the
+      // baseline and then drop it — drift detection silently off on every
+      // re-open, which is the exact failure the 400 guard on the route exists
+      // to prevent. `catalog-baseline.test.ts` drives this factory to prove it.
+      ...(input.knownTools !== undefined
+        ? { knownToolNames: input.knownTools }
+        : {}),
+    });
+  };
+}
 
 /**
  * Every server id this component will open a session for.
@@ -70,20 +116,11 @@ const atlassianConnect: RemoteMcpConnectionFactory = (input) =>
  */
 export const SESSION_FACTORIES: Readonly<Record<string, SessionFactory>> =
   Object.freeze({
-    [ATLASSIAN_SERVER_ID]: (input: OpenSessionInput) =>
-      createAtlassianMcpSession({
-        email: input.email,
-        apiToken: input.apiToken,
-        cloudId: input.cloudId,
-        connect: atlassianConnect,
-        ...(input.url !== undefined ? { url: input.url } : {}),
-        ...(input.knownTools !== undefined
-          ? { knownToolNames: input.knownTools }
-          : {}),
-      }),
+    [ATLASSIAN_SERVER_ID]: createAtlassianSessionFactory(),
   });
 
-/** The ids {@link SESSION_FACTORIES} serves, sorted. Rendered by `/health`. */
+/** The ids {@link SESSION_FACTORIES} serves, sorted. Rendered by the
+ *  bearer-gated `GET /sessions`, and by the `UNKNOWN_SERVER_ID` refusal. */
 export function knownServerIds(
   factories: Readonly<Record<string, SessionFactory>> = SESSION_FACTORIES,
 ): string[] {

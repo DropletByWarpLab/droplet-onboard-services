@@ -58,6 +58,13 @@ import createDocument from "./handlers/files/create-document.js";
 import createPdfReport from "./handlers/files/create-pdf-report.js";
 import createWordDocument from "./handlers/files/create-word-document.js";
 import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
+// WARP-2664 — file cleanup: a read-only report (what could go, what an
+// organize would do), then the two approved writes it feeds. Bulk delete is
+// its own tool rather than a loop over delete_file so ONE confirmation is
+// bound to the exact path list.
+import analyzeFileCleanup from "./handlers/files/analyze-file-cleanup.js";
+import organizeFiles from "./handlers/files/organize-files.js";
+import deleteFiles from "./handlers/files/delete-files.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -230,6 +237,9 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+// WARP-2180: durable background runs (epic WARP-2176)
+import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
+import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
 
 const allTools: Tool[] = [
   // network
@@ -284,6 +294,9 @@ const allTools: Tool[] = [
   createPdfReport,
   createWordDocument,
   createSpreadsheet,
+  analyzeFileCleanup,
+  organizeFiles,
+  deleteFiles,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,
@@ -421,6 +434,10 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
+  // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
+  startAgentRun,
+  listAgentRuns,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

@@ -117,6 +117,12 @@ import { createLlmRouter } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
 import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
 import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import { guardComposerFailOpen } from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — this file owns the business-block contract and builds its own
+// rows, so its fixtures were already right. The guard pins that, and the one
+// case that drives a throw declares it.
+const composers = guardComposerFailOpen();
 
 const FILLED_PROFILE = {
   id: "singleton",
@@ -280,6 +286,9 @@ describe("POST /api/llm/chat — business block role-leak matrix (§15)", () => 
 
 describe("POST /api/llm/chat — business block resilience + budget", () => {
   it("fail-opens to no business block when the workspace read throws", async () => {
+    // WARP-2652 — deliberate: `workspaceThrows` drives the throw and the
+    // absence of the block IS the assertion below.
+    composers.expectFailOpen("business");
     const prisma = createPrismaMock({ workspaceType: "BUSINESS", workspaceThrows: true });
     const res = await chat(buildApp(prisma));
     expect(res.status).toBe(200);
