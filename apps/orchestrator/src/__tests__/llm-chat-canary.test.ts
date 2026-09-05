@@ -29,8 +29,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 // ── Config mock — hoisted above ALL route imports. The real
 // authMiddleware reads config.AUTH_ENABLED, config.SERVICE_TOKEN_VOICE,
@@ -117,27 +116,16 @@ vi.mock("../services/mqtt.service.js", () => ({
 // whole point of this canary is to exercise the production auth chain.
 import { authMiddleware } from "../middleware/auth.js";
 import { createLlmRouter } from "../routes/llm.js";
+import { packagePath } from "./helpers/test-paths.js";
 
 const SERVICE_TOKEN_VOICE = "test-voice-token-32chars-padding-xyz";
 
 /**
- * Resolve `apps/orchestrator/src/routes/llm.ts` from either invocation
- * point (workspace-local vitest or repo-root `npm run test:orchestrator`).
- * Walking from cwd avoids `import.meta.url`, which tsc rejects under
- * CommonJS (the orchestrator's compile target).
+ * `apps/orchestrator/src/routes/llm.ts`, anchored to this test file rather
+ * than the runner's cwd (WARP-2654). `__dirname` under the hood, not
+ * `import.meta.url`, which tsc rejects under CommonJS (this app's target).
  */
-function findLlmRoutePath(): string {
-  const candidates = [
-    join(process.cwd(), "src", "routes", "llm.ts"),
-    join(process.cwd(), "apps", "orchestrator", "src", "routes", "llm.ts"),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return resolve(candidate);
-  }
-  throw new Error(
-    `Could not locate src/routes/llm.ts from ${process.cwd()} — tried ${candidates.join(", ")}`,
-  );
-}
+const LLM_ROUTE_PATH = packagePath("src", "routes", "llm.ts");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -186,7 +174,7 @@ describe("WARP-171 canary — POST /api/llm/chat accepts service principal (voic
     // repo root (`npm run test:orchestrator`). We deliberately don't use
     // import.meta.url — the orchestrator compiles to CommonJS, which tsc
     // forbids that property in.
-    const llmRoutePath = findLlmRoutePath();
+    const llmRoutePath = LLM_ROUTE_PATH;
     const src = readFileSync(llmRoutePath, "utf8");
 
     // Find the requireRole(...) call attached to "/llm/chat". The route

@@ -33,29 +33,15 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { providerDescriptor } from "@droplet/shared-types";
 import { REMOTE_MCP_SESSION_STATES, BRIDGE_ERROR_CODES } from "./mcp-bridge.client.js";
 import { ATLASSIAN_REMOTE_SERVER_ID } from "./remote-mcp-servers.js";
 import { ATLASSIAN_SERVER_ID } from "./atlassian-tool-policy.js";
+import { REPO_ROOT } from "../__tests__/helpers/test-paths.js";
 
-/** Walk up from the CWD to the repo root. `process.cwd()` rather than
- *  `import.meta.url`: this workspace compiles to CommonJS and `import.meta`
- *  is a TS1470 there (the trap `add-llm-tool-skill.test.ts` already hit). */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      statSync(join(dir, "docker", "docker-compose.yml"));
-      return dir;
-    } catch {
-      dir = dirname(dir);
-    }
-  }
-  throw new Error("could not locate the repo root from " + process.cwd());
-}
-
-const ROOT = repoRoot();
+// Anchored to this test file, not to `process.cwd()` (WARP-2654).
+const ROOT = REPO_ROOT;
 const BRIDGE_SRC = join(ROOT, "services", "mcp-bridge", "src");
 
 function read(...parts: string[]): string {

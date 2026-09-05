@@ -1,8 +1,8 @@
 /**
  * WARP-2632 — the one way a dashboard test finds a file on disk.
  *
- * Every path here is anchored to THIS FILE (`fileURLToPath(import.meta.url)`),
- * never to `process.cwd()`. The distinction is not cosmetic:
+ * Every path here is anchored to THIS FILE (`__dirname`), never to
+ * `process.cwd()`. The distinction is not cosmetic:
  *
  *   - `process.cwd()` is the directory the RUNNER was launched from, which is
  *     the dashboard package only when someone happened to `cd` there.
@@ -25,16 +25,41 @@
  * a wrong path raises ENOENT naming the absolute path it tried, instead of
  * silently succeeding against the wrong tree.
  *
- * `fileURLToPath`, NOT `new URL(import.meta.url).pathname` — the latter yields
- * `/C:/…` on Windows, which `path.resolve` doubles into `C:\C:\…`. This is the
- * same pattern the a11y source-scrape suites already use
- * (`src/__tests__/a11y.side-panel-close.test.ts`).
+ * WHY `__dirname` AND NOT `fileURLToPath(import.meta.url)` (WARP-2654)
+ * ------------------------------------------------------------------
+ * Both spellings anchor to the owning file, so both satisfy the invariant
+ * above and neither was ever the bug. But this package carried BOTH — 17
+ * files on `__dirname`, 10 on `fileURLToPath` — with the two sets giving
+ * contradictory reasons, and a reader picking a pattern got no answer. It is
+ * now `__dirname` everywhere, because that is what `vitest.config.ts` already
+ * uses for the `server.fs.allow` roots (WARP-2613), so the config and the
+ * suites it configures agree; because it is the majority; and because
+ * `apps/orchestrator` and `packages/tools-core` compile to CommonJS and
+ * *cannot* write `import.meta` (TS1470), so one rule now covers three of the
+ * four workspaces: `__dirname` unless the package is ESM, and only
+ * `services/erp-connector` is.
+ *
+ * Two things that are true and worth not relearning:
+ *
+ *   - The `__dirname` suites' stated reason was wrong. Several claimed
+ *     `import.meta.url` is "not Windows-safe"; `auth-gate.routing.test.tsx`
+ *     said it yields `C:\C:\…`. That is true of `new URL(import.meta.url)
+ *     .pathname`, which gives `/C:/…` that `path.resolve` then doubles — and
+ *     false of `fileURLToPath`, which exists precisely to convert correctly.
+ *     Those comments are corrected rather than carried over.
+ *   - `__dirname` in these files is a vitest affordance, not a language
+ *     guarantee: vitest injects it into its CJS-interop module scope. It is a
+ *     real CommonJS `__dirname` in `vitest.config.ts` (this package sets no
+ *     `"type": "module"`), but a shim in an ESM-transformed test module, and
+ *     `next build` would not honour it. That costs nothing here — every file
+ *     that uses it is test-only and unreachable from a route — but if a
+ *     path-reading module ever has to be imported by the Next graph, it must
+ *     use `fileURLToPath(import.meta.url)`, NOT `new URL(…).pathname`.
  */
 import { readFileSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve, sep } from "node:path";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = __dirname;
 
 /** `apps/web-dashboard` — the package this helper lives in. */
 export const PACKAGE_ROOT = resolve(here, "../../..");
