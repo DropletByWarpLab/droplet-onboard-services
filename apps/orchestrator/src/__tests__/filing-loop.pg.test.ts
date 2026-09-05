@@ -451,10 +451,17 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
       const base = `http://127.0.0.1:${server.address().port}`;
       const res = await fetch(`${base}/api/crm/companies/${result.createdCompanyId}`);
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { id: string; name: string; origin: string };
-      expect(body.id).toBe(result.createdCompanyId);
-      expect(body.name).toBe(`${P}ACME Dental Supply Ltd`);
-      expect(body.origin).toBe("EXTRACTED");
+      // The route wraps the row: `{ company: … }`, like every other CRM read.
+      const body = (await res.json()) as {
+        company?: { id: string; name: string; origin: string };
+      };
+      expect(body.company?.id).toBe(result.createdCompanyId);
+      expect(body.company?.name).toBe(`${P}ACME Dental Supply Ltd`);
+      // 🔴 The provenance survives the round trip. The "Created by Droplet"
+      // chip reads THIS off the wire — if `origin` were dropped by the
+      // serializer the chip would silently never appear, and every filed row
+      // would read as one a person typed.
+      expect(body.company?.origin).toBe("EXTRACTED");
     } finally {
       await new Promise<void>((res) => server.close(() => res()));
     }
