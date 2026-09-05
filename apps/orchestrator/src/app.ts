@@ -12,6 +12,7 @@ import {
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
@@ -21,6 +22,8 @@ import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
+import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -47,7 +50,13 @@ import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
+import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createCrmRouter } from "./routes/crm.js";
+import { createMoneyRouter } from "./routes/money.js";
+import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
+import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
+import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -97,7 +106,7 @@ import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { mcpClient } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
@@ -114,6 +123,14 @@ import {
 } from "./services/workspace-settings.service.js";
 import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
 import { createLogger } from "./lib/logger.js";
+
+// One limiter for the process (module scope, not per createApp): tests build
+// several apps and express-rate-limit warns when a MemoryStore is created
+// repeatedly from the same call site.
+const authenticatedApiRateLimit = createRateLimit("authenticated-api", {
+  windowMs: 60_000,
+  limit: 1_200,
+});
 
 export function createApp(
   prisma: PrismaClient,
@@ -242,6 +259,18 @@ export function createApp(
   // along for the workspace-module intersection (modules.service).
   initEffectiveAccess(prisma, config);
 
+  // CodeQL js/missing-rate-limiting — per-client ceiling on the whole
+  // authenticated surface, mounted right before authMiddleware so the public
+  // routers above keep their own tighter presets. Keyed on the real client:
+  // nginx sets X-Forwarded-For on the /api leg and `trust proxy` is 1. The
+  // budget is a DoS backstop, NOT a policy limit: 1,200/min = 20 req/s
+  // sustained per IP, ~10x the dashboard's steady state (widgets poll at
+  // 10-60 s) and comfortably above its worst legitimate burst (page-load
+  // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
+  // principal (mcp-server, email-indexer, routing, …) comes from its own
+  // container IP so they don't share a bucket with a browser.
+  app.use(authenticatedApiRateLimit);
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -301,7 +330,51 @@ export function createApp(
   // WARP-1137 — Eaglesoft ERP integration control plane + data API. Reads
   // degrade honestly (ERP_NOT_CONNECTED) until the connector's live driver
   // lands (WARP-1095+); writes stage an outbox request confirmed by a human.
-  app.use("/api", createIntegrationsRouter(prisma));
+  // WARP-2659 — an `mcp` track's disconnect also tears down the remote
+  // session this process opened at boot; the service takes that lifecycle as
+  // a dependency (`IntegrationsServiceDeps.remoteMcp`) rather than importing
+  // the singleton. The binding is read LAZILY, inside the arrow, on purpose:
+  // a dozen route suites build this app with a `vi.mock` of the singleton
+  // that stubs `mcpClient` alone, and an eager `detach: detachRemoteMcp`
+  // would read a missing export at mount time in every one of them.
+  app.use(
+    "/api",
+    createIntegrationsRouter(prisma, {
+      remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) },
+    }),
+  );
+  // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
+  // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
+  // and validates whatever `credentialFields` a provider declares.
+  //
+  // WARP-2485 — this shares the /api/integrations prefix with
+  // `createIntegrationsRouter` above, and with nothing else: `createErpRouter`
+  // below owns /api/erp, a different prefix. Mount order is NOT what keeps the
+  // two apart, and neither mount is load-bearing on being second. The invariant
+  // is that their path sets are disjoint — no single URL can match a route in
+  // both — and while that holds either order behaves identically.
+  // `/integrations/:provider/credentials` ends in a literal `credentials`;
+  // the Eaglesoft routes are `/integrations`, `/integrations/eaglesoft`, and
+  // `/integrations/eaglesoft/<literal verb>`. If a route is ever added that one
+  // URL could match in both, mount order silently picks the winner and the
+  // loser becomes unreachable, so the disjointness is checked rather than
+  // asserted here: `routes/integrations-prefix.mount.test.ts` enumerates both
+  // routers' stacks and fails on any such pair.
+  app.use("/api", createSaasCredentialsRouter(prisma));
+  // WARP-2463 — admin-only read over the reconciliation sweep's STORED drift
+  // report. Its own factory rather than a route on the integrations router:
+  // that router's floor is family-and-up, this surface is owner/admin, and a
+  // route whose guard is narrower than its neighbours' is safer as its own
+  // registration than as an exception inside someone else's file.
+  //
+  // `/integrations/:connectionId/drift` is match-disjoint from every other
+  // route under /api/integrations — it is the only one whose LAST segment is
+  // `drift`, and the two-segment routes differ in arity — so this mount's
+  // POSITION is not load-bearing and reordering this block cannot change which
+  // handler serves a request. See the table in routes/erp-drift.ts. WARP-2485
+  // adds a test for exactly that property; `createErpDriftRouter` should join
+  // its ROUTERS list.
+  app.use("/api", createErpDriftRouter(prisma));
   app.use("/api", createErpRouter(prisma));
   // WARP-2115 / ADR-041 — Microsoft 365 cloud connector control plane. Ships
   // OFF: with no M365_CLIENT_ID the routes report unavailable and connect 503s.
@@ -339,6 +412,27 @@ export function createApp(
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
   app.use("/api", createPmNativeRouter(prisma));
+  // WARP-2586 (ADR-045 slice G) — cross-project work-item relations
+  // (blocks / relates / duplicates). Its own router on the same prefix; the
+  // paths are disjoint from the native router's, so neither shadows the other.
+  app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
+  // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
+  // shadows the other; the `crm` module gate comes from the registry.
+  app.use("/api", createCrmRouter(prisma));
+  // WARP-2581 — money: invoices and bills landed from a cloud ledger. Its own
+  // disjoint prefix (`/api/money`) and its own `money` module gate; read-only,
+  // because the vendor stays the system of record.
+  app.use("/api", createMoneyRouter(prisma));
+  // WARP-2585 (ADR-045) — file ↔ business record links. Same `/api/crm`
+  // prefix, so `mountModuleGates` covers it with the `crm` module gate already
+  // registered above; no registry edit and no second gate vocabulary. Order
+  // against createCrmRouter does not matter: nothing in routes/crm.ts uses a
+  // path parameter in the first segment after `/crm`, so neither can shadow
+  // the other (the mount-order hazard this file documents elsewhere).
+  app.use("/api", createCrmEntityLinksRouter(prisma));
+  // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
+  app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
   app.use(createPmMobileRouter(prisma));
@@ -346,6 +440,10 @@ export function createApp(
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
   app.use("/api", createScenesRouter(prisma, matter));
+  // WARP-2180 — durable agent runs: start / list / detail / cancel / confirm
+  // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
+  // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
+  app.use("/api", createAgentRunsRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.

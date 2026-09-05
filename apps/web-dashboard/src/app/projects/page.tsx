@@ -7,7 +7,7 @@
  * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type JSX } from "react";
 import Link from "next/link";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -20,6 +20,7 @@ import "./projects.css";
 import { PmIcon } from "@/components/projects/icons";
 import { PeopleContext } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
+import { stageRecordPinHandoff } from "@/lib/pin-handoff";
 import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
@@ -27,9 +28,15 @@ import {
   useSummary,
   useProjectStates,
   useProjectItems,
+  useDepartments,
   usePeople,
   pmActions,
 } from "@/components/projects/usePm";
+import {
+  DEPARTMENT_ANY,
+  departmentOptions,
+  matchesDepartment,
+} from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
@@ -63,6 +70,10 @@ export default function ProjectsPage(): JSX.Element {
   // (the sidebar entry is hidden by the same flag; this covers direct URLs).
   const { projects: projectsEnabled } = useAppCapabilities();
   if (!projectsEnabled) return <ProjectsDisabled />;
+  // WARP-2558 (ADR-044) — this page reads the `projects` flag and nothing
+  // else. It used to also read `crm` and render the CRM's sub-tabs, which is
+  // why its header renamed itself when a module it does not own flipped. The
+  // CRM lives at /customers now.
   return <ProjectsWorkspace />;
 }
 
@@ -77,6 +88,12 @@ function ProjectsWorkspace(): JSX.Element {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
+  // ADR-045 §5.3 — the department filter. Client-side like `savedView` and `q`:
+  // the board already holds every item for the project in one fetch, so a
+  // server round-trip buys nothing and would cost the instant saved-view
+  // counts. The server-side `?department=` filter exists for the API and the
+  // LLM's pm_list_work_items, and applies the identical rollup rule.
+  const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
   const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
@@ -85,15 +102,26 @@ function ProjectsWorkspace(): JSX.Element {
   const { summary, mutate: mutateSummary } = useSummary();
   const { states } = useProjectStates(projectId);
   const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
+  const { departments } = useDepartments();
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
 
   const allItems = items ?? [];
+  // ADR-045 §5.3 — the scoped list unioned with every department visible on
+  // this board, so an archived department (hidden from a non-admin's
+  // /api/departments) or one the caller is not a member of is still filterable.
+  const deptOptions = useMemo(
+    () => departmentOptions(allItems, departments),
+    [allItems, departments],
+  );
   const filtered = useMemo(() => {
     let list = allItems;
     if (q.trim()) list = list.filter((i) => matchQuery(i, q.trim()));
+    if (department !== DEPARTMENT_ANY) {
+      list = list.filter((i) => matchesDepartment(i, department, deptOptions));
+    }
     return applySavedView(list, savedView, user?.id);
-  }, [allItems, q, savedView, user?.id]);
+  }, [allItems, q, department, deptOptions, savedView, user?.id]);
 
   const counts: Record<SavedView, number> = useMemo(
     () => ({
@@ -106,7 +134,8 @@ function ProjectsWorkspace(): JSX.Element {
     [allItems, user?.id],
   );
 
-  const filterActive = savedView !== "all" || q.trim() !== "";
+  const filterActive =
+    savedView !== "all" || q.trim() !== "" || department !== DEPARTMENT_ANY;
   const boardDomain: Domain = itemsLoading
     ? "loading"
     : itemsErr
@@ -128,6 +157,7 @@ function ProjectsWorkspace(): JSX.Element {
     setView("board");
     setSavedView("all");
     setQ("");
+    setDepartment(DEPARTMENT_ANY);
   };
 
   const backToIndex = () => {
@@ -154,7 +184,8 @@ function ProjectsWorkspace(): JSX.Element {
 
   const isProjectView = view === "board" || view === "list";
 
-  const headerTitle = view === "index" ? "Projects" : project?.name ?? "Projects";
+  const headerTitle =
+    view === "index" ? "Projects" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
@@ -162,8 +193,7 @@ function ProjectsWorkspace(): JSX.Element {
         ? `${project.openCount} open · ${project.doneCount} done`
         : undefined;
 
-  const actions =
-    view === "index" ? (
+  const actions = view === "index" ? (
       <>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
@@ -176,9 +206,30 @@ function ProjectsWorkspace(): JSX.Element {
       </>
     ) : (
       <>
-        <Link className="btn" href="/chat">
-          <PmIcon name="msg" size={14} /> Ask AI about this project
-        </Link>
+        {/* WARP-2582 — record-scoped, and `project` is in hand here, so this
+            hands over an identity instead of a bare navigation: the seed line
+            names the project on turn 1 and the pin scopes every turn after.
+            Note the honest limit — pm_list_projects / pm_get_work_item are in
+            EXCLUDED_FROM_CHAT_TOOLS, so a project pin scopes retrieval and
+            names the record; it does not unlock a PM read tool. */}
+        {/* Rendered only with the record in hand — the CRM drawer does the
+            same. A button that navigates to /chat with nothing staged would
+            be a silent regression to a bare link. */}
+        {project && (
+          <Link
+            className="btn"
+            href="/chat"
+            onClick={() =>
+              stageRecordPinHandoff({
+                kind: "project",
+                id: project.id,
+                name: project.name,
+              })
+            }
+          >
+            <PmIcon name="msg" size={14} /> Ask AI about this project
+          </Link>
+        )}
         {!readOnly && project && (
           <button className="btn primary" type="button" onClick={() => setModal("newitem")}>
             <PmIcon name="plus" size={14} /> New item
@@ -205,7 +256,13 @@ function ProjectsWorkspace(): JSX.Element {
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
                 <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                   <ViewSwitcher view={view} onView={(v) => setView(v)} />
-                  <FilterBar q={q} onQ={setQ} />
+                  <FilterBar
+                    q={q}
+                    onQ={setQ}
+                    departments={deptOptions}
+                    department={department}
+                    onDepartment={setDepartment}
+                  />
                 </div>
                 <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
               </div>

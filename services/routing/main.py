@@ -42,6 +42,8 @@ from droplet_openwrt_sdk import (
     describe_network_for_llm,
     detect_deployment_topology,
     parse_ai_acl_scopes,
+    discovery_service_allowed,
+    DISCOVERY_SERVICE_ALLOWLIST,
 )
 from router_ports import (
     DeviceSectionNameExhausted,
@@ -88,6 +90,7 @@ from schemas import (
     ApTestSeedRequest,
     ApBandSteeringRequest,
     ApWirelessRequest,
+    DiscoveryTestSeedRequest,
 )
 import re
 
@@ -1839,7 +1842,29 @@ def vpn_setup(req: VpnSetupRequest):
             logger.warning("vpn: firewall reload nudge failed (rule may need manual reload): %s", exc)
 
         info = r.vpn.get_interface_info(req.interface)
-        return {"status": "ok", "created": True, **info}
+        # WARP-2687 — `info` is a uci read-back, so on its own it will happily
+        # describe an interface the kernel never created. Measured on a live
+        # RB5009 2026-09-03: this endpoint returned `created: true` with a real
+        # public key while `ip link show wg0` said the device did not exist,
+        # nothing listened on udp/51820, and netifd reported NO_DEVICE — because
+        # the router had no wireguard kernel module at all. That 200 then drove
+        # `configured: true` on GET /api/vpn/status, so the dashboard showed
+        # remote access as ready over nothing. Say what we actually observed.
+        live = r.vpn.interface_is_live(req.interface)
+        if live is False:
+            logger.error(
+                "vpn: %s is configured but the kernel device does not exist — "
+                "the router is missing WireGuard support (see WARP-2689)",
+                req.interface,
+            )
+        return {
+            "status": "ok",
+            "created": True,
+            # None = we could not tell (older image / no `wireguard` ACL grant).
+            # False is an observation and means the tunnel cannot work yet.
+            "interface_live": live,
+            **info,
+        }
 
     except ConnectionLost as exc:
         return JSONResponse(
@@ -1867,7 +1892,19 @@ def vpn_status(interface: str = "wg0"):
             raise HTTPException(status_code=404, detail=f"VPN interface '{interface}' not configured")
         info = r.vpn.get_interface_info(interface)
         peers = r.vpn.list_peers(interface)
-        return {**info, "peer_count": len(peers)}
+        # WARP-2687 — `peer_count` counts uci sections, which is what the box
+        # intends to have, not what the interface holds. `live_peer_count` is
+        # the kernel's own answer, and the two disagreeing is the signal that a
+        # staged change never reached the interface. Both are reported rather
+        # than one replacing the other, because a caller needs to tell "no peers
+        # configured" from "peers configured but not live" from "cannot tell".
+        live = r.vpn.live_peers(interface)
+        return {
+            **info,
+            "peer_count": len(peers),
+            "interface_live": r.vpn.interface_is_live(interface),
+            "live_peer_count": None if live is None else len(live),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
@@ -1939,6 +1976,21 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
             applied = False
             logger.warning("vpn: uci.apply after add_peer failed (peer is staged): %s", exc)
 
+        # WARP-2686 — the mirror of the revoke defect, and it fails the customer
+        # the other way round: measured on a live RB5009 2026-09-03, apply
+        # returned success and `wg show` had ZERO peers, so the .conf we hand
+        # the user cannot handshake with anything. `ifup` is what the peer set
+        # needs; then confirm the key is really on the interface.
+        if applied:
+            r.vpn.reload_interface(req.interface)
+        live = r.vpn.live_peers(req.interface)
+        if live is not None and public_key not in live:
+            applied = False
+            logger.error(
+                "vpn: peer %s not on %s after add + reload — the issued config cannot connect",
+                public_key, req.interface,
+            )
+
         # 🔴 Report staged-vs-live honestly. Remote access is the one feature
         # where a silent "ok" that never went live means the customer simply
         # cannot get in — so a peer that committed but never applied returns
@@ -1952,6 +2004,9 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
             "allowed_ips": list(req.allowed_ips),
             "description": req.description,
             "persistent_keepalive": req.persistent_keepalive,
+            # None = kernel state unreadable on this router; see the note on the
+            # DELETE handler. Never downgrade `applied` on unknown.
+            "peer_verified": None if live is None else (public_key in live),
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
@@ -1998,6 +2053,20 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             applied = False
             logger.warning("vpn: uci.apply after overlay add_peer failed (peer is staged): %s", exc)
 
+        # WARP-2686 — same defect, and this is the path the phone and the
+        # desktop app actually use, so it is the one a customer meets. `apply`
+        # is not a peer-set reload; force the ifup and then confirm the key is
+        # really on the interface.
+        if applied:
+            r.vpn.reload_interface(req.interface)
+        live = r.vpn.live_peers(req.interface)
+        if live is not None and req.public_key not in live:
+            applied = False
+            logger.error(
+                "vpn: overlay peer %s not on %s after add + reload — the device cannot punch",
+                req.public_key, req.interface,
+            )
+
         # staged-vs-live: an overlay peer that never applied cannot hole-punch,
         # so the phone would silently fail to connect (audit 2026-08-06).
         return {
@@ -2008,6 +2077,9 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             "endpoint": req.endpoint,
             "allowed_ips": list(req.allowed_ips),
             "persistent_keepalive": req.persistent_keepalive,
+            # None = kernel state unreadable on this router. Never downgrade
+            # `applied` on unknown — see the DELETE handler's note.
+            "peer_verified": None if live is None else (req.public_key in live),
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
@@ -2034,14 +2106,40 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
         except Exception as exc:  # noqa: BLE001
             applied = False
             logger.warning("vpn: uci.apply after delete_peer failed: %s", exc)
-        # staged-vs-live: on apply failure the peer is removed from config but
-        # STILL ACTIVE until a reload — the caller must know revocation isn't
-        # live yet (audit 2026-08-06).
+
+        # WARP-2686 — `uci.apply` succeeding is NOT revocation. Measured on a
+        # live RB5009 2026-09-03: apply returned success, the section was gone
+        # from uci and from GET /vpn/peers, and `wg show` still held the peer
+        # with a live session — the revoked key then completed a fresh handshake
+        # and reached the LAN. So force the ifup the peer set actually needs,
+        # then go and LOOK.
+        if applied:
+            r.vpn.reload_interface(req.interface)
+        live = r.vpn.live_peers(req.interface)
+        if live is not None and req.public_key in live:
+            # Observed still-present after the reload. This is the one case that
+            # must never read as success: `applied: false` is the contract the
+            # orchestrator already keys on (`isRevokeApplied`) to keep the DB row
+            # active, surface REVOKE_STAGED, and keep the retry button visible.
+            applied = False
+            logger.error(
+                "vpn: peer %s still live on %s after delete + reload — revocation NOT in effect",
+                req.public_key, req.interface,
+            )
         return {
             "status": "ok" if applied else "staged",
             "applied": applied,
             "interface": req.interface,
             "removed": removed,
+            # Three-valued on purpose. `None` = we could not read kernel state
+            # (no rpcd-mod-wireguard, or no `wireguard` ACL grant — the default
+            # on routers flashed before WARP-2183/WARP-2689), and the caller
+            # must not read that as either proof or failure. We still performed
+            # the reload, so we do not downgrade `applied` on unknown: doing so
+            # would fail every revoke on those routers, trading a rare
+            # half-revoke for the total loss of revocation the orchestrator's
+            # own `isRevokeApplied` comment warns about.
+            "revocation_verified": None if live is None else (req.public_key not in live),
         }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
@@ -3637,5 +3735,84 @@ def fabric_members():
             if synthesized is not None:
                 members.append(synthesized)
         return {"members": members}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Generic mDNS discovery (WARP-2019, scan-3)
+# ---------------------------------------------------------------------------
+def _validate_discovery_service(service: str) -> str:
+    """Reject anything that is not a well-formed, allowlisted service type.
+
+    Two gates, both required. The regex keeps a caller-supplied value from
+    reaching a ubus call as anything but a service type; the allowlist keeps
+    this endpoint from being a general-purpose LAN scanner for whoever holds a
+    bearer token. Note the routing service binds 0.0.0.0 on a host-networked
+    container — it is NOT isolated by the compose network, so "internal only"
+    is not a property this endpoint can rely on.
+    """
+    candidate = (service or "").strip()
+    if not discovery_service_allowed(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "unsupported service type; allowed: "
+                + ", ".join(sorted(DISCOVERY_SERVICE_ALLOWLIST))
+            ),
+        )
+    return candidate
+
+
+@app.get("/discovery/mdns")
+def discovery_mdns(service: str):
+    """Read-only mDNS browse for one allowlisted, non-Droplet service type.
+
+    The `_droplet-*._tcp` fabric inventory keeps its own endpoints
+    (`/aps/discovered`, `/fabric/members`) and is untouched by this one —
+    their parsers drop records without a `mac=` anchor, which every eSCL
+    scanner advert lacks. `DiscoveryApi` exists for exactly that reason.
+
+    Observations only: no device writes, no lifecycle state. The scanner
+    adopt/decommission state machine lives in the orchestrator (WARP-2027),
+    which polls this endpoint.
+    """
+    service_type = _validate_discovery_service(service)
+    try:
+        r = get_router()
+        discovery = getattr(r, "discovery", None)
+        if discovery is None or not hasattr(discovery, "browse_service"):
+            return {"records": []}
+        return {"records": discovery.browse_service(service_type)}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/discovery/_test_seed", include_in_schema=False)
+def discovery_test_seed(req: DiscoveryTestSeedRequest):
+    """Inject an mDNS record into the mock router. Test-only.
+
+    Sibling of `/aps/_test_seed`: production discovery is multicast-driven and
+    cannot be simulated, so this is the seam that lets pytest and the
+    orchestrator's scanner poller (WARP-2027) run end-to-end without an eSCL
+    device. Returns 404 when the router isn't a MockRouter.
+    """
+    service_type = _validate_discovery_service(req.service)
+    try:
+        r = get_router()
+        discovery = getattr(r, "discovery", None)
+        if discovery is None or not hasattr(discovery, "seed"):
+            raise HTTPException(
+                status_code=404,
+                detail="_test_seed only available in ROUTING_MODE=mock",
+            )
+        discovery.seed(
+            service_type,
+            hostname=req.hostname,
+            port=req.port,
+            last_ip=req.last_ip,
+            txt=req.txt or {},
+        )
+        return {"status": "ok", "service": service_type, "hostname": req.hostname}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

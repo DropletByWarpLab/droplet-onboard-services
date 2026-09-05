@@ -7,11 +7,12 @@
  * Tier-1 read.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import listThreatEvents from "../../../src/handlers/network/list-threat-events.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  orchestratorGet: ReturnType<typeof vi.fn>,
+  orchestratorGet: Mock,
   role?: Role,
 ): ToolContext {
   return {
@@ -102,7 +103,7 @@ const AUTH_ITEMS = [
 function routedGet(opts?: {
   networkStatus?: number;
   authStatus?: number;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   return vi
     .fn()
     .mockImplementation(

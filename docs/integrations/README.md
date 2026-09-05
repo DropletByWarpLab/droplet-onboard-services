@@ -3,7 +3,9 @@
 > **Audience:** anyone building, operating, or reviewing a Droplet integration.
 > **Scope:** the whole integration system — the generic connector framework that applies to **every** integration, with **Eaglesoft** as the first concrete provider.
 >
-> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — operator guide) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+> **See also:** [`SETUP.md`](SETUP.md) (connect an integration — setup guide, in two tracks) · [`credential-handling.md`](credential-handling.md) (what the box does with a pasted SaaS credential) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
+>
+> **Per-vendor customer setup guides (cloud/SaaS):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md).
 
 ---
 
@@ -115,11 +117,19 @@ State is **always an explicit enum column**, never derived from a row's absence 
 
 ```
 NOT_CONFIGURED → PROVISIONING → CONNECTED
+                              ↘ CAPABILITY_LIMITED (works; ONE dataset refused by the vendor's plan or the app's scopes)
                               ↘ DEGRADED (can't reach the server; last-synced shown, labelled stale)
                               ↘ DRIFT_LOCKED (schema changed after an upgrade → writes frozen)
+                              ↘ NEEDS_RECONNECT (the stored credential was revoked or rotated → the owner pastes a new one)
                               ↘ ERROR (unexpected failure)
 DISABLED (turned off)
 ```
+
+`CAPABILITY_LIMITED` (WARP-2623) and `NEEDS_RECONNECT` (WARP-2458) are the two members this diagram used to fold into `ERROR`, and both distinctions are the product. `NEEDS_RECONNECT` says a new credential fixes it; `CAPABILITY_LIMITED` says the credential is fine and the fix is a plan or scope change in the vendor's own console — sync keeps running through it, because withholding one dataset is not a reason to stop reading the others.
+
+"Sync keeps running" is a claim about the CURSORS, and it has a specific mechanism. A `CAPABILITY_LIMITED` connection is polled (`POLLABLE_CONNECTION_STATUSES`), so the refused dataset's cursor still ticks and still throws. `asSyncFailure` classifies both vendor capability errors — Mailchimp's `CAPABILITY_MISSING`, HubSpot's `CAPABILITY_NOT_AVAILABLE` — as transient, so that ONE cursor parks in `BACKOFF` at the maximum retry interval, keeps its watermark, and does **not** set `needsReconnect`. Every other cursor on the connection is untouched.
+
+The state it must never take is `FAILED`, and the reason is that `FAILED` is terminal by construction rather than by policy: it is absent from `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor` never revives an existing row, and `foldSyncState` ranks it highest — so one refused dataset would report the whole connection's sync as failed on `GET /api/integrations` forever, including after the owner buys the plan. `BACKOFF` is claimable, which is what makes the recovery automatic: when the plan or the scope grant changes, the next tick after the backoff window simply succeeds. Nobody has to touch the box.
 
 A connect attempt that can't reach the external system lands in **`PROVISIONING`**, never a fake `CONNECTED`. This is honest degradation — the dashboard shows "connecting / not connected", which is the truth.
 
@@ -142,7 +152,7 @@ A write is **never applied without a confirmed request**. Intent (`createWriteRe
 Reads are safe; writing back into a live system of record is the sharp edge. Every layer is designed around that.
 
 1. **Read-only by default.** A new connection is read-only. Writes are a **per-practice, per-capability opt-in** (`writeEnabled`), off until explicitly enabled.
-2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §3 and [`eaglesoft.md`](eaglesoft.md).
+2. **Least-privilege database access.** Droplet connects as **dedicated accounts it provisions inside the external database** — a `droplet_ro` (SELECT-only, the default) and, only when writes are enabled, a narrow `droplet_rw`. Never a shared/admin/default credential. See [`SETUP.md`](SETUP.md) §2.3 ("The dedicated user in their database model") and [`eaglesoft.md`](eaglesoft.md). This applies to the **LAN track only** — a cloud/SaaS provider has no database in which to provision an account, and instead takes a credential the owner creates in the vendor's own console ([`SETUP.md`](SETUP.md) §3, [`credential-handling.md`](credential-handling.md)).
 3. **The assistant never emits SQL.** It invokes **named, parameterized commands** from the registries only. There is no "run this query" escape hatch against a live third-party system.
 4. **Financial / clinical / claim tables are never written.** `FORBIDDEN_WRITE_TABLES` makes them impossible targets. Writes are confined to a small, vetted, tested allow-list (e.g. an appointment reschedule).
 5. **The write outbox: create → confirm → apply → verify.** A proposed write is staged (`ErpWriteRequest`, `PENDING_CONFIRMATION`), a **human confirms** it (the dashboard's write-confirm modal — voice/LLM alone can never authorize a write), then the connector applies it in one transaction, then a verify-read checks the result. A blocked/failed apply is recorded `FAILED` — never a fake `APPLIED`.

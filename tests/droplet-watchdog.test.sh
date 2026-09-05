@@ -50,7 +50,10 @@ reset_work() {
   rm -rf "${WORK:?}/state" "${WORK:?}/pci" "${WORK:?}/usb" "${WORK:?}/bin" \
          "${WORK:?}/docker" "${WORK:?}/klog" "${WORK:?}/rescan" \
          "${WORK:?}/daemon.json" "${WORK:?}/host_units_exit" \
-         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log"
+         "${WORK:?}/host_units_out" "${WORK:?}/host_units.log" \
+         "${WORK:?}/relay_check_exit" "${WORK:?}/relay_check_exit2" \
+         "${WORK:?}/relay_check_n" "${WORK:?}/relay_repair_exit" \
+         "${WORK:?}/relay.log"
   mkdir -p "$WORK/bin" "$WORK/docker"
   : > "$WORK/klog"
 }
@@ -131,8 +134,37 @@ run_wd() {
       DROPLET_WATCHDOG_XVF_COOLDOWN_S=0 \
       DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
+      DROPLET_WATCHDOG_RELAY_DNS_BIN="$WORK/bin/droplet-relay-dns" \
+      DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/app-downloads-audit" \
       "$@" \
       bash "$WATCHDOG" 2>&1
+}
+
+# WARP-2189 droplet-relay-dns stub. Exit codes come from fixtures:
+#   $WORK/relay_check_exit    exit for `check`   (default 0)
+#   $WORK/relay_check_exit2   exit for the SECOND and later `check` calls —
+#                             i.e. the independent re-check after a repair
+#   $WORK/relay_repair_exit   exit for `repair`  (default 0)
+mk_relay_dns_stub() {
+  cat > "$WORK/bin/droplet-relay-dns" <<EOF
+#!/bin/sh
+printf 'droplet-relay-dns %s\n' "\$*" >> "$WORK/relay.log"
+case "\$1" in
+  check)
+    n=\$(cat "$WORK/relay_check_n" 2>/dev/null || echo 0)
+    n=\$((n + 1)); echo "\$n" > "$WORK/relay_check_n"
+    echo "droplet-relay-dns: origin verdict"
+    if [ "\$n" -ge 2 ] && [ -f "$WORK/relay_check_exit2" ]; then
+      exit \$(cat "$WORK/relay_check_exit2")
+    fi
+    exit \$(cat "$WORK/relay_check_exit" 2>/dev/null || echo 0) ;;
+  repair)
+    echo "droplet-relay-dns: repair verdict"
+    exit \$(cat "$WORK/relay_repair_exit" 2>/dev/null || echo 0) ;;
+esac
+exit 0
+EOF
+  chmod +x "$WORK/bin/droplet-relay-dns"
 }
 
 # WARP-1829 droplet-host-units stub: logs its invocation, prints
@@ -145,6 +177,18 @@ cat "$WORK/host_units_out" 2>/dev/null
 exit \$(cat "$WORK/host_units_exit" 2>/dev/null || echo 0)
 EOF
   chmod +x "$WORK/bin/droplet-host-units"
+}
+
+# WARP-2666 app-downloads auditor stub. Report comes from $WORK/audit_out,
+# exit code from $WORK/audit_exit (default 0).
+mk_app_downloads_stub() {
+  cat > "$WORK/bin/app-downloads-audit" <<EOF
+#!/bin/sh
+printf 'app-downloads-audit %s\n' "\$*" >> "$WORK/audit.log"
+cat "$WORK/audit_out" 2>/dev/null
+exit \$(cat "$WORK/audit_exit" 2>/dev/null || echo 0)
+EOF
+  chmod +x "$WORK/bin/app-downloads-audit"
 }
 
 STATUS_JSON="$WORK/state/status.json"
@@ -214,18 +258,28 @@ else
   exit 1
 fi
 
-all_present=1
-for c in wifi voice_dsp docker_dns container_crashloop host_unit_staleness; do
-  s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
-  case "$s" in
-    ok|healed|heal_failed|escalated|not_applicable) : ;;
-    *) all_present=0 ;;
-  esac
-done
-if [ "$all_present" = 1 ]; then
-  pass "every known check carries an explicit enum status (none inferred from absence)"
+# The check list is read out of the script's own WD_ALL_CHECKS rather than
+# hand-copied here: a hand-copied list silently stops covering the newest check,
+# which is how host_artefacts (WARP-2574) and relay_dns went untested by this
+# assertion for as long as they did.
+ALL_CHECKS="$(grep -oE '^WD_ALL_CHECKS="[^"]+"' "$WATCHDOG" \
+  | sed -e 's/^WD_ALL_CHECKS="//' -e 's/"$//')"
+if [ -z "$ALL_CHECKS" ]; then
+  fail "could not read WD_ALL_CHECKS from droplet-watchdog.sh — this assertion would cover nothing"
 else
-  fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
+  all_present=1
+  for c in $ALL_CHECKS; do
+    s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
+    case "$s" in
+      ok|healed|heal_failed|escalated|not_applicable) : ;;
+      *) all_present=0 ;;
+    esac
+  done
+  if [ "$all_present" = 1 ]; then
+    pass "every check in WD_ALL_CHECKS ($ALL_CHECKS) carries an explicit enum status"
+  else
+    fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
+  fi
 fi
 
 # Checks not in DROPLET_WATCHDOG_CHECKS are explicitly not_applicable.
@@ -723,6 +777,407 @@ if [ "$(wd_field host_unit_staleness status)" = "not_applicable" ]; then
   pass "a detector that cannot run reports not_applicable, not a fake verdict"
 else
   fail "expected not_applicable for a broken detector, got $(wd_field host_unit_staleness status)"
+fi
+
+# =============================================================================
+# Phase 8b: host_artefacts (WARP-2574)
+# =============================================================================
+# The blind spot behind Phase 8. host_unit_staleness enumerates units FROM
+# SYSTEMD, so it can only report on artefacts that EXIST — an artefact that was
+# never installed has no unit and no process, and reads as nothing at all.
+# Measured 2026-08-31: droplet-power-restore (WARP-2190) and the hardware
+# watchdog (WARP-2192) sat in the bench box's checkout for five days, installed
+# on none of it, while Phase 8's check reported ok the entire time.
+echo "--- Phase 8b: host_artefacts ---"
+
+reset_work
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" \
+       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/absent" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "host_artefacts: not_applicable when droplet-host-units is absent"
+else
+  fail "expected not_applicable, got $(wd_field host_artefacts status)"
+fi
+
+# Everything the checkout declares is installed.
+reset_work
+mk_host_units_stub
+echo 0 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "ok" ]; then
+  pass "host_artefacts: ok when every declared artefact is installed"
+else
+  fail "expected ok, got $(wd_field host_artefacts status)"
+fi
+if grep -q 'droplet-host-units audit' "$WORK/host_units.log"; then
+  pass "host_artefacts delegates to the detector's read-only audit mode"
+else
+  fail "the check did not invoke the auditor: $(cat "$WORK/host_units.log" 2>/dev/null)"
+fi
+
+# --- the 2026-08-31 bench box, as the auditor would report it ----------------
+reset_work
+mk_host_units_stub
+echo 1 > "$WORK/host_units_exit"
+cat > "$WORK/host_units_out" <<'AUDIT_FIXTURE'
+  host artefacts declared by /home/droplet/edge-platform/scripts/host/MANIFEST: 60
+  checkout: /home/droplet/edge-platform
+  MISSING       /usr/local/sbin/droplet-power-restore                     declared in scripts/host/MANIFEST, absent from this box
+  MISSING       /etc/systemd/system/droplet-power-restore.service         declared in scripts/host/MANIFEST, absent from this box
+  MISSING       /etc/modules-load.d/droplet-watchdog-hw.conf              declared in scripts/host/MANIFEST, absent from this box
+  NOT-ENABLED   droplet-power-restore.timer                               systemd has no such unit (is-enabled=not-found)
+  DRIFT         /usr/local/sbin/droplet-watchdog                          installed copy differs from scripts/host/droplet-watchdog.sh
+  ok            /usr/local/sbin/droplet-host-net                          matches scripts/host/usr-local-sbin/droplet-host-net
+AUDIT_FIXTURE
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "heal_failed" ]; then
+  pass "host_artefacts: heal_failed when the box is missing what its checkout declares"
+else
+  fail "expected heal_failed, got $(wd_field host_artefacts status)"
+fi
+ha_msg="$(wd_field host_artefacts message)"
+case "$ha_msg" in
+  *droplet-power-restore*) pass "the message names the missing artefact" ;;
+  *) fail "message does not name the missing artefact: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"3 missing"*) pass "the message counts the missing artefacts" ;;
+  *) fail "message does not count what is missing: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"1 drifted"*) pass "the message counts drift separately from absence" ;;
+  *) fail "message does not distinguish drift from absence: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *"1 not enabled"*) pass "the message counts units that are not enabled" ;;
+  *) fail "message does not count not-enabled units: $ha_msg" ;;
+esac
+case "$ha_msg" in
+  *setup.sh*) pass "the message carries the one-line fix" ;;
+  *) fail "message does not say how to fix it: $ha_msg" ;;
+esac
+# `ok` rows must never be counted as problems — a check that cries wolf on a
+# healthy box is a check people learn to ignore.
+case "$ha_msg" in
+  *droplet-host-net*) fail "an ok row leaked into the failure message: $ha_msg" ;;
+  *) pass "ok rows are not reported as problems" ;;
+esac
+
+# The fix here is a full setup.sh run — apt, unit rewrites, service restarts.
+# A 3-minute timer must never start an unattended provision.
+if grep -qE 'setup\.sh|refresh' "$WORK/host_units.log"; then
+  fail "the watchdog tried to APPLY the fix: $(cat "$WORK/host_units.log")"
+else
+  pass "the watchdog never runs the installer (detect-and-report only)"
+fi
+
+# Two consecutive detections escalate — a CRITICAL line, not a quiet repeat.
+ha_out="$(run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts")"
+if [ "$(wd_field host_artefacts status)" = "escalated" ] \
+   && printf '%s\n' "$ha_out" | grep -q 'CRITICAL'; then
+  pass "a box that stays un-provisioned escalates to CRITICAL"
+else
+  fail "no escalation on the second detection: status=$(wd_field host_artefacts status)"
+fi
+
+# --- a very broken box must not write a multi-kilobyte status.json ----------
+reset_work
+mk_host_units_stub
+echo 1 > "$WORK/host_units_exit"
+: > "$WORK/host_units_out"
+for i in $(seq 1 40); do
+  printf '  MISSING       /usr/local/sbin/droplet-artefact-%02d   absent\n' "$i" \
+    >> "$WORK/host_units_out"
+done
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+ha_msg="$(wd_field host_artefacts message)"
+if [ "${#ha_msg}" -lt 700 ]; then
+  pass "a box missing 40 artefacts still writes a readable status message (${#ha_msg} chars)"
+else
+  fail "the status message ballooned to ${#ha_msg} chars — status.json becomes unreadable"
+fi
+case "$ha_msg" in
+  *"more)"*) pass "the truncated list says how many were elided" ;;
+  *) fail "the message truncates without saying so: $ha_msg" ;;
+esac
+
+# 4 = "I could not look", which must never be reported as health.
+reset_work
+mk_host_units_stub
+echo 4 > "$WORK/host_units_exit"
+printf 'could not locate this box checkout\n' > "$WORK/host_units_out"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "an unlocatable manifest reports not_applicable, never ok"
+else
+  fail "expected not_applicable for exit 4, got $(wd_field host_artefacts status)"
+fi
+case "$(wd_field host_artefacts message)" in
+  *MANIFEST*) pass "the not_applicable message says what could not be found" ;;
+  *) fail "the message does not explain why there is no verdict" ;;
+esac
+
+# An auditor that cannot run is not evidence the box is broken.
+reset_work
+mk_host_units_stub
+echo 2 > "$WORK/host_units_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="host_artefacts" >/dev/null || true
+if [ "$(wd_field host_artefacts status)" = "not_applicable" ]; then
+  pass "an auditor that cannot run reports not_applicable, not a fake verdict"
+else
+  fail "expected not_applicable for a broken auditor, got $(wd_field host_artefacts status)"
+fi
+
+# =============================================================================
+# Phase 8c: app_downloads (WARP-2666)
+# =============================================================================
+# The same shape as 8b, one layer up. `/downloads` is where a customer gets the
+# client app for the box in front of them, and it has been EMPTY on every box
+# that has ever shipped — because an empty catalog answers HTTP 200 with
+# available:false, which is correct for the API and invisible to /api/health,
+# to every uptime probe and to all seven of the other checks here.
+#
+# Detect-and-report only: the fix is a human copying an installer onto the box.
+echo "--- Phase 8c: app_downloads ---"
+
+ADL='DROPLET_WATCHDOG_CHECKS=app_downloads'
+
+# No auditor reachable → no verdict. Never ok.
+reset_work
+run_wd "$ADL" DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/absent-auditor" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: not_applicable when the auditor cannot be found"
+else
+  fail "expected not_applicable, got $(wd_field app_downloads status)"
+fi
+
+# Exit 0 — everything the release declares is staged.
+reset_work
+mk_app_downloads_stub
+echo 0 > "$WORK/audit_exit"
+printf 'OK            windows  Droplet_0.2.0_x64-setup.exe (1 installer asset(s)) verified\n' > "$WORK/audit_out"
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "ok" ]; then
+  pass "app_downloads: ok when every declared client app is staged"
+else
+  fail "expected ok, got $(wd_field app_downloads status)"
+fi
+
+# Exit 3 — declared blocked. not_applicable, but the MESSAGE must name the
+# platforms and their tickets: a silent n/a is the shape this check exists to
+# end, and reporting it as broken would train people to ignore a permanent red.
+reset_work
+mk_app_downloads_stub
+echo 3 > "$WORK/audit_exit"
+cat > "$WORK/audit_out" <<'BLOCKED_FIXTURE'
+BLOCKED       windows  WARP-1955 — no v* tag cut yet; release.yml has never run
+BLOCKED       android  WARP-1415 — no signing secrets, no tag, no Play listing
+BLOCKED       ios  WARP-1955 — no distribution pipeline at all
+BLOCKED_FIXTURE
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: a declared-blocked release is not_applicable, not a failure"
+else
+  fail "expected not_applicable for declared-blocked, got $(wd_field app_downloads status)"
+fi
+ad_msg="$(wd_field app_downloads message)"
+case "$ad_msg" in
+  *windows*WARP-1955*) pass "the blocked message names the platform AND its ticket" ;;
+  *) fail "blocked message does not name platform + ticket: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *android*) pass "the blocked message names every blocked platform" ;;
+  *) fail "blocked message does not name android: $ad_msg" ;;
+esac
+
+# Exit 4 — could not look. THE distinction this whole change is about: it must
+# never collapse into ok.
+reset_work
+mk_app_downloads_stub
+echo 4 > "$WORK/audit_exit"
+printf 'audit: no readable EXPECTED — no verdict\n' > "$WORK/audit_out"
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "not_applicable" ]; then
+  pass "app_downloads: exit 4 (no verdict) never reports ok"
+else
+  fail "expected not_applicable for exit 4, got $(wd_field app_downloads status)"
+fi
+case "$(wd_field app_downloads message)" in
+  *"no verdict"*) pass "the exit-4 message says there is no verdict" ;;
+  *) fail "exit-4 message does not say 'no verdict': $(wd_field app_downloads message)" ;;
+esac
+
+# Exit 1 — a declared installer is genuinely missing on a box that should have
+# it. That IS a failure.
+reset_work
+mk_app_downloads_stub
+echo 1 > "$WORK/audit_exit"
+cat > "$WORK/audit_out" <<'GAP_FIXTURE'
+MISSING       windows  declared 'installer' in EXPECTED but nothing is staged
+STALE         android  staged bytes disagree with catalog.json: droplet.apk(digest)
+OK            ios  store link https://apps.apple.com/app/id123
+GAP_FIXTURE
+run_wd "$ADL" >/dev/null || true
+if [ "$(wd_field app_downloads status)" = "heal_failed" ]; then
+  pass "app_downloads: heal_failed when a declared client app is missing"
+else
+  fail "expected heal_failed, got $(wd_field app_downloads status)"
+fi
+ad_msg="$(wd_field app_downloads message)"
+case "$ad_msg" in
+  *"1 missing"*) pass "the message counts what is missing" ;;
+  *) fail "message does not count missing: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *"1 stale"*) pass "the message counts stale bytes separately from absence" ;;
+  *) fail "message does not distinguish stale from missing: $ad_msg" ;;
+esac
+case "$ad_msg" in
+  *windows*) pass "the message names the affected platform" ;;
+  *) fail "message does not name the platform: $ad_msg" ;;
+esac
+# An OK row must never be counted as a problem.
+case "$ad_msg" in
+  *ios*) fail "an OK row leaked into the failure message: $ad_msg" ;;
+  *) pass "OK rows are not reported as problems" ;;
+esac
+case "$ad_msg" in
+  *stage.sh*) pass "the message carries the one-line fix" ;;
+  *) fail "message does not say how to fix it: $ad_msg" ;;
+esac
+
+# Detect-and-report only: the watchdog must never stage anything itself.
+if grep -qE 'stage|gen-catalog' "$WORK/audit.log" 2>/dev/null; then
+  fail "the watchdog tried to stage an installer: $(cat "$WORK/audit.log")"
+else
+  pass "the watchdog never stages (detect-and-report only)"
+fi
+
+# =============================================================================
+# Phase 9: relay_dns (WARP-2189)
+# =============================================================================
+echo "--- Phase 9: relay_dns ---"
+
+RD_ONLY='DROPLET_WATCHDOG_CHECKS=relay_dns'
+
+reset_work
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: not_applicable when droplet-relay-dns is absent"
+else
+  fail "expected not_applicable without the helper, got $(wd_field relay_dns status)"
+fi
+
+# Healthy origin: report ok and — the part that matters on a 3-minute timer —
+# never invoke repair, so a healthy box never restarts its DNS plane.
+reset_work
+mk_relay_dns_stub
+echo 0 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "ok" ]; then
+  pass "relay_dns: ok when the origin answers"
+else
+  fail "expected ok for a healthy origin, got $(wd_field relay_dns status)"
+fi
+if grep -q repair "$WORK/relay.log"; then
+  fail "relay_dns invoked repair on a healthy origin"
+else
+  pass "relay_dns: never invokes repair when the origin is healthy"
+fi
+
+# No split-horizon FQDN / address not on this host — a shape fact, not a fault.
+reset_work
+mk_relay_dns_stub
+echo 3 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: helper exit 3 → not_applicable (no FQDN to serve on this shape)"
+else
+  fail "expected not_applicable for helper exit 3, got $(wd_field relay_dns status)"
+fi
+
+# The heal path.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 0 > "$WORK/relay_check_exit2"
+echo 0 > "$WORK/relay_repair_exit"
+rd_out="$(run_wd "$RD_ONLY")"
+if [ "$(wd_field relay_dns status)" = "healed" ]; then
+  pass "relay_dns: broken origin is repaired → healed"
+else
+  fail "expected healed after a successful repair, got $(wd_field relay_dns status)"
+fi
+if grep -q 'repair' "$WORK/relay.log"; then
+  pass "relay_dns: delegates the heal to droplet-relay-dns repair"
+else
+  fail "relay_dns did not invoke the helper's repair"
+fi
+if grep -q 'relay_dns' "$WORK/state/heal.log" 2>/dev/null; then
+  pass "relay_dns: heal recorded in heal.log"
+else
+  fail "relay_dns heal not recorded in heal.log"
+fi
+
+# A repair that does not take must not be reported as healed.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 1 > "$WORK/relay_repair_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "heal_failed" ]; then
+  pass "relay_dns: failed repair → heal_failed"
+else
+  fail "expected heal_failed for a failed repair, got $(wd_field relay_dns status)"
+fi
+case "$(wd_field relay_dns message)" in
+  *"off-site access"*) pass "relay_dns: the message says what the operator has lost" ;;
+  *) fail "message does not explain the impact: $(wd_field relay_dns message)" ;;
+esac
+
+# A repair that CLAIMS success but leaves the origin dead is the dangerous
+# case — the independent re-check is what catches it.
+reset_work
+mk_relay_dns_stub
+echo 1 > "$WORK/relay_check_exit"
+echo 1 > "$WORK/relay_check_exit2"
+echo 0 > "$WORK/relay_repair_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "heal_failed" ]; then
+  pass "relay_dns: repair reporting success but leaving the origin dead → heal_failed"
+else
+  fail "a lying repair was accepted as $(wd_field relay_dns status)"
+fi
+
+# Persistent failure escalates rather than retry-storming a DNS restart.
+rd_out="$(run_wd "$RD_ONLY")"
+if [ "$(wd_field relay_dns status)" = "escalated" ] \
+   && printf '%s\n' "$rd_out" | grep -q 'CRITICAL'; then
+  pass "relay_dns: a persistently broken origin escalates to CRITICAL"
+else
+  fail "no escalation on the second failure: $(wd_field relay_dns status)"
+fi
+
+# An undocumented exit code is not a verdict.
+reset_work
+mk_relay_dns_stub
+echo 2 > "$WORK/relay_check_exit"
+run_wd "$RD_ONLY" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: a detector that cannot run reports not_applicable, not a fake verdict"
+else
+  fail "expected not_applicable for helper exit 2, got $(wd_field relay_dns status)"
+fi
+
+# Every known check must always be present in status.json.
+reset_work
+mk_relay_dns_stub
+echo 0 > "$WORK/relay_check_exit"
+run_wd DROPLET_WATCHDOG_CHECKS="wifi" >/dev/null || true
+if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
+  pass "relay_dns: reports not_applicable when disabled — never silently absent"
+else
+  fail "relay_dns missing/wrong when disabled: $(wd_field relay_dns status)"
 fi
 
 # =============================================================================

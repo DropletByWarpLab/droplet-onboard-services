@@ -559,11 +559,25 @@ async def startup() -> None:
     # open the mic. A box whose owner switched voice off boots silent and
     # stays silent: no detector, no capture stream, no worker thread.
     # Only POST /voice/enabled brings it back.
-    if not VoiceEnabledStore().load():
-        logger.info(
-            "voice assistant is switched off — wake pipeline not started "
-            '(POST /voice/enabled {"enabled": true} to turn it back on)',
-        )
+    #
+    # WARP-1620 — "switched off" includes a flag the box cannot READ.
+    # This boot is the precise moment the old fail-open re-armed a
+    # microphone nobody had touched: the admin's "off" was on disk, /data
+    # went bad underneath it, and the next container start read the fault
+    # as permission to listen.
+    switch = VoiceEnabledStore().read()
+    if not switch.enabled:
+        if switch.fault is not None:
+            # read() has already logged the fault itself; this records
+            # what it COST — the pipeline that did not start.
+            logger.error(
+                "voice-enabled flag unreadable — wake pipeline not started",
+            )
+        else:
+            logger.info(
+                "voice assistant is switched off — wake pipeline not started "
+                '(POST /voice/enabled {"enabled": true} to turn it back on)',
+            )
         return
     # `build_llm_from_env()` does a synchronous httpx.get to ipapi.co
     # for the geo lookup; `_pipeline.start()` does three sync
@@ -710,6 +724,13 @@ class VoiceStatusResponse(BaseModel):
     # switched the assistant off: no pipeline exists, nothing reads PCM,
     # and `state` reads "off" — a deliberate silence, distinct from
     # "no_mic", which is a hardware fault the box keeps retrying.
+    #
+    # WARP-1620 — false ALSO means the flag could not be read, in which
+    # case `error_message` carries the fault. Read the pair, not the
+    # bool: `enabled: false` with no `error_message` is somebody's
+    # choice, and with one it is a storage fault nobody chose. The
+    # dashboard needs that difference to send an owner to the right
+    # place — the toggle, or the drive.
     enabled: bool
     state: str
     listening: bool
@@ -873,11 +894,16 @@ class CalibrationApplyRequest(BaseModel):
 #
 # StrictBool, not bool: pydantic's default lax mode reads "false", "off"
 # and 0 as real booleans, so a caller sending a string could silently
-# silence the box. VoiceEnabledStore deliberately refuses to read a
-# string "false" out of the flag file as an admin's intent, and the wire
-# has to agree with the file — otherwise the same value means two
-# different things depending on which layer sees it. Only a JSON
-# `true`/`false` flips the switch; anything else is a 422, never a guess.
+# silence the box. VoiceEnabledStore refuses to read a string "false" out
+# of the flag file as an admin's intent either, and the wire has to agree
+# with the file — otherwise the same value means two different things
+# depending on which layer sees it. Only a JSON `true`/`false` flips the
+# switch; anything else is a 422, never a guess.
+#
+# The two layers say so differently, and that asymmetry is deliberate
+# (WARP-1620). Here there is a caller to tell, so a bad value is rejected
+# and nothing changes. On disk there is nobody to tell, and the only safe
+# resolution of "no readable intent" is OFF.
 
 class VoiceEnabledRequest(BaseModel):
     enabled: StrictBool
@@ -983,7 +1009,14 @@ def voice_status() -> VoiceStatusResponse:
     # caching it: POST /voice/enabled is its only writer, and a read off
     # the page cache is cheaper than reasoning about a stale cache when a
     # toggle and a poll race.
-    enabled = VoiceEnabledStore().load()
+    #
+    # WARP-1620 — `read()` rather than `load()`: when the flag can't be
+    # read the box goes silent, and this endpoint is where the dashboard
+    # finds out WHY. Failing closed without saying so would swap a
+    # privacy failure for a support failure — an owner staring at a
+    # silent box, sure they never touched the switch, and right.
+    switch = VoiceEnabledStore().read()
+    enabled = switch.enabled
     if _pipeline is None:
         # No pipeline, for one of two reasons the dashboard must be able
         # to tell apart: an admin switched voice off (state "off" — a
@@ -997,6 +1030,9 @@ def voice_status() -> VoiceStatusResponse:
             listening=False,
             wake_loaded=False,
             threshold=WAKE_THRESHOLD,
+            # None on an admin's deliberate off — a chosen silence is not
+            # a fault and must not light one up on the /voice page.
+            error_message=switch.fault,
         )
     s = _pipeline.status()
     return VoiceStatusResponse(
@@ -1011,7 +1047,14 @@ def voice_status() -> VoiceStatusResponse:
         last_wake_at=s.last_wake_at,
         last_wake_score=s.last_wake_score,
         last_wake_model=s.last_wake_model,
-        error_message=s.error_message,
+        # WARP-1620 — a flag fault outranks the pipeline's own error: it
+        # is the reason `enabled` reads false above, and `state` still
+        # reports what the pipeline is genuinely doing. A pipeline built
+        # while the flag was readable keeps running until something stops
+        # it, and claiming "off" over an open mic stream would be the
+        # WARP-1619 mistake again — a promise of silence the box isn't
+        # keeping. The fault says what changed; `state` says what IS.
+        error_message=switch.fault or s.error_message,
         stt_loaded=s.stt_loaded,
         last_transcript=s.last_transcript,
         last_transcript_at=s.last_transcript_at,
@@ -1149,9 +1192,22 @@ def _require_voice_on() -> None:
     request is well-formed and the caller is allowed, the box is just in a
     state where it won't capture — and flipping the switch makes the very
     same request work.
+
+    WARP-1620 — a flag the box cannot read closes these paths exactly as
+    firmly as an admin's explicit off, but says something different while
+    doing it. The status code is deliberately the SAME (409): the shape
+    of the answer is "not while voice is off", and a caller that special-
+    cased a fault code would only find new ways to keep asking. The
+    detail is what changes, because a wizard rendering "you switched this
+    off" over a storage fault sends the owner to the wrong switch.
     """
-    if not VoiceEnabledStore().load():
-        raise HTTPException(status_code=409, detail=_VOICE_OFF_CAPTURE_DETAIL)
+    switch = VoiceEnabledStore().read()
+    if switch.enabled:
+        return
+    detail = _VOICE_OFF_CAPTURE_DETAIL
+    if switch.fault is not None:
+        detail = f"{detail} {switch.fault}"
+    raise HTTPException(status_code=409, detail=detail)
 
 
 @app.post("/audio/test-record", response_model=TestRecordResponse)

@@ -11,17 +11,22 @@
  * predicates unmockable independently of the chrome.
  */
 import type { LucideIcon } from "lucide-react";
+
+import type { AccessModuleId } from "@/lib/types";
 import {
   Activity,
   Blocks,
   BookOpen,
+  Building2,
   Calendar as CalendarIcon,
   ChartColumn,
+  Repeat,
   Cpu,
   Download,
   Film,
   FlaskConical,
   FolderKanban,
+  Receipt,
   FolderLock,
   FolderOpen,
   Globe,
@@ -35,6 +40,7 @@ import {
   MessagesSquare,
   Mic,
   Network,
+  KeyRound,
   ScrollText,
   Settings,
   ShieldCheck,
@@ -79,20 +85,25 @@ export type NavItem = {
    * child still disappears with its parent. (It used to be a documented no-op
    * on children, which meant a sub-destination could never be gated on its
    * own.)
+   *
+   * WARP-2577: this was a hand-listed union, and it drifted exactly as a
+   * parallel list does. It named twelve ids while `AccessModuleId` carried
+   * fifteen; WARP-2558 then added `crm` to it by hand, because the CRM had
+   * just earned a route to gate — leaving `contacts` still missing and the
+   * next module still owing someone a second edit.
+   *
+   * It is now DERIVED from `AccessModuleId`, the vocabulary that describes
+   * itself as having no parallel list to drift. This union was that list, so
+   * a module id reaches this field the day it is declared and nobody has to
+   * remember.
+   *
+   * `chat` is excluded rather than omitted. It is a core module — the comment
+   * above says core modules are never tagged — and `Exclude` states that rule
+   * where the type is, instead of leaving it as an absence a reader has to
+   * notice. Adding a module id now reaches this field automatically; making a
+   * module core is the only edit that ever needs to touch it again.
    */
-  requiresModule?:
-    | "files"
-    | "email"
-    | "calendar"
-    | "projects"
-    | "knowledge"
-    | "docs"
-    | "cameras"
-    | "network"
-    | "smart_home"
-    | "managed_switch"
-    | "voice"
-    | "team_chat";
+  requiresModule?: Exclude<AccessModuleId, "chat">;
   /**
    * WARP-1807 — a tucked destination: rendered by NO nav surface (desktop
    * aside, mobile tab bar, More drawer), but still part of the nav
@@ -165,6 +176,25 @@ export const NAV_GROUPS: NavGroup[] = [
         roles: ["owner", "admin", "family"],
       },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
+      // WARP-2671: Routines sits in Workspace, NOT Admin, and deliberately
+      // apart from /tools. `/tools` is under Admin because a catalog of the
+      // box's built-in capabilities is administrative reference material; a
+      // routine is a sequence somebody composed to do their own job, which
+      // makes it their work and not an admin artefact.
+      //
+      // Placed AFTER Ask AI rather than between Reports and Ask AI: WARP-1992
+      // pins Reports as directly after Overview and directly before Ask AI
+      // (reports.nav.test.ts), and that adjacency was chosen on purpose.
+      //
+      // Role-gated rather than module-gated: routines compose tools from
+      // every surface, so there is no single module whose absence should
+      // hide the page. Guests cannot run or publish anything here.
+      {
+        href: "/routines",
+        label: "Routines",
+        icon: Repeat,
+        roles: ["owner", "admin", "family"],
+      },
       // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
       // are conversation surfaces); gated by the team_chat module and
       // carrying the unread-count badge the Sidebar resolves.
@@ -200,13 +230,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // NavItem type has no count field; out of scope).
       { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
-      // ADR-026: native PM surface — sits next to Calendar (both are
-      // time/workflow-oriented) and ahead of Knowledge (the read-only search
-      // index). Page at /projects renders natively off /api/pm/* under the
-      // dashboard session — no embedded stack, no second login.
-      // WARP-1154/1155: hidden when the orchestrator says the Projects module
-      // is off, so the nav never advertises a surface the box won't serve.
-      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2558 (ADR-044): /projects moved to the Business group below. The
+      // ROUTE is unchanged — it is live, deep-linked and named by PM tools —
+      // only its grouping moved.
       // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
       {
         href: "/knowledge",
@@ -220,6 +246,94 @@ export const NAV_GROUPS: NavGroup[] = [
       // /context is "what's indexed" by capability density.
       // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
       { href: "/context", label: "Context", icon: Sparkles, hidden: true },
+    ],
+  },
+  // WARP-2558 (ADR-044) — the Business group.
+  //
+  // Three systems describe the same business: who you sell to (CRM), the work
+  // you deliver (PM), and the practice you run day to day (the ERP surface,
+  // which arrives in slice 2). They were a lodger inside Projects, Projects
+  // itself, and a page filed next to the router. Grouping them says they are
+  // one subject without merging them into one page — the rejected shape, which
+  // only pushes the container-is-its-own-child problem down a level.
+  //
+  // Two rules this group holds:
+  //
+  //  1. A tab never renames itself. Each entry's `label` is constant; turning
+  //     a module on may ADD an entry, never rebrand one. That is the fix for
+  //     the shipped state where the sidebar said "Projects" and the page
+  //     header said "CRM" on the same box.
+  //  2. Every entry survives its neighbours being off. `visibleItems` already
+  //     filters per item and Sidebar drops empty groups, so a CRM-only box
+  //     shows Customers alone and a Projects-only box shows Projects alone —
+  //     no caption over an empty list, and no dependency between them.
+  {
+    label: "Business",
+    items: [
+      // WARP-2561 (ADR-044) — Planning: what is COMING. /reports answers how
+      // it went and has no business tile at all, so nothing in the product
+      // answered the forward question.
+      //
+      // Role-gated and NOT module-gated, for the reason spelled out on
+      // /reports above: it composes tiles from separately-gated sources and
+      // each degrades on its own, so a module gate here would delete the whole
+      // page because one tile's module is off. There is deliberately no
+      // `business` module — a ModuleId value costs a Prisma enum migration
+      // plus six mirrored sites, to buy a gate this page must not have.
+      //
+      // Same role array as /reports. A guest has access to almost nothing on
+      // it, so the nav never advertises a page that would be mostly locked.
+      {
+        href: "/business",
+        label: "Planning",
+        icon: Sparkles,
+        roles: ["owner", "admin", "family"],
+      },
+      // The CRM's own door. Before this it had `navHrefs: []` and rendered as
+      // sub-tabs on /projects, which made CRM-without-PM unrepresentable —
+      // and that is the shape of most dental boxes.
+      {
+        href: "/customers",
+        label: "Customers",
+        icon: Building2,
+        requiresModule: "crm",
+      },
+      // ADR-026: native PM surface. Page at /projects renders natively off
+      // /api/pm/* under the dashboard session — no embedded stack, no second
+      // login. WARP-1154/1155: hidden when the orchestrator says the Projects
+      // module is off, so the nav never advertises a surface the box won't
+      // serve.
+      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
+      // WARP-2581 — what the business is owed and what it owes, landed from a
+      // connected ledger. Gated on its own module: a box that keeps its books
+      // somewhere else has no /money entry at all rather than an empty page.
+      // Sits after Projects: customers, then the work, then what it is worth.
+      // Practice stays last — it is the vertical's surface, role-gated rather
+      // than module-gated, and ADR-044 put it at the end of the group.
+      { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
+      // WARP-2560 (ADR-044) — the practice's day: schedule, KPIs, patient
+      // lookup. It rendered at /integrations/eaglesoft, filed in Operations
+      // beside the router, because that is where the CONNECTION is set up.
+      // This is not a connection screen.
+      //
+      // Gated by `roles` and NOT by `requiresModule`, because there is no
+      // `erp` module and this ticket does not invent one — connector reach is
+      // ADR-032 §5.4's connectors axis, not the feature axis. The array is
+      // the SAME one the /integrations/eaglesoft child carried, copied rather
+      // than widened, and it mirrors the orchestrator's own
+      // requireRole("owner","admin") on the admin-tier ERP routes.
+      //
+      // The label is a fixed word on purpose. ADR-044 records that the
+      // vertical's own noun (patient / client / guest) becomes a per-connector
+      // `partyNoun` on the connector descriptor; that is a later slice, and
+      // making the nav label data-driven before a second connector exists
+      // would be a mechanism with one caller.
+      {
+        href: "/practice",
+        label: "Practice",
+        icon: Stethoscope,
+        roles: ["owner", "admin"],
+      },
     ],
   },
   {
@@ -253,9 +367,11 @@ export const NAV_GROUPS: NavGroup[] = [
       // (design brief §2). Ordered Cameras · Network · Devices · Voice.
       { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
       { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
-      // WARP-1101: Integrations hub + per-provider ERP surfaces. Eaglesoft is
-      // provider #1 (the Patterson dental PMS Droplet reads directly over its
-      // SQL Anywhere DB, on the LAN). The child reveals on /integrations/*.
+      // WARP-1101: the Integrations hub — connecting, credentials, connection
+      // status. WARP-2560 (ADR-044) removed the Eaglesoft child: the practice
+      // DATA surface moved to /practice in the Business group, and what stays
+      // here is the plumbing. Connecting a connector genuinely is
+      // infrastructure; reading the day's schedule is not.
       // WARP-1528 (nav-gate gap b): this item shipped with NO gate at all
       // while the orchestrator's erp.ts + integrations.ts both require
       // owner/admin — so family/guest were shown a hub that 403s. Mirrors the
@@ -270,10 +386,17 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Blocks,
         roles: ["owner", "admin"],
         children: [
+          // WARP-2275: the SaaS credential configurator. `roles` on the child
+          // as well as the parent, for the same reason the sibling above
+          // carries it — a future widening of one must not silently widen the
+          // other. It mirrors the orchestrator's own
+          // `requireRole("owner","admin")` on /api/integrations/*/credentials,
+          // which is the guard that actually decides; this only keeps the nav
+          // from offering a page that would 403.
           {
-            href: "/integrations/eaglesoft",
-            label: "Eaglesoft",
-            icon: Stethoscope,
+            href: "/integrations/credentials",
+            label: "Credentials",
+            icon: KeyRound,
             roles: ["owner", "admin"],
           },
         ],

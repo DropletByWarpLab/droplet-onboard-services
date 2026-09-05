@@ -14,6 +14,7 @@ import {
   Check,
   X,
   FolderOpen,
+  Cpu,
 } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
@@ -36,7 +37,13 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 // One primitive for every type-to-confirm destructive flow, never a fork.
 import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
 import { translateError } from "@/lib/friendly-errors";
-import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
+import type {
+  DataStorageTotals,
+  DiskInfo,
+  DriveInfo,
+  PoolInfo,
+  SystemDiskInfo,
+} from "@/lib/types";
 // Shared destructive-flow helpers (same ones the Settings Danger zone reuses):
 // the host script's typed-phrase gate + the calm adopt-refusal copy.
 import {
@@ -59,21 +66,14 @@ import {
   driveContentsHref,
   driveDisplayName,
   drivePoolName,
+  formatBytes,
   isPoolBackedDevice,
   poolBackingDrive,
   sanitizeFsLabel,
   takenVolumeNames,
   uniqueFsLabel,
+  usagePctOf,
 } from "./drive-display";
-
-// Binary units, matching the rest of the dashboard (VolumesPanel etc.).
-function fmtBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const v = bytes / Math.pow(1024, i);
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
 
 // Customer-facing name: friendly displayName, then FS label, then the
 // GUID-guarded mount tail — never the raw device path or a machine id, since
@@ -101,8 +101,7 @@ function poolName(pool: PoolInfo): string {
 const DRIVE_NAME_MAX = 64;
 
 function usagePct(d: DriveInfo): number {
-  if (!d.size_bytes) return 0;
-  return Math.max(0, Math.min(100, (d.used_bytes / d.size_bytes) * 100));
+  return usagePctOf(d.used_bytes, d.size_bytes);
 }
 
 // Design Storage meter: amber past 80%, red past 95% (matches VolumesPanel).
@@ -201,7 +200,8 @@ function busLabel(bus?: string): string {
 }
 
 export function DrivesPanel() {
-  const { drives, disks, isLoading, bridgeError, refresh } = useDrives();
+  const { drives, disks, totals, systemDisk, isLoading, bridgeError, refresh } =
+    useDrives();
   // BUG-3 / ADR-019: real mdadm pools replace the old client-side byte-sum
   // "pooled storage" fiction. Pools are OPTIONAL — `pools` is [] when none.
   const { pools, refresh: refreshPools } = usePools();
@@ -543,6 +543,17 @@ export function DrivesPanel() {
             <span style={{ fontFamily: "var(--font-mono)" }}>/mnt/droplet/</span>
           </p>
         </div>
+        {/* WARP-2098 — the one box-level storage figure, and the wording is
+            load-bearing. It is "across your drives", never "pooled": ADR-019
+            deleted a client-side byte-sum labelled "Total pooled storage"
+            because it described no disk that existed, and this number is a sum
+            too. What makes it honest is its INPUT — the server's post-filter
+            data-drive list, which excludes the system disk and counts a pool
+            as its one mounted filesystem rather than its raw members. Absent
+            totals render nothing at all rather than 0 B. */}
+        {totals && (
+          <DataStorageHeadline totals={totals} />
+        )}
         <button
           onClick={onRescan}
           disabled={rescanning}
@@ -671,6 +682,30 @@ export function DrivesPanel() {
         )}
       </div>
 
+      {/* WARP-2098 — the Droplet's own install disk, in its OWN section below
+          the owner's drives. Placement is the point: it comes after the data
+          drives because it is context, not capacity the owner can use, and it
+          is a section of its own so it can never be mistaken for a pool member
+          or a drive with actions. Rendered only when the bridge reports it, so
+          an older bridge simply shows nothing here. */}
+      {systemDisk && (
+        <div>
+          <h3
+            className="uppercase tracking-wide mb-2"
+            style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-muted)" }}
+          >
+            System drive
+          </h3>
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+            role="list"
+            aria-label="System drive"
+          >
+            <SystemDriveCard system={systemDisk} />
+          </div>
+        </div>
+      )}
+
       {/* WARP-936 — present-but-unmounted disks. Read-only inventory with an
           explicit per-state path forward; nothing here auto-mounts or
           auto-wipes, and every destructive action goes through the tier-3
@@ -725,7 +760,7 @@ export function DrivesPanel() {
         confirmLabel="Erase & adopt"
         confirmedIdentifier={
           adoptPending
-            ? `${diskTitle(adoptPending.disk)} · ${fmtBytes(adoptPending.disk.size_bytes)} · ${adoptPending.disk.name}`
+            ? `${diskTitle(adoptPending.disk)} · ${formatBytes(adoptPending.disk.size_bytes)} · ${adoptPending.disk.name}`
             : ""
         }
         variant="destructive"
@@ -770,7 +805,7 @@ export function DrivesPanel() {
         }
         affectedSummary={
           reclaimPending
-            ? `${diskTitle(reclaimPending.disk)} · ${fmtBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
+            ? `${diskTitle(reclaimPending.disk)} · ${formatBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
             : ""
         }
         confirmPhrase={reclaimPending ? diskTitle(reclaimPending.disk) : ""}
@@ -798,6 +833,173 @@ export function DrivesPanel() {
 function diskTitle(d: DiskInfo): string {
   const model = (d.model || "").replace(/[-_]+/g, " ").trim();
   return model || "Drive";
+}
+
+/**
+ * WARP-2098 — the box-level storage headline.
+ *
+ * Deliberately compact and deliberately named: "used across your drives".
+ * ADR-019 removed a client-side sum labelled "Total pooled storage" because a
+ * sum of every mounted volume is not a pool's capacity, and
+ * drives-panel.pools.test.tsx still asserts that phrase never returns. This is
+ * a sum too — what makes it legitimate is that the server computed it over the
+ * SAME filtered data-drive list it returned, so the system disk is excluded and
+ * a pool contributes one mounted filesystem, not its member disks.
+ */
+function DataStorageHeadline({ totals }: { totals: DataStorageTotals }) {
+  const p = usagePctOf(totals.used_bytes, totals.size_bytes);
+  return (
+    <div className="min-w-0" style={{ minWidth: "180px" }}>
+      <div
+        className="flex items-baseline gap-1.5 tabular-nums"
+        style={{ fontSize: "13px", color: "var(--text-muted)" }}
+      >
+        <span style={{ color: "var(--text)", fontWeight: 600 }}>
+          {formatBytes(totals.used_bytes)}
+        </span>
+        <span>of {formatBytes(totals.size_bytes)} used across your drives</span>
+      </div>
+      <div style={{ marginTop: "6px" }}>
+        <Meter pct={p} kind={meterKind(p)} />
+      </div>
+    </div>
+  );
+}
+
+/** WARP-2098 — plain-language label for one filesystem on the system disk.
+ *  The role comes from the server so this is a lookup, not path-matching. */
+function systemFsLabel(role: SystemDiskInfo["filesystems"][number]["role"]): string {
+  if (role === "root") return "System software";
+  if (role === "boot") return "Startup files";
+  return "App data and files";
+}
+
+/**
+ * WARP-2098 — the Droplet's OWN system disk, shown as its own card.
+ *
+ * Why it exists: WARP-827 hid the OS disk from every drive list, which was
+ * right (those lists feed rename / eject / erase / pool pickers) but left the
+ * owner unable to see the appliance's own disk at all. On this box that is the
+ * disk that fills first — the docker data-root, and so Nextcloud's uploaded
+ * files, live on it while the storage pool reaches Nextcloud only as external
+ * storage — so "how full is the Droplet itself?" had no answer in the product.
+ *
+ * Why it is a separate component and not a DriveCard: it must carry NO
+ * affordances. No Browse (it is not a Nextcloud mount, so a deep link would be
+ * dead), no Rename (there is no Drive row, and there is no uuid to PATCH), no
+ * Eject, and it can never reach adopt / reclaim / reformat. It takes
+ * SystemDiskInfo, not DriveInfo, so it cannot be handed to anything that acts
+ * on a drive.
+ */
+function SystemDriveCard({ system }: { system: SystemDiskInfo }) {
+  // The bridge says WHY there is or is not a total, as an explicit state —
+  // branch on that, never on `used_bytes !== null`. "partial" and "unavailable"
+  // both carry null, and they are different things to tell the owner: one has
+  // a readable breakdown under it, the other has nothing. Neither gets a meter
+  // (a 0% bar reads as a pristine empty disk).
+  const measured = system.measurement === "complete";
+  const p = measured ? usagePctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
+  const model = (system.model || "").replace(/[-_]+/g, " ").trim();
+  // Startup partitions are tiny and there can be two of them (/boot, /boot/efi);
+  // fold them into one row so the breakdown reads as three lines, not four.
+  const rows = [
+    ...system.filesystems.filter((f) => f.role !== "boot"),
+  ];
+  const boot = system.filesystems.filter((f) => f.role === "boot");
+  return (
+    <div role="listitem" className="card">
+      <div className="flex items-start gap-3">
+        <IconTile>
+          <Cpu className="h-5 w-5" />
+        </IconTile>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4
+              className="truncate"
+              style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+              title={model || "System drive"}
+            >
+              System drive
+            </h4>
+            {model && <HwTag upper={false}>{model}</HwTag>}
+            {system.bus && <HwTag>{busLabel(system.bus)}</HwTag>}
+          </div>
+          <p
+            className="tabular-nums"
+            style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}
+          >
+            {formatBytes(system.size_bytes)} ·{" "}
+            <span style={{ fontFamily: "var(--font-mono)" }}>{system.name}</span>
+          </p>
+        </div>
+        <Badge kind="muted">Not user storage</Badge>
+      </div>
+
+      {measured ? (
+        <div className="mt-3">
+          <Meter pct={p} kind={meterKind(p)} />
+          <div
+            className="flex items-center justify-between tabular-nums"
+            style={{
+              marginTop: "10px",
+              fontFamily: "var(--font-mono)",
+              fontSize: "12px",
+              color: "var(--text-muted)",
+            }}
+          >
+            <span style={{ color: "var(--text)" }}>
+              {formatBytes(system.used_bytes ?? 0)}
+            </span>
+            <span>of {formatBytes(system.size_bytes)}</span>
+          </div>
+        </div>
+      ) : system.measurement === "partial" ? (
+        <p className="mt-3" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          Part of this disk couldn&rsquo;t be read, so there&rsquo;s no total.
+          What could be read is listed below.
+        </p>
+      ) : (
+        <p className="mt-3" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          Usage unavailable.
+        </p>
+      )}
+
+      {/* The breakdown is the useful part: it shows the owner that uploaded
+          files land here, on the Droplet's own disk, rather than on the pool.
+          Gated on the STATE as well as the rows: "unavailable" means nothing
+          was measured, and the card must never say so above a populated
+          table (code review, WARP-2098). */}
+      {system.measurement !== "unavailable" && (rows.length > 0 || boot.length > 0) && (
+        <ul
+          className="mt-3 flex flex-col gap-1"
+          style={{ fontSize: "12px", color: "var(--text-muted)" }}
+        >
+          {rows.map((f) => (
+            <li key={f.mount} className="flex items-center justify-between gap-3">
+              <span className="truncate">{systemFsLabel(f.role)}</span>
+              <span className="tabular-nums flex-none" style={{ fontFamily: "var(--font-mono)" }}>
+                {formatBytes(f.used_bytes)} of {formatBytes(f.size_bytes)}
+              </span>
+            </li>
+          ))}
+          {boot.length > 0 && (
+            <li className="flex items-center justify-between gap-3">
+              <span className="truncate">{systemFsLabel("boot")}</span>
+              <span className="tabular-nums flex-none" style={{ fontFamily: "var(--font-mono)" }}>
+                {formatBytes(boot.reduce((n, f) => n + f.used_bytes, 0))} of{" "}
+                {formatBytes(boot.reduce((n, f) => n + f.size_bytes, 0))}
+              </span>
+            </li>
+          )}
+        </ul>
+      )}
+
+      <p className="mt-3" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+        The Droplet&rsquo;s own disk. It isn&rsquo;t part of your storage pool
+        and can&rsquo;t be renamed, ejected, or added to one.
+      </p>
+    </div>
+  );
 }
 
 /** One available (unmounted) disk card. States:
@@ -861,7 +1063,7 @@ function AvailableDiskCard({
             className="tabular-nums"
             style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}
           >
-            {fmtBytes(disk.size_bytes)} ·{" "}
+            {formatBytes(disk.size_bytes)} ·{" "}
             <span style={{ fontFamily: "var(--font-mono)" }}>{disk.name}</span>
           </p>
         </div>
@@ -1089,10 +1291,10 @@ function DriveCard({
           style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-muted)" }}
         >
           <span>
-            <span style={{ color: "var(--text)" }}>{fmtBytes(d.used_bytes)}</span> of{" "}
-            {fmtBytes(d.size_bytes)}
+            <span style={{ color: "var(--text)" }}>{formatBytes(d.used_bytes)}</span> of{" "}
+            {formatBytes(d.size_bytes)}
           </span>
-          <span>{fmtBytes(d.free_bytes)} free</span>
+          <span>{formatBytes(d.free_bytes)} free</span>
         </div>
         <Meter pct={p} kind={meterKind(p)} />
       </div>
@@ -1423,11 +1625,11 @@ function PoolCard({
           >
             <span>
               <span style={{ color: "var(--text)" }}>
-                {fmtBytes(backingDrive.used_bytes)}
+                {formatBytes(backingDrive.used_bytes)}
               </span>{" "}
-              of {fmtBytes(backingDrive.size_bytes)}
+              of {formatBytes(backingDrive.size_bytes)}
             </span>
-            <span>{fmtBytes(backingDrive.free_bytes)} free</span>
+            <span>{formatBytes(backingDrive.free_bytes)} free</span>
           </div>
           <Meter pct={usedPct} kind={meterKind(usedPct)} />
         </div>

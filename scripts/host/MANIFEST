@@ -1,0 +1,185 @@
+# =============================================================================
+# WARP-2574 — host artefact manifest
+# =============================================================================
+#
+# Every artefact `install_single_box_host_integration` (scripts/lib/single-box.sh)
+# places on a box, in one machine-readable table.
+#
+# ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────
+# WARP-1829 shipped `droplet-host-units check`, which finds host units running
+# STALE code. It enumerates units from systemd, so it can only ever see units
+# that EXIST. A host artefact that was never installed has no unit to enumerate
+# and no process to compare — it is invisible to that detector, and to
+# `systemctl status`, and to /api/health.
+#
+# Measured 2026-08-31 on the bench box: WARP-2190 (droplet-power-restore) and
+# WARP-2192 (the hardware watchdog) merged on 2026-08-26, the box's checkout
+# contained both, and NEITHER was installed. Both units read `not-found`,
+# /dev/watchdog0 did not exist, and the board's AC-loss policy was still
+# `always-off` — the box would have stayed dark after a power cut, five days
+# after the fix shipped. The box refresh updates the checkout and restarts
+# CONTAINERS; nothing re-runs the host-integration installer, so a host-unit
+# feature can merge, be marked Done, and run on zero boxes.
+#
+# This table is the expectation half of that reconciliation. `droplet-host-units
+# audit` reads it and compares it against the live filesystem and
+# `systemctl is-enabled`; the `host_artefacts` check on droplet-watchdog.timer
+# reports the result.
+#
+# ── WHY IT CANNOT ROT ────────────────────────────────────────────────────────
+# A hand-maintained table that drifts from the installer would be WORSE than no
+# table: it would report green for artefacts nobody installs. So the table is
+# not trusted on its own — tests/host-artefacts.test.sh reconciles it against
+# `install_single_box_host_integration` in BOTH directions on every PR:
+#
+#   * every `install -m` / `install -d` / `systemctl enable` in that function
+#     must have a row here, and
+#   * every row here must name a source that exists in the repo.
+#
+# Adding a host artefact without a row FAILS CI. That is the structural closure:
+# the blind spot cannot silently re-open.
+#
+# ── WHY IT IS READ FROM THE CHECKOUT, NEVER FROM AN INSTALLED COPY ───────────
+# `audit` resolves this file inside the box's git checkout. It is deliberately
+# NOT installed to /usr/local. The question being asked is "is the box running
+# what the tree says", so the expectation must come from the TREE. An installed
+# copy would be stale in exactly the situation the audit exists to catch — a
+# checkout that pulled a new artefact whose installer never re-ran — and would
+# answer "nothing is missing" while the new artefact sat uninstalled.
+#
+# ── FORMAT ───────────────────────────────────────────────────────────────────
+#   <kind>  <source>  <destination>  <mode>  <policy>  <note...>
+#
+# Whitespace-separated; `-` means "not applicable to this kind". The note is
+# free text to end of line. Blank lines and `#` comments are ignored.
+#
+#   kind    file   a file the installer copies into place
+#           dir    a directory the installer creates
+#           unit   a systemd unit the installer ENABLES
+#           skip   an artefact deliberately NOT reconciled (reason mandatory)
+#
+#   source  repo-relative path of the file the installer copies FROM
+#           (`-` for dir/unit/skip rows)
+#
+#   policy  file: track     content AND mode must match the repo source
+#           file: presence  must exist; content deliberately not compared
+#                           (note mandatory — say WHY, or use `track`)
+#           dir:  present   must exist as a directory
+#           unit: enabled   `systemctl is-enabled` must say enabled
+#           skip: <token>   short reason token; note mandatory
+#
+# A `presence` or `skip` row with no note fails the CI guard. You cannot opt out
+# of content checking without writing down why.
+#
+# Adding a host artefact? Add its row here in the same commit as the installer
+# line. The guard will tell you if you forget, but the point is that the box
+# reports the gap on its own from then on.
+# =============================================================================
+
+# --- OpenWrt AP attach + host LAN (WARP-843, WARP-2064) ----------------------
+file  scripts/host/usr-local-sbin/droplet-openwrt-attach                     /usr/local/sbin/droplet-openwrt-attach                                0755  track
+file  scripts/host/usr-local-sbin/droplet-host-net                           /usr/local/sbin/droplet-host-net                                      0755  track
+file  scripts/host/usr-local-sbin/droplet-openwrt-watch                      /usr/local/sbin/droplet-openwrt-watch                                 0755  track
+file  scripts/host/etc-default/droplet-host-net                              /etc/default/droplet-host-net                                         0644  track
+file  scripts/host/etc-systemd-system/droplet-openwrt-attach.service         /etc/systemd/system/droplet-openwrt-attach.service                    0644  track
+file  scripts/host/etc-systemd-system/droplet-openwrt-attach.service.d/override.conf  /etc/systemd/system/droplet-openwrt-attach.service.d/override.conf  0644  track
+file  scripts/host/etc-systemd-system/droplet-openwrt-attach.path            /etc/systemd/system/droplet-openwrt-attach.path                       0644  track
+file  scripts/host/etc-systemd-system/droplet-openwrt-attach-reapply.service /etc/systemd/system/droplet-openwrt-attach-reapply.service            0644  track
+file  scripts/host/etc-systemd-system/droplet-openwrt-watch.service          /etc/systemd/system/droplet-openwrt-watch.service                     0644  track
+file  scripts/host/etc-systemd-system/droplet-host-net.service               /etc/systemd/system/droplet-host-net.service                          0644  track
+dir   -                                                                      /etc/droplet                                                          -     present  WARP-1035 bind-mounted read-only into matter-controller; must exist before compose up
+dir   -                                                                      /etc/droplet-host-net                                                 -     present  holds the host dnsmasq conf below
+dir   -                                                                      /etc/systemd/system/droplet-openwrt-attach.service.d                   -     present  drop-in dir for the override above
+file  scripts/host/etc-droplet-host-net/lan-dhcp.conf                        /etc/droplet-host-net/lan-dhcp.conf                                   0644  presence  regenerated at runtime — setup_local_dns() (scripts/lib/local-dns.sh) and droplet-relay-dns rewrite managed blocks in place, so a healthy box legitimately differs from the repo baseline
+file  scripts/host/droplet-relay-dns.sh                                      /usr/local/sbin/droplet-relay-dns                                     0755  track
+
+# --- network self-heal (WARP-1680) -------------------------------------------
+file  scripts/host/usr-local-sbin/droplet-net-selfheal                       /usr/local/sbin/droplet-net-selfheal                                  0755  track
+file  scripts/host/etc-systemd-system/droplet-net-selfheal.service           /etc/systemd/system/droplet-net-selfheal.service                      0644  track
+
+# --- SSH access toggle (WARP-1984, WARP-1908) --------------------------------
+file  scripts/host/usr-local-sbin/droplet-ssh-access                         /usr/local/sbin/droplet-ssh-access                                    0755  track
+file  scripts/host/usr-local-sbin/droplet-ssh-access-boot-reset              /usr/local/sbin/droplet-ssh-access-boot-reset                         0755  track
+file  scripts/host/etc-systemd-system/droplet-ssh-access.service             /etc/systemd/system/droplet-ssh-access.service                        0644  track
+file  scripts/host/etc-systemd-system/droplet-ssh-access.path                /etc/systemd/system/droplet-ssh-access.path                           0644  track
+file  scripts/host/etc-systemd-system/droplet-ssh-access-boot-reset.service  /etc/systemd/system/droplet-ssh-access-boot-reset.service             0644  track
+dir   -                                                                      /var/lib/droplet-ssh-access                                           -     present  root-owned, NOT group-writable — `state` is what the dashboard trusts
+dir   -                                                                      /var/lib/droplet-ssh-access/intent.d                                  -     present  the writable half; a directory not a file because a single-file bind detaches on rename (WARP-1908)
+
+# --- tmpfiles ----------------------------------------------------------------
+file  scripts/host/etc-tmpfiles.d/droplet.conf                               /etc/tmpfiles.d/droplet.conf                                          0644  track
+
+# --- mDNS: deliberately absent from this table (WARP-2576) -------------------
+# /etc/avahi/services/droplet.service is on every healthy box, but this
+# installer does not put it there — _write_avahi_service_file() in
+# scripts/lib/local-dns.sh tees it, from a heredoc, with no repo source file to
+# compare against. It is out of scope for a table whose subject is
+# `install_single_box_host_integration`.
+#
+# It used to be in scope, and that is the cautionary half. A static copy under
+# scripts/host/etc-avahi/ was installed here first, then overwritten by the
+# local-dns.sh heredoc later in the SAME setup.sh run — it never reached a box.
+# Its row could only ever be `policy=presence`: the repo copy advertised two
+# services (_http, _https) and a real box has four (plus _smb._tcp and
+# _device-info._tcp, which are what Finder needs), so content-comparing it
+# reported DRIFT on every healthy box forever.
+#
+# If you are about to re-add that install line: don't. Change what the box
+# advertises in local-dns.sh, which is the single owner.
+
+# --- hardware watchdog (WARP-2192) -------------------------------------------
+# Both halves or nothing: systemd never loads watchdog drivers itself (no
+# /dev/watchdog without the modules-load fragment) and RuntimeWatchdogSec is off
+# by default (PID1 never pets it without the system.conf drop-in). Either one
+# missing makes the whole feature a silent no-op — which is exactly the state
+# the bench box was found in.
+dir   -                                                                      /etc/modules-load.d                                                   -     present  sp5100_tco is loaded from here at boot
+dir   -                                                                      /etc/systemd/system.conf.d                                            -     present  PID1 reads RuntimeWatchdogSec from here at startup
+file  scripts/host/etc-modules-load.d/droplet-watchdog-hw.conf               /etc/modules-load.d/droplet-watchdog-hw.conf                          0644  track
+file  scripts/host/etc-systemd-system.conf.d/droplet-watchdog.conf           /etc/systemd/system.conf.d/droplet-watchdog.conf                      0644  track
+
+# --- unified self-heal watchdog (WARP-1002, WARP-869) ------------------------
+file  scripts/host/droplet-watchdog.sh                                       /usr/local/sbin/droplet-watchdog                                      0755  track
+file  scripts/host/usr-local-sbin/droplet-wifi-watchdog                      /usr/local/sbin/droplet-wifi-watchdog                                 0755  track
+file  scripts/host/etc-systemd-system/droplet-watchdog.service               /etc/systemd/system/droplet-watchdog.service                          0644  track
+file  scripts/host/etc-systemd-system/droplet-watchdog.timer                 /etc/systemd/system/droplet-watchdog.timer                            0644  track
+file  scripts/host/etc-default/droplet-watchdog                              /etc/default/droplet-watchdog                                         0644  presence  install-once tuning file — operator edits are never clobbered, so content legitimately differs
+
+# --- power-loss auto-restart (WARP-2190) -------------------------------------
+file  scripts/host/usr-local-sbin/droplet-power-restore                      /usr/local/sbin/droplet-power-restore                                 0755  track
+file  scripts/host/etc-systemd-system/droplet-power-restore.service          /etc/systemd/system/droplet-power-restore.service                     0644  track
+file  scripts/host/etc-systemd-system/droplet-power-restore.timer            /etc/systemd/system/droplet-power-restore.timer                       0644  track
+file  scripts/host/etc-default/droplet-power-restore                         /etc/default/droplet-power-restore                                    0644  presence  install-once tuning file — operator edits are never clobbered, so content legitimately differs
+
+# --- host-unit refresh (WARP-1829) + this auditor (WARP-2574) ----------------
+file  scripts/host/droplet-host-units.sh                                     /usr/local/sbin/droplet-host-units                                    0755  track
+file  scripts/host/etc-systemd-system/droplet-host-units.service             /etc/systemd/system/droplet-host-units.service                        0644  track
+
+# --- egress audit collector (WARP-268) ---------------------------------------
+dir   -                                                                      /usr/local/lib/droplet-egress-audit                                   -     present  the collector payload the launcher execs
+file  scripts/host/usr-local-sbin/droplet-egress-audit                       /usr/local/sbin/droplet-egress-audit                                  0755  track
+file  scripts/host/etc-systemd-system/droplet-egress-audit.service           /etc/systemd/system/droplet-egress-audit.service                      0644  track
+file  scripts/host/etc-default/droplet-egress-audit                          /etc/default/droplet-egress-audit                                     0644  presence  install-once AND rewritten by `sed -i` at install time to embed this box's REPO_ROOT paths, so it never matches the repo copy
+
+# --- units the installer ENABLES ---------------------------------------------
+# Only units with an [Install] section appear here. Deliberately absent:
+# droplet-watchdog.service (started by its timer), droplet-host-units.service
+# (on-demand, no [Install] — see its unit file), and
+# droplet-openwrt-attach-reapply.service (start-on-demand relay).
+unit  -  droplet-ssh-access.path                 -  enabled
+unit  -  droplet-ssh-access-boot-reset.service   -  enabled
+unit  -  droplet-net-selfheal.service            -  enabled
+unit  -  droplet-openwrt-attach.service          -  enabled
+unit  -  droplet-openwrt-attach.path             -  enabled
+unit  -  droplet-openwrt-watch.service           -  enabled
+unit  -  droplet-host-net.service                -  enabled
+unit  -  droplet-watchdog.timer                  -  enabled
+unit  -  droplet-power-restore.service           -  enabled
+unit  -  droplet-power-restore.timer             -  enabled
+unit  -  droplet-egress-audit.service            -  enabled
+
+# --- deliberately NOT reconciled ---------------------------------------------
+skip  -  /etc/default/droplet-openwrt-attach  -  generated  written by a here-doc from .env, not copied from the repo, and holds the per-box AP PSK — there is no repo source to compare it against
+skip  -  /usr/local/bin/xvf_host              -  arch-gated  installed only on x86_64 and only when scripts/host/xvf/<arch>/SHA256SUMS verifies; a box that legitimately declines it must not read as broken
+skip  -  /usr/local/bin/                      -  arch-gated  the xvf_host dlopen'd libs + yaml, installed binary-adjacent under the same arch and checksum gate as the binary above
+skip  -  /usr/local/lib/droplet-egress-audit/ -  glob        `install services/egress-audit/*.py` — membership follows the service tree, so the directory presence row above is the honest assertion

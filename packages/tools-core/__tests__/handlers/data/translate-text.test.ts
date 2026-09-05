@@ -7,11 +7,12 @@
  * only the translated text. Tier-1 read — no writes, no confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import translateText from "../../../src/handlers/data/translate-text.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  orchestratorPost: ReturnType<typeof vi.fn>,
+  orchestratorPost: Mock,
 ): ToolContext {
   return {
     http: {
@@ -33,7 +34,7 @@ function ctxWith(
   };
 }
 
-function okPost(content: string, model = "qwen2.5:7b"): ReturnType<typeof vi.fn> {
+function okPost(content: string, model = "qwen2.5:7b"): Mock {
   // Fresh Response per call — a Response body can only be read once.
   return vi
     .fn()

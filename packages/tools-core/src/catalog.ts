@@ -23,6 +23,16 @@
  * suite goes red. That is the same discipline `WRITE_TOOLS` uses in the
  * orchestrator — derive from the registry, never maintain a silent
  * parallel list.
+ *
+ * WHAT IS DELIBERATELY ABSENT (WARP-2418 / ADR-043). A tool advertised at
+ * runtime by a remote MCP server has NO entry here and must never gain one:
+ * this catalog answers "what is installed on this box", and a session to a
+ * vendor's server is not an installed capability. Its domain — the one thing
+ * per-turn selection needs and a wire catalog cannot supply — lives in the
+ * parallel runtime layer,
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`, written
+ * only by `remote-mcp-servers.ts`. `tool-selection.service.ts` reads both,
+ * with THIS one winning any name collision.
  */
 
 import { TOOLS } from "./registry.js";
@@ -41,13 +51,29 @@ export type ToolDomain =
   | "email"
   | "memory"
   | "pm"
+  // WARP-2546 — the CRM. Slug matches the `crm` ModuleId so the module
+  // toggle gates the domain.
+  | "crm"
   | "erp"
+  // WARP-2581 — money at rest: invoices and bills landed from a connected
+  // ledger. Slug matches the `money` ModuleId so the module toggle gates the
+  // domain, exactly as `crm` and `team_chat` do.
+  | "money"
+  // WARP-2497 — the connected SaaS accounts (Stripe / HubSpot / Mailchimp).
+  // Its own domain rather than a slot under `erp`: `erp` is the on-prem
+  // practice-management connector, and the dashboard gates the two
+  // separately (`erp` reach is a connector grant, `cloud` a tool grant).
+  | "cloud"
   | "business"
   | "system"
   | "data"
   // WARP-1685 — Messages (member-to-member team chat). Slug matches the
   // `team_chat` ModuleId so the module toggle gates the domain.
-  | "team_chat";
+  | "team_chat"
+  // WARP-2180 — durable background runs (epic WARP-2176): start one, list
+  // yours. Its own domain so selection can find the pair on a "do this in
+  // the background" turn without dragging a whole vertical along.
+  | "agent_runs";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -111,6 +137,16 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "restore_file_version",
     "share_file",
     "create_document",
+    // WARP-2212 — document GENERATION, distinct from create_document's empty
+    // seed: these send a spec to POST /api/files/render and come back with a
+    // finished file.
+    "create_pdf_report",
+    "create_word_document",
+    "create_spreadsheet",
+    // WARP-2664 — cleanup: the read-only report and the two writes it feeds.
+    "analyze_file_cleanup",
+    "organize_files",
+    "delete_files",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -173,27 +209,54 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "search_contacts",
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
-  pm: [
-    "pm_create_project",
-    "pm_create_work_item",
-    "pm_update_work_item",
-    "pm_add_work_item_comment",
-    "pm_transition_work_item",
-    "pm_list_workspaces",
-    "pm_list_projects",
-    "pm_list_work_items",
-    "pm_get_work_item",
-    "pm_search_work_items",
-  ],
+  // ADR-045 — EMPTY, and deliberately still declared. Slice C moved the five
+  // PM reads into `business_find`/`business_timeline`; slice D moved the five
+  // PM writes into `business_create`/`business_update`. The domain survives
+  // because it is the slot a REMOTE tracker catalog (Atlassian, WARP-2316)
+  // registers into, and its DOMAIN_RULES entry is how such a tool becomes
+  // selectable — the exclusion list names LOCAL tools only. It is also what
+  // the `projects` module's `toolDomains: ["pm"]` resolves against
+  // (module-registry.ts's unknown-domain invariant).
+  pm: [],
+  // WARP-2581 — money at rest. Excluded from the chat pool (see
+  // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
+  // so it is MCP- and API-reachable and never advertised on a chat turn.
+  money: ["money_list_open_documents"],
+  // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
+  // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
+  // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
+  // Kept as the landing slot for a remote HubSpot catalog.
+  crm: [],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
     "erp_get_ar_summary",
     "erp_schedule_appointment",
   ],
-  business: ["business_profile_get"],
+  // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
+  cloud: ["cloud_query_dataset"],
+  // ADR-045 slice C — `business` is an UNCLAIMED domain (access-catalog.ts's
+  // UNCLAIMED_DOMAINS: system / business / data / erp are not feature-gated),
+  // so unlike `crm`/`pm` these two are advertised regardless of the module
+  // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
+  // `/api/crm/*` and `/api/pm/projects*`), and `_graph.ts`'s `businessError`
+  // turns that 404 into a sentence naming the switch — the same bargain
+  // `cloud_query_dataset` makes with `DatasetNotServedError`.
+  // ADR-045 — `business` is now the ONE door to the CRM and the tracker
+  // alike, reads and writes together. That is the point of the collapse: the
+  // owner does not have to know which of two vocabularies their question is in.
+  business: [
+    "business_profile_get",
+    "business_find",
+    "business_timeline",
+    "business_create",
+    "business_update",
+    "business_link",
+  ],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
+  // WARP-2180 — durable background runs.
+  agent_runs: ["start_agent_run", "list_agent_runs"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -274,7 +337,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   read_document_text: "Read a whole PDF or scanned document end to end",
   list_recent_files: "See the files you changed most recently",
   write_file: "Save a new file or update an existing one",
-  delete_file: "Delete a file from your Droplet",
+  delete_file: "Delete a file, or a folder and everything in it, from your Droplet",
   create_directory: "Make a new folder",
   rename_file: "Rename a file or folder",
   move_file: "Move a file or folder somewhere else",
@@ -284,6 +347,14 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   restore_file_version: "Roll a file back to an earlier version",
   share_file: "Create a shareable link to a file",
   create_document: "Create a new blank Word doc or spreadsheet",
+  // The contrast with create_document above is the whole point of the copy:
+  // that one makes an EMPTY file to type into, these three arrive finished.
+  create_pdf_report: "Write a finished PDF report and save it to your files",
+  create_word_document: "Write a Word document you can keep editing",
+  create_spreadsheet: "Build a spreadsheet from a table of data",
+  analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
+  organize_files: "Sort a folder's files into tidy subfolders",
+  delete_files: "Clear out a list of files you have agreed to delete",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",
@@ -356,23 +427,31 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   email_send: "Send an email you've approved",
   search_contacts: "Find people you email, with their addresses",
   // Project tracker
-  pm_create_project: "Start a new project in your project tracker",
-  pm_create_work_item: "Add a new task to your project tracker",
-  pm_update_work_item: "Update the details of a task",
-  pm_add_work_item_comment: "Add a comment to a task",
-  pm_transition_work_item: "Move a task to a new status, like done",
-  pm_list_workspaces: "See your project tracker workspaces",
-  pm_list_projects: "See your projects",
-  pm_list_work_items: "See the tasks in a project",
-  pm_get_work_item: "See the full details of one task",
-  pm_search_work_items: "Search your tasks",
+  // CRM (customers, deals, pipeline) — reads moved to the business graph
   // ERP (Eaglesoft practice-management integration)
   erp_get_schedule_today: "See the day's appointment schedule from your practice software",
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
-  // Business (business-knowledge profile)
+  // Money (invoices and bills landed from a connected ledger)
+  money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
+  // Cloud connectors (Stripe / HubSpot / Mailchimp)
+  cloud_query_dataset:
+    "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
+  // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
+  business_find:
+    "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
+  business_timeline: "See what has happened recently on a customer, deal or job",
+  // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
+  // it names what the OWNER gets, and says the quiet part — these three ask
+  // first, every time, because they change the record.
+  business_create:
+    "Add a customer, a deal, a project, a task or a note to the record (you approve it first)",
+  business_update:
+    "Change a customer, a deal or a task — including moving it to a new stage or status (you approve it first)",
+  business_link:
+    "Connect two things to each other, like a deal to the job that delivers it (you approve it first)",
   // Team chat (Messages)
   team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
   team_chat_send_meeting_invite:
@@ -396,6 +475,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Background runs (WARP-2180)
+  start_agent_run: "Hand Droplet a longer task to work on in the background",
+  list_agent_runs: "See your background tasks and how they went",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

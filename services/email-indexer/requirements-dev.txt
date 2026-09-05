@@ -4,4 +4,4 @@ pytest-asyncio==1.4.0
 
 # WARP-1948 — OSV floor for pytest's transitive pygments (see the matching
 # floor block in requirements.txt for rationale).
-pygments>=2.20.0
+pygments>=2.21.0

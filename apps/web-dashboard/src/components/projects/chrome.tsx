@@ -3,6 +3,13 @@
 // In-page chrome for project views: view switcher, saved-view chips, search.
 
 import { PmIcon } from "./icons";
+import {
+  DEPARTMENT_ANY,
+  DEPARTMENT_NONE,
+  type DepartmentOption,
+} from "./department";
+
+import type { JSX } from "react";
 
 export type ProjectView = "board" | "list" | "cycles" | "modules";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
@@ -73,7 +80,19 @@ export function SavedViews({
   );
 }
 
-export function FilterBar({ q, onQ }: { q: string; onQ: (v: string) => void }): JSX.Element {
+export function FilterBar({
+  q,
+  onQ,
+  departments,
+  department,
+  onDepartment,
+}: {
+  q: string;
+  onQ: (v: string) => void;
+  departments: readonly DepartmentOption[];
+  department: string;
+  onDepartment: (v: string) => void;
+}): JSX.Element {
   return (
     <div className="pm-row" style={{ gap: 10, flexWrap: "wrap" }}>
       <div className="pm-search" style={{ minWidth: 240 }}>
@@ -85,6 +104,29 @@ export function FilterBar({ q, onQ }: { q: string; onQ: (v: string) => void }): 
           aria-label="Search work items"
         />
       </div>
+      {/* ADR-045 §5.3 — a <select>, not the design brief's §3.9(b) chiprow: the
+          department count is unbounded and a rail of pills stops working past
+          about six. `select.pm-input` is the pattern the New-item modal
+          already uses, and projects.css paints its native option popup for
+          dark mode. Hidden entirely when nothing on this box owns work, so a
+          household that has never made a department sees no new control. */}
+      {departments.length > 0 && (
+        <select
+          className="pm-input"
+          style={{ width: "auto", minWidth: 168, height: 34 }}
+          value={department}
+          aria-label="Filter by department"
+          onChange={(e) => onDepartment(e.target.value)}
+        >
+          <option value={DEPARTMENT_ANY}>Any department</option>
+          <option value={DEPARTMENT_NONE}>No department</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.kind === "TEAM" ? `${d.name} (team)` : d.name}
+            </option>
+          ))}
+        </select>
+      )}
       <span className="pm-row" style={{ gap: 7, marginLeft: 6, fontSize: 12.5, color: "var(--text-3)" }}>
         Group by <strong style={{ color: "var(--text-2)", fontWeight: 600 }}>state</strong>
       </span>

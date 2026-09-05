@@ -8,9 +8,10 @@
 # box's opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`) from the HQ
 # challenge response. It does three things:
 #
-#   1. Idempotently writes DROPLET_PUBLIC_FQDN=<fqdn> into the repo .env
-#      (sed-replace-or-append), so the next orchestrator boot reads the learned
-#      name directly instead of re-learning it from HQ.
+#   1. Idempotently writes DROPLET_PUBLIC_FQDN=<fqdn> into the repo .env via the
+#      canonical _upsert_env_kv (scripts/lib/secrets.sh) — symlink-preserving
+#      and literal-safe (WARP-2537) — so the next orchestrator boot reads the
+#      learned name directly instead of re-learning it from HQ.
 #   2. Sources scripts/lib/local-dns.sh and runs setup_public_fqdn_dns so the
 #      split-horizon DNS (host dnsmasq host-record + the routing/container leg)
 #      registers the FQDN → 192.168.20.1 — the one name resolves at home AND
@@ -81,22 +82,43 @@ export REPO_ROOT
 
 ENV_FILE="${DROPLET_PUBLIC_FQDN_ENV_FILE:-$REPO_ROOT/.env}"
 
-# --- Idempotent .env write-back (sed-replace-or-append) ---------------------
+# --- Idempotent .env write-back (canonical upsert — WARP-2537) --------------
+# This used to stage a temp file and `mv` it over $ENV_FILE. On a box where
+# relocate_secrets_to_data has run, $ENV_FILE is a SYMLINK into the encrypted
+# /data — mv REPLACED the link with a plain file on the unencrypted boot disk,
+# moving the secrets back outside the LUKS boundary and breaking the compose
+# `../.env` env_file (the WARP-232 regression class, closed for
+# droplet-set-nvr-media.sh by WARP-2522). The sed splice above it was
+# unreachable-by-luck rather than safe: the FQDN regex just above rejects every
+# byte sed would have interpreted, so the write went through _because_ of the
+# validation, not because the writer was correct.
+#
+# _upsert_env_kv (scripts/lib/secrets.sh) is the repo's one .env writer with the
+# right discipline: it resolves a symlinked $ENV_FILE and renames onto the REAL
+# target so the link survives, strips-and-appends with printf (no sed, so every
+# byte of the value lands literally), normalizes a missing trailing newline
+# first, and stages under umask 077 + chmod 600. Hard-fail when the lib cannot
+# be found rather than fall back to a clobbering writer — same "refuse loudly"
+# posture as the validation above. (The DNS legs below re-derive LIB_DIR against
+# local-dns.sh, which is deliberately best-effort; the .env write is not.)
+LIB_DIR="$SCRIPT_DIR/../lib"
+if [ ! -f "$LIB_DIR/secrets.sh" ]; then
+  LIB_DIR="$REPO_ROOT/scripts/lib"
+fi
+[ -f "$LIB_DIR/secrets.sh" ] || die "secrets.sh not found under $LIB_DIR — refusing to rewrite ${ENV_FILE} without the canonical symlink-preserving writer"
+# shellcheck source=../lib/secrets.sh
+. "$LIB_DIR/secrets.sh"
+
 # Create the file if missing so a brand-new box can still record the name.
 [ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 0600 "$ENV_FILE"; }
 
 _desired="DROPLET_PUBLIC_FQDN=${FQDN}"
 if grep -qxF "$_desired" "$ENV_FILE"; then
   : # already current — no rewrite (keeps re-runs byte-identical)
-elif grep -qE '^[[:space:]]*#?[[:space:]]*DROPLET_PUBLIC_FQDN=' "$ENV_FILE"; then
-  # Replace an existing (possibly commented / empty) line in place. Use a tmp
-  # file + mv so a crash mid-write can't truncate .env.
-  _tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
-  sed -E "s|^[[:space:]]*#?[[:space:]]*DROPLET_PUBLIC_FQDN=.*|${_desired}|" \
-    "$ENV_FILE" > "$_tmp"
-  mv "$_tmp" "$ENV_FILE"
 else
-  printf '%s\n' "$_desired" >> "$ENV_FILE"
+  # _upsert_env_kv targets $ENV_FILE when set — which this script always sets
+  # (the DROPLET_PUBLIC_FQDN_ENV_FILE test hook included).
+  _upsert_env_kv DROPLET_PUBLIC_FQDN "$FQDN"
 fi
 printf 'DROPLET_PUBLIC_FQDN persisted to %s\n' "$ENV_FILE"
 

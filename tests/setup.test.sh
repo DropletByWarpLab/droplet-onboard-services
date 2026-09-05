@@ -225,6 +225,172 @@ fi
 # Clean the opt-in back out so later phases see the default posture.
 sed -i.bak -E '/^DROPLET_TPM_ALLOW_SCAFFOLD=/d' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
 
+# --- DROPLET_ENV production posture (WARP-1320) ---------------------------
+# Nothing in provisioning ever set DROPLET_ENV, so every production-only
+# fail-closed guard keyed on it — ai-gateway's keystore refusing the public
+# dev DEVICE_SECRET (WARP-581 / GW-09), the WARP-588 session-store fail-loud,
+# device-identity's mock-TPM warning — was DORMANT on every shipped box; they
+# only armed via DROPLET_FIPS_REQUIRED, which a standard non-FIPS box never
+# sets. generate_env must write DROPLET_ENV=production by default, and honor
+# an explicit provisioning-environment override (the documented escape hatch
+# for a lab bench that wants the permissive posture:
+# `DROPLET_ENV=development ./scripts/setup.sh`).
+
+# Fresh default write: regenerate with no DROPLET_ENV in the environment.
+(
+  unset DROPLET_ENV
+  REGENERATE_ENV=true generate_env >/dev/null 2>&1
+)
+DROPLET_ENV_COUNT=$(grep -cE '^DROPLET_ENV=' "$TMP_ROOT/.env" || true)
+DROPLET_ENV_VALUE=$( { grep -E '^DROPLET_ENV=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2-)
+if [ "$DROPLET_ENV_COUNT" = "1" ] && [ "$DROPLET_ENV_VALUE" = "production" ]; then
+  pass "generate_env writes exactly one DROPLET_ENV=production by default"
+else
+  fail "generate_env DROPLET_ENV wrong (lines=${DROPLET_ENV_COUNT}, value='${DROPLET_ENV_VALUE}') — production-only guards stay dormant"
+fi
+
+# Explicit override honored on a fresh write.
+(
+  DROPLET_ENV=development REGENERATE_ENV=true generate_env >/dev/null 2>&1
+)
+DROPLET_ENV_OVERRIDE=$( { grep -E '^DROPLET_ENV=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2-)
+if [ "$DROPLET_ENV_OVERRIDE" = "development" ]; then
+  pass "generate_env honors an explicit DROPLET_ENV override from the provisioning environment"
+else
+  fail "generate_env wrote DROPLET_ENV='${DROPLET_ENV_OVERRIDE}' under DROPLET_ENV=development (override clobbered)"
+fi
+
+# migrate_env backfill: a provisioned box predating the key gains production
+# (the truthful posture of a shipped box) on its next setup re-run.
+(
+  unset DROPLET_ENV
+  REGENERATE_ENV=true generate_env >/dev/null 2>&1
+)
+sed -i.bak '/^DROPLET_ENV=/d' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+( unset DROPLET_ENV; migrate_env >/dev/null 2>&1 ) || true
+DROPLET_ENV_MIGRATED_COUNT=$(grep -cE '^DROPLET_ENV=' "$TMP_ROOT/.env" || true)
+DROPLET_ENV_MIGRATED=$( { grep -E '^DROPLET_ENV=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2-)
+if [ "$DROPLET_ENV_MIGRATED_COUNT" = "1" ] && [ "$DROPLET_ENV_MIGRATED" = "production" ]; then
+  pass "migrate_env backfills exactly one DROPLET_ENV=production on a pre-1320 .env"
+else
+  fail "migrate_env DROPLET_ENV backfill wrong (lines=${DROPLET_ENV_MIGRATED_COUNT}, value='${DROPLET_ENV_MIGRATED}')"
+fi
+
+# migrate_env preserves an EXPLICIT existing value — a bench box that opted
+# into the permissive posture must survive every setup re-run un-clobbered.
+sed -i.bak -E 's|^DROPLET_ENV=.*$|DROPLET_ENV=development|' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+( unset DROPLET_ENV; migrate_env >/dev/null 2>&1 ) || true
+DROPLET_ENV_PRESERVED_COUNT=$(grep -cE '^DROPLET_ENV=' "$TMP_ROOT/.env" || true)
+DROPLET_ENV_PRESERVED=$( { grep -E '^DROPLET_ENV=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2-)
+if [ "$DROPLET_ENV_PRESERVED_COUNT" = "1" ] && [ "$DROPLET_ENV_PRESERVED" = "development" ]; then
+  pass "migrate_env preserves an explicit DROPLET_ENV (never clobbers a bench opt-out)"
+else
+  fail "migrate_env clobbered an explicit DROPLET_ENV (lines=${DROPLET_ENV_PRESERVED_COUNT}, value='${DROPLET_ENV_PRESERVED}')"
+fi
+
+# Restore the shipping default for the phases below.
+sed -i.bak -E 's|^DROPLET_ENV=.*$|DROPLET_ENV=production|' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+
+# compose must not shadow the .env value: DROPLET_ENV reaches the guard
+# services via `env_file: ../.env`, and an `environment:` entry outranks
+# env_file — a pin there would silently defeat the provisioning write.
+if ! grep -qE '^[[:space:]]*-[[:space:]]*DROPLET_ENV=|^[[:space:]]*DROPLET_ENV:' "$REPO_ROOT_REAL/docker/docker-compose.yml"; then
+  pass "docker-compose.yml does not pin DROPLET_ENV in any environment: block (env_file value wins)"
+else
+  fail "docker-compose.yml pins DROPLET_ENV in an environment: block — it would shadow the .env value"
+fi
+
+# --- Guard spot-check: the provisioned value ARMS a real guard ------------
+# Runs the ACTUAL ai-gateway keystore guard (services/ai-gateway/auth/
+# keystore.py::_assert_device_secret_safe, WARP-581 / GW-09) with DROPLET_ENV
+# read back from the generated .env and DEVICE_SECRET forced to the public
+# dev default. Armed = the module import raises RuntimeError ("refusing to
+# start"). The cryptography package is PYTHONPATH-stubbed (the import-time
+# guard never touches it), so a bare python3 suffices — as on CI's runner.
+# Mutation coverage: if generate_env stops writing DROPLET_ENV=production,
+# the exported value goes empty, the guard stays permissive, and this fails.
+GUARD_PY="$(command -v python3 || command -v python || true)"
+if [ -z "$GUARD_PY" ]; then
+  fail "python3 unavailable — cannot spot-check the WARP-581 keystore guard (CI's runner always has it)"
+else
+  PYSTUBS="$TMP_ROOT/pystubs"
+  mkdir -p "$PYSTUBS/cryptography/hazmat/primitives/kdf"
+  : > "$PYSTUBS/cryptography/__init__.py"
+  : > "$PYSTUBS/cryptography/hazmat/__init__.py"
+  : > "$PYSTUBS/cryptography/hazmat/primitives/__init__.py"
+  : > "$PYSTUBS/cryptography/hazmat/primitives/kdf/__init__.py"
+  cat > "$PYSTUBS/cryptography/fernet.py" <<'PYSTUB'
+# Test stub (WARP-1320): the keystore import-time guard never touches Fernet.
+class Fernet:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class InvalidToken(Exception):
+    pass
+PYSTUB
+  cat > "$PYSTUBS/cryptography/hazmat/primitives/hashes.py" <<'PYSTUB'
+# Test stub (WARP-1320).
+class SHA256:
+    pass
+PYSTUB
+  cat > "$PYSTUBS/cryptography/hazmat/primitives/kdf/pbkdf2.py" <<'PYSTUB'
+# Test stub (WARP-1320).
+class PBKDF2HMAC:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def derive(self, *args, **kwargs):
+        return b""
+PYSTUB
+  cat > "$TMP_ROOT/guard_probe.py" <<'PYSTUB'
+# WARP-1320 guard probe: import the real keystore module; the WARP-581 guard
+# runs at import. RuntimeError = armed (production refuses the public dev
+# DEVICE_SECRET); a clean import = dormant.
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location(
+    "keystore_under_test", os.environ["KEYSTORE_PATH"]
+)
+mod = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(mod)
+except RuntimeError:
+    print("ARMED")
+    sys.exit(0)
+print("DORMANT")
+PYSTUB
+
+  KEYSTORE_UNDER_TEST="$REPO_ROOT_REAL/services/ai-gateway/auth/keystore.py"
+  ENV_DROPLET_ENV=$( { grep -E '^DROPLET_ENV=' "$TMP_ROOT/.env" || true; } | head -n1 | cut -d= -f2-)
+  GUARD_RESULT=$(KEYSTORE_PATH="$KEYSTORE_UNDER_TEST" PYTHONPATH="$PYSTUBS" \
+    DROPLET_ENV="$ENV_DROPLET_ENV" DROPLET_FIPS_REQUIRED="" \
+    DEVICE_SECRET="dev-secret-change-in-production" \
+    KEYS_DIR="$TMP_ROOT/keys" \
+    "$GUARD_PY" "$TMP_ROOT/guard_probe.py" 2>/dev/null || true)
+  if [ "$GUARD_RESULT" = "ARMED" ]; then
+    pass "keystore guard ARMS under the provisioned DROPLET_ENV (refuses the public dev DEVICE_SECRET)"
+  else
+    fail "keystore guard result '${GUARD_RESULT}' under DROPLET_ENV='${ENV_DROPLET_ENV}' (expected ARMED — WARP-581 fail-closed dormant)"
+  fi
+
+  # Control: the pre-1320 provisioning shape (no DROPLET_ENV anywhere) leaves
+  # the same guard dormant — proving the spot-check discriminates on the
+  # value provisioning writes, not on the stub plumbing.
+  GUARD_CONTROL=$(KEYSTORE_PATH="$KEYSTORE_UNDER_TEST" PYTHONPATH="$PYSTUBS" \
+    DROPLET_ENV="" DROPLET_FIPS_REQUIRED="" \
+    DEVICE_SECRET="dev-secret-change-in-production" \
+    KEYS_DIR="$TMP_ROOT/keys" \
+    "$GUARD_PY" "$TMP_ROOT/guard_probe.py" 2>/dev/null || true)
+  if [ "$GUARD_CONTROL" = "DORMANT" ]; then
+    pass "keystore guard control: dormant without DROPLET_ENV (the exact pre-1320 shipped-box shape)"
+  else
+    fail "keystore guard control returned '${GUARD_CONTROL}' (expected DORMANT — probe cannot discriminate)"
+  fi
+fi
+
 # =============================================================================
 # Phase 3: single-box .env knobs — configure_single_box_env (WARP-654 follow-up)
 # =============================================================================
@@ -233,6 +399,14 @@ echo "--- Phase 3: configure_single_box_env (single-box knobs) ---"
 # lib/single-box.sh is a sourceable lib (functions only; no top-level run).
 # logging.sh is already sourced above, and REPO_ROOT + a generated .env exist
 # from Phase 2 — so configure_single_box_env has everything it needs.
+# WARP-2543 — single-box.sh now calls configure_gpu_env (accelerator detection
+# decides the DMR profile and image), so gpu.sh is a hard dependency of it and
+# must be sourced FIRST, exactly as scripts/setup.sh does. Without this,
+# configure_single_box_env dies on an undefined function and every knob it
+# writes afterwards silently stops being written — which failed 33 assertions
+# in this file the first time round, none of them mentioning the GPU.
+# shellcheck source=../scripts/lib/gpu.sh
+source "$REPO_ROOT_REAL/scripts/lib/gpu.sh"
 # shellcheck source=../scripts/lib/single-box.sh
 source "$REPO_ROOT_REAL/scripts/lib/single-box.sh"
 
@@ -262,6 +436,46 @@ if configure_single_box_env >/dev/null 2>&1; then
 else
   fail "configure_single_box_env exited with an error"
 fi
+
+# --- WARP-2543: the GPU fix must actually be WIRED IN ------------------------
+#
+# 🔴 `configure_gpu_env "$env_target" || return 1` in single-box.sh is the ONE
+# line connecting scripts/lib/gpu.sh to the product, and until this assertion
+# existed it could be deleted with all three shell suites staying green:
+# tests/gpu-vendor-selection.test.sh sources gpu.sh and calls the function
+# itself, and tests/dmr-profile-survives-setup.test.sh writes GPU_VENDOR into
+# its own fixture .env before eval-ing the extracted block — so neither ever
+# depends on the real call having run. Deleting it makes the whole feature a
+# no-op: no GPU_VENDOR is written, the profile block falls back to
+# `${_gpu_vendor:-amd}`, and every box silently keeps the pre-WARP-2543 ROCm
+# shape. This is the only assertion that dies when that line goes.
+if grep -qE '^GPU_VENDOR=' "$TMP_ROOT/.env"; then
+  pass "configure_single_box_env wrote GPU_VENDOR (the GPU fix is wired into setup)"
+else
+  fail "no GPU_VENDOR in .env — configure_gpu_env is not being called; the WARP-2543 fix is inert"
+fi
+
+# The vendor must be one of the three the code can act on, not an empty or
+# junk value that would quietly select no DMR profile at all.
+SB_GPU_VENDOR="$(grep -E '^GPU_VENDOR=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2-)"
+case "$SB_GPU_VENDOR" in
+  nvidia|amd|none) pass "GPU_VENDOR is a recognised value ($SB_GPU_VENDOR)" ;;
+  *) fail "GPU_VENDOR='$SB_GPU_VENDOR' is not one of nvidia/amd/none" ;;
+esac
+
+# And the runtime profile token must agree with the detected vendor — a CUDA
+# profile beside a ROCm image (or vice versa) is the exact disagreement this
+# change exists to prevent.
+SB_PROFILES="$(grep -E '^COMPOSE_PROFILES=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2-)"
+case "$SB_GPU_VENDOR,$SB_PROFILES" in
+  nvidia,*dmr-cuda*) pass "nvidia vendor -> dmr-cuda token in COMPOSE_PROFILES" ;;
+  amd,*)  case ",$SB_PROFILES," in
+            *,dmr,*) pass "amd vendor -> the unchanged 'dmr' token (installed fleet safe)" ;;
+            *)       fail "amd vendor but no 'dmr' token (profiles: $SB_PROFILES)" ;;
+          esac ;;
+  none,*) pass "no GPU detected — profile left at the pre-existing shape ($SB_PROFILES)" ;;
+  *) fail "vendor '$SB_GPU_VENDOR' disagrees with COMPOSE_PROFILES '$SB_PROFILES'" ;;
+esac
 
 # The single-box shape runs the AP as a host hostapd (not a standalone UCI router),
 # so the device-bridge must read pairing-QR creds in hostapd mode. The install
@@ -1888,9 +2102,9 @@ fi
 # — a future "simplify" pass must not trim a pattern that an interrupted run
 # can actually strand. Writers (all stage to a `.$$`/`.<epoch>` sibling then
 # rename, leaving the sibling on interruption):
-#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_file.torn.$(date +%s)")
+#   .env.torn.*    -> secrets.sh generate_env torn-quarantine  (cp "$env_write_target.torn.$(date +%s)")
 #   .env.tmp.*     -> secrets.sh atomic .env write             ("$env_write_target.tmp.$$")
-#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_file.migrate.$$")
+#   .env.migrate.* -> secrets.sh migrate_env stage             ("$env_target.migrate.$$")
 #   .env.upsert.*  -> secrets.sh _upsert_env_kv / single-box.sh configure_single_box_env ("$target.upsert.$$")
 SECRETS_SH="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 SINGLEBOX_SH="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
@@ -1937,7 +2151,9 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # (ops) and fleet-agent (telemetry) are profile-gated services no default
 # provision pre-builds. inference-manager (dmr) is appended the same way —
 # WARP-2131's model-catalog sidecar, built only on a box running that runtime.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager"
+# mcp-bridge (remote-mcp) is appended the same way — WARP-2627's outbound MCP
+# session component, built only on a box that has connected a remote MCP vendor.
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

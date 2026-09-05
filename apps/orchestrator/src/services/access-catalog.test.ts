@@ -9,7 +9,7 @@
  * these specs keep the two from drifting on the load-bearing values.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   GATEABLE_MODULE_IDS,
   ALWAYS_ON_FEATURES,
@@ -23,16 +23,23 @@ import {
 } from "./access-catalog.js";
 
 describe("access-catalog — module vocabulary", () => {
-  it("gates the 12 non-core ModuleIds; chat is the always-on module at act", () => {
+  // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
+  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId
+  // cannot arrive without someone writing its §9 ladder — which is exactly
+  // what this test caught each time they did.
+  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
         "cameras",
+        "contacts",
+        "crm",
         "docs",
         "email",
         "files",
         "knowledge",
         "managed_switch",
+        "money",
         "network",
         "projects",
         "smart_home",
@@ -146,6 +153,25 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
       expect(TOOL_DOMAINS).toContain(d);
     }
     expect(GRANTABLE_TOOL_DOMAINS.length).toBe(TOOL_DOMAINS.length - 1);
+  });
+
+  it("`business` is grantable in its own right and holds every business_* tool (WARP-2583)", () => {
+    // ADR-045 moved the PM and CRM tools into one domain. A grant on `pm` or
+    // `crm` reaches nothing local any more (both are empty landing slots for
+    // remote catalogs), so a role that lacks `business` reaches none of them.
+    expect(GRANTABLE_TOOL_DOMAINS).toContain("business");
+    const business = TOOL_CATALOG.filter((t) => t.name.startsWith("business_"));
+    expect(business.map((t) => t.name)).toEqual(
+      expect.arrayContaining([
+        "business_find",
+        "business_timeline",
+        "business_create",
+        "business_update",
+        "business_link",
+      ]),
+    );
+    for (const t of business) expect(t.domain, t.name).toBe("business");
+    expect(TOOL_CATALOG.filter((t) => t.domain === "pm" || t.domain === "crm")).toEqual([]);
   });
 });
 

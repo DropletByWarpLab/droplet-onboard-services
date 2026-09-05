@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listCameras from "../../../src/handlers/cameras/list-cameras.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       // WARP-339: list_cameras now calls `ctx.http.orchestrator.get`

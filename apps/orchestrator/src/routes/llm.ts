@@ -16,14 +16,35 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
+// and the wire payload cannot disagree.
+import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
+// WARP-2582 — business context pins. The renderer is pure; the resolver is
+// where the module gate and the per-person tool-domain grant compose.
+import {
+  MAX_PINS_PER_SESSION,
+  isBusinessPinKind,
+  renderContextPinBlock,
+  type BusinessPinKind,
+} from "../services/context-pin-prompt.js";
+import {
+  checkBusinessPinTarget,
+  resolveBusinessPinTargets,
+} from "../services/context-pin-targets.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
+  narrowToolsToScope,
   resolveToolAccessScope,
+  toolAllowedForTier,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
+// WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
+// domain selection, so it sizes the tools[] the model actually receives.
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
@@ -45,7 +66,7 @@ import {
   resolveActiveChatModel,
   localModelIdentifiers,
 } from "../services/active-model.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import {
   decideCloudTurn,
   isLocalProvider,
@@ -217,6 +238,34 @@ function logPollutedAnswer(
       ...result.pollutedDiagnostics,
     }),
   );
+}
+
+/**
+ * WARP-2469 / WARP-2486 — scrub the interceptor's confirmation secret from
+ * a trace entry before the NON-STREAMING path persists the trace or returns
+ * it to the client.
+ *
+ * A WARP-2305 challenge carries its single-use token in `error.details`
+ * (nested under `interceptor` AND flat, for the WARP-640 chip), and the
+ * agent loop's trace holds the raw payload. The streaming path already
+ * egresses only an opaque `challengeId` (llm-agent.service.ts registers the
+ * challenge and never forwards the token); this closes the same hole on the
+ * blocking path, where the full trace rides both `liveToolCalls` (persisted)
+ * and the response body. Only an INTERCEPTOR challenge is scrubbed — a
+ * WARP-640 scene challenge's flat token is the client-facing "Approve & run"
+ * handle by design and passes through untouched.
+ */
+function scrubInterceptorChallenge(result: unknown): unknown {
+  const r = result as {
+    status?: unknown;
+    error?: { details?: { interceptor?: { outcome?: unknown } } };
+  } | null;
+  if (r?.status !== "confirmation_required") return result;
+  if (r.error?.details?.interceptor?.outcome !== "confirmation_required") {
+    return result;
+  }
+  const { details: _details, ...error } = r.error as Record<string, unknown>;
+  return { ...(r as Record<string, unknown>), error };
 }
 
 // /llm/chat accepts tool-role messages on replay so a client can resume a
@@ -1233,6 +1282,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           conversationId && assistantMessageId
             ? createFileCitationService(prisma)
             : undefined,
+        // WARP-2469 — the chat approval round-trip. The SAME instance the
+        // `POST /api/llm/confirm/:challengeId` handler above writes to: a
+        // second store would put the approval somewhere the loop never
+        // looks, which is exactly the mint-a-token-nobody-can-redeem
+        // failure `confirm-dispatcher-coverage.guard.test.ts` exists for.
+        approvals: chatApprovalStore,
       };
       // Carry the authenticated user.id (UUID, not username) onto every
       // citation insert so the related-chats route can scope by owner.
@@ -1424,21 +1479,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             orderBy: { addedAt: "asc" },
           });
           if (pins.length > 0) {
-            const lines = pins.map((p: { kind: string; ref: string; meta: unknown }) => {
-              const metaSuffix =
-                p.meta && typeof p.meta === "object"
-                  ? ` ${JSON.stringify(p.meta)}`
-                  : "";
-              return `- ${p.kind}: ${p.ref}${metaSuffix}`;
+            // WARP-2582 — a business pin (customer / deal / project /
+            // work_item) carries a RECORD ID, not a path, so it has to be
+            // resolved before it can be rendered: prepending a bare uuid is
+            // worse than prepending nothing, because the model spends a turn
+            // guessing what it names or invents an answer.
+            //
+            // The resolver is also where the two authorization axes compose.
+            // `/api/llm/*` is gated on the `chat` module, NOT on `crm` or
+            // `projects` — so without this a pin would keep naming a customer
+            // on a box whose operator turned the CRM off, which is a module
+            // gate bypassed through a prompt. It runs PER TURN, not once at
+            // create, precisely because enablement changes under a live pin.
+            // `toolAccessScope` is the s3 reach already resolved above for
+            // this turn; re-resolving it here would buy a second REPEATABLE
+            // READ transaction on the chat critical path for nothing.
+            //
+            // Zero added queries on a turn with no business pin — which is
+            // nearly every turn — so this is affordable inline.
+            const targets = await resolveBusinessPinTargets(prisma, pins, {
+              scope: toolAccessScope,
             });
-            const pinSystemMessage: ChatMessage = {
-              role: "system",
-              content:
-                "Context pins for this conversation — prefer these as " +
-                "scope hints when calling retrieval tools:\n" +
-                lines.join("\n"),
-            };
-            agentMessages = [pinSystemMessage, ...agentMessages];
+            const block = renderContextPinBlock(pins, targets);
+            // `null` when nothing survived resolution (every pin unavailable,
+            // or a business pin the resolver could not reach). A header with
+            // no lines under it is prompt the model reads for nothing.
+            if (block) {
+              const pinSystemMessage: ChatMessage = { role: "system", content: block };
+              agentMessages = [pinSystemMessage, ...agentMessages];
+            }
           }
         } catch (err) {
           // Pin-load failure must NOT block chat — degrade gracefully.
@@ -1698,26 +1767,81 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const interviewBlock = interviewActive
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
-        // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives:
-        // an explicit allowed set verbatim, otherwise the WARP-1424 default
-        // chat scope (registry minus chat-tool-scope.ts exclusions).
-        const effectiveTools = allowedForUser
+        // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
+        // default chat scope (registry minus chat-tool-scope.ts exclusions).
+        const pooledTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
             )
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
+        //
+        // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
+        // with no explicit `allowed_tools`, regardless of `toolAccessScope`, so
+        // `allowedForUser` alone does not carry the scope. The agent loop
+        // applies `inScope` unconditionally from `req.toolAccessScope` — so
+        // without this line an admin on a restrictive AccessRole gets an
+        // estimate sized against the FULL pool while a smaller set goes on the
+        // wire, which is the estimate/actual divergence WARP-2552 exists to
+        // close, reopened for one role+scope combination.
+        //
+        // WARP-2497 had this filter; the conflict resolution that merged
+        // WARP-2552's shared-helper estimate over it kept the better estimate
+        // and lost the scope narrowing with the version it replaced. Restored
+        // here, and `tool-selection.parity.test.ts` now runs a SCOPED fixture
+        // so an unscoped one cannot pass for coverage again.
+        //
+        // Through the SHARED helper, not an inline re-expression of the same
+        // rule: an inline copy here is what drifted out of step with the
+        // dispatch-side filter in the first place.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
+        // WARP-2552 — but the pool is NOT what the model receives, and sizing
+        // it as though it were is the defect this fixes.
+        //
+        // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
+        // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
+        // which the route passes UNCONDITIONALLY — there is no path that ships
+        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // The comment that used to sit here still claimed the estimate
+        // "reflects what the model actually receives"; it had been false since
+        // selection landed. Measured on a 16384 window: the estimator charged
+        // ~14,986 tokens of tool schemas on a turn that ships ~3,426 — an
+        // ~11.5K-token phantom on EVERY turn.
+        //
+        // The consequence was not theoretical. `degradeToFit` below drops the
+        // business block, then the persona block, once the estimate exceeds
+        // the window; with the phantom included, identity + tool guidance +
+        // the pool alone came to ~15,853 tokens against a 15,360 ceiling. So
+        // on any box carrying durable memory facts, persona and business were
+        // being dropped from the system prompt on every turn — to make room
+        // for schemas that were never sent.
+        //
+        // Under `off` the pool genuinely IS the wire payload, so it is sized
+        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
+        // that. Runtime-registered remote tools are not in this estimate — the
+        // route has no registry access — which is unchanged from before; the
+        // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
+        // the fully assembled advertisement.
+        const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
+          mode: config.TOOL_SELECTION_MODE,
+          messages: agentMessages,
+          priorToolNames,
+          pool: effectiveTools.map((t) => t.name),
+        });
         const toolSchemasJson = JSON.stringify(
-          effectiveTools.map((t) => ({
-            type: "function" as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema,
-            },
-          })),
+          effectiveTools
+            .filter((t) => advertisedNamesForEstimate.has(t.name))
+            .map((t) => ({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema,
+              },
+            })),
         );
         // Everything already spliced onto agentMessages (pins, attachments,
         // history) counts toward the window; serialize it as one blob.
@@ -2019,6 +2143,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
+        // WARP-2486 — scrub interceptor confirmation secrets from the
+        // trace BEFORE anything downstream reads it: `liveToolCalls`
+        // (persisted below) and the `res.json` body both carry
+        // `result.trace`.
+        result = {
+          ...result,
+          trace: result.trace.map((t) => ({
+            ...t,
+            result: scrubInterceptorChallenge(t.result),
+          })),
+        };
         logBlankAnswer(result, conversationId, assistantMessageId);
         logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
@@ -2476,6 +2611,143 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   //
   // The `inputSchema → parameters` rename mirrors the OpenAI
   // function-calling shape callers historically expected.
+  // ── WARP-2469 — the chat approval round-trip ──────────────────────
+  //
+  // WARP-2305's interceptor can REFUSE a write and mint a token bound to
+  // it. This is the only route that turns a human's thumbs-up into that
+  // token. Without it, the 8 registry tools that never had a handler-side
+  // check, every connector write tool, and every WARP-320 remote tool
+  // fail closed in chat with no path to approval.
+  //
+  // RBAC, two layers, both required:
+  //
+  //  1. AT REGISTRATION — `requireRole` excludes `guest` and every
+  //     service principal. A guest gets 403 *and* a `recordAccessDenied`
+  //     policy-violation row, from the shared guard rather than an
+  //     inlined role compare (WARP-1062: local guards that skip the row
+  //     deny silently, which is how an ACL breach becomes invisible).
+  //
+  //  2. IN THE HANDLER — `toolAllowedForTier` re-checks the CALLER's tier
+  //     against THIS tool. Registration cannot express "family may
+  //     approve a read-ish confirming tool but not a write", because the
+  //     tool is only known once the challenge is loaded. Same predicate
+  //     the chat dispatch path uses, so approval and execution cannot
+  //     disagree about what a tier may do.
+  //
+  // The response body deliberately does NOT carry the bound token. The
+  // agent loop that redeems it runs server-side on `/api/llm/chat` for
+  // EVERY caller — the dashboard and a raw API client alike — and claims
+  // the grant from the approval store itself, attaching the token via
+  // `_meta` when the model re-issues the call (see
+  // `chat-approval.service.ts`). No client ever needs the secret, so
+  // returning it would hand a live single-use write capability to
+  // whatever holds the HTTP response, for nothing.
+  const confirmDecisionSchema = z.object({
+    decision: z.enum(["approve", "deny"]),
+  });
+
+  router.post(
+    "/llm/confirm/:challengeId",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const user = (req as AuthedRequest).user;
+        const username = user?.username;
+        if (!username) {
+          // Defense in depth: `requireRole` has already established a
+          // role, but a principal with no username owns no challenge and
+          // must not be able to approve one.
+          recordAccessDenied(req, "confirm-no-username");
+          res.status(403).json({ error: "Forbidden: no user on session" });
+          return;
+        }
+
+        const parsed = confirmDecisionSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "decision must be 'approve' or 'deny'" });
+          return;
+        }
+
+        const challengeId = req.params.challengeId;
+        const challenge = chatApprovalStore.get(challengeId);
+        if (!challenge) {
+          res.status(404).json({ error: "Unknown or expired challenge" });
+          return;
+        }
+
+        // Layer 2. A `family` caller may not approve a write tool, even
+        // though the route admits the role.
+        if (!toolAllowedForTier(challenge.tool, user?.role)) {
+          recordAccessDenied(req, "confirm-tool-tier");
+          res.status(403).json({ error: "Forbidden: role not permitted for this tool" });
+          return;
+        }
+
+        if (parsed.data.decision === "deny") {
+          const denied = chatApprovalStore.deny(challengeId, username);
+          if (!denied.ok) {
+            res
+              .status(denied.reason === "expired" ? 410 : 409)
+              .json({ status: denied.reason, challengeId });
+            return;
+          }
+          // A refusal is a security-relevant decision and is audited with
+          // the same PHI-free shape the interceptor's own rows use: tool
+          // name and outcome, no arguments, and no field one could be put
+          // in.
+          await recordActivity({
+            kind: "tool_call",
+            severity: "warn",
+            sourceIcon: "shield-off",
+            what: `${denied.tool} refused by user`,
+            sub: `for ${username}`,
+            refs: {
+              name: denied.tool,
+              confirmation: "user_denied",
+              userId: username,
+              ticket: "WARP-2469",
+            },
+            actor: actorFromRequest(req),
+          });
+          res.json({ challengeId, status: "denied", tool: denied.tool });
+          return;
+        }
+
+        const approved = chatApprovalStore.approve(challengeId, username);
+        if (!approved.ok) {
+          res
+            .status(approved.reason === "expired" ? 410 : 409)
+            .json({ status: approved.reason, challengeId });
+          return;
+        }
+
+        await recordActivity({
+          kind: "tool_call",
+          severity: "info",
+          sourceIcon: "shield-check",
+          what: `${approved.tool} approved by user`,
+          sub: `for ${username}`,
+          refs: {
+            name: approved.tool,
+            confirmation: "user_approved",
+            userId: username,
+            ticket: "WARP-2469",
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.json({
+          challengeId,
+          status: "approved",
+          tool: approved.tool,
+          expiresAt: approved.expiresAt,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   router.get("/llm/tools", async (req, res, next) => {
     try {
       const tools = await mcpClient.listTools();
@@ -2591,11 +2863,32 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // creation (today: `req.user.username`; per WARP-485+WARP-488 the
   // backfill to UUID lands separately on ChatSession in a follow-up).
   // Read both shapes so the gate works through the transition.
+  // WARP-2582 — the four business kinds join the five WARP-460 ones. A
+  // business `ref` is a record id, so it is validated as a uuid: `.uuid()`
+  // here is a ROUTE guard on user input and never reaches a model. The
+  // WARP-1839 prohibition on `pattern`/`enum`/`maxLength` is about TOOL JSON
+  // SCHEMAS, which the ai-gateway feeds to llama.cpp's GBNF compiler — this
+  // zod object is not one of those and never serialises into `tools[]`.
   const pinCreateSchema = z.object({
-    kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
+    kind: z.enum([
+      "folder",
+      "file",
+      "email_thread",
+      "camera",
+      "camera_window",
+      "customer",
+      "deal",
+      "project",
+      "work_item",
+    ]),
     ref: z.string().min(1).max(512),
     meta: z.record(z.unknown()).optional(),
   });
+
+  /** A business pin's ref must be a record id. Kept separate from the shape
+   *  above so the five path-shaped kinds keep accepting exactly what they
+   *  always did. */
+  const businessRefSchema = z.string().uuid();
 
   async function loadOwnedSession(
     sessionId: string,
@@ -2632,7 +2925,48 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           where: { sessionId: req.params.sessionId },
           orderBy: { addedAt: "asc" },
         });
-        res.json({ pins });
+        // WARP-2582 — resolve alongside the rows so the dashboard can render a
+        // NAME. Without this the Context panel would list a raw uuid, which is
+        // the same defect on the human side that the prompt resolution fixes
+        // on the model side.
+        //
+        // `resolved` is an ADDITIVE field and `null` for the five path-shaped
+        // kinds: their `ref` is self-describing and there is no record to look
+        // up. That is a property of the KIND, not a state derived from a null
+        // column — the four target states are an explicit enum
+        // (`ContextPinTargetState`), never inferred from a missing label.
+        //
+        // Same two-axis gate as the chat turn, and the same reason: this route
+        // is behind the `chat` module, not `crm`/`projects`.
+        //
+        // Resolution is BEST-EFFORT here, as it is on the chat turn: a CRM/PM
+        // read failing must not take the whole listing down, least of all for
+        // a session whose pins are all path-shaped and never touched CRM. On a
+        // failure every business pin reads `unavailable` — the same explicit
+        // state the per-target resolver uses when a module cannot answer —
+        // and the path-shaped pins are unaffected.
+        let targets: Awaited<ReturnType<typeof resolveBusinessPinTargets>> = new Map();
+        try {
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/pins] failed to resolve business pin targets:", err);
+        }
+        res.json({
+          pins: pins.map((p: { id: string; kind: string }) => ({
+            ...p,
+            resolved:
+              targets.get(p.id) ??
+              (isBusinessPinKind(p.kind)
+                ? { state: "unavailable", label: null, sublabel: null }
+                : null),
+          })),
+        });
       } catch (err) {
         next(err);
       }
@@ -2657,15 +2991,105 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           });
           return;
         }
-        const pin = await prisma.contextPin.create({
-          data: {
-            sessionId: req.params.sessionId!,
-            kind: parsed.data.kind,
-            ref: parsed.data.ref,
-            meta: parsed.data.meta as object | undefined,
-          },
+        // WARP-2582 — a business pin is only accepted for a record the caller
+        // can read RIGHT NOW. This does not make the per-turn resolution
+        // redundant and is not meant to: a module can be switched off, or a
+        // record deleted, between the pin being made and the next turn.
+        // Create-time validation exists so the failure surfaces on the button
+        // the user pressed, instead of as a pin that silently never worked.
+        if (isBusinessPinKind(parsed.data.kind)) {
+          const refOk = businessRefSchema.safeParse(parsed.data.ref);
+          if (!refOk.success) {
+            res.status(400).json({ error: "Invalid pin", details: "ref must be a record id" });
+            return;
+          }
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          const check = await checkBusinessPinTarget(
+            prisma,
+            parsed.data.kind as BusinessPinKind,
+            parsed.data.ref,
+            { scope },
+          );
+          if (!check.ok) {
+            if (check.reason === "module_disabled") {
+              // Byte-consistent with requireModuleEnabled / the feature gate:
+              // a module that is off reads as ABSENT, never as FORBIDDEN.
+              res.status(404).json({ error: "module_disabled", module: check.module });
+              return;
+            }
+            // 422, not 404: the request is well-formed and the SESSION exists
+            // — it is the referenced record that does not. 404 on this route
+            // already means "no such session", and collapsing the two would
+            // make a deleted customer read as a revoked thread.
+            res.status(422).json({ error: "pin_target_not_found" });
+            return;
+          }
+        }
+
+        // Advisory cap. The ENFORCING gate is the pin block's char budget
+        // (CONTEXT_PIN_BLOCK_MAX_CHARS), which no concurrent insert can get
+        // around; this one exists to tell a user who is over it, at the moment
+        // they go over, rather than to be race-free.
+        const existingCount = await prisma.contextPin.count({
+          where: { sessionId: req.params.sessionId },
         });
-        res.status(201).json({ pin });
+        if (existingCount >= MAX_PINS_PER_SESSION) {
+          // The cap bounds NEW pins. Re-pinning a record that is already in
+          // the set is idempotent (the P2002 branch below) and adds nothing to
+          // the block, so a full session still answers 200 with the existing
+          // row instead of refusing the one gesture that changes nothing.
+          const already = await prisma.contextPin.findFirst({
+            where: {
+              sessionId: req.params.sessionId,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+            },
+          });
+          if (already) {
+            res.status(200).json({ pin: already });
+            return;
+          }
+          res.status(409).json({ error: "too_many_pins", limit: MAX_PINS_PER_SESSION });
+          return;
+        }
+
+        try {
+          const pin = await prisma.contextPin.create({
+            data: {
+              sessionId: req.params.sessionId!,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+              meta: parsed.data.meta as object | undefined,
+            },
+          });
+          res.status(201).json({ pin });
+        } catch (err) {
+          // WARP-2582 — pinning the same record twice is IDEMPOTENT, not an
+          // error: the record-drawer action makes a double click one gesture,
+          // and the user's intent ("this thread is about Northwind") is
+          // already satisfied. Caught from the unique index rather than
+          // pre-checked with findFirst, which would be the exact
+          // findUnique-then-write TOCTOU the review patterns flag. 200, not
+          // 201, so a client can tell it created nothing.
+          if ((err as { code?: string }).code === "P2002") {
+            const existing = await prisma.contextPin.findFirst({
+              where: {
+                sessionId: req.params.sessionId,
+                kind: parsed.data.kind,
+                ref: parsed.data.ref,
+              },
+            });
+            if (existing) {
+              res.status(200).json({ pin: existing });
+              return;
+            }
+          }
+          throw err;
+        }
       } catch (err) {
         next(err);
       }

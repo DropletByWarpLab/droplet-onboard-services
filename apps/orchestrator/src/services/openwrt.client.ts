@@ -1310,6 +1310,19 @@ export interface DeleteVpnPeerResult {
   applied?: boolean;
   interface: string;
   removed: number;
+  /** WARP-2686 — did routing OBSERVE the peer leave the interface?
+   *
+   *  Three-valued, and the third value is the common one. `true` = checked and
+   *  gone. `false` = checked and STILL THERE (routing also sets
+   *  `applied: false`, so `isRevokeApplied` already rejects it). `null` or
+   *  absent = routing could not read kernel state at all, which is the default
+   *  on every router flashed without `rpcd-mod-wireguard` or without a
+   *  `wireguard` grant in the droplet-ai ACL (WARP-2689).
+   *
+   *  Do NOT gate revocation on this being `true` — unknown is not failure, and
+   *  treating it as one would break revocation on most routers in the field.
+   *  It is for telling an operator whether the revoke was *proven*. */
+  revocation_verified?: boolean | null;
 }
 
 /** True unless routing EXPLICITLY said the delete was not applied.

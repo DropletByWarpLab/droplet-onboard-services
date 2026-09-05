@@ -1,3 +1,7 @@
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS, TOOL_CATALOG } from "../src/index.js";
 
@@ -90,18 +94,20 @@ const EXPECTED_TOOL_NAMES = [
   "remove_device",
   "create_scene",
   "assign_device_room",
-  // WARP-509 — Plane PM write tools
-  "pm_add_work_item_comment",
-  "pm_create_project",     // WARP-2058
-  "pm_create_work_item",
-  "pm_transition_work_item",
-  "pm_update_work_item",
-  // WARP-508 — Plane PM read tools
-  "pm_get_work_item",
-  "pm_list_projects",
-  "pm_list_work_items",
-  "pm_list_workspaces",
-  "pm_search_work_items",
+  // ADR-045 — the `pm` and `crm` tool families are GONE, and that is the
+  // decision this list exists to make somebody sign.
+  //
+  // Slice C replaced WARP-508's five PM reads and WARP-2546's five CRM reads
+  // with `business_find` / `business_timeline`. Slice D replaced WARP-509's
+  // five PM writes and the two CRM writes with `business_create` /
+  // `business_update` / `business_link`. Seventeen names out, five in, all
+  // listed under business below.
+  //
+  // Both DOMAINS survive with their DOMAIN_RULES entries and hold zero local
+  // tools — that is deliberate, not leftover. A rule is the route a REMOTE
+  // catalog registered into `pm` (Atlassian, WARP-2316) or `crm` (HubSpot)
+  // becomes selectable, because the exclusion list names LOCAL tools only.
+  // `chat-tool-scope.test.ts` pins both as documented dead rules.
   // WARP-1094 — ERP-connector (Eaglesoft) tools
   "erp_get_schedule_today",
   "erp_find_patient",
@@ -109,6 +115,15 @@ const EXPECTED_TOOL_NAMES = [
   "erp_schedule_appointment",
   // WARP-1120 — business-knowledge layer (read-only Tier 1)
   "business_profile_get",
+  // ADR-045 slice D — the write verbs (Tier-2: write + confirmation).
+  // Seven tools in, three out; the registry gets SMALLER by four.
+  "business_create",
+  "business_update",
+  "business_link",
+  // ADR-045 slice C — the business graph, read half. Two verbs over one typed
+  // graph, replacing ten noun-shaped CRM/PM reads. Both Tier-1.
+  "business_find",
+  "business_timeline",
   // WARP-1685 — Messages sends (Tier-2: write + two-phase confirmation)
   "team_chat_send_message",
   "team_chat_send_meeting_invite",
@@ -164,8 +179,27 @@ const EXPECTED_TOOL_NAMES = [
   "restore_file_version",
   "share_file",
   "create_document",
+  // WARP-2211/2212 — document generation (a finished file), as opposed to
+  // create_document's empty seed.
+  "create_pdf_report",
+  "create_word_document",
+  "create_spreadsheet",
+  // WARP-2664 — file cleanup: read-only report, then organize (write +
+  // confirm) and bulk delete-to-trash (write + confirm).
+  "analyze_file_cleanup",
+  "organize_files",
+  "delete_files",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
+  // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
+  // three vendors and all ten datasets; the dataset arg picks the provider.
+  "cloud_query_dataset",
+  // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
+  "money_list_open_documents",
+  // agent_runs (WARP-2180) — start is Tier-2 (it spends compute unattended),
+  // list is Tier-1. Both in the chat pool: a run is startable from chat.
+  "start_agent_run",
+  "list_agent_runs",
 ];
 
 describe("TOOLS registry", () => {
@@ -184,17 +218,52 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("list_files")?.requiresWrite).toBe(false);
     expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
+    // WARP-2669 — `delete_file` had no assertion here at all, which is part
+    // of how it kept `requiresConfirmation: false` while the confirmation
+    // contract doc (§3) used it as its worked example of a gated tool and
+    // three orchestrator suites used it as their confirming fixture. It is a
+    // RECURSIVE delete: a directory goes with everything inside it. Pinned
+    // now so a future flip back is a decision somebody has to write down.
+    expect(TOOLS.get("delete_file")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("delete_file")?.requiresConfirmation).toBe(true);
+    // WARP-2180 — starting a background run spends compute unattended: Tier-2.
+    expect(TOOLS.get("start_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
+    // gate of its own, so there is no route challenge to stand down for.
+    expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();
+    // ...and no `confirmed` boolean in the schema, so the legacy path (§3) is
+    // closed to it and only a human-minted token gets through.
+    expect(
+      Object.keys(
+        (TOOLS.get("delete_file")?.inputSchema as { properties: Record<string, unknown> })
+          .properties,
+      ),
+    ).toEqual(["path"]);
     expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
     // WARP-508/509 — embedded Plane PM. Read tools are read-only; write
     // tools (create / update / comment / transition) are
     // requiresWrite=true AND requiresConfirmation=true because every
     // Plane write hits a customer's tracked project state.
-    expect(TOOLS.get("pm_list_workspaces")?.requiresWrite).toBe(false);
-    expect(TOOLS.get("pm_get_work_item")?.requiresWrite).toBe(false);
-    expect(TOOLS.get("pm_create_work_item")?.requiresWrite).toBe(true);
-    expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
-    expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
-    expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
+    // ADR-045 slice C — the PM read tools are gone; the graph reads that
+    // replaced them carry the Read tier now, and they are what this pair of
+    // assertions is for (a read that is silently flagged write loses nothing
+    // visible until RBAC narrows it away for a family role).
+    expect(TOOLS.get("business_find")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_find")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("business_timeline")?.requiresConfirmation).toBe(false);
+    // ADR-045 slice D — the tier moved with the capability: creating a task
+    // and transitioning one are both `business_*` verbs now, and both stay
+    // write + confirmation.
+    expect(TOOLS.get("business_create")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_create")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("business_update")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_update")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("business_link")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("business_link")?.requiresConfirmation).toBe(true);
     // WARP-1094 — ERP-connector (Eaglesoft). The three reads are Read-tier;
     // erp_schedule_appointment is Write-tier (every ERP write hits a live
     // third-party PMS through the confirmed outbox pipeline, brief §11.6).
@@ -319,6 +388,16 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("share_file")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("create_document")?.requiresWrite).toBe(true);
     expect(TOOLS.get("create_document")?.requiresConfirmation).toBe(false);
+    // WARP-2212 — the generators are plain writes too. They create a NEW file
+    // at a path the caller named, and POST /api/files/render refuses an
+    // existing one (409) — enforced atomically by the `If-None-Match: *`
+    // create-new guard on the WebDAV PUT itself (WARP-2523), with the exists?
+    // pre-check as a fast path — so there is no overwrite for a confirmation
+    // to guard against.
+    for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
   });
 
   // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──

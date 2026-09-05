@@ -66,7 +66,7 @@ import { Router, type Request } from "express";
 import { z } from "zod";
 import type { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
-import { checkSpaceAccess } from "../middleware/space.js";
+import { checkSpaceAccess, departmentSpaceToken } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
 import { createLogger } from "../lib/logger.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
@@ -248,25 +248,6 @@ function toMeetingDto(m: MeetingRowLike, names?: Map<string, ContactDto>) {
       respondedAt: r.respondedAt.toISOString(),
     })),
   };
-}
-
-/**
- * WARP-1898 — a resolved `departmentId` in the WIRE space vocabulary the
- * dashboard's `/files?space=` understands. The seeded HOUSEHOLD department
- * is addressed as the legacy `"shared"` literal there (GET /api/files/spaces
- * reports it under that id); every other department/team is `dept:<uuid>`.
- * routes/files.ts translates `"shared"` back to the gate's `"household"` at
- * its own boundary, so this stays on the UI side of that seam.
- */
-async function departmentSpaceId(
-  prisma: PrismaClient,
-  departmentId: string,
-): Promise<string> {
-  const dept = await prisma.department.findUnique({
-    where: { id: departmentId },
-    select: { kind: true },
-  });
-  return dept?.kind === "HOUSEHOLD" ? "shared" : `dept:${departmentId}`;
 }
 
 function toMessageDto(
@@ -713,7 +694,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         // nothing: /files re-runs its own space gate on every read.
         const sharedFileSpace =
           departmentId !== null
-            ? await departmentSpaceId(prisma, departmentId)
+            ? await departmentSpaceToken(prisma, departmentId)
             : (body.space ?? null);
 
         data = {

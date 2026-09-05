@@ -1346,6 +1346,12 @@ export default function UsersPage() {
                 openEdit(p);
               }}
               onOpenDepartments={() => setTab("departments")}
+              // WARP-2738 — the panel refreshes its OWN list; this page keeps
+              // a second copy for the roster chips, the person editor's role
+              // select and the invite picker. A role created from a template
+              // would otherwise be missing from all three until the tab
+              // remounted.
+              onRolesChanged={reloadAccessRoles}
             />
           )}
         </div>

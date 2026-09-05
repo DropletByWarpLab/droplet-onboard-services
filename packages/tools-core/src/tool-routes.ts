@@ -72,6 +72,18 @@
  * Paths carry `:param` segments (e.g. `/api/cameras/events/:eventId`); the
  * cross-check matches path SHAPE (segment count + literal segments), so the
  * exact param name here is documentation, not load-bearing.
+ *
+ * ## Runtime-registered tools have no row here, on purpose (WARP-2418)
+ *
+ * A tool advertised by a remote MCP server (ADR-043) dials no orchestrator
+ * route of ours, so there is nothing for the admission suite to prove and a
+ * row would be a fiction the cross-check would then have to be taught to
+ * skip. The completeness gate is keyed off `registry.ts`, which such a tool
+ * is never in, so this needs no exemption — it needs only to be said, since
+ * "the manifest is complete" and "the manifest covers every tool the model
+ * can name" stopped being the same sentence the moment a catalog could
+ * arrive over a socket. Those tools live in
+ * `apps/orchestrator/src/services/runtime-tool-registry.service.ts`.
  */
 
 export type ToolClient = "orchestrator" | "nextcloud" | "none";
@@ -153,6 +165,27 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("read_document_text"), // ctx.readDocumentText shim (no ctx.http hop)
   { tool: "list_recent_files", client: "nextcloud", hops: [admit("get", "/api/files/recents")] },
   { tool: "write_file", client: "nextcloud", hops: [admit("post", "/api/files/upload")] },
+  // WARP-2212: the three generators all dispatch one spec to the same render
+  // route. `nextcloud` because that client targets the orchestrator's
+  // /api/files surface (FILES_API_URL) and carries the caller's NC
+  // credentials — the document must land in the CALLER's storage.
+  { tool: "create_pdf_report", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  { tool: "create_word_document", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  { tool: "create_spreadsheet", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  // WARP-2664 — file cleanup. analyze walks the tree through the same
+  // listing hop list_files uses; organize lists once then mkdir + move per
+  // file; delete_files reads the parent listing before every delete so a
+  // folder passed as a file is refused rather than trashed recursively.
+  { tool: "analyze_file_cleanup", client: "nextcloud", hops: [admit("get", "/api/files")] },
+  { tool: "organize_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("post", "/api/files/mkdir"),
+    admit("post", "/api/files/move"),
+  ] },
+  { tool: "delete_files", client: "nextcloud", hops: [
+    admit("get", "/api/files"),
+    admit("delete", "/api/files"),
+  ] },
   { tool: "delete_file", client: "nextcloud", hops: [admit("delete", "/api/files")] },
   { tool: "create_directory", client: "nextcloud", hops: [admit("post", "/api/files/mkdir")] },
   { tool: "rename_file", client: "nextcloud", hops: [admit("post", "/api/files/move")] },
@@ -290,16 +323,16 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("memory_forget"), // ctx.prisma
 
   // ── pm (native, orchestrator /api/pm/* via callOrch) ────────────────────
-  { tool: "pm_create_project", client: "orchestrator", hops: [admit("post", "/api/pm/projects")] },
-  { tool: "pm_create_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/projects/:id/work-items")] },
-  { tool: "pm_update_work_item", client: "orchestrator", hops: [admit("patch", "/api/pm/work-items/:id")] },
-  { tool: "pm_add_work_item_comment", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/comments")] },
-  { tool: "pm_transition_work_item", client: "orchestrator", hops: [admit("post", "/api/pm/work-items/:id/transition")] },
-  { tool: "pm_list_workspaces", client: "orchestrator", hops: [admit("get", "/api/pm/workspaces")] },
-  { tool: "pm_list_projects", client: "orchestrator", hops: [admit("get", "/api/pm/projects")] },
-  { tool: "pm_list_work_items", client: "orchestrator", hops: [admit("get", "/api/pm/projects/:id/work-items")] },
-  { tool: "pm_get_work_item", client: "orchestrator", hops: [admit("get", "/api/pm/work-items/:id")] },
-  { tool: "pm_search_work_items", client: "orchestrator", hops: [admit("get", "/api/pm/work-items")] },
+  // ADR-045 slice D — the pm write rows moved to the `business_*` block
+  // below, which declares the same hops from one tool each.
+
+  // WARP-2546 — CRM. ADR-045 slice C removed the five read rows; the two
+  // write rows stay until slice D.
+  // ADR-045 slice D — `crm_log_activity` → `business_create({entity:"note"})`
+  // and `crm_move_deal_stage` → `business_update({entity:"deal", state})`.
+  // Note the second one no longer needs `POST /api/crm/deals/:id/stage` at
+  // all: since WARP-2579 the PATCH applies the move inside the same
+  // transaction as the field update, STAGE_CHANGE timeline row included.
 
   // ── erp (ERP_NOT_CONNECTED stubs — no ctx.http hop yet) ─────────────────
   none("erp_get_schedule_today"),
@@ -307,8 +340,104 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("erp_get_ar_summary"),
   none("erp_schedule_appointment"),
 
+  // ── money (WARP-2581) ───────────────────────────────────────────────────
+  {
+    tool: "money_list_open_documents",
+    client: "orchestrator",
+    hops: [admit("get", "/api/money/documents")],
+  },
+
+  // ── cloud (WARP-2497) ───────────────────────────────────────────────────
+  // Lives under /api/erp/* because the cloud connectors reuse the ERP
+  // route surface and its connector-grant gate; the tool domain is `cloud`.
+  { tool: "cloud_query_dataset", client: "orchestrator", hops: [admit("get", "/api/erp/dataset/:dataset")] },
+
   // ── business ────────────────────────────────────────────────────────────
   none("business_profile_get"), // ctx.prisma
+
+  // ADR-045 slice D — the write verbs. `business_create` dispatches to SIX
+  // routes across two back ends, so every one is declared: the drift gate
+  // checks the LIST, and an undeclared hop is how a tool ships with a route
+  // the mcp principal cannot reach.
+  //
+  // Two routes are deliberately ABSENT because two entities are:
+  // `POST /api/crm/companies/:id/contacts` and `PATCH /api/pm/projects/:id`
+  // are both `requireRole(...WRITE)` and do NOT admit `_service:mcp`, so
+  // `contact` is not a creatable entity and `project` is not an updatable
+  // one. Adding either branch would ship a 403 with a schema in front of it.
+  {
+    tool: "business_create",
+    client: "orchestrator",
+    hops: [
+      admit("post", "/api/crm/companies"),
+      admit("post", "/api/crm/deals"),
+      admit("post", "/api/pm/projects"),
+      admit("post", "/api/pm/projects/:id/work-items"),
+      admit("post", "/api/crm/activities"),
+      admit("post", "/api/pm/work-items/:id/comments"),
+    ],
+  },
+  {
+    tool: "business_update",
+    client: "orchestrator",
+    hops: [
+      admit("patch", "/api/crm/companies/:id"),
+      admit("patch", "/api/crm/deals/:id"),
+      admit("patch", "/api/pm/work-items/:id"),
+    ],
+  },
+  // One hop, because both live edges are columns on the DEAL
+  // (`CrmDeal.projectId`, `CrmDeal.companyId` — WARP-2117). The other seven
+  // edges in LINK_EDGES are `not_built` and make no call at all.
+  {
+    tool: "business_link",
+    client: "orchestrator",
+    hops: [admit("patch", "/api/crm/deals/:id")],
+  },
+
+  // ADR-045 slice C — the business graph. `business_find` dispatches a
+  // different call per `entity`, and on `entity:"customer"` with an `id` it
+  // makes four, so EVERY branch is declared: the cross-check is bidirectional,
+  // and an undeclared hop is how a tool ships with a route the mcp principal
+  // cannot reach.
+  //
+  // `/api/crm/companies/:id/record` (WARP-2563) replaced the bare
+  // `/api/crm/companies/:id` on the customer branch (WARP-2583 review): the
+  // record carries the company AND every deal of theirs, open and closed, AND
+  // the projects that name the company — the two edges a customer's delivery
+  // work hangs off. The bare read only ever saw the company.
+  //
+  // `/api/crm/contacts` and `/api/crm/contacts/:id` are NEW in this change
+  // (routes/crm.ts). They exist because the CRM had no way to read its own
+  // people at all: `/api/contacts` is owner-scoped and 403s `_service:mcp`
+  // outright (`contacts_require_a_user`), so a hop there would ship dead.
+  {
+    tool: "business_find",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/crm/companies"),
+      admit("get", "/api/crm/companies/:id/record"),
+      admit("get", "/api/crm/contacts"),
+      admit("get", "/api/crm/contacts/:id"),
+      admit("get", "/api/crm/deals"),
+      admit("get", "/api/crm/deals/:id"),
+      admit("get", "/api/crm/summary"),
+      admit("get", "/api/pm/projects"),
+      admit("get", "/api/pm/projects/:id"),
+      admit("get", "/api/pm/projects/:id/work-items"),
+      admit("get", "/api/pm/work-items"),
+      admit("get", "/api/pm/work-items/:id"),
+    ],
+  },
+  {
+    tool: "business_timeline",
+    client: "orchestrator",
+    hops: [
+      admit("get", "/api/crm/activities"),
+      admit("get", "/api/pm/work-items/:id/activity"),
+      admit("get", "/api/pm/work-items/:id/comments"),
+    ],
+  },
 
   // ── team chat (WARP-1685) ───────────────────────────────────────────────
   // Both tools act as the forwarded X-Droplet-User human; the routes admit
@@ -348,4 +477,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  // WARP-2180 — background runs. The route admits the mcp principal on
+  // behalf of the named chat user (requireRoleOrMcpService).
+  { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs")] },
 ];

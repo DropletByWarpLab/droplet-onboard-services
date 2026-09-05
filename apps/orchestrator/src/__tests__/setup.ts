@@ -67,6 +67,34 @@ class PrismaClientKnownRequestError extends Error {
   }
 }
 
+// WARP-2484: Prisma's three JSON-null sentinels. The generated client exports
+// them as singleton instances of distinct classes, and Prisma tells them apart
+// BY IDENTITY — they are not interchangeable and they are not strings:
+//   DbNull   → the SQL NULL in a nullable Json column
+//   JsonNull → the JSON `null` *value* stored inside the column
+//   AnyNull  → "either of the above" (filters only)
+//
+// Omitting them made `Prisma.DbNull` resolve to `undefined` in every suite
+// that loads this file, so `chat-persistence.service.ts`'s
+// `toolCalls: { not: Prisma.DbNull }` degraded to `{ not: undefined }` — which
+// Prisma reads as "no filter at all". That is a DIFFERENT query from the one
+// production runs, and nothing could catch it: `undefined === undefined` makes
+// every identity check on the sentinel vacuously true. The write paths
+// (`activity.service.ts`, `routes/cameras.ts`) hit the same hole and each
+// in-memory fake grew its own workaround for it.
+//
+// `_tag` and `toString()` are both load-bearing. `toString()` mirrors the real
+// client (which stringifies to exactly `"Prisma.DbNull"`); `_tag` is the shape
+// the repo's existing ActivityRow fakes already sniff for to normalise the
+// sentinel back to `null` on the way into their in-memory rows.
+function makeJsonNullSentinel(name: "DbNull" | "JsonNull" | "AnyNull") {
+  return Object.freeze({
+    _tag: `Prisma.${name}` as const,
+    toString: () => `Prisma.${name}`,
+    toJSON: () => name,
+  });
+}
+
 // WARP-1261: a stable, always-present HOUSEHOLD department fixture — matches
 // the shape (+ a real uuid-format id, since files-spaces.test.ts pins it with
 // `stringMatching(/^dept:[a-f0-9-]{36}$/)`) of the bootstrap-time seed row a
@@ -261,6 +289,12 @@ vi.mock("@prisma/client", () => {
         RepeatableRead: "RepeatableRead",
         Serializable: "Serializable",
       },
+      // WARP-2484 — three DISTINCT objects, never aliased to one another and
+      // never `undefined`. See makeJsonNullSentinel above for why identity is
+      // the whole point.
+      DbNull: makeJsonNullSentinel("DbNull"),
+      JsonNull: makeJsonNullSentinel("JsonNull"),
+      AnyNull: makeJsonNullSentinel("AnyNull"),
     },
   };
 });

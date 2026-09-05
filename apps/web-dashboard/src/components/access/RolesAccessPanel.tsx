@@ -13,7 +13,7 @@
  * that is expected and correct.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -22,6 +22,7 @@ import {
   Cpu,
   Gauge,
   KeyRound,
+  LayoutTemplate,
   Lock,
   MoreHorizontal,
   Plug,
@@ -31,6 +32,7 @@ import {
   ShieldCheck,
   User,
   UserPlus,
+  Wrench,
   X,
 } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
@@ -39,6 +41,7 @@ import { useToast } from "@/components/Toast";
 import {
   assignAccessRole,
   createAccessRole,
+  createRoleFromTemplate,
   updateAccessRole,
   archiveAccessRole,
   restoreAccessRole,
@@ -51,6 +54,7 @@ import type {
   AccessRolePayload,
   AccessSyncState,
   AccessTier,
+  RoleTemplate,
   RosterUser,
 } from "@/lib/types";
 import {
@@ -60,12 +64,14 @@ import {
   featureDef,
   formatStorageBytes,
   roleToDraft,
+  templateToDraft,
   tierLabel,
   type RoleDraft,
 } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import { AccessChip, GuardNote, SyncChip } from "./bits";
 import { RoleBuilderSheet, type ConnectorOption } from "./RoleBuilderSheet";
+import { RoleTemplateGallery } from "./RoleTemplateGallery";
 import "./access.css";
 
 type ListState = "loading" | "ready" | "error";
@@ -98,6 +104,69 @@ const APPLIED_LINGER_MS = 4000;
 /** Ties the disabled Assign-people button to the note that explains it —
  *  only ever one role detail on screen, so a constant id is safe. */
 const ARCHIVED_REASON_ID = "access-archived-reason";
+
+/** What the builder sheet is open ON. `templateId` is present only for the
+ *  WARP-2738 "customize a template first" path. */
+interface BuilderState {
+  mode: "create" | "edit";
+  base: RoleDraft;
+  /** Catalogue id the draft was seeded from — remount key + `initialDirty`. */
+  templateId?: string;
+}
+
+/**
+ * WARP-2738 — the sheet's remount key.
+ *
+ * The shipped key was `${mode}-${base.id ?? "new"}`, which is the CONSTANT
+ * string "create-new" for every create. Two different templates therefore
+ * share a key, and React would keep the first sheet — and its `useState`
+ * draft — mounted while the panel handed it a second `base` it never reads
+ * again. The seed is only read at mount, so the operator would edit template A
+ * under template B's name.
+ *
+ * Exported and unit-tested rather than asserted through the UI: the sheet is a
+ * modal dialog, so today nothing can pick a second template while the first is
+ * open (the gallery is either behind the backdrop or in a dialog this panel
+ * closed). The key is what keeps that safe if a future affordance makes the
+ * switch reachable, and a DOM test could only pretend to prove it.
+ */
+export function roleBuilderSheetKey(builder: BuilderState): string {
+  return `${builder.mode}-${builder.base.id ?? "new"}-${builder.templateId ?? "blank"}`;
+}
+
+/**
+ * WARP-2738 — 409 `CONCURRENT_MUTATION` is a RETRY, not a failure.
+ *
+ * Every mutation on this surface opens at SERIALIZABLE, and a create derives
+ * its slug from the name, so two operators instantiating the same template
+ * race on the same slug base. The loser's transaction applied NOTHING, and the
+ * identical call is the correct response — so it is re-issued once here rather
+ * than surfaced as an error the operator has to interpret.
+ *
+ * Once, not in a loop: a second race is a signal (someone else is working in
+ * this panel right now), and a silent retry loop would hide it. The caller
+ * renders {@link ACCESS_COPY.templateRaceRetry} if the retry loses too.
+ *
+ * `updateAccessRole` and friends still throw a BARE Error as of phase 2 — the
+ * server answers them 409 too, but the status never reaches the client. This
+ * helper simply never matches there; wiring `status`/`code` onto those helpers
+ * is the named follow-up, not a silent gap here.
+ */
+async function withConcurrentRetry<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    const e = err as Error & { status?: number; code?: string };
+    if (e.status === 409 && e.code === "CONCURRENT_MUTATION") return call();
+    throw err;
+  }
+}
+
+/** True when a refusal is the retryable SERIALIZABLE race (nothing applied). */
+function isConcurrentMutation(err: unknown): boolean {
+  const e = err as Error & { status?: number; code?: string };
+  return e?.status === 409 && e?.code === "CONCURRENT_MUTATION";
+}
 
 /** A row that is merely AT REST in `synced` shows nothing — §12 reserves the
  *  chip for work in flight, work that just landed, or work that needs a human;
@@ -149,6 +218,19 @@ export interface RolesAccessPanelProps {
   onOpenPerson: (person: RosterUser) => void;
   /** Files deep-link inside the builder → the Departments & teams tab. */
   onOpenDepartments: () => void;
+  /**
+   * WARP-2738 — the PAGE's copy of the roles list is stale after this panel
+   * creates one. `/users` holds its own `accessRoles` for the roster chips,
+   * the person editor's role select and the invite picker; the panel's
+   * `reload()` refreshes only its own. Both have to move or a role the
+   * operator just made is missing from every picker until the tab remounts.
+   *
+   * Fired on the two CREATE paths this ticket owns (instantiate, and the
+   * builder save the "customize first" path routes through). Duplicate,
+   * archive, restore and delete still leave the page stale — pre-existing,
+   * named as a follow-up rather than quietly widened here.
+   */
+  onRolesChanged?: () => void;
 }
 
 export function RolesAccessPanel({
@@ -157,6 +239,7 @@ export function RolesAccessPanel({
   connectors,
   onOpenPerson,
   onOpenDepartments,
+  onRolesChanged,
 }: RolesAccessPanelProps) {
   const { toast } = useToast();
   const offline = useOffline();
@@ -164,8 +247,19 @@ export function RolesAccessPanel({
   const [listState, setListState] = useState<ListState>("loading");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const [builder, setBuilder] = useState<{ mode: "create" | "edit"; base: RoleDraft } | null>(null);
+  const [builder, setBuilder] = useState<BuilderState | null>(null);
   const [builderBusy, setBuilderBusy] = useState(false);
+  // WARP-2738 — the template gallery: `galleryOpen` is the dialog beside the
+  // header's New-role button (the §4.1 empty state renders the same gallery
+  // inline, with no dialog around it). `templateTarget` is the card awaiting
+  // the create dialog's confirmation, and `templateFromGallery` remembers
+  // whether cancelling should hand the operator back to the grid they came
+  // from — the two dialogs never stack, so the way back has to be explicit.
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [templateTarget, setTemplateTarget] = useState<RoleTemplate | null>(null);
+  const [templateFromGallery, setTemplateFromGallery] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [templateBusyId, setTemplateBusyId] = useState<string | null>(null);
   const [assignOpen, setAssignOpen] = useState(false);
   const [assignChecked, setAssignChecked] = useState<Set<string>>(new Set());
   const [assignBusy, setAssignBusy] = useState(false);
@@ -351,13 +445,83 @@ export function RolesAccessPanel({
   const openCreate = () => setBuilder({ mode: "create", base: blankRoleDraft("family") });
   const openEdit = (role: AccessRole) => setBuilder({ mode: "edit", base: roleToDraft(role) });
 
+  // ── WARP-2738: the two ways out of a template card ──
+
+  /** "Customize first" — seed the builder and let the operator edit before
+   *  anything is written. Saves through the ORDINARY create path
+   *  (`draftToRolePayload` → `createAccessRole`), so nothing about the
+   *  resulting row remembers a template made it. The gallery dialog closes:
+   *  the sheet is modal, and two stacked dialogs fight over the focus trap
+   *  and Escape. */
+  const openTemplateBuilder = (template: RoleTemplate) => {
+    setGalleryOpen(false);
+    setBuilder({ mode: "create", base: templateToDraft(template), templateId: template.id });
+  };
+
+  /** "Use this template" — one click, but never a silent write: the create
+   *  dialog states the consequence and offers the rename the server's
+   *  optional `name` accepts. Slug collisions are NOT errors ("Front Desk"
+   *  twice yields `front-desk` then `front-desk-2`), so nothing is deduped
+   *  here. */
+  const askUseTemplate = (template: RoleTemplate) => {
+    setTemplateFromGallery(galleryOpen);
+    setGalleryOpen(false);
+    setTemplateTarget(template);
+    setTemplateName(template.name);
+  };
+
+  const cancelTemplateCreate = () => {
+    setTemplateTarget(null);
+    // Back to the grid the operator was reading, not to an empty panel.
+    if (templateFromGallery) setGalleryOpen(true);
+    setTemplateFromGallery(false);
+  };
+
+  /** POST /api/access/roles { templateId } — the SAME guarded write path a
+   *  hand-authored role takes, so what lands is an ordinary editable row with
+   *  `peopleCount: 0`. Both role lists are refreshed: this panel's own, and
+   *  the page's (roster chips, person editor, invite picker). */
+  async function performTemplateCreate() {
+    const template = templateTarget;
+    if (!template) return;
+    const renamed = templateName.trim();
+    // Send `name` only when it actually differs — an unchanged field posts
+    // `{ templateId }` alone and lets the server use the template's own name.
+    const override = renamed && renamed !== template.name ? renamed : undefined;
+    setTemplateBusyId(template.id);
+    try {
+      const { role: created, syncState } = await withConcurrentRetry(() =>
+        createRoleFromTemplate(template.id, override),
+      );
+      setTemplateTarget(null);
+      setTemplateFromGallery(false);
+      await reload();
+      onRolesChanged?.();
+      setSelectedId(created.id);
+      noteSyncState(created.id, syncState);
+      toast(ACCESS_COPY.templateCreated(created.name || template.name), "success");
+      scheduleSyncRefetch(created.id);
+    } catch (err: any) {
+      toast(
+        isConcurrentMutation(err)
+          ? ACCESS_COPY.templateRaceRetry
+          : err?.message || "Failed to create the role",
+        "error",
+      );
+    } finally {
+      setTemplateBusyId(null);
+    }
+  }
+
   async function handleBuilderSave(payload: AccessRolePayload) {
     if (!builder) return;
     setBuilderBusy(true);
     try {
       let touchedId: string | null = null;
       if (builder.mode === "create") {
-        const { role, syncState } = await createAccessRole(payload);
+        // WARP-2738 — the "customize a template first" path lands here, and it
+        // races on the derived slug exactly as the one-click path does.
+        const { role, syncState } = await withConcurrentRetry(() => createAccessRole(payload));
         setBuilder(null);
         await reload();
         setSelectedId(role.id);
@@ -380,10 +544,17 @@ export function RolesAccessPanel({
             : null,
         );
       }
+      // The page keeps its own roles list for the roster chips and the role
+      // pickers; a create (or a rename) leaves it stale until this fires.
+      onRolesChanged?.();
       toast(`'${payload.name}' saved — applying now.`, "success");
       scheduleSyncRefetch(touchedId);
     } catch (err: any) {
-      toast(err?.message || "Failed to save the role", "error");
+      // The race sentence says "nothing was created", so it belongs to the
+      // CREATE branch alone — an edit that loses the same race changed
+      // nothing, but it never created anything either.
+      const raced = builder.mode === "create" && isConcurrentMutation(err);
+      toast(raced ? ACCESS_COPY.templateRaceRetry : err?.message || "Failed to save the role", "error");
     } finally {
       setBuilderBusy(false);
     }
@@ -391,12 +562,20 @@ export function RolesAccessPanel({
 
   async function handleDuplicate(role: AccessRole) {
     try {
-      const { role: copy } = await duplicateAccessRole(role.id);
+      // Same verb, same derived-slug race as the two create paths — `lib/api`
+      // carries the typed refusal for this call precisely so it can be retried
+      // rather than rendered as a failure.
+      const { role: copy } = await withConcurrentRetry(() => duplicateAccessRole(role.id));
       await reload();
       setSelectedId(copy.id);
       toast(`'${role.name}' duplicated — edit the copy.`, "success");
     } catch (err: any) {
-      toast(err?.message || "Failed to duplicate the role", "error");
+      toast(
+        isConcurrentMutation(err)
+          ? ACCESS_COPY.templateRaceRetry
+          : err?.message || "Failed to duplicate the role",
+        "error",
+      );
     }
   }
 
@@ -512,17 +691,30 @@ export function RolesAccessPanel({
       // WARP-1560: "No custom roles yet" stops being true the moment a role
       // exists but is merely filed away — say which of the two it is.
       const allArchived = archivedRoles.length > 0;
+      // WARP-2738 — on a fresh box this card holds the ONLY create CTA (the
+      // header's New-role button is conditioned on there being roles already),
+      // so the gallery goes here rather than behind a button nobody can see.
+      // The blank path is kept, not replaced: "start from a template" and
+      // "start from nothing" are both legitimate, and an empty state that
+      // offers only presets teaches an operator the builder needs one.
       return (
-        <div className="card">
-          <div className="empty">
-            <span className="ei">{allArchived ? <Archive size={24} /> : <KeyRound size={24} />}</span>
-            <span style={{ maxWidth: "42ch" }}>
-              {allArchived ? ACCESS_COPY.emptyRolesAllArchived : ACCESS_COPY.emptyRoles}
-            </span>
-            <button type="button" className="btn primary" onClick={openCreate} style={{ marginTop: 8 }}>
-              <Plus size={14} /> New role
-            </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="card">
+            <div className="empty">
+              <span className="ei">{allArchived ? <Archive size={24} /> : <KeyRound size={24} />}</span>
+              <span style={{ maxWidth: "42ch" }}>
+                {allArchived ? ACCESS_COPY.emptyRolesAllArchived : ACCESS_COPY.emptyRoles}
+              </span>
+              <button type="button" className="btn primary" onClick={openCreate} style={{ marginTop: 8 }}>
+                <Plus size={14} /> New role
+              </button>
+            </div>
           </div>
+          <RoleTemplateGallery
+            onUse={askUseTemplate}
+            onCustomize={openTemplateBuilder}
+            busyTemplateId={templateBusyId}
+          />
         </div>
       );
     }
@@ -640,6 +832,37 @@ export function RolesAccessPanel({
             ))}
             {featureChips.length === 0 && <AccessChip tone="muted">No features on</AccessChip>}
           </div>
+        </div>
+        {/* WARP-2738 — the TOOL axis, which T8 left off this pane entirely.
+            It is the one axis that is genuinely fail-closed: a domain absent
+            here is a domain the assistant cannot call, with no nav-only
+            half-measure and no silent clamp. Without it an instantiated
+            template could not be verified after the fact — and a Read-only
+            Auditor's whole value IS its tool list. Domains render as the wire
+            slugs they are (mono), like the connector rows below. */}
+        <div>
+          <div className="type-caption-1 mb-2" style={{ color: "var(--text-faint)", fontWeight: 600 }}>
+            {ACCESS_COPY.toolsAxis}
+          </div>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {role.toolGrants.map((grant) => (
+              <AccessChip key={grant.domain} mono icon={<Wrench size={12} aria-hidden="true" />}>
+                {grant.domain} · {grant.level}
+              </AccessChip>
+            ))}
+            {role.toolGrants.length === 0 && (
+              <AccessChip tone="muted">{ACCESS_COPY.noToolsGranted}</AccessChip>
+            )}
+          </div>
+          {/* `tierKeepsWriteTools` admits owner and admin only, so below admin
+              a `use` grant IS a `view` grant. Said once, next to the chips
+              that would otherwise imply otherwise. */}
+          {role.startingPoint !== "admin" && role.toolGrants.length > 0 && (
+            <div className="acc-lvl-reason">
+              <Wrench size={12} aria-hidden="true" />
+              {ACCESS_COPY.toolsReadOnlyBelowAdmin}
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
           <span className="type-caption-1" style={{ color: "var(--text-faint)", fontWeight: 600, minWidth: 78 }}>
@@ -960,11 +1183,19 @@ export function RolesAccessPanel({
             <div className="sect" style={{ marginTop: 0, justifyContent: "space-between" }}>
               <h2>{ACCESS_COPY.yourRoles}</h2>
               {listState === "ready" && activeRoles.length > 0 && (
-                // §4.1: the primary action of the pane is filled accent —
-                // the Departments ghost sibling is a recorded divergence.
-                <button type="button" className="btn primary sm" onClick={openCreate}>
-                  <Plus size={13} /> New role
-                </button>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {/* WARP-2738 — a second way in, never a replacement: the
+                      blank builder stays the filled primary because starting
+                      from nothing is still the general case. */}
+                  <button type="button" className="btn ghost sm" onClick={() => setGalleryOpen(true)}>
+                    <LayoutTemplate size={13} /> {ACCESS_COPY.templatesOpen}
+                  </button>
+                  {/* §4.1: the primary action of the pane is filled accent —
+                      the Departments ghost sibling is a recorded divergence. */}
+                  <button type="button" className="btn primary sm" onClick={openCreate}>
+                    <Plus size={13} /> New role
+                  </button>
+                </div>
               )}
             </div>
             {renderRolesList()}
@@ -1025,13 +1256,16 @@ export function RolesAccessPanel({
       {/* Role builder sheet — keyed so a fresh open resets the draft. */}
       {builder && (
         <RoleBuilderSheet
-          key={`${builder.mode}-${builder.base.id ?? "new"}`}
+          key={roleBuilderSheetKey(builder)}
           open
           mode={builder.mode}
           base={builder.base}
           actingTier={actingTier}
           connectors={connectors}
           busy={builderBusy}
+          // A template seed is already the operator's intent, so Save is live
+          // immediately; a blank create still has to be typed into.
+          initialDirty={builder.templateId !== undefined}
           onSave={handleBuilderSave}
           onClose={() => setBuilder(null)}
           onOpenDepartments={onOpenDepartments}
@@ -1055,6 +1289,25 @@ export function RolesAccessPanel({
         }
         onAssign={() => void performAssign()}
         onClose={() => setAssignOpen(false)}
+      />
+
+      {/* WARP-2738 — the gallery as a dialog, for a box that already has
+          roles. Same component the §4.1 empty state renders inline. */}
+      <RoleTemplateGalleryDialog
+        open={galleryOpen}
+        busyTemplateId={templateBusyId}
+        onUse={askUseTemplate}
+        onCustomize={openTemplateBuilder}
+        onClose={() => setGalleryOpen(false)}
+      />
+
+      <TemplateCreateDialog
+        template={templateTarget}
+        name={templateName}
+        busy={templateBusyId !== null}
+        onNameChange={setTemplateName}
+        onCreate={() => void performTemplateCreate()}
+        onCancel={cancelTemplateCreate}
       />
 
       <ConfirmDialog
@@ -1163,6 +1416,154 @@ function AssignPeopleDialog({
           </button>
           <button type="button" className="btn primary" onClick={onAssign} disabled={busy || checked.size === 0}>
             {busy ? "Assigning…" : "Assign"}
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * WARP-2738 — the template gallery in a dialog, for a box that already has
+ * roles. The §4.1 empty state renders the SAME gallery inline; only the
+ * chrome differs, so the two entry points can never drift apart.
+ *
+ * `useId` for the heading rather than a constant: this panel already mounts a
+ * second copy of the gallery inline, and two elements sharing an `id` is how
+ * `aria-labelledby` starts pointing at the wrong one.
+ */
+function RoleTemplateGalleryDialog({
+  open,
+  busyTemplateId,
+  onUse,
+  onCustomize,
+  onClose,
+}: {
+  open: boolean;
+  busyTemplateId: string | null;
+  onUse: (template: RoleTemplate) => void;
+  onCustomize: (template: RoleTemplate) => void;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  return (
+    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="2xl">
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: -8 }}>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close templates"
+          className="p-1"
+          style={{ color: "var(--text-muted)" }}
+        >
+          <X size={16} />
+        </button>
+      </div>
+      {/* Mounted only while open, so the catalogue read happens when the
+          operator asks for it rather than on every visit to the tab. */}
+      {open && (
+        <RoleTemplateGallery
+          headingId={headingId}
+          busyTemplateId={busyTemplateId}
+          onUse={onUse}
+          onCustomize={onCustomize}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+/**
+ * WARP-2738 — the one-click create, which is still never a silent write.
+ *
+ * A <ConfirmDialog> would have been the reflex, but it has no input slot and
+ * the server accepts an OPTIONAL `name` at instantiation. Offering it here is
+ * what makes two Front Desks usable: the slugs already differ (`front-desk`,
+ * then `front-desk-2`) and the server refuses neither, so the only thing
+ * missing was a way to tell them apart in a picker. Nothing is deduplicated
+ * client-side — a repeated name is a legal choice, not a mistake to correct.
+ */
+function TemplateCreateDialog({
+  template,
+  name,
+  busy,
+  onNameChange,
+  onCreate,
+  onCancel,
+}: {
+  template: RoleTemplate | null;
+  name: string;
+  busy: boolean;
+  onNameChange: (value: string) => void;
+  onCreate: () => void;
+  onCancel: () => void;
+}) {
+  const headingId = useId();
+  const nameId = `${headingId}-name`;
+  const hintId = `${headingId}-hint`;
+  return (
+    <Dialog open={template !== null} onClose={onCancel} labelledBy={headingId} maxWidth="sm">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 id={headingId} style={{ margin: 0, fontSize: 17, fontWeight: 600, color: "var(--text)" }}>
+            {ACCESS_COPY.templateCreateHeading}
+          </h2>
+          <button type="button" onClick={onCancel} aria-label="Close" className="p-1" style={{ color: "var(--text-muted)" }}>
+            <X size={16} />
+          </button>
+        </div>
+        {template && (
+          <>
+            <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0, lineHeight: 1.55 }}>
+              {ACCESS_COPY.templateCreateBody(template.name)}
+            </p>
+            <div>
+              <label
+                htmlFor={nameId}
+                className="type-caption-1 mb-1.5 block"
+                style={{ color: "var(--text-muted)" }}
+              >
+                {ACCESS_COPY.templateCreateNameLabel}
+              </label>
+              <input
+                id={nameId}
+                aria-describedby={hintId}
+                value={name}
+                onChange={(e) => onNameChange(e.target.value)}
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
+              />
+              <p id={hintId} style={{ fontSize: 12, color: "var(--text-faint)", margin: "6px 0 0", lineHeight: 1.5 }}>
+                {ACCESS_COPY.templateCreateNameHint}
+              </p>
+            </div>
+            {/* The two disclosures that belong to the ACT of creating, rather
+                than to the catalogue: what a role does to the people who hold
+                it, and what this template deliberately leaves unset. */}
+            <GuardNote icon={<KeyRound size={15} aria-hidden="true" />}>
+              {ACCESS_COPY.templatesNarrowing}
+            </GuardNote>
+            <GuardNote icon={<Plug size={15} aria-hidden="true" />}>
+              {ACCESS_COPY.templatesNoExtras}
+            </GuardNote>
+          </>
+        )}
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={onCreate}
+            disabled={busy || name.trim().length === 0}
+          >
+            {busy ? "Creating…" : ACCESS_COPY.templateCreateSubmit}
           </button>
         </div>
       </div>

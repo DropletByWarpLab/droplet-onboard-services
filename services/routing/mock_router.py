@@ -383,6 +383,21 @@ class _MockVpn:
         # When False, peer_handshakes returns None (UNKNOWN) — simulates a box
         # whose ubus interface status carries no peer handshake data.
         self._handshakes_available: bool = True
+        # WARP-2686 — kernel state, deliberately NOT the same store as _peers.
+        # interface_name -> set of public keys the interface is actually holding.
+        self._live: dict[str, set[str]] = {}
+        # False = this router cannot report kernel state at all (no
+        # rpcd-mod-wireguard, or no `wireguard` grant in the droplet-ai ACL).
+        # That is the DEFAULT on every router flashed before WARP-2183, so the
+        # unverifiable path is the common one and has to stay safe.
+        self._live_available: bool = True
+        # False = the wireguard kernel module is absent, so uci can carry a
+        # perfect interface section while `ip link` has no device (WARP-2689).
+        self._kernel_device: bool = True
+        # False = ifup is accepted but the peer set never actually changes —
+        # the router behaviour that made a "successful" revoke leave the peer
+        # live and reachable.
+        self._reload_effective: bool = True
 
     @staticmethod
     def generate_keypair() -> tuple[str, str]:
@@ -417,6 +432,8 @@ class _MockVpn:
             "listen_port": int(listen_port),
             "addresses": [address],
         }
+        # A fresh interface holds no peers until something reloads it.
+        self._live.setdefault(name, set())
         logger.info("mock: VPN create_interface name=%s port=%s addr=%s", name, listen_port, address)
 
     def add_peer(self, interface: str, public_key: str, allowed_ips: str,
@@ -460,8 +477,56 @@ class _MockVpn:
         and toggle `_handshakes_available`."""
         if not self._handshakes_available:
             return None
-        keys = {p["public_key"] for p in self._peers if p["interface"] == interface}
+        keys = self._live.get(interface, set())
         return {k: v for k, v in self._handshakes.items() if k in keys}
+
+    # ------------------------------------------------------------------
+    # WARP-2686 — the KERNEL half, modelled separately from uci on purpose.
+    #
+    # `_peers` above is the config. `_live` is what the interface is actually
+    # holding. Nothing syncs them except `reload_interface`, because that is
+    # exactly how the real router behaves: a successful `uci.apply` does NOT
+    # reload a wireguard peer set, so a peer can be deleted from the config and
+    # keep its session. A mock where add/delete mutate both at once cannot
+    # express the defect and would let the bug back in.
+    # ------------------------------------------------------------------
+
+    def reload_interface(self, interface: str = "wg0") -> bool:
+        """The ifup. Syncs kernel state from config — unless a test says it
+        doesn't take (`_reload_effective = False`), which models the router
+        that motivated WARP-2686."""
+        if not self._reload_effective:
+            return True
+        self._live[interface] = {
+            p["public_key"] for p in self._peers if p["interface"] == interface
+        }
+        return True
+
+    def live_peers(self, interface: str = "wg0"):
+        """None = UNKNOWN (no rpcd-mod-wireguard / no ACL grant), which is the
+        default on routers flashed before WARP-2183. dict = a real observation."""
+        if not self._live_available or not self._kernel_device:
+            return None
+        if interface not in self._interfaces:
+            # Answered, interface absent ⇒ it holds no peers. Matches the real
+            # SDK: an observation, not an unknown.
+            return {}
+        return {
+            pk: {
+                "allowed_ips": [],
+                "last_handshake": int(self._handshakes.get(pk, 0) or 0),
+                "rx_bytes": 0,
+                "tx_bytes": 0,
+            }
+            for pk in self._live.get(interface, set())
+        }
+
+    def interface_is_live(self, interface: str = "wg0"):
+        if not self._live_available:
+            return None
+        if not self._kernel_device:
+            return False
+        return interface in self._interfaces
 
     def setup_firewall(self, interface: str = "wg0", listen_port: int = 51820) -> None:
         logger.info("mock: VPN setup_firewall iface=%s port=%s — no-op", interface, listen_port)
@@ -686,6 +751,51 @@ class _MockAp:
         }
 
 
+class _MockDiscovery:
+    """In-memory non-Droplet mDNS records, seeded via `/discovery/_test_seed`.
+
+    WARP-2019 (scan-3). Mirrors `_MockAp._discovered`: production discovery is
+    multicast-driven and cannot be simulated in a test, so scan-4's scanner
+    poller drives this instead of needing a real eSCL device on the wire.
+    Records are stored already in `DiscoveryApi.browse_service()` shape.
+    """
+
+    def __init__(self) -> None:
+        # service_type -> hostname -> record
+        self._records: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def browse_service(self, service_type: str) -> list[dict[str, Any]]:
+        return [
+            dict(record)
+            for _, record in sorted(self._records.get(service_type, {}).items())
+        ]
+
+    def seed(
+        self,
+        service_type: str,
+        *,
+        hostname: str,
+        port: Optional[int] = None,
+        last_ip: Optional[str] = None,
+        txt: Optional[dict[str, str]] = None,
+    ) -> None:
+        # Blank values are omitted here too, so the seam can't produce a record
+        # shape the real parser would never emit.
+        kv = {k: v for k, v in (txt or {}).items() if v}
+        record: dict[str, Any] = {
+            "service_type": service_type,
+            "hostname": hostname,
+            "txt": kv,
+        }
+        if uuid := kv.get("uuid"):
+            record["uuid"] = uuid
+        if port is not None:
+            record["port"] = port
+        if last_ip:
+            record["last_ip"] = last_ip
+        self._records.setdefault(service_type, {})[hostname] = record
+
+
 class _MockUci:
     """Minimal uci mock — safe_apply happy path only."""
 
@@ -742,6 +852,7 @@ class MockRouter:
         self.uci = _MockUci()
         self.vpn = _MockVpn()
         self.ap = _MockAp()  # WARP-446
+        self.discovery = _MockDiscovery()  # WARP-2019
         self.file = _MockFile()
 
     def session_info(self) -> dict[str, Any]:

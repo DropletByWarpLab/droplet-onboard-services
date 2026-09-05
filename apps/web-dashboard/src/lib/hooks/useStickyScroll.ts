@@ -32,7 +32,7 @@ export const STICKY_PX = 80;
 
 export interface UseStickyScrollResult {
   /** Ref to attach to the scroll container (`<div className="overflow-y-auto">`). */
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
   /** True when the user has scrolled up off the live tail. */
   isDetached: boolean;
   /** Imperatively scroll to the bottom and re-attach. */

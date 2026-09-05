@@ -2,17 +2,31 @@
 
 ## Branching model
 
-**Open your PR against `main`.** It is the only long-lived branch.
+Work flows through **`stage`** before it reaches **`main`**. Open your PR
+against `stage` — `main` only ever receives merges from `stage`.
 
-Work used to flow through a `stage` branch first, so a subset of real boxes
-installed a build ahead of everyone else. `stage` has been deleted
-(WARP-2187) and the CI guard that required it is gone, so that soak no
-longer exists: once a release is published from `main`, it reaches every box
-on the stable channel.
+```
+your branch ──PR──▶ stage ──PR──▶ main
+                      │             │
+                 channel: stage  channel: stable
+```
 
-That makes review the only thing standing between a merge and the fleet.
-What lands on `main` should be releasable on its own -- not "releasable once
-someone notices on stage".
+Both branches publish OTA releases, and a device subscribes to exactly
+one channel. So `stage` is not a staging *server* — it is the build a
+subset of real boxes will install, ahead of everyone else. What lands on
+`stage` should be releasable; what lands on `main` should have soaked.
+
+**`stage` is permanent — never delete it, and never push straight to it.**
+Every commit reaches `stage` through a PR and reaches `main` through a
+promotion PR. Because a promotion PR's head *is* `stage`, the *Delete
+branch* button GitHub offers on the merged promote deletes the release
+channel itself — it has been clicked four times, and each time GitHub
+silently auto-closed every open PR based on `stage` (2, then 9, then 39),
+none of which can be reopened once the base ref is gone.
+
+Promoting is an ordinary PR (`stage` → `main`), reviewed like any other.
+Hotfixes take the same route: skipping `stage` means shipping every box a
+build that has never run on one.
 
 Your PR must carry the WARP key it implements in its **title** —
 `WARP-123: …` or `fix(scope): … (WARP-123)`. That is a required check
@@ -21,12 +35,12 @@ with `[no-ticket]`. Keys you merely *reference* go in the body, never the
 title. The full list of gates that must go green, and the rule for adding
 one, is [`docs/ci-required-checks.md`](docs/ci-required-checks.md).
 
-Releases are published by dispatching `publish-release.yml` from the branch
-you want to ship -- the workflow derives the channel from the ref and
-refuses to run from anywhere else. See the "Branching and releases" section
-of [`CLAUDE.md`](CLAUDE.md) for the full contract, and
-[`docs/SECURITY.md`](docs/SECURITY.md) for how a device decides to trust a
-release.
+Releases are published by dispatching `publish-release.yml` from the
+branch you want to ship — the workflow derives the channel from the ref
+and refuses to run from anywhere else. See the "Branching and releases"
+section of [`CLAUDE.md`](CLAUDE.md) for the full contract, and
+[`docs/SECURITY.md`](docs/SECURITY.md) for how a device decides to trust
+a release.
 
 ## Architecture
 
@@ -72,7 +86,16 @@ npm ls --workspaces --depth 0
 cd droplet-onboard-services
 
 # Install Node.js dependencies (all workspaces)
-npm install
+npm ci
+
+# Make the checkout buildable: prisma generate, then build the leaf
+# workspaces (see "Workspace builds come first" — skipping this is the usual
+# cause of a "broken" fresh checkout). One prisma generate plus five tsc
+# builds; the machine dominates, not the repo — seconds on a warm Mac, ~48 s
+# on an idle Windows box, 6m07s on that same box under heavy load. Let it
+# finish: it clears all five leaf dist/ before rebuilding them, so a half-run
+# tree is worse off than an untouched one.
+npm run bootstrap
 
 # Set up the AI Gateway Python environment
 cd services/ai-gateway
@@ -81,24 +104,32 @@ source .venv/bin/activate    # or .venv\Scripts\activate on Windows
 pip install -r requirements-dev.txt
 cd ../..
 
-# Build the @droplet/* packages the apps import (see "Workspace builds come
-# first" — skipping this is the usual cause of a "broken" fresh checkout)
-npm run build -w @droplet/shared-types -w @droplet/tools-core \
-              -w @droplet/fips-selftest -w @droplet/auth-policy \
-              -w @droplet/erp-connector
-
-# Generate Prisma client
-cd apps/orchestrator && npx prisma generate && cd ../..
-
 # Run all tests
 npm run test
 ```
 
 ### Workspace builds come first
 
+`npm ci` alone does not leave this monorepo in a state where `tsc`, Vitest or a
+workspace `build` can run — that is what `npm run bootstrap`
+(`scripts/bootstrap.sh`) is for. It does three things, in order:
+
+1. **`prisma generate`** for `apps/orchestrator/prisma/schema.prisma`. Until it
+   runs, `node_modules/.prisma/client` is Prisma's placeholder, which declares
+   `export declare const PrismaClient: any` — so `ctx.prisma.<model>` is `any`
+   and every destructure of a row is a `TS7031`.
+2. **`rm -rf` each leaf `dist/`**. `tsc` emits but never prunes, so a file moved
+   out of `src/` survives in `dist/` indefinitely and reds guards that are
+   asserting about the *source* tree.
+3. **Builds the five leaf workspaces** in dependency order:
+   `@droplet/shared-types` → `@droplet/fips-selftest` → `@droplet/erp-connector`
+   → `@droplet/tools-core` → `@droplet/mcp-server`.
+
 Three of those five resolve through their built `dist/` — `@droplet/tools-core`,
 `@droplet/fips-selftest` and `@droplet/erp-connector` all point `main`, `types`
-and every `exports` condition at `dist/`. `turbo.json`'s `test` task does **not**
+and every `exports` condition at `dist/`. `@droplet/mcp-server` does too
+(`dist/lib.js` + `dist/lib.d.ts`), and the orchestrator's mcp-client tests spawn
+its `dist/index.js` as a child process. `turbo.json`'s `test` task does **not**
 declare `dependsOn: ["^build"]`, so nothing builds them implicitly, and on a
 fresh checkout `tsc` and Vitest fail against packages that are present and
 healthy in the tree:
@@ -116,14 +147,26 @@ is the only one of the five that lives under `services/` rather than
 `apps/orchestrator/Dockerfile`; a local checkout is the only place you have to
 do it yourself.
 
-The other two — `@droplet/shared-types` and `@droplet/auth-policy` — point
-`main`, `types` and `exports.import` at `./src/index.ts`, so TypeScript and
-Vitest resolve them straight from source and they do **not** need building for
-either. Only their `exports.require` condition points at `dist/`, so a CommonJS
-`require()` of one of them is the single path that does. They stay in the build
-command above because building all five is one line, costs seconds, and removes
-the need to remember which two are the exception — not because a fresh checkout
-fails without them.
+`@droplet/shared-types` and `@droplet/auth-policy` point `main`, `types` and
+`exports.import` at `./src/index.ts`, so TypeScript and Vitest resolve them
+straight from source. `shared-types` is still on the bootstrap list because
+`tools-core`'s **emitted** CommonJS resolves it through `exports.require` →
+`dist/` (WARP-1874); `auth-policy` has no such consumer and is deliberately
+absent.
+
+**Re-run `npm run bootstrap` after every merge or rebase** that touches a leaf
+workspace or the Prisma schema — a `dist/` from the previous commit type-checks
+happily against the wrong types. If `tsc` or Vitest is reporting something that
+looks impossible, `npm run bootstrap:check` says in one line whether the tree is
+bootstrapped — a stale `dist/` included, not just a missing one; the root
+`npm run test` runs that check for you first.
+
+Deliberately **not** a `postinstall` hook: `services/mcp-server/Dockerfile` runs
+`npm ci` before it `COPY`s `apps/orchestrator/prisma`, so a hook would generate
+against a schema that is not in the image yet, and every CI leg that needs the
+client already runs `npm run -w @droplet/orchestrator db:generate` explicitly —
+a hook would only add duplicate work to every `npm ci` in the org's metered
+minutes (`docs/ci-cost-budget.md`).
 
 ### Optional: pre-commit secret scanning
 

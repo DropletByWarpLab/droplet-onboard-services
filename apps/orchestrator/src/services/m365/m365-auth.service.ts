@@ -22,6 +22,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 
+import { recordActivity } from "../activity.singleton.js";
 import { sealTokenCache, unsealTokenCache } from "./token-cache.js";
 import {
   classifyAuthFailure,
@@ -119,6 +120,52 @@ interface ConnectionRow {
   pendingFlowExpiresAt: Date | null;
   homeAccountId: string | null;
   tokenCacheEnc: string | null;
+}
+
+/**
+ * WARP-2285 — the audit rows this surface was shipped without.
+ *
+ * `routes/m365.ts` and this file together contained ZERO `recordActivity`
+ * calls: a customer could grant Microsoft 365 consent, have a refresh token
+ * encrypted onto their row, and later disconnect, and none of it appeared in
+ * the activity log. Under ADR-041 §2 connecting IS the consent record, so that
+ * was a compliance gap on an already-shipped surface.
+ *
+ * One row per state transition, each named distinctly. The NEEDS_RECONNECT and
+ * DISCONNECTED rows in particular must stay tellable apart — the schema
+ * docstring at `schema.prisma:4990-5012` requires the states themselves be
+ * distinguishable, and an audit that flattened them would answer "is this
+ * person connected?" but not "did they leave, or did their grant die?", which
+ * are a support question and a security question respectively.
+ *
+ * Nothing here records a token, a cache blob, a device code or an access token.
+ * The scope carries the user, the state, and the redacted reason only.
+ */
+async function auditM365(params: {
+  what: string;
+  state: M365State;
+  userId: string;
+  severity: "info" | "warn";
+  reason?: string | null;
+  /** True when a person asked for this; false when the box discovered it. */
+  userInitiated: boolean;
+}): Promise<void> {
+  await recordActivity({
+    kind: "auth",
+    severity: params.severity,
+    sourceIcon: "cloud",
+    what: params.what,
+    sub: params.state,
+    actor: params.userInitiated
+      ? { type: "user", id: params.userId }
+      : { type: "system", id: null },
+    refs: {
+      connector: "m365",
+      userId: params.userId,
+      state: params.state,
+      reason: params.reason ?? null,
+    },
+  });
 }
 
 const DISCONNECTED_VIEW: M365ConnectionView = {
@@ -243,7 +290,7 @@ async function persistConnected(
   result: EntraAuthResult,
   now: Date = new Date(),
 ): Promise<void> {
-  await prisma.m365Connection.updateMany({
+  const { count } = await prisma.m365Connection.updateMany({
     where: { userId, state: "PENDING_CONSENT" },
     data: {
       state: "CONNECTED",
@@ -258,6 +305,20 @@ async function persistConnected(
       lastError: null,
     },
   });
+
+  // Gated on `count` deliberately. When the guard above rejects the write — the
+  // person disconnected while the poll was still in flight — nothing changed,
+  // and an audit row claiming a connection would be the audit log's own version
+  // of the bug that guard exists to prevent.
+  if (count > 0) {
+    await auditM365({
+      what: "Microsoft 365 connected",
+      state: "CONNECTED",
+      userId,
+      severity: "info",
+      userInitiated: true,
+    });
+  }
 }
 
 /**
@@ -307,6 +368,45 @@ async function persistFailure(
   });
 }
 
+// --- Needs reconnect, discovered by the box ---------------------------------
+
+/**
+ * Move a CONNECTED link to NEEDS_RECONNECT because Graph refused a token that
+ * had refreshed fine.
+ *
+ * The refresh path above only ever sees a refresh fail. A live 401/403 on a
+ * delta call — resource access revoked, a conditional-access policy, a tenant
+ * that changed under the grant — never reaches it, so without this seam the
+ * sync engine would back the cursor off forever while the row the dashboard
+ * reads kept saying CONNECTED. The stored cache is kept: the person may only
+ * need to consent again, and dropping it would force a full sign-in for a
+ * policy hiccup. Idempotent — a second cursor hitting the same wall in the
+ * same tick writes nothing new.
+ */
+export async function markNeedsReconnect(
+  prisma: PrismaClient,
+  userId: string,
+  reason: string,
+): Promise<void> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  if (!row || row.state !== "CONNECTED") return;
+
+  await prisma.m365Connection.update({
+    where: { userId },
+    data: { state: "NEEDS_RECONNECT", lastError: reason },
+  });
+  await auditM365({
+    what: "Microsoft 365 needs reconnect",
+    state: "NEEDS_RECONNECT",
+    userId,
+    severity: "warn",
+    reason,
+    userInitiated: false,
+  });
+}
+
 // --- Disconnect -----------------------------------------------------------
 
 /**
@@ -333,6 +433,15 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
       connectedAt: null,
       lastError: null,
     },
+  });
+
+  // After the purge, not before: the row is the thing being attested to.
+  await auditM365({
+    what: "Microsoft 365 disconnected",
+    state: "DISCONNECTED",
+    userId,
+    severity: "info",
+    userInitiated: true,
   });
 }
 
@@ -396,6 +505,17 @@ export async function getAccessToken(
         tokenCacheEnc: null,
         lastError: "The stored Microsoft sign-in could not be read. Please connect again.",
       },
+    });
+    // `userInitiated: false` and a distinct `what` are what keep this tellable
+    // apart from the disconnect row above. Nobody asked for this; the box found
+    // the stored sign-in unreadable and dropped it.
+    await auditM365({
+      what: "Microsoft 365 needs reconnect",
+      state: "NEEDS_RECONNECT",
+      userId,
+      severity: "warn",
+      reason: "The stored Microsoft sign-in could not be read.",
+      userInitiated: false,
     });
     throw new M365NotConnectedError("NEEDS_RECONNECT");
   }

@@ -3,12 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "require": "./dist/lib.js",
+      "import": "./dist/lib.js",
+      "default": "./dist/lib.js"
+    },
+    "./dist/*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "droplet-mcp-server": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
@@ -33,6 +48,6 @@
     "@types/node": "^20.12.12",
     "tsx": "^4.23.12",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "vitest": "^3.2.6"
   }
 }

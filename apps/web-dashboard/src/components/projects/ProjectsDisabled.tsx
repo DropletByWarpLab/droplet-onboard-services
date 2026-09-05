@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { FolderKanban } from "lucide-react";
 import { mutate } from "swr";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { EmptyBlock } from "@/components/projects/bits";
 import { useAuth } from "@/lib/auth";
-import { setAppModuleEnabled } from "@/lib/api";
+import { setAppModuleEnabled, type AppCapabilities } from "@/lib/api";
+import { APP_CAPABILITY_DEFAULTS } from "@/lib/hooks/useAppCapabilities";
 
 /** Honest "module off" state (WARP-1154/1155). Rendered when the orchestrator
  *  explicitly reports the Projects module disabled — no PM request ever fires
@@ -38,7 +39,27 @@ export function ProjectsDisabled(): JSX.Element {
       // browser's 30 s HTTP cache and keep this screen up after the server
       // already said yes. The gate cache is invalidated server-side by the
       // PATCH, so the workspace's PM reads succeed immediately.
-      await mutate("/api/capabilities", { projects: true }, { revalidate: false });
+      //
+      // Merge rather than replace (WARP-2578): the payload carries `crm` and
+      // `contacts` too, and writing `{ projects: true }` alone blanked them for
+      // every other reader of this cache key until the next probe — which is
+      // 10 minutes away (refreshInterval) and cannot be revalidated into
+      // place here, because that is the HTTP cache this flip exists to skip.
+      //
+      // The defaults spread is load-bearing, not belt-and-braces: with no
+      // cache entry yet, `{ ...prev, projects: true }` would write the same
+      // `undefined` flags this fixes. Both the shape and the pre-probe
+      // fallbacks are imported rather than re-declared, so this component
+      // cannot drift from the contract the hook serves.
+      await mutate(
+        "/api/capabilities",
+        (prev: AppCapabilities | undefined): AppCapabilities => ({
+          ...APP_CAPABILITY_DEFAULTS,
+          ...prev,
+          projects: true,
+        }),
+        { revalidate: false },
+      );
     } catch {
       setError("Couldn't turn on Projects just now. Try again in a moment.");
       setBusy(false);

@@ -612,3 +612,80 @@
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
+
+/* ── role-template gallery (WARP-2738) ──────────────────────────────
+   One component serves two very different widths: the §4.1 empty state
+   renders it INSIDE the 360px left column, and the "Start from a
+   template" dialog renders it at 720px. `auto-fill` with a
+   `min(100%, 260px)` floor is what lets a single grid do both — one
+   column in the rail, two or three in the dialog — without a size prop
+   the caller could get wrong. No new tokens (brief §1/§15). */
+.acc-tplgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+.acc-tplcard {
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.acc-tplcard .hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.acc-tplcard .nm {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+}
+.acc-tplcard .desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+/* Grant rows: the label is the legend key, so it carries the same icon
+   the legend above the grid does — grouping alone would be a colorless
+   twin of color-alone (§13: icon AND word, every time). */
+.acc-tplrow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.acc-tplrow .lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+.acc-tplrow .lbl svg {
+  flex-shrink: 0;
+}
+.acc-tplrow .chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* `margin-top: auto` keeps the actions on the card's baseline when a
+   neighbour in the same grid row has a longer description. */
+.acc-tplcard .ft {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 2px;
+}
+.acc-tpl-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

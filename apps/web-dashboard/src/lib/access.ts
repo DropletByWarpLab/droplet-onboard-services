@@ -26,6 +26,7 @@ import type {
   AccessTier,
   ConnectorAccessLevel,
   FeatureAccessLevel,
+  RoleTemplate,
   ToolAccessLevel,
 } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
@@ -385,6 +386,89 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     ],
   },
   {
+    // WARP-2117. Value-identical ladder to the server's access-catalog entry;
+    // only the copy lives here.
+    //
+    // WARP-2558 (ADR-044) — `requires: "projects"` is gone, mirroring the
+    // orchestrator registry. The CRM owns /customers, so it is no longer
+    // unreachable without PM, and a builder gating Customers must not be told
+    // to turn on a module the surface does not need.
+    moduleId: "crm",
+    label: "CRM",
+    description: "Customers, deals and the sales pipeline",
+    levels: [
+      { value: "view", label: "View", grants: "See customers and the pipeline" },
+      {
+        value: "act",
+        label: "Work",
+        grants: "Log activity and move deals",
+        minTier: FAMILY,
+        dropNoun: "Work on deals",
+        dropVerb: "move deals",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Edit the pipeline and delete records",
+        minTier: FAMILY,
+        dropNoun: "Manage the CRM",
+        dropVerb: "manage the pipeline",
+      },
+    ],
+  },
+  {
+    // WARP-2581. Value-identical ladder to the server's access-catalog entry;
+    // only the copy lives here. TWO levels, not three: money is read-only on
+    // this box — the vendor stays the system of record — so there is no `act`
+    // to grant, because there is no action.
+    moduleId: "money",
+    label: "Money",
+    description: "Invoices and bills from a connected ledger",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "See what is owed and what is due",
+        minTier: FAMILY,
+        dropNoun: "See the money",
+        dropVerb: "see invoices and bills",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Connect and disconnect the ledger",
+        minTier: ADMIN,
+        dropNoun: "Manage the ledger",
+        dropVerb: "connect a ledger",
+      },
+    ],
+  },
+  {
+    // WARP-2018/2032.
+    moduleId: "contacts",
+    label: "Contacts",
+    description: "The address book",
+    levels: [
+      { value: "view", label: "View", grants: "See contacts" },
+      {
+        value: "act",
+        label: "Edit",
+        grants: "Add and update contacts",
+        minTier: FAMILY,
+        dropNoun: "Edit contacts",
+        dropVerb: "update contacts",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Connect an address book",
+        minTier: FAMILY,
+        dropNoun: "Manage contacts",
+        dropVerb: "connect an address book",
+      },
+    ],
+  },
+  {
     moduleId: "voice",
     label: "Voice",
     description: "Talking to the assistant out loud",
@@ -465,9 +549,35 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
     feature: "calendar",
   },
   { id: "email", label: "Email", domains: ["email"], feature: "email" },
-  { id: "projects", label: "Projects", domains: ["pm"], feature: "projects" },
+  // ADR-045 (WARP-2583) — this row was `projects`, writing the `pm` grant,
+  // and it was the row that gated every project and task tool. The collapse
+  // moved all of those, and the CRM's, into the `business` domain
+  // (`business_find`, `business_timeline`, `business_create`,
+  // `business_update`, `business_link`), which until this change sat under
+  // System below — so withholding Projects from a role changed nothing, and
+  // the broad System toggle handed out the tools that create projects, tasks,
+  // deals and notes. `business` is its own row now. `pm` and `crm` ride with
+  // it: both hold zero local tools and exist as the landing slots for a
+  // remote tracker or CRM catalog (Atlassian, HubSpot) — the same reach.
+  //
+  // No `feature`, deliberately. The domain spans TWO modules (projects, crm),
+  // so a single-module auto-off would be wrong in one direction or the other;
+  // the server treats it as unclaimed for the same reason (access-catalog.ts
+  // UNCLAIMED_DOMAINS). What a role may DO with the tools is still gated per
+  // entity, per person, at the route — `/api/pm/*` and `/api/crm/*` sit
+  // behind `requireFeatureAccess` — so a role without Projects gets a 404
+  // from `business_create({entity:"project"})` whatever this row says.
+  // `view` withholds the three writes; there is no OFF for an ungated row,
+  // exactly as for System and Cloud accounts.
+  { id: "business", label: "Business", domains: ["business", "pm", "crm"], feature: null },
   { id: "memory", label: "Memory", domains: ["memory"], feature: "knowledge" },
-  { id: "system", label: "System", domains: ["system", "business", "data"], feature: null },
+  // WARP-2497 — its own row rather than folded into System: the cloud
+  // connectors read customer, payment and mailing-list records, a different
+  // sensitivity class from System's box telemetry and pure-compute utilities,
+  // and an operator has to be able to withhold it on its own. No module gates
+  // it (there is no connectors AccessModuleId), so `feature` stays null.
+  { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
+  { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
 
 // ── Floor clamping ─────────────────────────────────────────────────────────
@@ -845,5 +955,123 @@ export function roleToDraft(role: AccessRole): RoleDraft {
     usageTouched: false,
     cloud: role.cloudModelsAllowed,
     locks: role.mayOperateLocks,
+  };
+}
+
+/**
+ * WARP-2738 — role template (GET /api/access/role-templates) → editable draft.
+ *
+ * The builder's "start from this, then adjust" path. `POST { templateId }` is
+ * the other one and needs nothing from here; this function exists for the panel
+ * that opens the builder PRE-FILLED, which then saves through
+ * `draftToRolePayload` → `createAccessRole` like any hand-authored role. The
+ * bar is therefore exact: `draftToRolePayload(templateToDraft(t))` must
+ * reproduce `t`'s feature and tool grants EXACTLY, or the operator gets a role
+ * narrower (or wider) than the card they clicked, with nothing on screen saying
+ * so. `access.test.ts` pins that round trip for every template shape.
+ *
+ * Structurally this is `roleToDraft` with a template in place of a wire role,
+ * and NOT `blankRoleDraft` with values poured in — three shipped behaviours in
+ * `draftToRolePayload` make the blank shape wrong here, and each one fails
+ * SILENTLY:
+ *
+ *   1. `touchedToolGroups` is [], the EDIT-mode value, not blankRoleDraft's
+ *      "every group". A touched group fans its display level out across ALL of
+ *      its domains, so seeding every group would (a) invent grants no template
+ *      holds — `system` is the group `["system", "business", "data"]` and
+ *      several templates grant only two of the three, at two different levels;
+ *      `cloud` and `system` are gated by no feature at all, so they would fan
+ *      out onto every template — and (b) flatten mixed levels. The group select
+ *      is a LOSSY view over per-domain rows; a template's rows are per-domain,
+ *      so they pass through the untouched-verbatim path exactly as a server
+ *      role's rows do. Auto-off still works: that path drops a row whose
+ *      group's gating feature is off.
+ *   2. `originalToolGrants` carries the template's rows VERBATIM, and that is
+ *      the only thing that can carry four of them. TOOL_DOMAIN_GROUPS covers 15
+ *      of the 19 grantable domains — `crm`, `money`, `team_chat` and
+ *      `agent_runs` belong to NO group, and `draftToRolePayload` emits an
+ *      ungrouped domain only from this array. blankRoleDraft sets it to [],
+ *      which would silently drop a Front Desk's `crm` tools and a Bookkeeper's
+ *      `money` tools on the way to the wire.
+ *   3. `usageTouched` is false, so the template's raw usage values re-emit
+ *      verbatim instead of being round-tripped through the lossy GB/TB input.
+ *      Every shipped template leaves all three caps null (a cap the box does
+ *      not enforce is not a cap), so today both paths agree — but the day one
+ *      carries a non-whole-GB quota, only this one keeps it.
+ *
+ * `features` is built by walking ACCESS_FEATURES rather than the template, for
+ * the same reason `roleToDraft` does: absent row = OFF has to be rendered as an
+ * explicit off entry. The consequence is that a grant on a module this build's
+ * catalog does not know is dropped from the draft (the direct
+ * `POST { templateId }` path is unaffected — the server never consults this).
+ * Tool grants have no such hole: an unknown domain rides through
+ * `originalToolGrants` untouched, exactly as `erp` does.
+ */
+export function templateToDraft(template: RoleTemplate): RoleDraft {
+  const features: FeatureDraft = {};
+  for (const f of ACCESS_FEATURES) {
+    if (f.alwaysOn) {
+      features[f.moduleId] = { on: true, level: f.levels[0]!.value };
+      continue;
+    }
+    const grant = template.featureGrants.find((g) => g.moduleId === f.moduleId);
+    features[f.moduleId] = grant
+      ? { on: true, level: grant.level }
+      : { on: false, level: f.levels[0]!.value };
+  }
+
+  // DISPLAY values only — the widest level among each group's granted domains,
+  // exactly as roleToDraft computes them. The save path ignores this map while
+  // the group is untouched, so a group the template covers partially (or not at
+  // all) shows a level without that level becoming a grant.
+  const tools: Record<string, ToolAccessLevel> = {};
+  for (const g of TOOL_DOMAIN_GROUPS) {
+    const grants = template.toolGrants.filter((t) => g.domains.includes(t.domain));
+    tools[g.id] = grants.some((t) => t.level === "use") ? "use" : "view";
+  }
+
+  // Always empty in practice — no template carries a connector grant, because a
+  // provider slug is per-box and naming one this box has not configured would
+  // store dead config. Hydrated properly anyway rather than hardcoded to {}, so
+  // this function stays a projection of the payload rather than a claim about
+  // it. The panel's confirm copy is where the operator is told to add connector
+  // access afterwards, in the builder.
+  const connectors: Record<string, ConnectorAccessLevel | "none"> = {};
+  for (const c of template.connectorGrants) connectors[c.provider] = c.level;
+
+  const { value: storageValue, unit: storageUnit } = bytesToStorageInput(
+    template.storageQuotaBytes,
+  );
+
+  return {
+    // No row exists yet: this draft CREATES one. The panel posts it through the
+    // create path, and the server derives the authoritative slug.
+    id: null,
+    name: template.name,
+    slug: slugifyRoleName(template.name),
+    description: template.description,
+    startingPoint: template.startingPoint,
+    features,
+    tools,
+    originalToolGrants: template.toolGrants.map((t) => ({ domain: t.domain, level: t.level })),
+    touchedToolGroups: [],
+    connectors,
+    usage: {
+      storageValue,
+      storageUnit,
+      uploadMb: template.maxUploadSizeMb != null ? String(template.maxUploadSizeMb) : "",
+      llmDaily: template.llmDailyMessageCap != null ? String(template.llmDailyMessageCap) : "",
+    },
+    originalUsage: {
+      storageQuotaBytes: template.storageQuotaBytes,
+      maxUploadSizeMb: template.maxUploadSizeMb,
+      llmDailyMessageCap: template.llmDailyMessageCap,
+    },
+    usageTouched: false,
+    cloud: template.cloudModelsAllowed,
+    // Honest even though every template but one sets this false: the payload
+    // builder ANDs it against a live smart_home grant exactly as the server
+    // does, so turning Devices off in the builder turns locks off with it.
+    locks: template.mayOperateLocks,
   };
 }

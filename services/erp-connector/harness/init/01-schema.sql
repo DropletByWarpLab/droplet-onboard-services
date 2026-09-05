@@ -140,6 +140,222 @@ CREATE TABLE dba.ap_summary (
   balance       numeric(12,2)
 );
 
+-- =============================================================================
+-- WARP-2280 — the SaaS datasets (payments, CRM, commerce, marketing)
+-- =============================================================================
+--
+-- Same standing as the accounting block above, and added for the same reason:
+-- `harness-postgres-drift` builds EVERY registered read against this schema, so
+-- a dataset whose reads have no lane here would either fail the drift suite or
+-- force a carve-out in it — and a universally-quantified drift test with an
+-- exemption list stops being one.
+--
+-- These are not claims that any shipping track has a SQL database behind
+-- Stripe or HubSpot; none does, and the cloud connectors are REST. The shapes
+-- mirror CANONICAL_COLUMNS in export-drop/profiles.ts exactly, so a drift in
+-- either side is caught here at unit-test speed.
+--
+-- Money columns are numeric(12,2) — DECIMAL MAJOR UNITS, matching the canonical
+-- contract. Stripe's API is integer minor units; converting is the connector's
+-- job at its boundary, and a minor-units column here would enshrine the bug the
+-- convention exists to prevent. Counts are integer, not numeric.
+--
+-- No real data: everything below is fictional.
+
+-- Payments — a money MOVEMENT, as opposed to accounting's money POSITION.
+CREATE TABLE dba.charge (
+  charge_id        varchar(64) PRIMARY KEY,
+  created_at       timestamp,
+  customer_id      varchar(64),
+  amount           numeric(12,2),
+  amount_refunded  numeric(12,2),
+  currency         varchar(3),
+  status           varchar(30)
+);
+
+CREATE TABLE dba.refund (
+  refund_id     varchar(64) PRIMARY KEY,
+  created_at    timestamp,
+  charge_id     varchar(64),
+  amount        numeric(12,2),
+  currency      varchar(3),
+  status        varchar(30),
+  reason        varchar(120)
+);
+
+CREATE TABLE dba.payout (
+  payout_id     varchar(64) PRIMARY KEY,
+  created_at    timestamp,
+  arrival_at    timestamp,
+  amount        numeric(12,2),
+  currency      varchar(3),
+  status        varchar(30)
+);
+
+-- net_amount = gross_amount - fee_amount, and is the one money column here
+-- that may legitimately be negative (a refund takes money off the balance).
+CREATE TABLE dba.balance_transaction (
+  balance_transaction_id varchar(64) PRIMARY KEY,
+  created_at             timestamp,
+  type                   varchar(40),
+  gross_amount           numeric(12,2),
+  fee_amount             numeric(12,2),
+  net_amount             numeric(12,2),
+  currency               varchar(3)
+);
+
+-- amount is the recurring charge per `interval`, never annualized.
+CREATE TABLE dba.subscription (
+  subscription_id        varchar(64) PRIMARY KEY,
+  customer_id            varchar(64),
+  status                 varchar(30),
+  current_period_start   timestamp,
+  current_period_end     timestamp,
+  amount                 numeric(12,2),
+  currency               varchar(3),
+  interval               varchar(20)
+);
+
+-- CRM — people and pipeline. `contact` is deliberately NOT `patient`: no PHI,
+-- and a contact may have bought nothing.
+CREATE TABLE dba.contact (
+  contact_id       varchar(64) PRIMARY KEY,
+  created_at       timestamp,
+  first_name       varchar(80),
+  last_name        varchar(80),
+  email            varchar(160),
+  company_id       varchar(64),
+  lifecycle_stage  varchar(40)
+);
+
+CREATE TABLE dba.company (
+  company_id    varchar(64) PRIMARY KEY,
+  created_at    timestamp,
+  name          varchar(160),
+  domain        varchar(160)
+);
+
+-- amount is EXPECTED value, not money that exists. Summing it with invoice
+-- balances mixes forecast with fact.
+CREATE TABLE dba.deal (
+  deal_id       varchar(64) PRIMARY KEY,
+  created_at    timestamp,
+  closed_at     timestamp,
+  company_id    varchar(64),
+  name          varchar(160),
+  stage         varchar(60),
+  amount        numeric(12,2),
+  currency      varchar(3)
+);
+
+CREATE TABLE dba.ticket (
+  ticket_id     varchar(64) PRIMARY KEY,
+  created_at    timestamp,
+  closed_at     timestamp,
+  contact_id    varchar(64),
+  subject       varchar(200),
+  status        varchar(30),
+  priority      varchar(20)
+);
+
+-- Commerce. Revenue is total_amount - tax_amount - refunded_amount; the tax
+-- was never the business's money, which is why it is its own column.
+CREATE TABLE dba."order" (
+  order_id            varchar(64) PRIMARY KEY,
+  created_at          timestamp,
+  customer_id         varchar(64),
+  total_amount        numeric(12,2),
+  subtotal_amount     numeric(12,2),
+  tax_amount          numeric(12,2),
+  refunded_amount     numeric(12,2),
+  currency            varchar(3),
+  financial_status    varchar(30),
+  fulfillment_status  varchar(30)
+);
+
+-- price_amount is the LIST price for one unit, before discount, excluding tax.
+-- inventory_quantity is a count and may be negative where overselling is on.
+CREATE TABLE dba.product (
+  product_id          varchar(64) PRIMARY KEY,
+  created_at          timestamp,
+  title               varchar(200),
+  sku                 varchar(80),
+  price_amount        numeric(12,2),
+  currency            varchar(3),
+  inventory_quantity  integer,
+  status              varchar(30)
+);
+
+-- total_spent_amount is lifetime GROSS, not net of refunds — a ranking signal,
+-- not a revenue figure.
+CREATE TABLE dba.customer (
+  customer_id         varchar(64) PRIMARY KEY,
+  created_at          timestamp,
+  first_name          varchar(80),
+  last_name           varchar(80),
+  email               varchar(160),
+  orders_count        integer,
+  total_spent_amount  numeric(12,2),
+  currency            varchar(3)
+);
+
+-- Marketing. Every number is a count; opens/clicks are UNIQUE recipients, so
+-- an open rate cannot exceed 100% and discredit the row.
+CREATE TABLE dba.campaign (
+  campaign_id   varchar(64) PRIMARY KEY,
+  sent_at       timestamp,
+  audience_id   varchar(64),
+  subject       varchar(200),
+  status        varchar(30),
+  emails_sent   integer,
+  opens_unique  integer,
+  clicks_unique integer
+);
+
+CREATE TABLE dba.audience (
+  audience_id        varchar(64) PRIMARY KEY,
+  created_at         timestamp,
+  name               varchar(160),
+  member_count       integer,
+  unsubscribe_count  integer
+);
+
+-- WARP-2466 — a CRM timeline activity. No status and nothing to resolve: it is
+-- a thing that HAPPENED, which is why it is not a ticket.
+CREATE TABLE dba.engagement (
+  engagement_id varchar(64) PRIMARY KEY,
+  occurred_at   timestamp,
+  type          varchar(30),
+  contact_id    varchar(64),
+  deal_id       varchar(64)
+);
+
+-- WARP-2466 — one person's MEMBERSHIP of one audience. `subscription_status`
+-- is the column the row exists for: mailing somebody who unsubscribed is the
+-- one unrecoverable mistake this dataset can cause.
+CREATE TABLE dba.audience_member (
+  audience_member_id  varchar(64) PRIMARY KEY,
+  audience_id         varchar(64),
+  email               varchar(200),
+  subscription_status varchar(30),
+  opted_in_at         timestamp,
+  -- WARP-2509 — renamed from `last_changed_at`. One name for the modification
+  -- column across every dataset that has one; the vendor's `last_changed`
+  -- spelling stays in the Mailchimp mapper.
+  updated_at          timestamp
+);
+
+-- WARP-2466 — a purchase as a MARKETING platform recorded it. No tax, no
+-- refund and no fulfillment state, which is exactly why it is not `order`.
+CREATE TABLE dba.ecommerce_order (
+  ecommerce_order_id varchar(64) PRIMARY KEY,
+  store_id           varchar(64),
+  customer_id        varchar(64),
+  total_amount       numeric(14,2),
+  currency           varchar(3),
+  processed_at       timestamp
+);
+
 -- Watermark trigger: bump last_modified on every UPDATE (mimics the SQL
 -- Anywhere DEFAULT TIMESTAMP column the connector discovers + guards on).
 CREATE OR REPLACE FUNCTION dba.touch_last_modified() RETURNS trigger AS $$

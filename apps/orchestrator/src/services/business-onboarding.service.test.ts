@@ -21,6 +21,7 @@ import {
   INTERVIEW_CONDUCTOR_BLOCK,
   INTERVIEW_SESSION_TITLE,
   WRAP_UP_TURN,
+  OPENING_TURN,
   CLOSING_TURN,
   ONBOARDING_FACTS_ADDED_BY,
 } from "./business-onboarding.service.js";
@@ -310,6 +311,69 @@ describe("startOnboarding (§9.2)", () => {
     });
   });
 
+  // The walkthrough defect: `start` used to create the session and stop
+  // there. The dashboard then opened a thread with nothing in it, and
+  // because /llm/chat refuses a turn with no user message the model could
+  // never speak first — so the "interview" was an ordinary blank chat
+  // waiting for the owner to guess that they should type. The opener is
+  // server-authored for the same reason CLOSING_TURN is.
+  it("seeds the opening question into the new session (the interview must open itself)", async () => {
+    const p = makePrisma({});
+    const r = await startOnboarding(asPrisma(p), "stefan");
+    expect(p._messages).toEqual([
+      {
+        sessionId: r.conversationId,
+        role: "assistant",
+        content: OPENING_TURN,
+      },
+    ]);
+  });
+
+  it("the opener carries the topic-1 marker, so the dots read 1 of 7 on first paint", () => {
+    // The marker IS the whole progress protocol (§9.3) — an unmarked opener
+    // would leave the eyebrow stuck on 0 of 7 next to a live question.
+    expect(OPENING_TURN).toMatch(/^\[topic 1\/7\]\s+\S/);
+  });
+
+  it("a re-run's FRESH session gets its own opener", async () => {
+    const p = makePrisma({
+      onboardingState: "completed",
+      interviewChatId: "old-interview",
+    });
+    const r = await startOnboarding(asPrisma(p), "stefan");
+    expect(p._messages).toEqual([
+      {
+        sessionId: r.conversationId,
+        role: "assistant",
+        content: OPENING_TURN,
+      },
+    ]);
+  });
+
+  it("an idempotent resume seeds NOTHING — it must not re-ask topic 1 mid-interview", async () => {
+    const p = makePrisma({
+      onboardingState: "in_progress",
+      interviewChatId: "conv-live",
+    });
+    await startOnboarding(asPrisma(p), "stefan");
+    expect(p._messages).toHaveLength(0);
+  });
+
+  it("the self-healed session gets an opener too (it is created empty)", async () => {
+    const p = makePrisma({
+      onboardingState: "in_progress",
+      interviewChatId: null,
+    });
+    const r = await startOnboarding(asPrisma(p), "stefan");
+    expect(p._messages).toEqual([
+      {
+        sessionId: r.conversationId,
+        role: "assistant",
+        content: OPENING_TURN,
+      },
+    ]);
+  });
+
   it("skipped → in_progress (Run business setup)", async () => {
     const p = makePrisma({ onboardingState: "skipped" });
     const r = await startOnboarding(asPrisma(p), "stefan");
@@ -352,8 +416,11 @@ describe("startOnboarding (§9.2)", () => {
     await expect(startOnboarding(asPrisma(p), "stefan")).rejects.toBeInstanceOf(
       OnboardingStateConflictError,
     );
-    // Rollback: no orphaned "Getting to know your business" session.
+    // Rollback: no orphaned "Getting to know your business" session — and
+    // no orphaned opener either. The seed is inside the same transaction
+    // precisely so a losing start cannot leave a stray question behind.
     expect(p._sessions).toHaveLength(0);
+    expect(p._messages).toHaveLength(0);
   });
 
   it("self-heals a live state whose session link is gone", async () => {

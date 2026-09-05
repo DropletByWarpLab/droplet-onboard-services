@@ -101,6 +101,45 @@ export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m3
  *  therefore the same factory-reset shred story — an owner who resets the box
  *  reconnects the company, which is the correct outcome for a financial grant. */
 export function deriveErpCloudTokenKey(): Buffer { return hkdf(deviceIkm(), "erp-cloud-token"); }
+/** WARP-2276 / ADR-041 / ADR-042 §5 — column key for the SaaS credentials an
+ *  owner pastes into the admin configurator. They are stored in
+ *  `IntegrationConnection.providerTokensEnc` (`schema.prisma:4396`), the
+ *  cloud-track credential column, which is what the connectors' TokenResolver
+ *  reads — NOT `apiCredentialsEnc`, the Eaglesoft REST triple's LAN column.
+ *
+ *  That puts two writers on one column, which is safe because they are disjoint
+ *  by PROVIDER and each fails closed against the other: this label plus a
+ *  `saas-credential:<rowId>` AAD, against `erp-cloud-token` plus a bare-row-id
+ *  AAD. Neither can open the other's ciphertext, so a mismatch reads as "no
+ *  credential" rather than as a wrong one.
+ *
+ *  Its OWN `info` label rather than a widening of `deriveErpCloudTokenKey`,
+ *  which is the same deliberate per-purpose separation that keeps the M365 and
+ *  ERP-cloud labels apart: those two hold tokens the box OBTAINED through an
+ *  OAuth grant it can re-run, while this holds a long-lived secret the customer
+ *  typed in once and may have reused elsewhere. One compromised key must not
+ *  open the other, and the blast radius of a pasted API key is the customer's
+ *  vendor account, not just this box's grant.
+ *
+ *  Rides the DEVICE_SECRET_KEY ikm like its siblings, so a factory reset
+ *  crypto-shreds every stored credential even if the rows survive — an owner
+ *  who resets the box re-pastes the key, which is the correct outcome. */
+export function deriveSaasCredentialKey(): Buffer { return hkdf(deviceIkm(), "saas-credential"); }
+/**
+ * The AAD that binds a SaaS credential blob to the connection row holding it.
+ *
+ * Separate from the key derivation ON PURPOSE. The key is per-PURPOSE (one
+ * label for every SaaS credential on the box); the AAD is per-ROW. Folding the
+ * row id into the key instead would make a moved blob fail too — but it would
+ * also make the AAD dead weight, and the next caller to reach for
+ * `encryptColumn` without an AAD would silently get a blob that decrypts on any
+ * row sharing the key. Keeping the binding here, in the value both call sites
+ * must pass, is what makes "moved between rows fails closed" a testable claim
+ * rather than an incidental property of the derivation.
+ */
+export function saasCredentialAad(connectionId: string): string {
+  return `saas-credential:${connectionId}`;
+}
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {

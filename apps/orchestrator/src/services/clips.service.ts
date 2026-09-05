@@ -161,7 +161,9 @@ function signingKey(): Buffer {
 }
 
 function b64url(buf: Buffer): string {
-  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // Base64 of a Buffer carries at most two `=` pads, so the strip is bounded:
+  // `=+$` re-scans an unbounded run from every offset (CodeQL js/polynomial-redos).
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/={1,2}$/, "");
 }
 function fromB64url(s: string): Buffer {
   s = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -172,7 +174,7 @@ function fromB64url(s: string): Buffer {
 /** Defense-in-depth path validation. Reject traversal markers (raw and
  *  percent-decoded) so a caller can't sign a token whose ncPath escapes the
  *  signing user's Nextcloud namespace. Mirrors PR #1's validateNcPath. */
-function assertSafeNcPath(ncPath: string): string {
+export function assertSafeNcPath(ncPath: string): string {
   if (typeof ncPath !== "string") throw new Error("nc_path must be a string");
   if (ncPath.length === 0) throw new Error("nc_path is required");
   if (ncPath.length > 4096) throw new Error("nc_path too long");

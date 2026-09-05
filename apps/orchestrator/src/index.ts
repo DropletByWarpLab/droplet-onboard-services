@@ -28,12 +28,27 @@ import {
   stopHealthMonitor,
   onHealthSnapshot,
 } from "./services/health-monitor.service.js";
-import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
+import {
+  ensureMcpStarted,
+  ensureRemoteMcpAttached,
+  remoteMcpReconcilerDeps,
+  stopMcp,
+} from "./services/mcp-client.singleton.js";
+import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import {
+  AGENT_RUN_LOCK_KEY,
+  createAgentRunWorker,
+} from "./services/agent-run-worker.service.js";
+import {
+  AGENT_RUN_SCHEDULE_LOCK_KEY,
+  tickAgentRunSchedules,
+} from "./services/agent-run-schedule-ticker.service.js";
+import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
@@ -99,13 +114,40 @@ import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
+import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
 } from "./routes/network-throughput.js";
 import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
-import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
+import {
+  initActivityRecorder,
+  recordActivity,
+  getActivityRecorder,
+} from "./services/activity.singleton.js";
+import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
+import {
+  discoverResources,
+  runSyncTick,
+  type M365SyncDeps,
+} from "./services/m365/m365-sync.service.js";
+import { GraphClient } from "./services/m365/graph-client.js";
+import { initialUrlFor } from "./services/m365/graph-resources.js";
+import { createEntraClient, isM365Configured } from "./services/m365/entra-client.js";
+
+/**
+ * Product version for the Graph `User-Agent` Microsoft asks integrators to
+ * send. Duplicated from `services/analytics/index.ts`'s
+ * `ORCHESTRATOR_FW_VERSION` and carrying the same caveat it does: a single
+ * canonical runtime version source does not exist yet, and when one lands both
+ * should read it.
+ */
+const ORCHESTRATOR_M365_UA_VERSION = "0.1.0";
+import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
+// WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
+import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
+import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
 import { runNightlyChainVerification } from "./services/audit-verify.service.js";
@@ -359,6 +401,24 @@ async function main() {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
   }
 
+  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP session, if this box is
+  // entitled to one. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
+  // empty) this constructs nothing and dials nothing — it returns
+  // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
+  // vendor session that cannot be opened must not stop the appliance booting.
+  try {
+    const attached = await ensureRemoteMcpAttached(prisma);
+    if (!attached.attached) {
+      logger.info(
+        "Remote MCP not attached (%s): %s",
+        attached.reason,
+        attached.message,
+      );
+    }
+  } catch (err) {
+    logger.warn("Remote MCP attach failed: %s", (err as Error).message);
+  }
+
   // First-boot model readiness: if LLM_MODEL is set and Ollama doesn't
   // have it yet, fire a background pull so the user lands on a working
   // dashboard ~20 min after first boot without any manual `ollama pull`.
@@ -394,6 +454,22 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+
+  // WARP-2651 / ADR-043 §5 — reconcile this process's attachment against the
+  // sessions the bridge actually holds, every 30 s.
+  //
+  // Two asymmetric failures had no recovery before this: an orchestrator crash
+  // left the bridge holding an authenticated vendor connection nothing drives,
+  // and a bridge restart left this process pointing at a session that no longer
+  // exists, failing every dispatch until the ORCHESTRATOR restarted. Both are a
+  // one-tick fix here.
+  //
+  // NO `lockKey`, deliberately: unlike the firewall reconcilers below, what this
+  // converges is per-PROCESS in-memory state, so a lock would leave every
+  // replica but one permanently detached. And on the shipping default
+  // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
+  // without dialling anything at all.
+  mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
@@ -517,6 +593,53 @@ async function main() {
       await tickSceneSchedules(prisma, sceneMatterDispatcher);
     },
     { lockKey: "droplet:scene-schedule-ticker" },
+  );
+
+  // WARP-2177 — durable agent-run worker (epic WARP-2176). Two ticks on the
+  // one sanctioned clock, no second scheduler:
+  //   - the claim/reclaim tick runs under its own advisory lock so only one
+  //     replica claims each queued row (the claim itself is a conditional
+  //     updateMany, so even a lost lock cannot double-claim);
+  //   - the heartbeat tick is per process and unlocked: it beats the runs
+  //     THIS process is executing. Timer-driven, not iteration-driven, so a
+  //     run sitting in a slow model call still holds its lease.
+  // The run executes OUTSIDE the tick — the lock is transaction-scoped with a
+  // 60 s timeout, which is right for a tick and wrong for a 40-minute run.
+  // NOT gated on ROUTING_MODE: runs need the model and the tool registry,
+  // neither of which depends on router supervision.
+  const agentRunWorker = createAgentRunWorker({
+    prisma,
+    agent: { mcp: mcpClient, aiGateway: { chat: aiGateway.chat } },
+  });
+  cronRuntime.scheduleInterval(
+    config.agentRuns.tickMs,
+    async () => {
+      await agentRunWorker.tickOnce();
+    },
+    { lockKey: AGENT_RUN_LOCK_KEY },
+  );
+  cronRuntime.scheduleInterval(config.agentRuns.heartbeatMs, async () => {
+    await agentRunWorker.heartbeatOnce();
+  });
+  // WARP-2180 — recurring runs. Every 60 s, due AgentRunSchedule rows are
+  // ENQUEUED (never executed here); the worker above claims them. Same
+  // clock, its own lock key, no second scheduler.
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      await tickAgentRunSchedules(prisma);
+    },
+    { lockKey: AGENT_RUN_SCHEDULE_LOCK_KEY },
+  );
+  logger.info(
+    {
+      workerId: agentRunWorker.workerId,
+      concurrency: config.agentRuns.concurrency,
+      tickMs: config.agentRuns.tickMs,
+      heartbeatMs: config.agentRuns.heartbeatMs,
+      reclaimAfterMs: config.agentRuns.reclaimAfterMs,
+    },
+    "agent run worker started",
   );
 
   // WARP-1385 (ADR-030) — direct-punch remote-access overlay connect agent.
@@ -1033,6 +1156,34 @@ async function main() {
     { lockKey: "droplet:team-chat-meeting-reminders" },
   );
 
+  // WARP-2587 (ADR-045 slice I) — PM + CRM notification sweep. Every 60s,
+  // projects pending PmActivity / CrmActivity rows into NotificationLog +
+  // MQTT toasts; exactly-once via the pending→sent claim inside the sweep's
+  // own transaction, coalesced to at most one notification per recipient per
+  // tick per source so a bulk import cannot fan out 200 toasts.
+  //
+  // Its own lockKey, distinct from the meeting sweep's, so the two 60s jobs
+  // never contend on one advisory lock and starve each other.
+  //
+  // The second argument is the SLICE-H SEAM: `departmentWatchers` defaults to
+  // assignees-only because PmProject has no department today. When slice H
+  // lands, pass its resolver here — that is the whole integration; nothing in
+  // activity-notify.service.ts changes.
+  //
+  // Errors propagate naked to cron-runtime's `safeRun`, matching every other
+  // handler here; only the MQTT toast and the department resolver are
+  // absorbed inside the service (leaf effects).
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      const result = await runActivityNotifySweep(prisma);
+      if (result.notificationsSent > 0 || result.pmSkipped > 0 || result.crmSkipped > 0) {
+        logger.info(result, "activity notify sweep");
+      }
+    },
+    { lockKey: "droplet:activity-notify" },
+  );
+
   // WARP-475's nightly camera-retention purge used to fire here at 03:30.
   // WARP-1849 removed it: both endpoints it called —
   // `DELETE /api/recordings?before=` and `DELETE /api/events?before=` —
@@ -1169,6 +1320,214 @@ async function main() {
     logger,
   });
 
+  // WARP-2218 — connector sync. The escape this closes: BEFORE this leg
+  // existed, no connector sync was scheduled anywhere in the product, and
+  // `lastHealthyAt` — the column the hub renders as "last synced" — was
+  // written in exactly one place, inside `connect()`. A connection that
+  // succeeded in March and had served reads ever since still displayed its
+  // March timestamp. "Last synced" meant "last connected", which is a
+  // confidently wrong statement about how fresh a customer's money data is.
+  //
+  // Two legs, deliberately on different cadences:
+  //
+  //   incremental  reads from the persisted watermark. Frequent and cheap.
+  //   sweep        re-enumerates from the beginning and emits a drift report.
+  //                Rare and expensive.
+  //
+  // The sweep is not an optimisation to add later. Xero's `UpdatedDateUTC`
+  // does not fire on DueDate / SentToContact / contact-balance changes,
+  // HubSpot's Search API is eventually consistent, and Stripe does not
+  // guarantee event ordering — so the incremental path can report SUCCESS
+  // while silently missing records, which is worse than failing, because the
+  // owner has no way to find out. See `services/erp-sync/reconcile.ts`.
+  //
+  // Both carry a `lockKey`: `cron-runtime.service.ts:154` `withAdvisoryLock`
+  // pins acquire+release to one backend connection inside a `$transaction` and
+  // SKIPS the tick when another replica holds it. Without it a multi-instance
+  // box double-polls every vendor and burns a shared rate budget twice.
+  //
+  // Errors propagate naked to `safeRun`, matching every other cron leg in this
+  // file — swallowing them would zero the per-handler consecutiveFailures
+  // canary that downstream alerting reads.
+  // WARP-2383 / WARP-2408 — expire minted Xero access tokens out of process
+  // memory.
+  //
+  // A Xero Custom Connection issues NO refresh token and a 30-minute access
+  // token (ADR-042 §6), so the connector re-mints from the stored client
+  // credential and caches the result per CONNECTION — module-level, because
+  // `erp.service` builds and closes a connector per read and a per-instance
+  // cache would mint a token for every read.
+  //
+  // This leg is deliberately NOT a proactive re-mint. Against the four-hour
+  // poll cadence the token is expired at every tick by construction, so
+  // refreshing it on a timer would mint ~57 tokens a day to use six of them,
+  // spending the very daily allowance the cadence exists to protect. What it
+  // buys instead is that a token belonging to a connection nobody has read
+  // from since this morning is not still sitting in memory this evening, and
+  // that the cache cannot grow on a box whose connections come and go.
+  //
+  // Ten minutes, on `cron-runtime` and never a `while (true)`: a third of the
+  // token's life, so nothing dead lingers long, and cheap enough that the
+  // frequency is not worth tuning.
+  cronRuntime.scheduleInterval(10 * 60 * 1000, async () => {
+    const dropped = pruneExpiredXeroTokens();
+    if (dropped > 0) logger.debug({ dropped }, "expired xero access tokens dropped from memory");
+  });
+
+  const erpSyncRecorder = getActivityRecorder();
+  if (erpSyncRecorder) {
+    const erpSyncRunner = createErpSyncRunner({
+      prisma: prisma as never,
+      recorder: erpSyncRecorder,
+      // WARP-2417 — the same device identity the schedule below is jittered
+      // from. It reaches `claimDueErpCursors`, which applies each provider's
+      // declared `pollIntervalFloorMs` (Xero: four hours) on top of the tick,
+      // jittered per box so the fleet does not converge on the same instants.
+      deviceId: config.DROPLET_DEVICE_ID,
+    });
+
+    // Read at BOOT, inside main() — never at module import. A schedule frozen
+    // at import is the `INFERENCE_RUNTIME` bug again: `docker restart` does not
+    // re-read `env_file`, so the operator changes the value, restarts, and
+    // nothing happens. Reading here means `up -d --force-recreate` is enough.
+    const erpTickMs = Number(process.env.DROPLET_ERP_SYNC_TICK_MS ?? 15 * 60 * 1000);
+    const erpSweepLegMs = Number(process.env.DROPLET_ERP_SYNC_SWEEP_LEG_MS ?? 60 * 60 * 1000);
+
+    // Per-box jitter, derived from device identity — NOT `Math.random()`.
+    // Xero's rate limit is app-wide and POOLED at 10,000 calls/min across
+    // every box we ship, which saturates at roughly 1,250 boxes syncing on the
+    // same minute. On-prem appliances otherwise align on round times, and that
+    // is a limit we neither control nor can raise per customer. Deriving the
+    // offset keeps the same box in the same slot across restarts, so an
+    // incident can be explained rather than shrugged at.
+    const deviceId = config.DROPLET_DEVICE_ID;
+
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(erpTickMs, deviceId),
+      async () => {
+        await erpSyncRunner.registerCursors();
+        const out = await erpSyncRunner.runIncrementalTick();
+        if (out.cursorsClaimed > 0) {
+          logger.info(out, "erp connector sync tick");
+        }
+      },
+      { lockKey: "droplet:erp-connector-sync" },
+    );
+
+    // The sweep LEG runs hourly; whether any cursor is actually re-enumerated
+    // is gated inside the runner on the persisted `lastSweepAt` (24h default).
+    // Splitting it this way means a box that was powered off over its sweep
+    // window picks the work up within the hour instead of skipping a full day,
+    // while the expensive re-enumeration itself still happens only daily.
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(erpSweepLegMs, `${deviceId}:sweep`),
+      async () => {
+        const out = await erpSyncRunner.runReconciliationSweep();
+        const drifted = out.reports.filter((r) => r.driftDetected);
+        if (drifted.length > 0) {
+          logger.warn(
+            { connections: drifted.length, totalMissed: drifted.reduce((n, r) => n + r.totalMissed, 0) },
+            "erp reconciliation sweep found records the incremental path missed",
+          );
+        }
+      },
+      { lockKey: "droplet:erp-connector-reconciliation" },
+    );
+
+    // WARP-2463 — retention for the sweep's STORED drift report.
+    //
+    // The sweep writes one row per (connection, entity) per pass, INCLUDING a
+    // clean pass, so the table grows on a fixed schedule forever and needs a
+    // trim by construction. Its own leg at 03:30 rather than a line in the
+    // 03:00 daily-purge handler: that handler runs every retention sweep on
+    // the box inside ONE 60 s advisory-lock transaction, and adding a table
+    // spends from the same budget (see audit-retention-purge.service.ts, which
+    // is mostly an argument about exactly that). 03:30 continues the 03:00 /
+    // 03:15 spacing that keeps the legs off each other's lock pool.
+    //
+    // Window read at BOOT, like the two schedules above — never at module
+    // import, so `up -d --force-recreate` is enough to change it.
+    registerErpDriftRetention(cronRuntime, prisma as never, {
+      retentionDays: config.DROPLET_ERP_DRIFT_RETENTION_DAYS,
+      onTrimmed: (result) => {
+        if (result.deleted > 0 || result.skipped) {
+          logger.info(result, "erp drift record retention trim");
+        }
+      },
+    });
+  }
+
+  // WARP-2118 (ADR-041) — the Microsoft 365 delta sync tick.
+  //
+  // This is the caller WARP-2115 shipped without. Every decision it makes
+  // already existed and was already tested — `sync-policy.ts` classifies the
+  // failure, `delta-cursor.service.ts` moves the cursor, `m365-auth.service.ts`
+  // resolves the grant — and none of them had anything calling them in
+  // sequence, so no mailbox was ever read.
+  //
+  // Gated on `isM365Configured()`: with no client id there is no app to
+  // authenticate against, and a tick that runs anyway would mark every cursor
+  // failed on a box that simply does not offer the feature.
+  //
+  // Discovery runs BEFORE the tick, every time, and that ordering is
+  // load-bearing rather than tidy: mail delta is per-folder, so a folder
+  // created since the last tick has no cursor and its mail is invisible until
+  // discovery registers one. `upsertCursor` touches nothing on an existing row,
+  // so re-running it is free.
+  //
+  // `lockKey` for the same reason as the ERP legs: without it a multi-instance
+  // box double-polls Microsoft and spends the tenant's throttling budget twice.
+  if (isM365Configured()) {
+    const m365Deps: M365SyncDeps = {
+      prisma: prisma as never,
+      client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
+      entra: createEntraClient(),
+      initialUrlFor,
+    };
+
+    // Read at BOOT, never at module import — `docker restart` does not re-read
+    // `env_file`, so a schedule frozen at import ignores an operator's change.
+    const m365TickMs = Number(process.env.DROPLET_M365_SYNC_TICK_MS ?? 5 * 60 * 1000);
+
+    cronRuntime.scheduleInterval(
+      jitteredPeriodMs(m365TickMs, `${config.DROPLET_DEVICE_ID}:m365`),
+      async () => {
+        // Only CONNECTED grants. A NEEDS_RECONNECT row has a dead refresh
+        // token, and enumerating it every tick would hammer Entra to produce
+        // the same failure the person already has to act on.
+        const connected = (await prisma.m365Connection.findMany({
+          where: { state: "CONNECTED" },
+          select: { userId: true },
+        })) as Array<{ userId: string }>;
+
+        for (const { userId } of connected) {
+          const found = await discoverResources(m365Deps, userId);
+          if (found.skipped.length > 0) {
+            // A licence gap or a declined scope, not a crash — but silence here
+            // would look identical to "that workload has no data".
+            logger.info(
+              { skipped: found.skipped, registered: found.registered },
+              "m365 discovery skipped workloads",
+            );
+          }
+        }
+
+        const out = await runSyncTick(m365Deps);
+        if (out.cursorsClaimed > 0) {
+          logger.info(
+            {
+              cursorsClaimed: out.cursorsClaimed,
+              cursorsCompleted: out.cursorsCompleted,
+              itemsSeen: out.itemsSeen,
+            },
+            "m365 delta sync tick",
+          );
+        }
+      },
+      { lockKey: "droplet:m365-delta-sync" },
+    );
+  }
+
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   // feat/scene-schedules: pass the hoisted Matter dispatcher so the scenes
@@ -1190,6 +1549,12 @@ async function main() {
   // Docker's restart policy brings a fresh instance back.
   const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
+    // WARP-2177 — hand in-flight runs back to `queued` (not charged as an
+    // attempt) so the restarted process resumes them from their checkpoint
+    // on its first tick instead of after the reclaim threshold.
+    await agentRunWorker.releaseAll().catch((err) => {
+      logger.warn("agent run release failed: %s", (err as Error).message);
+    });
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
     // test suites that drive `createApp()` end-to-end don't leak the

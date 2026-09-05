@@ -32,11 +32,15 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole, recordAccessDenied } from "../middleware/auth.js";
+import {
+  requireRole,
+  requireRoleOrMcpService,
+  recordAccessDenied,
+} from "../middleware/auth.js";
 import { createErpService, type ErpUser } from "../services/erp.service.js";
 import { ErpError } from "../services/erp-error.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
-import { EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
+import { EAGLESOFT_API_PROVIDER, EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
 import type { ConnectorLevel } from "../services/access-catalog.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -386,6 +390,22 @@ function erpConnectorWriteGate(prisma: PrismaClient) {
   }
 }
 
+/**
+ * The most rows a single cloud dataset read will return (WARP-2497).
+ *
+ * A ceiling rather than a page: the caller is an LLM turn with a ~12.4K-token
+ * `tools[]` budget and a 16K window, and a month of charges from a busy
+ * merchant is thousands of rows. Truncating with `truncated: true` lets the
+ * assistant say "the most recent 200, there are more" — which is true —
+ * instead of silently answering from a window that the context degrader
+ * trimmed somewhere the model cannot see.
+ *
+ * Not configurable. A number an operator can raise is a number that will be
+ * raised the first time someone wants a bigger export, and the failure it
+ * causes lands in a prompt rather than in this file.
+ */
+export const MAX_DATASET_ROWS = 200;
+
 export function createErpRouter(prisma: PrismaClient): Router {
   const router = Router();
   const svc = createErpService(prisma);
@@ -419,6 +439,116 @@ export function createErpRouter(prisma: PrismaClient): Router {
   router.get("/erp/patient/:id", canRead, async (req, res, next) => {
     try {
       res.json(await svc.getPatient(req.params.id, erpUser(req)));
+    } catch (err) {
+      if (!handleErpError(res, err)) next(err);
+    }
+  });
+
+  /**
+   * WARP-2567 (ADR-044) — the practice block on a customer record.
+   *
+   * 🔴 Why this lives HERE, on the ERP router, and not as a section of
+   * `GET /api/crm/companies/:id/record`:
+   *
+   * The CRM is business-shared. `family` — the front desk — reaches
+   * /customers and the record page, and must. Eaglesoft patients are PHI,
+   * gated in exactly one place: `canRead` below, which resolves an
+   * Eaglesoft-keyed connector grant ON TOP of the role. Adding one more field
+   * to a response the CRM's own gate has already cleared is precisely how a
+   * patient would end up on a page the front desk can open, and
+   * `customer-record.service.test.ts` pins that route's exact key set so the
+   * attempt is a red build rather than a quiet widening.
+   *
+   * It uses the SAME `canRead` instance as `/erp/patient/:id` — deliberately
+   * the same reference, not an equivalent one. A second implementation of a
+   * PHI check is a second thing to keep correct, and the two would drift on
+   * the day one of them was updated.
+   *
+   * The response distinguishes "no linked patient" from "not permitted"; the
+   * PAGE does not, and must not. A lock icon announces that a patient record
+   * exists, which is itself the disclosure.
+   */
+  router.get("/erp/practice/by-company/:companyId", canRead, async (req, res, next) => {
+    try {
+      const links = await prisma.partyLink.findMany({
+        where: {
+          companyId: req.params.companyId,
+          isArchived: false,
+          // 🔴 Only ERP providers. A customer routinely carries links to
+          // Stripe, HubSpot and the practice system at once, and handing a
+          // Stripe customer id to the dental connector would at best 404 and
+          // at worst read a patient whose chart number happens to collide.
+          externalSystem: { in: [EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER] },
+        },
+        select: { id: true, externalSystem: true, externalId: true },
+        orderBy: { createdAt: "asc" },
+      });
+
+      if (links.length === 0) {
+        res.json({ patients: [], linked: false });
+        return;
+      }
+
+      // Read through the EXISTING patient read, so the connector, the drift
+      // lock, the degraded-status handling and the minimum-necessary field
+      // set all come along unchanged rather than being re-implemented.
+      const user = erpUser(req);
+      const patients = await Promise.all(
+        links.map(async (l) => ({
+          linkId: l.id,
+          externalSystem: l.externalSystem,
+          externalId: l.externalId,
+          patient: await svc.getPatient(l.externalId, user),
+        })),
+      );
+      res.json({ patients, linked: true });
+    } catch (err) {
+      if (!handleErpError(res, err)) next(err);
+    }
+  });
+
+  /**
+   * Cloud business datasets for the assistant (WARP-2497).
+   *
+   * ## Why this route does not use `canRead`
+   *
+   * `erpConnectorReadGate` is built for PHI: it resolves an Eaglesoft-keyed
+   * connector grant and admits family-and-up on the strength of it. Two things
+   * make it the wrong gate here. It would decide access to a Stripe charge
+   * using a DENTAL connector grant, which is not a policy anybody could state
+   * out loud; and it does not admit `_service:mcp`, so a tool dispatching
+   * through it 401s — the "shipped but dead tool" bug class that `TOOL_ROUTES`
+   * and `tools-mcp-admission.test.ts` exist to make impossible.
+   *
+   * So: admin-tier humans, or the MCP service principal the tool runs as. The
+   * service then applies `CLOUD_DATASET_READ_ROLES` again on the resolved
+   * user, which is the enforcement point for a human caller.
+   */
+  const canReadCloudDataset = requireRoleOrMcpService("owner", "admin");
+
+  router.get("/erp/dataset/:dataset", canReadCloudDataset, async (req, res, next) => {
+    try {
+      // Only the parameters the registered read queries actually bind. An
+      // allow-list at the point of use, not a denylist: an unexpected query
+      // param is DROPPED rather than forwarded, so a caller cannot smuggle a
+      // field into a vendor request by naming it.
+      const params: Record<string, unknown> = {};
+      for (const key of ["from", "to", "status", "query", "id", "stage", "audienceId", "companyId"]) {
+        const v = req.query[key];
+        if (typeof v === "string" && v !== "") params[key] = v;
+      }
+      const limit = Number(req.query.limit);
+      const result = await svc.queryDataset(
+        { dataset: req.params.dataset, params },
+        erpUser(req),
+      );
+      // Bound the payload HERE rather than in the tool: the row cap is a
+      // property of what this box will put in a prompt, and a caller that
+      // skipped the tool should not get an unbounded ledger either.
+      const cap =
+        Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_DATASET_ROWS) : MAX_DATASET_ROWS;
+      const rows = result.rows.slice(0, cap);
+      res.json({ ...result, rows, truncated: rows.length < result.rows.length });
     } catch (err) {
       if (!handleErpError(res, err)) next(err);
     }

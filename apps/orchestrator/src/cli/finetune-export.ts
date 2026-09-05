@@ -146,6 +146,10 @@ const DROP_LABELS: Record<DropReason, string> = {
   unknown_tool: "tool no longer in the registry",
   no_tool_calls: "no tool calls",
   incomplete_exchange: "incomplete exchange",
+  // WARP-2425 — the connector firewall. Shown in the histogram like every
+  // other reason so an operator can SEE how much of their history was excluded
+  // for reading a customer's books, rather than wondering where it went.
+  connector_records: "read a connected system of record (excluded, WARP-2425)",
 };
 
 export async function runFinetuneExportCli(
@@ -183,6 +187,7 @@ export async function runFinetuneExportCli(
     unknown_tool: 0,
     no_tool_calls: 0,
     incomplete_exchange: 0,
+    connector_records: 0,
   };
   for (const messages of sessions) {
     const run = curateMessages(messages, {

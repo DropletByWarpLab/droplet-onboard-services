@@ -53,10 +53,13 @@ install_luks_data_partition() {
   # enroll failed hard on a TPM-less box — the flag was inert end to end. We
   # forward the value the caller actually set (default 0), so the two sides
   # agree on whether to skip the TPM enroll. Also forward DROPLET_TPM_PCRS_BIND
-  # so a non-default PCR set stays consistent across the sudo boundary.
+  # so a non-default PCR set stays consistent across the sudo boundary, and
+  # DROPLET_LUKS_UNLOCK_TIMEOUT (WARP-2100) so a tuned unlock bound isn't
+  # silently scrubbed back to the default.
   if sudo DROPLET_REPO_ROOT="$REPO_ROOT" \
        DROPLET_LUKS_ALLOW_NO_TPM="${DROPLET_LUKS_ALLOW_NO_TPM:-0}" \
        DROPLET_TPM_PCRS_BIND="${DROPLET_TPM_PCRS_BIND:-0+2+4+7}" \
+       DROPLET_LUKS_UNLOCK_TIMEOUT="${DROPLET_LUKS_UNLOCK_TIMEOUT:-30}" \
        /usr/local/sbin/droplet-luks-provision.sh provision; then
     log_success "Encrypted data partition provisioned (LUKS2/Argon2id, TPM PCRs 0+2+4+7)"
   else

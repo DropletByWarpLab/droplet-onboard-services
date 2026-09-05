@@ -5,8 +5,10 @@ Two layers defend that promise in CI:
 
 1. Long-standing invariant gates: `security-tests.yml`
    (`scripts/test-security.sh` — compose/secret hygiene, CORS, mem-limits,
-   OTA trust anchor) and `test-fips.yml` (`scripts/test-fips.sh` — banned
-   crypto algorithms, exceptions in `docs/security/fips-exceptions.md`).
+   OTA trust anchor) and `ci.yml`'s `fips` leg (`scripts/test-fips.sh` —
+   banned crypto algorithms, exceptions in
+   `docs/security/fips-exceptions.md`; moved out of `test-fips.yml` by
+   WARP-2481 so that it actually blocks a merge).
 2. The WARP-243 scanner lane (this document) plus the WARP-269 egress gate
    (see the Egress section).
 
@@ -17,16 +19,58 @@ file.
 
 ## Scanner inventory
 
+> **What "blocks PRs" means here — the one-line rule.** A check blocks a merge
+> **only** if it is a leg of `ci.yml` aggregated by `ci-summary`, **or** it is
+> itself a required context in a ruleset (`ci-summary`, `egress-gate`,
+> `title carries a WARP key`). Nothing else blocks, however red it goes. The
+> "Blocks PRs?" column below names the mechanism for every `yes`; if a row
+> cannot name one, the answer is no.
+>
+> This table claimed `gitleaks`, `hadolint` and Trivy blocked PRs when none of
+> them did (WARP-2493, corrected 2026-08-28) — the same defect WARP-2481 fixed
+> for `fips-lint` and `semgrep`. Verify with
+> `docs/ci-required-checks.md#verifying`, never from this prose.
+
 | Workflow | Tool (pinned) | Blocks PRs? | Scope | Baseline / escape hatch |
 |---|---|---|---|---|
-| `gitleaks.yml` | gitleaks 8.30.1 | yes | working tree + PR commit range | `.gitleaks.toml` (test fixtures only) |
-| `semgrep.yml` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
-| `hadolint.yml` | hadolint 2.14.0 | yes | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
-| `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | yes (fixable HIGH/CRITICAL not in baseline) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
+| `ci.yml` job `gitleaks` | gitleaks 8.30.1 | yes — via the required `ci-summary` fan-in (WARP-2493); previously `gitleaks.yml`, red-but-advisory | working tree + PR commit range | `.gitleaks.toml` (test fixtures only) |
+| `ci.yml` job `semgrep` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) — blocks via the required `ci-summary` fan-in since WARP-2481; before that it was red-but-advisory | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
+| `ci.yml` job `hadolint` | hadolint 2.14.0 | yes — via the required `ci-summary` fan-in (WARP-2493); previously `hadolint.yml`, red-but-advisory | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
+| `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | **no** — advisory today. Its verdict IS a job exit status (`exit-code: "1"`, no SARIF upload) and it already fans into `docker-build ok`, but that context is **not required** and cannot be as written: `docker-build.yml` is path-filtered, so on an out-of-scope PR it never reports (WARP-2172). See [Trivy is a job status, and still does not block](#trivy-blocking) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
 | `codeql.yml` | CodeQL (JS/TS + Python + Actions) | no — advisory signal only (not a required check; no `code_scanning` ruleset rule exists — see [CodeQL ownership](#codeql)) | code paths + `.github/workflows/**` | GitHub per-PR alert diffing |
 | `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` |
 | `egress-gate.yml` | `scripts/check-egress-allowlist.py` | yes | outbound destinations | `docs/security/allowed-egress.yaml` (security review required) |
 | Dependabot | `.github/dependabot.yml` | n/a (opens fix PRs) | npm ×2, pip ×13, actions | grouped weekly, limits per ecosystem |
+
+### Trivy is a job status, and still does not block {#trivy-blocking}
+
+Unlike CodeQL, Trivy's verdict is an **ordinary job exit status**, not a
+code-scanning alert. Evidence in `docker-build.yml`'s scan step:
+
+- `exit-code: "1"` — the action fails the step on a qualifying finding.
+- No `format: sarif`, no `github/codeql-action/upload-sarif`, and no
+  `security-events: write` permission anywhere in the workflow, so nothing is
+  ever uploaded to the Security tab.
+
+So it *could* be folded into `ci-summary` — but only by relocating the whole
+13-image build matrix (GHCR layer cache, per-image `detect` filters, 20–60 min
+runtime) into `ci.yml`. That is a large, expensive change and a deliberate
+decision in its own right, not a side effect of a docs correction. It was
+**not** done under WARP-2493.
+
+The cheaper correct shape is the one `docs/ci-required-checks.md` calls option
+2: leave the builds where they are and give `docker-build.yml` an unfiltered
+job that reports green when no image is in scope, making `docker-build ok`
+requireable. That is WARP-2172's territory.
+[`docs/security/fips-ci-gate-required.md`](security/fips-ci-gate-required.md)
+covers the same ground for the FIPS build-time gate; it previously instructed
+adding `docker-build ok` as a required context, which would have hung every
+out-of-scope PR on "Expected". That instruction and its ruleset JSON were
+removed under WARP-2493.
+
+Until one of those lands: **a fixable HIGH/CRITICAL in a rebuilt image turns
+`docker-build ok` red and does not stop the merge.** Treat it as review-blocking
+by convention, not by machine.
 
 ### CodeQL ownership: this repo runs advanced setup only (WARP-2167) {#codeql}
 
@@ -180,9 +224,40 @@ in review, no exceptions. Hostnames that are not egress (XML namespaces,
 doc links) register as `kind: reference`; runtime-configured destinations
 (user mail servers, fleet HQ URL) as `kind: dynamic` with their config key.
 
-Limits: the static scan cannot see hostnames assembled at runtime — that is
-what WARP-268's runtime audit is for; reviewers should treat dynamic URL
-construction toward the network as a smell requiring a `dynamic` entry.
+The registry must also stay honest in the other direction. A `kind: egress`
+entry's `code_refs` are load-bearing: one of its hosts has to appear there as
+a non-comment literal, or the entry carries a `no_code_literal:` reason naming
+who owns the destination instead (WARP-2452). That reason is checked **per
+host** since WARP-2487, and may be written either as one string covering every
+host of the entry or as a `{host: reason}` mapping — an entry with one
+SDK-owned host and one the code really dials was previously impossible to
+describe truthfully. Those paths must themselves be inside the scan's own
+scope — a `docs/` path cannot be evidence that a host is dialled, because the
+scan never reads it (WARP-2468). Entry ids must be unique; YAML does not
+object to two blocks sharing one, so the gate does (WARP-2487).
+
+**What counts as a hostname** is the Public Suffix List, vendored at
+`scripts/data/public_suffix_list.dat` and refreshed by
+`scripts/fetch-public-suffix-list.sh` (WARP-2487). It replaces a fifteen-entry
+TLD tuple that was, since WARP-2467, the gate for code as well as config — so
+a destination on `.sh`, `.app` or `.xyz` was invisible until somebody
+remembered to widen the tuple. The scanner never fetches the list: it runs
+offline in CI and on the box, reads the committed snapshot, and
+`--check-psl-freshness` fails once that snapshot's own `VERSION` line is more
+than 180 days old.
+
+Limits: the static scan cannot see a hostname whose every part is assembled at
+runtime — that is what WARP-268's runtime audit is for; reviewers should treat
+dynamic URL construction toward the network as a smell requiring a `dynamic`
+entry. It CAN now see the common half of that pattern: since WARP-2467 a bare
+hostname in a code string literal is extracted just like a full URL, so
+`const H = "api.vendor.com"` followed by `fetch(\`https://${H}/v1\`)` no longer
+passes unregistered. Two bounded blind spots come with the wider suffix list,
+both deliberate and both visible in a diff: a destination whose name equals a
+tracked file's basename is read as a filename, and a bare host on a
+non-legacy TLD is only taken when it is written as a *value* — the whole
+string literal or the whole right-hand side of a config setting — rather than
+as a word inside running text.
 
 # Supply-chain security — signing & verification {#supply-chain}
 

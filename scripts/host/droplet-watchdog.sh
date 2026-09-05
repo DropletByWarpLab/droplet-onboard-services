@@ -40,6 +40,30 @@
 #                        device-bridge owns the panel feed and the console
 #                        handback, so a supervisor able to restart it on its
 #                        own cadence is the thundering herd, not the fix.
+#   host_artefacts       A host artefact the checkout declares is NOT INSTALLED
+#                        on this box at all — the blind spot the check above
+#                        structurally cannot see, because it enumerates units
+#                        from systemd and a never-installed artefact has no unit
+#                        (WARP-2574). Measured 2026-08-31: droplet-power-restore
+#                        (WARP-2190) and the hardware watchdog (WARP-2192) sat in
+#                        the box's checkout for five days, installed on none of
+#                        it, while host_unit_staleness reported ok. Delegates to
+#                        `droplet-host-units audit`. Detect-and-report only, and
+#                        not by preference: the fix is a full `setup.sh` run
+#                        (apt, unit rewrites, service restarts) — an unattended
+#                        provision is not something a 3-minute timer may start.
+#   relay_dns            The ADR-025 cloudflared relay resolves the box's FQDN
+#                        by dialling the box's OWN dnsmasq. dnsmasq binds only
+#                        explicitly listed addresses and the shipped template
+#                        lists one leg, so on a relayed box nothing answers
+#                        where the tunnel dials — a healthy connector that
+#                        cannot resolve the box, which from off-site is
+#                        indistinguishable from a dead box (WARP-2189).
+#                        Delegates detection AND heal to
+#                        /usr/local/sbin/droplet-relay-dns. HEALS: the change
+#                        is one generated conf block, `dnsmasq --test`ed before
+#                        install, verified after, auto-rolled-back on failure.
+#                        Also starts the connector container if it is stopped.
 #
 # Status contract (architecture-guard rule: explicit enums, never inferred
 # from absence): every known check ALWAYS appears in
@@ -88,7 +112,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -115,12 +139,28 @@ WD_DOCKER_DAEMON_JSON="${DROPLET_WATCHDOG_DOCKER_DAEMON_JSON:-/etc/docker/daemon
 WD_CRASHLOOP_THRESHOLD="${DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD:-3}"
 WD_LOG_TAIL="${DROPLET_WATCHDOG_LOG_TAIL:-200}"
 
-# WARP-1829 — the standalone host-unit staleness detector this check delegates
-# to. Installed by setup.sh (scripts/lib/single-box.sh); not_applicable when
-# absent, so the check is safe on any shape.
+# WARP-1829 / WARP-2574 — the standalone detector both host_unit_staleness
+# (`check`) and host_artefacts (`audit`) delegate to. One binary, two questions:
+# "is this running process older than its code" and "is this artefact installed
+# at all". Installed by setup.sh (scripts/lib/single-box.sh); not_applicable
+# when absent, so both checks are safe on any shape.
 WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness"
+# WARP-2189 — the relay's DNS origin. The check delegates detection AND heal to
+# this helper (single owner of the managed listener block, shared with
+# setup_local_dns); not_applicable when absent, so it is safe on any shape.
+WD_RELAY_DNS_BIN="${DROPLET_WATCHDOG_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
+WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
+
+# WARP-2666 — the client-app download surface. The auditor is NOT installed to
+# /usr/local: it reads the checkout's own data/app-downloads, so it must run
+# from the checkout (an installed copy would be stale in exactly the case being
+# caught). Empty by default and resolved from the box's own droplet.service,
+# the same derived source droplet-host-units uses, so it stays right on a box
+# whose checkout lives somewhere unusual.
+WD_APP_DOWNLOADS_AUDIT="${DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT:-}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -589,6 +629,319 @@ wd_check_host_unit_staleness() {
   units="$(printf '%s\n' "$out" | awk '$1 == "STALE" || $1 == "FAILED" { print $2 }' | tr '\n' ' ')"
   CHECK_OUTCOME=heal_failed
   CHECK_MESSAGE="host units running code older than the tree: ${units:-<see detail>}— the process started before its own sources were last modified, so a merged fix is inert in it. Fix: sudo $WD_HOST_UNITS_BIN refresh (detail: $WD_HOST_UNITS_BIN check)"
+  return 0
+}
+
+# --- host_artefacts ----------------------------------------------------------
+# WARP-2574, and the reason host_unit_staleness above was not enough.
+#
+# That check enumerates units FROM SYSTEMD, so it can only report on artefacts
+# that exist. A host artefact that was NEVER INSTALLED has no unit to enumerate
+# and no process to compare — it is invisible to it, to `systemctl status`, and
+# to /api/health (which reports containers only).
+#
+# Measured 2026-08-31 on the bench box: WARP-2190 (droplet-power-restore) and
+# WARP-2192 (the hardware watchdog) merged 2026-08-26, the box's checkout
+# contained both, and neither was installed. Both units read `not-found`,
+# /dev/watchdog0 did not exist, and the AC-loss policy was still `always-off` —
+# the box would have stayed dark after a power cut, five days after the fix
+# shipped. host_unit_staleness reported ok throughout, correctly and uselessly.
+#
+# The cause is structural: the box refresh updates the checkout and restarts
+# CONTAINERS, and nothing re-runs install_single_box_host_integration. So any
+# host-unit feature can merge, be marked Done, and run on zero boxes. This check
+# is what makes the box say so on its own.
+#
+# DETECT-AND-REPORT ONLY, and here that is not a judgement call: the "heal" is
+# `sudo ./scripts/setup.sh`, which apt-installs packages, rewrites unit files,
+# restarts host units and re-enables services. Running that from a 3-minute
+# timer is not a self-heal, it is an unattended provision on a live appliance.
+# The watchdog names the artefacts and the one-line fix; a human or the deploy
+# path applies it.
+#
+# No deployment shape can be red here for merely being that shape:
+# install_single_box_host_integration is the ONLY installer of
+# /usr/local/sbin/droplet-watchdog, so this supervisor exists only on boxes
+# that ran the very installer the manifest describes. A shape that skips the
+# host integration skips the watchdog with it. Files the box legitimately
+# rewrites at runtime (the install-once /etc/default tuning files,
+# lan-dhcp.conf) are policy=presence in the manifest for the same reason — a
+# check that cries wolf on a healthy box is a check people learn to ignore.
+wd_check_host_artefacts() {
+  if [ ! -x "$WD_HOST_UNITS_BIN" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units not installed at $WD_HOST_UNITS_BIN (re-run ./scripts/setup.sh)"
+    return 0
+  fi
+
+  local out rc=0
+  out="$("$WD_HOST_UNITS_BIN" audit 2>&1)" || rc=$?
+
+  if [ "$rc" = 0 ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="every host artefact the checkout declares is installed, current and enabled"
+    return 0
+  fi
+  # 4 = the manifest could not be located, so there is no verdict. Saying
+  # not_applicable here is the honest answer; inventing "ok" would recreate the
+  # exact silence this check exists to end.
+  if [ "$rc" = 4 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units could not locate the checkout's scripts/host/MANIFEST — no verdict; inspect '$WD_HOST_UNITS_BIN audit'"
+    return 0
+  fi
+  if [ "$rc" != 1 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-host-units audit could not run (exit $rc) — inspect '$WD_HOST_UNITS_BIN audit'"
+    return 0
+  fi
+
+  # Column 1 of the audit's human report is a single whitespace-free label and
+  # column 2 is the destination — a contract pinned by
+  # tests/host-artefacts.test.sh, so this awk cannot silently read the wrong
+  # field if the report is reformatted.
+  local n_missing n_drift n_disabled n_unverif names extra parts
+  n_missing="$(printf '%s\n' "$out" | awk '$1 == "MISSING" { n++ } END { print n + 0 }')"
+  n_drift="$(printf '%s\n' "$out" | awk '$1 == "DRIFT" { n++ } END { print n + 0 }')"
+  n_disabled="$(printf '%s\n' "$out" | awk '$1 == "NOT-ENABLED" { n++ } END { print n + 0 }')"
+  n_unverif="$(printf '%s\n' "$out" | awk '$1 == "UNVERIFIABLE" { n++ } END { print n + 0 }')"
+
+  parts=""
+  [ "$n_missing" -gt 0 ]  && parts="$parts, $n_missing missing"
+  [ "$n_drift" -gt 0 ]    && parts="$parts, $n_drift drifted"
+  [ "$n_disabled" -gt 0 ] && parts="$parts, $n_disabled not enabled"
+  [ "$n_unverif" -gt 0 ]  && parts="$parts, $n_unverif unverifiable"
+  parts="${parts#, }"
+
+  # Name the first few rather than all of them: this string goes into
+  # status.json, and a box missing the whole integration would otherwise write a
+  # multi-kilobyte value that nothing can read. The full list is one command away.
+  names="$(printf '%s\n' "$out" \
+    | awk '$1 == "MISSING" || $1 == "DRIFT" || $1 == "NOT-ENABLED" || $1 == "UNVERIFIABLE" { print $2 }' \
+    | head -6 | tr '\n' ' ')"
+  extra=$(( n_missing + n_drift + n_disabled + n_unverif - 6 ))
+  if [ "$extra" -gt 0 ]; then
+    names="${names}(+$extra more) "
+  fi
+
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="this box is not running what its checkout declares — ${parts}: ${names}a host feature merged and was never installed here, so it is inert no matter what the repo says. Fix: sudo ./scripts/setup.sh (detail: $WD_HOST_UNITS_BIN audit)"
+  return 0
+}
+
+# --- app_downloads -------------------------------------------------------------
+# WARP-2666. `/downloads` is the page a customer opens to install the client
+# app for the box in front of them. Every box that has ever shipped served it
+# empty, and NOTHING noticed: the API answers `catalog_missing` as HTTP 200
+# with available:false (routes/app-downloads.ts classifies it benign, which is
+# right for the API), so an empty page is green to /api/health, to every uptime
+# probe and to all seven of this watchdog's other checks. Exactly the WARP-2574
+# shape one layer up — a thing that was never installed has no failing signal
+# to notice, only a missing success.
+#
+# Detect-and-report only. There is no heal: the fix is a human copying an
+# installer onto the box, which is not something a 3-minute timer should do.
+#
+# Reads the HOST's files, never the API: /api/app-downloads is auth-gated, and
+# a 200 would be the wrong signal anyway.
+wd_resolve_app_downloads_audit() {
+  [ -n "$WD_APP_DOWNLOADS_AUDIT" ] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local exec_start token dir
+  exec_start="$(systemctl show droplet.service -p ExecStart 2>/dev/null)"
+  [ -n "$exec_start" ] || return 1
+  # Pull absolute paths out of the property and walk up from each until one
+  # looks like the checkout. Same derivation as droplet-host-units, kept small
+  # here because the watchdog only needs one unit's worth of it.
+  for token in $(printf '%s' "$exec_start" | tr ' ;' '\n\n' | grep '^/' ); do
+    [ -e "$token" ] || continue
+    dir="$(dirname "$token")"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+      if [ -f "$dir/scripts/app-downloads/audit.sh" ]; then
+        WD_APP_DOWNLOADS_AUDIT="$dir/scripts/app-downloads/audit.sh"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+  done
+  return 1
+}
+
+wd_check_app_downloads() {
+  if ! wd_resolve_app_downloads_audit; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="could not locate this box's checkout to run scripts/app-downloads/audit.sh — no verdict; point at it with DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT=<path>"
+    return 0
+  fi
+  if [ ! -r "$WD_APP_DOWNLOADS_AUDIT" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads auditor not readable at $WD_APP_DOWNLOADS_AUDIT — no verdict"
+    return 0
+  fi
+
+  local out rc=0
+  out="$(bash "$WD_APP_DOWNLOADS_AUDIT" 2>&1)" || rc=$?
+
+  if [ "$rc" = 0 ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="every client app this release declares is staged and verifies against its catalog"
+    return 0
+  fi
+
+  # 3 = clean, but platforms are deliberately blocked and ticketed. Nothing
+  # here is broken and nothing is healable, so this is not_applicable — but
+  # the MESSAGE names every blocked platform and its ticket, because a silent
+  # "n/a" is the shape this whole check exists to end.
+  #
+  # Deliberately not a new outcome. This machine's vocabulary is
+  # ok|healed|heal_failed|not_applicable and widening it would change `overall`
+  # for every box. The gate that must go RED for a release with nothing staged
+  # is the BUILD (scripts/image/build-iso.sh pre-flight, scripts/test/ship-check.sh)
+  # — that is where a human can still decide. A box already in the field cannot
+  # fix this, so nagging it is noise; recording it plainly is not.
+  if [ "$rc" = 3 ]; then
+    local blocked
+    blocked="$(printf '%s\n' "$out" | awk '$1 == "BLOCKED" { print $2 "(" $3 ")" }' | head -6 | tr '\n' ' ')"
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="/downloads is intentionally short: ${blocked}declared blocked in data/app-downloads/EXPECTED, so customers on those platforms get no app from this box (detail: bash $WD_APP_DOWNLOADS_AUDIT)"
+    return 0
+  fi
+
+  # 4 = could not look. Never 'ok' — that collapse is the bug being fixed.
+  if [ "$rc" = 4 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads audit reached no verdict (missing EXPECTED, staging root or python3) — inspect 'bash $WD_APP_DOWNLOADS_AUDIT'"
+    return 0
+  fi
+
+  if [ "$rc" != 1 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="app-downloads audit could not run (exit $rc) — inspect 'bash $WD_APP_DOWNLOADS_AUDIT'"
+    return 0
+  fi
+
+  # Column 1 is a whitespace-free label and column 2 the platform — a contract
+  # pinned by tests/app-downloads-audit.test.sh, so this awk cannot silently
+  # read the wrong field if the report is reformatted.
+  local n_missing n_stale n_unverif names extra parts
+  n_missing="$(printf '%s\n' "$out" | awk '$1 == "MISSING" { n++ } END { print n + 0 }')"
+  n_stale="$(printf '%s\n' "$out" | awk '$1 == "STALE" { n++ } END { print n + 0 }')"
+  n_unverif="$(printf '%s\n' "$out" | awk '$1 == "UNVERIFIABLE" { n++ } END { print n + 0 }')"
+
+  parts=""
+  [ "$n_missing" -gt 0 ] && parts="$parts, $n_missing missing"
+  [ "$n_stale" -gt 0 ]   && parts="$parts, $n_stale stale"
+  [ "$n_unverif" -gt 0 ] && parts="$parts, $n_unverif unverifiable"
+  parts="${parts#, }"
+
+  # Name the first few only: this string lands in status.json, and an
+  # unbounded list writes a multi-kilobyte value nothing can read.
+  names="$(printf '%s\n' "$out" \
+    | awk '$1 == "MISSING" || $1 == "STALE" || $1 == "UNVERIFIABLE" { print $2 }' \
+    | head -6 | tr '\n' ' ')"
+  extra=$(( n_missing + n_stale + n_unverif - 6 ))
+  if [ "$extra" -gt 0 ]; then
+    names="${names}(+$extra more) "
+  fi
+
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="/downloads does not carry what this release declares — ${parts}: ${names}a customer opening 'Get the app' is shown nothing for those platforms. Fix: stage the installer (./scripts/app-downloads/stage.sh) — detail: bash $WD_APP_DOWNLOADS_AUDIT"
+  return 0
+}
+
+# --- relay_dns -----------------------------------------------------------------
+# WARP-2189. Off-site access rides the ADR-025 cloudflared relay, and every
+# off-site lookup is a DNS query the connector dials at the box's own dnsmasq
+# (DROPLET_PUBLIC_FQDN_IP:53, via the Cloudflare Local Domain Fallback). The
+# host dnsmasq binds only explicitly listed addresses, and the shipped template
+# lists one — the .20.1 LAN leg — so on a relayed box nothing answers where the
+# tunnel dials and cloudflared loops "connection refused".
+#
+# This is the failure mode that reads as "the box is down" from outside while
+# the box is entirely healthy: the connector stays up, TCP still answers, but
+# the FQDN goes NXDOMAIN and the name-only certificate makes connecting by IP
+# unvalidatable. It was diagnosed from scratch twice (2026-08-14, 2026-08-26),
+# both times after the hand-applied listener was wiped by a setup.sh re-run.
+#
+# UNLIKE host_unit_staleness this check DOES heal on its own, because the heal
+# is narrow and reversible where that one is broad: one generated conf block,
+# validated with `dnsmasq --test` BEFORE install, one unit restart, verified
+# after, and rolled back automatically if the unit does not come back. The
+# restart momentarily interrupts host LAN DHCP/DNS, but leases are sticky
+# (dhcp-leasefile lives outside /tmp) and the alternative is an invisible total
+# loss of remote support. The helper no-ops when the listener is already bound,
+# so a healthy box never restarts anything.
+wd_check_relay_dns() {
+  if [ ! -x "$WD_RELAY_DNS_BIN" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-relay-dns not installed at $WD_RELAY_DNS_BIN (re-run ./scripts/setup.sh)"
+    return 0
+  fi
+
+  local out rc=0
+  out="$("$WD_RELAY_DNS_BIN" check 2>&1)" || rc=$?
+
+  # 3 = no split-horizon FQDN on this box, or the address is not on this host.
+  # Neither is a fault, and neither is repairable from here.
+  if [ "$rc" = 3 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="${out##*: }"
+    return 0
+  fi
+  # Anything other than the documented 0/1/3 means the detector itself failed.
+  # That is not evidence the origin is broken — say so rather than healing on a
+  # verdict we do not have.
+  if [ "$rc" != 0 ] && [ "$rc" != 1 ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="droplet-relay-dns check could not run (exit $rc) — inspect '$WD_RELAY_DNS_BIN check'"
+    return 0
+  fi
+
+  if [ "$rc" = 1 ]; then
+    wd_log_heal relay_dns "DNS origin broken (${out##*: }) — running droplet-relay-dns repair"
+    local rout rrc=0
+    rout="$("$WD_RELAY_DNS_BIN" repair 2>&1)" || rrc=$?
+    if [ "$rrc" != 0 ]; then
+      CHECK_OUTCOME=heal_failed
+      CHECK_MESSAGE="the relay's DNS origin is not answering and the repair did not take (exit $rrc): ${rout##*: } — off-site access to this box is blind until this clears; inspect '$WD_RELAY_DNS_BIN check' and 'systemctl status droplet-host-net'"
+      return 0
+    fi
+    # Trust the repair only after an independent re-check.
+    rc=0
+    "$WD_RELAY_DNS_BIN" check >/dev/null 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+      CHECK_OUTCOME=heal_failed
+      CHECK_MESSAGE="droplet-relay-dns repair reported success but the origin still does not answer (re-check exit $rc) — inspect '$WD_RELAY_DNS_BIN check'"
+      return 0
+    fi
+    wd_log_heal relay_dns "DNS origin restored: ${rout##*: }"
+    CHECK_OUTCOME=healed
+    CHECK_MESSAGE="restored the relay's DNS origin: ${rout##*: }"
+    return 0
+  fi
+
+  # DNS origin is fine. The other half of "reachable from off-site" is the
+  # connector itself. Compose already gives it restart: unless-stopped, so a
+  # STOPPED container means Docker gave up or someone stopped it — start it.
+  # A container that was never created means this box does not run the relay.
+  if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
+    local state
+    state="$(docker inspect -f '{{.State.Status}}' "$WD_RELAY_CONTAINER" 2>/dev/null)"
+    if [ -n "$state" ] && [ "$state" != running ] && [ "$state" != restarting ]; then
+      wd_log_heal relay_dns "connector $WD_RELAY_CONTAINER is $state — starting it"
+      if docker start "$WD_RELAY_CONTAINER" >/dev/null 2>&1; then
+        CHECK_OUTCOME=healed
+        CHECK_MESSAGE="DNS origin healthy; started the stopped relay connector $WD_RELAY_CONTAINER (was $state)"
+        return 0
+      fi
+      CHECK_OUTCOME=heal_failed
+      CHECK_MESSAGE="DNS origin healthy but the relay connector $WD_RELAY_CONTAINER is $state and would not start — off-site access is down; inspect 'docker logs $WD_RELAY_CONTAINER'"
+      return 0
+    fi
+  fi
+
+  CHECK_OUTCOME=ok
+  CHECK_MESSAGE="${out##*: }"
   return 0
 }
 

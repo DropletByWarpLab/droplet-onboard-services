@@ -14,10 +14,14 @@
  *   2. non-admin roles → the honest "an owner or admin can turn it on" copy
  *      and NO enable button (the server would 403 it anyway).
  *   3. a failed enable → calm inline error, no crash, button usable again.
+ *   4. WARP-2578 — that flip MERGES. It used to write `{ projects: true }`
+ *      over the whole cache entry, blanking `crm`/`contacts` for every
+ *      other reader of the key until the 10-minute probe came round.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
 import React from "react";
+import type { AppCapabilities } from "@/lib/api";
 
 const setAppModuleEnabledMock = vi.fn();
 const mutateMock = vi.fn();
@@ -82,15 +86,46 @@ describe("ProjectsDisabled — enable path (WARP-1306)", () => {
       });
 
       expect(setAppModuleEnabledMock).toHaveBeenCalledWith("projects", true);
-      // The capabilities cache flips immediately (don't wait out the 30 s
-      // HTTP cache) so the workspace renders on the next paint.
+      // The capabilities cache flips through an UPDATER, not a replacement
+      // value — see the merged-result assertions below.
       expect(mutateMock).toHaveBeenCalledWith(
         "/api/capabilities",
-        { projects: true },
+        expect.any(Function),
         { revalidate: false },
       );
+
+      // With nothing cached yet, the write lands on the hook's documented
+      // per-flag defaults — NOT `undefined` for the flags it doesn't own.
+      const update = mutateMock.mock.calls[0][1] as
+        (prev: AppCapabilities | undefined) => AppCapabilities;
+      expect(update(undefined)).toEqual({
+        projects: true,
+        crm: false,
+        contacts: false,
+      });
     },
   );
+
+  // WARP-2578 — the regression this closes. A whole-object replace here
+  // switched the CRM off for the rest of the probe window; once /customers
+  // is a nav-visible route gated on `crm` (ADR-044/WARP-2558), that shows up
+  // as the Customers entry vanishing from the sidebar.
+  it("preserves the other capability flags already in the cache", async () => {
+    setAppModuleEnabledMock.mockResolvedValue(undefined);
+    render(<ProjectsDisabled />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /turn on projects/i }));
+      await Promise.resolve();
+    });
+
+    const update = mutateMock.mock.calls[0][1] as
+      (prev: AppCapabilities | undefined) => AppCapabilities;
+
+    expect(
+      update({ projects: false, crm: true, contacts: true }),
+    ).toEqual({ projects: true, crm: true, contacts: true });
+  });
 
   it.each(["family", "guest"])(
     "shows the owner/admin copy and no enable button to %s",

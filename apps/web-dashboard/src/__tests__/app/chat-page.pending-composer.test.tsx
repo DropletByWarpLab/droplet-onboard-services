@@ -14,7 +14,10 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
-import { PENDING_COMPOSER_KEY, type PendingComposerPayload } from "@/lib/types";
+// WARP-2582 — PendingComposerPayload became a union (tool | pin). This suite
+// exercises the TOOL variant, so it names that directly: typing the literal as
+// the union lets the `...p` spread widen `kind` to "tool" | "pin".
+import { PENDING_COMPOSER_KEY, type PendingComposerToolPayload } from "@/lib/types";
 
 // ── useChat mock — overridable per-test via chatRef (fresh vs deep-linked). ──
 const sendMessageMock = vi.fn();
@@ -77,8 +80,8 @@ vi.mock("@/lib/auth", () => ({
 
 import ChatPage from "@/app/chat/page";
 
-function writePayload(p: Partial<PendingComposerPayload> = {}) {
-  const payload: PendingComposerPayload = {
+function writePayload(p: Partial<PendingComposerToolPayload> = {}) {
+  const payload: PendingComposerToolPayload = {
     kind: "tool",
     toolName: "block_network_device",
     label: "Block network device",

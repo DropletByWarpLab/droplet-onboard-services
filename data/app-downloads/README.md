@@ -3,9 +3,11 @@
 This is where the Droplet client apps (Windows installer, Android APK, iOS
 build) are staged so the box can serve them to a browser at `/downloads`.
 
-The apps ship **inside the appliance image**. Nothing here is fetched from
+Whatever is here is served **by the box itself**. Nothing is fetched from
 the internet at runtime, which is the point: a customer on a LAN with no
 internet can still install the client app for the box in front of them.
+Getting an artifact here in the first place is a separate problem, and
+today it is a manual one — see "Nothing stages these for you" below.
 
 ## How it works
 
@@ -26,43 +28,119 @@ refuses on mismatch. Running the generator is therefore what makes an
 artifact servable at all — a binary dropped in here without regenerating
 the catalog will not be served.
 
+## Nothing stages these for you
+
+Read this before believing any comment that says the artifacts arrive with
+the image. **They do not, and never have.** The box gets its code by
+`git clone` from GitHub (see `scripts/image/autoinstall/user-data`), the
+installers are git-ignored, and no build step, `setup.sh` path or CI job
+copies one in. Every box therefore boots with an empty staging root, and
+`/downloads` correctly reports that no apps are staged — which is the
+honest answer to a real absence, not a bug in the page.
+
+Until an artifact source exists that a box can reach on its own — a
+published `droplet-windows` release, or an OTA payload — staging is an
+operator action. `stage.sh` is that action.
+
 ## Staging an artifact
 
-1. Build the installer in its own repo (`droplet-windows`, `droplet-android`).
-2. Copy it into the matching platform directory here.
-3. Copy `platforms.example.json` to `platforms.json` and set the version.
-4. Generate the catalog:
+On a box, from the repo root:
+
+```bash
+./scripts/app-downloads/stage.sh ~/Droplet_0.2.0_x64-setup.exe
+```
+
+That copies it in, records the version, regenerates `catalog.json`,
+restarts the orchestrator (which memoises the catalog and would otherwise
+keep serving the old one), and proves the running container sees the
+result. `--verify-only` re-runs just the last check; `--dry-run` prints
+what it would do.
+
+Off-box — an image build, or a staging root you are assembling by hand —
+skip the wrapper and drive the engine directly:
+
+```bash
+node scripts/app-downloads/stage.mjs --dir data/app-downloads <installer>
+```
+
+Both end in the same two generator calls, and the second one is the point:
 
 ```bash
 node scripts/app-downloads/gen-catalog.mjs --dir data/app-downloads
-```
-
-5. Verify it is current (this is also the image-build / CI guard):
-
-```bash
 node scripts/app-downloads/gen-catalog.mjs --dir data/app-downloads --check
 ```
 
 `--check` exits non-zero when the staged bytes disagree with the catalog,
 which is what stops a stale catalog shipping next to swapped binaries.
 
+### Do not leave the previous release in place
+
+`gen-catalog`'s `pickPrimary()` takes the first `-setup.exe` in **sorted**
+order, so `Droplet_0.1.2_…` beats `Droplet_0.2.0_…` and the download
+button quietly hands out the older build — with a catalog that parses and
+a digest that verifies. `stage.sh` clears the platform directory for this
+reason. If you stage by hand, delete the old installer yourself.
+
 ## What is and isn't committed
 
 Installers are binaries built from other repos — they are **git-ignored**
-here and staged by the image build. Only `.gitignore`, this README, and
-`platforms.example.json` are tracked. A dev checkout therefore mounts an
-effectively empty directory, and `/downloads` honestly reports that no
-apps are staged rather than erroring.
+here, so git can never deliver one to a box. Only `.gitignore`, this
+README, and `platforms.example.json` are tracked. Every checkout and every
+freshly imaged box therefore mounts an effectively empty directory, and
+`/downloads` honestly reports that no apps are staged rather than
+erroring. `catalog.json` and the staged binaries are local state, and it is worth
+being exact about what erases them, because "re-stage to be safe" is how
+a box ends up serving last release's installer:
+
+- **`git pull` / an OTA deploy — survive.** They are git-ignored, so
+  nothing in a deploy touches them. The *catalog* can go stale against a
+  new client release, though: `scripts/app-downloads/audit.sh` reports
+  `STALE` for that, and it is the only thing that will.
+- **A factory reset — survives.** `scripts/factory-reset.sh` removes
+  `data/secrets`, `.data`, `docker/certs`, `docker/secrets` and `.env`,
+  and runs no `git clean`. It never touches this directory. (Verify
+  before trusting this line: `grep -c app-downloads scripts/factory-reset.sh`
+  → 0.)
+- **A reimage — does NOT survive.** The installer is not in the repo and
+  is not in the ISO, and first boot clones a fresh checkout. Re-stage
+  after a reimage; commissioning a reimaged box without re-staging is how
+  a customer gets the empty page.
+
+## What EXPECTED is for
+
+`EXPECTED` is the tracked declaration of what a release must carry, one
+row per platform, with `installer` / `store` / `blocked` / `absent`
+policies. `scripts/app-downloads/audit.sh` reconciles it against what is
+actually staged and is read by the image build, `ship-check` and the
+box's own watchdog.
+
+It exists because observing this directory is not enough. "It is empty"
+is true and uninformative, and any check that only looks at the bytes
+goes green the moment one platform is staged — which is how the other
+four would go quiet again. A `blocked` row must name a ticket *and* a
+reason, so "blocked, and a human signed that" stays distinguishable from
+"nobody noticed". Flipping a row to `installer` asserts that a release
+now **must** carry it: do that in the same change that makes the artifact
+real, never ahead of it.
 
 ## Trust model — read before "hardening" this
 
 Two gates, and it matters which one is load-bearing:
 
 - **Digest (always on, fail-closed).** Every byte is re-hashed against the
-  catalog pin at serve time. The artifacts ship with the appliance image
-  and are mounted read-only, so that image is the trust root; the box's
-  remaining job is proving the bytes it hands over are the bytes that
-  shipped. This gate works today.
+  catalog pin at serve time. This gate works today — but be precise about
+  what it proves. **The trust root is the operator's stage**, not the
+  image: the artifacts do not ship with the image, they are put here by a
+  human who downloaded them with their own credentials. The digest proves
+  the bytes have not changed *since that stage*. It says nothing about
+  whether they were the right bytes to begin with — that is what the
+  operator's own verification of the release download is for, and why
+  `clients.lock.json` records what was staged.
+
+  This distinction stops mattering the day anything fetches automatically:
+  a gate that pins whatever it just downloaded is self-referential. Any
+  future fetch must verify against the tracked lock *before* `gen-catalog`
+  pins anything.
 
 - **Cosign signature over `catalog.json` (opt-in, off by default).**
   Enabled with `DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE=1`. It is off on

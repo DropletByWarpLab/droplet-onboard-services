@@ -54,8 +54,38 @@ vi.mock("../middleware/auth.js", () => ({
       }
       next();
     },
+  // WARP-2497 — the cloud dataset route's gate. Modelled on the real one:
+  // the MCP service principal is admitted ahead of the tier check (that is
+  // the whole reason the route uses it rather than `canRead`), everyone else
+  // falls through to the same role logic as above, so the 403 body and the
+  // `recordAccessDenied` row stay byte-identical for a human caller.
+  requireRoleOrMcpService:
+    (...allowed: string[]) =>
+    (req: Request, res: Response, next: NextFunction) => {
+      const user = (req as unknown as { user?: { id?: string; role?: string } }).user;
+      if (user?.id === "_service:mcp" && user.role === "service") {
+        next();
+        return;
+      }
+      const role = user?.role;
+      if (typeof role !== "string" || role.length === 0) {
+        recordAccessDeniedMock(req, "no-role");
+        res.status(403).json({ error: "Forbidden: no role on session" });
+        return;
+      }
+      if (!allowed.includes(role)) {
+        recordAccessDeniedMock(req, "role-not-permitted");
+        res.status(403).json({ error: "Forbidden: role not permitted" });
+        return;
+      }
+      next();
+    },
   recordAccessDenied: recordAccessDeniedMock,
 }));
+
+/** WARP-2567 — hoisted so a test can assert the WHERE the route built, not
+ *  merely the rows it got back. The provider filter is the whole guard. */
+const partyLinkFindMany = vi.fn();
 
 const svcMock = {
   getSchedule: vi.fn(),
@@ -72,26 +102,36 @@ vi.mock("../services/erp.service.js", () => ({
 }));
 
 import { createErpRouter } from "./erp.js";
-import { EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
+import { EAGLESOFT_API_PROVIDER, EAGLESOFT_PROVIDER } from "../services/erp-provider.js";
 // The REAL error class — `handleErpError` branches on `instanceof`, so a
 // duck-typed stand-in would fall through to the 500 handler and quietly make
 // the honest-409 assertion below vacuous.
 import { ErpError } from "../services/erp-error.js";
 
-/** Prisma surface the route's connector gate needs (the connection probe). */
-function createPrismaMock(opts: { connectionConfigured: boolean }) {
+/** Prisma surface the route's connector gate needs (the connection probe),
+ *  plus — WARP-2567 — the party-link read the practice-by-company route makes. */
+function createPrismaMock(opts: {
+  connectionConfigured: boolean;
+  partyLinks?: Array<{ id: string; externalSystem: string; externalId: string }>;
+}) {
   return {
     integrationConnection: {
       findFirst: vi.fn(async () =>
         opts.connectionConfigured ? { id: "conn-1" } : null,
       ),
     },
+    partyLink: {
+      findMany: partyLinkFindMany.mockImplementation(async () => opts.partyLinks ?? []),
+    },
   };
 }
 
 function buildApp(
   user: { id?: string; role?: string } | undefined,
-  opts: { connectionConfigured?: boolean } = {},
+  opts: {
+    connectionConfigured?: boolean;
+    partyLinks?: Array<{ id: string; externalSystem: string; externalId: string }>;
+  } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -104,6 +144,7 @@ function buildApp(
     createErpRouter(
       createPrismaMock({
         connectionConfigured: opts.connectionConfigured ?? true,
+        partyLinks: opts.partyLinks,
       }) as never,
     ),
   );
@@ -630,5 +671,99 @@ describe("ERP writes — the connector grant LEVEL is enforced (WARP-1579)", () 
       role: "admin",
       connectorGrantLevel: "read_write",
     });
+  });
+});
+
+describe("WARP-2567 — the practice block on a customer record", () => {
+  const LINKS = [
+    { id: "pl-erp", externalSystem: EAGLESOFT_API_PROVIDER, externalId: "4471" },
+    { id: "pl-stripe", externalSystem: "stripe", externalId: "cus_9f2" },
+  ];
+
+  it("is gated by the ERP's OWN connector gate, not by a second one", async () => {
+    // The assertion that stops a second PHI gate coming into existence.
+    // Comparing the middleware REFERENCES, not their behaviour: two gates
+    // that agree today are two gates to keep agreeing, and the day one is
+    // updated is the day they diverge silently.
+    const router = createErpRouter(createPrismaMock({ connectionConfigured: true }) as never);
+    const layerFor = (path: string) =>
+      (router as unknown as { stack: Array<{ route?: { path: string; stack: Array<{ handle: unknown }> } }> }).stack.find(
+        (l) => l.route?.path === path,
+      )?.route;
+
+    const patient = layerFor("/erp/patient/:id");
+    const practice = layerFor("/erp/practice/by-company/:companyId");
+    expect(patient).toBeDefined();
+    expect(practice).toBeDefined();
+
+    // Each route is [gate, handler]; the gate is the first.
+    expect(practice!.stack[0].handle).toBe(patient!.stack[0].handle);
+  });
+
+  it("refuses a family member with no connector grant, and says nothing else", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue(access("family", {}));
+    const res = await request(buildApp({ id: "u1", role: "family" }, { partyLinks: LINKS })).get(
+      "/api/erp/practice/by-company/co1",
+    );
+    expect(res.status).toBe(403);
+    // The refusal must not disclose that a patient link exists.
+    expect(JSON.stringify(res.body)).not.toContain("4471");
+    expect(svcMock.getPatient).not.toHaveBeenCalled();
+  });
+
+  it("resolves ONLY ERP links — a Stripe id never reaches the dental connector", async () => {
+    // The customer carries both. Handing cus_9f2 to Eaglesoft would at best
+    // 404 and at worst read a patient whose chart number collides with it.
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("owner", { [EAGLESOFT_PROVIDER]: "read" }),
+    );
+    svcMock.getPatient.mockResolvedValue({ id: "4471", name: "Dana W" });
+
+    const res = await request(buildApp({ id: "u1", role: "owner" }, { partyLinks: LINKS })).get(
+      "/api/erp/practice/by-company/co1",
+    );
+    expect(res.status).toBe(200);
+
+    const where = partyLinkFindMany.mock.calls[0][0].where;
+    // Mutation: drop the externalSystem filter → the Stripe row comes back and
+    // is sent to getPatient.
+    expect(where.externalSystem).toEqual({
+      in: [EAGLESOFT_PROVIDER, EAGLESOFT_API_PROVIDER],
+    });
+    // Mutation: drop this and an unlinked customer's stale links resurface.
+    expect(where.isArchived).toBe(false);
+    expect(where.companyId).toBe("co1");
+  });
+
+  it("answers 'no link' distinctly from 'not permitted' — on the WIRE", async () => {
+    // The response tells them apart; the PAGE deliberately does not. Both
+    // render as nothing, so a lock never announces that a patient exists.
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("owner", { [EAGLESOFT_PROVIDER]: "read" }),
+    );
+    const res = await request(buildApp({ id: "u1", role: "owner" }, { partyLinks: [] })).get(
+      "/api/erp/practice/by-company/co1",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ patients: [], linked: false });
+    expect(svcMock.getPatient).not.toHaveBeenCalled();
+  });
+
+  it("reads each linked patient through the EXISTING patient read", async () => {
+    // Not a new query path: the connector, the drift lock, the degraded
+    // handling and the minimum-necessary field set all come along with it.
+    resolveEffectiveAccessMock.mockResolvedValue(
+      access("owner", { [EAGLESOFT_PROVIDER]: "read" }),
+    );
+    svcMock.getPatient.mockResolvedValue({ id: "4471", name: "Dana W" });
+
+    const res = await request(
+      buildApp({ id: "u1", role: "owner" }, { partyLinks: [LINKS[0]] }),
+    ).get("/api/erp/practice/by-company/co1");
+
+    expect(svcMock.getPatient).toHaveBeenCalledTimes(1);
+    expect(svcMock.getPatient.mock.calls[0][0]).toBe("4471");
+    expect(res.body.linked).toBe(true);
+    expect(res.body.patients[0].externalId).toBe("4471");
   });
 });
