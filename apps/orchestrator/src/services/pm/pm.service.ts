@@ -46,6 +46,8 @@ export const PM_ERRORS = {
   WORK_ITEM_NOT_FOUND: "work_item_not_found",
   COMMENT_NOT_FOUND: "comment_not_found",
   IDENTIFIER_TAKEN: "identifier_taken",
+  /** ADR-048 — a project filed under a customer that does not exist. */
+  COMPANY_NOT_FOUND: "company_not_found",
   INVALID_PARENT: "invalid_parent",
   INVALID_STATE: "invalid_state",
   STATE_IS_LAST: "state_is_last",
@@ -500,6 +502,24 @@ export async function getProject(prisma: PrismaClient, projectId: string): Promi
   return mapProject(row);
 }
 
+/**
+ * ADR-048 (WARP-2729) — refuse a project→customer link to a customer that is
+ * not there.
+ *
+ * Existence only. Origin is deliberately NOT checked: linking is additive and
+ * writes nothing to the company, so a project may be filed under a synced
+ * (EXTERNAL) customer exactly as under one somebody typed. The EXTERNAL guards
+ * in `crm.service.ts` exist to stop a caller EDITING a vendor-owned row, which
+ * this does not do.
+ */
+async function assertCompanyExists(prisma: PrismaClient, companyId: string): Promise<void> {
+  const found = await prisma.crmCompany.findUnique({
+    where: { id: companyId },
+    select: { id: true },
+  });
+  if (!found) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
+}
+
 export async function createProject(
   prisma: PrismaClient,
   actorId: string | null,
@@ -512,12 +532,33 @@ export async function createProject(
     color?: string;
     /** ADR-045 §5.3 — the department that will own this project's work. */
     departmentId?: string;
+    /**
+     * ADR-048 (WARP-2729) — the customer this project is FOR.
+     *
+     * The column has existed since WARP-2562 with NO writer anywhere: not here,
+     * not in `updateProject`, not on the route, not in `pm_create_project`, not
+     * in the dashboard. The customer record already READS it
+     * (`customer-record.service.ts` lists projects by `companyId`), so filing a
+     * project under a customer has been half-built the whole time — this is the
+     * missing half.
+     *
+     * Deliberately NOT derived from `CrmDeal.projectId`: deriving drops every
+     * job that never had a deal (a warranty callout, a second phase, work that
+     * predates the CRM being switched on), which is the schema comment's own
+     * stated reason for the column existing.
+     */
+    companyId?: string;
   },
 ): Promise<ApiProject> {
   // ADR-045 §5.3 — refuse HOUSEHOLD and archive-intent departments, but NOT a
   // department that is merely pending / provisioning / failed: storage
   // convergence is not a precondition for owning work.
   if (input.departmentId) await assertAssignableDepartment(prisma, input.departmentId);
+  // ADR-048 — a project may only be filed under a customer that exists.
+  // Checked here rather than left to the FK so the caller gets
+  // `company_not_found` (→404) instead of a redacted P2003 500 — the exact
+  // defect WARP-2577 fixed on five CRM columns, not re-introduced here.
+  if (input.companyId) await assertCompanyExists(prisma, input.companyId);
 
   const workspace = await prisma.pmWorkspace.upsert({
     where: { slug: input.workspaceSlug ?? HOME_WORKSPACE_SLUG },
@@ -555,6 +596,7 @@ export async function createProject(
         icon: input.icon ?? null,
         color: input.color ?? null,
         departmentId: input.departmentId ?? null,
+        companyId: input.companyId ?? null,
         createdById: actorId,
         states: {
           create: DEFAULT_STATES.map((s) => ({
@@ -586,6 +628,17 @@ export async function updateProject(
     leadId?: string | null;
     /** ADR-045 §5.3 — `undefined` leaves it alone, `null` clears it. */
     departmentId?: string | null;
+    /**
+     * ADR-048 — the customer. `undefined` leaves it alone, `null` clears it.
+     *
+     * The service is deliberately permissive: a human may re-point a project at
+     * a different customer, because correcting a mistake is the whole reason
+     * the field is editable. The "only fill a NULL, never overwrite" rule is an
+     * AUTO-APPLY policy (WARP-2733's class table), enforced there — a
+     * restriction on what the box may do unattended is not a restriction on
+     * what a person may do.
+     */
+    companyId?: string | null;
     archived?: boolean;
   },
 ): Promise<ApiProject> {
@@ -613,6 +666,18 @@ export async function updateProject(
     // would be the one place in this function that does.
     data.department = fields.departmentId
       ? { connect: { id: fields.departmentId } }
+      : { disconnect: true };
+  }
+  // ADR-048. Same connect/disconnect idiom as `department` above: this update
+  // goes through Prisma's CHECKED `PmProjectUpdateInput`, which exposes
+  // relations rather than their foreign keys. Clearing is unguarded — removing
+  // a wrong customer must never be blocked by the customer's own state.
+  if (fields.companyId !== undefined) {
+    if (fields.companyId !== null) {
+      await assertCompanyExists(prisma, fields.companyId);
+    }
+    data.company = fields.companyId
+      ? { connect: { id: fields.companyId } }
       : { disconnect: true };
   }
   if (fields.archived !== undefined) {

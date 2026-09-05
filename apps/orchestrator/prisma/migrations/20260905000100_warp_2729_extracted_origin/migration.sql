@@ -1,0 +1,41 @@
+-- WARP-2729 (ADR-048) — `EXTRACTED` as a third record origin.
+--
+-- ITS OWN MIGRATION FILE, WITH NO DATA STATEMENTS, ON PURPOSE.
+--
+-- `ALTER TYPE ... ADD VALUE` adds a label that cannot be USED until the adding
+-- transaction commits. Prisma runs each migration file in one transaction, so
+-- keeping this alone guarantees no later statement in the same file can
+-- reference the new label. (`ToolRunStatus` set the same precedent.)
+--
+-- 🔴 NO `*_provenance_complete` REWRITE IS NEEDED, and that was verified rather
+-- than assumed. The shipped constraint from 20260901041500_warp_2549_landing_seam
+-- reads:
+--
+--     ("connectionId" IS NULL AND "externalSystem" IS NULL AND "externalId" IS NULL)
+--     OR ("connectionId" IS NOT NULL AND ... AND "origin" = 'EXTERNAL')
+--
+-- The FIRST arm carries no `origin` predicate at all, so a row with all-NULL
+-- provenance already passes at ANY origin value, EXTRACTED included. Widening
+-- the CHECK would be optional tightening, not a prerequisite, and it would make
+-- this migration heavier than it needs to be.
+--
+-- WHY A NEW ORIGIN RATHER THAN LANDING AS EXTERNAL
+--
+-- An extracted row could only be EXTERNAL by inventing an IntegrationConnection
+-- for "nextcloud" or "mail". The second arm of that same CHECK would then force
+-- `origin = 'EXTERNAL'`, and EXTERNAL rows are refused edits and deletes
+-- (archive only) and are overwritten by the next landing tick. That is exactly
+-- wrong for a draft a person is expected to correct, and it is a lie about
+-- provenance — no vendor sent this row.
+--
+-- EXTRACTED instead behaves like LOCAL everywhere it matters: the edit and
+-- delete guards in crm.service.ts test `existing.origin === "EXTERNAL"`
+-- specifically, so an EXTRACTED company stays fully editable and deletable.
+-- What it adds is honesty — the record itself can say "Droplet made this", so
+-- the dashboard never has to infer authorship from `createdById IS NULL`.
+
+-- AlterEnum
+ALTER TYPE "CrmRecordOrigin" ADD VALUE 'EXTRACTED';
+
+-- AlterEnum
+ALTER TYPE "ContactOrigin" ADD VALUE 'EXTRACTED';

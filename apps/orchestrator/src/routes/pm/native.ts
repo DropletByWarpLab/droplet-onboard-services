@@ -33,6 +33,8 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "work_item_not_found":
     case "comment_not_found":
     case "department_not_found":
+    // ADR-048 — same shape: the referenced row is simply not there.
+    case "company_not_found":
       res.status(404).json({ error: msg });
       return true;
     case "invalid_parent":
@@ -83,6 +85,9 @@ const projectCreateSchema = z.object({
   color: z.string().max(32).optional(),
   // ADR-045 §5.3 — the department that owns this project's work.
   department_id: z.string().max(64).optional(),
+  // ADR-048 (WARP-2729) — the customer this project is FOR. The column has
+  // existed since WARP-2562 with no writer on any path; this is the first.
+  company_id: z.string().max(64).optional(),
 });
 
 const projectPatchSchema = z.object({
@@ -93,6 +98,8 @@ const projectPatchSchema = z.object({
   leadId: z.string().max(64).nullable().optional(),
   // ADR-045 §5.3 — `null` clears the department; omitting it leaves it alone.
   department_id: z.string().max(64).nullable().optional(),
+  // ADR-048 — `null` clears the customer; omitting it leaves it alone.
+  company_id: z.string().max(64).nullable().optional(),
   archived: z.boolean().optional(),
 });
 
@@ -236,6 +243,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         icon: parsed.data.icon,
         color: parsed.data.color,
         departmentId: parsed.data.department_id,
+        companyId: parsed.data.company_id,
       });
       res.status(201).json({ project });
     } catch (err) {
@@ -261,11 +269,15 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       // whose name differs from the service's, so the spread cannot carry it.
       // `undefined` (absent) and `null` (clear) mean different things and both
       // must survive the rename.
-      const { department_id, ...rest } = parsed.data;
+      // ADR-048 — `company_id` renames for the same reason `department_id`
+      // does, and carries the same three-state meaning: absent leaves the
+      // customer alone, `null` clears it, an id sets it.
+      const { department_id, company_id, ...rest } = parsed.data;
       res.json({
         project: await pm.updateProject(prisma, req.params.id, {
           ...rest,
           departmentId: department_id,
+          companyId: company_id,
         }),
       });
     } catch (err) {

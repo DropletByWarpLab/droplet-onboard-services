@@ -60,7 +60,7 @@ export interface ApiContactPhone {
 
 export interface ApiContact {
   id: string;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   sourceId: string | null;
   externalSystem: string | null;
   externalId: string | null;

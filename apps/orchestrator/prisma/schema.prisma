@@ -209,7 +209,6 @@ model ContextPin {
   meta      Json?
   addedAt   DateTime       @default(now())
 
-  @@index([sessionId, addedAt])
   /// WARP-2582 — one pin per record per thread. The record-drawer "Ask AI
   /// about this customer" action makes a duplicate ONE CLICK, and a duplicate
   /// is not cosmetic: it spends the pin block's char budget twice on every
@@ -219,6 +218,7 @@ model ContextPin {
   /// silently inserts forever. `meta` is excluded for that reason as much as
   /// any other.
   @@unique([sessionId, kind, ref])
+  @@index([sessionId, addedAt])
 }
 
 /// WARP-460 — kinds of context the user can pin to a chat thread.
@@ -1124,8 +1124,91 @@ model FileIndexStatus {
   /// permanent. NULL = written before the column existed (treated as gen 1).
   extractorCapability String?
 
+  /// ADR-048 (WARP-2729) — the filing ledger. These five columns make this row
+  /// the queue: the durable row that already says "new content exists" carries
+  /// its own claim, exactly as WARP-2587 put `notifyStatus` on the activity
+  /// tables instead of adding an event table.
+  ///
+  /// 🔴 EVERY COLUMN HERE IS NULLABLE OR CARRIES A POSTGRES DEFAULT, and that is
+  /// load-bearing rather than incidental. `services/file-indexer/db.py`
+  /// `set_index_status` INSERTs this row naming its columns explicitly, so a
+  /// column it never writes is filled by Postgres — no Python change, and no
+  /// coupling between a Prisma migration and a file-indexer image release (an
+  /// unknown column there kills ALL indexing, not just filing). Prisma's
+  /// CLIENT-side defaults (`@default(uuid())`, `@updatedAt`) emit no DB default
+  /// at all, so a NOT NULL column of that shape would break the Python INSERT —
+  /// silently, because `watcher.py _set_status` swallows every DB exception at
+  /// `logger.debug`.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractReason    ExtractReason?
+
+  /// Terminal marker. A CHECK ties this to a terminal `extractStatus`, so a row
+  /// can never sit forever-pending with a terminal status or vice versa.
+  extractedAt DateTime?
+
+  /// 🔴 The watermark the last extraction CONSUMED — not when it ran.
+  ///
+  /// `updatedAt` above is bumped by `set_index_status` on EVERY upsert, so
+  /// `extractedFromUpdatedAt < updatedAt` is the re-index signal, computed
+  /// entirely orchestrator-side. It is a separate column from `extractedAt`
+  /// deliberately: writing `now()` there would overtake a bump that landed
+  /// WHILE the worker held the claim, and that file could then never re-arm.
+  /// The worker snapshots `updatedAt` at claim time and writes THAT value here.
+  extractedFromUpdatedAt DateTime?
+
+  /// Cheap content fingerprint (chunk count + hash of the first and last chunk
+  /// text), compared before any model call. `updatedAt` is bumped by a TOUCH,
+  /// not a change — `on_modified` fires on metadata-only events and the ON
+  /// CONFLICT arm has no `WHERE`/`IS DISTINCT FROM` — so a `chown -R`, a restic
+  /// restore, a desktop resync or an `occ files:scan` would otherwise re-extract
+  /// the whole corpus. Unchanged fingerprint ⇒ `done/unchanged`, no LLM call.
+  extractFingerprint String?
+
   @@id([userId, path])
   @@index([userId, status])
+  @@index([extractStatus, updatedAt])
+}
+
+/// ADR-048 — the filing claim state machine. Explicit enum, never derived from
+/// a NULL (CLAUDE.md), and `not_needed` is a real terminal so a row is never
+/// silently skipped into a forever-pending state — the `TeamChatMeetingReminder
+/// Status { pending | sent | not_needed }` shape WARP-2587 proved.
+enum ExtractStatus {
+  pending
+  running
+  done
+  skipped
+  failed
+  not_needed
+}
+
+/// Why a source reached a terminal state. An enum, never free text: a failure
+/// class must be groupable and renderable, and free text is where filenames
+/// (which are PHI, WARP-1983) leak into a column nobody screens.
+enum ExtractReason {
+  /// The classifier returned verdict RECORD. Terminal before any extraction.
+  phi_record
+  /// The path or filename tripped the deterministic denylist. The LLM was
+  /// never called at all.
+  phi_path
+  not_business
+  too_large
+  bad_json
+  model_unreachable
+  /// The active model resolved to a non-local provider. Unattended work over
+  /// stored documents is local, full stop — there is no owner opt-in.
+  cloud_model_refused
+  owner_unavailable
+  out_of_scope
+  ignored_by_you
+  stale_claim
+  /// Pre-dates the owner enabling filing. Set by the slice-1 backfill so first
+  /// boot does not extract a three-year history overnight. NOT sticky.
+  backlog
+  /// The content fingerprint was unchanged since the last extraction.
+  unchanged
 }
 
 enum FileIndexState {
@@ -1766,7 +1849,7 @@ model NotificationLog {
   channels    String
   deliveredAt DateTime?
   error       String?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
 }
@@ -3060,8 +3143,33 @@ model EmailMessage {
   /// mail retention stays governed by the mail surface alone.
   crmActivities CrmActivity[]
 
+  /// ADR-048 — filing proposals derived from this message. `onDelete: SetNull`
+  /// on the far side, and deliberately not covered by any CHECK there: this
+  /// model's own `accountId` is `onDelete: Cascade`, so a CHECK requiring the
+  /// pointer would make deleting an email account impossible once one proposal
+  /// existed.
+  ingestProposals IngestProposal[]
+
+  /// ADR-048 (WARP-2729) — the same filing ledger as `FileIndexStatus`.
+  ///
+  /// NO route change is needed: `prisma.emailMessage.create` on the 201 branch
+  /// of `POST /api/email/:accountId/messages-ingest` takes the default, and the
+  /// P2002 branch returns `duplicate: true` before any create, so a redelivery
+  /// never re-arms.
+  ///
+  /// There is deliberately no `extractedFromUpdatedAt` or fingerprint here:
+  /// this model has no `updatedAt` and is immutable after create, so there is
+  /// no email re-arm. An extractor-version bump is a bounded, explicit owner
+  /// action, not an automatic one.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractedAt      DateTime?
+  extractReason    ExtractReason?
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
+  @@index([extractStatus, receivedAt])
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3337,34 +3445,34 @@ enum ToolRunStatus {
 /// goalposts of a run already in flight. `maxIter` alone does not bound a run
 /// whose model calls are slow.
 model AgentRun {
-  id          String         @id @default(uuid())
+  id                 String                   @id @default(uuid())
   /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
   /// run cannot outlive a role change with stale reach.
-  userId      String
+  userId             String
   /// The chat conversation that started the run, when one did.
-  sessionId   String?
-  goal        String
-  model       String
-  status      AgentRunStatus @default(queued)
+  sessionId          String?
+  goal               String
+  model              String
+  status             AgentRunStatus           @default(queued)
   /// Not before. Delay and backoff without a second queue.
-  runAfter    DateTime       @default(now())
-  claimedBy   String?
-  claimedAt   DateTime?
-  heartbeatAt DateTime?
-  startedAt   DateTime?
-  endedAt     DateTime?
-  deadlineAt  DateTime?
-  attempts    Int            @default(0)
-  maxIter     Int
-  iteration   Int            @default(0)
-  messages    Json?
-  trace       Json?
+  runAfter           DateTime                 @default(now())
+  claimedBy          String?
+  claimedAt          DateTime?
+  heartbeatAt        DateTime?
+  startedAt          DateTime?
+  endedAt            DateTime?
+  deadlineAt         DateTime?
+  attempts           Int                      @default(0)
+  maxIter            Int
+  iteration          Int                      @default(0)
+  messages           Json?
+  trace              Json?
   /// The final assistant answer on `succeeded`.
-  result      String?
+  result             String?
   /// The loop's own `stop_reason` for the terminal segment.
-  stopReason  String?
-  error       String?
+  stopReason         String?
+  error              String?
   /// WARP-2179 — the parked Tier-2 call, while `status = awaiting_confirmation`.
   /// Explicit columns, not a blob: the call is bound the way the interceptor
   /// binds its token — tool name + `confirmationBindingHash(tool, args)` — so
@@ -3381,8 +3489,8 @@ model AgentRun {
   pendingDecision    AgentRunPendingDecision?
   pendingDecidedAt   DateTime?
   pendingDecidedBy   String?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
 
   // Claim scan: `status = queued AND runAfter <= now()`.
   @@index([status, runAfter])
@@ -4081,15 +4189,15 @@ model PmWorkspace {
 /// first commits and never observes/reuses the same number (WARP-885 —
 /// documents the existing enforcement; no schema change needed for this one).
 model PmProject {
-  id          String      @id @default(uuid())
-  workspaceId String
-  workspace   PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name        String
-  identifier  String
-  description String?
-  icon        String?
-  color       String?
-  leadId      String?
+  id           String      @id @default(uuid())
+  workspaceId  String
+  workspace    PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name         String
+  identifier   String
+  description  String?
+  icon         String?
+  color        String?
+  leadId       String?
   /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
   /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
   /// one must never delete work, and a project with no department reads as
@@ -4098,17 +4206,17 @@ model PmProject {
   /// household-shared and every role still reads every project.
   departmentId String?
   department   Department? @relation("PmProjectDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
-  seqCounter  Int         @default(0)
-  sortOrder   Int         @default(0)
+  seqCounter   Int         @default(0)
+  sortOrder    Int         @default(0)
   /// Canonical "is archived" signal (WARP-884) — explicit column, not
   /// derived from `archivedAt IS NOT NULL`. `archivedAt` remains the audit
   /// timestamp of when it was archived (null when un-archived, mirroring the
   /// prior derivation's semantics).
-  isArchived  Boolean     @default(false)
-  archivedAt  DateTime?
-  createdById String?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @default(now()) @updatedAt
+  isArchived   Boolean     @default(false)
+  archivedAt   DateTime?
+  createdById  String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   states     PmState[]
   labels     PmLabel[]
@@ -4137,7 +4245,7 @@ model PmProject {
   /// SetNull, not Cascade — deleting a customer must not delete the work
   /// delivered for them. The job happened.
   companyId String?
-  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  company   CrmCompany?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
   /// WARP-2585 — files related to this job. Cascade, unlike `crmDeals`: a link
   /// is a pointer with no independent meaning, where a deal is a commercial
   /// record that outlives the project.
@@ -5244,6 +5352,277 @@ enum WriteStatus {
 /// confirms (invariant 1, §11.2). `command` is a registered command NAME
 /// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
 /// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+// ============================================================================
+// ADR-048 - auto-filing (WARP-2727 / WARP-2729)
+//
+// Three tables: what the box PROPOSED, what the owner CORRECTED, and what the
+// owner CONSENTED to. The queue itself is not here - it is the claim columns on
+// `FileIndexStatus` and `EmailMessage`, because those rows already say "new
+// content exists" and a shadow queue would be a second source of truth.
+//
+// EVERY ACTOR COLUMN BELOW IS A PLAIN `String`, NOT AN FK, and that is a
+// decision rather than an omission. Two of them sit inside NOT-NULL CHECKs, and
+// an `onDelete: SetNull` FK under such a CHECK makes the row UN-DELETABLE: the
+// SetNull fires inside the same statement that the CHECK then rejects, so the
+// parent delete fails. That trap is live here twice over - `EmailMessage.
+// accountId` is `onDelete: Cascade`, so a `DELETE /api/email/accounts` would
+// cascade into every email proposal - and the house pattern already avoids it:
+// `ErpWriteRequest.requestedBy`, `ToolSpec.ownerId` and `PmComment.createdById`
+// are all bare strings. These columns are an AUDIT of who consented or decided,
+// and that fact stays true after the user row is gone. A dangling id is caught
+// by the worker's per-tick `resolveAttributedToolAccess`, which fails closed and
+// pauses filing with "the person who turned this on is no longer active" -
+// which is the designed behaviour, not a degradation.
+// ============================================================================
+
+enum IngestSourceKind {
+  FILE
+  EMAIL
+}
+
+enum IngestProposalKind {
+  /// Attach a file to a record that already exists. Reversible, additive.
+  LINK_FILE
+  /// Put an inbound email on an existing customer's timeline.
+  LOG_EMAIL_ACTIVITY
+  /// Set `PmProject.companyId` where it is currently NULL. Never overwrites.
+  SET_PROJECT_CUSTOMER
+  CREATE_CUSTOMER
+  CREATE_PROJECT
+  /// Never auto-applies, in any mode, on any vertical: a person is where PHI
+  /// lives on a practice box.
+  CREATE_CONTACT
+  /// Several candidates matched; a human picks. Never auto-applies.
+  MATCH_REVIEW
+  /// Held until the ADR-049 section 4 `ErpDocument` widening (WARP-2739). Money
+  /// is never auto-applied even after that.
+  CREATE_MONEY_DOC
+}
+
+enum IngestProposalStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  /// The owner said "not the same" - recorded as a FilingDecision too, so the
+  /// pair is never offered again.
+  NOT_SAME
+  EXPIRED
+  UNDONE
+}
+
+/// What the POLICY TABLE (`services/filing/policy.ts`) decided, evaluated in
+/// code and never by the model. `NEVER` is unappliable even by a human, and a
+/// CHECK enforces that rather than a branch.
+enum FilingPolicyClass {
+  AUTO
+  REVIEW
+  NEVER
+}
+
+enum PhiVerdict {
+  CLEAN
+  /// A vendor invoice that names patients - the document a dental practice
+  /// actually receives every week. Company and money survive; every person
+  /// entity and every verbatim quote is dropped, and confidence is capped
+  /// below every auto floor so it can never apply unattended.
+  MENTIONS
+  /// Terminal. No extraction pass, no proposal, no evidence stored.
+  RECORD
+}
+
+enum IngestMatchKind {
+  EMAIL
+  DOMAIN
+  NAME
+  NONE
+}
+
+model IngestProposal {
+  id String @id @default(uuid())
+
+  sourceKind IngestSourceKind
+
+  /// The durable source identity, `file:<ncFileId>` or `email:<uuid>`. TEXT and
+  /// NOT NULL on purpose: it is what the dedupe key is scoped by, and unlike the
+  /// two optional pointers below it survives the source row being deleted, so
+  /// no CHECK here can ever be broken by a cascade.
+  sourceRef String
+
+  /// Convenience pointers, deliberately NOT covered by any CHECK. See the block
+  /// comment above: `emailMessageId` is SetNull under a Cascade parent, so a
+  /// CHECK requiring it would make deleting an email account impossible.
+  ncFileId       Int?
+  emailMessageId String?
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+
+  kind         IngestProposalKind
+  status       IngestProposalStatus @default(PENDING)
+  policyClass  FilingPolicyClass
+  /// Rendered in words on the review card: "Not applied automatically because
+  /// the sender uses a personal email address."
+  policyReason String?
+
+  confidence Int
+  phiVerdict PhiVerdict
+  matchKind  IngestMatchKind
+
+  /// The proposed fields, validated by a zod `.strict()` per-kind allow-list
+  /// that has no `dob`/`chart`/`insurance`/`treatment` member anywhere - the
+  /// model has nowhere to put PHI, which is a structural control rather than a
+  /// prompt rule.
+  payload Json
+
+  /// Verbatim quotes proving each extracted field, each verified to be a real
+  /// substring of the text actually sent. NULLED in the same transaction as a
+  /// reject / not-same / PHI skip, and 30 days after an apply.
+  evidence Json?
+
+  extractorVersion String
+  dedupeKey        String
+
+  requestedById String
+  /// Who decided, and when. Required for every decided status INCLUDING
+  /// UNDONE — an undone proposal was applied by somebody first, and undoing
+  /// it does not unmake that.
+  decidedById   String?
+  decidedAt     DateTime?
+  appliedAt     DateTime?
+  autoApplied   Boolean   @default(false)
+  undoneById    String?
+  undoneAt      DateTime?
+  /// "delete" or "archive" - which branch the undo took, per the landed-purge
+  /// rule (a row that acquired a human note is archived, never deleted).
+  undoMode      String?
+
+  /// Back-pointers to what applying this actually created. The "Created by
+  /// Droplet" chip reads `origin === 'EXTRACTED'`, never `createdById IS NULL`
+  /// - state is never derived from a NULL.
+  createdCompanyId    String?
+  createdContactId    String?
+  createdProjectId    String?
+  createdEntityLinkId String?
+  createdActivityId   String?
+
+  /// A child proposal (e.g. LINK_FILE against a customer this run also
+  /// proposes creating) that cannot apply until its parent does.
+  dependsOnProposalId String?
+
+  /// What applying this actually produced. Named relations because the plain
+  /// `createdCompanyId` / `createdContactId` columns above are audit strings
+  /// with no FK — only the row's own `proposalId` back-pointer is referential,
+  /// so a reader can always ask a record "did Droplet file you?" without a
+  /// join through this table.
+  companiesFiled CrmCompany[] @relation("CompanyFiledByProposal")
+  contactsFiled  Contact[]    @relation("ContactFiledByProposal")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Re-extraction of the same source at the same extractor version must not
+  /// mint a second proposal for the same thing.
+  @@unique([sourceRef, kind, dedupeKey, extractorVersion])
+  @@index([status, createdAt])
+  @@index([sourceRef])
+  @@index([ncFileId])
+  @@index([emailMessageId])
+  @@index([dependsOnProposalId])
+}
+
+enum IngestKeyKind {
+  EMAIL_ADDRESS
+  EMAIL_DOMAIN
+  NAME
+  NC_FOLDER
+}
+
+enum FilingDecisionKind {
+  /// "Not this customer" - never offer this pair again.
+  NOT_SAME
+  /// "Mail from @northgatedental.com always files under Northgate Dental."
+  ALWAYS_HERE
+  /// "Ignore anything from this sender or folder."
+  IGNORE_SOURCE
+}
+
+/// The correction memory, and the reason auto mode survives week two: a
+/// correction made once is never made twice, and the owner can READ and REVOKE
+/// what they taught it. Consulted BEFORE the matcher searches.
+model FilingDecision {
+  id       String             @id @default(uuid())
+  keyKind  IngestKeyKind
+  /// Lowercased on write.
+  keyValue String
+  verdict  FilingDecisionKind
+
+  /// Required for NOT_SAME and ALWAYS_HERE, forbidden for IGNORE_SOURCE - a
+  /// CHECK, because a rule pointing at no customer is not a rule.
+  companyId String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  @@index([keyKind, keyValue])
+}
+
+enum AutoFilingMode {
+  off
+  /// Everything waits for a click.
+  propose
+  /// Owner-promoted classes apply unattended, within caps.
+  auto
+}
+
+enum AutoFilingLevel {
+  /// Default: attach files, log email on existing customers, set a project's
+  /// customer. Never creates.
+  links_only
+  also_create
+}
+
+enum AutoFilingVertical {
+  general
+  /// ASKED at enable time, never derived at read time. A LAN dental connector
+  /// only pre-fills the answer - a heuristic must not silently decide a PHI
+  /// posture.
+  healthcare
+}
+
+/// Consent as a ROW with constraints, not a settings blob: the record proving a
+/// human authorised unattended CRM writes must be one the database refuses to
+/// leave half-filled.
+model AutoFilingSetting {
+  id String @id @default("singleton")
+
+  mode     AutoFilingMode     @default(off)
+  level    AutoFilingLevel    @default(links_only)
+  vertical AutoFilingVertical @default(general)
+
+  /// Who turned it on, server-stamped. Plain String, no FK - see the block
+  /// comment at the top of this section.
+  enabledById String?
+  /// Bounds the ledger: a source older than this is retired `not_needed/
+  /// backlog` rather than claimed, so enabling filing never files three years
+  /// of history overnight.
+  enabledAt   DateTime?
+
+  folders      Json?
+  pathDenylist Json?
+  sources      Json?
+
+  hourlyApplyCap Int @default(50)
+  dailyCreateCap Int @default(10)
+  digestHour     Int @default(8)
+
+  /// `mode = 'auto'` is refused by a CHECK until an extraction-eval run has
+  /// recorded a pass on THIS box's model (WARP-2732). The canary is auto mode's
+  /// own merge condition, so it is a database invariant rather than a promise.
+  canaryPassedAt DateTime?
+  canaryModel    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model ErpWriteRequest {
   id           String      @id @default(cuid())
   connectionId String
@@ -6025,6 +6404,9 @@ enum ContactOrigin {
   /// Pulled from a source (CardDAV, Graph, a CRM connector). The source owns
   /// the synced fields.
   EXTERNAL
+  /// ADR-048 — derived by Droplet from a document or an email. Editable like
+  /// LOCAL; see `CrmRecordOrigin.EXTRACTED`.
+  EXTRACTED
 }
 
 model AddressBookSource {
@@ -6082,6 +6464,10 @@ model AddressBookSource {
 
 model Contact {
   id String @id @default(uuid())
+
+  /// ADR-048 - see `CrmCompany.proposalId`. Not in any CHECK.
+  proposalId String?
+  proposal   IngestProposal? @relation("ContactFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
 
   userId String
 
@@ -6175,7 +6561,7 @@ model Contact {
   /// question.
   partyLinks    PartyLink[]
   /// WARP-2585 — files related to this person (an ID scan, a signed form).
-  fileLinks       EntityLink[]
+  fileLinks     EntityLink[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -6187,6 +6573,7 @@ model Contact {
   @@index([userId, origin])
   /// The default listing is "this person's contacts, unarchived, by name".
   @@index([userId, isArchived])
+  @@index([proposalId])
 }
 
 model ContactEmail {
@@ -6239,6 +6626,14 @@ model ContactPhone {
 enum CrmRecordOrigin {
   LOCAL
   EXTERNAL
+  /// ADR-048 — created by Droplet from a document or an email, then applied by
+  /// a human (or by an owner-promoted auto-apply class). Behaves like LOCAL:
+  /// the shipped `*_provenance_complete` CHECK's first arm carries NO origin
+  /// predicate, so an EXTRACTED row with all-NULL provenance already passes,
+  /// and the edit/delete guards key on `EXTERNAL` — so a person can correct an
+  /// EXTRACTED draft freely, which is the whole point of not landing it as
+  /// EXTERNAL under a fabricated connection.
+  EXTRACTED
 }
 
 /// What reaching a stage MEANS. An explicit outcome class, never inferred from
@@ -6275,6 +6670,13 @@ enum CrmActivityKind {
 
 model CrmCompany {
   id String @id @default(uuid())
+
+  /// ADR-048 - the proposal that created this row, when Droplet filed it.
+  /// Deliberately NOT referenced by any CHECK: it is `onDelete: SetNull`, and
+  /// a SetNull FK inside a NOT-NULL CHECK makes the row un-deletable and the
+  /// purge walker un-runnable.
+  proposalId String?
+  proposal   IngestProposal? @relation("CompanyFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
 
   name String
 
@@ -6342,16 +6744,16 @@ model CrmCompany {
 
   /// WARP-2581 — money owed by or to this customer, when a document matched.
   documents ErpDocument[]
-
-  @@unique([connectionId, externalId])
-  @@index([connectionId])
   /// WARP-2585 — files in /files that BELONG to this customer. Pointers, not
   /// copies; deleting the company deletes the links and none of the files.
   fileLinks EntityLink[]
 
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
+  @@index([proposalId])
 }
 
 /// WARP-2562 (ADR-044) — how a link came to exist. An explicit column, never
@@ -6652,12 +7054,11 @@ model CrmDeal {
 
   contactLinks CrmDealContact[]
   activities   CrmActivity[]
+  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
+  fileLinks    EntityLink[]
 
   @@unique([connectionId, externalId])
   @@index([connectionId])
-  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
-  fileLinks EntityLink[]
-
   @@index([pipelineId, stageId])
   @@index([stageId])
   @@index([companyId])
@@ -6792,7 +7193,6 @@ model CrmActivity {
   @@index([emailMessageId])
   @@index([calendarEventId])
   @@index([workItemId])
-
   /// createdAt, NOT occurredAt — unlike every index above it. `occurredAt` is
   /// when the interaction HAPPENED and is caller-supplied: a connector
   /// backdates it and a MEETING can carry a future one, and a sweep gated on a
