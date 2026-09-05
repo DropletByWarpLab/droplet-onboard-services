@@ -38,7 +38,10 @@
  * ## No `while (true)`, and no advisory lock either
  *
  * Scheduling is `cronRuntime.scheduleInterval` (repo rule 9), at the 30 s the
- * schedule ticker and the egress reconciler already use.
+ * schedule ticker and the egress reconciler already use — with ONE tick in
+ * flight at a time, because `scheduleInterval` itself does not guarantee
+ * that and a tick's critical path awaits the vendor
+ * ({@link createRemoteMcpReconcileTick}).
  *
  * Unlike those two it takes **no `lockKey`**, and that is a decision rather than
  * an omission. An advisory lock exists so only one replica performs a shared
@@ -78,8 +81,13 @@ const logger = createLogger("remote-mcp-reconciler");
 export const REMOTE_MCP_RECONCILE_INTERVAL_MS = 30_000;
 
 /** Why a tick did no work. `null` means it ran. Named rather than inferred from
- *  a zero count, which is the same fact for three different reasons. */
-export type RemoteMcpReconcileSkip = "nothing_registered" | "backoff" | null;
+ *  a zero count, which is the same fact for four different reasons. */
+export type RemoteMcpReconcileSkip =
+  | "nothing_registered"
+  | "backoff"
+  /** The previous tick had not finished — see {@link createRemoteMcpReconcileTick}. */
+  | "in_flight"
+  | null;
 
 export interface RemoteMcpReconcileResult {
   /** Registrations that were due this tick. */
@@ -295,6 +303,73 @@ export async function reconcileRemoteMcpSessions(
 }
 
 /**
+ * The tick as the cron runtime sees it: {@link reconcileRemoteMcpSessions}
+ * behind an IN-FLIGHT guard.
+ *
+ * `scheduleInterval` is a bare `setInterval(() => void safeRun(handler))` with
+ * no overlap protection (`cron-runtime.service.ts`), and a tick's critical
+ * path includes the vendor: `attachAtlassianRemote` awaits the bridge's `open`
+ * (which awaits `session.connect()`), then `mux.listTools()`, then `state()` —
+ * each up to the client's 30 s timeout, against a 30 s interval. With Atlassian
+ * slow, tick N+1 fires while tick N is inside `deps.reattach`. Without this
+ * guard N+1 reads `state === "reattaching"`, decides a re-open is needed,
+ * `detach`es the port N is about to use, re-reads the credential and sends a
+ * SECOND `open` that replaces N's session under it; whichever `mux.attachRemote`
+ * loses gets `SERVER_ID_IN_USE` and `close()`s — a `DELETE` of the session the
+ * other tick just opened. The next tick sees `closed`, and the cycle repeats,
+ * re-transmitting the credential each time.
+ *
+ * So: one tick at a time, per process. A tick that finds the previous one
+ * still running is SKIPPED — reported as `skipped: "in_flight"`, counted, and
+ * logged at warn, so a vendor that is persistently slower than the interval is
+ * visible as a growing counter rather than as a silent halving of the cadence.
+ * It is not a failure: it does not throw, so it does not feed `safeRun`'s
+ * consecutive-failure canary — a slow vendor is not a broken handler. A tick
+ * that THROWS releases the guard on its way out, so one bad tick cannot skip
+ * every later one.
+ *
+ * A closure per mount rather than module state, so every test drives its own
+ * instance; the process has exactly one mount.
+ */
+export interface RemoteMcpReconcileTick {
+  /** Run one tick — or skip it, if the previous one has not finished. */
+  run(): Promise<RemoteMcpReconcileResult>;
+  /** Ticks skipped because the previous one was still in flight. */
+  readonly overlapsSkipped: number;
+}
+
+export function createRemoteMcpReconcileTick(
+  deps: RemoteMcpReconcilerDeps,
+): RemoteMcpReconcileTick {
+  let inFlight: Promise<RemoteMcpReconcileResult> | null = null;
+  let overlapsSkipped = 0;
+  return {
+    get overlapsSkipped() {
+      return overlapsSkipped;
+    },
+    async run() {
+      if (inFlight !== null) {
+        overlapsSkipped += 1;
+        logger.warn({ overlapsSkipped }, "remote_mcp_reconcile_tick_overlap_skipped");
+        return {
+          checked: 0,
+          reattached: [],
+          orphansClosed: [],
+          bridgeUnreachable: false,
+          skipped: "in_flight",
+        };
+      }
+      inFlight = reconcileRemoteMcpSessions(deps);
+      try {
+        return await inFlight;
+      } finally {
+        inFlight = null;
+      }
+    },
+  };
+}
+
+/**
  * Mount the reconciler on the cron runtime.
  *
  * Errors propagate naked to `safeRun`, the same posture the pattern-miner and
@@ -306,8 +381,10 @@ export function mountRemoteMcpReconciler(
   deps: RemoteMcpReconcilerDeps,
   intervalMs: number = REMOTE_MCP_RECONCILE_INTERVAL_MS,
 ): void {
+  const tick = createRemoteMcpReconcileTick(deps);
   cronRuntime.scheduleInterval(intervalMs, async () => {
-    const result = await reconcileRemoteMcpSessions(deps);
+    const result = await tick.run();
+    if (result.skipped === "in_flight") return;
     if (
       result.reattached.length > 0 ||
       result.orphansClosed.length > 0 ||

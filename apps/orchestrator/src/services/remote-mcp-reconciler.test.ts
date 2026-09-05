@@ -24,6 +24,8 @@ import {
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { RemoteMcpLifecycleRegistry } from "./remote-mcp-lifecycle.service.js";
 import {
+  createRemoteMcpReconcileTick,
+  mountRemoteMcpReconciler,
   reconcileRemoteMcpSessions,
   type RemoteMcpReconcilerDeps,
 } from "./remote-mcp-reconciler.service.js";
@@ -70,7 +72,13 @@ interface FixtureSession {
 function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
   const sessions = new Map<string, FixtureSession>();
   const calls: { method: string; path: string; body: unknown }[] = [];
-  const state = { tools: initialTools, down: false };
+  const state = {
+    tools: initialTools,
+    down: false,
+    /** When set, the bridge's `open` does not answer until it resolves — a
+     *  slow vendor inside `session.connect()`. */
+    stallOpen: null as Promise<void> | null,
+  };
 
   const health = (id: string, s: FixtureSession) => ({
     serverId: id,
@@ -125,6 +133,7 @@ function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
       return json(200, { closed });
     }
     if (action === "open") {
+      if (state.stallOpen) await state.stallOpen;
       // Replacement, and the baseline is seeded from `knownTools` when the
       // caller supplied one — the WARP-2651 contract.
       const known = (body as { knownTools?: string[] } | undefined)?.knownTools;
@@ -266,8 +275,21 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     audit,
     openCredentials,
     attach,
+    deps,
     tick: () => reconcileRemoteMcpSessions(deps),
+    /** The tick the cron runtime actually drives: one in flight at a time. */
+    guarded: createRemoteMcpReconcileTick(deps),
   };
+}
+
+/** A promise the test resolves by hand, so the bridge's `open` can be held for
+ *  exactly as long as a tick should stay parked inside the vendor call. */
+function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 async function remoteToolNames(mux: McpToolMultiplexer): Promise<string[]> {
@@ -600,5 +622,102 @@ describe("the gates are unchanged on the reconciler's path", () => {
       reason: "gate_refused",
     });
     expect(await remoteToolNames(h.mux)).toEqual([]);
+  });
+});
+
+describe("overlapping ticks do not re-enter the re-open (one tick in flight)", () => {
+  const opens = (h: ReturnType<typeof harness>) =>
+    h.bridge.calls.filter((c) => c.path.endsWith("/open"));
+
+  it("skips a tick that fires while the previous one is still inside the vendor call", async () => {
+    const h = harness();
+    await h.attach();
+    expect(h.openCredentials).toHaveBeenCalledTimes(1);
+    h.bridge.sessions.clear();
+
+    // Tick N reaches the bridge's `open` and is parked there: the vendor is
+    // slower than the 30 s interval.
+    const stall = gate();
+    h.bridge.state.stallOpen = stall.promise;
+    const first = h.guarded.run();
+    await vi.waitFor(() => expect(opens(h)).toHaveLength(2)); // boot + tick N
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("reattaching");
+
+    // Tick N+1 fires. Without the guard it reads `reattaching`, detaches the
+    // port N is about to use, re-reads the credential and sends a SECOND open
+    // that replaces N's session under it.
+    const second = await h.guarded.run();
+    expect(second.skipped).toBe("in_flight");
+    expect(h.guarded.overlapsSkipped).toBe(1);
+    expect(opens(h)).toHaveLength(2);
+    expect(h.openCredentials).toHaveBeenCalledTimes(2);
+    expect(h.bridge.calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+
+    // The vendor answers; tick N completes normally.
+    stall.release();
+    h.bridge.state.stallOpen = null;
+    const done = await first;
+    expect(done.reattached).toEqual([ATLASSIAN_REMOTE_SERVER_ID]);
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+
+    // And the guard has let go: the next tick RUNS, and finds nothing to do.
+    const third = await h.guarded.run();
+    expect(third.skipped).toBeNull();
+    expect(third.reattached).toEqual([]);
+    expect(opens(h)).toHaveLength(2);
+    expect(h.guarded.overlapsSkipped).toBe(1);
+  });
+
+  it("a tick that THROWS releases the guard — the next tick runs instead of being skipped forever", async () => {
+    const h = harness();
+    await h.attach();
+    h.bridge.sessions.clear();
+    let explode = true;
+    const tick = createRemoteMcpReconcileTick({
+      ...h.deps,
+      // `detach` is the one dependency the tick calls outside a try/catch.
+      detach: (serverId) => {
+        if (explode) throw new Error("detach exploded");
+        h.deps.detach(serverId);
+      },
+    });
+
+    await expect(tick.run()).rejects.toThrow("detach exploded");
+
+    explode = false;
+    const next = await tick.run();
+    expect(next.skipped).toBeNull();
+    expect(next.reattached).toEqual([ATLASSIAN_REMOTE_SERVER_ID]);
+    expect(tick.overlapsSkipped).toBe(0);
+  });
+
+  it("mountRemoteMcpReconciler schedules the GUARDED tick, not the bare one", async () => {
+    const h = harness();
+    await h.attach();
+    h.bridge.sessions.clear();
+    let handler: (() => void | Promise<void>) | null = null;
+    mountRemoteMcpReconciler(
+      {
+        scheduleInterval: (_ms, fn) => {
+          handler = fn;
+        },
+      },
+      h.deps,
+      30_000,
+    );
+    expect(handler).not.toBeNull();
+
+    const stall = gate();
+    h.bridge.state.stallOpen = stall.promise;
+    const a = handler!();
+    await vi.waitFor(() => expect(opens(h)).toHaveLength(2));
+    // The overlapping fire returns at once, having dialled nothing.
+    await handler!();
+    expect(opens(h)).toHaveLength(2);
+
+    stall.release();
+    await a;
+    expect(opens(h)).toHaveLength(2);
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
   });
 });
