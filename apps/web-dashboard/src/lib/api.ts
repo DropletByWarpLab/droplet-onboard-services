@@ -55,7 +55,7 @@ import type {
   ModelsCatalogPayload,
   NetworkCommandResult,
   NetworkOverview,
-  StorageStats,
+  StorageOverview,
   DrivesResponse,
   PoolsResponse,
   PoolInfo,
@@ -877,7 +877,10 @@ export async function transcribeNowBrainItem(
 
 // --- Storage ---
 
-export async function fetchStorage(): Promise<StorageStats> {
+/** GET /api/storage. WARP-2098: the headline quadruple is the box's DATA
+ *  drives (OS/boot disk excluded), with the install disk under `system` and the
+ *  Nextcloud account quota under `cloud`. */
+export async function fetchStorage(): Promise<StorageOverview> {
   const res = await authFetch(`${BASE}/api/storage`);
   if (!res.ok) throw new Error(`Failed to fetch storage: ${res.status}`);
   return res.json();
