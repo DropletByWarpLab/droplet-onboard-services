@@ -329,6 +329,14 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/crm/filing/proposals/abc/apply", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/crm/filing/proposals/abc/reject", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/crm/filing/proposals/abc/not-same", allowed: ["owner", "admin"] },
+  // WARP-2731 — undo, the Rules memory and the Skipped list. Same reasoning as
+  // the rows above: a rule names a domain the owner filed under, and a skip
+  // list is a list of documents that exist. `family` sees neither.
+  { method: "post", path: "/api/crm/filing/proposals/abc/undo", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/rules", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/rules", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/crm/filing/rules/abc", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/skipped", allowed: ["owner", "admin"] },
 ];
 
 /**
