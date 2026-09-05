@@ -91,14 +91,16 @@
  *     accurate again, for a completely different reason.
  *   • `switch`, `erp` — fully excluded AND ruleless. Coherent: no rule
  *     promises something the pool cannot deliver.
- *   • `pm` again, from the other direction (WARP-2582). Context pins can now
- *     name a `project` / `work_item`, and pin domains feed selection — but
- *     every pm READ tool is excluded above, so a pm pin can only scope
- *     retrieval and name the record in prose; it can never become a tool call
- *     in chat. `context-pin-prompt.ts` says so in the prompt rather than
- *     implying a tool that is not on the wire. The `crm` half is the opposite:
- *     six of its seven tools are in scope, so a customer pin resolves to an id
- *     the model can spend on `crm_get_customer` the same turn.
+ *   • `pm` again, from the other direction (WARP-2582, then WARP-2583).
+ *     Context pins can name a `customer` / `deal` / `project` / `work_item`,
+ *     and pin domains feed selection. Under WARP-2582 a pm pin could only
+ *     scope retrieval, because every pm READ was excluded here; ADR-045
+ *     moved those reads into `business_find` / `business_timeline`, which are
+ *     IN the pool, so `context-pin-prompt.ts` maps all four kinds to
+ *     `business` and every business pin resolves to an id the model can
+ *     spend on `business_find` the same turn. Mapping them to `pm` / `crm`
+ *     would admit nothing — both domains are empty of local tools — which is
+ *     exactly what #2005's review caught when the map lagged the catalog.
  *
  * None of these is fixed by deleting one side. The `notifications` and `pm`
  * rules are what make REMOTE tools in those domains selectable once

@@ -23,8 +23,8 @@
  * WHY THE READ-BACK EXISTS AT ALL. Per-turn selection matches DOMAIN_RULES
  * against the LAST USER MESSAGE (`lastUserMessageText` filters role==="user").
  * A pin is not a user message. So on "summarise the last month", with a
- * customer pinned, no rule fires, `crm` is not advertised, and the model is
- * handed a customer id it has no tool to spend. That is the worthless-pin
+ * customer pinned, no rule fires, `business` is not advertised, and the model
+ * is handed a customer id it has no tool to spend. That is the worthless-pin
  * outcome this slice exists to prevent, and no wording of the pin line fixes
  * it - the tool simply is not on the wire.
  *
@@ -65,16 +65,35 @@ export function isBusinessPinKind(kind: string): kind is BusinessPinKind {
 /**
  * Pin kind -> the tools-core `ToolDomain` that can act on it.
  *
- * Note the two vocabularies this straddles, which is why it is a written-out
- * map and not a string transform: the MODULE is `projects` but its TOOL DOMAIN
- * is `pm` (module-registry.ts declares `toolDomains: ["pm"]` for it), while
- * `crm` happens to be spelled the same on both axes.
+ * All four resolve to `business`, and this stays a written-out map rather
+ * than a constant for the reason it was one before: the answer is a fact
+ * about the CATALOG, not about the pin, and the catalog has moved once
+ * already. WARP-2582 shipped customer/deal -> `crm` and project/work_item ->
+ * `pm`, which was right while `crm_get_customer` and `pm_get_work_item`
+ * existed. ADR-045 (WARP-2583) collapsed every CRM and PM tool into
+ * `business_find` / `business_timeline` / `business_create` /
+ * `business_update`, all in the `business` domain, and left `crm` and `pm`
+ * declared but EMPTY - landing slots for a remote HubSpot/Atlassian catalog.
+ *
+ * Why an empty domain is worse than no domain here: `selectAdvertisedTools`
+ * seeds its domain set from this map and then keeps a pool tool only if
+ * `resolveDomain(name)` is in that set. No local tool resolves to `crm` or
+ * `pm` any more, so a pin pointing there admitted NOTHING - the exact
+ * worthless-pin outcome this module exists to prevent, reintroduced with
+ * every test green because the tests pinned the map, not the wire. The
+ * selection-level case in context-pin-prompt.test.ts now holds this end to
+ * end: it goes red if a pinned customer stops admitting `business_find`.
+ *
+ * Not `crm`/`pm` as well. A pin names a LOCAL row by id, and a remote
+ * catalog cannot spend a local id; the sentence rules in
+ * tool-selection.service.ts are what open those two domains for remote
+ * tools, and a pin has no business widening past what it can use.
  */
 export const PIN_KIND_TOOL_DOMAIN: Readonly<Record<BusinessPinKind, ToolDomain>> = {
-  customer: "crm",
-  deal: "crm",
-  project: "pm",
-  work_item: "pm",
+  customer: "business",
+  deal: "business",
+  project: "business",
+  work_item: "business",
 };
 
 /**
@@ -133,14 +152,19 @@ export const PIN_BLOCK_HEADER =
 
 /**
  * Appended only when at least one business pin survived resolution. It costs
- * ~150 chars and buys the model the one thing it cannot infer: that the
+ * ~190 chars and buys the model the one thing it cannot infer: that the
  * bracketed uuid is the argument, not decoration.
+ *
+ * Names `business_find` and `business_timeline` because those are what is on
+ * the wire (ADR-045; both are in the chat pool, unlike the `pm_*` reads they
+ * replaced, which is why the WARP-2582 wording told the model a project pin
+ * could not be opened). A pin kind IS a `business_find` entity, so the model
+ * needs no translation table.
  */
 const BUSINESS_PIN_GUIDANCE =
   "\nBusiness pins carry the record's id in brackets - pass it straight to " +
-  "the matching tool (customer -> crm_get_customer, deal -> crm_get_deal). " +
-  "Project and work-item pins have no read tool in chat: use the name when " +
-  "you answer, and say you cannot open the record.";
+  "business_find as id, with the matching entity (customer, deal, project or " +
+  "work_item), and to business_timeline for what has happened on it.";
 
 /**
  * Ceiling on the whole rendered block.
@@ -253,7 +277,7 @@ const BUSINESS_LINE_RE = /^- (customer|deal|project|work_item):/;
  *
  * A `missing` line still yields its domain, which is right: the record is
  * gone but the conversation is still about the CRM, and the model needs
- * `crm_search_customers` to offer the obvious next move.
+ * `business_find` to offer the obvious next move.
  *
  * Deterministic and allocation-light. Returns `[]` on any turn with no pin
  * block, which is nearly all of them.
