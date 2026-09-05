@@ -19,6 +19,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { Timeline } from "./views";
 import { useCompanies, useCrmActions, useTimeline } from "./useCrm";
 import type { CrmSubject } from "./types";
+import { StopFilingHere } from "./StopFilingHere";
 
 function Field({
   label,
@@ -413,6 +414,15 @@ export function RecordDrawer({
               {busy ? "Saving…" : "Log"}
             </button>
           </div>
+        )}
+
+        {/* WARP-2731 — the correction lives where the mistake is DISCOVERED.
+            The review card is where an owner decides; this drawer is where
+            they later notice that mail from a supplier has been landing on the
+            wrong account for three weeks. Making them find the original card
+            to fix it means most corrections never get made. */}
+        {!readOnly && subject.type === "COMPANY" && (
+          <StopFilingHere companyId={subject.id} />
         )}
 
         <Timeline activities={activities} isLoading={isLoading} />

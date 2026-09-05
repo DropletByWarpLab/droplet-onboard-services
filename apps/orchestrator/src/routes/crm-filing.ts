@@ -42,7 +42,22 @@ import {
   rejectProposal,
 } from "../services/filing/apply.service.js";
 import { parsePayload } from "../services/filing/payloads.js";
-import { readFilingSettings, SETTING_ID } from "../services/filing/settings.js";
+import {
+  permittedOwnerIds,
+  readFilingSettings,
+  SETTING_ID,
+} from "../services/filing/settings.js";
+import { undoProposal } from "../services/filing/undo.service.js";
+import {
+  listRules,
+  revokeRule,
+  RULE_ERRORS,
+  teachNotSame,
+} from "../services/filing/rules.service.js";
+import { listSkipped } from "../services/filing/skipped.service.js";
+import { readFilingHealth } from "../services/filing/digest.js";
+import { filingPauseState } from "../services/filing/worker.js";
+import { AUDIT_PHRASES, recordFilingAudit } from "../services/filing/audit.js";
 
 const REVIEWER = ["owner", "admin"] as const;
 
@@ -60,6 +75,17 @@ const applyBody = z
   .strict();
 
 const notSameBody = z.object({ companyId: z.string().uuid() }).strict();
+
+const skippedQuery = z.object({ before: z.string().datetime().optional() });
+
+/** "Stop filing @domain here", from a record's own chip. */
+const teachBody = z
+  .object({
+    keyKind: z.enum(["EMAIL_ADDRESS", "EMAIL_DOMAIN", "NAME", "NC_FOLDER"]),
+    keyValue: z.string().trim().min(1).max(320),
+    companyId: z.string().uuid(),
+  })
+  .strict();
 
 /**
  * Turning filing on.
@@ -98,7 +124,13 @@ function mapError(err: unknown, res: Response): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   switch (msg) {
     case FILING_ERRORS.PROPOSAL_NOT_FOUND:
+    case RULE_ERRORS.NOT_FOUND:
       res.status(404).json({ error: msg });
+      return true;
+    case FILING_ERRORS.NOT_APPLIED:
+      // 409 for the same reason NOT_PENDING is: the row exists and the
+      // caller's view of it is stale, usually a second tab.
+      res.status(409).json({ error: msg });
       return true;
     case FILING_ERRORS.NOT_PENDING:
       // 409, not 404: the row is there and the caller's view of it is stale —
@@ -185,12 +217,19 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
         readFilingSettings(prisma),
         prisma.ingestProposal.count({ where: { status: "PENDING" } }),
       ]);
+      // WARP-2731 — the Health block. Two numbers that make two different
+      // SILENCES visible: a corpus the indexer can no longer embed
+      // (`hoursSinceLastIndex`), and a worker registered but never firing
+      // (`lastTickAt`). Neither is a count of successes — a feature whose
+      // health page reports only what it did looks healthiest once it stops.
+      const health = await readFilingHealth(prisma, filingPauseState());
       res.json({
         mode: settings.mode,
         level: settings.level,
         vertical: settings.vertical,
         enabled: settings.mode !== "off",
         pending,
+        health,
       });
     } catch (err) {
       next(err);
@@ -378,6 +417,131 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  /**
+   * Undo an applied filing.
+   *
+   * The promise the whole review surface rests on. `POST`, not `DELETE`: it
+   * creates a decision (`UNDONE`, with an actor and a time) rather than
+   * removing one, and the proposal row survives so the audit trail can still
+   * say what happened.
+   */
+  router.post(
+    "/crm/filing/proposals/:id/undo",
+    requireRole(...REVIEWER),
+    async (req, res, next) => {
+      const actorId = actorOf(req);
+      if (!actorId) {
+        res.status(403).json({ error: "human_reviewer_required" });
+        return;
+      }
+      try {
+        const result = await undoProposal(prisma, req.params.id, actorId);
+        await recordFilingAudit({
+          ownerId: actorId,
+          what: AUDIT_PHRASES.undone,
+          refs: {
+            sourceRef: `proposal:${result.proposalId}`,
+            sourceKind: "FILE",
+            extractStatus: "done",
+            extractReason: result.mode,
+          },
+        });
+        res.json(result);
+      } catch (err) {
+        if (mapError(err, res)) return;
+        next(err);
+      }
+    },
+  );
+
+  /** What Droplet has been taught, in sentences. */
+  router.get("/crm/filing/rules", requireRole(...REVIEWER), async (_req, res, next) => {
+    try {
+      res.json({ rules: await listRules(prisma) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/crm/filing/rules/:id", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    try {
+      await revokeRule(prisma, req.params.id);
+      // The rule is gone; the fact it existed survives here. Without this the
+      // Rules page could be emptied with nothing anywhere recording it.
+      await recordFilingAudit({
+        ownerId: actorId,
+        what: AUDIT_PHRASES.ruleRevoked,
+        refs: {
+          sourceRef: `rule:${req.params.id}`,
+          sourceKind: "FILE",
+          extractStatus: "done",
+        },
+      });
+      res.status(204).end();
+    } catch (err) {
+      if (mapError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.post("/crm/filing/rules", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    const parsed = teachBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const rule = await teachNotSame(prisma, parsed.data, actorId);
+      await recordFilingAudit({
+        ownerId: actorId,
+        what: AUDIT_PHRASES.ruleWritten,
+        refs: {
+          sourceRef: `rule:${rule.id}`,
+          sourceKind: "FILE",
+          extractStatus: "done",
+        },
+      });
+      res.status(201).json({ rule });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * What Droplet decided NOT to file.
+   *
+   * The surface that stops this feature having a silent mode: without it, a
+   * folder whose name happens to contain "treatment" swallows a month of
+   * invoices and there is nowhere to find out why.
+   */
+  router.get("/crm/filing/skipped", requireRole(...REVIEWER), async (req, res, next) => {
+    const parsed = skippedQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const settings = await readFilingSettings(prisma);
+      const owners = await permittedOwnerIds(prisma, settings);
+      const page = await listSkipped(prisma, owners, settings.enabledById, {
+        ...(parsed.data.before ? { before: new Date(parsed.data.before) } : {}),
+      });
+      res.json(page);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   return router;
 }

@@ -1260,6 +1260,20 @@ export async function logActivity(
   prisma: PrismaClient,
   input: ActivityInput,
   actorId: string | null,
+  /**
+   * ADR-048 (WARP-2731) — the box wrote this row, not a person.
+   *
+   * 🔴 `origin` is not decoration on this table. Two things read `LOCAL` as
+   * "a human typed this": `landed-purge.ts`'s survival test
+   * (`where: { origin: "LOCAL", [subject]: id }`, which decides whether a
+   * record is archived rather than deleted) and ADR-048's undo, which deletes
+   * a filed record carrying only machine rows and ARCHIVES one a person has
+   * since annotated. A box-written caption left at the default makes both lie.
+   *
+   * Passed only by the filing apply path. Every human caller omits it and
+   * keeps `LOCAL`.
+   */
+  filing?: FilingProvenance,
 ): Promise<ApiCrmActivity> {
   const subjectId =
     input.subjectType === "COMPANY"
@@ -1323,7 +1337,7 @@ export async function logActivity(
       emailMessageId: input.emailMessageId ?? null,
       calendarEventId: input.calendarEventId ?? null,
       workItemId: input.workItemId ?? null,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
     },
   });
   return activityToApi(row);
