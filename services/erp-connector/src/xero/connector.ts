@@ -1437,12 +1437,20 @@ export class XeroConnector implements Connector {
   /**
    * Invoices or bills, filtered to the OPEN ones.
    *
-   * The `Type` predicate is pushed down to Xero (it is the only thing
-   * distinguishing the two datasets in one resource) while the open predicate
-   * is applied client-side, byte-identically to the QuickBooks and export-drop
-   * tracks: a part-paid document is still money, status vocabularies differ,
-   * and a balance we could not read is money we cannot account for and must
-   * stay visible rather than be quietly dropped.
+   * Two predicates are pushed down to Xero. `Type` is the only thing
+   * distinguishing the two datasets in one resource. `Status=="AUTHORISED"`
+   * is the approval gate: Xero populates `AmountDue` on `DRAFT` and
+   * `SUBMITTED` documents too, so without it "who owes us" counts invoices
+   * nobody has sent and "what do we owe" counts bills nobody has approved.
+   * QuickBooks has no draft state, which is why the precedent this method
+   * follows never needed the clause. A part-paid document stays `AUTHORISED`
+   * in Xero (`PAID` is reached only at zero balance), so approval and openness
+   * are independent axes and both are applied.
+   *
+   * The open predicate itself is applied client-side, byte-identically to the
+   * QuickBooks and export-drop tracks: a part-paid document is still money,
+   * status vocabularies differ, and a balance we could not read is money we
+   * cannot account for and must stay visible rather than be quietly dropped.
    */
   private async documents(
     op: string,
@@ -1451,7 +1459,7 @@ export class XeroConnector implements Connector {
     ifModifiedSince: string | undefined,
   ): Promise<CanonicalRow[]> {
     const raw = await this.pull(op, "Invoices", "Invoices", {
-      where: `Type=="${type}"`,
+      where: `Type=="${type}" AND Status=="AUTHORISED"`,
       ifModifiedSince,
     });
     const idColumn = dataset === "invoice" ? "invoice_id" : "bill_id";

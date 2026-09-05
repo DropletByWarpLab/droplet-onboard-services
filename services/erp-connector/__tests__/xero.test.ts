@@ -686,6 +686,28 @@ describe("the read surface", () => {
     expect(decodeURIComponent(bills.calls[1].url)).toContain('where=Type=="ACCPAY"');
   });
 
+  it("asks Xero for AUTHORISED documents only — a draft is not money owed", async () => {
+    // Xero fills `AmountDue` on DRAFT and SUBMITTED documents too, so the
+    // client-side balance filter alone keeps an invoice nobody has sent and a
+    // bill nobody has approved. Mutation: drop the `Status` clause from the
+    // pushed-down `where` → "who owes us" includes unapproved paperwork, and
+    // the number the owner is told is larger than the one they can collect.
+    const invoices = build([tokenResponse(), json({ Invoices: [] })]);
+    await invoices.connector.runRead("get_open_invoices", {});
+    // Read back through `URL`, which turns the `+` URLSearchParams wrote for
+    // the space back into a space; `decodeURIComponent` does not.
+    expect(new URL(invoices.calls[1].url).searchParams.get("where")).toBe(
+      'Type=="ACCREC" AND Status=="AUTHORISED"',
+    );
+
+    __resetXeroTokenCacheForTest();
+    const bills = build([tokenResponse(), json({ Invoices: [] })]);
+    await bills.connector.runRead("get_open_bills", {});
+    expect(new URL(bills.calls[1].url).searchParams.get("where")).toBe(
+      'Type=="ACCPAY" AND Status=="AUTHORISED"',
+    );
+  });
+
   it("projects an invoice onto exactly the canonical columns", async () => {
     // Mutation: spread the vendor record (`{...raw, updated_at}`) → the whole
     // Xero payload is persisted, which is the minimum-necessary rule broken in
