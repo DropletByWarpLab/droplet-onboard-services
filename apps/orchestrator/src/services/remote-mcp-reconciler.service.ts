@@ -23,6 +23,18 @@
  *      that believes it is `attached` while the bridge holds no such session
  *      goes `reattaching` → `attached`.
  *
+ * ## The read is `GET /sessions`, not `/health`
+ *
+ * #1964's Gaps list called this "a cron-runtime health read", and the first
+ * cut of this file read `/health`. Between this branch being cut and its merge
+ * to `stage`, 952e0d78 (WARP-2300 review) moved the inventory — `knownServers`
+ * and every session's health — to the bearer-gated `GET /sessions`, because
+ * `/health` is served without a bearer to every container on the compose
+ * network and was telling all of them whether the customer's credential was
+ * being rejected. `/health` is now a constant, so the tick reads `/sessions`.
+ * The `health_unreachable` reason token and the "bridge hop" wording below
+ * name the HOP to the container, whichever route carries the inventory.
+ *
  * ## No `while (true)`, and no advisory lock either
  *
  * Scheduling is `cronRuntime.scheduleInterval` (repo rule 9), at the 30 s the
@@ -46,7 +58,7 @@
  */
 import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
-import type { McpBridgeHealth } from "./mcp-bridge.client.js";
+import type { BridgeSessionsBody } from "./mcp-bridge.client.js";
 import {
   auditRemoteMcpLifecycle,
   ownsBridgeSession,
@@ -76,7 +88,7 @@ export interface RemoteMcpReconcileResult {
   reattached: string[];
   /** Server ids the bridge held that this process does not own. */
   orphansClosed: string[];
-  /** `true` when `GET /health` itself did not answer. */
+  /** `true` when `GET /sessions` itself did not answer. */
   bridgeUnreachable: boolean;
   skipped: RemoteMcpReconcileSkip;
 }
@@ -84,8 +96,17 @@ export interface RemoteMcpReconcileResult {
 export interface RemoteMcpReconcilerDeps {
   /** Defaults to the process-wide registry; injected in tests. */
   lifecycle?: RemoteMcpLifecycleRegistry;
-  /** `GET /health` — every session the BRIDGE holds, not just ours. */
-  health: () => Promise<McpBridgeHealth>;
+  /**
+   * `GET /sessions` — every session the BRIDGE holds, not just ours.
+   *
+   * The bearer-gated inventory, NOT `/health`: stage commit 952e0d78 made
+   * `/health` a constant `{status:"ok"}` because it is served to every
+   * container on the compose network without a credential. A read of the old
+   * route parses fine and carries no `sessions`, so it would fail one line
+   * later, every tick, forever — `remote-mcp-reconciler.bridge-contract.test.ts`
+   * drives the bridge's real router to keep this pointed at the right one.
+   */
+  sessions: () => Promise<BridgeSessionsBody>;
   /** `DELETE /sessions/:id`. */
   closeSession: (serverId: string) => Promise<void>;
   /** Drop the multiplexer's port before a re-attach, or `attachRemote` refuses
@@ -125,7 +146,7 @@ export async function reconcileRemoteMcpSessions(
   if (registrations.length === 0) {
     // The shipping default. `REMOTE_MCP_SERVER_ALLOWLIST` is empty, so no attach
     // ever registered anything, so there is nothing to reconcile and NOTHING IS
-    // DIALLED — not even `/health`. A box nobody configured must not talk to a
+    // DIALLED — not even `GET /sessions`. A box nobody configured must not talk to a
     // container it is not running.
     return { ...empty, skipped: "nothing_registered" };
   }
@@ -137,9 +158,9 @@ export async function reconcileRemoteMcpSessions(
     return { ...empty, skipped: "backoff" };
   }
 
-  let health: McpBridgeHealth;
+  let inventory: BridgeSessionsBody;
   try {
-    health = await deps.health();
+    inventory = await deps.sessions();
   } catch (err) {
     for (const reg of due) {
       const t = lifecycle.record({
@@ -160,7 +181,7 @@ export async function reconcileRemoteMcpSessions(
     }
     logger.warn(
       { code: err instanceof Error ? err.message : String(err), servers: due.length },
-      "remote_mcp_bridge_health_unreachable",
+      "remote_mcp_bridge_unreachable",
     );
     return { ...empty, checked: due.length, bridgeUnreachable: true };
   }
@@ -179,7 +200,7 @@ export async function reconcileRemoteMcpSessions(
   }
 
   const orphansClosed: string[] = [];
-  for (const session of health.sessions) {
+  for (const session of inventory.sessions) {
     const reg = lifecycle.get(session.serverId);
     if (reg && ownsBridgeSession(reg)) continue;
     // Failure (1): an authenticated vendor connection nothing here drives. It is
@@ -203,7 +224,7 @@ export async function reconcileRemoteMcpSessions(
 
   const reattached: string[] = [];
   for (const reg of due) {
-    const session = health.sessions.find((s) => s.serverId === reg.serverId);
+    const session = inventory.sessions.find((s) => s.serverId === reg.serverId);
 
     // ADR-043 §1's fourth failure state, from either direction: the bridge is
     // holding a session whose surface moved, or this process already knows it

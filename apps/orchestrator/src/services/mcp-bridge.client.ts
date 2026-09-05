@@ -126,10 +126,22 @@ export interface McpBridgeOpenInput {
   knownTools?: readonly string[];
 }
 
-/** What `GET /health` answers. The one bridge route served without a bearer,
- *  so the compose healthcheck needs no secret. */
-export interface McpBridgeHealth {
-  status: string;
+/**
+ * What `GET /sessions` answers: the bridge's inventory, behind the bearer.
+ *
+ * Mirrors `http-api.ts`'s `BridgeSessionsBody`, and the mirror is gated by
+ * `remote-mcp-reconciler.bridge-contract.test.ts`, which drives the bridge's
+ * REAL router for this read rather than a fixture that models it.
+ *
+ * It used to ride on the unauthenticated `/health` — and this client used to
+ * read it there — until stage commit 952e0d78 (WARP-2300 review) moved it.
+ * `/health` is readable by every container on the compose bridge network, and
+ * `sessions` says whether the customer has connected a vendor and whether
+ * their credential is being rejected. `/health` now answers the constant
+ * `{status:"ok"}` and nothing else; a reader that still expected `sessions`
+ * there gets `undefined` and throws on every tick.
+ */
+export interface BridgeSessionsBody {
   knownServers: string[];
   /** Every session the BRIDGE currently holds — including ones this process
    *  does not own, which is the whole point of reading it (WARP-2651). */
@@ -220,15 +232,19 @@ export class McpBridgeClient implements McpClientPort {
   }
 
   /**
-   * The bridge's own health, and every session IT holds.
+   * The bridge's inventory: every session IT holds, and the ids it can open.
    *
    * The reconciler's read. Deliberately a whole-component read rather than
    * `state()` per server: case (1) of WARP-2651 is a session the orchestrator
    * does NOT know about, and a per-server read can only ever confirm what the
    * caller already named.
+   *
+   * `GET /sessions`, behind the bearer like every other route this client
+   * calls — NOT `/health`, which the bridge serves without one and which
+   * therefore says nothing about the customer (`http-auth.ts`).
    */
-  async health(): Promise<McpBridgeHealth> {
-    return this.#send<McpBridgeHealth>("GET", "/health");
+  async sessions(): Promise<BridgeSessionsBody> {
+    return this.#send<BridgeSessionsBody>("GET", "/sessions");
   }
 
   /**

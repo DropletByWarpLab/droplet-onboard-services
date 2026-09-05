@@ -90,7 +90,8 @@ export type RemoteMcpAttachReason =
    * listing has nothing to compare against and would absorb the drift.
    */
   | "catalog_changed"
-  /** `GET /health` on the bridge did not answer. */
+  /** The bridge's inventory read (`GET /sessions`) did not answer — the HOP
+   *  to the container failed, whatever the vendor sessions would have said. */
   | "health_unreachable";
 
 /**

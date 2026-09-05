@@ -172,7 +172,7 @@ function createBridgeClient(serverId: string): McpBridgeClient {
  * WARP-2651 — the reconciler's production wiring.
  *
  * Every dependency is a thin adapter onto something that already exists: the
- * bridge client's `/health` and `DELETE`, the multiplexer's `detachRemote`, and
+ * bridge client's `GET /sessions` and `DELETE`, the multiplexer's `detachRemote`, and
  * the SAME `attachAtlassianRemote` the boot path uses — so the re-open is not a
  * second, parallel implementation of "open a session" that could drift from the
  * gated one.
@@ -181,7 +181,7 @@ export function remoteMcpReconcilerDeps(
   prisma: AttachAtlassianDeps["prisma"],
 ): RemoteMcpReconcilerDeps {
   return {
-    health: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID).health(),
+    sessions: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID).sessions(),
     closeSession: async (serverId) => {
       await createBridgeClient(serverId).close();
     },

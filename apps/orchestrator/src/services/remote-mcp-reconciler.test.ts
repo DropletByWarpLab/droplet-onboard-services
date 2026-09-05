@@ -58,14 +58,19 @@ interface FixtureSession {
 
 /**
  * A model of `services/mcp-bridge`, faithful in the three behaviours this
- * ticket turns on: `open` REPLACES, `/health` reports every session the bridge
- * holds (including ones this process never opened), and a listing that
- * disagrees with the baseline flips the session to `catalog_changed`.
+ * ticket turns on: `open` REPLACES, the bearer-gated `GET /sessions` reports
+ * every session the bridge holds (including ones this process never opened),
+ * and a listing that disagrees with the baseline flips the session to
+ * `catalog_changed`. `/health` answers the constant `{status:"ok"}` and
+ * nothing else, as it has on `stage` since 952e0d78 — a model that still
+ * served the inventory there is exactly how the old read stayed green while
+ * the shipped bridge had moved. The model is the fixture; the bridge's REAL
+ * router is driven by `remote-mcp-reconciler.bridge-contract.test.ts`.
  */
 function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
   const sessions = new Map<string, FixtureSession>();
   const calls: { method: string; path: string; body: unknown }[] = [];
-  const state = { tools: initialTools, healthFails: false };
+  const state = { tools: initialTools, down: false };
 
   const health = (id: string, s: FixtureSession) => ({
     serverId: id,
@@ -87,13 +92,24 @@ function fixtureBridge(initialTools: McpToolDescriptor[] = TOOLS_A) {
         headers: { "content-type": "application/json" },
       });
 
+    // A container that is down does not answer with a status — it does not
+    // answer, on any path. `fetch` rejects, which is what the client turns
+    // into BRIDGE_UNREACHABLE.
+    if (state.down) throw new TypeError("fetch failed");
+
     if (path === "/health") {
-      // A container that is down does not answer with a status — it does not
-      // answer. `fetch` rejects, which is what the client turns into
-      // BRIDGE_UNREACHABLE.
-      if (state.healthFails) throw new TypeError("fetch failed");
+      // The constant, and deliberately nothing else — served without a bearer.
+      return json(200, { status: "ok" });
+    }
+
+    // Every other route sits behind the bearer, checked before routing.
+    const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    if (authorization !== `Bearer ${BRIDGE_TOKEN}`) {
+      return json(401, { error: { code: "UNAUTHORIZED", message: "Unauthorized." } });
+    }
+
+    if (path === "/sessions" && method === "GET") {
       return json(200, {
-        status: "ok",
         knownServers: [ATLASSIAN_REMOTE_SERVER_ID],
         sessions: [...sessions.entries()].map(([id, s]) => health(id, s)),
       });
@@ -218,13 +234,13 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     lifecycle,
     audit,
     now: () => clock.now,
-    health: () =>
+    sessions: () =>
       new McpBridgeClient({
         baseUrl: BRIDGE_URL,
         serviceToken: BRIDGE_TOKEN,
         serverId: ATLASSIAN_REMOTE_SERVER_ID,
         fetchImpl: bridge.fetchImpl,
-      }).health(),
+      }).sessions(),
     closeSession: async (serverId) => {
       await new McpBridgeClient({
         baseUrl: BRIDGE_URL,
@@ -265,7 +281,7 @@ beforeEach(() => {
 });
 
 describe("the empty allowlist is still the shipping default (gates untouched)", () => {
-  it("registers nothing and the reconciler dials NOTHING — not even /health", async () => {
+  it("registers nothing and the reconciler dials NOTHING — not even GET /sessions", async () => {
     const h = harness({ allowlist: [] });
 
     const attached = await h.attach();
@@ -492,7 +508,7 @@ describe("the bridge hop itself fails: bounded backoff", () => {
   it("goes bridge_unreachable, then SKIPS ticks inside the window, then recovers", async () => {
     const h = harness();
     await h.attach();
-    h.bridge.state.healthFails = true;
+    h.bridge.state.down = true;
     h.audit.mockClear();
 
     const first = await h.tick();
@@ -518,7 +534,7 @@ describe("the bridge hop itself fails: bounded backoff", () => {
 
     // Past the window, with the container back: a full reconcile runs again.
     h.clock.now += 30_000;
-    h.bridge.state.healthFails = false;
+    h.bridge.state.down = false;
     h.bridge.sessions.clear();
     const third = await h.tick();
     expect(third.reattached).toEqual([ATLASSIAN_REMOTE_SERVER_ID]);
@@ -530,16 +546,16 @@ describe("the bridge hop itself fails: bounded backoff", () => {
   });
 
   it("does not leave a gate refusal stuck inside a bridge backoff window", async () => {
-    // The backoff belongs to the BRIDGE hop. Once /health answers, an operator
+    // The backoff belongs to the BRIDGE hop. Once GET /sessions answers, an operator
     // who fixes their connection must be reattached on the next tick — not
     // after a ten-minute window they cannot see.
     const h = harness();
     await h.attach();
-    h.bridge.state.healthFails = true;
+    h.bridge.state.down = true;
     await h.tick();
 
     h.clock.now += 30_000;
-    h.bridge.state.healthFails = false;
+    h.bridge.state.down = false;
     h.prismaState.row = { ...connectedRow, status: "DISABLED" };
     await h.tick();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({
