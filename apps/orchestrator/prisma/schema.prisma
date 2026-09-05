@@ -3161,9 +3161,9 @@ model EmailMessage {
   /// this model has no `updatedAt` and is immutable after create, so there is
   /// no email re-arm. An extractor-version bump is a bounded, explicit owner
   /// action, not an automatic one.
-  extractStatus    ExtractStatus    @default(pending)
+  extractStatus    ExtractStatus  @default(pending)
   extractClaimedAt DateTime?
-  extractAttempts  Int              @default(0)
+  extractAttempts  Int            @default(0)
   extractedAt      DateTime?
   extractReason    ExtractReason?
 
@@ -6573,6 +6573,7 @@ model Contact {
   @@index([userId, origin])
   /// The default listing is "this person's contacts, unarchived, by name".
   @@index([userId, isArchived])
+  @@index([proposalId])
 }
 
 model ContactEmail {
@@ -6752,6 +6753,7 @@ model CrmCompany {
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
+  @@index([proposalId])
 }
 
 /// WARP-2562 (ADR-044) — how a link came to exist. An explicit column, never

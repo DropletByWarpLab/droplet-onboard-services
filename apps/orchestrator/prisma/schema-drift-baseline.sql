@@ -100,15 +100,23 @@
 --      a unique index.
 --
 --      They were added here on the assumption that `migrate diff` would report
---      a DROP for each, the way it does for the HNSW index above. IT DOES NOT.
---      The gate measured baseline 14 statement lines against actual 10 — the
---      four surplus were exactly these. Prisma appears to ignore a partial index
---      outright rather than propose dropping it, which is different from how it
---      treats an index on an `Unsupported()` column.
+--      a DROP for each, the way it does for the HNSW index above. IT DOES NOT —
+--      the gate measured baseline 14 against actual 10, and the four surplus
+--      were exactly these. Prisma ignores a partial index outright rather than
+--      proposing to drop it, which is different from how it treats an index on
+--      an `Unsupported()` column.
 --
---      So: a Prisma-inexpressible index does not automatically belong in this
---      file. Run the gate and read the diff before adding one — the entries here
---      are measurements, not predictions.
+--      The mirror-image mistake followed immediately: two ORDINARY indexes
+--      (`CrmCompany_proposalId_idx`, `Contact_proposalId_idx`) were created in
+--      migration SQL and not declared in schema.prisma, and those DID drift.
+--      The fix was to declare them — `@@index([proposalId])` on both models —
+--      NOT to record them here. This gate's own failure message says it:
+--      "Fix the source of truth - do NOT just re-baseline."
+--
+--      So the rule runs in both directions: a Prisma-INEXPRESSIBLE index needs
+--      no entry, and a Prisma-EXPRESSIBLE one needs a datamodel declaration
+--      rather than an entry. This file is for what Prisma CANNOT say. Run the
+--      gate and read the diff — entries here are measurements, never guesses.
 --
 -- UPDATING THIS FILE
 -- ------------------
