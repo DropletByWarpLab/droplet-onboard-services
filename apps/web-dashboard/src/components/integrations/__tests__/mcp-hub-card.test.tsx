@@ -298,6 +298,35 @@ describe("the card's affordances are the credential configurator's, not the ERP 
     expect(row?.textContent).not.toContain("synced");
     expect(row?.textContent).toContain("read-only");
   });
+
+  /**
+   * WARP-2659 — the "On this box only" badge on the Connected strip describes
+   * the synced copy of a connector's data, and this track keeps no copy: the
+   * tile's own line says "nothing is copied onto the box". `syncs` fixed the
+   * sub-line; the badge has to follow the same fact, or the strip claims a
+   * residency for data the box never holds while the tile beneath it denies
+   * one.
+   *
+   * Asserted on BOTH rows, so the gate cannot pass by dropping the badge
+   * everywhere. Mutation: render the badge unconditionally → red on the MCP
+   * row; invert the gate → red on the Eaglesoft row.
+   */
+  it("shows no on-this-box badge for a track that copies nothing onto the box", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([
+      conn(MCP_ID, "CONNECTED"),
+      conn("eaglesoft", "CONNECTED"),
+    ]);
+    const { container } = renderHub();
+    await settled(container);
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>(".rows .lrow"));
+    const mcpRow = rows.find((r) => r.textContent?.includes(MCP_CONNECTORS[0]!.name));
+    const lanRow = rows.find((r) => r.textContent?.includes("Eaglesoft"));
+    expect(mcpRow, "the MCP row is on the Connected strip").toBeTruthy();
+    expect(lanRow, "the Eaglesoft row is on the Connected strip").toBeTruthy();
+    expect(mcpRow!.textContent).not.toContain("On this box only");
+    expect(lanRow!.textContent).toContain("On this box only");
+  });
 });
 
 describe("state copy comes from the box, never from absence", () => {

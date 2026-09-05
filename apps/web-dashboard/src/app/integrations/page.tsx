@@ -111,9 +111,21 @@ export default function IntegrationsPage() {
                         {mode === "writes-enabled" ? "writes enabled" : mode === "writes-paused" ? "writes paused" : "read-only"}
                       </span>
                     </span>
-                    <span className="badge muted" style={{ gap: 5 }}>
-                      <ShieldCheck size={11} /> On this box only
-                    </span>
+                    {/* WARP-2659 — the badge describes the SYNCED COPY: the
+                        datasets a LAN or cloud track lands on this box and
+                        nowhere else. A track that syncs nothing has no copy to
+                        describe, and its tile already says so ("nothing is
+                        copied onto the box"); rendering the badge there would
+                        claim a residency for data the box never holds. Gated
+                        on the same `syncs` fact that drops the "synced …"
+                        clause above, because it is the same fact — the
+                        dashboard descriptor carries no track, and `syncs` is
+                        the per-track statement of exactly this. */}
+                    {e.syncs && (
+                      <span className="badge muted" style={{ gap: 5 }}>
+                        <ShieldCheck size={11} /> On this box only
+                      </span>
+                    )}
                     <ChevronRight size={16} className="text-label-tertiary" />
                   </button>
                 );
