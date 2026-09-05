@@ -52,6 +52,8 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
     await prisma.$connect();
     ({ applyProposal, FILING_ERRORS } = await import("../services/filing/apply.service.js"));
     ({ runFilingReconcile } = await import("../services/filing/reconcile.js"));
+    const existing = await prisma.moduleSetting.findUnique({ where: { moduleId: "crm" } });
+    crmModuleWasEnabled = existing?.enabled ?? null;
   });
 
   afterAll(async () => {
@@ -62,6 +64,11 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
   // deleteMany() here would eat another suite's rows.
   const P = "warp2730-";
 
+  /** The module state this suite flips. Restored in `afterAll` rather than
+   *  left on: the pg files share one throwaway database, and leaving a module
+   *  enabled would silently change what a sibling suite's gate does. */
+  let crmModuleWasEnabled: boolean | null = null;
+
   async function cleanup() {
     await prisma.entityLink.deleteMany({ where: { filePath: { startsWith: `/${P}` } } });
     await prisma.ingestProposal.deleteMany({ where: { sourceRef: { startsWith: P } } });
@@ -71,7 +78,17 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
   }
 
   beforeEach(cleanup);
-  afterAll(cleanup);
+  afterAll(async () => {
+    await cleanup();
+    if (crmModuleWasEnabled === null) {
+      await prisma.moduleSetting.deleteMany({ where: { moduleId: "crm" } });
+    } else {
+      await prisma.moduleSetting.update({
+        where: { moduleId: "crm" },
+        data: { enabled: crmModuleWasEnabled },
+      });
+    }
+  });
 
   // ── 1 + 2: the claim ─────────────────────────────────────────────────────
 
@@ -406,6 +423,17 @@ describe.skipIf(!RUN)("the filing loop against a real database (WARP-2730)", () 
     // (`GET /api/files` answering 200 [] on an outage).
     const id = await seedProposal();
     const result = await applyProposal(prisma, id, ctx);
+
+    // 🔴 The `crm` module is `defaultEnabled: false` in the registry, and
+    // `mountModuleGates` 404s a route whose module is off. That 404 is the gate
+    // working — and it is exactly why this test is worth having: everything
+    // above proves rows exist, and a row nobody can reach is not a feature.
+    // Enable the module the way the box does, through its own table.
+    await prisma.moduleSetting.upsert({
+      where: { moduleId: "crm" },
+      create: { moduleId: "crm", enabled: true, setBy: "warp2730-pg" },
+      update: { enabled: true },
+    });
 
     const { createApp } = await import("../app.js");
     const app = createApp(prisma) as unknown as {

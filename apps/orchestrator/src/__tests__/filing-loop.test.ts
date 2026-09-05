@@ -50,7 +50,11 @@ import { screenPath } from "../services/filing/phi-screen.js";
 import { isInScope, permittedOwnerIds, readFilingSettings } from "../services/filing/settings.js";
 import { parsePayload } from "../services/filing/payloads.js";
 import { notSameKey } from "../services/filing/apply.service.js";
-import type { MatchOutcome } from "../services/filing/match.js";
+import {
+  domainFromEmail,
+  isPublicEmailDomain,
+  type MatchOutcome,
+} from "../services/filing/match.js";
 
 const INVOICE_TEXT =
   "Invoice 1042\nACME Dental Supply Ltd\n12 Mill Road\nTotal $4,250.00 USD\nDue 2026-10-01";
@@ -798,6 +802,70 @@ describe("🔴 the chunk reader is scoped", () => {
       ok: false,
       reason: "no_text",
     });
+  });
+});
+
+describe("🔴 free mail providers are never a match key", () => {
+  it("recognises a provider under any of its TLDs", () => {
+    for (const d of ["gmail.com", "gmx.net", "gmx.com", "proton.me", "yahoo.co.uk"]) {
+      expect(isPublicEmailDomain(d), d).toBe(true);
+    }
+  });
+
+  it("MUTATION: read the FIRST label — a business at mail.acme.example is refused", () => {
+    // `mail` IS a free provider's label. Reading the first label instead of
+    // the one before the suffix would classify this business's own mail domain
+    // as public and silently stop it ever matching by domain.
+    expect(isPublicEmailDomain("mail.acme.example")).toBe(false);
+    expect(isPublicEmailDomain("mail.northgate.example")).toBe(false);
+  });
+
+  it("leaves ordinary business domains alone", () => {
+    for (const d of ["acme-dental.example", "northgate.example", "warp-lab.example"]) {
+      expect(isPublicEmailDomain(d), d).toBe(false);
+    }
+  });
+
+  it("a bare label or nothing is not a provider", () => {
+    expect(isPublicEmailDomain(null)).toBe(false);
+    expect(isPublicEmailDomain("gmail")).toBe(false);
+  });
+
+  it("a free-provider sender never becomes a DOMAIN match key", async () => {
+    // The end-to-end consequence: two unrelated private customers sharing a
+    // free provider must not resolve to one company.
+    const seen: string[] = [];
+    await buildDrafts({
+      source: FILE_SOURCE,
+      phiVerdict: "CLEAN",
+      settings: PROPOSE_SETTINGS,
+      resolveMatch: async (input) => {
+        seen.push(...(input.emails ?? []));
+        return { kind: "NONE" };
+      },
+      entities: {
+        companies: [
+          {
+            name: "A Person",
+            emails: ["someone@gmail.com"],
+            phones: [],
+            role: "customer",
+            confidence: 90,
+            evidence: [{ quote: "A Person" }],
+          },
+        ],
+        people: [],
+        projects: [],
+        moneyDocuments: [],
+        deals: [],
+      },
+    });
+    // The matcher is still given the address — an EMAIL key is exact and safe.
+    // What it must not do is derive a DOMAIN key from it, which `matchCompany`
+    // filters with `isPublicEmailDomain`.
+    expect(seen).toEqual(["someone@gmail.com"]);
+    expect(domainFromEmail("someone@gmail.com")).toBe("gmail.com");
+    expect(isPublicEmailDomain(domainFromEmail("someone@gmail.com"))).toBe(true);
   });
 });
 

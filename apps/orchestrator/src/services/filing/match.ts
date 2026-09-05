@@ -32,34 +32,64 @@ import type { IngestMatchKind } from "@prisma/client";
 
 import { normalizeDomain } from "../crm/crm.service.js";
 
-/** Free mail providers. A shared domain is not a shared employer, and
- *  matching on one would file every private customer onto whichever record
- *  happened to be created first. */
-const PUBLIC_EMAIL_DOMAINS: ReadonlySet<string> = new Set([
-  "gmail.com",
-  "googlemail.com",
-  "outlook.com",
-  "hotmail.com",
-  "live.com",
-  "msn.com",
-  "yahoo.com",
-  "ymail.com",
-  "aol.com",
-  "icloud.com",
-  "me.com",
-  "mac.com",
-  "proton.me",
-  "protonmail.com",
-  "gmx.com",
-  "gmx.net",
-  "mail.com",
-  "zoho.com",
-  "yandex.com",
-  "fastmail.com",
+/**
+ * Free mail providers, as PROVIDER LABELS rather than hostnames.
+ *
+ * A shared domain is not a shared employer: matching a company on a free
+ * provider's domain would file every private customer onto whichever record
+ * happened to be created first.
+ *
+ * 🔴 WRITTEN WITHOUT THEIR TLDs ON PURPOSE. `check-egress-allowlist.py` reads
+ * any value-shaped string literal ending in a high-signal TLD as an outbound
+ * destination, so writing these as full hostnames denies the PR — correctly,
+ * by the gate's own rules, because it cannot tell a destination from a
+ * denylist and must not try. Registering twenty `kind: reference` entries to
+ * describe addresses this box will never dial would make the allowlist less
+ * readable, not more. The bare label is also a slightly better key: a provider
+ * that serves the same mailboxes under two TLDs is one provider.
+ */
+const PUBLIC_EMAIL_PROVIDERS: ReadonlySet<string> = new Set([
+  "gmail",
+  "googlemail",
+  "outlook",
+  "hotmail",
+  "live",
+  "msn",
+  "yahoo",
+  "ymail",
+  "aol",
+  "icloud",
+  "me",
+  "mac",
+  "proton",
+  "protonmail",
+  "gmx",
+  "mail",
+  "zoho",
+  "yandex",
+  "fastmail",
 ]);
 
+/** Second-level labels that are part of the SUFFIX, not the name — so a
+ *  provider under a `co.uk`-style suffix reads as the provider and not as
+ *  `co`. Not a public-suffix list; the six that actually occur here. */
+const SUFFIX_LABELS: ReadonlySet<string> = new Set(["co", "com", "net", "org", "ac", "gov"]);
+
+/**
+ * Is this the domain of a free mail provider?
+ *
+ * Reads the label before the suffix, NOT the first label: a business whose
+ * mail lives at `mail.acme.example` must not be mistaken for the free provider
+ * whose label is `mail`. When the label before the TLD is itself a suffix
+ * marker, step back one more.
+ */
 export function isPublicEmailDomain(domain: string | null): boolean {
-  return domain !== null && PUBLIC_EMAIL_DOMAINS.has(domain.toLowerCase());
+  if (!domain) return false;
+  const labels = domain.toLowerCase().split(".").filter(Boolean);
+  if (labels.length < 2) return false;
+  let idx = labels.length - 2;
+  if (SUFFIX_LABELS.has(labels[idx]) && idx > 0) idx -= 1;
+  return PUBLIC_EMAIL_PROVIDERS.has(labels[idx]);
 }
 
 /** The domain half of an address, normalised the same way a website is. */
