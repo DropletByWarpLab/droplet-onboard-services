@@ -52,7 +52,14 @@ _upsert_env_kv() {
   if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
     printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
+  # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
+  # well as a bare one. Every sed writer this primitive replaces matched
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
+  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # so a plain `^KEY=` strip would leave their commented placeholder behind and
+  # append a SECOND line for the same key. Only an assignment form is matched —
+  # `# KEY: prose` documentation lines in the generated .env are untouched.
+  ( umask 077; { grep -vE "^[[:space:]]*#?[[:space:]]*${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
   mv "$stage" "$target"
@@ -158,14 +165,24 @@ apply_fips_mode() {
 _rewrite_database_url_sslmode() {
   local target="$1"
   local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
-  local stage="${env_file}.upsert.$$"
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Staging beside the link and renaming onto
+  # it would REPLACE the link with a plain file on the unencrypted boot disk —
+  # and the stage sibling would itself be a full-secrets copy landing there.
+  # Resolve the link and write THROUGH it, exactly as _upsert_env_kv does.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+  local stage="${env_target}.upsert.$$"
   [ -f "$env_file" ] || return 0
   grep -qE '^DATABASE_URL=.*sslmode=' "$env_file" || return 0
-  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  rm -f "${env_target}".upsert.* 2>/dev/null || true
   ( umask 077; sed -E "s|^(DATABASE_URL=.*[?\&]sslmode=)[A-Za-z-]+|\1${target}|" \
       "$env_file" > "$stage" )
   chmod 600 "$stage"
-  mv "$stage" "$env_file"
+  mv "$stage" "$env_target"
 }
 
 # WARP-595: core keys that EVERY .env our heredoc has ever written contains
@@ -241,6 +258,19 @@ generate_env() {
   local env_file="$REPO_ROOT/.env"
   local force_regen=false
 
+  # WARP-232 (finding 2) / WARP-2621: once relocate_secrets_to_data has run,
+  # $env_file is a SYMLINK onto the encrypted /data. Every writer below stages
+  # beside the link's REAL target and renames onto it, so the regenerated (or
+  # restored) secrets stay inside the LUKS boundary and the symlink survives —
+  # never replace the link with a plain file on the unencrypted root. Resolved
+  # ONCE here rather than at the heredoc write: the torn-.env restore leg just
+  # below is a writer too, and it used to run before this resolution existed.
+  local env_write_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_write_target" ] || env_write_target="$env_file"
+  fi
+
   # --- WARP-595: recover a torn .env from an interrupted previous run ---
   # Interruption scenario closed: a power cut / SSH drop mid-heredoc left a
   # truncated .env; the old behaviour saw ".env already exists", skipped
@@ -254,20 +284,25 @@ generate_env() {
   if [ -f "$env_file" ] && [ "${REGENERATE_ENV:-false}" != "true" ] && _env_file_is_torn "$env_file"; then
     log_warn ".env is incomplete — torn write from an interrupted setup run detected"
     local newest_backup
-    newest_backup="$(ls -1t "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
+    # WARP-2624: backups now land beside the RESOLVED target, but a box
+    # upgraded mid-life still has pre-WARP-2624 backups beside the LINK — read
+    # BOTH and take the newest, so an interrupted upgrade can still recover.
+    # (When .env is not a symlink the two patterns are the same path; `ls -1t`
+    # just lists it twice and `head -n 1` still picks the newest.)
+    newest_backup="$(ls -1t "$env_write_target".bak.* "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
     if [ -n "$newest_backup" ] && ! _env_file_is_torn "$newest_backup"; then
       local torn_copy
-      torn_copy="$env_file.torn.$(date +%s)"
+      torn_copy="$env_write_target.torn.$(date +%s)"
       cp "$env_file" "$torn_copy"
       # A legacy torn file sits at umask-default 644 (the pre-atomic writer
       # died BEFORE its chmod) and `cp` preserves that mode — force 600 so the
       # kept copy's leading secrets block is never world-readable.
       chmod 600 "$torn_copy"
-      local restore_tmp="$env_file.tmp.$$"
+      local restore_tmp="$env_write_target.tmp.$$"
       rm -f "$restore_tmp"
       cp "$newest_backup" "$restore_tmp"
       chmod 600 "$restore_tmp"
-      mv "$restore_tmp" "$env_file"
+      mv "$restore_tmp" "$env_write_target"
       log_success "Restored .env from $newest_backup (torn copy quarantined at $torn_copy until this run completes)"
       log_info "  migrate_env will backfill any keys added since that backup"
       log_divider
@@ -288,9 +323,12 @@ generate_env() {
   fi
 
   # --- Backup existing .env if regenerating ---
+  # WARP-2624: beside the RESOLVED target — a .bak of a relocated .env is a
+  # complete copy of every device secret, so writing it beside the LINK would
+  # put it back on the unencrypted boot disk.
   if [ -f "$env_file" ]; then
     # shellcheck disable=SC2155  # `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
-    local backup="$env_file.bak.$(date +%s)"
+    local backup="$env_write_target.bak.$(date +%s)"
     cp "$env_file" "$backup"
     # On the torn-no-backup regen path the source is a legacy 644 torn file
     # (see the torn_copy chmod above) — force the backup to 600 regardless.
@@ -543,16 +581,9 @@ generate_env() {
   # the new complete file, never a prefix. The temp file is created empty and
   # chmod'd 600 BEFORE any secret is written into it.
   #
-  # WARP-232 (finding 2): on a --regenerate-env re-run AFTER secrets have been
-  # relocated onto the encrypted /data, $env_file is a SYMLINK. Stage beside and
-  # rename onto the link's REAL target so the regenerated secrets stay inside the
-  # LUKS boundary and the symlink survives — never replace the link with a plain
-  # file on the unencrypted root.
-  local env_write_target="$env_file"
-  if [ -L "$env_file" ]; then
-    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
-    [ -n "$env_write_target" ] || env_write_target="$env_file"
-  fi
+  # WARP-232 (finding 2): $env_write_target is the link's REAL target, resolved
+  # once at the top of this function — stage beside it and rename onto it so the
+  # regenerated secrets stay inside the LUKS boundary and the symlink survives.
   local env_tmp="$env_write_target.tmp.$$"
   rm -f "$env_write_target".tmp.* 2>/dev/null || true
   : > "$env_tmp"
@@ -953,6 +984,19 @@ migrate_env() {
   local env_file="$REPO_ROOT/.env"
   [ -f "$env_file" ] || return 0
 
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Stage beside the link's REAL target and
+  # rename onto it — renaming onto the LINK would replace it with a plain file
+  # on the unencrypted boot disk, and the .env.migrate.* stage (a full copy of
+  # every secret) would have been written there too. WARP-2624: the two
+  # pre-migration .env.bak.* copies below are complete secret snapshots for the
+  # same reason, so they are written beside the resolved target as well.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+
   local backed_up=false
   local appended_count=0
   local appended_keys=""
@@ -963,8 +1007,8 @@ migrate_env() {
   # matched the `^KEY=` existence check on the next run and the mangled value
   # was kept forever. With the stage + rename, the live .env is either the
   # pre-migration file or the fully-migrated file, never something in between.
-  local stage="$env_file.migrate.$$"
-  rm -f "$env_file".migrate.* 2>/dev/null || true
+  local stage="$env_target.migrate.$$"
+  rm -f "$env_target".migrate.* 2>/dev/null || true
   cp "$env_file" "$stage"
   chmod 600 "$stage"
 
@@ -982,7 +1026,7 @@ migrate_env() {
     if ! grep -qE "^${key}=" "$stage" 2>/dev/null; then
       if [ "$backed_up" = "false" ]; then
         # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
-        local backup="$env_file.bak.$(date +%s)"
+        local backup="$env_target.bak.$(date +%s)"
         cp "$env_file" "$backup"
         log_info "Backed up existing .env to $backup before migration"
         backed_up=true
@@ -1221,7 +1265,7 @@ migrate_env() {
   if grep -qE '^MQTT_BROKER(_LOCAL)?=mqtt://' "$stage" 2>/dev/null; then
     if [ "$backed_up" = "false" ]; then
       # shellcheck disable=SC2155  # Same rationale as above: `date +%s` cannot meaningfully fail.
-      local backup="$env_file.bak.$(date +%s)"
+      local backup="$env_target.bak.$(date +%s)"
       cp "$env_file" "$backup"
       log_info "Backed up existing .env to $backup before migration"
       backed_up=true
@@ -1245,7 +1289,7 @@ migrate_env() {
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
-    mv "$stage" "$env_file"
+    mv "$stage" "$env_target"
   else
     rm -f "$stage"
   fi

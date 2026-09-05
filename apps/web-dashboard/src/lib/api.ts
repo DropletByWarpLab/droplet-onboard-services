@@ -2,6 +2,9 @@ import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
 } from "@droplet/shared-types";
+// WARP-2633 — the ONE `SaasConnectionState`; re-exported below (see the
+// docstring there) so `@/lib/api` stays the name every consumer imports from.
+import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
   CameraInfo,
   CameraGroupInfo,
@@ -52,7 +55,7 @@ import type {
   ModelsCatalogPayload,
   NetworkCommandResult,
   NetworkOverview,
-  StorageStats,
+  StorageOverview,
   DrivesResponse,
   PoolsResponse,
   PoolInfo,
@@ -121,6 +124,12 @@ import type {
   AccessExceptionInput,
   EffectiveAccess,
   AppDownloadCatalog,
+  Routine,
+  RoutineStatus,
+  RoutineRun,
+  RoutineSchedule,
+  ContextPinKind,
+  ContextPinTarget,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -874,7 +883,10 @@ export async function transcribeNowBrainItem(
 
 // --- Storage ---
 
-export async function fetchStorage(): Promise<StorageStats> {
+/** GET /api/storage. WARP-2098: the headline quadruple is the box's DATA
+ *  drives (OS/boot disk excluded), with the install disk under `system` and the
+ *  Nextcloud account quota under `cloud`. */
+export async function fetchStorage(): Promise<StorageOverview> {
   const res = await authFetch(`${BASE}/api/storage`);
   if (!res.ok) throw new Error(`Failed to fetch storage: ${res.status}`);
   return res.json();
@@ -4500,10 +4512,24 @@ export async function setConversationProject(
 export interface ContextPin {
   id: string;
   sessionId: string;
-  kind: "folder" | "file" | "email_thread" | "camera" | "camera_window";
+  /** Canonical union lives in ./types — it is shared with the composer
+   *  hand-off payload, and two copies of it would drift. */
+  kind: ContextPinKind;
   ref: string;
   meta?: Record<string, unknown> | null;
   addedAt: string;
+  /**
+   * WARP-2582 — the resolved target for a BUSINESS pin (customer / deal /
+   * project / work_item). `null` for the five path-shaped kinds: their `ref`
+   * is self-describing and there is no record to look up. That is a property
+   * of the kind, not a state inferred from absence — the four target states
+   * are their own explicit enum.
+   *
+   * Optional on the wire so a dashboard talking to a pre-WARP-2582 box (or a
+   * cached response) degrades to showing the `ref`, which is what it did
+   * before this field existed.
+   */
+  resolved?: ContextPinTarget | null;
 }
 
 export async function listContextPins(
@@ -8124,6 +8150,21 @@ export async function fetchAppDownloads(
 ): Promise<AppDownloadCatalog> {
   const res = await authFetch(`${BASE}/api/app-downloads`, { signal });
 
+  // An expired session answers 401 with `{error: "..."}` — no boolean
+  // `available` — which the malformed-body branch below would render as
+  // "the box's app catalog is corrupted". That is a lie about the box, and
+  // because this page fetches once on mount with no retry, it is a
+  // permanent one until the customer reloads. Name the real problem.
+  if (res.status === 401 || res.status === 403) {
+    return {
+      available: false,
+      reason: "not_authenticated",
+      detail: "Your session has expired.",
+      attestation: null,
+      platforms: [],
+    };
+  }
+
   let body: unknown;
   try {
     body = await res.json();
@@ -8135,10 +8176,19 @@ export async function fetchAppDownloads(
   // Only an explicit `available: true` counts. A malformed body is
   // "unavailable with an unknown reason", never optimistically available.
   if (!parsed || typeof parsed.available !== "boolean") {
+    // A non-ok response that DID parse (every 503 the route emits carries a
+    // real `reason`) must keep that reason: the page has hand-written copy
+    // for signature_failed, malformed_catalog and the schema_* family, and
+    // flattening them all to "malformed_response" throws away the only
+    // diagnosis the box gave.
+    const passthrough =
+      parsed && typeof parsed.reason === "string" ? parsed.reason : null;
     return {
       available: false,
-      reason: "malformed_response",
-      detail: "The box returned an unexpected app-catalog response.",
+      reason: passthrough ?? "malformed_response",
+      detail:
+        (parsed && typeof parsed.detail === "string" ? parsed.detail : null) ??
+        "The box returned an unexpected app-catalog response.",
       attestation: null,
       platforms: [],
     };
@@ -8180,27 +8230,19 @@ export interface SaasCredentialField {
 /**
  * Connection state, straight from the orchestrator.
  *
- * `NEEDS_RECONNECT` is deliberately distinct from `NOT_CONFIGURED`: a rejected
- * credential is not an absent one, and telling a person to "connect" when they
- * already did is how a broken connection stays broken.
+ * WARP-2633 — this was a hand-maintained MIRROR of the orchestrator's union
+ * and is now a re-export of the shared definition in `@droplet/shared-types`
+ * (`saas-connection-state.ts`), which both sides import. Mirroring is what
+ * WARP-2517 shipped and what WARP-2623 had to edit twice; dropping a member
+ * the box can send is how `STATE_COPY[view.state]` came to crash the
+ * credentials page on the very rows it exists to repair, and there is no
+ * longer a second list to drop it from.
  *
- * `ERROR` is deliberately distinct from `NEEDS_RECONNECT` (WARP-2458, mirrored
- * here by WARP-2517): the service folds a persisted `ERROR` status straight
- * through, and it means something a new key will not fix — a vendor-side
- * refusal like an IP access policy or a plan limit. This union mirrors the
- * orchestrator's `SaasConnectionState` in `saas-credential.service.ts`;
- * dropping a member the box can send is how `STATE_COPY[view.state]` came to
- * crash the credentials page on the very rows it exists to repair.
+ * Re-exported from here, rather than every consumer being retargeted at the
+ * package, because `SaasCredentialView` below carries it and the components
+ * import the pair together from `@/lib/api`.
  */
-export type SaasConnectionState =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "DISABLED";
+export type { SaasConnectionState };
 
 export interface SaasCredentialView {
   provider: string;
@@ -8293,4 +8335,134 @@ export async function saveSaasCredential(
     throw new Error(detail || `Failed to save credentials: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Routines (WARP-2671) — ToolSpec CRUD, runs, schedules ---
+//
+// Every call here is owner/admin on the orchestrator side except the reads,
+// which allow `family` too. The client does not re-implement that check: the
+// surface hides what a role cannot do, and the server refuses it regardless.
+
+async function routineJson<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `${what}: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchRoutines(status?: RoutineStatus): Promise<Routine[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await authFetch(`${BASE}/api/tools${qs}`);
+  const body = await routineJson<{ tools?: Routine[] } | Routine[]>(
+    res,
+    "Failed to load routines",
+  );
+  // The list route has been through two shapes; accept either rather than
+  // breaking the page on a field rename.
+  return Array.isArray(body) ? body : (body.tools ?? []);
+}
+
+export async function fetchRoutine(slug: string): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}`);
+  return routineJson<Routine>(res, "Failed to load routine");
+}
+
+export async function fetchRoutineRuns(
+  slug: string,
+  limit = 20,
+): Promise<RoutineRun[]> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/runs?limit=${limit}`,
+  );
+  const body = await routineJson<{ runs: RoutineRun[] }>(res, "Failed to load runs");
+  return body.runs ?? [];
+}
+
+export async function fetchRoutineSchedules(
+  slug: string,
+): Promise<RoutineSchedule[]> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules`,
+  );
+  const body = await routineJson<{ schedules: RoutineSchedule[] }>(
+    res,
+    "Failed to load schedules",
+  );
+  return body.schedules ?? [];
+}
+
+/** Promote a draft or accepted suggestion to `live`. */
+export async function setRoutineStatus(
+  slug: string,
+  status: RoutineStatus,
+): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  return routineJson<Routine>(res, "Failed to update routine");
+}
+
+/**
+ * Run now. A `writes && !reversible` spec answers 409 with a
+ * `confirmation_required` body; the caller re-invokes with `confirm` set
+ * rather than this helper deciding on the user's behalf.
+ */
+export async function runRoutine(
+  slug: string,
+  confirm = false,
+): Promise<{ status: number; body: unknown }> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/runs${confirm ? "?confirm=true" : ""}`,
+    { method: "POST" },
+  );
+  const body = await res.json().catch(() => ({}));
+  return { status: res.status, body };
+}
+
+export async function createRoutineSchedule(
+  slug: string,
+  input: { rrule: string; timezone?: string },
+): Promise<RoutineSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return routineJson<RoutineSchedule>(res, "Failed to create schedule");
+}
+
+export async function updateRoutineSchedule(
+  slug: string,
+  id: string,
+  patch: { rrule?: string; timezone?: string; enabled?: boolean },
+): Promise<RoutineSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  return routineJson<RoutineSchedule>(res, "Failed to update schedule");
+}
+
+export async function deleteRoutineSchedule(
+  slug: string,
+  id: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/tools/${encodeURIComponent(slug)}/schedules/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
+  }
 }

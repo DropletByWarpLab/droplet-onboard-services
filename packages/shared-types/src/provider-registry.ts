@@ -538,6 +538,120 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 6,
     },
   },
+  {
+    id: "shopify",
+    displayName: "Shopify",
+    category: "Commerce",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "shopDomain",
+        label: "Store domain",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored separately from the credentials on purpose
+        // (ADR-042 §5: "non-secret connection facts … go in `providerConfig`,
+        // never in the encrypted blob and never re-derived per request").
+        // Keeping it here means answering "where does this connection dial?"
+        // never requires decrypting a credential — which matters more on this
+        // track than anywhere else, because the store domain IS the host for
+        // both the API and the token endpoint.
+        //
+        // `SHOPIFY_SHOP_NAME_PATTERN` with the suffix appended. The suffix is
+        // mandatory in the FORM even though the connector accepts a bare
+        // handle: a merchant typing a custom domain they pointed at the store
+        // is the mistake this field exists to catch, and Shopify authenticates
+        // only on the myshopify one.
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.myshopify\\.com$",
+        // The help text names the SUFFIX and never a sampled store: a
+        // "your-store.myshopify.com" example here is a bare hostname in a
+        // string literal, which `egress-gate` reads as an unregistered
+        // destination and denies — correctly, since the dynamic entry
+        // registers no hosts. The example belongs in the setup guide, which
+        // the scanner does not read.
+        help:
+          "Your store's .myshopify.com address, not a custom domain you point at the store. " +
+          "Shopify authenticates on this one.",
+      },
+      {
+        name: "clientId",
+        label: "Client ID",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `SHOPIFY_CLIENT_CREDENTIAL_PATTERN`. The NEGATIVE half is the
+        // boundary rejection ADR-042 §4 requires: a `shpat_` admin-created
+        // token is refused before it is ever stored, because Shopify removed
+        // the flow that minted it on 2026-01-01 and it cannot be re-created if
+        // it stops working. The positive half is deliberately loose — Shopify
+        // publishes no format guarantee, and a false rejection here blocks a
+        // paying customer's onboarding for no security gain.
+        //
+        // Marked `secret` although a client id is not, strictly, a secret: it
+        // is half of a credential PAIR that authenticates on its own, so it is
+        // sealed with the other half rather than left in `providerConfig`
+        // where a read view would render it.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help:
+          "From your own Dev Dashboard app at shopify.dev, in the same Shopify organization " +
+          "as the store. An old shpat_ token is not this — that flow was removed in 2026.",
+      },
+      {
+        name: "clientSecret",
+        label: "Client secret",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // The only vendor in WARP-2214 whose paste includes a client secret —
+        // the MERCHANT's secret, for the MERCHANT's app, on the MERCHANT's box
+        // (ADR-042 §2). Compatible with §3 precisely because Warp Lab minted
+        // none of it, and Shopify's own rule that the app and the store share
+        // an organization is what makes it unmistakably theirs.
+        pattern: "^(?!shp(at|ca|pa|ss)_)\\S+$",
+        help: "Shown once when the app is created. Treat it like a password.",
+      },
+    ],
+    // EMPTY, and not because this track stays on the LAN — it emphatically does
+    // not. Every request goes to `<store>.myshopify.com`, THE TOKEN MINT
+    // INCLUDED: Shopify's client-credentials grant posts to the store's own
+    // host, so unlike QuickBooks Online there is no separate OAuth host to
+    // register and no static name for the egress scanner to find.
+    // `dynamicEgress` below is what says so.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.shopDomain",
+      registryId: "shopify-admin-api",
+    },
+    // Mirrors `SHOPIFY_DATASETS`. These three names were RESERVED for Shopify
+    // when the vocabulary was widened (WARP-2280) and the columns were compared
+    // before this list was written — `ecommerce_order` is deliberately NOT here
+    // (it is Mailchimp's attribution shadow, with no tax, refund or fulfilment
+    // column) and neither is `contact` (a CRM person, not a storefront buyer).
+    datasets: ["order", "product", "customer"],
+    // No `rateLimit`: Shopify's GraphQL Admin API meters by QUERY COST against
+    // a refilling leaky bucket, not by a call ceiling over a period, so a
+    // monthly number invented here would be a guess wearing a policy's clothes
+    // — the same reason Dentrix Ascend and Mailchimp have none. The connector
+    // derives its backoff from the `throttleStatus` the vendor returns.
+    catalog: {
+      id: "shopify",
+      name: "Shopify",
+      category: "Commerce",
+      description: "Orders, catalogue and inventory read straight from your store — never a write.",
+      availability: "available",
+      // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
+      // customer creates this credential in a vendor console we do not control,
+      // so shipping the card without the click-path is shipping an unusable
+      // connector. Served from `docs/integrations/shopify.md`, bundled at build
+      // so the link works with no internet.
+      setupGuideHref: "/help/integrations/shopify",
+      order: 7,
+    },
+  },
   // ── WARP-2650 — the first MCP-backed provider ────────────────────────────
   //
   // #1944 built the outbound MCP client, #1956 the Atlassian profile and #1964
@@ -648,14 +762,210 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     datasets: [],
     credentialExpiry: {
       field: "tokenExpiresAt",
-      // WARP-2353's number, mirrored from `ATLASSIAN_TOKEN_EXPIRY_WARNING_DAYS`
-      // and asserted equal to it (`provider-registry.test.ts`) rather than
-      // imported: this module is bundled into the dashboard and that one is
-      // orchestrator-only.
+      // WARP-2353's number, and since WARP-2300 the only copy of it: the
+      // orchestrator-only module it used to be mirrored from had no production
+      // callers and was deleted rather than kept in step by an assertion.
+      //
+      // 30 days is sized so the warning outlasts a holiday or a handover —
+      // creating a replacement is a customer-admin action in a console the box
+      // does not control, and Atlassian offers no grace period and sends no
+      // reminder of its own.
       warningDays: 30,
+      // Atlassian's documented maximum API-token lifetime.
       maxLifetimeDays: 365,
     },
     setupGuideHref: "/help/integrations/atlassian",
+  },
+  {
+    id: "brevo",
+    displayName: "Brevo",
+    category: "Marketing",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Brevo API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, deliberately. Brevo publishes no documented shape for
+        // a v3 key — the `xkeysib-` prefix is widely repeated but is not a
+        // documented contract — so a regex here would be a guess that refuses
+        // valid keys the day Brevo changes the prefix. The connector ships no
+        // credential regex either, and `brevo.test.ts` pins that absence so
+        // nobody "helpfully" adds one from a blog post.
+        help:
+          "In Brevo: your account name (top right) → SMTP & API → API keys → Generate a new API key. " +
+          "Copy it immediately — Brevo shows the value once.",
+      },
+    ],
+    // One fixed host, so this is a plain registered destination and the base
+    // URL is a whole-string literal in the connector for the egress scanner to
+    // extract. Contrast Mailchimp and Pipedrive, whose hosts are per-account.
+    egressHosts: ["api.brevo.com"],
+    datasets: [
+      "contact",
+      "audience",
+      "audience_member",
+      "campaign",
+      "company",
+      "deal",
+      "ecommerce_order",
+    ],
+    // Brevo's general ceiling is documented per HOUR and differs sharply by
+    // endpoint (contacts is far higher than the default), so the number here is
+    // the CONSERVATIVE general one — the connector holds the per-endpoint
+    // detail, which a single pair of numbers cannot express.
+    rateLimit: { callCeiling: 100, periodMs: 3_600_000 },
+    catalog: {
+      id: "brevo",
+      name: "Brevo",
+      category: "Marketing",
+      description:
+        "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/brevo",
+      order: 8,
+    },
+  },
+  {
+    id: "klaviyo",
+    displayName: "Klaviyo",
+    category: "Marketing",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Klaviyo private API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `KLAVIYO_API_KEY_PATTERN`. The `pk_` prefix IS documented, and it is
+        // what separates a PRIVATE key from a public site id — pasting the
+        // public one would produce 401s that look like a wrong password rather
+        // than the wrong KIND of credential.
+        pattern: "^pk_[!-~]{8,512}$",
+        // Path kept in step with `docs/integrations/klaviyo.md`, which is the
+        // researched one: it is your organization name (bottom left) →
+        // Settings → API keys, NOT Settings → Account → API keys. The wizard
+        // shows this line and the guide shows the full path; the two
+        // disagreeing is how an owner ends up hunting for a screen.
+        help:
+          "In Klaviyo: your organization name (bottom left) → Settings → API keys → " +
+          "Create Private API Key, scope Read-only. It starts with pk_. The public " +
+          "API key (your six-character site ID) will not work.",
+      },
+      {
+        name: "conversionMetricId",
+        label: "Conversion metric ID (optional)",
+        type: "string",
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        // Declared because the SETUP GUIDE tells the owner to paste it here.
+        // Campaign send/open/click counts do not live on Klaviyo's campaign
+        // records — they come from a separate report that must be told which
+        // event counts as a sale. Without this the other four datasets work
+        // normally and campaign performance is reported as unavailable rather
+        // than shown as zero, which would read as "this campaign reached
+        // nobody". Optional on purpose: requiring it would block a connection
+        // that does not want campaign numbers at all.
+        help:
+          "Only if you want campaign send, open and click counts. In Klaviyo: " +
+          "Analytics → Metrics → open the metric that represents a sale (usually " +
+          "Placed Order) and copy its ID from the address bar.",
+      },
+    ],
+    egressHosts: ["a.klaviyo.com"],
+    datasets: ["contact", "audience", "audience_member", "campaign", "engagement"],
+    // Klaviyo publishes burst AND steady ceilings per endpoint. The steady
+    // figure is the one a poll cadence must respect; the connector carries the
+    // per-endpoint table.
+    rateLimit: { callCeiling: 150, periodMs: 60_000 },
+    catalog: {
+      id: "klaviyo",
+      name: "Klaviyo",
+      category: "Marketing",
+      description:
+        "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/klaviyo",
+      order: 9,
+    },
+  },
+  {
+    id: "pipedrive",
+    displayName: "Pipedrive",
+    category: "CRM",
+    track: "cloud",
+    credentialFields: [
+      {
+        name: "apiToken",
+        label: "Pipedrive API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // `PIPEDRIVE_TOKEN_PATTERN` — printable ASCII, length-bounded. Loose on
+        // purpose: Pipedrive documents no token shape, so this refuses only the
+        // things that cannot be a token (empty, whitespace, control bytes).
+        pattern: "^[\x21-\x7e]{8,512}$",
+        help:
+          "In Pipedrive: your profile (top right) → Personal preferences → API → " +
+          "Your personal API token. The token inherits YOUR permissions, so create it " +
+          "from an account that can see everything the box should read.",
+      },
+      {
+        name: "companyDomain",
+        label: "Pipedrive company domain",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        // NOT secret, and stored apart from the token for the same ADR-042 §5
+        // reason Mailchimp's datacentre is: this value SELECTS THE HOST, so
+        // answering "where does this connection dial?" must never require
+        // decrypting a credential — and a token swapped out-of-band must not be
+        // able to silently move the destination.
+        pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+        // NO example hostname here, deliberately. The egress scanner extracts
+        // any scheme-less host literal from tracked source and denies it, and
+        // it is RIGHT to: a sampled tenant name registered to make the gate
+        // pass would be a real destination nobody reviewed. Describe the shape
+        // instead of illustrating it.
+        help:
+          "The first part of your Pipedrive web address — the label before the dot " +
+          "when you sign in. If your address starts with acme, this is acme.",
+      },
+    ],
+    // EMPTY because the host is `<companyDomain>.pipedrive.com`, assembled from
+    // the customer's own configuration. There is no name to register and no
+    // literal for the egress scanner to find, exactly as with Mailchimp — and
+    // `check-egress-allowlist.py` contributes ZERO host patterns for the
+    // `kind: dynamic` entry this pairs with, so `assertSafePipedriveBaseUrl`
+    // in the connector is the ENTIRE control, not defence in depth.
+    egressHosts: [],
+    dynamicEgress: {
+      configKey: "IntegrationConnection.providerConfig.companyDomain",
+      registryId: "pipedrive-api",
+    },
+    datasets: ["contact", "company", "deal", "engagement", "product"],
+    // Pipedrive's limit is BURST-shaped — a small allowance over a two-second
+    // window rather than a generous hourly pool — so a poll that would be
+    // comfortable against an hourly ceiling can still trip this one.
+    rateLimit: { callCeiling: 20, periodMs: 2_000 },
+    catalog: {
+      id: "pipedrive",
+      name: "Pipedrive",
+      category: "CRM",
+      description:
+        "People, organisations, deals, activities and products — read from your Pipedrive.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/pipedrive",
+      order: 10,
+    },
   },
 ] as const satisfies readonly ProviderDescriptor[];
 

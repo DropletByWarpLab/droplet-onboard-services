@@ -177,6 +177,12 @@ jobs:
               # wrong `primary` is served faithfully and is still wrong.
               - "scripts/app-downloads/**"
               - "tests/app-downloads-stage.test.sh"
+              - "tests/app-downloads-audit.test.sh"
+              # The declaration half. data/app-downloads/EXPECTED states what a
+              # release must carry; without this line, a change to EXPECTED or
+              # to the tracked contract files merges with ZERO test signal —
+              # which is how the original gap survived.
+              - "data/app-downloads/**"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -236,12 +242,29 @@ jobs:
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
             # PR time, not only via storage-pool-tests.yml's manual dispatch.
+            # WARP-2629 adds the live-secrets wipe to the same leg: same shape
+            # (fixture tree + stub binaries, <3s, no root/disks/Docker), same
+            # class — a default-ON destructive path whose FAILURE MODE IS
+            # SILENT. A reset that quietly stops wiping /data still prints
+            # "Factory reset complete" and ships the previous tenant's keys
+            # with the box, so it has to be caught at PR time. The leg already
+            # fires on scripts/factory-reset.sh, so the marginal spend is the
+            # rare PR touching only the library: ~1 billable min/run.
             storage:
               - "scripts/lib/storage-wipe.sh"
+              - "scripts/lib/secrets-wipe.sh"
               - "scripts/factory-reset.sh"
               - "scripts/host/droplet-storage-pool.sh"
               - "tests/factory-reset-storage-wipe.test.sh"
+              - "tests/factory-reset-secrets-wipe.test.sh"
               - "tests/storage-pool-destroy-superblock.test.sh"
+              # WARP-2647: the other two factory-reset guards. Both are static
+              # greps of scripts/factory-reset.sh — already in this filter — so
+              # the only PRs these two lines newly catch are the rare ones that
+              # touch a guard and nothing else. Listed so a guard edit fires
+              # the leg that runs it; the leg itself is unchanged in cost.
+              - "tests/factory-reset-volume-wipe.test.sh"
+              - "tests/factory-reset-purge-scope.test.sh"
             # WARP-2481: the WARP-229 FIPS static source lint, moved here from
             # test-fips.yml so its result reaches branch protection through
             # ci-summary. This list is the EXACT `paths:` test-fips.yml used
@@ -505,6 +528,107 @@ jobs:
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/erp-connector build
 
+      # WARP-2606: ship-check's `tsc-full` phase 4 — the pass that type-checks
+      # each workspace's `tsconfig.test.json` — has no CI runner (the
+      # `shipcheck` job runs the script's parse + self-test only, never
+      # `tsc-full`). `packages/tools-core` was the only workspace that shipped
+      # one when this step was written, and `stage` carried 8 errors in it (a
+      # TS1470 `import.meta` under CommonJS, plus 7 TS2339 reads of `.data`
+      # through the unnarrowed `ToolResult` union) while every other check was
+      # green: `vitest` strips types with esbuild and the package's own
+      # `tsconfig.json` excludes `__tests__/`, so nothing in CI looked.
+      #
+      # WARP-2515 (#1943) then added a `tsconfig.test.json` + `typecheck:tests`
+      # to four more workspaces and wired a runner for NONE of them, so phase 4
+      # is no longer this one command. WARP-2644 gives each of them a runner on
+      # a leg the `detect` filters ALREADY fire for when that workspace changes,
+      # placed after that leg's existing leaf builds. The mapping, which is the
+      # thing to keep true when a workspace joins or a filter moves:
+      #
+      #   workspace                  | leg                   | detect filter that fires it
+      #   ---------------------------|-----------------------|----------------------------
+      #   packages/tools-core        | tools-core-mcp-server | packages/tools-core/**
+      #   packages/fips-selftest     | tools-core-mcp-server | packages/fips-selftest/**
+      #   services/mcp-server        | tools-core-mcp-server | services/mcp-server/**
+      #   packages/shared-types      | orchestrator          | packages/shared-types/**
+      #   services/erp-connector     | erp-connector         | services/erp-connector/**
+      #   services/matter-controller | matter-controller     | services/matter-controller/**
+      #   services/mcp-bridge        | mcp-bridge (own job)  | services/mcp-bridge/**
+      #
+      # WARP-2617 added the last two rows: `services/matter-controller`, whose
+      # `tsconfig.json` also excludes `__tests__` so its `build` step checks
+      # none of its 6 test files, and `services/mcp-bridge`, the same shape.
+      # `ship-check.sh tsc-full` is still not what runs in CI (the `shipcheck`
+      # job is parse + self-test only), so a `typecheck:tests` script with no
+      # step in this file has NO caller — which is exactly how
+      # matter-controller's first landed.
+      #
+      # No workspace ships a `tsconfig.test.json` that is absent from that
+      # table; `apps/orchestrator` and `apps/web-dashboard` have none (their
+      # tests are already inside the `tsc --noEmit` those legs run). The root
+      # `tests/` and `schemas/__tests__/` trees have no tsconfig at all and are
+      # therefore out of phase 4 entirely — that is WARP-2618, not this.
+      #
+      # Steps on EXISTING legs rather than a new `tsc-full` job or a new
+      # `ci-summary` leg, deliberately, per docs/ci-cost-budget.md: each leg is
+      # already gated on the right detect filter, already reported through
+      # `check_leg node`, and has already installed, generated Prisma and built
+      # the workspace dists these commands need. Marginal cost, measured
+      # locally: tools-core 1.7 s, fips-selftest 0.6 s, mcp-server 1.4 s
+      # (tools-core-mcp-server leg, +3.7 s); shared-types 0.7 s (orchestrator
+      # leg); erp-connector 1.0 s (erp-connector leg); matter-controller 11.4 s
+      # (matter-controller leg); mcp-bridge 4.2 s (mcp-bridge job). Budget
+      # ~2.5x on a runner.
+      # Of the last 100 commits on `stage`, 25 touch a path in the
+      # tools-core-mcp-server filter and 11 touch `services/erp-connector/**`;
+      # at the current ~590 PRs/month that is ~148 + ~65 runs, so worst case
+      # ~25 + ~6 runner-min/month — inside the docs/ci-cost-budget.md noise
+      # floor (and in practice ~0 billed, since Actions rounds a JOB to the
+      # minute and these seconds rarely cross a boundary). No callout threshold
+      # is approached: the >2k min/mo callout is ~60x this.
+      #
+      # The alternative shapes, and why not: a `scripts/test/ship-check.sh
+      # tsc-full` step would re-run phases 1-3 (prisma generate + four builds +
+      # seven whole-workspace `tsc`) to reach phase 4, ~4 min/run — and the
+      # script has no phase selector, so it would also need one. A separate
+      # `tsc-full` job would repeat checkout + `npm ci` + `prisma generate` +
+      # the workspace builds for the same seconds of signal (~4 min/run, ~120
+      # min/month) AND would need a new required-check name added to branch
+      # protection by hand. No new job names, no new `pull_request:` workflow.
+      #
+      # Runs BEFORE the vitest run: a type error should be reported as itself,
+      # not as whatever the suite happens to do with it.
+      - name: Typecheck @droplet/tools-core tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/tools-core typecheck:tests
+
+      # WARP-2644: the other two workspaces the tools-core-mcp-server filter
+      # already fires for. Same leg, same reason, same ordering rule (before
+      # the vitest runs below). fips-selftest is built by the step above for
+      # every suite but web-dashboard, and mcp-server by the tools-core /
+      # mcp-server build steps, so both resolve their `@droplet/*` imports.
+      - name: Typecheck @droplet/fips-selftest tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/fips-selftest typecheck:tests
+
+      - name: Typecheck @droplet/mcp-server tests (tsconfig.test.json)
+        if: matrix.suite == 'tools-core-mcp-server'
+        run: npm run -w @droplet/mcp-server typecheck:tests
+
+      # WARP-2644 / WARP-2639: shared-types is reached by the ORCHESTRATOR
+      # filter, not the one above — `packages/shared-types/**` is listed under
+      # `orchestrator:` and `web-dashboard:`, never under
+      # `tools-core-mcp-server:` — so a shared-types-only PR runs this leg and
+      # not that one. Its tests live INSIDE `src/` and its own `tsconfig.json`
+      # excludes `src/**/*.test.ts`, so every type-level assertion in them
+      # asserted nothing in a green suite.
+      #
+      # PR #1968 (WARP-2639) adds this identical step; whichever of the two
+      # lands second should drop its copy rather than keep both.
+      - name: Typecheck @droplet/shared-types tests (tsconfig.test.json)
+        if: matrix.suite == 'orchestrator'
+        run: npm run -w @droplet/shared-types typecheck:tests
+
       - name: Test @droplet/tools-core
         if: matrix.suite == 'tools-core-mcp-server'
         run: npm run -w @droplet/tools-core test
@@ -535,6 +659,20 @@ jobs:
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
 
+      # WARP-2647: the guarded migration entrypoint's own suite (WARP-573) —
+      # 33 assertions over apps/orchestrator/scripts/migrate-and-start.sh, and
+      # it ran in NO workflow. vitest never sees it (it is bash, driven with
+      # mock psql/pg_dump/pg_restore/npx on PATH), and neither does
+      # orchestrator-tests.yml's pg-integration job, which runs the REAL
+      # `prisma migrate deploy` rather than the entrypoint that wraps it — so
+      # the backup-before-migrate and abort-on-failure branches this pins were
+      # unguarded end to end. Pure bash, no Docker, no Postgres: ~5 s on a leg
+      # that already paid for checkout + npm ci. Its trigger is
+      # `apps/orchestrator/**`, already in this leg's detect filter.
+      - name: Guarded migration entrypoint (migrate-and-start.sh)
+        if: matrix.suite == 'orchestrator'
+        run: bash apps/orchestrator/scripts/migrate-and-start.test.sh
+
       # The staging half of /downloads. The orchestrator's own suite covers the
       # serving half (parse, digest, refuse); this covers the script that puts
       # an installer there in the first place — including the silent failure
@@ -545,6 +683,19 @@ jobs:
       - name: App-download staging script
         if: matrix.suite == 'orchestrator'
         run: bash tests/app-downloads-stage.test.sh
+
+      # WARP-2666: the declaration half. `/downloads` being empty answers
+      # HTTP 200, so it is green to /api/health and to every other gate — the
+      # page a customer opens to install the app has been blank on every box
+      # that has ever shipped and nothing said so. This suite pins the
+      # auditor's exit contract (notably that "could not look" never collapses
+      # into "fine"), reconciles data/app-downloads/EXPECTED against the
+      # generator's platform list in BOTH directions, and mutation-tests each
+      # of those assertions. A platform added without an EXPECTED row fails
+      # here rather than going silently unaudited.
+      - name: App-download release declaration (EXPECTED + audit)
+        if: matrix.suite == 'orchestrator'
+        run: bash tests/app-downloads-audit.test.sh
 
       # WARP-1984: the SSH toggle's host half. The orchestrator's vitest guard
       # reads these artefacts as TEXT (it can prove `iptables` never appears);
@@ -595,11 +746,24 @@ jobs:
           esac
           bash tests/droplet-ssh-access.test.sh
 
-      # build IS the type-check for the matter sidecar — mirrors
-      # matter-controller-tests.yml.
+      # build IS the type-check for the matter sidecar's SOURCE — mirrors
+      # matter-controller-tests.yml. Its `tsconfig.json` excludes
+      # `__tests__`, so the 6 test files need the second step.
       - name: Type-check @droplet/matter-controller
         if: matrix.suite == 'matter-controller'
         run: npm run -w @droplet/matter-controller build
+
+      # WARP-2617: `typecheck:tests` reads `tsconfig.test.json`, the only
+      # config that reaches `__tests__/`. Without this step the script had
+      # NO CI caller — `ship-check.sh tsc-full` is not run in CI (the
+      # `shipcheck` job is parse + self-test only) — so a TS2322 fixture
+      # regression in these tests landed green on every gate. Same shape
+      # and ordering rule as the other `typecheck:tests` steps (mapping
+      # table on the tools-core step): before vitest, on the leg the
+      # `matter-controller` detect filter already fires.
+      - name: Typecheck @droplet/matter-controller tests (tsconfig.test.json)
+        if: matrix.suite == 'matter-controller'
+        run: npm run -w @droplet/matter-controller typecheck:tests
 
       - name: Test @droplet/matter-controller
         if: matrix.suite == 'matter-controller'
@@ -644,6 +808,17 @@ jobs:
       - name: Build @droplet/erp-connector
         if: matrix.suite == 'erp-connector'
         run: npm run -w @droplet/erp-connector build
+
+      # WARP-2644: this leg is the one the `services/erp-connector/**` detect
+      # filter fires, and the build above is what its 23 test files need — they
+      # import the package by its own name (`@droplet/erp-connector`), which
+      # resolves through `types: dist/index.d.ts`. Verified standalone: with
+      # every OTHER workspace's dist removed, this command still passes here,
+      # so the step does not smuggle in a dependency the leg does not build.
+      # See the mapping table on the tools-core typecheck step above.
+      - name: Typecheck @droplet/erp-connector tests (tsconfig.test.json)
+        if: matrix.suite == 'erp-connector'
+        run: npm run -w @droplet/erp-connector typecheck:tests
 
       - name: Test @droplet/erp-connector
         if: matrix.suite == 'erp-connector'
@@ -726,6 +901,32 @@ jobs:
       - name: Run factory-reset storage-wipe unit tests
         run: bash tests/factory-reset-storage-wipe.test.sh
 
+      # WARP-2629 — the live-secrets wipe on /data. Deliberately here and not
+      # in the factory-reset suite's own job: that suite shells out to
+      # `docker compose version` and cannot run on a box whose daemon is down,
+      # which is exactly a box a factory reset has to work on. (Named without
+      # its path on purpose — scripts/check-test-wiring.sh harvests every
+      # tests/*.test.sh token in this block, comments included.)
+      - name: Run factory-reset live-secrets wipe unit tests
+        run: bash tests/factory-reset-secrets-wipe.test.sh
+
+      # WARP-2647: the two factory-reset guards that ran in NO workflow at all.
+      # Both were written after a real incident — the WARP-605 project-name bug
+      # that left droplet_pgdata alive behind a "successful" reset, and the
+      # `docker system prune -af` that would have deleted the sibling
+      # droplet-local-LLM images — and both then sat green on developers'
+      # machines for months without ever running at PR time. They are static
+      # greps of scripts/factory-reset.sh, which is already this leg's trigger:
+      # no Docker, no root, <0.1 s each.
+      #
+      # KEEP IN LOCKSTEP with storage-pool-tests.yml's storage-pool-unit job —
+      # scripts/check-test-wiring.sh fails if the two lists diverge.
+      - name: Run factory-reset volume-wipe unit tests
+        run: bash tests/factory-reset-volume-wipe.test.sh
+
+      - name: Run factory-reset purge-scope unit tests
+        run: bash tests/factory-reset-purge-scope.test.sh
+
   # WARP-2398 / ADR-043 §5 — the OUTBOUND MCP session component.
   #
   # `services/mcp-bridge` is the ONLY workspace permitted to construct an MCP
@@ -771,6 +972,14 @@ jobs:
       # Typecheck (vitest does not) — see the leg comment above.
       - name: Build @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge build
+
+      # WARP-2617: `build` reads `tsconfig.json`, which excludes `__tests__`,
+      # so the step above typechecks none of this workspace's 9 test files.
+      # Same runner shape as the `typecheck:tests` steps on the node matrix
+      # (mapping table on the tools-core step); this job is its own leg, so
+      # the step sits here. Runs BEFORE vitest for the same reason as there.
+      - name: Typecheck @droplet/mcp-bridge tests (tsconfig.test.json)
+        run: npm run -w @droplet/mcp-bridge typecheck:tests
 
       - name: Test @droplet/mcp-bridge
         run: npm run -w @droplet/mcp-bridge test
@@ -1043,15 +1252,59 @@ jobs:
 
       # The self-test's compose-config case shells out to `docker compose
       # config`, which resolves the merged tree's `env_file: ../.env`
-      # directives and fails if that file is absent. .env is .gitignored, so
-      # a fresh checkout never has one. Seed it from the tracked example, or
-      # the self-test goes red on the runner for a reason that has nothing to
-      # do with the change under test. (compose-config itself still reads
-      # .env.example for values — see run_check_compose_config.)
+      # directives and cannot merge the tree if that file is absent. .env is
+      # .gitignored, so a fresh checkout never has one. Seed it from the
+      # tracked example. (compose-config itself still reads .env.example for
+      # values — see run_check_compose_config.)
+      #
+      # WARP-2646 — the gate now SKIPs rather than FAILs for this, so dropping
+      # this step no longer reds the job with a bogus "rejected
+      # docker-compose.yml". It reds it at the skip gate instead, naming
+      # `compose-config-yaml-breakage` as an un-allowed skip: still red, and
+      # now for the true reason. The skip id is deliberately NOT added to
+      # SHIPCHECK_ALLOW_SKIP below — a runner that cannot evaluate the compose
+      # file must be a failure, not a quiet pass.
       - name: Seed .env for the compose-config case
         run: cp .env.example .env
 
+      # WARP-2637 — a SKIP is no longer folded into the pass count, and the
+      # suite refuses to exit 0 on a skip the caller has not named.
+      #
+      # This job deliberately does NOT `npm ci`. Installing the monorepo plus
+      # `npm run bootstrap` plus the FOUR `tsc-full` sweeps the two
+      # node_modules-gated cases perform (each runs the check twice: clean
+      # baseline, then mutated) is minutes of metered time per run, on a job
+      # whose remit is parse + self-test — see docs/ci-cost-budget.md and
+      # WARP-2455's out-of-scope list. So those two cases cannot run here, and
+      # they are named explicitly rather than blanket-allowed: any OTHER case
+      # that starts skipping on the runner now fails this job instead of
+      # quietly inflating "N/N passed", which is exactly how the WARP-329
+      # fixture guard stayed vacuous. The names are also written to the job
+      # summary by the script, so the hole is visible without reading the log.
+      #
+      # The trade this leaves standing: the WARP-329 and WARP-492 cases are
+      # developer-machine gates only. Running them in CI is a spend decision,
+      # not an oversight.
+      #
+      # WARP-2620 — the bar for adding an id here is "this job structurally
+      # cannot run that case", not "that case sometimes flakes". Both ids below
+      # clear it: no `npm ci`, so no node_modules, so neither tsc-full case can
+      # execute, ever, on this job. `docker-build-smoke-shim-allowlist` does NOT
+      # clear it and is deliberately absent — it runs fine here, and its SKIP
+      # (the smoke container died before reaching the planted `docker buildx`) is
+      # news worth a red and a re-run, not a standing exemption. Allow-listing
+      # it would leave a guard that can no longer fail.
+      #
+      # WARP-2645 — the value is a list of SKIP IDS, not display names. The
+      # ids are declared beside each `_run_test` registration in
+      # scripts/test/ship-check.test.sh. Keying this on the display name made
+      # it a prose-shaped wire contract: rewording a case's name — which
+      # happens whenever its rationale sharpens — silently stopped allowing
+      # that case's skip and reddened this job for a case nobody had touched.
+      # Changing an id now takes a deliberate edit in both files.
       - name: Run the ship-check self-test
+        env:
+          SHIPCHECK_ALLOW_SKIP: "tsc-full-warp329-fixture,tsc-full-prisma-pin"
         run: bash scripts/test/ship-check.test.sh
 
 

@@ -589,6 +589,72 @@ def comment_styles(path: str) -> tuple[bool, bool, bool]:
     return slashes, hashes, dashes
 
 
+# ── WARP-2516: JS/TS regex literals ─────────────────────────────────────────
+# A `/` that opens a regex literal is not a divide, and the quotes inside it
+# are not string delimiters. `scan_source` did not know that, so `/[^\']/`
+# left the walker inside a phantom string for the rest of the file: comment
+# stripping stopped, and a hostname in a `//` comment below it counted as a
+# non-comment literal and BACKED a registry entry that should have been
+# reported as unreferenced — the exact escape WARP-2452 exists to close.
+#
+# Characters after which a `/` starts a regex rather than a division. A
+# division always follows a VALUE (identifier, literal, `)`, `]`), so the
+# complement is what is listed here; `<` is deliberately absent, to keep JSX's
+# `</div>` out.
+REGEX_POSITION_CHARS = "=(,:[!&|?{};"
+
+
+def regex_literal_end(text: str, start: int) -> int | None:
+    r"""Index just past the regex literal at `start`, or None if it is not one.
+
+    Returns None at a newline, because a JS regex literal cannot span lines —
+    so an unmatched `/` (a division this heuristic misread) costs nothing
+    instead of swallowing the rest of the file. `[...]` is tracked because a
+    `/` inside a character class does not close the literal, and escapes are
+    honoured so `\/` does not either.
+    """
+    i, n, in_class = start + 1, len(text), False
+    while i < n:
+        ch = text[i]
+        if ch == "\n":
+            return None
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        elif ch == "/" and not in_class:
+            i += 1
+            while i < n and text[i].isalpha():   # trailing flags: gimsuyd
+                i += 1
+            return i
+        i += 1
+    return None
+
+
+def in_regex_position(text: str, at: int) -> bool:
+    """Would a `/` at `at` open a regex literal rather than divide?
+
+    A heuristic, like the rest of this walker — the real answer needs a
+    parser. It fails in the PERMISSIVE direction for both passes: a division
+    misread as a regex still yields every character, and a regex misread as a
+    division only restores today's behaviour.
+    """
+    j = at - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    if j < 0 or text[j] == "\n":
+        return True                                    # start of a line
+    if text[j] in REGEX_POSITION_CHARS:
+        return True
+    if not text[:j + 1].endswith("return"):            # `return /re/.test(x)`
+        return False
+    before = text[j - 6] if j >= 6 else "\n"
+    return not (before.isalnum() or before in "_$")
+
+
 def scan_source(text: str, slashes: bool, hashes: bool, dashes: bool = False):
     """Walk `text` yielding (char, in_string) for every NON-comment char.
 
@@ -610,16 +676,21 @@ def scan_source(text: str, slashes: bool, hashes: bool, dashes: bool = False):
     Known limits, accepted deliberately:
       * An unbalanced apostrophe in prose ("don't") leaves the walker inside
         a phantom string, suppressing comment detection for the rest of it.
+        The one shape that really occurred — a quote inside a REGEX literal,
+        `/[^']/` — is handled (WARP-2516); JSX text is the remaining one.
       * Markdown and JSON get no stripping — neither has comment syntax.
       * A triple-quoted block used as DATA rather than prose (a heredoc-ish
         SQL blob) is treated as prose, so a host inside one does not deny.
         Rare, and it fails in the permissive direction like the rest.
 
-    Every limit fails PERMISSIVE for the BACKING pass: it can only retain
-    text, never delete a real literal, so the worst case is a lie we miss,
-    never a false CI failure against honest code. For the DENIAL pass the
-    same permissiveness means at worst an extra host to register, which is
-    cheap and reviewed — never a missed destination.
+    Retaining text is permissive for the DENIAL pass — at worst an extra
+    host to register, which is cheap and reviewed, never a missed
+    destination. It is NOT harmless for the BACKING pass: a comment that
+    survives stripping BACKS an entry, so the entry stops being reported as
+    unreferenced and the registry quietly keeps describing code that is not
+    there. That is the failure WARP-2516 found and fixed for regex literals,
+    and it is why a new limit here needs the backing direction thought
+    through, not just the denial one.
     """
     i, n, quote = 0, len(text), None
     while i < n:
@@ -683,6 +754,20 @@ def scan_source(text: str, slashes: bool, hashes: bool, dashes: bool = False):
             while i < n and text[i] != "\n":
                 i += 1
             continue
+        # Regex literal (WARP-2516). Checked AFTER the two comment branches,
+        # which own `//` and `/*`. Its characters are still YIELDED, with
+        # in_string=False: a regex is code, so the backing pass must keep
+        # seeing it (`/files.allowed-vendor.com/` really is the code naming
+        # that host), while the denial pass, which reads only in_string=True,
+        # correctly declines to treat it as a string literal. What changes is
+        # only that a quote inside can no longer open one.
+        if slashes and ch == "/" and in_regex_position(text, i):
+            end = regex_literal_end(text, i)
+            if end is not None:
+                for c in text[i:end]:
+                    yield c, False
+                i = end
+                continue
         yield ch, False
         i += 1
 

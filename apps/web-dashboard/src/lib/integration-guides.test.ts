@@ -14,8 +14,8 @@
  *     from the static output with no test noticing.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync } from "node:fs";
+import { readRepoFile, repoPath } from "@/__tests__/helpers/test-paths";
 import {
   providerDescriptors,
   registerProviderDescriptor,
@@ -34,21 +34,15 @@ import {
 } from "./integration-guides";
 import { generateStaticParams } from "@/app/help/integrations/[provider]/page";
 
-/** The repo root, from wherever vitest was launched. Fails loudly rather than
- *  walking off the top — a path assertion that silently reads the wrong tree
- *  passes forever. */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    if (existsSync(resolve(dir, "docs/integrations"))) return dir;
-    dir = resolve(dir, "..");
-  }
-  throw new Error(`could not locate the repo root from ${process.cwd()}`);
-}
-
-/** The repo's `docs/integrations`. */
+/** The repo's `docs/integrations`.
+ *
+ *  WARP-2632 — resolved from THIS FILE's location via `REPO_ROOT`, not by
+ *  walking up from `process.cwd()`. The walk did not fail on a wrong cwd, it
+ *  climbed until something matched: from a directory that merely contains a
+ *  `docs/integrations/`, this gate compared the shipped bundle against that
+ *  directory and reported on a tree it had never read. */
 function docsDir(): string {
-  return resolve(repoRoot(), "docs/integrations");
+  return repoPath("docs/integrations");
 }
 
 /** Slugs the ROUTE will prerender — read through the page's own
@@ -279,12 +273,19 @@ describe("page furniture", () => {
    * moved goes red against the fixture.
    */
   it("agrees with the shell checker's slugify, case for case", () => {
-    const tsv = readFileSync(
-      resolve(repoRoot(), "scripts/fixtures/heading-slug-cases.tsv"),
-      "utf8",
-    );
+    const tsv = readRepoFile("scripts/fixtures/heading-slug-cases.tsv");
     const cases = tsv
-      .split("\n")
+      // `/\r?\n/`, not `"\n"`. The fixture carried no `.gitattributes` pin, so a
+      // Windows clone with `core.autocrlf=true` materialized it as CRLF and
+      // every `expected` field arrived with a trailing CR. The assertion then
+      // failed between two VISUALLY IDENTICAL strings — the worst shape a
+      // fixture failure can take. The pin guarded below is the root fix; this
+      // split stays because it also holds on a clone that predates the pin
+      // (git does not re-checkout a file merely because its attributes
+      // changed). Same belt-and-braces as the migration SQL, which is pinned
+      // in `.gitattributes` AND read with `/\r?\n/` by
+      // file-edit-session.schema.test.ts.
+      .split(/\r?\n/)
       .filter((line) => line.trim() !== "" && !line.startsWith("#"))
       .map((line) => line.split("\t"));
 
@@ -292,6 +293,39 @@ describe("page furniture", () => {
     for (const [heading, expected] of cases) {
       expect(headingSlug(heading), `heading: ${heading}`).toBe(expected);
     }
+  });
+
+  /**
+   * The TSV is the shared statement of the slug rule and BOTH consumers parse
+   * it field-wise: this test splits on `\t`, and `check-setup-guides.sh` reads
+   * it with `while IFS=<tab> read -r heading expected`. `read` keeps a trailing
+   * CR inside `$expected`, so a CRLF checkout breaks the shell's self-check
+   * exactly as it broke this one — and that half only ever runs on Linux,
+   * where nobody would see it. Tolerating CRLF at the TypeScript call site
+   * fixes one of the two; pinning the bytes fixes both.
+   *
+   * Guard the PIN, not the on-disk bytes: a byte assertion would go red on
+   * every clone that predates the pin, because git does not re-checkout a
+   * file whose attributes changed — and a red on an existing Windows
+   * checkout is precisely what this branch exists to remove. Same shape as
+   * WARP-1567's `*.snap` pin guard in snapshot-eol.test.ts.
+   *
+   * Mutation: delete `*.tsv text eol=lf` from `.gitattributes` → red.
+   */
+  it("`.gitattributes` pins the shared slug fixture to LF", () => {
+    const pinned = readRepoFile(".gitattributes")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .some((line) => /^\*\.tsv\s+.*\btext\b.*\beol=lf\b/.test(line));
+
+    expect(
+      pinned,
+      "`.gitattributes` must carry a `*.tsv text eol=lf` rule — without it a " +
+        "Windows checkout materializes scripts/fixtures/heading-slug-cases.tsv " +
+        "as CRLF, and check-setup-guides.sh's slugify self-check then compares " +
+        "every expected slug against one carrying a trailing CR.",
+    ).toBe(true);
   });
 
   /** Trimming, which the TSV cannot express — trailing spaces in a fixture

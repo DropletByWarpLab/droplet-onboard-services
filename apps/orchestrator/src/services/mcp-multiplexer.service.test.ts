@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   DENY_ALL_REMOTE_TOOLS,
+  MAX_RETAINED_REJECTIONS,
   McpToolMultiplexer,
   namespacedToolName,
   parseNamespacedToolName,
@@ -358,5 +359,43 @@ describe("detach", () => {
     await mux.callTool("atlassian__jira_get_issue", {});
     expect(remote.callTool).not.toHaveBeenCalled();
     expect(local.callTool).toHaveBeenCalledWith("atlassian__jira_get_issue", {}, undefined);
+  });
+});
+
+describe("the rejection window is bounded", () => {
+  /**
+   * `listTools()` runs per agent turn AND per request at five call sites, and
+   * a remote that is unreachable pushes one entry every single time — so an
+   * outage or a disconnected account grew this array for the life of the
+   * process, and `syncRemoteCatalog` copied the whole thing on every sync.
+   *
+   * MUTATION: delete the `splice` in `#reject()` → this test goes red.
+   */
+  it("keeps the newest MAX_RETAINED_REJECTIONS and drops the oldest", async () => {
+    const local = portDouble([tool("list_files")]);
+    const mux = new McpToolMultiplexer(local, { isServerAllowed: allowAll });
+    let turn = 0;
+    const remote: McpClientPort = {
+      isStarted: true,
+      listTools: vi.fn(async () => {
+        turn += 1;
+        throw new Error(`outage ${turn}`);
+      }),
+      callTool: vi.fn(async () => ({ content: [], isError: false })),
+    };
+    expect(mux.attachRemote("atlassian", remote)).toBeNull();
+
+    // 150 agent turns against an unreachable vendor is a few minutes of chat,
+    // not an edge case.
+    for (let i = 0; i < 150; i += 1) await mux.listTools();
+
+    const kept = mux.rejections();
+    expect(kept).toHaveLength(MAX_RETAINED_REJECTIONS);
+    // Newest retained…
+    expect(kept[kept.length - 1]!.message).toContain("outage 150");
+    expect(kept[kept.length - 1]!.code).toBe("REMOTE_CATALOG_UNAVAILABLE");
+    // …oldest dropped: the window starts at 51, so 1-50 are gone.
+    expect(kept[0]!.message).toContain("outage 51");
+    expect(kept.some((r) => r.message.endsWith("outage 1"))).toBe(false);
   });
 });

@@ -53,9 +53,12 @@ import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
+  type BusinessContextPinKind,
   type PendingComposerPayload,
+  type PendingComposerToolPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
+import { createContextPin } from "@/lib/api";
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
@@ -111,14 +114,26 @@ export default function ChatPage() {
   const [bizProfile, setBizProfile] = useState<
     (BusinessProfileView & { workspaceType?: string }) | null
   >(null);
+  // Returns the in-flight fetch so a caller CAN observe it. Nothing the user
+  // is owed may be sequenced behind it: `fetchBusinessProfile` → `authFetch`
+  // carries no timeout and no AbortController and swallows both outcomes
+  // internally, so an await on it is an await with no ceiling.
   const refreshBizProfile = useCallback(() => {
-    fetchBusinessProfile()
+    return fetchBusinessProfile()
       .then((p) => setBizProfile(p))
       .catch(() => setBizProfile(null));
   }, []);
   useEffect(() => {
     if (user) refreshBizProfile();
   }, [user, refreshBizProfile]);
+
+  // WARP-2667 — the interview session id `startBusinessOnboarding` just
+  // returned. Held here because the profile is not the only source of it, and
+  // must not be the only one the surface can read: the start response already
+  // names the session, and it is the one answer that cannot stall.
+  const [startedInterviewChatId, setStartedInterviewChatId] = useState<
+    string | null
+  >(null);
 
   const isPrivileged = user?.role === "owner" || user?.role === "admin";
   const isBusinessBox = bizProfile?.workspaceType === "BUSINESS";
@@ -158,15 +173,46 @@ export default function ChatPage() {
     },
   });
 
+  // The `?c=<id>` currently in the URL. Read HERE, above the interview
+  // derivations, because it is the only id that moves in the same tick as
+  // `router.push` — `conversationId` trails it by a whole `loadConversation`
+  // round trip.
+  const searchParams = useSearchParams();
+  const urlConversationId = searchParams?.get("c") ?? null;
+
   // WARP-1121 — is the open conversation the onboarding-interview session at
   // all? True across the WHOLE lifecycle (in_progress / re_running /
   // completed): `interviewChatId` keeps pointing at the session after commit —
   // only the deletion hook clears it. Message SHAPING (marker stripping +
   // ReviewCard for the fenced proposal) keys off THIS so a just-completed
   // session still renders the card and never leaks raw fenced JSON or
-  // `[topic n/7]` markers as plain text.
-  const interviewConversation =
-    Boolean(conversationId) && bizProfile?.interviewChatId === conversationId;
+  // `[topic n/7]` markers as plain text — it is a statement about the
+  // transcript actually on screen, so it must NOT run ahead of the load.
+  //
+  // `startedInterviewChatId` counts as authoritative alongside the profile's
+  // link: it is only ever set from a `startBusinessOnboarding` response, so an
+  // id that matches it IS the interview session, whether or not the profile
+  // read that would have said so has come back yet.
+  const isInterviewChatId = (id: string | null): boolean =>
+    id !== null &&
+    (id === bizProfile?.interviewChatId || id === startedInterviewChatId);
+
+  const interviewConversation = isInterviewChatId(conversationId);
+
+  // WARP-2667 — the interview session is open OR opening. Which surface owns
+  // an empty /chat cannot be decided by `interviewConversation` alone: the two
+  // halves of it move on different clocks. `onboardingState` leaves
+  // `not_started` the instant the profile refresh lands, retiring the intro
+  // card; `conversationId` only catches up when the URL-driven
+  // `loadConversation` resolves. In between, neither branch claims the screen
+  // and the generic "Ask Droplet anything" empty state paints INSIDE the
+  // session the user just started — the exact defect this ticket closes, in a
+  // narrower window (pr-reviewer, #1987). `handleResumeOpen` opens the same
+  // window: it pushes with no await at all. The URL is authoritative from the
+  // instant of the push, so reading it closes the gap from the other side.
+  // Every surface that must not straddle it keys off THIS.
+  const interviewSessionOpen =
+    interviewConversation || isInterviewChatId(urlConversationId);
   // …the LIVE interview is the active subset — it flips false the moment
   // onboardingState settles. This drives the genuinely-active-only chrome
   // (progress dots, topic chips, wrap-up auto-send), NOT the message shaping.
@@ -185,9 +231,8 @@ export default function ChatPage() {
   // when the user clicks a row; we react to that by loading the thread.
   // Conversely, when conversationId changes for any other reason (new chat
   // minted server-side, message sent, clearMessages), we mirror it into the
-  // URL so a refresh restores the same thread.
-  const searchParams = useSearchParams();
-  const urlConversationId = searchParams?.get("c") ?? null;
+  // URL so a refresh restores the same thread. (`urlConversationId` itself is
+  // read further up — the interview derivations need it.)
 
   // URL → state: when ?c=<id> changes (sidebar click, deep link, browser
   // back/forward), rehydrate that conversation. When `c` is removed (e.g.
@@ -270,7 +315,17 @@ export default function ChatPage() {
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
   // chat" hand-off (null when the chat wasn't opened from a tool).
-  const [activeTool, setActiveTool] = useState<PendingComposerPayload | null>(null);
+  // WARP-2582 — narrowed to the TOOL variant now that the hand-off payload is a
+  // union. The chip below reads `requiresWrite` / `requiresConfirmation`, which
+  // only the tool variant carries; typing this as the union would be a compile
+  // error rather than a silent undefined.
+  const [activeTool, setActiveTool] = useState<PendingComposerToolPayload | null>(null);
+  // WARP-2582 — a record hand-off's pin, held until the first turn mints a
+  // conversation id. Pins are per-session and the id does not exist yet on the
+  // turn the user arrives; see lib/pin-handoff.ts for why that is inherent.
+  const [pendingPin, setPendingPin] = useState<
+    { kind: BusinessContextPinKind; ref: string } | null
+  >(null);
   // WARP-295: sticky-bottom auto-scroll + Jump-to-latest pill. The hook
   // owns the detach detection so the page just wires onScroll +
   // stickyScrollToBottom through.
@@ -354,7 +409,8 @@ export default function ChatPage() {
     } catch {
       payload = null;
     }
-    if (!payload || payload.kind !== "tool") return;
+    if (!payload) return;
+    if (payload.kind !== "tool" && payload.kind !== "pin") return;
     if (urlConversationId || messages.length > 0) return;
     // One-shot: clear before seeding so it can't resurface on a later mount.
     try {
@@ -362,12 +418,36 @@ export default function ChatPage() {
     } catch {
       /* ignore */
     }
-    setActiveTool(payload);
+    if (payload.kind === "tool") {
+      setActiveTool(payload);
+    } else if (payload.pin) {
+      // WARP-2582 — held, not applied. There is no session id on this render:
+      // the first turn mints it, so the pin lands in the effect below and the
+      // seed line carries the record's identity for turn 1.
+      setPendingPin(payload.pin);
+    }
     chatInputRef.current?.seed(payload.seedText);
     // Mount-only: the fresh-chat guard reads the initial url/messages, matching
     // the pendingPrompt effect's one-shot semantics.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // WARP-2582 — apply a staged record pin once the first turn has minted a
+  // conversation. Pins are per-session, so this is the earliest moment one can
+  // exist; from the SECOND turn on, the orchestrator's per-turn injection
+  // scopes the thread without the user restating the record.
+  //
+  // Cleared BEFORE the request so a re-render cannot fire it twice, and
+  // failure is silent by design: the seed line already named the record, so a
+  // pin that did not stick costs continuity, not the answer.
+  useEffect(() => {
+    if (!pendingPin || !conversationId) return;
+    const staged = pendingPin;
+    setPendingPin(null);
+    void createContextPin(conversationId, staged).catch(() => {
+      /* non-fatal — the seed line already carried the identity */
+    });
+  }, [pendingPin, conversationId]);
 
   // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
   // attached (within ~80px of the bottom). When they've scrolled up to
@@ -406,7 +486,23 @@ export default function ChatPage() {
   const handleInterviewStart = useCallback(async () => {
     try {
       const r = await startBusinessOnboarding();
-      refreshBizProfile();
+      // This returning means the session and its seeded opening turn are
+      // already persisted server-side, so the trip into it is owed to the
+      // user unconditionally — it must not be sequenced behind a second
+      // request that can hang. An awaited `refreshBizProfile()` here (the
+      // first cut of this fix) did exactly that: a stalled or backgrounded
+      // `GET /api/business-profile` never resolves, `router.push` never
+      // fires, and the owner is left on the intro card looking at a Start
+      // button for an interview that already exists, with no way to reach it
+      // short of a manual reload (pr-reviewer, #1987).
+      //
+      // Recording the id first is what makes the early push safe: the
+      // surface guards read it, so the interview owns the screen from the
+      // very next render whether the profile ever arrives or not — which is
+      // also what stops the stale `not_started` from painting the Start card
+      // a second time inside the session the click just created.
+      setStartedInterviewChatId(r.conversationId);
+      void refreshBizProfile();
       router.push(`/chat?c=${encodeURIComponent(r.conversationId)}`);
     } catch {
       refreshBizProfile(); // 409 = another admin moved it — re-sync.
@@ -792,6 +888,7 @@ export default function ChatPage() {
               Typing normally still works (composer stays live); the card
               returns on the next empty visit until started or skipped. */}
           {messages.length === 0 &&
+            !interviewSessionOpen &&
             isPrivileged &&
             isBusinessBox &&
             bizProfile?.onboardingState === "not_started" && (
@@ -833,7 +930,7 @@ export default function ChatPage() {
               end. If it is not accessible, it is not shown. */}
           {messages.length === 0 &&
             isPrivileged &&
-            !interviewActive &&
+            !interviewSessionOpen &&
             interviewResumable &&
             (bizProfile?.onboardingState === "in_progress" ||
               bizProfile?.onboardingState === "re_running") && (
@@ -844,7 +941,18 @@ export default function ChatPage() {
                 />
               </div>
             )}
+          {/* The generic chat empty state — "Ask Droplet anything" plus four
+              off-topic suggestion prompts. It must never paint inside the
+              interview session: that surface is the walkthrough, and an empty
+              frame of it (the beat before the transcript loads, or a
+              self-healed session) reading "Ask Droplet anything · Dim the
+              living-room lights" is precisely the "it dropped me back into a
+              chat" report. Keyed off `interviewSessionOpen` — the whole
+              lifecycle AND the navigation into it — so a finished interview
+              reopened after its history is gone stays quiet too, and so does
+              the beat between `router.push` and the transcript arriving. */}
           {messages.length === 0 &&
+            !interviewSessionOpen &&
             !(
               isPrivileged &&
               isBusinessBox &&

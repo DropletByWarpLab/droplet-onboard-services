@@ -9,18 +9,22 @@
  * host/IP, chart numbers, schema version) is rendered mono + read-only.
  */
 
-import type { CredentialExpiryVerdict } from "@droplet/shared-types";
+import type { CredentialExpiryVerdict, IntegrationStatus } from "@droplet/shared-types";
 
-/** Explicit connection lifecycle — never derived from absence (arch rule 10). */
-export type IntegrationStatus =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "NEEDS_RECONNECT"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * Explicit connection lifecycle — never derived from absence (arch rule 10).
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here, because this module was
+ * one of FOUR hand-copied unions of the Prisma enum and the two dashboard
+ * copies were the pair no test could compare (an `apps/orchestrator` test
+ * cannot import from `apps/web-dashboard`).
+ *
+ * The import is `import type`, erased at compile — nothing from the package
+ * enters the client bundle, the same boundary WARP-2633 checked for
+ * `SaasConnectionState`.
+ */
+export type { IntegrationStatus };
 
 /** Providers the hub knows about. Eaglesoft ships first; the rest are the
  *  framework placeholders that make the hub read as N-provider, not one-off. */
@@ -36,7 +40,17 @@ export type ConnectorId =
   // rendering a tile nothing can route to.
   | "stripe"
   | "hubspot"
-  | "mailchimp";
+  | "mailchimp"
+  // WARP-2296 — the fourth SaaS vendor.
+  | "shopify"
+  // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
+  // programme. Added by hand, like every entry above: the union is the thing
+  // that makes the `as ConnectorId` cast in `connectors.ts` honest, so it has
+  // to be widened deliberately rather than derived from the descriptors it is
+  // checking.
+  | "brevo"
+  | "klaviyo"
+  | "pipedrive";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

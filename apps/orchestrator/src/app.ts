@@ -50,9 +50,13 @@ import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
+import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createCrmRouter } from "./routes/crm.js";
+import { createMoneyRouter } from "./routes/money.js";
+import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
+import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -396,10 +400,25 @@ export function createApp(
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
   app.use("/api", createPmNativeRouter(prisma));
+  // WARP-2586 (ADR-045 slice G) — cross-project work-item relations
+  // (blocks / relates / duplicates). Its own router on the same prefix; the
+  // paths are disjoint from the native router's, so neither shadows the other.
+  app.use("/api", createPmRelationsRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
   app.use("/api", createCrmRouter(prisma));
+  // WARP-2581 — money: invoices and bills landed from a cloud ledger. Its own
+  // disjoint prefix (`/api/money`) and its own `money` module gate; read-only,
+  // because the vendor stays the system of record.
+  app.use("/api", createMoneyRouter(prisma));
+  // WARP-2585 (ADR-045) — file ↔ business record links. Same `/api/crm`
+  // prefix, so `mountModuleGates` covers it with the `crm` module gate already
+  // registered above; no registry edit and no second gate vocabulary. Order
+  // against createCrmRouter does not matter: nothing in routes/crm.ts uses a
+  // path parameter in the first segment after `/crm`, so neither can shadow
+  // the other (the mount-order hazard this file documents elsewhere).
+  app.use("/api", createCrmEntityLinksRouter(prisma));
   // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
   app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
@@ -409,6 +428,10 @@ export function createApp(
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
   app.use("/api", createScenesRouter(prisma, matter));
+  // WARP-2180 — durable agent runs: start / list / detail / cancel / confirm
+  // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
+  // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
+  app.use("/api", createAgentRunsRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.

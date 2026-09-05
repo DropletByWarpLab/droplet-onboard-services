@@ -472,3 +472,152 @@ export {
   type MailchimpPurgeStore,
   type MailchimpStatus,
 } from "./mailchimp/connector.js";
+
+// WARP-2296 — Shopify: the storefront commerce track. GraphQL Admin API only,
+// on client credentials the MERCHANT mints in their own Dev Dashboard app
+// (admin-created custom apps and their `shpat_` tokens were removed on
+// 2026-01-01). The store host is assembled at runtime from the connection's own
+// `<store>.myshopify.com` domain — the token endpoint included — so
+// `assertSafeShopifyBaseUrl` is the enforcement, not defence in depth, and
+// there is no fixed Shopify OAuth host to register. Two vendor gates are
+// detected rather than absorbed: protected customer data (Grow plan) comes back
+// as HTTP 200 with blanked fields, and the 60-day order wall comes back as a
+// shorter list.
+export {
+  ShopifyConnector,
+  InvalidShopifyCredentialError,
+  ShopifyBulkOperationError,
+  ShopifyOrderHistoryWallError,
+  ShopifyProtectedDataDeniedError,
+  ShopifyReauthorizationRequiredError,
+  ShopifyScopeMissingError,
+  ShopifyThrottledError,
+  ShopifyTimeoutError,
+  UnsafeShopifyBaseUrlError,
+  assertReadOnlyShopifyDocument,
+  assertSafeShopifyBaseUrl,
+  assertShopifyClientCredential,
+  assertShopifyShopDomain,
+  blockedShopifyCredentialResolver,
+  detectProtectedDataRedaction,
+  shopifyAllowedApiHosts,
+  shopifyBaseUrlFor,
+  throttleWaitMs as shopifyThrottleWaitMs,
+  SHOPIFY_ACCESS_TOKEN_HEADER,
+  SHOPIFY_ALLOWED_HOST_PATTERN,
+  SHOPIFY_ALLOWED_MUTATIONS,
+  SHOPIFY_API_VERSION,
+  SHOPIFY_CLIENT_CREDENTIAL_PATTERN,
+  SHOPIFY_DATASETS,
+  SHOPIFY_DATASET_SCOPES,
+  SHOPIFY_GRAPHQL_PATH,
+  SHOPIFY_GROW_PLAN_REMEDIATION,
+  SHOPIFY_LEGACY_ADMIN_TOKEN_PATTERN,
+  SHOPIFY_MAX_PAGES,
+  SHOPIFY_MAX_PAGE_SIZE,
+  SHOPIFY_MAX_THROTTLE_RETRIES,
+  SHOPIFY_ORDER_HISTORY_REMEDIATION,
+  SHOPIFY_ORDER_HISTORY_SCOPE,
+  SHOPIFY_ORDER_HISTORY_WALL_DAYS,
+  SHOPIFY_PROTECTED_CUSTOMER_FIELDS,
+  SHOPIFY_PROTECTED_DATA_PLAN,
+  SHOPIFY_PROVIDER,
+  SHOPIFY_REQUEST_TIMEOUT_MS,
+  SHOPIFY_SHOP_DOMAIN_SUFFIX,
+  SHOPIFY_SHOP_NAME_PATTERN,
+  SHOPIFY_TOKEN_LIFETIME_SECONDS,
+  SHOPIFY_TOKEN_PATH,
+  SHOPIFY_TOKEN_REFRESH_SKEW_MS,
+  SHOPIFY_TRACK_REMEDIATION,
+  type ShopifyBulkExportRef,
+  type ShopifyConnectionState,
+  type ShopifyConnectorConfig,
+  type ShopifyConnectorDeps,
+  type ShopifyCredentialRejection,
+  type ShopifyCredentialResolver,
+  type ShopifyOrderHistoryAccess,
+  type ShopifyProtectedDataProbe,
+  type ShopifyStatus,
+} from "./shopify/connector.js";
+
+// WARP-2708 — Brevo: the contacts-lists-and-campaigns marketing track, plus the
+// CRM half (companies, deals) and e-commerce orders Brevo carries alongside it.
+// One FIXED host, so unlike Mailchimp its base URL is a whole-string literal the
+// egress scanner can extract, and its allowlist entry is a plain `kind: egress`.
+// The credential is a single `api-key` header — not `Authorization`, not
+// `Bearer` — and the track ships NO credential regex on purpose: Brevo documents
+// no key shape, so a pattern here would refuse valid keys the day the prefix
+// changes. `modifiedSince` is documented on five endpoints and ABSENT on the
+// rest; the connector refuses to send it where it is not documented rather than
+// letting Brevo ignore it and reporting a full scan as an incremental read.
+export {
+  BrevoConnector,
+  UnsafeBrevoBaseUrlError,
+  BrevoReauthorizationRequiredError,
+  BrevoIpBlockedError,
+  BrevoCapabilityMissingError,
+  assertSafeBrevoBaseUrl,
+  BREVO_PROVIDER,
+  BREVO_API_BASE_URL,
+  BREVO_ALLOWED_API_HOSTS,
+  BREVO_AUTH_HEADER,
+  BREVO_DATASETS,
+  BREVO_DELTA_PARAM,
+  BREVO_TRACK_REMEDIATION,
+  type BrevoConnectorConfig,
+  type BrevoConnectorDeps,
+  type BrevoDataset,
+} from "./brevo/connector.js";
+
+// WARP-2709 — Klaviyo: profiles, lists, campaigns and the events behind them.
+// Fixed host. TWO mandatory headers, not one: the `Klaviyo-API-Key` scheme on
+// `Authorization`, AND a dated `revision` header that is an error to omit rather
+// than a fallback to "latest". Its delta filter operators are PER ENDPOINT and
+// not uniform — copying one onto another yields a 400 or, worse, a scan that
+// reports itself as incremental — so the connector holds a filter table rather
+// than one parameter name.
+export {
+  KlaviyoConnector,
+  UnsafeKlaviyoBaseUrlError,
+  InvalidKlaviyoCredentialError,
+  KlaviyoReauthorizationRequiredError,
+  KlaviyoCapabilityMissingError,
+  assertSafeKlaviyoBaseUrl,
+  KLAVIYO_PROVIDER,
+  KLAVIYO_API_BASE_URL,
+  KLAVIYO_ALLOWED_API_HOSTS,
+  KLAVIYO_API_REVISION,
+  KLAVIYO_API_KEY_PATTERN,
+  KLAVIYO_DATASETS,
+  KLAVIYO_DELTA_FILTERS,
+  KLAVIYO_TRACK_REMEDIATION,
+  type KlaviyoConnectorConfig,
+  type KlaviyoConnectorDeps,
+  type KlaviyoDataset,
+} from "./klaviyo/connector.js";
+
+// WARP-2710 — Pipedrive: persons, organizations, deals, activities and products.
+// PER-ACCOUNT HOST (`<companyDomain>.pipedrive.com`), which puts it in the
+// Mailchimp situation: `check-egress-allowlist.py` contributes ZERO host
+// patterns for the `kind: dynamic` entry this pairs with, so
+// `assertSafePipedriveBaseUrl` is the ENTIRE control and this module carries no
+// `https://…pipedrive.com` scheme literal for the scanner to misread as an
+// unregistered host. Auth is `x-api-token`; the legacy `?api_token=` query form
+// is v1-only and would put the credential in the customer's own proxy logs.
+export {
+  PipedriveConnector,
+  UnsafePipedriveBaseUrlError,
+  InvalidPipedriveCredentialError,
+  PipedriveReauthorizationRequiredError,
+  PipedriveCapabilityMissingError,
+  assertSafePipedriveBaseUrl,
+  PIPEDRIVE_PROVIDER,
+  PIPEDRIVE_API_HOST_SUFFIX,
+  PIPEDRIVE_AUTH_HEADER,
+  PIPEDRIVE_COMPANY_DOMAIN_PATTERN,
+  PIPEDRIVE_DATASETS,
+  PIPEDRIVE_DELTA_PARAM,
+  PIPEDRIVE_TRACK_REMEDIATION,
+  type PipedriveConnectorConfig,
+  type PipedriveConnectorDeps,
+} from "./pipedrive/connector.js";

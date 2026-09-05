@@ -95,7 +95,25 @@ const CLOUD_ERP_PROVIDERS_BEFORE = ["quickbooks-online", "dentrix-ascend"] as co
  * folding new ids into them would quietly turn a regression anchor into a
  * running total. The assertions below compose the two explicitly instead.
  */
-const SAAS_PROVIDERS_WARP_2214 = ["stripe", "hubspot", "mailchimp"] as const;
+const SAAS_PROVIDERS_WARP_2214 = [
+  "stripe",
+  "hubspot",
+  "mailchimp",
+  // WARP-2296 — the fourth vendor on these rails. Appended here rather than to
+  // the `_BEFORE` anchors above for the reason this constant's docstring gives:
+  // those two lists are a record of what shipped before the descriptor
+  // refactor, and folding a new id into one would turn a regression anchor into
+  // a running total.
+  "shopify",
+  // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
+  // programme, appended for the same reason and in declaration order. Two
+  // fixed-host tracks and one per-account host; all three serve only datasets
+  // that already existed in the vocabulary, which is why they could ship
+  // without widening it.
+  "brevo",
+  "klaviyo",
+  "pipedrive",
+] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -115,7 +133,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     );
   });
 
-  it("cloud-track ids are the pre-change cloud set PLUS all three SaaS vendors", () => {
+  it("cloud-track ids are the pre-change cloud set PLUS every SaaS vendor", () => {
     // The cloud/LAN split is preserved as a descriptor field rather than
     // erased. Every WARP-2214 vendor is a cloud track by definition — it
     // reaches a vendor SaaS — so a `track: "lan"` on any of them would be a
@@ -866,6 +884,14 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "stripe",
       "hubspot",
       "mailchimp",
+      // WARP-2296 — Shopify, at catalog.order 7.
+      "shopify",
+      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, at catalog.order 8, 9, 10.
+      // Pinned here rather than derived, so adding a card is a decision that
+      // shows up in a diff.
+      "brevo",
+      "klaviyo",
+      "pipedrive",
     ]);
   });
 });

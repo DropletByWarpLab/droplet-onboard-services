@@ -29,6 +29,7 @@ import { useAuth, authFetch } from "@/lib/auth";
 import { fetchUsers } from "@/lib/api";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { AuditTimeline } from "@/components/audit/AuditTimeline";
+import { AgentRunsPanel } from "@/components/audit/AgentRunsPanel";
 import {
   BrokenChainBanner,
   ChainVerificationBadge,
@@ -127,6 +128,9 @@ function AuditPageInner() {
   const [kind, setKind] = useState(() =>
     parseKindParam(searchParams?.get("kind")),
   );
+  // WARP-2180 — `?run=<id>` opens that background run's detail (a parked
+  // run's approval prompt is deep-linkable from chat or a notification).
+  const initialRunId = searchParams?.get("run") ?? null;
   const [actorType, setActorType] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("all");
   const [q, setQ] = useState("");
@@ -506,6 +510,10 @@ function AuditPageInner() {
         </label>
       </div>
 
+      {/* WARP-2180 — background runs live on the Activity surface, not in
+          the nav. Their tool calls are the `tool_call` rows below, grouped
+          by refs.agentRunId; this panel is the run-level view of them. */}
+      <AgentRunsPanel initialRunId={initialRunId} />
       {error && (
         <div className="card" role="alert" style={{ marginBottom: 16 }}>
           <p style={{ fontSize: 13, color: "var(--text)" }} title={error.detail}>

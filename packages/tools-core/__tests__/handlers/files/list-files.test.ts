@@ -88,6 +88,13 @@ describe("list_files", () => {
     );
   });
 
+  // PR #1985 review: a malformed percent escape is a literal, not an error.
+  it("lists a path holding a bare % as written", async () => {
+    const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    await listFiles.handler({ path: "/Reports/50% Off" }, ctxWith(get));
+    expect(get).toHaveBeenCalledWith(`/?path=${encodeURIComponent("/Reports/50% Off")}`, expect.anything());
+  });
+
   it("still lists root for a bare '/'", async () => {
     const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     await listFiles.handler({ path: "/" }, ctxWith(get));
@@ -103,7 +110,6 @@ describe("list_files", () => {
     "/Notes/%2e%2e/admin",
     "/Notes/%252e%252e/admin",
     "/Notes/..\\admin",
-    "/Notes/%zz",
     // WARP-1373: the trailing-slash strip must not weaken the guard.
     "/Notes/../",
     "/Notes/%2e%2e/",

@@ -1,3 +1,7 @@
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
 import { describe, it, expect } from "vitest";
 import { TOOLS, TOOL_CATALOG } from "../src/index.js";
 
@@ -177,11 +181,22 @@ const EXPECTED_TOOL_NAMES = [
   "create_pdf_report",
   "create_word_document",
   "create_spreadsheet",
+  // WARP-2664 — file cleanup: read-only report, then organize (write +
+  // confirm) and bulk delete-to-trash (write + confirm).
+  "analyze_file_cleanup",
+  "organize_files",
+  "delete_files",
   // WARP-1861 — GPU telemetry (Tier-1 read, via device-bridge)
   "get_gpu_status",
   // WARP-2497 — cloud connectors (Stripe/HubSpot/Mailchimp). ONE tool for all
   // three vendors and all ten datasets; the dataset arg picks the provider.
   "cloud_query_dataset",
+  // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
+  "money_list_open_documents",
+  // agent_runs (WARP-2180) — start is Tier-2 (it spends compute unattended),
+  // list is Tier-1. Both in the chat pool: a run is startable from chat.
+  "start_agent_run",
+  "list_agent_runs",
 ];
 
 describe("TOOLS registry", () => {
@@ -200,6 +215,30 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("list_files")?.requiresWrite).toBe(false);
     expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
+    // WARP-2669 — `delete_file` had no assertion here at all, which is part
+    // of how it kept `requiresConfirmation: false` while the confirmation
+    // contract doc (§3) used it as its worked example of a gated tool and
+    // three orchestrator suites used it as their confirming fixture. It is a
+    // RECURSIVE delete: a directory goes with everything inside it. Pinned
+    // now so a future flip back is a decision somebody has to write down.
+    expect(TOOLS.get("delete_file")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("delete_file")?.requiresConfirmation).toBe(true);
+    // WARP-2180 — starting a background run spends compute unattended: Tier-2.
+    expect(TOOLS.get("start_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
+    // gate of its own, so there is no route challenge to stand down for.
+    expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();
+    // ...and no `confirmed` boolean in the schema, so the legacy path (§3) is
+    // closed to it and only a human-minted token gets through.
+    expect(
+      Object.keys(
+        (TOOLS.get("delete_file")?.inputSchema as { properties: Record<string, unknown> })
+          .properties,
+      ),
+    ).toEqual(["path"]);
     expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
     // WARP-508/509 — embedded Plane PM. Read tools are read-only; write
     // tools (create / update / comment / transition) are

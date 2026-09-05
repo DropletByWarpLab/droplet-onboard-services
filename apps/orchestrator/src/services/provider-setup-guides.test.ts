@@ -28,11 +28,13 @@
  *    no moment of use to link from and requiring a guide would mean writing one
  *    for a connector nobody can reach. Those descriptors are correctly absent
  *    from `CLOUD_PROVIDERS`.
- *  • `shopify` and `xero` guides are on this branch with no descriptor, because
- *    the guides were written from vendor research ahead of the connectors
- *    (WARP-2296 / #1945 and WARP-2383). That is the SAME defect class as the
- *    Atlassian one — a readable guide for an unconnectable integration — but it
- *    is a state somebody chose, and the fix is another PR's, not a test's.
+ *  • The `xero` guide is on this branch with no descriptor, because the guide
+ *    was written from vendor research ahead of the connector (WARP-2383). That
+ *    is the SAME defect class as the Atlassian one — a readable guide for an
+ *    unconnectable integration — but it is a state somebody chose, and the fix
+ *    is another PR's, not a test's. `shopify` was here too until WARP-2296 /
+ *    #1945 landed its descriptor on `stage`; the third test below is what
+ *    forced this entry out at the merge.
  *
  * So the invariant is directional plus one EXPLICIT, named exception list.
  * {@link GUIDE_AHEAD_OF_DESCRIPTOR} is the list, it carries the ticket that
@@ -41,8 +43,8 @@
  * unbacked guide is therefore a declared state rather than an inferred one,
  * which is the same rule the repo applies to persisted status.
  */
-import { readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -51,25 +53,10 @@ import {
   providersWithSetupGuide,
   setupGuideHrefFor,
 } from "@droplet/shared-types";
+import { repoPath } from "../__tests__/helpers/test-paths.js";
 
-/** Walk up from the CWD to the repo root. `process.cwd()` rather than
- *  `import.meta.url`: this workspace compiles to CommonJS and `import.meta` is
- *  a TS1470 there — the trap `add-llm-tool-skill.test.ts` hit and
- *  `adr-043-boundary.test.ts` documents. */
-function repoRoot(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      statSync(join(dir, "docker", "docker-compose.yml"));
-      return dir;
-    } catch {
-      dir = dirname(dir);
-    }
-  }
-  throw new Error("repo root not found from " + process.cwd());
-}
-
-const SCRIPT = join(repoRoot(), "scripts", "check-setup-guides.sh");
+// Anchored to this test file, not to `process.cwd()` (WARP-2654).
+const SCRIPT = repoPath("scripts", "check-setup-guides.sh");
 
 /**
  * Providers whose customer guide is on the tree ahead of their descriptor.
@@ -80,7 +67,6 @@ const SCRIPT = join(repoRoot(), "scripts", "check-setup-guides.sh");
  * reviewable decision, which is exactly what `atlassian` never got.
  */
 const GUIDE_AHEAD_OF_DESCRIPTOR: Readonly<Record<string, string>> = Object.freeze({
-  shopify: "WARP-2296 — connector + descriptor in PR #1945",
   xero: "WARP-2383 — connector + descriptor in flight",
 });
 

@@ -55,6 +55,10 @@ export type ToolDomain =
   // toggle gates the domain.
   | "crm"
   | "erp"
+  // WARP-2581 — money at rest: invoices and bills landed from a connected
+  // ledger. Slug matches the `money` ModuleId so the module toggle gates the
+  // domain, exactly as `crm` and `team_chat` do.
+  | "money"
   // WARP-2497 — the connected SaaS accounts (Stripe / HubSpot / Mailchimp).
   // Its own domain rather than a slot under `erp`: `erp` is the on-prem
   // practice-management connector, and the dashboard gates the two
@@ -65,7 +69,11 @@ export type ToolDomain =
   | "data"
   // WARP-1685 — Messages (member-to-member team chat). Slug matches the
   // `team_chat` ModuleId so the module toggle gates the domain.
-  | "team_chat";
+  | "team_chat"
+  // WARP-2180 — durable background runs (epic WARP-2176): start one, list
+  // yours. Its own domain so selection can find the pair on a "do this in
+  // the background" turn without dragging a whole vertical along.
+  | "agent_runs";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -135,6 +143,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_pdf_report",
     "create_word_document",
     "create_spreadsheet",
+    // WARP-2664 — cleanup: the read-only report and the two writes it feeds.
+    "analyze_file_cleanup",
+    "organize_files",
+    "delete_files",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -218,6 +230,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "crm_log_activity",
     "crm_move_deal_stage",
   ],
+  // WARP-2581 — money at rest. Excluded from the chat pool (see
+  // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
+  // so it is MCP- and API-reachable and never advertised on a chat turn.
+  money: ["money_list_open_documents"],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
@@ -229,6 +245,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   business: ["business_profile_get"],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
+  // WARP-2180 — durable background runs.
+  agent_runs: ["start_agent_run", "list_agent_runs"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -309,7 +327,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   read_document_text: "Read a whole PDF or scanned document end to end",
   list_recent_files: "See the files you changed most recently",
   write_file: "Save a new file or update an existing one",
-  delete_file: "Delete a file from your Droplet",
+  delete_file: "Delete a file, or a folder and everything in it, from your Droplet",
   create_directory: "Make a new folder",
   rename_file: "Rename a file or folder",
   move_file: "Move a file or folder somewhere else",
@@ -324,6 +342,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   create_pdf_report: "Write a finished PDF report and save it to your files",
   create_word_document: "Write a Word document you can keep editing",
   create_spreadsheet: "Build a spreadsheet from a table of data",
+  analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
+  organize_files: "Sort a folder's files into tidy subfolders",
+  delete_files: "Clear out a list of files you have agreed to delete",
   // Smart home
   list_smart_home_devices: "See all your smart home devices",
   get_smart_home_device: "Check the status of one smart home device",
@@ -419,6 +440,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_find_patient: "Look up a patient in your practice software",
   erp_get_ar_summary: "See what patients still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
+  // Money (invoices and bills landed from a connected ledger)
+  money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
@@ -447,6 +470,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Background runs (WARP-2180)
+  start_agent_run: "Hand Droplet a longer task to work on in the background",
+  list_agent_runs: "See your background tasks and how they went",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

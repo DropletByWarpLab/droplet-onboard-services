@@ -29,12 +29,18 @@
  *
  * ## The boundary this module does NOT cross
  *
- * It moves CURSORS and WATERMARKS. It persists no synced record anywhere.
- * `ErpEntityCache` still has zero writers after this story, and must: ADR-041
- * §4 forbids becoming its first writer until WARP-2028 lands the encryption
- * that model's schema already promises. `secretRef` is likewise never written
- * here. A sweep that cached what it enumerated would be the single easiest way
- * to breach that, which is why the sweep diffs in memory and keeps counts.
+ * It moves CURSORS and WATERMARKS, and — since WARP-2549 — hands a page of
+ * canonical rows to `land.ts`, which writes `company`, `contact` and `deal`
+ * into the CRM tables a human already types into.
+ *
+ * `ErpEntityCache` still has ZERO writers, and must: ADR-041 §4 forbids
+ * becoming its first writer until WARP-2028 lands the encryption that model's
+ * schema already promises. The amended §4 is about inheriting an UNKEPT
+ * PROMISE, not about persistence as such — `CrmCompany` makes no such claim.
+ * PHI datasets (`patient`, `appointment`, `account`) land nowhere at all.
+ * `secretRef` is likewise never written here. A sweep that cached what it
+ * enumerated would still be the single easiest way to breach that, which is
+ * why the sweep diffs in memory and keeps counts.
  *
  * ## Budget
  *
@@ -48,11 +54,15 @@
 import type { Connector } from "@droplet/erp-connector";
 import {
   ConnectorBlockedError,
+  HubSpotCapabilityUnavailableError,
+  MailchimpCapabilityMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
   DEFAULT_CALL_CEILING,
 } from "@droplet/erp-connector";
 import { providerDescriptor } from "@droplet/shared-types";
+
+import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
 
 import { createLogger } from "../../lib/logger.js";
 import type { ActivityRowRecorder } from "../activity.service.js";
@@ -65,6 +75,7 @@ import {
 } from "../erp-provider.js";
 import {
   claimDueErpCursors,
+  POLLABLE_CONNECTION_STATUSES,
   releaseErpCursorFailure,
   releaseErpCursorSuccess,
   upsertErpCursor,
@@ -87,6 +98,13 @@ import {
   type ErpDriftReport,
   type ErpEntityDrift,
 } from "./reconcile.js";
+import {
+  landCanonicalRows,
+  landsOnBox,
+  type LandOutcome,
+  type LandingConnection,
+  type LandingDb,
+} from "./land.js";
 import { redactSyncText } from "./redact.js";
 
 const logger = createLogger("erp-sync");
@@ -119,6 +137,20 @@ export interface ErpSyncPrisma extends ErpCursorPrisma, ErpDriftPrisma {
   };
 }
 
+/**
+ * WARP-2549 — how a page of rows reaches the CRM.
+ *
+ * A seam rather than a direct call because landing must run in a transaction,
+ * and the mocked prisma objects the tick tests build have no `$transaction`.
+ * Production passes the real client and gets `defaultLand` below.
+ */
+export type LandFn = (args: {
+  connection: LandingConnection;
+  entity: string;
+  rows: readonly unknown[];
+  now: Date;
+}) => Promise<LandOutcome | null>;
+
 /** A budget shaped like `CallBudget`, so tests can inject a spent one. */
 export interface SyncCallBudget {
   assertHeadroom(): void;
@@ -132,6 +164,13 @@ export interface ErpSyncDeps {
   connectorFor?: (conn: SyncConnectionRow) => Connector;
   /** Test seam. Production shares the connectors' per-connection budget. */
   budgetFor?: (conn: SyncConnectionRow) => SyncCallBudget;
+  /**
+   * Test seam. Production lands through `land.ts` inside one transaction.
+   * Returns `null` when this build has no landing path at all — which is only
+   * true of a mocked client, and is why the tick test that matters injects
+   * this rather than relying on the default.
+   */
+  land?: LandFn;
   now?: () => Date;
   tickLimit?: number;
   /**
@@ -195,8 +234,43 @@ function defaultBudgetFor(conn: SyncConnectionRow): SyncCallBudget {
   return sharedCallBudget(conn.id, ceiling);
 }
 
+/**
+ * WARP-2623 — is this the vendor refusing a dataset the plan does not include?
+ *
+ * ONE predicate with TWO consumers, deliberately: `asSyncFailure` reads it to
+ * pick the classification and `retryAfterOf` reads it to pick the interval. As
+ * two independent checks they would drift, and the failure mode of that drift
+ * is silent — a capability error classified non-FATAL but ridden up the
+ * exponential ramp still works, it just spends vendor calls to learn what the
+ * error already said.
+ *
+ * `instanceof` rather than a `code` string set, matching the three named
+ * branches below: both classes are exported from `@droplet/erp-connector`, so
+ * this is a compile-time coupling. A renamed class breaks the build; a renamed
+ * `code` literal would silently stop matching.
+ *
+ * A third connector growing a capability error must be added HERE. That is the
+ * same maintenance contract the three named branches already carry, and the
+ * cost of forgetting is stated in `asSyncFailure`.
+ */
+function isCapabilityBlocked(err: unknown): boolean {
+  return (
+    err instanceof HubSpotCapabilityUnavailableError ||
+    err instanceof MailchimpCapabilityMissingError
+  );
+}
+
 /** Pull a `Retry-After` off whatever shape the vendor error arrived in. */
 function retryAfterOf(err: unknown): string | null {
+  // Checked FIRST, and synthesised rather than read: neither vendor sends a
+  // `Retry-After` with a plan boundary, because from their side nothing is
+  // throttled. We know more than the header does — a plan changes on a
+  // human's timescale, never on the 30s base of the exponential ramp — so the
+  // first refused tick goes straight to the ceiling instead of spending seven
+  // pointless calls climbing to it. Expressed in `MAX_BACKOFF_MS` and not a
+  // literal so the two cannot drift; `computeBackoffMs` honours a
+  // `Retry-After` exactly, so this IS the wait.
+  if (isCapabilityBlocked(err)) return String(MAX_BACKOFF_MS / 1000);
   const e = err as { headers?: Record<string, string>; retryAfter?: string } | null;
   if (!e) return null;
   if (typeof e.retryAfter === "string") return e.retryAfter;
@@ -235,6 +309,42 @@ function asSyncFailure(err: unknown): {
     // Not configured, or the vendor is unreachable. Retrying is reasonable.
     return { code: "CONNECTOR_BLOCKED", statusCode: 503, message: err.message };
   }
+  if (isCapabilityBlocked(err)) {
+    // WARP-2623 — the vendor's plan or scope grant does not include this
+    // dataset. Neither class carries a `statusCode`, and `classifySyncFailure`
+    // reads `statusCode` plus two fixed code sets and nothing else, so without
+    // this branch both answered FATAL — and FATAL is TERMINAL here in a way no
+    // other classification is: `releaseErpCursorFailure` parks the cursor
+    // `FAILED` with `nextAttemptAt: null`, `FAILED` is absent from
+    // `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor`'s `update: {}` never
+    // revives it, and `foldSyncState` ranks `FAILED` highest — so ONE refused
+    // dataset renders the WHOLE connection's sync as failed on
+    // `GET /api/integrations`, forever, including after the owner buys the
+    // plan. `entities.ts:80-102` documents that exact chain as a known hazard.
+    //
+    // 429/TRANSIENT is the honest classification, for the same reason
+    // `QuotaExhaustedError` above takes it: nothing is broken and nothing is
+    // permanent. A quota returns next period; a plan boundary returns when the
+    // owner buys the plan — different timescales, same shape, and the
+    // timescale is carried by `retryAfterOf`'s matching arm, not by the class.
+    //
+    // NOT `AUTH`, which is the tempting near-miss: AUTH sets `needsReconnect`,
+    // which sends the owner to re-paste a credential that is working perfectly.
+    // Both error messages say so in as many words.
+    //
+    // Deliberately NOT a new `ErpSyncState` enum member. A dedicated
+    // capability-blocked cursor state would need a second Prisma enum
+    // migration in this PR, a rank in `SYNC_STATE_RANK`, a decision in
+    // `foldSyncState`, and a rendering in the hub — for behaviour `BACKOFF` at
+    // the ceiling already delivers exactly. The connection-level fact the
+    // owner needs is already modelled: it is the `CAPABILITY_LIMITED`
+    // IntegrationStatus this ticket adds.
+    return {
+      code: "CAPABILITY_BLOCKED",
+      statusCode: 429,
+      message: (err as Error).message,
+    };
+  }
   const e = err as { statusCode?: number; status?: number; code?: string; message?: string };
   return {
     statusCode: e?.statusCode ?? e?.status,
@@ -255,6 +365,20 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
   const connectorFor = deps.connectorFor ?? defaultConnectorFor;
   const budgetFor = deps.budgetFor ?? defaultBudgetFor;
   const tickLimit = deps.tickLimit ?? DEFAULT_TICK_LIMIT;
+
+  /**
+   * Land inside ONE transaction, so a page of rows is either all on the box or
+   * none of it is. The caller advances the watermark only after this resolves —
+   * see `runOneCursor`.
+   */
+  const defaultLand: LandFn = async (args) => {
+    const client = prisma as unknown as {
+      $transaction?: <T>(fn: (tx: LandingDb) => Promise<T>) => Promise<T>;
+    };
+    if (typeof client.$transaction !== "function") return null;
+    return client.$transaction((tx) => landCanonicalRows(tx, args));
+  };
+  const land = deps.land ?? defaultLand;
   const sweepIntervalMs = deps.sweepIntervalMs ?? 24 * 60 * 60 * 1000;
 
   /**
@@ -392,6 +516,28 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       // to null and re-enumerate the whole account on the next tick.
       const next = highWaterMark(records) ?? cursor.watermark;
 
+      // WARP-2549 — land BEFORE the watermark moves, and never after.
+      //
+      // The watermark is a promise that everything up to it has been dealt
+      // with. Advancing it first and landing second means a crash, a rollback
+      // or a constraint violation in between loses those rows permanently: the
+      // next tick asks the vendor for rows AFTER the mark and never sees them
+      // again. Landing first costs a re-read of one page in that same crash —
+      // and the re-read is harmless, because `(connectionId, externalId)`
+      // reconciles a row that is already here.
+      //
+      // A landing failure therefore falls into the catch below and parks the
+      // cursor as a sync failure, which is the honest report: the vendor was
+      // read, and this box did not keep what it read.
+      const landing = landsOnBox(cursor.entity)
+        ? await land({
+            connection: { id: conn.id, provider: conn.provider },
+            entity: cursor.entity,
+            rows,
+            now: at,
+          })
+        : null;
+
       await releaseErpCursorSuccess(prisma, cursor.id, next, at);
       await advanceLastHealthy(conn.id, at);
       await audit("Connector synced", true, {
@@ -400,6 +546,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
         entity: cursor.entity,
         recordCount: records.length,
         watermarkAdvanced: next !== cursor.watermark,
+        // Counts only. An audit row is exportable and append-only, which makes
+        // it the worst possible second home for customer content (rule 19).
+        landed: landing?.landed ?? 0,
+        landSkipped: landing?.skipped ?? 0,
+        landSkipReason: landing?.reason ?? null,
       });
       return "IDLE";
     } catch (err) {
@@ -483,8 +634,11 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
      * serves). Idempotent, and never resets an existing cursor's watermark.
      */
     async registerCursors() {
+      // WARP-2623 — the claim's own list, not a third copy of it. A status the
+      // scheduler polls but never registers a cursor for is a connection that
+      // silently syncs nothing.
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
       for (const conn of live) {
@@ -525,7 +679,7 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       let deferred = 0;
 
       const live = await prisma.integrationConnection.findMany({
-        where: { status: { in: ["CONNECTED", "DEGRADED"] } },
+        where: { status: { in: [...POLLABLE_CONNECTION_STATUSES] } },
         select: { id: true, provider: true, status: true },
       });
 

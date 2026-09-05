@@ -44,6 +44,44 @@ export const DEFAULT_MAX_CONCURRENT_CALLS = 4;
  *  not one we should silently obey. */
 export const MAX_HONOURED_PAUSE_MS = 60_000;
 
+/**
+ * The ONLY header names anything in this component is permitted to read off a
+ * remote response (rule 19).
+ *
+ * Declared here, beside the one method that consumes them, so the allowed set
+ * and its consumer cannot drift — `streamable-http.ts` filters a live
+ * `Response` through {@link pickRateLimitHeaders} before the map ever reaches
+ * a callback, which is what keeps an `Authorization` echo or a `Set-Cookie` in
+ * the same response out of reach rather than merely unread.
+ */
+export const RATE_LIMIT_HEADER_NAMES: readonly string[] = [
+  "retry-after",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+];
+
+/**
+ * Narrow an arbitrary header source down to {@link RATE_LIMIT_HEADER_NAMES}.
+ *
+ * Takes a LOOKUP rather than a map so it works against a `Headers` object, a
+ * plain record, or anything else, without the caller first materialising every
+ * header into a structure the rest of the process could reach.
+ *
+ * Returns `null` when none are present, so a caller can skip the work rather
+ * than hand {@link RemoteCallScheduler.noteRateLimitHeaders} an empty map on
+ * every healthy response.
+ */
+export function pickRateLimitHeaders(
+  get: (name: string) => string | null | undefined,
+): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const name of RATE_LIMIT_HEADER_NAMES) {
+    const value = get(name);
+    if (typeof value === "string" && value.length > 0) out[name] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export interface RemoteCallSchedulerOptions {
   /** @default DEFAULT_MAX_CONCURRENT_CALLS */
   maxConcurrent?: number;

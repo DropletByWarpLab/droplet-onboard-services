@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-import type { ToolContext } from "../../../src/types.js";
+import type { ToolContext, ToolResult } from "../../../src/types.js";
 import crmSearchCustomers from "../../../src/handlers/crm/search-customers.js";
 import crmGetCustomer from "../../../src/handlers/crm/get-customer.js";
 import crmListDeals from "../../../src/handlers/crm/list-deals.js";
@@ -28,6 +28,44 @@ const ctx = {
 
 function res(ok: boolean, status: number, body: unknown) {
   return { ok, status, json: async () => body };
+}
+
+// ── Narrowing `ToolResult` (WARP-2606) ──────────────────────────────────────
+//
+// `ToolResult` is a discriminated union: `data` lives ONLY on the `ok: true`
+// arm and `error` ONLY on the `ok: false` arm. Reading either through the
+// union is a TS2339 — which is exactly what `typecheck:tests` reported for the
+// seven `.data` reads below, and `vitest` never saw because esbuild strips
+// types without checking them.
+//
+// The two helpers narrow rather than cast, and that distinction is the point.
+// A cast (`out as { data: X }`) makes the compiler agree while leaving the
+// runtime free to hand back the OTHER arm: a handler that regressed into
+// returning an error would then fail with "cannot read properties of
+// undefined" — or, where the read feeds a `toMatchObject`, quietly compare
+// `undefined` against nothing. Narrowing turns that same regression into a
+// named failure carrying the tool's own error code, at the first line that
+// touches the result.
+type OkResult = Extract<ToolResult, { ok: true }>;
+type ErrResult = Extract<ToolResult, { ok: false }>;
+
+function expectOk(result: ToolResult): OkResult {
+  if (!result.ok) {
+    throw new Error(
+      `expected a successful ToolResult, got ${result.status}: ` +
+        `${result.error.code} — ${result.error.message}`,
+    );
+  }
+  return result;
+}
+
+function expectErr(result: ToolResult): ErrResult {
+  if (result.ok) {
+    throw new Error(
+      `expected a failed ToolResult, got ok with data ${JSON.stringify(result.data)}`,
+    );
+  }
+  return result;
 }
 
 const apiCompany = {
@@ -76,7 +114,7 @@ describe("read tools", () => {
     get.mockResolvedValue(res(true, 200, { companies: [apiCompany], total: 137 }));
     const out = await crmSearchCustomers.handler({ query: "roof" }, ctx);
     expect(out.ok).toBe(true);
-    expect((out.data as { total: number }).total).toBe(137);
+    expect((expectOk(out).data as { total: number }).total).toBe(137);
     expect(get.mock.calls[0][0]).toContain("q=roof");
     expect(get.mock.calls[0][0]).toContain("per_page=20");
   });
@@ -89,7 +127,8 @@ describe("read tools", () => {
       }),
     );
     const out = await crmSearchCustomers.handler({}, ctx);
-    const first = (out.data as { customers: Array<{ synced_from: string | null }> }).customers[0];
+    const first = (expectOk(out).data as { customers: Array<{ synced_from: string | null }> })
+      .customers[0];
     // origin is the explicit column; a stray externalSystem on a LOCAL row is
     // data corruption, not a reason to tell the model the row is synced.
     expect(first.synced_from).toBeNull();
@@ -101,7 +140,8 @@ describe("read tools", () => {
     // somebody is about to quote to a customer.
     get.mockResolvedValue(res(true, 200, { deals: [apiDeal], total: 1 }));
     const out = await crmListDeals.handler({ outcome: "WON" }, ctx);
-    const deal = (out.data as { deals: Array<{ amount_minor: string; outcome: string }> }).deals[0];
+    const deal = (expectOk(out).data as { deals: Array<{ amount_minor: string; outcome: string }> })
+      .deals[0];
     expect(deal.amount_minor).toBe("9007199254740993");
     expect(typeof deal.amount_minor).toBe("string");
     // Outcome comes from stage.kind — the stage NAME here is "Closed — signed",
@@ -142,7 +182,7 @@ describe("read tools", () => {
     );
     const out = await crmGetDeal.handler({ deal_id: "d1" }, ctx);
     expect(out.ok).toBe(true);
-    const data = out.data as { timeline: Array<{ summary: string }> };
+    const data = expectOk(out).data as { timeline: Array<{ summary: string }> };
     expect(data.timeline[0].summary).toBe("Called");
   });
 
@@ -159,7 +199,7 @@ describe("read tools", () => {
       }),
     );
     const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
     expect(stages[0]).toMatchObject({ deals: 3, total: null });
     expect(stages[0].total_note).toContain("mixed currencies");
     expect(stages[0]).not.toHaveProperty("amount_minor");
@@ -186,7 +226,7 @@ describe("read tools", () => {
       }),
     );
     const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
 
     // Both withhold a total — that part was always right.
     expect(stages[0]).toMatchObject({ deals: 4, total: null });
@@ -213,7 +253,7 @@ describe("read tools", () => {
       }),
     );
     const out = await crmPipelineSummary.handler({}, ctx);
-    const stages = (out.data as { stages: Array<Record<string, unknown>> }).stages;
+    const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
     expect(stages[0]).toMatchObject({ amount_minor: "1500" });
     expect(stages[0]).not.toHaveProperty("total_note");
   });
@@ -274,19 +314,17 @@ describe("error mapping", () => {
     get.mockResolvedValue(res(false, 404, { error: "deal_not_found" }));
     const missing = await crmGetDeal.handler({ deal_id: "nope" }, ctx);
     expect(missing.ok).toBe(false);
-    expect((missing as { error: { code: string } }).error.code).toBe("CRM_NOT_FOUND");
+    expect(expectErr(missing).error.code).toBe("CRM_NOT_FOUND");
 
     post.mockResolvedValue(res(false, 422, { error: "invalid_stage" }));
     const wrong = await crmMoveDealStage.handler({ deal_id: "d1", stage_id: "sX" }, ctx);
-    expect((wrong as { error: { code: string; message: string } }).error.code).toBe(
-      "CRM_INVALID_REQUEST",
-    );
-    expect((wrong as { error: { message: string } }).error.message).toBe("invalid_stage");
+    expect(expectErr(wrong).error.code).toBe("CRM_INVALID_REQUEST");
+    expect(expectErr(wrong).error.message).toBe("invalid_stage");
   });
 
   it("maps anything else to a generic API error", async () => {
     get.mockResolvedValue(res(false, 500, { error: "boom" }));
     const out = await crmListDeals.handler({}, ctx);
-    expect((out as { error: { code: string } }).error.code).toBe("CRM_API_ERROR");
+    expect(expectErr(out).error.code).toBe("CRM_API_ERROR");
   });
 });

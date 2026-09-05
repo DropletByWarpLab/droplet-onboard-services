@@ -4,8 +4,8 @@
  * an open socket per pm_* call under a slow/unresponsive orchestrator).
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { callOrch, OrchPmError } from "./pm-orch.js";
-import type { HttpClient, ToolContext } from "../../types.js";
+import { callOrch, OrchPmError } from "../../../src/handlers/pm/pm-orch.js";
+import type { HttpClient, ToolContext } from "../../../src/types.js";
 
 function makeResponse(status: number, body: unknown): Response {
   return {

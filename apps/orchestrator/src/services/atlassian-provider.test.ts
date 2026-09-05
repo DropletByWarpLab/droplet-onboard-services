@@ -37,11 +37,6 @@ import {
   type ProviderDescriptor,
 } from "@droplet/shared-types";
 
-import {
-  ATLASSIAN_TOKEN_EXPIRY_WARNING_DAYS,
-  ATLASSIAN_TOKEN_MAX_LIFETIME_DAYS,
-  atlassianTokenExpiryStatus,
-} from "./atlassian-token-expiry.js";
 import { __setColumnCryptoKeyForTest } from "./column-crypto.service.js";
 import { isCloudErpProvider, isKnownErpProvider } from "./erp-provider.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
@@ -232,18 +227,53 @@ describe("the credential fields match what the attach path reads", () => {
 });
 
 // ===========================================================================
-// The expiry window, and the duplication it is gated against
+// The expiry window — ONE implementation, on the descriptor
 // ===========================================================================
 
-describe("the credential expiry policy agrees with WARP-2353's module", () => {
-  it("mirrors the warning window and the vendor's maximum lifetime", () => {
-    // `atlassian-token-expiry.ts` is orchestrator-only and this descriptor is
-    // bundled into the dashboard, so the numbers are duplicated by necessity —
-    // and CHECKED rather than trusted, the same deal `ATLASSIAN_SERVER_ID` gets.
+/**
+ * WARP-2300 — this section used to assert that two implementations of the
+ * 365-day rule agreed with each other.
+ *
+ * `atlassian-token-expiry.ts` (WARP-2353) and `credentialExpiryVerdict`
+ * (WARP-2650) computed the same verdict from the same numbers, and the only
+ * thing holding them together was a test asserting they matched. One of them —
+ * the vendor-named one — had ZERO production callers: it was imported by its
+ * own test and by this file, and nothing else. The other is wired all the way
+ * to the card the owner reads (`saas-credential.service.ts` →
+ * `SaasCredentialsSection.tsx`).
+ *
+ * So the vendor module is deleted rather than wired up, and these tests now
+ * exercise the one that ships. The reasons, in order:
+ *
+ *  - `credentialExpiryVerdict` lives in `@droplet/shared-types`, which BOTH
+ *    apps can import. The vendor module is orchestrator-only, and the old
+ *    comment here recorded that as the REASON the numbers had to be
+ *    duplicated — wiring it into a surface would have meant duplicating it
+ *    into the dashboard bundle, i.e. a third copy.
+ *  - it is driven by the descriptor's `CredentialExpiryPolicy`, so a second
+ *    expiring vendor is a declaration rather than a second module. The vendor
+ *    module hardcodes Atlassian in its type names, its constants and its prose,
+ *    which is the `provider`-comparison `saas-credential.service.ts` calls "the
+ *    defect it exists to prevent".
+ *  - its vocabulary is strictly larger: `undefined` for a provider with no
+ *    expiry concept is a distinction `AtlassianTokenStatus` cannot express.
+ *
+ * The one rule the deleted module had that the survivor lacked — "no
+ * credential stored" is not "no expiry date recorded" — moved to the wired
+ * path and is asserted in `saas-credential.service.test.ts`. It was a live
+ * defect: every unconnected provider with an expiry policy rendered a warning
+ * about a credential that did not exist.
+ */
+describe("the credential expiry policy", () => {
+  it("carries Atlassian's window and maximum lifetime, on the descriptor", () => {
+    // 365 is Atlassian's documented maximum API-token lifetime; 30 days is the
+    // WARP-2353 window, sized so a warning outlasts a holiday or a handover —
+    // creating a replacement is a customer-admin action in a console the box
+    // does not control, and there is no grace period.
     expect(atlassian().credentialExpiry).toEqual({
       field: "tokenExpiresAt",
-      warningDays: ATLASSIAN_TOKEN_EXPIRY_WARNING_DAYS,
-      maxLifetimeDays: ATLASSIAN_TOKEN_MAX_LIFETIME_DAYS,
+      warningDays: 30,
+      maxLifetimeDays: 365,
     });
   });
 
@@ -256,12 +286,11 @@ describe("the credential expiry policy agrees with WARP-2353's module", () => {
     expect(field?.secret).toBe(false);
   });
 
-  it("classifies the boundary exactly as atlassianTokenExpiryStatus does", () => {
-    // The generic verdict and the vendor module must not disagree about the day
-    // a connection stops being green. The vendor module is handed the SAME
-    // instant the generic one derives from the date string — midnight UTC, the
-    // start of the stated day — because that is the choice under test, not an
-    // accident of how the fixture was written.
+  it("classifies every boundary day the window turns on", () => {
+    // A bare `YYYY-MM-DD` parses as midnight UTC — the START of the stated day
+    // — so a connection reads EXPIRED from the beginning of its last day rather
+    // than at an hour nobody can predict. Warning early costs one unnecessary
+    // rotation; warning late costs an outage the owner was promised notice of.
     const now = new Date("2026-09-02T00:00:00Z");
     const cases: Array<[string, "VALID" | "EXPIRING_SOON" | "EXPIRED", number]> = [
       ["2027-09-02", "VALID", 365],
@@ -279,19 +308,27 @@ describe("the credential expiry policy agrees with WARP-2353's module", () => {
         cloudId: FAKE_CLOUD_ID,
         tokenExpiresAt: date,
       });
-      const generic = credentialExpiryVerdict(atlassian(), config, now);
-      expect(generic, date).toEqual({ status: expected, daysRemaining: days });
-
-      const vendor = atlassianTokenExpiryStatus({
-        hasToken: true,
-        expiresAt: new Date(`${date}T00:00:00Z`),
-        now,
+      expect(credentialExpiryVerdict(atlassian(), config, now), date).toEqual({
+        status: expected,
+        daysRemaining: days,
       });
-      // The vendor module says CONNECTED where the generic one says VALID —
-      // the same verdict in two vocabularies, because one answers "what is
-      // this connection's status" and the other "how long has it got".
-      expect(vendor.status === "CONNECTED" ? "VALID" : vendor.status, date).toBe(expected);
-      expect(vendor.daysRemaining, date).toBe(generic?.daysRemaining);
+    }
+  });
+
+  it("is NEVER VALID inside the window — the rule the whole feature exists for", () => {
+    // A connection twelve days from a hard stop is not healthy, and rendering
+    // it green means the first signal the owner gets is the outage.
+    const now = new Date("2026-09-02T00:00:00Z");
+    for (const days of [30, 29, 12, 1, 0]) {
+      const at = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+      const config = parseProviderConfigWith(atlassian(), {
+        email: FAKE_EMAIL,
+        cloudId: FAKE_CLOUD_ID,
+        tokenExpiresAt: at.toISOString().slice(0, 10),
+      });
+      const verdict = credentialExpiryVerdict(atlassian(), config, now);
+      expect(verdict?.status, `${days} days out`).toBe("EXPIRING_SOON");
+      expect(verdict?.status).not.toBe("VALID");
     }
   });
 
@@ -558,7 +595,11 @@ describe("end to end — the row the connect flow wrote reaches the vendor's too
   it("refuses with ZERO bridge calls while the row is not yet CONNECTED", async () => {
     // A row mid-write — the credential cleared, or an operator having disabled
     // it. `status` is read as the explicit enum, never as "a row exists".
-    const row = { ...connect(GOOD_SUBMISSION), status: "DISABLED" };
+    // `as const` rather than a bare string: #1960 (WARP-2623) narrowed
+    // `SaasConnectionRow.status` from `string` to `IntegrationStatusName`, so a
+    // widened literal here would be a test asserting on a status the column
+    // cannot hold. The narrowing is the guarantee — this fixture opts into it.
+    const row = { ...connect(GOOD_SUBMISSION), status: "DISABLED" as const };
     const h = stack(row, ["atlassian"]);
 
     const result = await h.attach();

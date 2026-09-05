@@ -330,13 +330,23 @@ export const ATLASSIAN_TOOL_INDEX: ReadonlyMap<string, AtlassianToolClassificati
   new Map(ATLASSIAN_TOOL_CLASSIFICATIONS.map((t) => [t.name, t]));
 
 /**
- * The explicit v1 read list — the ONLY names {@link createAtlassianRemoteCallPolicy}
- * will allow.
+ * The explicit v1 read list — the exact set of names
+ * {@link createAtlassianRemoteCallPolicy} will allow on a reachable auth mode.
  *
  * Derived from the table rather than hand-written, so the table stays the one
  * place a privilege decision is recorded. ADR-043 §3 permits exactly this:
  * *"Read-only invocation of tools an operator has explicitly demoted to read
  * status under §2 may ship before those land. Writes may not."*
+ *
+ * This const is the artefact's source (`atlassian-tool-snapshot.ts` renders it
+ * into `docs/security/atlassian-mcp-tool-surface.json`); it is NOT itself
+ * consulted at dispatch. {@link classifyAtlassianRow} re-derives the same two
+ * conditions per row — `v1 === "allowed" && grade === "read"` — so the hot path
+ * needs no set lookup and no import cycle. The two are held in step by
+ * `atlassian-tool-policy.test.ts`, which asserts across the whole shipped table
+ * that dispatch allows a row IFF this set contains it. Until WARP-2300 review
+ * that equality did not hold: dispatch ignored the `v1` disposition entirely
+ * for read-graded rows, so this docstring's claim was false.
  */
 export const ATLASSIAN_V1_READ_TOOLS: ReadonlySet<string> = v1ReadToolsOf(
   ATLASSIAN_TOOL_CLASSIFICATIONS,
@@ -405,9 +415,15 @@ export interface AtlassianPolicyOptions {
  *   3. **wrong auth mode** → `ATLASSIAN_TOOL_UNAVAILABLE_IN_AUTH_MODE`,
  *      checked BEFORE the grade so an operator asking "why can't I read
  *      Compass" gets the true reason rather than a write refusal.
- *   4. **excluded** → its own code, carrying the row's note.
- *   5. **write or destructive** → `REMOTE_WRITE_NOT_PERMITTED`.
- *   6. otherwise allow.
+ *   4. **any v1 disposition other than `allowed`** → `excluded` keeps its own
+ *      code and the row's note; `blocked-write` answers
+ *      `REMOTE_WRITE_NOT_PERMITTED`; anything unrecognised fails closed.
+ *   5. **write or destructive** → `REMOTE_WRITE_NOT_PERMITTED`, independently
+ *      of what step 4 read, so one mis-edited field cannot open a tool.
+ *   6. otherwise allow — and steps 4+5 are exactly the two conditions
+ *      {@link v1ReadToolsOf} ANDs, so the set allowed here IS
+ *      {@link ATLASSIAN_V1_READ_TOOLS} intersected with the reachable auth
+ *      mode. That equality is asserted over the whole table.
  */
 export function createAtlassianRemoteCallPolicy(
   opts: AtlassianPolicyOptions,
@@ -445,11 +461,15 @@ export function classifyAtlassianCall(
  * The decision for ONE row (or for no row at all).
  *
  * Split out from {@link classifyAtlassianCall} so a test can hand it a row the
- * shipped table does not contain — specifically a write row mis-marked
- * `v1: "allowed"`. That case cannot occur on today's table, which is precisely
- * why it needs asserting: it is the one a future edit would introduce, and the
- * grade check below is the second of two independent layers that refuse it
- * (the first being {@link v1ReadToolsOf}).
+ * shipped table does not contain — a write row mis-marked `v1: "allowed"`, and
+ * a read row an operator held back with `v1: "blocked-write"`. Neither case
+ * occurs on today's table, which is precisely why they need asserting: they are
+ * the ones a future edit introduces.
+ *
+ * Both of the conditions {@link v1ReadToolsOf} ANDs are checked here, as two
+ * independent layers, because they say different things: `v1` is the
+ * disposition an operator RECORDED, `grade` is what the tool DOES. One field
+ * edited by mistake must not make a tool callable, in either direction.
  */
 export function classifyAtlassianRow(
   row: AtlassianToolClassification | undefined,
@@ -479,17 +499,30 @@ export function classifyAtlassianRow(
     };
   }
 
-  if (row.v1 === "excluded") {
-    return {
-      kind: "deny",
-      code: ATLASSIAN_DENY_CODES.excluded,
-      message:
-        `'${namespacedName}' is deliberately excluded from this release. ` +
-        (row.note ?? "") +
-        " Do not retry.",
-    };
+  // The v1 DISPOSITION — the decision an operator recorded — is checked here,
+  // and it is checked for EVERY row rather than only for `excluded` ones.
+  //
+  // Until WARP-2300 review this branch read `if (row.v1 === "excluded")`, so a
+  // `blocked-write` disposition was ignored whenever the row's grade said
+  // `read`. That made a row like `{grade: "read", v1: "blocked-write"}` — a
+  // read an operator held back pending WARP-2321 — dispatchable to the vendor
+  // while `docs/security/atlassian-mcp-tool-surface.json`, the reviewed
+  // security artefact derived from `v1ReadToolsOf`, said it was not. The
+  // enforcement path consulted neither `ATLASSIAN_V1_READ_TOOLS` nor
+  // `v1ReadToolsOf`; both were reachable only from tests and
+  // `atlassian-tool-snapshot.ts`.
+  //
+  // `!== "allowed"` rather than a list of refused values, so a fourth
+  // disposition added later is denied by DEFAULT and its author has to come
+  // here to make it callable.
+  if (row.v1 !== "allowed") {
+    return denyByDisposition(row, namespacedName);
   }
 
+  // The second, independent layer, and it means something different: `v1` is
+  // what an operator decided, `grade` is what the tool DOES. A row marked
+  // `allowed` by mistake must still not become callable because one field was
+  // edited — which is the reciprocal case `v1ReadToolsOf` pins at layer one.
   if (row.grade !== "read") {
     return {
       kind: "deny",
@@ -502,4 +535,49 @@ export function classifyAtlassianRow(
   }
 
   return { kind: "allow" };
+}
+
+/**
+ * Turn a non-`allowed` disposition into its refusal.
+ *
+ * `excluded` and `blocked-write` keep DIFFERENT codes because they send an
+ * operator to different places: `excluded` is a decision about this tool that
+ * outlives ADR-043 §3 and needs the row's own note, `blocked-write` is lifted
+ * when WARP-2321's deny tier ships.
+ */
+function denyByDisposition(
+  row: AtlassianToolClassification,
+  namespacedName: string,
+): RemoteCallDecision {
+  switch (row.v1) {
+    case "excluded":
+      return {
+        kind: "deny",
+        code: ATLASSIAN_DENY_CODES.excluded,
+        message:
+          `'${namespacedName}' is deliberately excluded from this release. ` +
+          (row.note ?? "") +
+          " Do not retry.",
+      };
+    case "blocked-write":
+      return {
+        kind: "deny",
+        code: ATLASSIAN_DENY_CODES.writeBlocked,
+        message:
+          `'${namespacedName}' is classified as a ${row.grade} and is held out of ` +
+          "this release by its recorded v1 disposition. Remote calls this box has " +
+          "not admitted to its read set are refused until the runtime deny tier " +
+          "ships (ADR-043 §3). Do not retry; tell the user the call was not made.",
+      };
+    default:
+      // Fail closed. A disposition added to `AtlassianV1Disposition` without a
+      // case here denies rather than falling through to allow.
+      return {
+        kind: "deny",
+        code: ATLASSIAN_DENY_CODES.excluded,
+        message:
+          `'${namespacedName}' carries a v1 disposition this box does not ` +
+          "recognise, so it is refused. Do not retry.",
+      };
+  }
 }

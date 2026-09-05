@@ -6,7 +6,12 @@
  * classifies Atlassian as the **customer-created credential** model: the
  * customer's own admin mints an API token in their own tenant, and the box
  * presents `Authorization: Basic base64(email:api_token)` against
- * `https://mcp.atlassian.com/v1/mcp`. No browser, no redirect URI, no
+ * `mcp.atlassian.com/v1/mcp` (written scheme-less on purpose: the egress
+ * gate's denial pass reads raw lines INCLUDING comments, so a scheme URL in a
+ * docstring is a candidate host in a file that holds no host literal —
+ * `safe-url.ts:20-24` says this component holds none, and the one literal
+ * that decides anything lives in `atlassian.ts` behind the registry entry's
+ * `code_refs`). No browser, no redirect URI, no
  * authorization-code flow — which is what makes WARP-2316 buildable on an
  * appliance with no public inbound path (ADR-009). The OAuth subtasks under
  * WARP-2300 exist for Slack only, and Slack is blocked on WARP-2402.

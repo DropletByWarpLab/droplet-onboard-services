@@ -163,6 +163,8 @@ export function buildContext(
   metaUserId?: string,
   metaEnhancement?: PrivateEnhancement,
   metaUserRole?: string,
+  // WARP-2180 — the durable run this dispatch belongs to, when it does.
+  metaAgentRunId?: string,
 ): ToolContext {
   const userId = claims?.sub ?? metaUserId;
   // WARP-286: bind the searchHybrid shim with the authenticated userId
@@ -229,6 +231,7 @@ export function buildContext(
     searchHybrid,
     readDocumentText,
     userId,
+    agentRunId: metaAgentRunId,
     // HTTP: the JWT claim is authoritative. Stdio (no claims): the
     // orchestrator forwards the caller's role via _meta.userRole
     // (WARP-845) — validated against the Role union, anything else

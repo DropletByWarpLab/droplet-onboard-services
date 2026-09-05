@@ -49,6 +49,13 @@ scripts/image/keys/*.pub text eol=lf
 scripts/image/autoinstall/* text eol=lf
 scripts/image/grub-autoinstall.cfg text eol=lf
 
+# WARP-2685 — the CI-coverage exemption list. Extensionless, so nothing above
+# catches it, and scripts/check-ci-coverage.sh matches its lines with
+# `grep -qxF` against a path: a CRLF checkout makes every entry read as
+# `services/foo\r`, which matches nothing, so the exemption silently stops
+# applying. Pin to LF.
+.github/ci-coverage-exempt text eol=lf
+
 # Prisma migration SQL. file-edit-session.schema.test.ts (and the other
 # *.schema.test.ts guards) read the migration bytes and comment-strip with
 # `/--.*$/` before asserting on the DDL. `.` never matches `\r` and a
@@ -108,3 +115,22 @@ scripts/host/etc-systemd-system.conf.d/* text eol=lf
 # the box's checkout; a trailing CR would land inside a path and every lookup
 # would miss. Same hazard as the units above, same pin.
 scripts/host/MANIFEST text eol=lf
+
+# WARP-2666 - the client-app release declaration, read field-by-field from the
+# box's checkout by scripts/app-downloads/audit.sh. Extensionless, so nothing
+# above catches it. A trailing CR lands in the LAST field of every row: on a
+# 3-field `absent`/`blocked` row it ends up INSIDE the ticket, so `-\r` stops
+# equalling `-` and the auditor refuses to give a verdict on a file that is
+# perfectly correct. Same hazard as MANIFEST, same pin.
+data/app-downloads/EXPECTED text eol=lf
+
+# WARP-2613 — shared cross-language fixtures. scripts/fixtures/heading-slug-
+# cases.tsv is the single statement of the heading-slug rule, and BOTH
+# implementations parse it FIELD-WISE: integration-guides.test.ts splits on the
+# tab, and check-setup-guides.sh reads it with `while IFS=<tab> read -r heading
+# expected`. `read` keeps a trailing CR inside the value, so a Windows checkout
+# (core.autocrlf=true) hands every `expected` slug a trailing `\r` and both
+# checkers compare two VISUALLY IDENTICAL strings that differ by one invisible
+# byte. Same class as the migration SQL and snapshot pins above; same fix.
+# Guarded by the `.gitattributes` pin assertion in integration-guides.test.ts.
+*.tsv text eol=lf

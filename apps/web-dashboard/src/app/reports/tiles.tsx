@@ -10,6 +10,8 @@
  * invents its own empty state is the thing to avoid.
  */
 
+import { formatFigure } from "@/components/money/format";
+import { useMoneySummary } from "@/app/money/useMoney";
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -503,21 +505,138 @@ function money(n: number): string {
   });
 }
 
-/** The half that has no data source, ever. Brief §9.1. */
-function MoneyOutHalf() {
+/**
+ * The paid-out half's shell. One label row, one body, one anchor bar — the
+ * same skeleton in every state, because a half that changes shape as it loads
+ * makes the tile jump next to a half that does not.
+ */
+function OutHalf({
+  icon,
+  children,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="rp-money-half">
       <div className="rp-money-label">
-        <TrendingDown size={14} aria-hidden="true" />
+        {icon}
         Paid out
       </div>
-      <div className="rp-money-note">No accounting system connected</div>
-      <div className="rp-money-sub">Connect one to see money going out.</div>
-      <a href="/integrations" className="rp-state-link">
-        Browse connectors →
-      </a>
-      {/* Present so the two halves stay balanced, but obviously inert. */}
-      <span className="rp-money-bar is-inert" />
+      {children}
+    </div>
+  );
+}
+
+const OUT_ICON = <TrendingDown size={14} aria-hidden="true" />;
+
+/**
+ * The half the brief recorded as having no data source, ever (§9.1).
+ *
+ * WARP-2581 gave it one: bills landed from a connected cloud ledger. It stays
+ * a DOORWAY rather than a ledger — one figure and a link — because Reports
+ * answers "how did it go" and /money answers "who owes what".
+ *
+ * 🔴 Two ledgers are never added here either. Where more than one contributes,
+ * the figure is withheld and the tile says how many bills across how many
+ * ledgers; the page that can show them side by side is one click away.
+ *
+ * 🔴 AND FIVE NOT-A-FIGURE STATES ARE FIVE DIFFERENT FACTS. This half once
+ * read `summary` alone, so a failed read, a refusal, a module that is off and
+ * a first paint all rendered "No accounting system connected" — sending an
+ * owner to reconnect a connector that was working. The distinctions are the
+ * ones `/money` itself makes on `error.status`, in this tile's vocabulary.
+ */
+function MoneyOutHalf() {
+  const { summary, error } = useMoneySummary();
+
+  // A refusal outranks everything: it must not be softened into an empty
+  // state, and it says nothing about what is behind it. No count, no ledger
+  // count, no CTA — describing the data to someone who may not see it has
+  // already leaked its shape.
+  if (error?.status === 403) {
+    return (
+      <OutHalf icon={<Lock size={14} aria-hidden="true" />}>
+        <div className="rp-money-note">Your role doesn&apos;t include this.</div>
+        <span className="rp-money-bar is-inert" />
+      </OutHalf>
+    );
+  }
+
+  // 404 is the `money` module being off (`routePrefixes`), which on a box that
+  // has connected nothing is the ordinary state — `defaultEnabled: false`.
+  if (error !== undefined && error.status !== 404) {
+    return (
+      <OutHalf icon={<AlertTriangle size={14} className="rp-state-err" aria-hidden="true" />}>
+        <div className="rp-money-note">Couldn&apos;t read what you owe</div>
+        <div className="rp-money-sub">What was read before is on the Money page.</div>
+        <span className="rp-money-bar is-inert" />
+      </OutHalf>
+    );
+  }
+
+  // Still reading. Never a zero and never "not connected" on the way to a
+  // figure — a claim that changes is one the reader has already acted on.
+  if (error === undefined && summary === undefined) {
+    return (
+      <OutHalf icon={OUT_ICON}>
+        <span className="rp-skel" style={{ width: "76%", height: 34 }} />
+      </OutHalf>
+    );
+  }
+
+  const payable = summary?.payable;
+
+  if (payable === undefined || payable.documentCount === 0) {
+    // `lastReadAt` is the box's read window across BOTH directions, so a null
+    // one means nothing has ever landed — there is genuinely nothing wired up.
+    // A non-null one with no open bills is a real and welcome answer.
+    const nothingLanded = summary === undefined || summary.lastReadAt === null;
+    return (
+      <OutHalf icon={OUT_ICON}>
+        {nothingLanded ? (
+          <>
+            <div className="rp-money-note">No accounting system connected</div>
+            <div className="rp-money-sub">Connect one to see money going out.</div>
+            <a href="/integrations" className="rp-state-link">
+              Browse connectors →
+            </a>
+          </>
+        ) : (
+          <>
+            <div className="rp-money-note">Nothing owed</div>
+            <div className="rp-money-sub">No open bills in your ledger.</div>
+          </>
+        )}
+        {/* Present so the two halves stay balanced, but obviously inert. */}
+        <span className="rp-money-bar is-inert" />
+      </OutHalf>
+    );
+  }
+
+  const single = payable.ledgers.length === 1 ? payable.ledgers[0] : null;
+  return (
+    <div className="rp-money-half">
+      <div className="rp-money-label">
+        {OUT_ICON}
+        You owe
+      </div>
+      {single ? (
+        <>
+          <div className="rp-money-fig">{formatFigure(single.balance, single.currency)}</div>
+          <div className="rp-money-sub">
+            across <span className="rp-mono">{payable.documentCount}</span> open bills
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="rp-money-note">
+            {payable.documentCount} open bills in {payable.ledgers.length} ledgers
+          </div>
+          <div className="rp-money-sub">Totals aren&rsquo;t shown across ledgers.</div>
+        </>
+      )}
+      <span className="rp-money-bar is-in" />
     </div>
   );
 }
@@ -618,6 +737,11 @@ export function MoneyBody({
         )}
       </div>
       <MoneyOutHalf />
+      {/* The doorway. Reports answers "how did it go"; /money answers "who
+          owes what". Do not grow a ledger inside this tile. */}
+      <a href="/money" className="rp-state-link">
+        Open Money →
+      </a>
     </>
   );
 }
