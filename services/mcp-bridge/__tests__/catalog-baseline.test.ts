@@ -14,10 +14,15 @@
  * these tests are what stop it being quietly dropped on any of the three hops
  * between the orchestrator and the session.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { ATLASSIAN_MCP_PROTOCOL_VERSION, ATLASSIAN_MCP_URL } from "../src/atlassian.js";
 import { RemoteMcpSession, type RemoteMcpConnection } from "../src/remote-session.js";
 import { handleBridgeRequest, BridgeSessionStore } from "../src/http-api.js";
-import type { OpenSessionInput, SessionFactory } from "../src/session-profiles.js";
+import {
+  createAtlassianSessionFactory,
+  type OpenSessionInput,
+  type SessionFactory,
+} from "../src/session-profiles.js";
 
 const TOKEN = "bridge-token-FAKE-0000000000000000";
 const AUTH = `Bearer ${TOKEN}`;
@@ -200,5 +205,99 @@ describe("the wire carries the baseline to the session", () => {
       { serviceToken: TOKEN, store },
     );
     expect(JSON.stringify(res.body)).not.toContain("ATATT-FAKE-000000000000");
+  });
+});
+
+describe("the PRODUCTION factory hands the baseline to the session", () => {
+  /**
+   * `createAtlassianSessionFactory` is what `SESSION_FACTORIES` serves, and it
+   * has been a builder rather than a literal since the WARP-2300 rate-limit
+   * seam — which is where this branch's `knownTools` → `knownToolNames`
+   * hand-over had to be re-homed on the merge to `stage`. The tests above
+   * prove the wire carries the field to A factory; this one proves the SHIPPED
+   * factory does not drop it on the floor, which `http-api.ts`'s 400 guard
+   * cannot see (it validates the field and hands it on; what the factory then
+   * does with it is invisible to the route).
+   *
+   * Same socket stub as `rate-limit-seam.test.ts`: the SDK, the transport, the
+   * guard stack, the scheduler and the session are all real, and
+   * `globalThis.fetch` throws on any URL or method it was not given.
+   */
+  function stubVendorServing(names: string[]): void {
+    const impl = async (url: unknown, init: unknown): Promise<Response> => {
+      if (String(url) !== ATLASSIAN_MCP_URL) {
+        throw new Error(`the stub was asked for an unexpected URL: ${String(url)}`);
+      }
+      const raw = (init as { body?: string }).body;
+      // The SDK's GET for the SSE stream; a POST-only server answers 405.
+      if (raw === undefined) return new Response(null, { status: 405 });
+      const message = JSON.parse(raw) as { id?: number; method: string };
+      const reply = (result: unknown) =>
+        new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      switch (message.method) {
+        case "initialize":
+          return reply({
+            protocolVersion: ATLASSIAN_MCP_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: "atlassian-mcp-server", version: "1.0.0" },
+          });
+        case "notifications/initialized":
+          return new Response(null, { status: 202 });
+        case "tools/list":
+          return reply({
+            tools: names.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+          });
+        default:
+          throw new Error(`the stub was asked for an unexpected method: ${message.method}`);
+      }
+    };
+    vi.stubGlobal("fetch", vi.fn(impl));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a session built by createAtlassianSessionFactory flips to catalog_changed on its FIRST listing", async () => {
+    stubVendorServing(["getJiraIssue", "deleteJiraIssue"]);
+    const factory = createAtlassianSessionFactory();
+    const s = factory({
+      email: "ops@vendor.example",
+      apiToken: "ATATT-FAKE-000000000000",
+      cloudId: "00000000-0000-4000-8000-000000000000",
+      knownTools: ["getJiraIssue", "getConfluencePage"],
+    });
+    expect((await s.connect()).state).toBe("ready");
+
+    await s.listTools();
+
+    // THE assertion behind the merge resolution: the builder handed
+    // `knownTools` to the session. Drop the spread inside
+    // `createAtlassianSessionFactory` and this reads "ready" — the moved
+    // surface silently absorbed on the first re-open after a bridge restart.
+    expect(s.state).toBe("catalog_changed");
+    expect(s.catalogDrift()).toEqual({
+      removed: ["getConfluencePage"],
+      added: ["deleteJiraIssue"],
+    });
+    await s.close();
+  });
+
+  it("and stays ready when the shipped factory is handed the surface it then sees", async () => {
+    stubVendorServing(["getJiraIssue", "getConfluencePage"]);
+    const s = createAtlassianSessionFactory()({
+      email: "ops@vendor.example",
+      apiToken: "ATATT-FAKE-000000000000",
+      cloudId: "00000000-0000-4000-8000-000000000000",
+      knownTools: ["getJiraIssue", "getConfluencePage"],
+    });
+    await s.connect();
+    await s.listTools();
+    expect(s.state).toBe("ready");
+    expect(s.catalogDrift()).toBeNull();
+    await s.close();
   });
 });
