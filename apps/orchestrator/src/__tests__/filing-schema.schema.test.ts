@@ -125,6 +125,32 @@ describe("WARP-2729 — filing migrations exist and are self-consistent", () => 
     expect(ours.length).toBeGreaterThan(0);
     expect(ours.every((d) => d > PREDECESSOR_ON_STAGE)).toBe(true);
   });
+
+  it("🔴 the enum widening applies before the tables that store its values", () => {
+    // The ordering that actually matters, and the only one this feature can
+    // assert without speaking for the whole repo: Prisma applies in
+    // folder-name order, so the `ALTER TYPE ... ADD VALUE` must sort BEFORE
+    // the tables whose columns use those values. Getting it wrong is not a
+    // test failure — it is an upgrade that dies partway through on a
+    // customer's box, ledger migrated and proposal tables not.
+    //
+    // Written as a relation between the three, NOT as a list of the folders
+    // that exist: a membership assertion is the same "wrong by construction"
+    // shape as the predecessor derivation above, and slice 3's first migration
+    // would falsify it.
+    const all = readdirSync(MIGRATIONS).filter((d) => /^\d{14}_/.test(d)).sort();
+    const find = (needle: string) => {
+      const hit = all.find((d) => d.includes(needle));
+      expect(hit, `no migration matching ${needle}`).toBeTruthy();
+      return hit as string;
+    };
+    const ledger = find("warp_2729_filing_ledger");
+    const enumWidening = find("warp_2729_extracted_origin");
+    const tables = find("warp_2729_filing_tables");
+
+    expect(ledger < enumWidening).toBe(true);
+    expect(enumWidening < tables).toBe(true);
+  });
 });
 
 describe("RULE 1 — no CHECK constrains a column an FK will SetNull", () => {
