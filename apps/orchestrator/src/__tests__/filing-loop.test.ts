@@ -104,7 +104,7 @@ function queueReplies(...contents: string[]): void {
   completeOnceMock.mockResolvedValue({ content: "", model: "test-model" });
 }
 
-const noMatch = async (): Promise<MatchOutcome> => ({ kind: "NONE" });
+const noMatch = async (): Promise<MatchOutcome> => ({ kind: "NONE", nearestScore: 0 });
 const PROPOSE_SETTINGS = {
   mode: "propose" as const,
   level: "links_only" as const,
@@ -445,6 +445,7 @@ describe("drafts: canned JSON to exact rows", () => {
         companyId: "11111111-1111-4111-8111-111111111111",
         companyName: "ACME Dental Supply Ltd",
         taught: false,
+        targetIsExternal: false,
       }),
       entities: {
         companies: [
@@ -846,7 +847,7 @@ describe("🔴 free mail providers are never a match key", () => {
       settings: PROPOSE_SETTINGS,
       resolveMatch: async (input) => {
         seen.push(...(input.emails ?? []));
-        return { kind: "NONE" };
+        return { kind: "NONE", nearestScore: 0 };
       },
       entities: {
         companies: [

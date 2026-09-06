@@ -1202,7 +1202,7 @@ async function main() {
     5 * 60_000,
     async () => {
       const result = await runFilingReconcile(prisma);
-      if (result.reArmed > 0 || result.givenUp > 0 || result.retried > 0) {
+      if (result.reArmed > 0 || result.givenUp > 0 || result.retried > 0 || result.freed > 0) {
         logger.info(result, "filing stale-claim reconcile");
       }
     },

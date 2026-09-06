@@ -60,7 +60,7 @@ function headlineForApplied(p: FilingProposal): string {
   }
 }
 
-export type FilingTab = "review" | "rules" | "skipped";
+export type FilingTab = "review" | "rules" | "skipped" | "settings";
 
 export function FilingTabList({
   tab,
@@ -75,6 +75,10 @@ export function FilingTabList({
     { id: "review", label: "Needs a look", count: pending },
     { id: "rules", label: "What you've taught it" },
     { id: "skipped", label: "Left alone" },
+    // WARP-2733 — last, and named for what it answers rather than for what it
+    // is. "Settings" would be a place you configure a machine; this is where
+    // an owner reads, in sentences, what the box is allowed to do on its own.
+    { id: "settings", label: "What Droplet does" },
   ];
   return (
     <div className="filing-tabs" role="tablist" aria-label="Filing">
@@ -185,6 +189,15 @@ export function RecentlyFiled({
         {undoable.map((p) => (
           <li key={p.id}>
             <span>{headlineForApplied(p)}</span>
+            {/* 🔴 WARP-2733 — said on the ROW, not in a filter or a legend.
+                The owner has to be able to tell, at a glance and without
+                clicking anything, which of these they did and which the box
+                did for them. That distinction is the entire consent record
+                made visible; hiding it behind a control would make "you can
+                always see what it did by itself" a claim rather than a fact. */}
+            {p.autoApplied ? (
+              <span className="filing-auto-chip">Droplet did this one</span>
+            ) : null}
             <button
               className="pm-btn sm ghost"
               disabled={busyId === p.id}
