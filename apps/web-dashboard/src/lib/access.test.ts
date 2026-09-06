@@ -592,7 +592,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "email", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "memory", level: "view" },
       ],
       connectorGrants: [],
@@ -656,8 +655,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "calendar", level: "use" },
         { domain: "reminders", level: "use" },
         { domain: "notifications", level: "use" },
-        { domain: "crm", level: "use" },
-        { domain: "pm", level: "use" },
         { domain: "memory", level: "use" },
         { domain: "money", level: "use" },
         { domain: "team_chat", level: "use" },
@@ -688,7 +685,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       toolGrants: [
         { domain: "money", level: "use" },
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "business", level: "view" },
         { domain: "data", level: "view" },
       ],
@@ -745,7 +741,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { moduleId: "team_chat", level: "act" },
       ],
       toolGrants: [
-        { domain: "crm", level: "view" },
         { domain: "email", level: "view" },
         { domain: "files", level: "view" },
         { domain: "calendar", level: "view" },
@@ -777,12 +772,10 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       ],
       toolGrants: [
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "calendar", level: "view" },
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "memory", level: "view" },
-        { domain: "pm", level: "view" },
       ],
       connectorGrants: [],
       cloudModelsAllowed: false,
@@ -892,13 +885,22 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
 
   // ── Trap: the four domains no UI group covers ───────────────────────────
   describe("ungrouped tool domains (the silent-drop trap)", () => {
-    it("TOOL_DOMAIN_GROUPS covers neither crm, money, team_chat nor agent_runs", () => {
+    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat nor agent_runs", () => {
       // The premise the whole seeding strategy rests on. If a group ever adopts
       // one of these, this pin fails and `templateToDraft` needs re-reading — a
       // grouped domain is fanned out, not passed through.
-      for (const ungrouped of ["crm", "money", "team_chat", "agent_runs"]) {
+      for (const ungrouped of ["money", "team_chat", "agent_runs"]) {
         expect(GROUPED_DOMAINS.has(ungrouped)).toBe(false);
       }
+      // WARP-2761: `crm` was on that list and is NOT ungrouped — the Business
+      // row adopted it and `pm` when ADR-045 (WARP-2583) emptied both into
+      // `business`. This half of WARP-2738 was written against the older
+      // table on a branch that predated it, and no stage run executed either
+      // suite before the merge. The positive statement lives in the
+      // "business is its own on-box row" spec above; stated here too, from
+      // this side, so the two cannot drift apart again.
+      expect(GROUPED_DOMAINS.has("crm")).toBe(true);
+      expect(GROUPED_DOMAINS.has("pm")).toBe(true);
     });
 
     it("seeds originalToolGrants with the template's rows VERBATIM, ungrouped included", () => {
@@ -907,21 +909,22 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         sortTools(byTemplateId("office-manager").toolGrants),
       );
       expect(draft.originalToolGrants.map((t) => t.domain)).toEqual(
-        expect.arrayContaining(["crm", "money", "team_chat"]),
+        expect.arrayContaining(["money", "team_chat"]),
       );
     });
 
-    it("REGRESSION: dropping the ungrouped rows loses crm, money and team_chat silently", () => {
+    it("REGRESSION: dropping the ungrouped rows loses money and team_chat silently", () => {
       // The defect this seeding exists to prevent. A draft that trusted the
       // groups to cover the tool axis — seeding originalToolGrants with only
       // the domains TOOL_DOMAIN_GROUPS knows — ships an Office Manager with no
-      // CRM, no Money and no Messages tools, and nothing anywhere says so.
+      // Money and no Messages tools, and nothing anywhere says so. (`crm` was
+      // named here too until WARP-2761; it is grouped now, so it survives the
+      // filter and proves nothing about the pass-through path.)
       const draft = templateToDraft(byTemplateId("office-manager"));
       draft.originalToolGrants = draft.originalToolGrants.filter((t) =>
         GROUPED_DOMAINS.has(t.domain),
       );
       const domains = draftToRolePayload(draft).toolGrants.map((t) => t.domain);
-      expect(domains).not.toContain("crm");
       expect(domains).not.toContain("money");
       expect(domains).not.toContain("team_chat");
     });
