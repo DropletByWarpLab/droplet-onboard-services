@@ -249,7 +249,8 @@ ALTER TABLE "FilingDecision"
     ("verdict" IN ('NOT_SAME', 'ALWAYS_HERE')) = ("companyId" IS NOT NULL)
   );
 
--- One live rule per (key, verdict[, company]).
+-- One live rule per key for the single-answer verdicts; per (key, company) for
+-- the exclusion list.
 --
 -- Partial uniques rather than a compound `@@unique`, because a compound unique
 -- over a NULLABLE column never collides in Postgres (NULL <> NULL) — the trap
@@ -259,8 +260,19 @@ CREATE UNIQUE INDEX "FilingDecision_ignore_source_key"
   ON "FilingDecision"("keyKind", "keyValue")
   WHERE "verdict" = 'IGNORE_SOURCE';
 
+-- 🔴 `companyId` is deliberately NOT in this key.
+--
+-- ALWAYS_HERE is a positive, single-answer assignment: "mail from @acme.com
+-- files under THIS customer". Keying it per-company would let two companies
+-- each hold a live ALWAYS_HERE rule for the same sender domain at once, and the
+-- matcher would then have two contradictory answers for one key with nothing in
+-- the schema to break the tie. One key, one destination — re-pointing a rule
+-- replaces the row rather than accumulating a second one.
+--
+-- NOT_SAME below is the opposite shape and DOES key per-company, because "this
+-- sender is not company A" and "…not company B" are both true at once.
 CREATE UNIQUE INDEX "FilingDecision_always_here_key"
-  ON "FilingDecision"("keyKind", "keyValue", "companyId")
+  ON "FilingDecision"("keyKind", "keyValue")
   WHERE "verdict" = 'ALWAYS_HERE';
 
 CREATE UNIQUE INDEX "FilingDecision_not_same_key"

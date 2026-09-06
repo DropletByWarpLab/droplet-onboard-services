@@ -145,17 +145,19 @@ export async function teachNotSame(
       companyId: input.companyId,
     },
   });
-  const row =
-    existing ??
-    (await prisma.filingDecision.create({
-      data: {
-        keyKind: input.keyKind,
-        keyValue,
-        verdict: "NOT_SAME",
-        companyId: input.companyId,
-        createdById: actorId,
-      },
-    }));
+  // 🔴 findFirst-then-create is check-then-act, and two clicks (a double-click,
+  // two tabs) can both find nothing and both insert.
+  //
+  // What stops a duplicate row is NOT this check — it is
+  // `FilingDecision_not_same_key`, the partial unique on
+  // (keyKind, keyValue, companyId) WHERE verdict = 'NOT_SAME', created with the
+  // table in WARP-2729. (It does not appear as `@@unique` in schema.prisma
+  // because Prisma cannot express a partial index; the constraint is real
+  // regardless — see the migration.) So the loser of the race gets P2002, and
+  // the only defect left is that an UNHANDLED P2002 is a 500 on a button whose
+  // job is already done. Recover by reading back the row the winner wrote:
+  // "stop filing here" is idempotent by nature.
+  const row = existing ?? (await createOrLoadNotSame(prisma, input, keyValue, actorId));
 
   const company = await prisma.crmCompany.findUnique({
     where: { id: input.companyId },
@@ -172,4 +174,32 @@ export async function teachNotSame(
     sentence: sentenceFor({ ...row, companyName }),
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/** Structural P2002 check — same shape the rest of the repo uses, without
+ *  importing Prisma's error classes (which the mocked-client unit lane does not
+ *  construct). */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
+}
+
+/** Create the NOT_SAME rule, or return the one that beat us to it. */
+async function createOrLoadNotSame(
+  prisma: PrismaClient,
+  input: { keyKind: IngestKeyKind; companyId: string },
+  keyValue: string,
+  actorId: string,
+) {
+  const where = {
+    keyKind: input.keyKind,
+    keyValue,
+    verdict: "NOT_SAME" as const,
+    companyId: input.companyId,
+  };
+  try {
+    return await prisma.filingDecision.create({ data: { ...where, createdById: actorId } });
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    return await prisma.filingDecision.findFirstOrThrow({ where });
+  }
 }

@@ -136,6 +136,10 @@ export interface ApiProject {
    *  `source` is always `"project"` here; the field is shaped identically to a
    *  work item's so one dashboard component renders both. */
   department: PmDepartmentRef | null;
+  /** ADR-048 (WARP-2729) — the customer this project is filed under, or null.
+   *  Exposed as the bare id (like `leadId`) so a `company_id` write is
+   *  confirmable through GET/list; without it the writer is unobservable. */
+  companyId: string | null;
   archived: boolean;
   /** Non-terminal items (backlog + unstarted + started). Present on list. */
   openCount: number;
@@ -239,6 +243,7 @@ function mapProject(row: ProjectRow): ApiProject {
     color: row.color,
     leadId: row.leadId,
     department: resolveDepartmentRef(null, row.department),
+    companyId: row.companyId,
     archived: row.isArchived,
     openCount: 0,
     doneCount: 0,
@@ -333,6 +338,21 @@ function deriveIdentifier(name: string): string {
  *  typed string error the happy path throws, so the route layer returns the
  *  correct HTTP status instead of leaking a raw 500. */
 /** Shared with pm-relations.service.ts -- one Prisma-code predicate, not two copies. */
+/**
+ * ADR-048 — is this P2003 the *company* foreign key?
+ *
+ * `PmProject` carries three FKs a caller can set (company, department, lead), so
+ * mapping any P2003 to `company_not_found` would mislabel a department race as a
+ * customer problem. Prisma names the constraint in `meta.field_name`
+ * (e.g. `PmProject_companyId_fkey`), so match on that and let anything else
+ * surface unchanged.
+ */
+function isCompanyFkViolation(err: unknown): boolean {
+  if (!isPrismaCode(err, "P2003")) return false;
+  const field = (err as { meta?: { field_name?: unknown } }).meta?.field_name;
+  return typeof field === "string" && field.toLowerCase().includes("company");
+}
+
 export function isPrismaCode(
   err: unknown,
   code: "P2002" | "P2025" | "P2003" | "P2034",
@@ -558,7 +578,12 @@ export async function createProject(
   // Checked here rather than left to the FK so the caller gets
   // `company_not_found` (→404) instead of a redacted P2003 500 — the exact
   // defect WARP-2577 fixed on five CRM columns, not re-introduced here.
-  if (input.companyId) await assertCompanyExists(prisma, input.companyId);
+  // `!== undefined`, not truthiness: `company_id: ""` is falsy, so a truthy
+  // check skipped the existence probe AND survived the `?? null` write (`??`
+  // does not coerce ""), reaching Postgres as an empty FK — a raw P2003 500.
+  // The zod schemas reject "" at the boundary; this keeps the service honest on
+  // its own, and matches `updateProject`'s shape below.
+  if (input.companyId !== undefined) await assertCompanyExists(prisma, input.companyId);
 
   const workspace = await prisma.pmWorkspace.upsert({
     where: { slug: input.workspaceSlug ?? HOME_WORKSPACE_SLUG },
@@ -613,6 +638,12 @@ export async function createProject(
     return mapProject(created);
   } catch (err) {
     if (isPrismaCode(err, "P2002")) throw new Error(PM_ERRORS.IDENTIFIER_TAKEN);
+    // A company hard-deleted between `assertCompanyExists` and this insert
+    // fails the FK. Companies CAN be hard-deleted (crm.service.ts), unlike
+    // departments, so the race is reachable — surface `company_not_found`
+    // (→404) rather than a redacted 500. Same idiom as the parent-FK race in
+    // `createWorkItem`.
+    if (isCompanyFkViolation(err)) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
     throw err;
   }
 }
@@ -686,11 +717,19 @@ export async function updateProject(
     data.isArchived = fields.archived;
     data.archivedAt = fields.archived ? new Date() : null;
   }
-  const updated = await prisma.pmProject.update({
-    where: { id: projectId },
-    data,
-    include: PROJECT_INCLUDE,
-  });
+  // Same FK race as `createProject`: the existence check above and this write
+  // are two round-trips, and the customer can vanish in between.
+  let updated;
+  try {
+    updated = await prisma.pmProject.update({
+      where: { id: projectId },
+      data,
+      include: PROJECT_INCLUDE,
+    });
+  } catch (err) {
+    if (isCompanyFkViolation(err)) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
+    throw err;
+  }
   return mapProject(updated);
 }
 
