@@ -892,13 +892,29 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
 
   // ── Trap: the four domains no UI group covers ───────────────────────────
   describe("ungrouped tool domains (the silent-drop trap)", () => {
-    it("TOOL_DOMAIN_GROUPS covers neither crm, money, team_chat nor agent_runs", () => {
+    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat nor agent_runs", () => {
       // The premise the whole seeding strategy rests on. If a group ever adopts
       // one of these, this pin fails and `templateToDraft` needs re-reading — a
       // grouped domain is fanned out, not passed through.
-      for (const ungrouped of ["crm", "money", "team_chat", "agent_runs"]) {
+      //
+      // 🔴 `crm` was on this list and is deliberately off it now. ADR-045
+      // (WARP-2583) gave `business` its own row and put `business`, `pm` and
+      // `crm` in it, precisely so withholding Projects stops being a no-op. The
+      // pin did its job — it failed the moment a group adopted one of these —
+      // and re-reading `templateToDraft` is what this change is: a grouped
+      // `crm` is fanned out through the Business row rather than passed
+      // through, which the round-trip tests above cover for every template.
+      for (const ungrouped of ["money", "team_chat", "agent_runs"]) {
         expect(GROUPED_DOMAINS.has(ungrouped)).toBe(false);
       }
+    });
+
+    it("…and `crm` / `pm` ARE grouped, under Business", () => {
+      // The other half. Without this the list above could quietly lose an
+      // entry and still pass, which is how the stale pin survived a merge.
+      expect(GROUPED_DOMAINS.has("crm")).toBe(true);
+      expect(GROUPED_DOMAINS.has("pm")).toBe(true);
+      expect(GROUPED_DOMAINS.has("business")).toBe(true);
     });
 
     it("seeds originalToolGrants with the template's rows VERBATIM, ungrouped included", () => {
@@ -911,19 +927,26 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       );
     });
 
-    it("REGRESSION: dropping the ungrouped rows loses crm, money and team_chat silently", () => {
+    it("REGRESSION: dropping the ungrouped rows loses money and team_chat silently", () => {
       // The defect this seeding exists to prevent. A draft that trusted the
       // groups to cover the tool axis — seeding originalToolGrants with only
       // the domains TOOL_DOMAIN_GROUPS knows — ships an Office Manager with no
-      // CRM, no Money and no Messages tools, and nothing anywhere says so.
+      // Money and no Messages tools, and nothing anywhere says so.
+      //
+      // `crm` is no longer one of the casualties, because ADR-045 moved it into
+      // the Business group: it now survives the filter on the grouped path.
+      // That is a narrowing of the blast radius, not a fix — `money` and
+      // `team_chat` are still carried ONLY by the pass-through, which is why
+      // this test still matters.
       const draft = templateToDraft(byTemplateId("office-manager"));
       draft.originalToolGrants = draft.originalToolGrants.filter((t) =>
         GROUPED_DOMAINS.has(t.domain),
       );
       const domains = draftToRolePayload(draft).toolGrants.map((t) => t.domain);
-      expect(domains).not.toContain("crm");
       expect(domains).not.toContain("money");
       expect(domains).not.toContain("team_chat");
+      // …and the grouped one does survive, which is what changed.
+      expect(domains).toContain("crm");
     });
 
     it("a domain this build's groups do not know rides through untouched", () => {

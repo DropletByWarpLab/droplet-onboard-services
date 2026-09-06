@@ -169,12 +169,22 @@ export const ROLE_TEMPLATES = [
       { moduleId: "voice", level: "act" },
     ],
     toolGrants: [
+      // ADR-045 (WARP-2583) collapsed the project/CRM tools into the
+      // `business` domain, leaving `crm` and `pm` holding ZERO tools — they
+      // survive only as landing slots for a remote tracker or CRM catalogue.
+      // `tierReachableDomains` admits a domain only when the catalogue has a
+      // non-write tool in it, so a zero-tool domain is unreachable for family
+      // and guest, and granting it here granted nothing while failing the
+      // tier-reachability invariant. The `crm` / `pm` MODULE grants above are
+      // untouched — those are what gate /api/crm/* and /api/pm/* at the route.
+      // Deliberately not widening the tier filter instead: if a HubSpot or
+      // Atlassian catalogue later registers WRITE tools under these domains,
+      // family and guest must not inherit them silently.
       { domain: "files", level: "view" },
       { domain: "calendar", level: "view" },
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "email", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "memory", level: "view" },
     ],
     connectorGrants: [],
@@ -332,7 +342,17 @@ export const ROLE_TEMPLATES = [
       { moduleId: "team_chat", level: "act" },
     ],
     toolGrants: [
-      { domain: "crm", level: "view" },
+      // ADR-045 (WARP-2583) collapsed the project/CRM tools into the
+      // `business` domain, leaving `crm` and `pm` holding ZERO tools — they
+      // survive only as landing slots for a remote tracker or CRM catalogue.
+      // `tierReachableDomains` admits a domain only when the catalogue has a
+      // non-write tool in it, so a zero-tool domain is unreachable for family
+      // and guest, and granting it here granted nothing while failing the
+      // tier-reachability invariant. The `crm` / `pm` MODULE grants above are
+      // untouched — those are what gate /api/crm/* and /api/pm/* at the route.
+      // Deliberately not widening the tier filter instead: if a HubSpot or
+      // Atlassian catalogue later registers WRITE tools under these domains,
+      // family and guest must not inherit them silently.
       { domain: "email", level: "view" },
       { domain: "files", level: "view" },
       { domain: "calendar", level: "view" },
@@ -364,13 +384,22 @@ export const ROLE_TEMPLATES = [
       { moduleId: "team_chat", level: "view" },
     ],
     toolGrants: [
+      // ADR-045 (WARP-2583) collapsed the project/CRM tools into the
+      // `business` domain, leaving `crm` and `pm` holding ZERO tools — they
+      // survive only as landing slots for a remote tracker or CRM catalogue.
+      // `tierReachableDomains` admits a domain only when the catalogue has a
+      // non-write tool in it, so a zero-tool domain is unreachable for family
+      // and guest, and granting it here granted nothing while failing the
+      // tier-reachability invariant. The `crm` / `pm` MODULE grants above are
+      // untouched — those are what gate /api/crm/* and /api/pm/* at the route.
+      // Deliberately not widening the tier filter instead: if a HubSpot or
+      // Atlassian catalogue later registers WRITE tools under these domains,
+      // family and guest must not inherit them silently.
       { domain: "files", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "calendar", level: "view" },
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "memory", level: "view" },
-      { domain: "pm", level: "view" },
     ],
     connectorGrants: [],
     cloudModelsAllowed: false,
