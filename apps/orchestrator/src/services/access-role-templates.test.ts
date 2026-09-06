@@ -21,7 +21,7 @@
  * assertions rather than being a second, unchecked seam.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import type { ModuleId } from "@prisma/client";
 import {
   ROLE_TEMPLATES,
@@ -210,6 +210,35 @@ describe("access-role-templates — the resolver keeps what the template grants"
       expect(reachable.has(g.domain), `${g.domain} unreachable for ${payload.startingPoint}`).toBe(
         true,
       );
+    }
+  });
+
+  /**
+   * WARP-2760. A domain can be DECLARED and hold no tools: ADR-045 moved every
+   * PM and CRM tool into `business`, leaving `pm` and `crm` as empty keys in
+   * DOMAIN_GROUPS. A grant for one is dead config — it stores a row the roles
+   * list then advertises as reach that no tool can ever satisfy.
+   *
+   * The tier check above catches it only for family and guest, because those
+   * tiers derive reach FROM THE CATALOG while owner/admin get
+   * `new Set(TOOL_DOMAINS)` — the declared list, empty keys included. So an
+   * admin-based template granting an emptied domain passes there and is caught
+   * only here. That asymmetry is exactly how `crm` reached stage in three
+   * templates and `pm` in two.
+   *
+   * Stated against the catalog rather than a hardcoded list, so the day a
+   * domain is emptied every template holding it goes red in that commit —
+   * the third occurrence of this class (WARP-2583 found the emptied `pm`
+   * still granted by the dashboard's Projects row).
+   */
+  const DOMAINS_WITH_TOOLS = new Set<string>(TOOL_CATALOG.map((entry) => entry.domain));
+
+  it.each(PAYLOADS)("%s grants no tool domain that holds zero tools", (_id, payload) => {
+    for (const g of payload.toolGrants) {
+      expect(
+        DOMAINS_WITH_TOOLS.has(g.domain),
+        `${g.domain} holds no tools — the grant is dead config the roles list still advertises as reach`,
+      ).toBe(true);
     }
   });
 
