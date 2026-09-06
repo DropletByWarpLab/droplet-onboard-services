@@ -122,7 +122,15 @@ describe("Background runs panel (WARP-2180)", () => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/agent-runs/run-1/confirm");
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ decision: "denied" });
     });
-    fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
+    // WARP-2696 — every action button on this panel is `disabled={busy}`, and
+    // `busy` stays true until the deny POST *settles*, not until it is issued.
+    // The waitFor above only proves it was issued, so clicking straight after
+    // it raced the reset: under CI load the click landed on a disabled button,
+    // did nothing, and the assertion below then timed out at 5000 ms. Waiting
+    // for the button to be enabled asserts the real precondition.
+    const cancelRun = await screen.findByRole("button", { name: /cancel run/i });
+    await waitFor(() => expect(cancelRun).not.toBeDisabled());
+    fireEvent.click(cancelRun);
     await waitFor(() => {
       expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/agent-runs/run-1/cancel")).toBe(true);
     });

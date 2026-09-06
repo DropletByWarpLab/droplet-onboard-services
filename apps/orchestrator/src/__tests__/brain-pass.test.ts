@@ -332,12 +332,17 @@ describe("money detectors (WARP-2754)", () => {
     return { erpDocument: { findMany: vi.fn(async () => rows) } } as never;
   }
 
+  // WARP-2739 reshaped `ErpDocument` under these detectors: the vendor's own
+  // status word moved `status` -> `vendorStatus` so the box's own lifecycle
+  // could take the name `status`. A LANDED row (this fixture) carries the
+  // vendor word and no lifecycle; a LOCAL row is the mirror image.
   const base = {
     id: "doc-1",
     balance: "500.00",
     currency: "USD",
     dueAt: due,
-    status: "open",
+    vendorStatus: "open",
+    status: null,
     counterpartyName: "Acme Ltd",
     externalSystem: "quickbooks",
   };
@@ -362,10 +367,61 @@ describe("money detectors (WARP-2754)", () => {
   it("skips a settled document whatever its balance says", async () => {
     // money.service.ts records that a paid document is never reaped, so a
     // stale row can keep a balance forever.
-    for (const status of ["paid", "PAID", " Void ", "refunded"]) {
-      const out = await overdueReceivables.run(erpPrisma([{ ...base, status }]), now);
+    for (const vendorStatus of ["paid", "PAID", " Void ", "refunded"]) {
+      const out = await overdueReceivables.run(erpPrisma([{ ...base, vendorStatus }]), now);
       expect(out).toHaveLength(0);
     }
+  });
+
+  it("skips a LOCAL document its own lifecycle has settled", async () => {
+    // A LOCAL row has no vendor word at all, so the prose check answers "not
+    // known settled" for every one of them. Reading only `vendorStatus` would
+    // have reported every paid, voided or written-off local invoice as
+    // overdue — and every still-DRAFT one, which was never even sent.
+    for (const status of ["PAID", "VOID", "WRITTEN_OFF", "CANCELLED", "DRAFT"]) {
+      const out = await overdueReceivables.run(
+        erpPrisma([{ ...base, vendorStatus: null, externalSystem: null, status }]),
+        now,
+      );
+      expect(out).toHaveLength(0);
+    }
+  });
+
+  it("still chases a PART_PAID document — it owes the remainder", async () => {
+    const out = await overdueReceivables.run(
+      erpPrisma([{ ...base, vendorStatus: null, externalSystem: null, status: "PART_PAID" }]),
+      now,
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  it("names the box, not `null`, as the source of a LOCAL document", async () => {
+    // `externalSystem` became nullable with WARP-2739. Interpolating it raw
+    // put the word "null" into a sentence an operator reads.
+    const out = await overdueReceivables.run(
+      erpPrisma([{ ...base, vendorStatus: null, externalSystem: null, status: "SENT" }]),
+      now,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.rationale).toContain("An invoice from this box");
+    expect(out[0]!.rationale).not.toContain("null");
+    expect(out[0]!.evidence.sources[0]!.quote).not.toContain("null");
+  });
+
+  it("queries the document KINDS that carry money owed, not the retired enum", async () => {
+    // RECEIVABLE/PAYABLE stopped existing as `ErpDocumentKind` values; the
+    // money-owed documents are INVOICE (owed TO the business) and BILL (owed
+    // BY it). A typed spy rather than the shared helper, so the `where` this
+    // asserts on is the real argument and not an `any`.
+    const spy = () => vi.fn(async (_args: { where: { kind: string } }) => [] as unknown[]);
+
+    const rx = spy();
+    await overdueReceivables.run({ erpDocument: { findMany: rx } } as never, now);
+    expect(rx.mock.calls[0]![0].where.kind).toBe("INVOICE");
+
+    const px = spy();
+    await overduePayables.run({ erpDocument: { findMany: px } } as never, now);
+    expect(px.mock.calls[0]![0].where.kind).toBe("BILL");
   });
 
   it("skips a zero or negative balance", async () => {
