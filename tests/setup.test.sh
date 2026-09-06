@@ -1985,6 +1985,61 @@ else
   fail "the pre-existing last line was corrupted by the append (COMPOSE_PROFILES mangled)"
 fi
 
+# (4b) WARP-2734 — an UPGRADED box must gain the `email` compose profile.
+#
+# THE BUG THIS PINS: `_migrate_ensure_key` only writes a key that is ABSENT,
+# and COMPOSE_PROFILES is present on every previously-provisioned box. So
+# migrate_env backfilled SERVICE_TOKEN_EMAIL — which is exactly what the
+# dashboard keys the Email module's `available` off — while email-indexer
+# stayed out of COMPOSE_PROFILES and never started. The module lit up as
+# available on a box where nothing was ingesting mail.
+T9E="$TMP_ROOT/warp2734-profiles"
+_profiles_of() { sed -nE 's|^COMPOSE_PROFILES=(.*)$|\1|p' "$1" | tail -n 1; }
+
+# An existing box: a narrow, operator-pinned profile list and no `email`.
+mkdir -p "$T9E/a"
+printf 'COMPOSE_PROFILES=linux,display,eval
+JWT_SECRET=x
+' > "$T9E/a/.env"
+( export REPO_ROOT="$T9E/a"; migrate_env ) >/dev/null 2>&1 || true
+if [ "$(_profiles_of "$T9E/a/.env")" = "linux,display,eval,email" ]; then
+  pass "migrate_env adds 'email' to an existing COMPOSE_PROFILES (upgrade path)"
+else
+  fail "migrate_env left COMPOSE_PROFILES as '$(_profiles_of "$T9E/a/.env")' — email-indexer will not start"
+fi
+
+# Idempotent: a second run must not append a duplicate.
+( export REPO_ROOT="$T9E/a"; migrate_env ) >/dev/null 2>&1 || true
+if [ "$(_profiles_of "$T9E/a/.env")" = "linux,display,eval,email" ]; then
+  pass "the 'email' profile migration is idempotent"
+else
+  fail "re-running migrate_env duplicated the profile: '$(_profiles_of "$T9E/a/.env")'"
+fi
+
+# A profile that merely STARTS with "email" is not it — whole-element compare.
+mkdir -p "$T9E/b"
+printf 'COMPOSE_PROFILES=emailx
+JWT_SECRET=x
+' > "$T9E/b/.env"
+( export REPO_ROOT="$T9E/b"; migrate_env ) >/dev/null 2>&1 || true
+if [ "$(_profiles_of "$T9E/b/.env")" = "emailx,email" ]; then
+  pass "a profile named 'emailx' is not mistaken for 'email'"
+else
+  fail "substring match on the profile list: got '$(_profiles_of "$T9E/b/.env")'"
+fi
+
+# An empty value must not gain a leading comma — `,email` is not a valid list.
+mkdir -p "$T9E/c"
+printf 'COMPOSE_PROFILES=
+JWT_SECRET=x
+' > "$T9E/c/.env"
+( export REPO_ROOT="$T9E/c"; migrate_env ) >/dev/null 2>&1 || true
+if [ "$(_profiles_of "$T9E/c/.env")" = "email" ]; then
+  pass "an empty COMPOSE_PROFILES becomes 'email', not ',email'"
+else
+  fail "empty COMPOSE_PROFILES became '$(_profiles_of "$T9E/c/.env")'"
+fi
+
 # (5) Static: generate_env must STAGE the heredoc and rename into place —
 # writing the live .env directly means an interruption leaves a prefix of the
 # file that a re-run mistakes for a complete .env.

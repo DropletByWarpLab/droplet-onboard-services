@@ -173,6 +173,44 @@ describe("🔴 a mail host that resolves inside the box is refused", () => {
     // so a future refactor cannot make the literal path the unguarded one.
     expect(lookupMock).not.toHaveBeenCalled();
   });
+
+  it("refuses a private IPv6 literal, bracketed or not", async () => {
+    const { prisma } = prismaMock();
+    for (const imapHost of ["::1", "[::1]", "fe80::1", "fc00::1"]) {
+      await expect(connectMailbox(prisma, { ...BODY, imapHost }, "u-1")).rejects.toThrow(
+        PROVISION_ERRORS.BLOCKED_HOST,
+      );
+    }
+    expect(lookupMock).not.toHaveBeenCalled();
+  });
+
+  it("🔴 does NOT call a public IPv6 mail server private just because it was typed bare", async () => {
+    // A DNS hostname cannot contain a colon, so `2001:db8::1` is unambiguously
+    // an IPv6 literal — but unbracketed it made `https://2001:db8::1:993`,
+    // which is not a URL. `new URL()` threw, the guard read that as
+    // `malformed`, and the operator was told a perfectly public server "points
+    // somewhere inside this Droplet's own network".
+    //
+    // 2001:db8::/32 is documentation space, not private space, so the guard has
+    // no business refusing it: reaching INDEXER_UNAVAILABLE means it got past
+    // the guard and died at the hop this suite breaks — the same vacuity-proof
+    // shape the public-host test uses.
+    const { prisma } = prismaMock();
+    await expect(
+      connectMailbox(prisma, { ...BODY, imapHost: "2001:db8::1" }, "u-1"),
+    ).rejects.toThrow(PROVISION_ERRORS.INDEXER_UNAVAILABLE);
+  });
+
+  it("stores an IPv6 host WITHOUT brackets, the way a socket wants it", async () => {
+    const { prisma, create } = prismaMock();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, passwordEnc: "gAAAAA-ciphertext" }),
+    });
+    await connectMailbox(prisma, { ...BODY, imapHost: "2001:db8::1" }, "u-1");
+    expect(create.mock.calls[0]![0].data.imapHost).toBe("2001:db8::1");
+  });
 });
 
 describe("a public mail host reaches the indexer", () => {

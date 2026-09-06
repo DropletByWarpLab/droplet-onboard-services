@@ -104,7 +104,7 @@ async function assertMailHostAllowed(host: string, port: number): Promise<string
   // The guard speaks URLs. A mail host is not one, so it is wrapped — `https`
   // rather than `imaps` because the scheme allow-list is about the URL parser,
   // not about the protocol we will actually speak.
-  const url = await assertOutboundDestinationAllowed(`https://${host}:${port}`);
+  const url = await assertOutboundDestinationAllowed(`https://${bracketIpv6(host)}:${port}`);
 
   // 🔴 RETURNS THE VETTED HOSTNAME, and every caller stores THAT.
   //
@@ -120,6 +120,26 @@ async function assertMailHostAllowed(host: string, port: number): Promise<string
   // than trying to anticipate it: there is only ever one hostname, and it is
   // the one that passed.
   return stripBrackets(url.hostname);
+}
+
+/**
+ * Wrap a BARE IPv6 literal in brackets before it is put into a URL.
+ *
+ * A DNS hostname cannot contain a colon, so a colon is an unambiguous IPv6
+ * marker. Without this, `2001:db8::1` — which is how everyone types an IPv6
+ * address — became `https://2001:db8::1:993`, which is not a URL at all.
+ * `new URL()` throws, `isOutboundUrlBlocked()` reads that as `malformed`, and
+ * the operator was told their perfectly public mail server "points somewhere
+ * inside this Droplet's own network". Wrong, and it points at the wrong fix.
+ *
+ * This does not widen the guard: the bracketed form still goes through
+ * `assertOutboundDestinationAllowed`, so loopback (`::1`), link-local (`fe80::/10`)
+ * and unique-local (`fc00::/7`) addresses are refused exactly as before — now
+ * with the refusal they actually earned.
+ */
+function bracketIpv6(host: string): string {
+  if (host.startsWith("[")) return host;
+  return host.includes(":") ? `[${host}]` : host;
 }
 
 /** An IPv6 literal comes back from the URL parser in brackets; a socket wants

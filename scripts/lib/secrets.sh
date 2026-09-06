@@ -1181,6 +1181,39 @@ migrate_env() {
   # routing egress/throughput samplers 401 (WARP-268 egress-anomaly feed dies),
   # and an empty JWT_SECRET bricks the orchestrator at boot. Backfill on upgrade.
   _migrate_ensure_key SERVICE_TOKEN_EMAIL "$(openssl rand -hex 32)"
+  # WARP-2734 — the token above is not enough on an UPGRADE.
+  #
+  # `_migrate_ensure_key COMPOSE_PROFILES` only writes when the key is ABSENT,
+  # and it is present on every previously-provisioned box. So the backfill gave
+  # those boxes `SERVICE_TOKEN_EMAIL` — which is exactly what the dashboard's
+  # module registry keys availability off (`id: "email"`,
+  # `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`) — while `email-indexer`
+  # stayed out of COMPOSE_PROFILES and never started. The Email module lit up
+  # as available on a box where nothing was ingesting mail: the worst shape,
+  # because it fails silently and looks fine.
+  #
+  # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
+  # path's half of the same decision. Compared as a whole list element (the
+  # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
+  # for it, and an empty value does not gain a leading comma.
+  if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
+    # Last assignment wins, which is how docker compose reads a .env.
+    _current_profiles="$(sed -nE 's|^COMPOSE_PROFILES=[[:space:]]*(.*)$|\1|p' "$stage" | tail -n 1)"
+    _current_profiles="${_current_profiles%"${_current_profiles##*[![:space:]]}"}"
+    if ! printf ',%s,' "$_current_profiles" | grep -q ',email,'; then
+      if [ -n "$_current_profiles" ]; then
+        _new_profiles="$_current_profiles,email"
+      else
+        _new_profiles="email"
+      fi
+      awk -v v="$_new_profiles" '
+        /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
+      ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
+      normalized=true
+      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+    fi
+    unset _current_profiles _new_profiles
+  fi
   _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
