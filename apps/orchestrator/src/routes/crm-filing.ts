@@ -56,6 +56,7 @@ import {
 } from "../services/filing/rules.service.js";
 import { listSkipped } from "../services/filing/skipped.service.js";
 import { readFilingHealth } from "../services/filing/digest.js";
+import { createLogger } from "../lib/logger.js";
 import { filingPauseState } from "../services/filing/worker.js";
 import { preflight } from "../services/filing/auto-apply.js";
 import {
@@ -214,6 +215,8 @@ function toCard(row: {
 /** Postgres surfaces a CHECK violation by NAME (unlike a unique violation,
  *  which names the FIELDS) — so matching on the constraint name is sound here
  *  in a way `P2002` matching never is. */
+const logger = createLogger("crm-filing-routes");
+
 function isCheckViolation(err: unknown, needle: string): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes(needle);
@@ -303,36 +306,63 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       return;
     }
     const body = parsed.data;
-    const turningOn = body.mode !== undefined && body.mode !== "off";
 
     try {
-      await prisma.autoFilingSetting.upsert({
-        where: { id: SETTING_ID },
-        create: {
-          id: SETTING_ID,
-          mode: body.mode ?? "off",
-          level: body.level ?? "links_only",
-          vertical: body.vertical ?? "general",
-          folders: body.folders ?? undefined,
-          pathDenylist: body.pathDenylist ?? undefined,
-          // Stamped on the way in, from the session — never from the body.
-          enabledById: turningOn ? actorId : null,
-          enabledAt: turningOn ? new Date() : null,
-        },
-        update: {
-          ...(body.mode !== undefined ? { mode: body.mode } : {}),
-          ...(body.level !== undefined ? { level: body.level } : {}),
-          ...(body.vertical !== undefined ? { vertical: body.vertical } : {}),
-          ...(body.folders !== undefined ? { folders: body.folders } : {}),
-          ...(body.pathDenylist !== undefined ? { pathDenylist: body.pathDenylist } : {}),
-          // 🔴 `enabledAt` is the BACKLOG BOUNDARY as well as the consent
-          // stamp: the worker will not claim a source whose `updatedAt`
-          // predates it. So it is set when filing is switched ON and left
-          // alone otherwise — refreshing it on an unrelated settings edit
-          // would silently retire everything that arrived in between.
-          ...(turningOn ? { enabledById: actorId, enabledAt: new Date() } : {}),
-          ...(body.mode === "off" ? { mode: "off" as const } : {}),
-        },
+      await prisma.$transaction(async (tx) => {
+        // 🔴 Both flags below are decided against the STORED mode, not the
+        // requested one, which is why this reads the row first and why the
+        // read and the write share a transaction.
+        //
+        // `AutoFilingSetting_enabled_has_actor` is a BICONDITIONAL:
+        //
+        //     ("mode" <> 'off') = ("enabledById" IS NOT NULL AND "enabledAt" IS NOT NULL)
+        //
+        // so the actor pair is not merely optional when filing is off — it is
+        // REQUIRED TO BE ABSENT. Writing mode='off' while leaving it populated
+        // is `false = true`, a 23514 the catch below does not recognise, a 500,
+        // and — because the statement rolls back — a row still saying 'propose'.
+        // The off switch did not turn filing off.
+        const current = await tx.autoFilingSetting.findUnique({ where: { id: SETTING_ID } });
+        const wasOff = current === null || current.mode === "off";
+        const goingOff = body.mode === "off";
+        // 🔴 The OFF -> ON EDGE, not "the request names a non-off mode".
+        //
+        // `enabledAt` is the BACKLOG BOUNDARY as well as the consent stamp: the
+        // worker will not claim a source whose `updatedAt` predates it. Stamping
+        // it whenever the body named a non-off mode meant that accepting the
+        // promotion — propose -> auto, the one click this feature is built
+        // around — moved the boundary to now and silently retired every
+        // document still waiting in the queue. Those rows never reach a
+        // terminal status, so they appear in no tab and in no count: they are
+        // simply gone, as a direct result of saying yes.
+        const turningOn = body.mode !== undefined && !goingOff && wasOff;
+
+        await tx.autoFilingSetting.upsert({
+          where: { id: SETTING_ID },
+          create: {
+            id: SETTING_ID,
+            mode: body.mode ?? "off",
+            level: body.level ?? "links_only",
+            vertical: body.vertical ?? "general",
+            folders: body.folders ?? undefined,
+            pathDenylist: body.pathDenylist ?? undefined,
+            // Stamped on the way in, from the session — never from the body.
+            enabledById: body.mode !== undefined && !goingOff ? actorId : null,
+            enabledAt: body.mode !== undefined && !goingOff ? new Date() : null,
+          },
+          update: {
+            ...(body.mode !== undefined ? { mode: body.mode } : {}),
+            ...(body.level !== undefined ? { level: body.level } : {}),
+            ...(body.vertical !== undefined ? { vertical: body.vertical } : {}),
+            ...(body.folders !== undefined ? { folders: body.folders } : {}),
+            ...(body.pathDenylist !== undefined ? { pathDenylist: body.pathDenylist } : {}),
+            ...(turningOn ? { enabledById: actorId, enabledAt: new Date() } : {}),
+            // Cleared together with the mode, in the same statement, because
+            // the CHECK is evaluated per row and will not accept one without
+            // the other.
+            ...(goingOff ? { enabledById: null, enabledAt: null } : {}),
+          },
+        });
       });
       res.json(await readFilingSettings(prisma));
     } catch (err) {
@@ -341,6 +371,14 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       if (isCheckViolation(err, "AutoFilingSetting_auto_requires_canary")) {
         res.status(422).json({ error: "auto_needs_canary" });
         return;
+      }
+      // The consent CHECK should now be unreachable — the branches above are
+      // the only writers and they keep mode and the actor pair in step. It is
+      // named here anyway so that if it ever fires again the log says which
+      // invariant broke, rather than leaving a bare 23514 to be traced back to
+      // a route by hand.
+      if (isCheckViolation(err, "AutoFilingSetting_enabled_has_actor")) {
+        logger.error({ err }, "filing settings: consent invariant violated");
       }
       next(err);
     }
