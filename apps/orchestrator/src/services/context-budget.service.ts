@@ -57,6 +57,10 @@ export interface RequestSizeParts {
   toolGuidance: string;
   /** Durable memory-facts block — trimmed by its own budget, not dropped. */
   memoryFactsBlock: string;
+  /** WARP-2752 (ADR-051) — the brain block: what the box worked out about this
+   *  business, bounded by its own char budget at build time. Droppable, but
+   *  LAST of the three (see `degradeToFit`). */
+  brainBlock: string;
   /** `JSON.stringify(tools[])` — the schemas sent to the model. */
   toolSchemasJson: string;
   /** Context-pin descriptions prepended for this conversation. */
@@ -81,6 +85,7 @@ export function estimateRequestTokens(parts: RequestSizeParts): number {
     parts.businessBlock.length +
     parts.toolGuidance.length +
     parts.memoryFactsBlock.length +
+    parts.brainBlock.length +
     parts.toolSchemasJson.length +
     parts.pinsText.length +
     parts.attachmentsText.length +
@@ -89,7 +94,7 @@ export function estimateRequestTokens(parts: RequestSizeParts): number {
 }
 
 /** Which optional blocks were dropped, in the order they were dropped. */
-export type DroppedBlock = "business" | "persona";
+export type DroppedBlock = "business" | "persona" | "brain";
 
 export interface DegradeOptions {
   /**
@@ -114,7 +119,9 @@ export interface DegradeResult {
   personaBlock: string;
   /** Business block after degradation ("" if dropped). */
   businessBlock: string;
-  /** Blocks dropped, in drop order (business before persona). */
+  /** Brain block after degradation ("" if dropped). */
+  brainBlock: string;
+  /** Blocks dropped, in drop order (business, then persona, then brain). */
   dropped: DroppedBlock[];
   /** Estimated tokens after degradation. */
   estimatedTokens: number;
@@ -130,9 +137,17 @@ export interface DegradeResult {
  * Deterministically shrink the request to fit `contextWindow − OUTPUT_RESERVE`.
  *
  * Drops the business block first, re-estimates, drops the persona block only
- * if still over, re-estimates, and finally flags `historyTrimNeeded` if even
- * a persona-less request overflows. Never touches identity / tool guidance /
- * tool schemas — those are load-bearing or caller-owned.
+ * if still over, then the BRAIN block, and finally flags `historyTrimNeeded`
+ * if even a stripped request overflows. Never touches identity / tool guidance
+ * / tool schemas — those are load-bearing or caller-owned.
+ *
+ * WARP-2752 — WHY THE BRAIN BLOCK IS DROPPED LAST of the three. It is the only
+ * one of them DERIVED from the business's own data: `businessBlock` is a
+ * 1,500-char summary a human typed once and `personaBlock` is tone, while the
+ * brain block is what the box actually read. Dropping it first would mean the
+ * turns most likely to need it — long, busy, business-shaped ones — are exactly
+ * the turns that lose it, which is the shape of the defect this ordering exists
+ * to avoid.
  */
 export function degradeToFit(
   parts: RequestSizeParts,
@@ -143,10 +158,11 @@ export function degradeToFit(
 
   let personaBlock = parts.personaBlock;
   let businessBlock = parts.businessBlock;
+  let brainBlock = parts.brainBlock;
   const dropped: DroppedBlock[] = [];
 
   const estimate = () =>
-    estimateRequestTokens({ ...parts, personaBlock, businessBlock });
+    estimateRequestTokens({ ...parts, personaBlock, businessBlock, brainBlock });
 
   let estimatedTokens = estimate();
 
@@ -166,9 +182,18 @@ export function degradeToFit(
     warn({ block: "persona", estimatedTokens, thresholdTokens });
   }
 
+  // Rank 3: drop the brain block. Last, deliberately — see the docstring.
+  if (estimatedTokens > thresholdTokens && brainBlock.length > 0) {
+    brainBlock = "";
+    dropped.push("brain");
+    estimatedTokens = estimate();
+    warn({ block: "brain", estimatedTokens, thresholdTokens });
+  }
+
   return {
     personaBlock,
     businessBlock,
+    brainBlock,
     dropped,
     estimatedTokens,
     historyTrimNeeded: estimatedTokens > thresholdTokens,

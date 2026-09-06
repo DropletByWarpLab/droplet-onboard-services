@@ -54,6 +54,7 @@ function parts(overrides: Partial<RequestSizeParts> = {}): RequestSizeParts {
     businessBlock: "",
     toolGuidance: "",
     memoryFactsBlock: "",
+    brainBlock: "",
     toolSchemasJson: "",
     pinsText: "",
     attachmentsText: "",
@@ -205,5 +206,45 @@ describe("degradeToFit — forced overflow", () => {
     // Nothing left to drop from the persona/business layer, so the caller is
     // told to fall through to the existing history/attachment trimming.
     expect(result.historyTrimNeeded).toBe(true);
+  });
+});
+
+describe("degradeToFit — the brain block is dropped LAST (WARP-2752)", () => {
+  it("keeps the brain block while business and persona are still droppable", () => {
+    // THE ordering this change exists for. The brain block is the only one of
+    // the three DERIVED from the business's own data — `businessBlock` is a
+    // 1,500-char summary a human typed once and `personaBlock` is tone. If it
+    // dropped first, the turns most likely to need it (long, busy,
+    // business-shaped) would be exactly the turns that lose it.
+    const warn = vi.fn();
+    const big = "x".repeat(2000);
+    const p = parts({
+      identityBlock: big,
+      personaBlock: big,
+      businessBlock: big,
+      brainBlock: "the brain block",
+      toolSchemasJson: REPRESENTATIVE_TOOLS_JSON,
+    });
+    const result = degradeToFit(p, { contextWindow: 512, warn });
+
+    // business and persona go; the brain block survives them.
+    expect(result.dropped.indexOf("business")).toBeLessThan(result.dropped.indexOf("brain"));
+    expect(result.dropped.indexOf("persona")).toBeLessThan(result.dropped.indexOf("brain"));
+    expect(warn.mock.calls.map((c) => c[0].block)).toEqual(["business", "persona", "brain"]);
+  });
+
+  it("does not drop the brain block when the request already fits", () => {
+    const p = parts({ brainBlock: "kept", toolSchemasJson: REPRESENTATIVE_TOOLS_JSON });
+    const result = degradeToFit(p, { contextWindow: 16384 });
+    expect(result.brainBlock).toBe("kept");
+    expect(result.dropped).toEqual([]);
+  });
+
+  it("counts the brain block toward the estimate", () => {
+    // A block that is spliced into the prompt but not measured is how a turn
+    // overflows the window with every guard reporting green.
+    const without = estimateRequestTokens(parts({ brainBlock: "" }));
+    const with_ = estimateRequestTokens(parts({ brainBlock: "y".repeat(400) }));
+    expect(with_).toBeGreaterThan(without);
   });
 });

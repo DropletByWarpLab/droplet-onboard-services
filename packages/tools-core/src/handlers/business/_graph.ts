@@ -66,6 +66,16 @@ export const FIND_ENTITIES = [
   "project",
   "work_item",
   "pipeline",
+  // WARP-2752 (ADR-051) — the brain, as two more entities rather than two more
+  // tools. This is the whole reason ADR-045 collapsed seventeen noun tools into
+  // five verbs: a new capability costs an enum VALUE inside a schema that
+  // already ships, not a registration against the full-registry ceiling
+  // (110,000 chars, last measured 100,561) plus a DOMAIN_RULES keyword regex —
+  // the fourth artifact that has been forgotten three times (WARP-2058 `pm`,
+  // WARP-2454 `team_chat`, WARP-2546's seven `crm_*`), each time shipping tools
+  // charged to the budget on every turn and advertised on none.
+  "finding",
+  "digest",
 ] as const;
 export type FindEntity = (typeof FIND_ENTITIES)[number];
 
@@ -95,11 +105,18 @@ const HONOURED_ARGS: Record<FindEntity, ReadonlySet<string>> = {
   project: new Set(["id", "query", "limit"]),
   work_item: new Set(["id", "query", "parent_id", "limit"]),
   pipeline: new Set(["id"]),
+  // `status` is honoured for findings and means the review state
+  // (new/acknowledged/actioned/dismissed/stale), NOT a deal outcome. The two
+  // never collide because HONOURED_ARGS is per entity — which is exactly what
+  // makes one shared arg name safe across entities that mean different things
+  // by it.
+  finding: new Set(["status", "limit"]),
+  digest: new Set(["query", "limit"]),
 };
 
 /** Human-readable reason, so the refusal names the fix rather than the rule. */
 const ARG_HINT: Record<string, string> = {
-  status: 'status only applies to entity "deal"',
+  status: 'status applies to entity "deal" (OPEN/WON/LOST) and "finding" (new/acknowledged/actioned/dismissed/stale)',
   idle_days: 'idle_days only applies to entity "deal"',
   parent_id:
     'parent_id is a customer id for entity "deal"/"contact" and a project id for entity "work_item"',
@@ -149,6 +166,39 @@ export function rejectMisusedArgs(
 
 /** Normalise + validate a deal status without a schema `enum` doing it for us
  *  on the fallback path. Uppercased, because a model writes "open". */
+/**
+ * WARP-2752 — a FINDING's status: the review state a human moves it through.
+ *
+ * A separate function from `normalizeStatus`, deliberately. The two vocabularies
+ * share an argument name and nothing else: merging them would let "WON" through
+ * on a finding and "dismissed" through on a deal, producing a filter that
+ * silently matches nothing — worse than a refusal, because the model believes
+ * the answer applied it.
+ *
+ * Lower-cased, mirroring the Prisma enum, where `normalizeStatus` upper-cases
+ * to match its own.
+ */
+export const FINDING_STATUSES = [
+  "new",
+  "acknowledged",
+  "actioned",
+  "dismissed",
+  "stale",
+] as const;
+
+export function normalizeFindingStatus(
+  raw: string | undefined,
+): string | ToolResult | undefined {
+  if (raw === undefined) return undefined;
+  const low = raw.trim().toLowerCase();
+  return (FINDING_STATUSES as readonly string[]).includes(low)
+    ? low
+    : fail(
+        "BUSINESS_INVALID_REQUEST",
+        `status for a finding must be one of ${FINDING_STATUSES.join(", ")}`,
+      );
+}
+
 export function normalizeStatus(raw: string | undefined): string | ToolResult | undefined {
   if (raw === undefined) return undefined;
   const up = raw.trim().toUpperCase();
@@ -182,6 +232,81 @@ export function toGraphDeal(row: Parameters<typeof toDeal>[0] & { projectId?: st
 }
 
 export const toGraphCompany = toCompany;
+
+/**
+ * WARP-2752 (ADR-051) — one finding, as the model should see it.
+ *
+ * THE PROJECTION IS THE ONLY NARROWING between the database and the model, so
+ * what is left out matters as much as what is kept.
+ *
+ * EVIDENCE IS SUMMARISED, NOT PASSED THROUGH. A finding can carry several
+ * sources each with a verbatim quote, and a tool result is capped at 8,000
+ * chars — pass the whole array and three findings fill the budget, so the
+ * model sees three problems and believes that is all of them. One quote plus a
+ * count keeps a page of findings inside one result, and the model can open any
+ * one of them by id if it needs the rest.
+ *
+ * `impact_minor` IS A STRING. Minor units, the `CrmDeal.amountMinor` wire shape
+ * this tool already uses everywhere else — a JSON number here would be the one
+ * place amounts change type, and the tool's own description promises they do
+ * not. `null` when the detector could not compute one: a fabricated number is
+ * worse than none.
+ */
+export function toBrainFinding(row: Record<string, unknown>) {
+  const evidence = (row.evidence ?? {}) as {
+    sources?: Array<{ sourceKind?: string; sourceId?: string; quote?: string }>;
+  };
+  const sources = Array.isArray(evidence.sources) ? evidence.sources : [];
+  const first = sources[0];
+  return {
+    id: String(row.id ?? ""),
+    kind: String(row.kind ?? ""),
+    title: String(row.title ?? ""),
+    why: String(row.rationale ?? "").slice(0, 400),
+    impact_minor: row.impactMinor === null || row.impactMinor === undefined
+      ? null
+      : String(row.impactMinor),
+    currency: (row.currency as string | null) ?? null,
+    status: String(row.status ?? ""),
+    confidence: (row.confidence as number | null) ?? null,
+    detector: String(row.detectorKey ?? ""),
+    first_seen: row.firstSeenAt ?? null,
+    evidence_count: sources.length,
+    evidence_first: first
+      ? { kind: first.sourceKind ?? "", id: first.sourceId ?? "", quote: String(first.quote ?? "").slice(0, 200) }
+      : null,
+  };
+}
+
+/**
+ * WARP-2752 — one digest. Same bounded-evidence rule as a finding, and for the
+ * same budget reason.
+ *
+ * `scope` is deliberately EXPOSED. A model that cannot tell a personal note
+ * from a company-wide fact will cite one as the other, and the person reading
+ * the answer has no way to know which they were told. The orchestrator already
+ * refuses to send a row the caller may not see; this is so the model can say
+ * WHICH it is looking at.
+ */
+export function toBrainDigest(row: Record<string, unknown>) {
+  const sources = Array.isArray(row.sources)
+    ? (row.sources as Array<{ sourceKind?: string; sourceId?: string; quote?: string }>)
+    : [];
+  const first = sources[0];
+  return {
+    id: String(row.id ?? ""),
+    kind: String(row.kind ?? ""),
+    title: String(row.title ?? ""),
+    body: String(row.body ?? "").slice(0, 600),
+    scope: String(row.scope ?? ""),
+    confidence: (row.confidence as number | null) ?? null,
+    last_confirmed: row.lastConfirmedAt ?? null,
+    evidence_count: sources.length,
+    evidence_first: first
+      ? { kind: first.sourceKind ?? "", id: first.sourceId ?? "", quote: String(first.quote ?? "").slice(0, 200) }
+      : null,
+  };
+}
 
 export interface ApiCrmContactRow {
   id: string;
