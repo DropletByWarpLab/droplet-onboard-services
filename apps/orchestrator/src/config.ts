@@ -1263,6 +1263,17 @@ const envForParse: NodeJS.ProcessEnv = {
     process.env.DEVICE_BRIDGE_URL,
     process.env.BRIDGE_URL,
   ),
+  // WARP-2758 — same rescue, and this key needs it most: it is the schema's
+  // ONLY `.url()`, so a bare `DROPLET_OTA_RELEASES_URL=` is a defined-but-empty
+  // value that `.default()` never replaces and `.url()` rejects, killing the
+  // hard `.parse()` below and the whole boot. The key is documented as an
+  // operator knob for fleet-agent (services/fleet-agent/README.md), whose
+  // config.py:157 treats blank as "use the canonical publisher" — and the
+  // orchestrator inherits the same root `.env` via `env_file:`. Without this,
+  // one blank line in `.env` bricks the orchestrator and not fleet-agent.
+  DROPLET_OTA_RELEASES_URL: firstNonEmpty(
+    process.env.DROPLET_OTA_RELEASES_URL,
+  ),
 };
 
 const parsed = envSchema.parse(envForParse);
