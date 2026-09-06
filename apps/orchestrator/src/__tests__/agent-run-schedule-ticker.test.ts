@@ -12,7 +12,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: false,
     agentMaxIter: { defaultIter: 10, capIter: 10 },
-    agentRuns: { concurrency: 1, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000 },
+    agentRuns: { concurrency: 1, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10 },
   },
 }));
 const { recordActivityMock } = vi.hoisted(() => ({ recordActivityMock: vi.fn().mockResolvedValue(null) }));

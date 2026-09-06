@@ -135,6 +135,38 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
 export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
 
 /**
+ * WARP-2749 — a run's inference requests carry the gateway's "background"
+ * priority (`X-Request-Priority`: 0 user-initiated, 5 automation, 10
+ * background) so an interactive turn is served first. The gateway REJECTS a
+ * priority ≥ 5 request with 429 while five or more requests are pending. That
+ * is chat being busy, not the run failing: on a 429 the worker hands the row
+ * back to the queue at the same checkpoint (`RUN_YIELD_MS` later, no attempt
+ * charged) and tries again. `deadlineAt` still stands, so a run that keeps
+ * yielding ends on its wall clock with an honest reason.
+ */
+const RUN_INFERENCE_PRIORITY = 10;
+const RUN_YIELD_MS = 60_000;
+
+/** The run's gateway: the caller's functions, each request stamped background priority. */
+function runGateway(gw: AgentDeps["aiGateway"]): AgentDeps["aiGateway"] {
+  const opts = { priority: RUN_INFERENCE_PRIORITY };
+  return {
+    chat: (r, s) => gw.chat(r, s, undefined, opts),
+    ...(gw.chatStream ? { chatStream: (r, s) => gw.chatStream!(r, s, undefined, opts) } : {}),
+  };
+}
+
+/**
+ * Both shapes a 429 takes: the real client throws (`chat()` throws on a
+ * non-OK blocking response), a mocked gateway returns `ok: false` and the loop
+ * reports `ai-gateway 429`.
+ */
+function gatewayBusy(threw: unknown, result: AgentResult | null): boolean {
+  if (threw instanceof Error && /^AI Gateway error 429\b/.test(threw.message)) return true;
+  return result?.stop_reason === "error" && result.error === "ai-gateway 429";
+}
+
+/**
  * The pool a run starts from, before per-principal narrowing: the chat pool
  * (chat-tool-scope.ts) plus {@link RUN_READMITTED_TOOLS}, minus
  * {@link RUN_EXCLUDED_TOOLS}. Confirming (Tier-2) tools are IN — the
@@ -221,7 +253,7 @@ export interface EnqueueAgentRunInput {
   goal: string;
   model: string;
   sessionId?: string | null;
-  /** Clamped to the loop's own cap (config.agentMaxIter.capIter). */
+  /** Clamped to the run cap (config.agentRuns.maxIter — WARP-2749, not the chat cap). */
   maxIter?: number;
   runAfter?: Date;
 }
@@ -234,7 +266,7 @@ export async function enqueueAgentRun(
   prisma: PrismaClient | Prisma.TransactionClient,
   input: EnqueueAgentRunInput,
 ): Promise<{ id: string }> {
-  const cap = config.agentMaxIter.capIter;
+  const cap = config.agentRuns.maxIter;
   const maxIter = Math.max(1, Math.min(input.maxIter ?? cap, cap));
   const row = await prisma.agentRun.create({
     data: {
@@ -488,7 +520,7 @@ const canonical = (v: unknown): string => {
 export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
   const { prisma } = deps;
   const limits = deps.limits ?? config.agentRuns;
-  const maxIterCap = deps.maxIterCap ?? config.agentMaxIter.capIter;
+  const maxIterCap = deps.maxIterCap ?? config.agentRuns.maxIter;
   const contextWindow = deps.contextWindow ?? config.OLLAMA_CONTEXT_LENGTH;
   const toolSelectionMode = deps.toolSelectionMode ?? config.TOOL_SELECTION_MODE;
   const now = deps.now ?? (() => new Date());
@@ -502,6 +534,18 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
   const controllers = new Map<string, AbortController>();
   /** runId → why it was told to stop, so the terminal write names it. */
   const stopReasons = new Map<string, StopReason>();
+  /**
+   * runId → the `claimedAt` this process stamped when it won the row. A lease
+   * is the (workerId, claimedAt) pair, not the worker id alone: a row that
+   * was reclaimed and then claimed again — by a same-named process, or by
+   * this one after a stall — carries a later `claimedAt`, so the zombie
+   * execution's next fenced write returns `count: 0` (WARP-2744 item 1).
+   */
+  const leases = new Map<string, Date>();
+  const leaseFence = (id: string) => {
+    const lease = leases.get(id);
+    return lease ? { claimedAt: lease } : {};
+  };
 
   function stop(runId: string, reason: StopReason): void {
     if (!stopReasons.has(runId)) stopReasons.set(runId, reason);
@@ -509,7 +553,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
   }
 
   /** The fence every executor write carries. */
-  const owned = (id: string) => ({ id, claimedBy: workerId, status: "running" as const });
+  const owned = (id: string) => ({ id, claimedBy: workerId, status: "running" as const, ...leaseFence(id) });
 
   async function reclaimStale(at: Date): Promise<{ reclaimed: number; failed: number }> {
     const cutoff = new Date(at.getTime() - limits.reclaimAfterMs);
@@ -580,7 +624,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
    * all. `count !== 1` means another worker won the row.
    */
   async function claim(runId: string, at: Date): Promise<boolean> {
-    return prisma.$transaction(async (tx) => {
+    const won = await prisma.$transaction(async (tx) => {
       const won = await tx.agentRun.updateMany({
         where: { id: runId, status: "queued" },
         data: { status: "running", claimedBy: workerId, claimedAt: at, heartbeatAt: at },
@@ -592,6 +636,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       return true;
     });
+    if (won) leases.set(runId, at);
+    return won;
   }
 
   function launch(runId: string): void {
@@ -603,6 +649,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         inFlight.delete(runId);
         controllers.delete(runId);
         stopReasons.delete(runId);
+        leases.delete(runId);
       });
     inFlight.set(runId, p);
   }
@@ -613,8 +660,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     let claimed = 0;
     const capacity = limits.concurrency - inFlight.size;
     if (capacity > 0) {
+      // A row this process is still executing is never a candidate, even if
+      // the reclaim above just re-queued it (a stalled heartbeat on our own
+      // run): re-claiming it here would put two executions on one row.
       const candidates = (await prisma.agentRun.findMany({
-        where: { status: "queued", runAfter: { lte: at } },
+        where: { status: "queued", runAfter: { lte: at }, id: { notIn: [...inFlight.keys()] } },
         orderBy: [{ runAfter: "asc" }, { createdAt: "asc" }],
         take: capacity,
         select: { id: true },
@@ -638,9 +688,17 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
   async function observe(runId: string, at: Date): Promise<StopReason | null> {
     const row = (await prisma.agentRun.findUnique({
       where: { id: runId },
-      select: { status: true, claimedBy: true, deadlineAt: true },
-    })) as { status: string; claimedBy: string | null; deadlineAt: Date | null } | null;
-    if (!row || row.claimedBy !== workerId || row.status !== "running") {
+      select: { status: true, claimedBy: true, claimedAt: true, deadlineAt: true },
+    })) as
+      | { status: string; claimedBy: string | null; claimedAt: Date | null; deadlineAt: Date | null }
+      | null;
+    const lease = leases.get(runId);
+    if (
+      !row ||
+      row.claimedBy !== workerId ||
+      row.status !== "running" ||
+      (lease !== undefined && row.claimedAt?.getTime() !== lease.getTime())
+    ) {
       const reason: StopReason = row?.status === "cancelled" ? "cancelled" : "fenced";
       stop(runId, reason);
       return reason;
@@ -673,7 +731,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     fenceStatuses: ReadonlyArray<"running" | "cancelled"> = ["running"],
   ): Promise<boolean> {
     const res = await prisma.agentRun.updateMany({
-      where: { id: runId, claimedBy: workerId, status: { in: [...fenceStatuses] } },
+      where: { id: runId, claimedBy: workerId, status: { in: [...fenceStatuses] }, ...leaseFence(runId) },
       data,
     });
     return res.count === 1;
@@ -689,6 +747,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           model: string;
           status: string;
           claimedBy: string | null;
+          claimedAt: Date | null;
           deadlineAt: Date | null;
           maxIter: number;
           iteration: number;
@@ -700,7 +759,15 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingDecision: "approved" | "denied" | null;
         }
       | null;
-    if (!run || run.status !== "running" || run.claimedBy !== workerId) return;
+    const lease = leases.get(runId);
+    if (
+      !run ||
+      run.status !== "running" ||
+      run.claimedBy !== workerId ||
+      (lease !== undefined && run.claimedAt?.getTime() !== lease.getTime())
+    ) {
+      return;
+    }
 
     const controller = new AbortController();
     controllers.set(runId, controller);
@@ -1079,7 +1146,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     let threw: unknown = null;
     try {
       result = await runAgent(
-        { mcp: deps.agent.mcp, aiGateway: deps.agent.aiGateway, approvals },
+        { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
         {
           model: run.model,
           messages,
@@ -1182,6 +1249,27 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         user ? { username: user.username, goal: run.goal } : undefined);
       return;
     }
+    if (gatewayBusy(threw, result)) {
+      // Interactive chat has the box (see RUN_INFERENCE_PRIORITY). Hand the
+      // row back to the queue at the same checkpoint — `iteration` and
+      // `messages` were written at the top of the iteration that could not
+      // start, so the resume re-runs exactly it — and try again later. Not a
+      // lease loss: `attempts` is untouched. `deadlineAt` still stands.
+      const ok = await finish(runId, {
+        status: "queued",
+        claimedBy: null,
+        claimedAt: null,
+        heartbeatAt: null,
+        runAfter: new Date(endedAt.getTime() + RUN_YIELD_MS),
+      });
+      if (ok) {
+        logger.info(
+          { runId, iteration: base + (result?.iterations ?? 0), yieldMs: RUN_YIELD_MS },
+          "agent_run_yielded_to_chat",
+        );
+      }
+      return;
+    }
     if (threw !== null || result === null) {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
@@ -1251,23 +1339,18 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // ws-bridge topic the park notification uses, with the result summary.
     notify?: { username: string; goal: string; result?: string | null },
   ): Promise<void> {
-    if (notify) {
+    // The person who cancelled a run does not need a toast saying so; the
+    // cancel route's audit row records it (WARP-2744 item 6).
+    if (notify && status !== "cancelled") {
       const goal = notify.goal.length > 80 ? `${notify.goal.slice(0, 77)}…` : notify.goal;
       const body =
         status === "succeeded"
           ? (notify.result ?? "").slice(0, 300) || "Finished."
-          : status === "cancelled"
-            ? "Cancelled."
-            : `Failed: ${(error ?? "unknown error").slice(0, 300)}`;
+          : `Failed: ${(error ?? "unknown error").slice(0, 300)}`;
       await sendNotification(prisma, {
         userId: notify.username,
         kind: "ai",
-        title:
-          status === "succeeded"
-            ? `Background run finished: ${goal}`
-            : status === "cancelled"
-              ? `Background run cancelled: ${goal}`
-              : `Background run failed: ${goal}`,
+        title: status === "succeeded" ? `Background run finished: ${goal}` : `Background run failed: ${goal}`,
         body,
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
@@ -1288,12 +1371,16 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   async function releaseAll(): Promise<void> {
     const ids = [...inFlight.keys()];
+    // Captured before the executions settle: `launch` drops a lease when its
+    // execution ends, and the release must still name the lease it held.
+    const held = new Map(ids.map((id) => [id, leases.get(id)] as const));
     for (const id of ids) stop(id, "fenced");
     await Promise.allSettled(ids.map((id) => inFlight.get(id)));
     const at = now();
     for (const id of ids) {
+      const lease = held.get(id);
       await prisma.agentRun.updateMany({
-        where: { id, claimedBy: workerId, status: "running" },
+        where: { id, claimedBy: workerId, status: "running", ...(lease ? { claimedAt: lease } : {}) },
         data: { status: "queued", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
       });
     }

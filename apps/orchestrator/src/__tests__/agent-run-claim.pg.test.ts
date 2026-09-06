@@ -30,7 +30,7 @@ vi.mock("../config.js", () => ({
       heartbeatMs: 15_000,
       reclaimAfterMs: 60_000,
       maxAttempts: 3,
-      maxWallMs: 2_400_000,
+      maxWallMs: 2_400_000, maxIter: 10,
     },
   },
 }));

@@ -121,9 +121,23 @@ racers still cannot both win a row (`agent-run-claim.pg.test.ts`, real
 Postgres).
 
 **Fencing.** Every executor write is conditioned on `claimedBy = workerId AND
-status = running`. A run reclaimed by another worker while this process was
-paused is one this process can no longer touch: its next checkpoint returns
-`count: 0`, it aborts, and the successor continues from the row.
+claimedAt = <the claimedAt this process stamped> AND status = running`. A lease
+is the `(workerId, claimedAt)` pair, not the worker id alone: a row reclaimed
+and claimed again — by a same-named process, or by this one after a stall —
+carries a later `claimedAt`, so the old execution's next write returns
+`count: 0`, it aborts, and the successor continues from the row. The claim
+query also excludes every id this process still has in flight, so a worker
+never re-claims a run it is itself executing (WARP-2744 item 1).
+
+**Yielding to chat (WARP-2749).** A run's inference requests carry
+`X-Request-Priority: 10`, the gateway's background level; interactive turns
+are served first, and while five or more requests are pending the gateway
+refuses a background request with 429. The worker treats that as "chat has
+the box", not as the run failing: the row goes back to `queued` at the same
+checkpoint with `runAfter` a minute out and no attempt charged. `deadlineAt`
+still stands, so a run that keeps yielding ends on its wall clock with that
+reason. A run's iteration cap is `AGENT_RUN_MAX_ITER` (30), its own, carried
+into the loop as `AgentDeps.maxIterCap`; the chat cap is untouched.
 
 **Heartbeat and reclaim.** The heartbeat is timer-driven (`AGENT_RUN_HEARTBEAT_MS`,
 15 s) and independent of iteration length, so a run parked in a slow model
@@ -192,6 +206,7 @@ resume needs both.
 | `AGENT_RUN_TICK_MS` | 5000 | claim/reclaim scan |
 | `AGENT_RUN_HEARTBEAT_MS` | 15000 | lease heartbeat |
 | `AGENT_RUN_RECLAIM_AFTER_MS` | 60000 | stale-lease threshold (≥ 2 × heartbeat, clamped) |
+| `AGENT_RUN_MAX_ITER` | 30 | a run's iteration cap, separate from the chat cap |
 | `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
 | `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
 
