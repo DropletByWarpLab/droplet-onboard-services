@@ -892,13 +892,23 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
 
   // ── Trap: the four domains no UI group covers ───────────────────────────
   describe("ungrouped tool domains (the silent-drop trap)", () => {
-    it("TOOL_DOMAIN_GROUPS covers neither crm, money, team_chat nor agent_runs", () => {
+    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat nor agent_runs", () => {
       // The premise the whole seeding strategy rests on. If a group ever adopts
       // one of these, this pin fails and `templateToDraft` needs re-reading — a
       // grouped domain is fanned out, not passed through.
-      for (const ungrouped of ["crm", "money", "team_chat", "agent_runs"]) {
+      //
+      // WARP-2760: `crm` used to be on this list and is NOT any more. The
+      // Business row adopted it (with `pm`) when WARP-2583 moved `business` out
+      // from under System — both are ADR-045 legacy domains holding zero tools,
+      // grouped so a grant stored before the move still renders somewhere. That
+      // is the adoption this pin exists to announce, so it is stated here
+      // rather than silently dropped.
+      for (const ungrouped of ["money", "team_chat", "agent_runs"]) {
         expect(GROUPED_DOMAINS.has(ungrouped)).toBe(false);
       }
+      // ...and the other half of the same fact, so a future ungrouping is just
+      // as loud as an adoption was.
+      expect(GROUPED_DOMAINS.has("crm")).toBe(true);
     });
 
     it("seeds originalToolGrants with the template's rows VERBATIM, ungrouped included", () => {
@@ -911,17 +921,20 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       );
     });
 
-    it("REGRESSION: dropping the ungrouped rows loses crm, money and team_chat silently", () => {
+    it("REGRESSION: dropping the ungrouped rows loses money and team_chat silently", () => {
       // The defect this seeding exists to prevent. A draft that trusted the
       // groups to cover the tool axis — seeding originalToolGrants with only
       // the domains TOOL_DOMAIN_GROUPS knows — ships an Office Manager with no
-      // CRM, no Money and no Messages tools, and nothing anywhere says so.
+      // Money and no Messages tools, and nothing anywhere says so.
+      //
+      // WARP-2760: `crm` is deliberately absent from these assertions now. It
+      // is GROUPED (see the pin above), so it survives this filter — asserting
+      // it is dropped tested the old grouping, not the seeding strategy.
       const draft = templateToDraft(byTemplateId("office-manager"));
       draft.originalToolGrants = draft.originalToolGrants.filter((t) =>
         GROUPED_DOMAINS.has(t.domain),
       );
       const domains = draftToRolePayload(draft).toolGrants.map((t) => t.domain);
-      expect(domains).not.toContain("crm");
       expect(domains).not.toContain("money");
       expect(domains).not.toContain("team_chat");
     });
