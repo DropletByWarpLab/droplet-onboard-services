@@ -87,7 +87,9 @@ const projectCreateSchema = z.object({
   department_id: z.string().max(64).optional(),
   // ADR-048 (WARP-2729) — the customer this project is FOR. The column has
   // existed since WARP-2562 with no writer on any path; this is the first.
-  company_id: z.string().max(64).optional(),
+  // `.min(1)`: an empty string is not a customer id. Without it, "" skipped the
+  // service's existence check and reached Postgres as an invalid FK.
+  company_id: z.string().min(1).max(64).optional(),
 });
 
 const projectPatchSchema = z.object({
@@ -99,7 +101,8 @@ const projectPatchSchema = z.object({
   // ADR-045 §5.3 — `null` clears the department; omitting it leaves it alone.
   department_id: z.string().max(64).nullable().optional(),
   // ADR-048 — `null` clears the customer; omitting it leaves it alone.
-  company_id: z.string().max(64).nullable().optional(),
+  // `null` clears; "" is a malformed id, not a clear — see the create schema.
+  company_id: z.string().min(1).max(64).nullable().optional(),
   archived: z.boolean().optional(),
 });
 
