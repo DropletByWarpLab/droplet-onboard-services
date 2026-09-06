@@ -136,6 +136,14 @@ export async function sendNotification(
   // slow or a keypair being unconfigured must never fail the caller's write.
   // The difference is that push failures are RECORDED rather than swallowed, so
   // "delivered: false" on a box with subscribers is diagnosable.
+  //
+  // A push failure is held SEPARATELY from `errors` and only folded in when
+  // NOTHING delivered. `error` on the log row answers "why did this not
+  // arrive"; a box with no push subscriptions at all is the normal case, and
+  // letting that populate `error` on every successful toast would make the
+  // column uniformly non-null — at which point a real failure is invisible in
+  // exactly the place someone would look for it.
+  let pushError: string | null = null;
   try {
     await ensurePushDispatch(prisma);
     const { sent } = await dispatchToUser(prisma, input.userId, {
@@ -144,8 +152,11 @@ export async function sendNotification(
     });
     if (sent > 0) channels.push("push");
   } catch (err) {
-    errors.push(`push: ${err instanceof Error ? err.message : String(err)}`);
+    pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
+    // Always visible to an operator, whether or not it reaches the row.
+    logger.warn({ err, userId: input.userId }, "push notification failed");
   }
+  if (pushError && channels.length === 0) errors.push(pushError);
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({
