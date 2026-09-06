@@ -361,6 +361,14 @@ declared `requiresConfirmation: false` while its route classified
 `"route"`, so the flag stops lying and the tool appears in every
 enumeration that derives from it.
 
+**Background runs do not offer route-owned tools.** A durable agent run
+(WARP-2176, `docs/agent-runs-design.md` §5) parks only on the interceptor's
+challenge; a route's `202` reaches it as an ordinary result with a token the
+run cannot redeem (the confirm endpoints are `dashboardOnly`). So
+`runToolPool()` (`agent-run-worker.service.ts`) excludes
+`confirmationOwnerOf(tool) === "route"` until a run can park on a route
+token (WARP-2744 item 2).
+
 **The drift gate.** A `"route"` declaration is a claim about a file in
 another package, so it is checked at runtime rather than trusted:
 `apps/orchestrator/src/__tests__/confirmation-owner-drift.guard.test.ts`

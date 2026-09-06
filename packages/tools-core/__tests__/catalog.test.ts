@@ -20,6 +20,7 @@
 
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "../src/registry.js";
+import { confirmationOwnerOf } from "../src/interceptor.js";
 import {
   TOOL_CATALOG,
   TOOL_DOMAINS,
@@ -150,5 +151,21 @@ describe("TOOL_CATALOG (WARP-555)", () => {
       expect(entry.homeDescription, `${entry.name} needs home copy`).toBeTruthy();
       expect(entry.homeDescription).not.toBe(entry.description);
     }
+  });
+});
+
+describe("TOOL_CATALOG carries confirmationOwner (WARP-2744)", () => {
+  it("every route-owned registry tool is route-owned in the catalog too, and nothing else is", () => {
+    const fromRegistry = Array.from(TOOLS.values())
+      .filter((t) => confirmationOwnerOf(t) === "route")
+      .map((t) => t.name)
+      .sort();
+    const fromCatalog = TOOL_CATALOG.filter((e) => confirmationOwnerOf(e) === "route")
+      .map((e) => e.name)
+      .sort();
+    expect(fromRegistry.length).toBeGreaterThan(0);
+    expect(fromCatalog).toEqual(fromRegistry);
+    // Undeclared stays undeclared: the default lives in confirmationOwnerOf, not on the entry.
+    expect(TOOL_CATALOG.find((e) => e.name === "delete_file")).not.toHaveProperty("confirmationOwner");
   });
 });

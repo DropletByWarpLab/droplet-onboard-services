@@ -87,7 +87,7 @@
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG, confirmationBindingHash } from "@droplet/tools-core";
+import { TOOL_CATALOG, confirmationBindingHash, confirmationOwnerOf } from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type { ChatMessage } from "../types/index.js";
@@ -185,6 +185,17 @@ function gatewayBusy(threw: unknown, result: AgentResult | null): boolean {
  * The one Tier-1 write kept is the notification channel. Lift this clause —
  * and its test — when that is done.
  *
+ * ROUTE-OWNED CONFIRMATIONS ARE OUT (WARP-2744 item 2). Ten tools declare
+ * `confirmationOwner: "route"` (WARP-2472, tool-confirmation-contract §13):
+ * the interceptor stands down and the orchestrator route asks, answering 202
+ * with a token redeemable only at its dashboard-only confirm endpoint. A run
+ * has no dashboard in the loop, so the interceptor never parks it and the
+ * route's envelope comes back as an ordinary result the model cannot act on
+ * — iterations burned, nobody notified. Until a run can park on a route
+ * token (its own ticket), the honest answer is not to offer the tool.
+ * `confirmationOwnerOf` is the one reader of that flag; the exclusion is
+ * structural, so a newly declared route-owned tool leaves the pool by itself.
+ *
  * Computed from the static catalog at module load, on purpose: runtime
  * (remote, ADR-043) tools are never in a run's `allowed_tools`, so a tool the
  * catalog does not know cannot reach a run at all.
@@ -193,6 +204,7 @@ export function runToolPool(): string[] {
   return TOOL_CATALOG.filter(
     (t) =>
       !RUN_EXCLUDED_TOOLS.has(t.name) &&
+      confirmationOwnerOf(t) !== "route" &&
       (RUN_READMITTED_TOOLS.has(t.name) ||
         (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) && !(t.requiresWrite && !t.requiresConfirmation))),
   ).map((t) => t.name);

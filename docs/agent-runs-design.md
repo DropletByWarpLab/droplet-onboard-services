@@ -168,7 +168,13 @@ challenges only what the catalog declares `requiresConfirmation`, so a Tier-1
 write in a run would simply happen with nobody watching — in chat it at least
 happens in front of the person who asked. Held until WARP-2002 and WARP-2008
 make confirmation a mechanism end to end and the eighteen Tier-1 writes have
-been judged for unattended use. One deliberate re-admission:
+been judged for unattended use. **Route-owned confirmations are out** (WARP-2744
+item 2): the ten tools declaring `confirmationOwner: "route"` are ones the
+interceptor stands down for so the orchestrator route can ask, with a token
+only the dashboard may redeem (`tool-confirmation-contract.md` §13). A run
+never parks on them and could never complete them, so `runToolPool()` drops
+`confirmationOwnerOf(t) === "route"` structurally until a run can park on a
+route token. One deliberate re-admission:
 `send_notification` is excluded from chat as a window-budget/UX call, not a
 safety tier; a run has no reader, so a notification is its completion channel,
 and it is Tier-1 in the catalog. A model that reaches for a Tier-2 tool hits
@@ -373,7 +379,10 @@ another's is a 404, a wrong role a 403.
 with lock key `droplet:agent-run-schedule-ticker`. A due row **enqueues** a
 run (never executes one); the worker claims it and re-resolves the creator's
 reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
-disables the schedule with a `system` row. No second clock.
+disables the schedule with a `system` row. No second clock. A due schedule whose owner row is gone
+is disabled inside the fire transaction with a `system` activity row
+(`reason: user_missing`) instead of enqueuing a run that could only fail —
+`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4).
 
 **Completion** — a terminal status notifies the owner over the same
 `droplet/notifications/<username>` topic the park uses, with the result

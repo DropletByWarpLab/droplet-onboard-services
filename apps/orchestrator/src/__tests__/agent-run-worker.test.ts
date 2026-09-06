@@ -59,7 +59,7 @@ import {
   type AgentRunTraceEntry,
 } from "../services/agent-run-worker.service.js";
 import { DENY_ALL_TOOL_SCOPE } from "../services/tool-access.service.js";
-import { TOOL_CATALOG } from "@droplet/tools-core";
+import { TOOL_CATALOG, confirmationOwnerOf } from "@droplet/tools-core";
 import { sendNotification } from "../services/notifications.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 
@@ -440,6 +440,20 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
       (t) => pool.has(t.name) && t.requiresWrite && !t.requiresConfirmation,
     ).map((t) => t.name);
     expect(unattendedWrites).toEqual(["send_notification"]);
+  });
+
+  it("the run pool holds NO route-owned confirmation: a run cannot redeem a route's token (WARP-2744 item 2)", () => {
+    // `confirmationOwner: "route"` means the interceptor stands down and the
+    // route asks with a dashboard-only token. A run would never park on it
+    // and could never complete it.
+    const pool = new Set(runToolPool());
+    expect(pool.has("block_network_device")).toBe(false);
+    expect(pool.has("share_clip")).toBe(false);
+    expect(pool.has("set_port_vlan")).toBe(false);
+    // Interceptor-owned Tier-2 stays: it parks (WARP-2179).
+    expect(pool.has("delete_file")).toBe(true);
+    const routeOwned = TOOL_CATALOG.filter((t) => pool.has(t.name) && confirmationOwnerOf(t) === "route").map((t) => t.name);
+    expect(routeOwned).toEqual([]);
   });
 
   it("the user row vanished between attribution and dispatch: the run fails as attribution_failed:user_missing, nothing dispatched", async () => {
