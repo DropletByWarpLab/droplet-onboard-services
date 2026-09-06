@@ -221,6 +221,20 @@ const OPEN: Prisma.ErpDocumentWhereInput = {
   // exactly the value of the work that has not been agreed yet.
   kind: { in: [...MONEY_KINDS] },
   OR: [{ balance: null }, { balance: { not: 0 } }],
+  // 🔴 WARP-2737 — nor is a document this box wrote and nobody has sent.
+  //
+  // The same argument as the kind allow-list above, one step further along.
+  // `createLocalDocument` mints every filed document `origin: LOCAL, status:
+  // DRAFT` with `balance = total`, so without this clause an invoice the owner
+  // has only just been SHOWN — extracted from a PDF, applied on one click —
+  // immediately joins "what you are owed", and joins the OVERDUE figure too
+  // whenever the `dueAt` read off that PDF has already passed. A draft nobody
+  // has sent is not a claim on anybody's bank account.
+  //
+  // Only LOCAL rows: a landed row carries `status = NULL` (the provenance
+  // CHECK puts the vendor's word in `vendorStatus`), so this cannot narrow the
+  // vendor-synced ledger by accident.
+  NOT: { origin: "LOCAL", status: "DRAFT" },
 };
 
 /** Open, and past its due date. A document with no due date cannot be late. */

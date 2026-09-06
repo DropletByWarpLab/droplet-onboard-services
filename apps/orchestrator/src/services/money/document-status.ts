@@ -149,6 +149,19 @@ export interface MoveResult {
  * Every refusal is a named error rather than a silent no-op: a caller that
  * asked for PAID and got back a document that is still SENT would show the
  * owner a success and an unchanged row.
+ *
+ * ⚠ THIS HAS NO CALLER YET, AND THAT IS TRACKED RATHER THAN ACCIDENTAL —
+ * WARP-2778. `createLocalDocument` below mints every filed document DRAFT and
+ * nothing on the box can move it: the money surface is two GET routes. What is
+ * missing is not a route, it is an access decision — `access-catalog.ts` says
+ * Money is READ-ONLY, "there is no `act` level: there is no action", and
+ * `FEATURE_GATED_MODULES` mounts only a view gate at the money prefix, so a
+ * PATCH here would be a write endpoint on a module whose access model says
+ * writes do not exist.
+ *
+ * Until that lands, an un-sent local DRAFT is excluded from the money
+ * aggregates (`money.service.ts`'s `OPEN`), so a filed invoice cannot inflate
+ * what an owner is told they are owed while they have no way to settle it.
  */
 export async function moveDocumentStatus(
   prisma: PrismaClient,

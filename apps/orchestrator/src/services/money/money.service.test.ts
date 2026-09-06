@@ -219,6 +219,79 @@ describe("documents", () => {
     );
   });
 
+  it("🔴 never counts a filed DRAFT the owner has not sent", async () => {
+    // WARP-2737 mints local documents `origin: LOCAL, status: DRAFT` with
+    // `balance = total`, so this is the clause standing between an owner and a
+    // receivables figure that grows every time they click Apply on a card.
+    // Worse than merely wrong: `dueAt` is read off the invoice PDF and is
+    // usually already in the past, so a filed draft lands in OVERDUE on the
+    // day it is filed — the box telling the owner they are late paying a bill
+    // it has just invented on their behalf.
+    const { svc, erpDocument } = service([]);
+    await svc.documents({ now: NOW });
+    const where = erpDocument.findMany.mock.calls[0][0].where as {
+      NOT?: { origin?: string; status?: string };
+    };
+    expect(where.NOT).toEqual({ origin: "LOCAL", status: "DRAFT" });
+  });
+
+  it("the same exclusion is on the TOTALS, not only the list", async () => {
+    // `OPEN` is shared between groupBy and findMany precisely so the figure and
+    // the table can never describe different rows — asserted here so a fix that
+    // filters only one of them is red.
+    const { svc, erpDocument } = service([]);
+    await svc.summary(NOW);
+    for (const call of erpDocument.groupBy.mock.calls) {
+      const where = call[0].where as { NOT?: unknown };
+      expect(where.NOT).toEqual({ origin: "LOCAL", status: "DRAFT" });
+    }
+    expect(erpDocument.groupBy.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("🔴 the filed draft is absent from the ANSWER, not merely from the query", async () => {
+    // The two assertions above are on the `where`; this one is on what comes
+    // back, so a clause that is present but does not do anything is red too.
+    const { svc } = service([
+      doc({ id: "landed", externalId: "INV-1", balance: "100.00" }),
+      doc({
+        id: "filed",
+        externalId: null,
+        connectionId: null,
+        externalSystem: null,
+        origin: "LOCAL",
+        status: "DRAFT",
+        balance: "9999.00",
+        dueAt: new Date("2026-08-01T00:00:00Z"), // read off the PDF, already past
+      }),
+    ]);
+    const views = await svc.documents({ now: NOW });
+    expect(views.map((v) => v.id)).toEqual(["landed"]);
+    // And it is not in the overdue list either, which is where a past `dueAt`
+    // off an invoice PDF would otherwise put it on the day it was filed.
+    const overdue = await svc.documents({ overdueOnly: true, now: NOW });
+    expect(overdue.map((v) => v.id)).not.toContain("filed");
+  });
+
+  it("a LOCAL document the owner HAS sent is money owed, and is counted", async () => {
+    // The complement, and the reason the exclusion names `status` as well as
+    // `origin`: narrowing to `origin: LOCAL` alone would be a ledger that can
+    // never contain anything the box itself issued, which is the opposite of
+    // what WARP-2739 widened the table for.
+    const { svc } = service([
+      doc({
+        id: "sent",
+        externalId: null,
+        connectionId: null,
+        externalSystem: null,
+        origin: "LOCAL",
+        status: "SENT",
+        balance: "250.00",
+      }),
+    ]);
+    const views = await svc.documents({ now: NOW });
+    expect(views.map((v) => v.id)).toEqual(["sent"]);
+  });
+
   it("🔴 never counts a quote or an order as money owed", async () => {
     const { svc, erpDocument } = service([]);
     await svc.documents({ now: NOW });
