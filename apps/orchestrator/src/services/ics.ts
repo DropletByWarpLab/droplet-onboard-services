@@ -4,16 +4,43 @@
  * Just enough to ingest external ICS feeds (iCloud public calendars, Google
  * public calendars, Fastmail, etc.) and to serialize the user's own events
  * for the /api/calendar/publish endpoint so phones can subscribe via
- * webcal://. We deliberately do NOT implement RRULE expansion, VTIMEZONE
- * parsing, or VALARM — v1 supports single events in UTC. Recurring events
- * coming from a feed are stored as their first instance only (with a
- * `recurring` note in the description if RRULE was present).
+ * webcal://. We deliberately do NOT implement RRULE expansion or VALARM
+ * semantics. Recurring events coming from a feed are stored as their first
+ * instance only, with no marker — `IcsEvent` carries the raw `rrule`, but
+ * `calendar.service.ts` has no column to persist it into.
+ *
+ * Nested components (VALARM, and anything else opened with BEGIN: inside a
+ * VEVENT) are SKIPPED, not merely unmodelled — see `parseIcs`. That
+ * distinction is the whole of WARP-2763: failing to model a component and
+ * failing to skip it are different things, and the second one silently
+ * overwrites the parent event's own SUMMARY/DESCRIPTION/UID.
+ *
+ * TZID on DTSTART/DTEND IS honoured (WARP-2764), via `Intl.DateTimeFormat`
+ * rather than a new dependency — see `zonedWallClockToUtc`, which implements
+ * RFC 5545 §3.3.5 for both the repeated hour and the spring-forward gap.
+ * Quoted and solidus-prefixed TZID spellings are normalized first
+ * (`normalizeTzid`), so Thunderbird's `/mozilla.org/…/America/New_York` and a
+ * DQUOTEd name both resolve.
+ *
+ * We still do not read VTIMEZONE blocks, so a TZID the runtime cannot resolve
+ * — Exchange's Windows zone names, e.g. `W. Europe Standard Time` — yields an
+ * Invalid Date and the event is dropped by the shape check at END:VEVENT.
+ * Dropping is deliberate: the alternative is inventing an instant, which is
+ * exactly the defect WARP-2764 fixed. That is now the ONLY drop class.
+ *
+ * ⚠ Known gap, separate ticket: `parseLine` splits name from value on the
+ * first `:`, so a quoted parameter that CONTAINS one — Exchange's
+ * `TZID="(UTC+01:00) Amsterdam, Berlin"` — splits inside the quotes and
+ * corrupts the value. Such a zone is unresolvable anyway, so today it lands in
+ * the documented drop class rather than producing a wrong time.
  *
  * Extending this module:
- *  - Recurring events: add `rrule` library + expand on read in
- *    calendar.service.ts.
- *  - Time zones: add `luxon` and parse VTIMEZONE blocks; convert non-UTC
- *    DATE-TIME values via TZID lookup.
+ *  - Recurring events: add an `rrule` library + expand on read in
+ *    calendar.service.ts. NOTE: `utils/rrule.ts`'s `nextFireFromRrule` is a
+ *    next-fire advancer, NOT an expander — it ignores COUNT/UNTIL and rejects
+ *    the bare `FREQ=WEEKLY;BYDAY=TU` Google emits. Do not reuse it here.
+ *  - Windows zone names: vendor the CLDR windowsZones map, or read the
+ *    STANDARD/DAYLIGHT offsets out of the VTIMEZONE the feed already ships.
  *  - Attendees / RSVP: parse ATTENDEE lines into a separate table.
  */
 
@@ -58,25 +85,206 @@ function parseLine(line: string): { name: string; params: Record<string, string>
   const params: Record<string, string> = {};
   for (let i = 1; i < parts.length; i++) {
     const eq = parts[i].indexOf("=");
-    if (eq > 0) params[parts[i].slice(0, eq).toUpperCase()] = parts[i].slice(eq + 1);
+    // RFC 5545 §3.2: `param-value = paramtext / quoted-string`. The DQUOTEs are
+    // delimiters, not data — a value that keeps them matches nothing downstream.
+    // Generic on purpose: this is true of every parameter, not just TZID.
+    if (eq > 0) {
+      params[parts[i].slice(0, eq).toUpperCase()] = parts[i]
+        .slice(eq + 1)
+        .replace(/^"(.*)"$/, "$1");
+    }
   }
   return { name, params, value };
+}
+
+/** The offset, in ms, that `tz` was running at the given instant —
+ *  `utcInstant + offset === wall clock in tz`. Positive east of UTC.
+ *
+ *  Derived by formatting the instant *in* the zone and reading the wall-clock
+ *  fields back, which is the only offset source available without a tz
+ *  database dependency. Throws `RangeError` for a zone the runtime cannot
+ *  resolve — callers must handle that rather than defaulting to UTC. */
+/** One `Intl.DateTimeFormat` per zone, reused. Constructing a formatter is the
+ *  expensive part, and resolving a feed costs several offset probes per event
+ *  (two per DTSTART/DTEND, plus one per candidate) — a 500-event feed would
+ *  otherwise build thousands of throwaway formatters on a box that is also
+ *  running everything else. Keyed by zone; the set of zones a box ever sees is
+ *  tiny and bounded by its subscriptions, so this never grows unboundedly. */
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zoneFormatter(tz: string): Intl.DateTimeFormat {
+  const hit = zoneFormatters.get(tz);
+  if (hit) return hit;
+  // Throws RangeError for a zone the runtime cannot resolve — deliberately not
+  // caught here, so callers keep the drop-rather-than-guess behaviour.
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    // `hourCycle: h23` — `hour12: false` reports midnight as hour 24 on some
+    // ICU builds, which would silently shift a midnight event by a day.
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  zoneFormatters.set(tz, fmt);
+  return fmt;
+}
+
+function timeZoneOffsetMs(utcInstantMs: number, tz: string): number {
+  const parts = zoneFormatter(tz).formatToParts(new Date(utcInstantMs));
+  const field = (type: string): number => {
+    const p = parts.find((x) => x.type === type);
+    return p ? Number(p.value) : NaN;
+  };
+  const asIfUtc = Date.UTC(
+    field("year"),
+    field("month") - 1,
+    field("day"),
+    field("hour"),
+    field("minute"),
+    field("second"),
+  );
+  return asIfUtc - utcInstantMs;
+}
+
+/** Resolve a wall clock in a named IANA zone to the UTC instant it denotes.
+ *  Returns an Invalid Date if `tz` is not resolvable by the runtime — never a
+ *  UTC guess, because a plausible wrong instant is worse than a dropped event
+ *  (WARP-2764).
+ *
+ *  RFC 5545 §3.3.5 specifies both awkward cases, and they need opposite
+ *  treatment, which is why this is not a single subtraction:
+ *
+ *   - **Repeated** local time (autumn fall-back — the hour occurs twice):
+ *     *"the DATE-TIME value refers to the first occurrence"*. So: the EARLIER
+ *     of the two valid instants.
+ *   - **Nonexistent** local time (spring-forward gap — the hour never occurs):
+ *     *"interpreted using the UTC offset before the gap in local times"*. That
+ *     is the pre-gap offset, which shifts the event forward past the gap — the
+ *     same answer Temporal's `compatible`, luxon and java.time give.
+ *
+ *  Method: an instant denotes wall clock `w` in `tz` iff `instant +
+ *  offset(instant) === w`. Probe the offset a day either side (a single probe
+ *  at the wall clock cannot see both sides of a transition — in the ambiguous
+ *  hour the second reading always agrees with the first), build a candidate per
+ *  distinct offset, and keep only those that actually round-trip. Zero
+ *  survivors means the wall clock is in a gap, and the pre-gap offset is the
+ *  spec's answer. Two survivors is the repeated hour, and `Math.min` is "first
+ *  occurrence".
+ *
+ *  🔴 Do not "simplify" this back to correct-once-and-return. That version
+ *  resolved the gap BACKWARD (a 02:30 New York start became 01:30 EST, two
+ *  hours early) and, in the three zones whose transition is at midnight
+ *  (America/Santiago, America/Havana, Atlantic/Azores), moved a 00:00 event to
+ *  the PREVIOUS CALENDAR DAY. It also returned the LATER occurrence of the
+ *  repeated hour in every zone east of UTC — 73 of 130 DST zones — which is a
+ *  §3.3.5 violation, not a defensible policy choice. */
+function zonedWallClockToUtc(
+  y: number,
+  mo: number,
+  d: number,
+  h: number,
+  mi: number,
+  s: number,
+  tz: string,
+): Date {
+  const wallAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  const DAY_MS = 86_400_000;
+  let offsetBefore: number;
+  let offsetAfter: number;
+  try {
+    offsetBefore = timeZoneOffsetMs(wallAsUtc - DAY_MS, tz);
+    offsetAfter = timeZoneOffsetMs(wallAsUtc + DAY_MS, tz);
+  } catch {
+    return new Date(NaN);
+  }
+  const valid = [...new Set([offsetBefore, offsetAfter])]
+    .map((off) => wallAsUtc - off)
+    .filter((instant) => timeZoneOffsetMs(instant, tz) === wallAsUtc - instant);
+  // No candidate round-trips ⇒ the local time does not exist ⇒ §3.3.5's
+  // "UTC offset before the gap".
+  return new Date(valid.length > 0 ? Math.min(...valid) : wallAsUtc - offsetBefore);
+}
+
+/** Normalize a TZID parameter value to a zone `Intl` can resolve.
+ *
+ *  RFC 5545 §3.2.19 is `tzidparam = "TZID" "=" [tzidprefix] paramtext` with
+ *  `tzidprefix = "/"` — a solidus marks a "globally unique" id. The registry
+ *  that form anticipated was never created, so emitters put a vendor path in
+ *  front of a plain IANA name: Thunderbird/Lightning ships
+ *  `/mozilla.org/20070129_1/America/New_York`, libical
+ *  `/softwarestudio.org/Tzfile/...`.
+ *
+ *  Longest resolvable suffix wins, so the 19 three-component zones survive
+ *  (`America/Indiana/Knox`, `America/Argentina/Buenos_Aires`) — taking a fixed
+ *  two trailing segments mangles those into non-zones.
+ *
+ *  This is not the "inventing an instant" WARP-2764 removed: a suffix is
+ *  accepted only if it names a REAL zone the runtime resolves, and `undefined`
+ *  (⇒ the caller drops the event) is returned when none does. Windows zone
+ *  names still drop, exactly as the module header says. */
+const normalizedTzids = new Map<string, string | undefined>();
+
+function normalizeTzid(tzid: string): string | undefined {
+  const cached = normalizedTzids.get(tzid);
+  if (cached !== undefined || normalizedTzids.has(tzid)) return cached;
+  const t = tzid.trim();
+  const candidates: string[] = t ? [t] : [];
+  if (t.startsWith("/")) {
+    const segments = t.slice(1).split("/");
+    for (let i = 0; i < segments.length; i++) candidates.push(segments.slice(i).join("/"));
+  }
+  let resolved: string | undefined;
+  for (const candidate of candidates) {
+    try {
+      zoneFormatter(candidate);
+      resolved = candidate;
+      break;
+    } catch {
+      /* not a zone — try the next, shorter suffix */
+    }
+  }
+  normalizedTzids.set(tzid, resolved);
+  return resolved;
 }
 
 /** Parse an ICS DATE or DATE-TIME value to a UTC Date.
  *  - `20260423` (DATE) → midnight UTC
  *  - `20260423T140000Z` (UTC DATE-TIME) → exact
- *  - `20260423T140000` (floating local — we treat as UTC for v1) → exact
- *  See module header for the time-zone caveat. */
-function parseIcsDateTime(value: string): Date {
+ *  - `20260423T090000` + `tzid` → resolved in that zone (WARP-2764)
+ *  - `20260423T140000` with no tzid (genuinely floating) → treated as UTC
+ *
+ *  `tzid` comes from the property's own `TZID` parameter. RFC 5545 §3.3.5
+ *  forbids TZID on a value that already carries `Z`, so an explicit `Z` wins
+ *  and the parameter is ignored rather than double-applied. */
+function parseIcsDateTime(value: string, tzid?: string): Date {
   const v = value.trim();
-  // DATE form: YYYYMMDD
+  // DATE form: YYYYMMDD. TZID does not apply — a DATE has no time of day.
   if (/^\d{8}$/.test(v)) {
     return new Date(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}T00:00:00Z`);
   }
   // DATE-TIME form: YYYYMMDDTHHMMSS[Z]
-  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z?$/.exec(v);
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(v);
   if (m) {
+    const isUtc = m[7] === "Z";
+    if (!isUtc && tzid) {
+      const zone = normalizeTzid(tzid);
+      // Unresolvable zone ⇒ Invalid Date ⇒ the shape check at END:VEVENT drops
+      // the event. Deliberate: see the module header.
+      if (!zone) return new Date(NaN);
+      return zonedWallClockToUtc(
+        Number(m[1]),
+        Number(m[2]),
+        Number(m[3]),
+        Number(m[4]),
+        Number(m[5]),
+        Number(m[6]),
+        zone,
+      );
+    }
     return new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
   }
   // Fallback — best effort. Returns Invalid Date if truly garbled, caller
@@ -121,17 +329,24 @@ export function parseIcs(text: string): IcsEvent[] {
   const lines = unfold(text);
   const events: IcsEvent[] = [];
   let inEvent = false;
+  /** Depth of components opened with BEGIN: *inside* the current VEVENT.
+   *  While > 0 every line belongs to a nested component and must not reach
+   *  the property switch (WARP-2763). Counted rather than name-matched so a
+   *  component we have never heard of is inert by construction. */
+  let nestedDepth = 0;
   let current: Partial<IcsEvent> & { _allDay?: boolean } = {};
 
   for (const line of lines) {
     const upper = line.trim().toUpperCase();
     if (upper === "BEGIN:VEVENT") {
       inEvent = true;
+      nestedDepth = 0;
       current = {};
       continue;
     }
     if (upper === "END:VEVENT") {
       inEvent = false;
+      nestedDepth = 0;
       // RFC 5545 lets all-day events omit DTEND (means "one day"). Fill in
       // before the validation check so the event isn't dropped — see the
       // "synthesises endsAt" test.
@@ -150,7 +365,19 @@ export function parseIcs(text: string): IcsEvent[] {
         current.startsAt instanceof Date &&
         !isNaN(current.startsAt.getTime()) &&
         current.endsAt instanceof Date &&
-        !isNaN(current.endsAt.getTime())
+        !isNaN(current.endsAt.getTime()) &&
+        // RFC 5545 §3.6.1: DTEND MUST be later than DTSTART. Belt and braces
+        // behind the gap handling above — one end of an event can sit in a
+        // spring-forward gap while the other does not, and shifting only that
+        // end past the gap can cross the other. Nothing downstream would catch
+        // it: syncSource upserts straight into Prisma and CalendarEvent has no
+        // CHECK constraint, so an inverted row would be persisted and then
+        // vanish from every hour-scale view and free/busy query.
+        // `>=` not `>` — some exporters emit zero-length markers, and those are
+        // harmless to an overlap query. All-day rows keep their own repair
+        // path, which runs just above this check.
+        (current._allDay === true ||
+          current.endsAt.getTime() >= current.startsAt.getTime())
       ) {
         events.push({
           uid: current.uid,
@@ -167,6 +394,20 @@ export function parseIcs(text: string): IcsEvent[] {
       continue;
     }
     if (!inEvent) continue;
+    // Inside a nested component (VALARM being the one every real exporter
+    // emits): swallow every line, tracking depth so a nested-nested BEGIN:
+    // cannot end the skip early. Without this the alarm's own DESCRIPTION /
+    // SUMMARY / UID fall through to the switch below and overwrite the
+    // parent event's — last write wins, and exporters put VALARM last.
+    if (nestedDepth > 0) {
+      if (upper.startsWith("BEGIN:")) nestedDepth++;
+      else if (upper.startsWith("END:")) nestedDepth--;
+      continue;
+    }
+    if (upper.startsWith("BEGIN:")) {
+      nestedDepth = 1;
+      continue;
+    }
     const parsed = parseLine(line);
     if (!parsed) continue;
     switch (parsed.name) {
@@ -183,13 +424,13 @@ export function parseIcs(text: string): IcsEvent[] {
         current.location = unescapeText(parsed.value);
         break;
       case "DTSTART":
-        current.startsAt = parseIcsDateTime(parsed.value);
+        current.startsAt = parseIcsDateTime(parsed.value, parsed.params.TZID);
         if (parsed.params.VALUE === "DATE" || /^\d{8}$/.test(parsed.value.trim())) {
           current._allDay = true;
         }
         break;
       case "DTEND":
-        current.endsAt = parseIcsDateTime(parsed.value);
+        current.endsAt = parseIcsDateTime(parsed.value, parsed.params.TZID);
         break;
       case "RRULE":
         current.rrule = parsed.value;
