@@ -973,6 +973,22 @@ const envSchema = z.object({
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
 
+  // WARP-2590 — the bridge's service bearer, minted per box by
+  // scripts/lib/secrets.sh and wired to BOTH ends via ${SERVICE_TOKEN_ERP_BRIDGE}.
+  //
+  // Read the `.env` name directly and do NOT re-declare it in compose as a
+  // `${VAR}` substitution: that resolves against docker/.env — a different,
+  // untracked file — and because `environment:` outranks `env_file:` the empty
+  // result SHADOWS the real value. That exact mistake blanked
+  // SERVICE_TOKEN_RAG_EVAL and 401'd 15 consecutive nightly eval runs.
+  //
+  // Empty is a legitimate state on a box with no ERP deployed (the bridge is
+  // profile-gated to "erp"), and it degrades the same honest way an empty
+  // ERP_SQL_BRIDGE_URL does: the connector keeps its blocked I/O boundary.
+  // Against a bridge that IS running, an empty token means 401 on every call —
+  // loudly, rather than looking like the practice's server is down.
+  SERVICE_TOKEN_ERP_BRIDGE: z.string().default(""),
+
   // --- ERP export-drop track (WARP-1964) ---
   // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports
   // land in, typically a read-only CIFS mount of a share on the practice LAN.

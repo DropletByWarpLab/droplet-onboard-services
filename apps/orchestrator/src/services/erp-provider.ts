@@ -742,6 +742,10 @@ registerConnectorFactory(EAGLESOFT_PROVIDER, ({ selector: sel }) =>
       // blocked I/O boundary and reports that the SAP client is missing —
       // which is the accurate remediation for a box with no bridge deployed.
       bridgeUrl: config.ERP_SQL_BRIDGE_URL || undefined,
+      // WARP-2590: the bridge now requires a service bearer. Undefined when
+      // unset, so a box with no ERP deployed keeps the same blocked-I/O
+      // degradation rather than sending an empty credential.
+      bridgeAuthToken: config.SERVICE_TOKEN_ERP_BRIDGE || undefined,
     },
   ),
 );
