@@ -257,7 +257,15 @@ export async function buildDrafts(args: {
     if (outcome.kind === "AMBIGUOUS") {
       add(
         "MATCH_REVIEW",
-        normalizeCompanyName(company.name),
+        // The same `|| lowercase` fallback its CREATE_CUSTOMER and
+        // CREATE_PROJECT siblings carry, and that `matchedKeyValue` three lines
+        // below already had. `normalizeCompanyName` collapses inputs like "LLC"
+        // to "", so without it two different ambiguous companies whose names
+        // both normalise to empty share a dedupeKey for one sourceRef — the
+        // second is counted as a duplicate by `persistDrafts`' unique-violation
+        // catch and silently dropped, and a real ambiguous match never reaches
+        // the owner's review queue.
+        normalizeCompanyName(company.name) || company.name.toLowerCase(),
         company.confidence,
         "NAME",
         {
