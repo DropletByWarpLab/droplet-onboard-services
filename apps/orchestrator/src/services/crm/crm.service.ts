@@ -640,7 +640,25 @@ export async function getCompany(prisma: PrismaClient, id: string): Promise<ApiC
  */
 export interface FilingProvenance {
   proposalId: string;
+  /**
+   * WARP-2735 — the idempotency key for a box-written timeline row.
+   *
+   * `CrmActivity` is `@@unique([externalSystem, externalId])` and, unlike the
+   * other CRM tables, carries no `connectionId` — so that pair is the ONLY
+   * idempotency key available on it. The email arm sets it to the
+   * `EmailMessage.id`, so re-running the same message writes nothing new
+   * rather than a second identical caption.
+   *
+   * Optional because the file arm has nothing to key on: two documents can
+   * legitimately produce two identical captions, and inventing a key for them
+   * would suppress the second.
+   */
+  externalId?: string;
 }
+
+/** Written into `CrmActivity.externalSystem` on every filed row. A constant,
+ *  so the idempotency key cannot collide with a connector's namespace. */
+export const FILING_EXTERNAL_SYSTEM = "filing";
 
 export async function createCompany(
   prisma: PrismaClient,
@@ -1499,6 +1517,25 @@ export async function logActivity(
       calendarEventId: input.calendarEventId ?? null,
       workItemId: input.workItemId ?? null,
       origin: filing ? "EXTRACTED" : "LOCAL",
+      // WARP-2735 — the idempotency key, when the caller has one. See
+      // `FilingProvenance.externalId`: this pair is the only unique key
+      // `CrmActivity` offers, and re-running one email must not append a
+      // second identical caption to a customer's timeline.
+      ...(filing?.externalId
+        ? { externalSystem: FILING_EXTERNAL_SYSTEM, externalId: filing.externalId }
+        : {}),
+      // 🔴 WARP-2735 — a filed row never enters the notification queue.
+      //
+      // `activity-notify.service.ts` takes `notifyStatus: "pending"` FIFO,
+      // 500 rows per 60 s, with NO kind filter, and marks everything that is
+      // not a WON/LOST stage change `not_needed` on arrival. Every row here
+      // would take the schema default `pending` and be swept for nothing — so
+      // a morning's mail would sit ahead of a real deal notification in a
+      // shared budget and delay it.
+      //
+      // Saying `not_needed` up front costs nothing and is simply true: nobody
+      // is notified because Droplet filed an email.
+      ...(filing ? { notifyStatus: "not_needed" as const } : {}),
     },
   });
   return activityToApi(row);

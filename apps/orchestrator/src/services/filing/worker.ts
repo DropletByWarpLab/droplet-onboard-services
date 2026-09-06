@@ -56,6 +56,7 @@ import { isInScope, permittedOwnerIds, readFilingSettings } from "./settings.js"
 import { noteTickCompleted } from "./digest.js";
 import { AUDIT_PHRASES, recordFilingAuditBestEffort, type FilingAuditRefs } from "./audit.js";
 import { indexBackedFileCheck, runAutoApply } from "./auto-apply.js";
+import { runEmailArm } from "./email-arm.js";
 import { capReachedFor, readCaps } from "./caps.js";
 
 const logger = createLogger("filing-worker");
@@ -202,6 +203,25 @@ async function runOneTick(prisma: PrismaClient): Promise<TickOutcome> {
   const owners = await permittedOwnerIds(prisma, settings);
   if (owners.length === 0 || !settings.enabledById) {
     return { status: "idle", reason: "no_owner" };
+  }
+
+  // WARP-2735 — the email arm, ahead of the model pre-flight.
+  //
+  // 🔴 The order is load-bearing. This arm is a JOIN: sender -> contact ->
+  // company, with no model anywhere on the path. A box whose local model is
+  // unreachable has nothing wrong with its MAIL, and returning `blocked`
+  // before running it would stop a customer's email reaching their timeline
+  // for a reason that has nothing to do with either.
+  //
+  // It is also cheap enough to sit in front of the expensive arm: a handful of
+  // indexed queries per message, bounded at EMAIL_CLAIM_BATCH per tick.
+  try {
+    await runEmailArm(prisma, settings);
+  } catch (err) {
+    // Absorbed rather than propagated: an email-arm fault must not take the
+    // file arm down with it, and `safeRun`'s failure counter feeds the canary
+    // that pauses EXTRACTION — which this arm does not do.
+    logger.error({ err }, "filing: email arm failed");
   }
 
   // Resolved BEFORE anything is claimed. A box pointed at a cloud model has
