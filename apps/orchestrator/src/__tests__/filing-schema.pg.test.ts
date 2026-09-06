@@ -344,6 +344,48 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
         /keyKind[\s\S]*keyValue|keyValue[\s\S]*keyKind/,
       );
     });
+
+    it("🔴 refuses a SECOND always-here rule for one key, even under a different customer", async () => {
+      // The review finding this index was rewritten for. ALWAYS_HERE is a
+      // positive, single-answer assignment: "@acme.example files HERE". While
+      // `companyId` was part of the key, company A and company B could each
+      // hold a live rule for the same sender domain and the matcher had two
+      // contradictory answers for one key — a duplicate click was enough.
+      const base = {
+        keyKind: "EMAIL_DOMAIN" as const,
+        keyValue: `${P}acme-one-home.example`,
+        verdict: "ALWAYS_HERE" as const,
+        createdById: `${P}owner`,
+      };
+      await prisma.filingDecision.create({ data: { ...base, companyId: `${P}company-a` } });
+
+      // A DIFFERENT company — this is the case the old key let through.
+      await expect(
+        prisma.filingDecision.create({ data: { ...base, companyId: `${P}company-b` } }),
+      ).rejects.toThrow(/keyKind[\s\S]*keyValue|keyValue[\s\S]*keyKind/);
+    });
+
+    it("but NOT_SAME stays per-customer — one sender can be excluded from many", async () => {
+      // The other half of the same fix: NOT_SAME is an exclusion LIST, so
+      // "not company A" and "not company B" are both true at once and must
+      // both be storable. If this ever starts failing, the ALWAYS_HERE fix was
+      // over-applied to its sibling.
+      const base = {
+        keyKind: "EMAIL_DOMAIN" as const,
+        keyValue: `${P}shared-vendor.example`,
+        verdict: "NOT_SAME" as const,
+        createdById: `${P}owner`,
+      };
+      await prisma.filingDecision.create({ data: { ...base, companyId: `${P}company-a` } });
+      await expect(
+        prisma.filingDecision.create({ data: { ...base, companyId: `${P}company-b` } }),
+      ).resolves.toBeTruthy();
+
+      // …and the same (key, company) pair still cannot be recorded twice.
+      await expect(
+        prisma.filingDecision.create({ data: { ...base, companyId: `${P}company-a` } }),
+      ).rejects.toThrow(/keyKind[\s\S]*keyValue|keyValue[\s\S]*keyKind|companyId/);
+    });
   });
 
   // ─────────────── the deletes that must SUCCEED ───────────────
