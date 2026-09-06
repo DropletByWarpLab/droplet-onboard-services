@@ -23,10 +23,14 @@
  * detectors were written against the old shape. Three columns moved:
  *
  *   - `kind` stopped being RECEIVABLE | PAYABLE and became the document type.
- *     Money owed TO the business is an `INVOICE`; money owed BY it is a
- *     `BILL`. (QUOTE/ORDER/RECEIPT are not money-owed documents, and a
- *     CREDIT_NOTE is receivable-and-NEGATIVE, so it is not something to
- *     chase — the `minor <= 0n` filter below would drop it anyway.)
+ *     Direction is now DERIVED from kind, and `money.service.ts` already owns
+ *     that mapping — `KINDS_BY_DIRECTION`, reachable as `kindsFor(direction)`.
+ *     These queries ask IT rather than naming kinds here, so the detector and
+ *     `directionOf()` cannot drift: RECEIVABLE is INVOICE + CREDIT_NOTE +
+ *     RECEIPT, PAYABLE is BILL, and QUOTE/ORDER are excluded by an allow-list
+ *     whose whole point is that a seventh kind stays out until somebody
+ *     decides it belongs. Hand-picking `INVOICE` here would have been a second,
+ *     quieter opinion about the same question.
  *   - the vendor's own status word was renamed `status` -> `vendorStatus`, so
  *     the box's own lifecycle could take the name `status`.
  *   - `externalSystem` became nullable — a LOCAL row has no vendor.
@@ -46,6 +50,7 @@
  * pass rather than nag forever.
  */
 import type { PrismaClient } from "@prisma/client";
+import { kindsFor, type MoneyDirection } from "../../money/money.service.js";
 import type { Detector, DetectedFinding } from "./types";
 
 /** Below this, an overdue invoice is noise. Reporting a $2 balance next to a
@@ -110,7 +115,7 @@ function isOpen(vendorStatus: string | null, status: string | null): boolean {
 async function overdue(
   prisma: PrismaClient,
   now: Date,
-  kind: "INVOICE" | "BILL",
+  direction: MoneyDirection,
 ): Promise<
   Array<{
     id: string;
@@ -124,7 +129,7 @@ async function overdue(
   }>
 > {
   return prisma.erpDocument.findMany({
-    where: { kind, dueAt: { lt: now } },
+    where: { kind: { in: [...kindsFor(direction)] }, dueAt: { lt: now } },
     select: {
       id: true,
       balance: true,
@@ -155,7 +160,7 @@ export const overdueReceivables: Detector = {
   key: "money.overdue-receivable",
   description: "Invoices past their due date with a balance still outstanding",
   async run(prisma: PrismaClient, now: Date): Promise<DetectedFinding[]> {
-    const rows = await overdue(prisma, now, "INVOICE");
+    const rows = await overdue(prisma, now, "RECEIVABLE");
     const out: DetectedFinding[] = [];
 
     for (const r of rows) {
@@ -207,7 +212,7 @@ export const overduePayables: Detector = {
   key: "money.overdue-payable",
   description: "Bills the business owes that are past their due date",
   async run(prisma: PrismaClient, now: Date): Promise<DetectedFinding[]> {
-    const rows = await overdue(prisma, now, "BILL");
+    const rows = await overdue(prisma, now, "PAYABLE");
     const out: DetectedFinding[] = [];
 
     for (const r of rows) {

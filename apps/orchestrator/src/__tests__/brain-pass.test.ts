@@ -24,6 +24,7 @@ import { encodeCursor, decodeCursor, parseDigests } from "../services/brain/brai
 import { decimalToMinor, overdueReceivables, overduePayables } from "../services/brain/detectors/money-overdue";
 import { dealsSlipping } from "../services/brain/detectors/deals-slipping";
 import type { Detector } from "../services/brain/detectors/types";
+import { kindsFor } from "../services/money/money.service.js";
 
 vi.mock("../middleware/space", () => ({
   readableDepartmentIdsFor: vi.fn(async () => new Set<string>()),
@@ -408,20 +409,31 @@ describe("money detectors (WARP-2754)", () => {
     expect(out[0]!.evidence.sources[0]!.quote).not.toContain("null");
   });
 
-  it("queries the document KINDS that carry money owed, not the retired enum", async () => {
-    // RECEIVABLE/PAYABLE stopped existing as `ErpDocumentKind` values; the
-    // money-owed documents are INVOICE (owed TO the business) and BILL (owed
-    // BY it). A typed spy rather than the shared helper, so the `where` this
-    // asserts on is the real argument and not an `any`.
-    const spy = () => vi.fn(async (_args: { where: { kind: string } }) => [] as unknown[]);
+  it("asks money.service for the kinds of each direction, never naming them here", async () => {
+    // RECEIVABLE/PAYABLE stopped existing as `ErpDocumentKind` values, and the
+    // mapping from direction to kinds is already owned by `KINDS_BY_DIRECTION`
+    // in money.service.ts. Asserting against `kindsFor()` rather than a literal
+    // is the point: a hand-written list here would be a second opinion that
+    // could drift from `directionOf()`, which the apply path uses to REFUSE a
+    // document whose kind and direction disagree.
+    const spy = () =>
+      vi.fn(async (_args: { where: { kind: { in: string[] } } }) => [] as unknown[]);
 
     const rx = spy();
     await overdueReceivables.run({ erpDocument: { findMany: rx } } as never, now);
-    expect(rx.mock.calls[0]![0].where.kind).toBe("INVOICE");
+    expect(rx.mock.calls[0]![0].where.kind.in).toEqual([...kindsFor("RECEIVABLE")]);
 
     const px = spy();
     await overduePayables.run({ erpDocument: { findMany: px } } as never, now);
-    expect(px.mock.calls[0]![0].where.kind).toBe("BILL");
+    expect(px.mock.calls[0]![0].where.kind.in).toEqual([...kindsFor("PAYABLE")]);
+
+    // And concretely, so a change to KINDS_BY_DIRECTION is a decision somebody
+    // sees rather than a silently-agreeing pair of tests.
+    expect(rx.mock.calls[0]![0].where.kind.in).toEqual(["INVOICE", "CREDIT_NOTE", "RECEIPT"]);
+    expect(px.mock.calls[0]![0].where.kind.in).toEqual(["BILL"]);
+    // QUOTE and ORDER are not money owed and must never be totalled.
+    expect(rx.mock.calls[0]![0].where.kind.in).not.toContain("QUOTE");
+    expect(rx.mock.calls[0]![0].where.kind.in).not.toContain("ORDER");
   });
 
   it("skips a zero or negative balance", async () => {
