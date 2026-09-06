@@ -36,8 +36,8 @@
  * is scoped to that prefix. Never an unscoped deleteMany, never a TRUNCATE
  * (the access-role.pg.test.ts rule).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { PrismaClient } from "@prisma/client";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import type { PrismaClient } from "@prisma/client";
 import { upsertDigest, upsertFinding } from "../services/brain/brain-digest.service";
 
 const RUN =
@@ -53,7 +53,15 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
   let deptId: string;
 
   beforeAll(async () => {
-    prisma = new PrismaClient();
+    // `setup.ts` mocks `@prisma/client` GLOBALLY for the DB-less lane, so a
+    // plain `new PrismaClient()` here returns the mock — an object with no
+    // model delegates, whose first use fails as
+    // "Cannot read properties of undefined (reading 'deleteMany')" rather than
+    // as anything resembling a database problem. Every `*.pg.test.ts` must
+    // reach past the mock; this is the `entity-link.pg.test.ts` pattern.
+    const { PrismaClient: RealPrismaClient } =
+      await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
+    prisma = new RealPrismaClient();
     await prisma.$connect();
   });
 
