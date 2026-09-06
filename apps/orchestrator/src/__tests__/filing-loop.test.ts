@@ -929,8 +929,18 @@ describe("two ambiguous companies whose names normalise to nothing", () => {
   const ambiguous = async (): Promise<MatchOutcome> => ({
     kind: "AMBIGUOUS",
     candidates: [
-      { companyId: "11111111-1111-4111-8111-111111111111", name: "Acme Dental" },
-      { companyId: "22222222-2222-4222-8222-222222222222", name: "Acme Dental Supply" },
+      {
+        companyId: "11111111-1111-4111-8111-111111111111",
+        name: "Acme Dental",
+        via: "NAME",
+        viaValue: "acme dental",
+      },
+      {
+        companyId: "22222222-2222-4222-8222-222222222222",
+        name: "Acme Dental Supply",
+        via: "NAME",
+        viaValue: "acme dental supply",
+      },
     ],
   });
 
