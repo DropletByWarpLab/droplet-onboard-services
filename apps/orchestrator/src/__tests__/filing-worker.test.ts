@@ -34,13 +34,24 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   isTimeoutError: () => false,
 }));
 
+// WARP-2731 review — the Health clock. `noteTickCompleted` is module state in
+// digest.js with no getter, so the call itself is the observable.
+const noteTickCompletedMock = vi.hoisted(() => vi.fn());
+vi.mock("../services/filing/digest.js", () => ({ noteTickCompleted: noteTickCompletedMock }));
+
 const resolveOffLanProviderMock = vi.hoisted(() => vi.fn());
 vi.mock("../services/cloud-access.service.js", () => ({
   resolveOffLanProvider: resolveOffLanProviderMock,
   isLocalProvider: (p: string) => p === "ollama" || p === "dmr" || p === "local",
 }));
 
-import { runFilingTick, __resetInFlightForTests } from "../services/filing/worker.js";
+import {
+  runFilingTick,
+  __resetInFlightForTests,
+  __resetCanaryForTests,
+  filingPauseState,
+  CANARY_THRESHOLD,
+} from "../services/filing/worker.js";
 import { fingerprintChunks } from "../services/filing/read-content.js";
 
 const ENABLED = {
@@ -106,6 +117,8 @@ function makePrisma(over: {
 
 beforeEach(() => {
   __resetInFlightForTests();
+  __resetCanaryForTests();
+  noteTickCompletedMock.mockClear();
   completeOnceMock.mockReset();
   listModelsMock.mockReset();
   resolveOffLanProviderMock.mockReset();
@@ -282,5 +295,119 @@ describe("the folder fence stops a claim before it is read", () => {
       extractReason: "out_of_scope",
     });
     expect(completeOnceMock).not.toHaveBeenCalled();
+  });
+});
+
+
+// ── WARP-2731 review findings ────────────────────────────────────────────────
+
+describe("🔴 the Health clock counts ticks the worker could not do anything with", () => {
+  // The defect: `noteTickCompleted()` lived in the `finally` of the claim
+  // block, which is entered only AFTER the model resolves. Every early return
+  // above it — `off`, `no_owner`, `paused`, and above all `blocked` — skipped
+  // it. During a sustained gateway outage every tick returns `blocked`, so
+  // `lastTickAt` froze at its pre-outage value and the Health row understated
+  // the outage by exactly as long as the outage lasted. That is the "a panel
+  // that counted only what filing did would look healthiest the moment it
+  // stopped" failure this row exists to prevent.
+
+  it("a BLOCKED tick still stamps the clock", async () => {
+    resolveOffLanProviderMock.mockResolvedValue("anthropic");
+    const { prisma } = makePrisma({ setting: ENABLED, claimRows: [CLAIM_ROW] });
+    expect(await runFilingTick(prisma)).toMatchObject({ status: "blocked" });
+    expect(noteTickCompletedMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("an OFF tick stamps it too — the worker is alive, just told to do nothing", async () => {
+    const { prisma } = makePrisma({ setting: null });
+    expect(await runFilingTick(prisma)).toEqual({ status: "idle", reason: "off" });
+    expect(noteTickCompletedMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a processed tick still stamps it exactly once", async () => {
+    completeOnceMock.mockResolvedValue({ content: "", model: "llama3:8b" });
+    const { prisma } = makePrisma({
+      setting: ENABLED,
+      claimRows: [CLAIM_ROW],
+      chunkRows: [{ text: "Invoice 1042 from ACME.", sensitivity: "standard" }],
+    });
+    await runFilingTick(prisma);
+    expect(noteTickCompletedMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("an in_flight tick does NOT stamp — the tick that owns the clock will", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    completeOnceMock.mockImplementation(async () => {
+      await held;
+      return { content: "", model: "llama3:8b" };
+    });
+    const { prisma } = makePrisma({
+      setting: ENABLED,
+      claimRows: [CLAIM_ROW],
+      chunkRows: [{ text: "Invoice 1042 from ACME.", sensitivity: "standard" }],
+    });
+    const slow = runFilingTick(prisma);
+    await new Promise((r) => setImmediate(r));
+    expect(await runFilingTick(prisma)).toEqual({ status: "idle", reason: "in_flight" });
+    expect(noteTickCompletedMock).not.toHaveBeenCalled();
+    release();
+    await slow;
+    expect(noteTickCompletedMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("🔴 the five-strike canary sees a completions-only outage", () => {
+  // The defect: `noteModelFailure()` had ONE call site — the pre-flight
+  // `resolveFilingModel` check, which only proves the model LIST answers. A
+  // gateway whose list endpoint is up while completions fail is a very
+  // plausible partial outage, and it surfaces as a THROW out of
+  // `extractFromText` (`askForJson` does not wrap `completeOnce`, and the
+  // function's only failure reasons are `bad_json` / `phi_*` / `not_business` —
+  // never `model_unreachable`). So the breaker whose doc comment promises to
+  // stop exactly this could never see it, and every claimed document burned its
+  // retry budget one at a time instead.
+
+  function outage() {
+    completeOnceMock.mockRejectedValue(new Error("ECONNREFUSED 127.0.0.1:12434"));
+    return makePrisma({
+      setting: ENABLED,
+      claimRows: [CLAIM_ROW],
+      chunkRows: [{ text: "Invoice 1042 from ACME.", sensitivity: "standard" }],
+    });
+  }
+
+  it("trips the pause after CANARY_THRESHOLD failing completions", async () => {
+    const { prisma } = outage();
+    expect(filingPauseState().paused).toBe(false);
+
+    for (let i = 0; i < CANARY_THRESHOLD; i += 1) {
+      // The throw is deliberately re-raised: a genuine fault reaching `safeRun`
+      // is this file's contract. The canary just gets to watch it go past.
+      await expect(runFilingTick(prisma)).rejects.toThrow(/ECONNREFUSED/);
+    }
+
+    expect(filingPauseState()).toEqual({ paused: true, reason: "model_unreachable" });
+  });
+
+  it("and one real answer in the middle clears the streak", async () => {
+    // The counter is CONSECUTIVE failures. Without this, a box that fails four
+    // times a day for two days would pause on an outage that never happened.
+    const { prisma } = outage();
+    for (let i = 0; i < CANARY_THRESHOLD - 1; i += 1) {
+      await expect(runFilingTick(prisma)).rejects.toThrow();
+    }
+    expect(filingPauseState().paused).toBe(false);
+
+    completeOnceMock.mockResolvedValue({ content: "", model: "llama3:8b" });
+    await runFilingTick(prisma);
+
+    completeOnceMock.mockRejectedValue(new Error("ECONNREFUSED 127.0.0.1:12434"));
+    for (let i = 0; i < CANARY_THRESHOLD - 1; i += 1) {
+      await expect(runFilingTick(prisma)).rejects.toThrow();
+    }
+    expect(filingPauseState().paused).toBe(false);
   });
 });
