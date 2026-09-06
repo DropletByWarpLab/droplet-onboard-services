@@ -987,12 +987,14 @@ export function roleToDraft(role: AccessRole): RoleDraft {
  *      role's rows do. Auto-off still works: that path drops a row whose
  *      group's gating feature is off.
  *   2. `originalToolGrants` carries the template's rows VERBATIM, and that is
- *      the only thing that can carry four of them. TOOL_DOMAIN_GROUPS covers 15
- *      of the 19 grantable domains — `crm`, `money`, `team_chat` and
- *      `agent_runs` belong to NO group, and `draftToRolePayload` emits an
- *      ungrouped domain only from this array. blankRoleDraft sets it to [],
- *      which would silently drop a Front Desk's `crm` tools and a Bookkeeper's
- *      `money` tools on the way to the wire.
+ *      the only thing that can carry three of them. TOOL_DOMAIN_GROUPS covers
+ *      16 of the 19 grantable domains — `money`, `team_chat` and `agent_runs`
+ *      belong to NO group, and `draftToRolePayload` emits an ungrouped domain
+ *      only from this array. blankRoleDraft sets it to [], which would silently
+ *      drop a Bookkeeper's `money` tools and an Office Manager's `team_chat`
+ *      tools on the way to the wire. (WARP-2760: `crm` was a fourth entry here
+ *      until the Business row adopted it alongside `pm`; `access.test.ts` pins
+ *      both halves of that fact so the next move is loud.)
  *   3. `usageTouched` is false, so the template's raw usage values re-emit
  *      verbatim instead of being round-tripped through the lossy GB/TB input.
  *      Every shipped template leaves all three caps null (a cap the box does
