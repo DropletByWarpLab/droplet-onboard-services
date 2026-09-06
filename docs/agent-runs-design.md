@@ -168,7 +168,13 @@ challenges only what the catalog declares `requiresConfirmation`, so a Tier-1
 write in a run would simply happen with nobody watching — in chat it at least
 happens in front of the person who asked. Held until WARP-2002 and WARP-2008
 make confirmation a mechanism end to end and the eighteen Tier-1 writes have
-been judged for unattended use. One deliberate re-admission:
+been judged for unattended use. **Route-owned confirmations are out** (WARP-2744
+item 2): the ten tools declaring `confirmationOwner: "route"` are ones the
+interceptor stands down for so the orchestrator route can ask, with a token
+only the dashboard may redeem (`tool-confirmation-contract.md` §13). A run
+never parks on them and could never complete them, so `runToolPool()` drops
+`confirmationOwnerOf(t) === "route"` structurally until a run can park on a
+route token. One deliberate re-admission:
 `send_notification` is excluded from chat as a window-budget/UX call, not a
 safety tier; a run has no reader, so a notification is its completion channel,
 and it is Tier-1 in the catalog. A model that reaches for a Tier-2 tool hits
