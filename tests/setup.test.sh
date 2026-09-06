@@ -1972,7 +1972,14 @@ if grep -qE '^ROUTING_MODE=(real|mock)$' "$T9D/.env"; then
 else
   fail "migrate_env glued the backfilled key onto the last line (no trailing-newline guard)"
 fi
-if grep -qE '^COMPOSE_PROFILES=(eval|linux,display,eval)$' "$T9D/.env"; then
+# WARP-2734 appended a CONDITIONAL `,email` to this value — the email-indexer
+# profile is switched on exactly when SERVICE_TOKEN_EMAIL is provisioned, which
+# generate_env always does. The pattern gains that optional suffix rather than
+# being loosened to `.*`, because what this assertion is ABOUT is corruption:
+# pre-fix the bug glued two keys together as `COMPOSE_PROFILES=evalROUTING_MODE=real`,
+# and anchoring both ends is what detects that. A `.*` would pass on the very
+# string the test exists to catch.
+if grep -qE '^COMPOSE_PROFILES=(eval|linux,display,eval)(,email)?$' "$T9D/.env"; then
   pass "the pre-existing last line survives a no-trailing-newline append"
 else
   fail "the pre-existing last line was corrupted by the append (COMPOSE_PROFILES mangled)"

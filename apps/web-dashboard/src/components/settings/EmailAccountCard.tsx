@@ -37,6 +37,7 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
 
 import { authFetch } from "@/lib/auth";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
 
 interface MailboxAccount {
@@ -56,6 +57,8 @@ export function EmailAccountCard(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  /** The mailbox awaiting a disconnect confirmation, or null. */
+  const [pendingDisconnect, setPendingDisconnect] = useState<MailboxAccount | null>(null);
 
   const [displayName, setDisplayName] = useState("");
   const [address, setAddress] = useState("");
@@ -139,7 +142,7 @@ export function EmailAccountCard(): JSX.Element {
   };
 
   /**
-   * 🔴 Confirmed, because it is not reversible.
+   * 🔴 Confirmed through `<ConfirmDialog>`, because it is not reversible.
    *
    * `EmailThread`, `EmailMessage` and `EmailDraft` all cascade on `accountId`,
    * so disconnecting deletes the entire stored archive for that mailbox — and
@@ -148,16 +151,12 @@ export function EmailAccountCard(): JSX.Element {
    * what is destroyed is everything Droplet had indexed about it, which is the
    * part search and the customer timeline read.
    *
-   * The prompt names the mailbox and says what goes, rather than asking "are
-   * you sure" about an unnamed thing.
+   * The repo's own primitive rather than `window.confirm`, which
+   * `check-native-dialogs.sh` bans (WARP-291) — a native dialog cannot carry
+   * the mailbox address as a verifiable identifier, cannot be styled to say
+   * this is destructive, and traps focus outside the app.
    */
-  const disconnect = async (id: string, address: string) => {
-    const ok = window.confirm(
-      `Disconnect ${address}?\n\n` +
-        "Droplet will delete its copy of this mailbox's mail, including anything " +
-        "shown on your customers' timelines. The mail stays on your mail server.",
-    );
-    if (!ok) return;
+  const disconnect = async (id: string) => {
     setBusy(true);
     setError(null);
     try {
@@ -174,28 +173,28 @@ export function EmailAccountCard(): JSX.Element {
   };
 
   return (
-    <section className="card">
+    <section className="card space-y-4">
       <h2 className="type-title-3">Mailboxes Droplet reads</h2>
-      <p className="type-body settings-hint">
+      <p className="type-caption-1">
         Connect a mailbox and Droplet keeps a copy of its mail on this Droplet, so you
         can search it and see it beside your customers. This is separate from the
         outbound relay below, which is how Droplet <em>sends</em>.
       </p>
 
       {accounts.length > 0 && (
-        <ul className="settings-list">
+        <ul className="flex flex-col gap-2">
           {accounts.map((a) => (
-            <li key={a.id}>
+            <li key={a.id} className="flex items-center justify-between gap-2">
               <span>
                 {a.displayName} · {a.address}
               </span>
-              <span className="settings-muted">
+              <span className="type-caption-1 text-system-green">
                 {a.imapStatus === "idle" ? "Connected" : a.imapStatus}
               </span>
               <button
                 className="btn"
                 disabled={busy}
-                onClick={() => void disconnect(a.id, a.address)}
+                onClick={() => setPendingDisconnect(a)}
               >
                 Disconnect
               </button>
@@ -205,12 +204,12 @@ export function EmailAccountCard(): JSX.Element {
       )}
 
       {!open ? (
-        <button className="btn primary" onClick={() => setOpen(true)}>
+        <button className="btn primary type-subheadline" onClick={() => setOpen(true)}>
           Connect a mailbox
         </button>
       ) : (
-        <div className="settings-form">
-          <label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1.5">
             Name it
             <input
               value={displayName}
@@ -218,7 +217,7 @@ export function EmailAccountCard(): JSX.Element {
               placeholder="Front desk"
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Email address
             <input
               type="email"
@@ -226,7 +225,7 @@ export function EmailAccountCard(): JSX.Element {
               onChange={(e) => setAddress(e.target.value)}
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Incoming mail server
             <input
               value={imapHost}
@@ -234,7 +233,7 @@ export function EmailAccountCard(): JSX.Element {
               placeholder="your mail server"
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Incoming port
             <input
               type="number"
@@ -242,7 +241,7 @@ export function EmailAccountCard(): JSX.Element {
               onChange={(e) => setImapPort(Number(e.target.value))}
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Outgoing mail server
             <input
               value={smtpHost}
@@ -250,7 +249,7 @@ export function EmailAccountCard(): JSX.Element {
               placeholder="your mail server"
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Outgoing port
             <input
               type="number"
@@ -258,11 +257,11 @@ export function EmailAccountCard(): JSX.Element {
               onChange={(e) => setSmtpPort(Number(e.target.value))}
             />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Username
             <input value={username} onChange={(e) => setUsername(e.target.value)} />
           </label>
-          <label>
+          <label className="flex flex-col gap-1.5">
             Password
             <input
               type="password"
@@ -274,12 +273,12 @@ export function EmailAccountCard(): JSX.Element {
               autoComplete="new-password"
             />
           </label>
-          <p className="type-caption settings-hint">
+          <p className="type-caption-1 px-0.5 sm:col-span-2">
             Droplet checks the mailbox before saving anything. The password is stored
             encrypted on this Droplet and is never shown again.
           </p>
-          <div className="settings-actions">
-            <button className="btn primary" disabled={busy} onClick={() => void connect()}>
+          <div className="flex items-center gap-2 pt-1 sm:col-span-2">
+            <button className="btn primary type-subheadline" disabled={busy} onClick={() => void connect()}>
               {busy ? "Checking…" : "Connect"}
             </button>
             <button
@@ -298,15 +297,38 @@ export function EmailAccountCard(): JSX.Element {
       )}
 
       {error && (
-        <p className="type-caption settings-error" role="alert">
+        <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2" role="alert">
           {error}
         </p>
       )}
       {savedAt !== null && !error && (
-        <p className="type-caption settings-ok" role="status">
+        <p className="type-footnote text-system-green flex items-center gap-1" role="status">
           Mailbox connected.
         </p>
       )}
+
+      <ConfirmDialog
+        open={pendingDisconnect !== null}
+        title="Disconnect this mailbox?"
+        // Says what is DESTROYED and what SURVIVES. "Are you sure?" about an
+        // unnamed thing is not a confirmation, it is a speed bump.
+        description={
+          "Droplet will delete its copy of this mailbox's mail, including anything " +
+          "shown on your customers' timelines. The mail itself stays on your mail " +
+          "server and is not touched."
+        }
+        // The address, so the person can check they are removing the one they
+        // meant before they do it.
+        confirmedIdentifier={pendingDisconnect?.address}
+        confirmLabel="Disconnect"
+        variant="destructive"
+        onCancel={() => setPendingDisconnect(null)}
+        onConfirm={async () => {
+          const target = pendingDisconnect;
+          setPendingDisconnect(null);
+          if (target) await disconnect(target.id);
+        }}
+      />
     </section>
   );
 }
