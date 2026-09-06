@@ -332,6 +332,15 @@ describe("money detectors (WARP-2754)", () => {
     return { erpDocument: { findMany: vi.fn(async () => rows) } } as never;
   }
 
+  /** Same double, but it keeps the call so the WHERE can be asserted. The
+   *  plain `erpPrisma` above answers with `rows` whatever it is asked — which
+   *  is exactly why a query that matched nothing in production stayed green
+   *  here for the whole life of the bug the next two cases pin. */
+  function erpSpy(rows: unknown[] = []) {
+    const findMany = vi.fn(async (_a?: unknown) => rows);
+    return { prisma: { erpDocument: { findMany } } as never, findMany };
+  }
+
   const base = {
     id: "doc-1",
     balance: "500.00",
@@ -371,6 +380,47 @@ describe("money detectors (WARP-2754)", () => {
   it("skips a zero or negative balance", async () => {
     expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "0" }]), now)).toHaveLength(0);
     expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "-5" }]), now)).toHaveLength(0);
+  });
+
+  /**
+   * WARP-2739 separated DIRECTION from KIND: `ErpDocumentKind` widened to six
+   * values and RECEIVABLE/PAYABLE stopped being ones. This detector kept
+   * querying `where: { kind: "RECEIVABLE" }` — a value no row can hold — so
+   * both detectors matched NOTHING in production while every test here passed,
+   * because the mock answers with `rows` regardless of the filter.
+   *
+   * These assert the WHERE itself, which is the only thing that catches it.
+   */
+  it("filters receivables by the KINDS of that direction, not the direction word", async () => {
+    const { prisma, findMany } = erpSpy();
+    await overdueReceivables.run(prisma, now);
+
+    const where = (findMany.mock.calls[0]![0] as { where: { kind: { in: string[] } } }).where;
+    expect(where.kind.in).toEqual(["INVOICE", "CREDIT_NOTE", "RECEIPT"]);
+    expect(where.kind.in).not.toContain("RECEIVABLE");
+    // QUOTE and ORDER are not money owed — money.service.ts's allow-list keeps
+    // an unaccepted quote out of "what you are owed".
+    expect(where.kind.in).not.toContain("QUOTE");
+    expect(where.kind.in).not.toContain("ORDER");
+  });
+
+  it("filters payables by the KINDS of that direction, not the direction word", async () => {
+    const { prisma, findMany } = erpSpy();
+    await overduePayables.run(prisma, now);
+
+    const where = (findMany.mock.calls[0]![0] as { where: { kind: { in: string[] } } }).where;
+    expect(where.kind.in).toEqual(["BILL"]);
+    expect(where.kind.in).not.toContain("PAYABLE");
+  });
+
+  it("never renders a null externalSystem as the literal \"null\"", async () => {
+    // `externalSystem` is String? — the raw interpolation put "null" into prose
+    // an operator reads. Same class of guess the currency rule refuses to make.
+    const out = await overdueReceivables.run(erpPrisma([{ ...base, externalSystem: null }]), now);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.rationale).not.toContain("null");
+    expect(out[0]!.rationale).toContain("an unnamed system");
+    expect(out[0]!.evidence.sources[0]!.quote).not.toContain("null");
   });
 
   it("skips sub-threshold noise", async () => {

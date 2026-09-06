@@ -13,11 +13,28 @@
  * live read-through vocabulary and are never landed, so there is nothing at
  * rest to sweep.
  *
- * What IS landed is `ErpDocument`: `kind` (RECEIVABLE | PAYABLE), `balance`,
- * `dueAt`, `currency`, `status`, and an `@@index([kind, dueAt])` that these
- * queries ride. POINT-IN-TIME overdue needs no history — only a trend does —
- * so these two run today, against real vendor-synced money, and they are the
- * proof that the loop, the table, the surface and the delivery all work.
+ * What IS landed is `ErpDocument`: `kind`, `balance`, `dueAt`, `currency`,
+ * `status`, and an `@@index([kind, dueAt])` that these queries ride. An `IN`
+ * on the leading column still rides it. POINT-IN-TIME overdue needs no history
+ * — only a trend does — so these two run today, against real vendor-synced
+ * money, and they are the proof that the loop, the table, the surface and the
+ * delivery all work.
+ *
+ * 🔴 `kind` IS NOT A DIRECTION. This file originally read
+ * `where: { kind: "RECEIVABLE" }`, which is what WARP-2739 had already stopped
+ * being true: it widened `ErpDocumentKind` to six values (QUOTE, ORDER,
+ * INVOICE, BILL, CREDIT_NOTE, RECEIPT) and moved direction into
+ * `money.service.ts`'s `KINDS_BY_DIRECTION`. A quote and an invoice are both
+ * receivable; a credit note is receivable and negative. So the old query
+ * compared the kind column against a value no row can hold and matched NOTHING
+ * — both detectors were silently dead, not merely mistyped. The type error that
+ * surfaced it was TypeScript reporting a semantic break, not a missing cast,
+ * which is why this takes `MoneyDirection` and resolves it through `kindsFor`
+ * rather than asserting the string into the enum.
+ *
+ * Going through `kindsFor` also inherits its allow-list posture: a seventh kind
+ * is EXCLUDED from these detectors until somebody decides it belongs, rather
+ * than silently appearing in "what you are owed".
  *
  * A NOTE ON `balance` AND `status`. `money.service.ts` records that a document
  * the vendor stops serving — paid, voided, deleted upstream — is NOT reaped, so
@@ -27,6 +44,7 @@
  * pass rather than nag forever.
  */
 import type { PrismaClient } from "@prisma/client";
+import { kindsFor, type MoneyDirection } from "../../money/money.service.js";
 import type { Detector, DetectedFinding } from "./types";
 
 /** Below this, an overdue invoice is noise. Reporting a $2 balance next to a
@@ -67,20 +85,18 @@ function isOpen(status: string | null): boolean {
 async function overdue(
   prisma: PrismaClient,
   now: Date,
-  kind: "RECEIVABLE" | "PAYABLE",
-): Promise<
-  Array<{
-    id: string;
-    balance: unknown;
-    currency: string | null;
-    dueAt: Date | null;
-    status: string | null;
-    counterpartyName: string | null;
-    externalSystem: string;
-  }>
-> {
+  direction: MoneyDirection,
+) {
+  // Return type INFERRED, deliberately. The hand-written shape that used to be
+  // here had rotted twice against the schema — it still said `status: string`
+  // after WARP-2739 made it an enum, and `externalSystem: string` when the
+  // column is `String?`. An annotation that only restates the selection is a
+  // second source of truth for the same fact, and this file is what it costs
+  // when the two drift. Inference cannot drift.
   return prisma.erpDocument.findMany({
-    where: { kind, dueAt: { lt: now } },
+    // `kind IN (...)` on the leading column of @@index([kind, dueAt]), not
+    // `kind = <direction>` — see the header note.
+    where: { kind: { in: [...kindsFor(direction)] }, dueAt: { lt: now } },
     select: {
       id: true,
       balance: true,
@@ -113,6 +129,10 @@ export const overdueReceivables: Detector = {
       if (days <= 0) continue;
 
       const who = r.counterpartyName?.trim() || "an unnamed customer";
+      // `externalSystem` is String? in the schema. Interpolated raw it renders
+      // the literal "null" into a finding an operator reads — the same class of
+      // guess the currency rule refuses to make.
+      const source = r.externalSystem?.trim() || "an unnamed system";
       // Impact and currency are all-or-nothing. A document with a balance and
       // no currency is unrenderable, so it is reported WITHOUT a number rather
       // than with a guessed one.
@@ -123,7 +143,7 @@ export const overdueReceivables: Detector = {
         kind: "loss",
         title: `${who} is ${days} days past due`,
         rationale:
-          `An invoice from ${r.externalSystem} fell due ${days} days ago and still ` +
+          `An invoice from ${source} fell due ${days} days ago and still ` +
           `carries a balance. Nothing in the box has chased it.` +
           (haveCurrency ? "" : " The vendor sent no currency, so no amount is shown."),
         impactMinor: haveCurrency ? minor : null,
@@ -133,7 +153,7 @@ export const overdueReceivables: Detector = {
             {
               sourceKind: "erp_document",
               sourceId: r.id,
-              quote: `${r.externalSystem} receivable, due ${
+              quote: `${source} receivable, due ${
                 r.dueAt?.toISOString().slice(0, 10) ?? "unknown"
               }, balance ${String(r.balance)} ${r.currency ?? "(no currency)"}`,
             },
@@ -165,6 +185,10 @@ export const overduePayables: Detector = {
       if (days <= 0) continue;
 
       const who = r.counterpartyName?.trim() || "an unnamed supplier";
+      // `externalSystem` is String? in the schema. Interpolated raw it renders
+      // the literal "null" into a finding an operator reads — the same class of
+      // guess the currency rule refuses to make.
+      const source = r.externalSystem?.trim() || "an unnamed system";
       const haveCurrency = Boolean(r.currency);
 
       out.push({
@@ -176,7 +200,7 @@ export const overduePayables: Detector = {
         kind: "risk",
         title: `A bill to ${who} is ${days} days overdue`,
         rationale:
-          `A payable from ${r.externalSystem} fell due ${days} days ago and is ` +
+          `A payable from ${source} fell due ${days} days ago and is ` +
           `still open. Late payment costs standing, and sometimes a fee.`,
         impactMinor: haveCurrency ? minor : null,
         currency: haveCurrency ? r.currency : null,
@@ -185,7 +209,7 @@ export const overduePayables: Detector = {
             {
               sourceKind: "erp_document",
               sourceId: r.id,
-              quote: `${r.externalSystem} payable, due ${
+              quote: `${source} payable, due ${
                 r.dueAt?.toISOString().slice(0, 10) ?? "unknown"
               }, balance ${String(r.balance)} ${r.currency ?? "(no currency)"}`,
             },
