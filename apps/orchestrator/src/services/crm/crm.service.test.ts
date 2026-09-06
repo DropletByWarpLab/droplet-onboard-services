@@ -737,10 +737,61 @@ describe("deleting a synced CRM row (WARP-2554 parity)", () => {
         findUnique: async () => ({ id: "c2", origin: "LOCAL" }),
         delete: del,
       },
+      // WARP-2739 — no money documents of ours point at it.
+      erpDocument: { count: async () => 0 },
     } as never;
 
     await expect(deleteCompany(prisma, "c2")).resolves.toBeUndefined();
     expect(del).toHaveBeenCalledWith({ where: { id: "c2" } });
+  });
+
+  /**
+   * WARP-2739 — the invariant a CHECK constraint could not carry.
+   *
+   * 🔴 `ErpDocument.companyId` is ON DELETE SET NULL. A CHECK requiring a
+   * non-null party on a LOCAL document would fire inside the statement that
+   * nulls it, so the company delete would fail with a constraint error naming
+   * a table nobody was touching, and the company would be permanently
+   * un-deletable with no readable way out. The refusal lives here instead,
+   * where it can say the true thing.
+   */
+  it("🔴 refuses to delete a customer that still has money documents of ours", async () => {
+    const del = vi.fn();
+    const count = vi.fn(async (_arg: { where: Record<string, unknown> }) => 2);
+    const prisma = {
+      crmCompany: {
+        findUnique: async () => ({ id: "c3", origin: "LOCAL" }),
+        delete: del,
+      },
+      erpDocument: { count },
+    } as never;
+
+    await expect(deleteCompany(prisma, "c3")).rejects.toThrow(
+      CRM_ERRORS.COMPANY_HAS_LOCAL_DOCUMENTS,
+    );
+    // MUTATION: drop the guard and this goes red. The refusal must precede the
+    // write — reporting it afterwards is reporting a deletion that happened.
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("🔴 counts only LOCAL documents — a landed invoice must not pin a customer", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const count = vi.fn(async (_arg: { where: Record<string, unknown> }) => 0);
+    const prisma = {
+      crmCompany: {
+        findUnique: async () => ({ id: "c4", origin: "LOCAL" }),
+        delete: del,
+      },
+      erpDocument: { count },
+    } as never;
+
+    await expect(deleteCompany(prisma, "c4")).resolves.toBeUndefined();
+    // A LANDED document survives with `companyId = NULL`, which is WARP-2581's
+    // behaviour and stays: the vendor still holds the document, and losing the
+    // account record must not lose the record of the money. Widening this
+    // predicate to every document would make a synced ledger able to pin a
+    // customer nobody can remove.
+    expect(count.mock.calls[0][0].where).toEqual({ companyId: "c4", origin: "LOCAL" });
   });
 
   it("refuses to delete an EXTERNAL deal, and names archive as the way out", async () => {

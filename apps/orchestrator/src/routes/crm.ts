@@ -117,6 +117,13 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case crm.CRM_ERRORS.STAGE_IS_LAST:
     case crm.CRM_ERRORS.PIPELINE_HAS_DEALS:
     case crm.CRM_ERRORS.DUPLICATE_LINK:
+    // WARP-2739 — deliberately NOT given `remediation: "archive"`. Archiving
+    // the customer would leave the invoices attached to an archived record,
+    // which is a legitimate thing to want but is not the way OUT of this
+    // refusal: the documents have to be dealt with first. Offering a
+    // remediation token that does not resolve the refusal is worse than
+    // offering none.
+    case crm.CRM_ERRORS.COMPANY_HAS_LOCAL_DOCUMENTS:
       res.status(409).json({ error: msg });
       return true;
     case crm.CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD:

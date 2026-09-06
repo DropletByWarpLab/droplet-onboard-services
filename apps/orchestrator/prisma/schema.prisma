@@ -5112,12 +5112,84 @@ model ErpEntityCache {
 /// Two kinds rather than two tables, because every column below is the same on
 /// both sides and only the counterparty's role differs — and because the
 /// question the owner asks ("what is overdue") crosses both.
+/// WARP-2739 (ADR-049 §4.1) — who wrote this document.
+///
+/// Mirrors `CrmRecordOrigin`, the pattern the CRM already proved, with one
+/// deliberate difference in vocabulary: the CRM's non-local value is `EXTERNAL`
+/// and carries "uneditable, archive-only, overwritten by the next landing
+/// tick". Here the value is `LANDED` and means exactly the same thing — the
+/// vendor owns the row — but the CRM's enum is not reused, because a shared
+/// enum across two tables with different lifecycles is how one table's widening
+/// becomes the other's migration.
+enum ErpDocumentOrigin {
+  /// A copy of what a vendor's server decided. `land-money.ts` owns it, the
+  /// vendor is the system of record, and the box may never edit it.
+  LANDED
+  /// The box's own document. Nothing outside this appliance has ever seen it,
+  /// and a person can correct it.
+  LOCAL
+}
+
+/// WARP-2739 (ADR-049 §4.1) — WHAT the document is.
+///
+/// 🔴 This enum used to be `RECEIVABLE | PAYABLE`, WHICH IS A DIRECTION, NOT A
+/// KIND. A quote and an invoice are both receivable; a credit note is
+/// receivable and negative; a receipt is receivable and already settled. The
+/// old pair could not tell any of those apart, so a native invoice had nowhere
+/// to live that a quote did not also occupy.
+///
+/// Direction is now DERIVED from kind (`money.service.ts`), which is the only
+/// place it was ever needed and the only place it stays correct as kinds are
+/// added.
 enum ErpDocumentKind {
-  /// An invoice. Money owed to the business.
-  RECEIVABLE
-  /// A bill. Money owed by the business — the half WARP-1991 records as
-  /// having had no data source anywhere in the product.
-  PAYABLE
+  /// An offer. Becomes an INVOICE by COPY, never by reference (§4.3).
+  QUOTE
+  ORDER
+  /// Money owed to the business.
+  INVOICE
+  /// Money owed by the business — the half WARP-1991 records as having had no
+  /// data source anywhere in the product.
+  BILL
+  /// Receivable and negative.
+  CREDIT_NOTE
+  RECEIPT
+}
+
+/// WARP-2739 (ADR-049 §4.2) — where a LOCAL document is in its life.
+///
+/// 🔴 ONE column with a per-kind allowed-transition map, not one enum per kind.
+/// Five enums are five things to keep in sync and a `switch` in every read
+/// path; the map lives in `document-status.ts` and is asserted cell by cell.
+///
+/// 🔴 NULL on every LANDED row, and the CHECK enforces it. A vendor's own
+/// status word is carried verbatim in `vendorStatus` and is NOT mapped onto
+/// these values: every vendor spells this differently, and folding five
+/// vocabularies into fourteen values would decide, silently, that "Voided" and
+/// "Paid" mean something this box chose for them.
+enum ErpDocumentStatus {
+  /// Every kind starts here.
+  DRAFT
+
+  // QUOTE: DRAFT -> SENT -> ACCEPTED | DECLINED | EXPIRED
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+
+  // ORDER: DRAFT -> CONFIRMED -> FULFILLED | CANCELLED
+  CONFIRMED
+  FULFILLED
+  CANCELLED
+
+  // INVOICE / BILL: DRAFT -> SENT -> PART_PAID -> PAID | VOID | WRITTEN_OFF
+  PART_PAID
+  PAID
+  VOID
+  WRITTEN_OFF
+
+  // CREDIT_NOTE: DRAFT -> ISSUED -> APPLIED
+  ISSUED
+  APPLIED
 }
 
 /// WARP-2581 — an invoice or bill, landed from a CLOUD ACCOUNTING connection.
@@ -5141,19 +5213,34 @@ enum ErpDocumentKind {
 model ErpDocument {
   id String @id @default(uuid())
 
-  /// The connection that landed it. RESTRICT for the same reason the CRM
-  /// tables use it — nothing deletes an `IntegrationConnection` today, and if
-  /// something starts, this fails loudly rather than silently dropping a
-  /// business's ledger.
-  connectionId String
-  connection   IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  /// WARP-2739 — LANDED or LOCAL, and the CHECK below makes the three
+  /// provenance columns follow from it.
+  ///
+  /// Defaults to LANDED because every row that existed when this column was
+  /// added was landed by definition, and a default of LOCAL would have made
+  /// the migration rewrite history.
+  origin ErpDocumentOrigin @default(LANDED)
+
+  /// The connection that landed it. NULL on a LOCAL row — nothing outside this
+  /// box has ever seen it.
+  ///
+  /// 🔴 A LOCAL ROW MAY NOT BORROW A CONNECTION, and the CHECK refuses it. A
+  /// document with a connection is vendor-owned, which on the CRM side means
+  /// uneditable, archive-only, and overwritten by the next landing tick. A
+  /// document a person has to be able to correct cannot be that.
+  ///
+  /// RESTRICT for the same reason the CRM tables use it — nothing deletes an
+  /// `IntegrationConnection` today, and if something starts, this fails loudly
+  /// rather than silently dropping a business's ledger.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// Vendor key, denormalised so a row can be displayed without a join.
   /// Derived from `connection.provider` on write, never accepted from a caller.
-  externalSystem String
+  externalSystem String?
   /// The vendor's own id for this document. Scoped to the CONNECTION: two
   /// QuickBooks companies both number their invoices from 1.
-  externalId     String
+  externalId     String?
 
   kind ErpDocumentKind
 
@@ -5205,7 +5292,22 @@ model ErpDocument {
   /// The vendor's own status word, carried verbatim. Not an enum: every vendor
   /// spells this differently and mapping five vocabularies onto three values
   /// would decide, silently, that "Voided" and "Paid" are the same thing.
-  status String?
+  ///
+  /// WARP-2739 renamed this from `status` so the box's own lifecycle could take
+  /// that name. The two are mutually exclusive by origin, and the CHECK says
+  /// so: a LANDED row has a vendor word and no lifecycle, a LOCAL row has a
+  /// lifecycle and no vendor word. Keeping one column for both would mean a
+  /// query for "my unpaid invoices" silently matching the string "Paid".
+  vendorStatus String?
+
+  /// WARP-2739 — the box's own lifecycle, for LOCAL rows only.
+  ///
+  /// 🔴 Maintained ONLY by `moveDocumentStatus`, which writes the transition
+  /// and its timeline entry inside one `$transaction`. `moveDealStage`
+  /// established that rule and `updateDeal` routes stage changes through it
+  /// precisely so a PATCH cannot skip the timeline; a guard test asserts no
+  /// other writer sets this column.
+  status ErpDocumentStatus?
 
   /// When the VENDOR last changed it — never presented as "up to date".
   /// Xero's `UpdatedDateUTC` does not fire on a due-date edit, a
@@ -5218,10 +5320,16 @@ model ErpDocument {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// The reconcile key, for LANDED rows. Postgres treats NULLs as distinct, so
+  /// this constrains nothing on a LOCAL row — which is right: a LOCAL document
+  /// has no vendor id to be unique about.
   @@unique([connectionId, kind, externalId])
   @@index([connectionId, kind, dueAt])
   @@index([companyId])
   @@index([kind, dueAt])
+  /// "The quotes I have out", "the invoices I have not sent". A LOCAL-document
+  /// list is always filtered by all three.
+  @@index([origin, kind, status])
 }
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
