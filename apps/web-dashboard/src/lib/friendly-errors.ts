@@ -515,6 +515,31 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
+    // CRM and therefore inside this domain. Each string says what happened and
+    // what to do about it, in the owner's words: file, customer, look, undo —
+    // never proposal, extraction or confidence.
+    proposal_not_found:
+      "That suggestion is gone. Someone may have already dealt with it.",
+    proposal_not_pending:
+      "Someone already dealt with this one. The list has been refreshed.",
+    proposal_never_appliable:
+      "Droplet can show you this, but it can't file it for you yet.",
+    proposal_payload_unreadable:
+      "Droplet can't read that suggestion back anymore. Clearing it is safe.",
+    // The one that matters most: the file moved or was replaced between
+    // Droplet reading it and you clicking. Filing it now would attach a
+    // document nobody has looked at.
+    proposal_source_changed:
+      "That file has changed or moved since Droplet read it, so nothing was filed. Droplet will read the new version and ask again.",
+    proposal_choice_required:
+      "Pick which customer this belongs to first.",
+    proposal_choice_not_offered:
+      "That customer wasn't one of the choices. Refresh and try again.",
+    human_reviewer_required:
+      "Only a person signed in to this Droplet can file these.",
+    auto_needs_canary:
+      "Droplet needs to check how well it reads your documents before it can file anything on its own.",
     // ADR-045 §5.3 — the three department-assignment refusals. Each names the
     // situation and the way out; none mentions Nextcloud, provisioning or a
     // groupfolder, because none of those is what the person did.
