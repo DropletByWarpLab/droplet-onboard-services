@@ -14,11 +14,38 @@
  * `syncedAgo` from there. Only the money-SPECIFIC rules live here.
  */
 
-/** Vendor words that mean the document is settled. */
-export const PAID_WORDS: ReadonlySet<string> = new Set(["paid", "settled"]);
+/**
+ * Words that mean the document is settled.
+ *
+ * WARP-2739 added the box's OWN lifecycle values to these two sets, lowercased
+ * the same way a vendor's word is. They are matched here rather than in a
+ * second map because the chip asks one question — is this settled, dead, or
+ * still out — and the answer does not depend on who wrote the document. A
+ * parallel set for local statuses would be the same list twice, and the copy
+ * nobody updates is always the one that decides the colour.
+ *
+ * `applied` is a CREDIT_NOTE that has been used up: nothing further happens to
+ * it, and showing it as outstanding would suggest money still to come.
+ */
+export const PAID_WORDS: ReadonlySet<string> = new Set(["paid", "settled", "applied"]);
 
-/** Vendor words that mean it never counted. */
-export const VOID_WORDS: ReadonlySet<string> = new Set(["void", "voided", "deleted"]);
+/**
+ * Words that mean it never counted.
+ *
+ * `written_off` is not "void" in accounting — the invoice was real and the
+ * money was not collected — but on this chip the question is whether the row
+ * is still a live claim, and it is not. Rendering it as open would keep a debt
+ * somebody has already given up on in the outstanding total forever.
+ */
+export const VOID_WORDS: ReadonlySet<string> = new Set([
+  "void",
+  "voided",
+  "deleted",
+  "written_off",
+  "cancelled",
+  "declined",
+  "expired",
+]);
 
 export type StatusClass = "open" | "paid" | "overdue" | "void";
 

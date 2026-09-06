@@ -6,11 +6,21 @@ import useSWR from "swr";
 
 import { authFetch } from "@/lib/auth";
 
-export type MoneyKind = "RECEIVABLE" | "PAYABLE";
+/**
+ * WARP-2739 — which way the money runs. This is what the filter tabs pick and
+ * what `?kind=` on the wire has always meant; the server derives it from the
+ * document's kind and sends it on every row, so nothing here re-derives it.
+ */
+export type MoneyDirection = "RECEIVABLE" | "PAYABLE";
+
+/** What a document IS. Six values since WARP-2739; `/money` only ever shows
+ *  the four that are money owed. */
+export type MoneyDocumentKind = "INVOICE" | "BILL" | "CREDIT_NOTE" | "RECEIPT";
 
 export interface MoneyLedgerTotal {
-  connectionId: string;
-  provider: string;
+  /** Null for the box's own documents: they are one book with no connection. */
+  connectionId: string | null;
+  provider: string | null;
   /** null means "this ledger's own currency", which the box does not know. */
   currency: string | null;
   /** Sum of BALANCES — what is unpaid, not what was invoiced. */
@@ -36,16 +46,23 @@ export interface MoneySummary {
 
 export interface MoneyDocument {
   id: string;
-  kind: MoneyKind;
-  externalId: string;
-  externalSystem: string;
-  connectionId: string;
+  kind: MoneyDocumentKind;
+  direction: MoneyDirection;
+  /** LANDED rows are the vendor's copy; LOCAL ones this box wrote. */
+  origin: "LANDED" | "LOCAL";
+  /** Null on a local document — no vendor has ever seen it. */
+  externalId: string | null;
+  externalSystem: string | null;
+  connectionId: string | null;
   issuedAt: string | null;
   dueAt: string | null;
   counterparty: { externalId: string | null; name: string | null; companyId: string | null };
   amount: string | null;
   balance: string | null;
   currency: string | null;
+  /** The vendor's own word, on a landed row. */
+  vendorStatus: string | null;
+  /** The box's own lifecycle, on a local row. */
   status: string | null;
   isOverdue: boolean;
   vendorUpdatedAt: string | null;
@@ -87,7 +104,7 @@ export function useMoneySummary(): {
   return { summary: data, error, isLoading };
 }
 
-export function useMoneyDocuments(kind: MoneyKind | "ALL"): {
+export function useMoneyDocuments(kind: MoneyDirection | "ALL"): {
   documents: MoneyDocument[] | undefined;
   error: MoneyRequestError | undefined;
   isLoading: boolean;

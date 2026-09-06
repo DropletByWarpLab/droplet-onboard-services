@@ -34,6 +34,7 @@ import {
   HeartPulse,
   HelpCircle,
   Laptop,
+  Lightbulb,
   LayoutDashboard,
   Mail,
   MessageSquare,
@@ -288,6 +289,24 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Planning",
         icon: Sparkles,
         roles: ["owner", "admin", "family"],
+      },
+      // WARP-2752 (ADR-051) — Brief: what the box NOTICED, as opposed to
+      // Planning's what is coming and /reports' how it went.
+      //
+      // owner/admin only, and narrower than its neighbours on purpose: a
+      // finding can be derived from the whole-company corpus, and ADR-051 §9
+      // puts that scope behind those two roles. The service filters by scope
+      // as well, so this entry is wayfinding rather than the gate.
+      //
+      // NOT module-gated. Like /business it composes separately-gated sources
+      // (money findings need the ERP connectors, document findings need the
+      // corpus pass) and each degrades on its own — a module gate here would
+      // hide the whole page because one source is off.
+      {
+        href: "/brief",
+        label: "Brief",
+        icon: Lightbulb,
+        roles: ["owner", "admin"],
       },
       // The CRM's own door. Before this it had `navHrefs: []` and rendered as
       // sub-tabs on /projects, which made CRM-without-PM unrepresentable —
