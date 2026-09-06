@@ -231,17 +231,14 @@ describe("access-role-templates — the resolver keeps what the template grants"
    * the third occurrence of this class (WARP-2583 found the emptied `pm`
    * still granted by the dashboard's Projects row).
    */
-  const TOOLS_PER_DOMAIN = new Map<string, number>();
-  for (const entry of TOOL_CATALOG) {
-    TOOLS_PER_DOMAIN.set(entry.domain, (TOOLS_PER_DOMAIN.get(entry.domain) ?? 0) + 1);
-  }
+  const DOMAINS_WITH_TOOLS = new Set<string>(TOOL_CATALOG.map((entry) => entry.domain));
 
   it.each(PAYLOADS)("%s grants no tool domain that holds zero tools", (_id, payload) => {
     for (const g of payload.toolGrants) {
       expect(
-        TOOLS_PER_DOMAIN.get(g.domain) ?? 0,
+        DOMAINS_WITH_TOOLS.has(g.domain),
         `${g.domain} holds no tools — the grant is dead config the roles list still advertises as reach`,
-      ).toBeGreaterThan(0);
+      ).toBe(true);
     }
   });
 
