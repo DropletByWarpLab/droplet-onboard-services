@@ -57,7 +57,21 @@
  *   • `tierReachableDomains(tier)` — family and guest lose `team_chat` as a
  *     TOOL domain entirely (both its tools are `requiresWrite`), so no
  *     family/guest template carries that tool grant even though all of them
- *     grant the team_chat FEATURE.
+ *     grant the team_chat FEATURE. It drops an EMPTY domain by the same
+ *     arithmetic, which is why NO template here — at ANY tier — grants `crm`
+ *     or `pm` (WARP-2761). ADR-045 slices C and D moved every CRM and PM tool
+ *     into `business`; catalog.ts keeps those two declared but toolless as
+ *     landing slots for a remote catalog. A grant on a domain with no tools
+ *     reaches nothing at any tier, so removing it cost no capability — what
+ *     it buys is that the day a remote HubSpot or Atlassian catalog registers
+ *     its first tool there, somebody grants it DELIBERATELY, rather than five
+ *     templates already holding a domain whose first tool may be a write.
+ *     The CRM and tracker READS those templates used to name now live in
+ *     `business`, which the three admin-based profiles grant. The family and
+ *     guest ones do not, and that is left alone on purpose: `business` is
+ *     UNCLAIMED (see the unclaimed-domain note below), so granting it is NOT
+ *     narrowed by their crm/projects feature grants — a policy widening, not
+ *     a bug fix.
  *   • `mayOperateLocks` is ANDed away unless a `smart_home` feature grant
  *     rides in the same payload.
  *
@@ -174,7 +188,6 @@ export const ROLE_TEMPLATES = [
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "email", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "memory", level: "view" },
     ],
     connectorGrants: [],
@@ -240,8 +253,6 @@ export const ROLE_TEMPLATES = [
       { domain: "calendar", level: "use" },
       { domain: "reminders", level: "use" },
       { domain: "notifications", level: "use" },
-      { domain: "crm", level: "use" },
-      { domain: "pm", level: "use" },
       { domain: "memory", level: "use" },
       { domain: "money", level: "use" },
       { domain: "team_chat", level: "use" },
@@ -273,7 +284,6 @@ export const ROLE_TEMPLATES = [
     toolGrants: [
       { domain: "money", level: "use" },
       { domain: "files", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "business", level: "view" },
       { domain: "data", level: "view" },
     ],
@@ -332,7 +342,6 @@ export const ROLE_TEMPLATES = [
       { moduleId: "team_chat", level: "act" },
     ],
     toolGrants: [
-      { domain: "crm", level: "view" },
       { domain: "email", level: "view" },
       { domain: "files", level: "view" },
       { domain: "calendar", level: "view" },
@@ -365,12 +374,10 @@ export const ROLE_TEMPLATES = [
     ],
     toolGrants: [
       { domain: "files", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "calendar", level: "view" },
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "memory", level: "view" },
-      { domain: "pm", level: "view" },
     ],
     connectorGrants: [],
     cloudModelsAllowed: false,

@@ -21,7 +21,7 @@
  * assertions rather than being a second, unchecked seam.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import type { ModuleId } from "@prisma/client";
 import {
   ROLE_TEMPLATES,
@@ -210,6 +210,31 @@ describe("access-role-templates — the resolver keeps what the template grants"
       expect(reachable.has(g.domain), `${g.domain} unreachable for ${payload.startingPoint}`).toBe(
         true,
       );
+    }
+  });
+
+  /**
+   * WARP-2761 — the EMPTY-domain trap, which the spec above cannot state.
+   *
+   * `tierReachableDomains` drops a domain holding no tools exactly as it
+   * drops a write-only one (it adds a domain only on finding a non-write tool
+   * in it), so when ADR-045 emptied `crm` and `pm` the five templates granting
+   * them went red on the three family/guest ones with a message about the
+   * WRITE filter — and stayed silently green on the two admin-based ones,
+   * because owner/admin take the whole domain union unconditionally.
+   *
+   * A grant on a toolless domain reaches nothing at ANY tier, so this asserts
+   * the honest thing directly and at every tier, and names the domain rather
+   * than the filter. It is the guard against the next domain the catalogue
+   * empties — or declares before its tools land.
+   *
+   * MUTATION: put `{ domain: "crm", level: "view" }` back on any template ->
+   * red here for that template, at whatever tier it sits.
+   */
+  it.each(PAYLOADS)("%s grants no tool domain that holds zero tools", (_id, payload) => {
+    const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
+    for (const g of payload.toolGrants) {
+      expect(populated.has(g.domain), `${g.domain} holds no tools`).toBe(true);
     }
   });
 
