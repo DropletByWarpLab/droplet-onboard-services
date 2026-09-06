@@ -37,7 +37,7 @@
  * than restating any of it.
  */
 
-import { CONNECTORS, providerKeyForConnector } from "@/lib/connectors";
+import { CONNECTORS, MCP_CONNECTORS, providerKeyForConnector } from "@/lib/connectors";
 import { providerName } from "@/app/reports/connectors";
 import type { ConnectorMeta } from "@/lib/erp-types";
 
@@ -77,6 +77,22 @@ export interface ProviderDescriptor {
   readonly connect: ConnectAction;
   /** What the tile's "open" / "fix connection" action does. */
   readonly open: ConnectAction;
+  /**
+   * Whether this provider's data arrives on a SCHEDULE (WARP-2659).
+   *
+   * True for every catalog card — a LAN or cloud track exists to pull canonical
+   * datasets on a cron. False for an MCP track, which has no connector, no
+   * dataset and no sync: its tools are called when the model calls them.
+   *
+   * It exists because the hub's Connected strip renders
+   * `synced {syncedAgo(lastSyncedAt)}`, and `syncedAgo(undefined)` is the
+   * string "never". A connected Atlassian would therefore read "Connected ·
+   * synced never", which invites the owner to go and fix a sync that is not
+   * supposed to exist. Carried as an explicit flag rather than inferred from a
+   * null `lastSyncedAt`, which would also be "never" for a cloud connector
+   * whose first sync has genuinely not run yet — two opposite facts.
+   */
+  readonly syncs: boolean;
   /**
    * WARP-2568 (ADR-044) — what this vertical calls the people it serves.
    *
@@ -130,6 +146,10 @@ const DIRECT_PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
 const DETAIL_ROUTES: Readonly<Record<string, string>> = {
   eaglesoft: "/practice",
 };
+
+/** The descriptor-driven credential configurator — an MCP track's only connect
+ *  surface (WARP-2275 / WARP-2659). */
+const CREDENTIALS_ROUTE = "/integrations/credentials";
 
 const COMING_SOON_REASON = "Available in a future update.";
 const NO_CONNECT_FLOW_REASON =
@@ -196,13 +216,57 @@ function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
     open: route
       ? { kind: "route", href: route }
       : { kind: "unavailable", reason: NO_DETAIL_VIEW_REASON },
+    syncs: true,
     partyNoun: partyNounFor(meta.id),
   };
 }
 
-/** The catalog, in catalog order — the hub's stable spine. */
-export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] =
-  CONNECTORS.map(descriptorFor);
+/**
+ * WARP-2659 — an MCP-track tile.
+ *
+ * Both actions route to the credential configurator, and that is the whole
+ * design:
+ *
+ *  • **Not the ERP wizard.** `ConnectWizard` probes a transport, offers read
+ *    scopes and starts a dataset sync. An MCP track has no connector to probe,
+ *    no scopes to grant and no dataset to sync, so opening it here would render
+ *    a form whose every step is a promise this track cannot keep.
+ *  • **`connect` and `open` are the SAME route, deliberately.** WARP-2483's
+ *    lesson is that a second "Connect" path alongside a stored credential can
+ *    write a second one over a working one. `/integrations/credentials` renders
+ *    one form per provider whose secret input says "Saved — replace to change",
+ *    so first-run and re-entry are the same act on the same row. Splitting them
+ *    would invent the double-store this avoids.
+ *
+ * `providerKeys` is the descriptor id ALONE — not `providerKeysFor`, which
+ * appends `<id>-export`. That key belongs to the export-drop family and no MCP
+ * track has one; claiming it would let this tile swallow a reported connection
+ * that is not its own.
+ */
+function mcpDescriptorFor(meta: ConnectorMeta): ProviderDescriptor {
+  const toCredentials: ConnectAction = {
+    kind: "route",
+    href: CREDENTIALS_ROUTE,
+  };
+  return {
+    meta,
+    providerKeys: [meta.id],
+    connect: toCredentials,
+    open: toCredentials,
+    syncs: false,
+    // WARP-2568's noun, through the same lookup every catalog card uses. An
+    // MCP track is not listed in `PARTY_NOUNS`, so this is the neutral default
+    // — and it is looked up rather than hard-coded here so that the day a
+    // vertical-specific MCP server lands, one table entry names its people.
+    partyNoun: partyNounFor(meta.id),
+  };
+}
+
+/** The catalog, in catalog order, then the MCP tracks — the hub's stable spine. */
+export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
+  ...CONNECTORS.map(descriptorFor),
+  ...MCP_CONNECTORS.map(mcpDescriptorFor),
+];
 
 /**
  * WARP-2568 — the vertical's noun for an orchestrator PROVIDER KEY.
@@ -245,6 +309,11 @@ export function descriptorForReportedProvider(
     providerKeys: [provider],
     connect: { kind: "unavailable", reason: NOT_IN_CATALOG_REASON },
     open: { kind: "unavailable", reason: NO_DETAIL_VIEW_REASON },
+    // The box reported this connection, and every provider it can sync is one
+    // this module knows about — so an unrecognised key is treated as a synced
+    // connector and keeps the sub-line it has always had. Claiming otherwise
+    // would hide a real staleness fact for a provider a newer box added.
+    syncs: true,
     // A provider nobody wrote a tile for gets the neutral word. Guessing a
     // vertical from an unrecognised key would be inventing copy about
     // somebody's business, which this function refuses to do everywhere else.

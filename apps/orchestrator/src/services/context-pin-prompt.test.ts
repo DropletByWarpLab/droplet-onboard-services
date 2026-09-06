@@ -3,10 +3,16 @@
  *
  * `renderContextPinBlock` writes it and `pinnedToolDomainsFromMessages` reads
  * it back to decide which tool domains the turn advertises. If the two ever
- * disagree, a pinned customer silently stops selecting `crm` and the model is
- * handed an id with no tool to spend it on - a failure that is invisible in
- * every other test because nothing errors. These assertions are what make the
- * coupling load-bearing rather than incidental.
+ * disagree, a pinned customer silently stops selecting `business` and the
+ * model is handed an id with no tool to spend it on - a failure that is
+ * invisible in every other test because nothing errors. These assertions are
+ * what make the coupling load-bearing rather than incidental.
+ *
+ * WARP-2583 added the third leg. Renderer and reader agreeing is worthless if
+ * the domain they agree on has no tools in it - which is what happened when
+ * ADR-045 emptied `crm`/`pm` and this map lagged the catalog. The last block
+ * therefore runs the REAL selection path and asserts a `business_*` tool
+ * reaches the advertised set, not just that a domain string comes back.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -17,6 +23,7 @@ import {
   type ContextPinTarget,
   type RenderablePin,
 } from "./context-pin-prompt.js";
+import { effectiveAdvertisedToolNames } from "./tool-selection.service.js";
 
 const active = (label: string, sublabel: string | null = null): ContextPinTarget => ({
   state: "active",
@@ -35,8 +42,10 @@ describe("renderContextPinBlock", () => {
       new Map([["p1", active("Northwind Dental")]]),
     );
     expect(block).toContain("- customer: Northwind Dental [id c-uuid]");
-    // The whole point: the id is presented AS an argument, not as decoration.
-    expect(block).toContain("crm_get_customer");
+    // The whole point: the id is presented AS an argument, not as decoration -
+    // and the tool it is an argument TO must be one the registry still has.
+    expect(block).toContain("business_find");
+    expect(block).not.toContain("crm_get_customer");
   });
 
   it("leaves folder/file pins byte-identical to what WARP-460 shipped", () => {
@@ -47,17 +56,21 @@ describe("renderContextPinBlock", () => {
     expect(block).toContain('- camera_window: front_door {"from":"a","to":"b"}');
     // No business pin => no business guidance paragraph, so a box that never
     // touches the CRM pays nothing for this ticket.
-    expect(block).not.toContain("crm_get_customer");
+    expect(block).not.toContain("business_find");
   });
 
-  it("says a project has no read tool instead of implying one", () => {
+  it("hands a project pin to business_find too - the tracker read is in chat now", () => {
     const block = renderContextPinBlock(
       [pin("p1", "project", "pr-uuid")],
       new Map([["p1", active("Surgery fit-out", "FIT")]]),
     );
-    // pm_get_work_item / pm_list_projects are in EXCLUDED_FROM_CHAT_TOOLS, so
-    // promising a tool here would be a lie the model acts on.
-    expect(block).toContain("no read tool in chat");
+    // WARP-2582 told the model a project pin had "no read tool in chat",
+    // because pm_get_work_item / pm_list_projects were excluded. ADR-045
+    // replaced them with business_find, which is in the pool - so the
+    // guidance must promise the tool that exists and stop disclaiming the
+    // one that does not.
+    expect(block).toContain("business_find");
+    expect(block).not.toContain("no read tool");
     expect(block).toContain("- project: Surgery fit-out - FIT [id pr-uuid]");
   });
 
@@ -118,17 +131,22 @@ describe("pinnedToolDomainsFromMessages", () => {
       ]),
     )!;
     const domains = pinnedToolDomainsFromMessages([{ role: "system", content: block }]);
-    expect(domains.sort()).toEqual(["crm", "pm"]);
+    // ONE domain for a CRM pin and a tracker pin alike: ADR-045 put both
+    // halves of the graph behind `business`. `crm` / `pm` would each be an
+    // empty set on the wire, so asserting them here would pin a lie.
+    expect(domains).toEqual(["business"]);
   });
 
   it("a missing target still selects its domain", () => {
     // The record is gone but the conversation is still about the CRM, and the
-    // model needs crm_search_customers to offer the obvious next move.
+    // model needs business_find to offer the obvious next move.
     const block = renderContextPinBlock(
       [pin("p1", "customer", "c")],
       new Map([["p1", { state: "missing", label: null, sublabel: null }]]),
     )!;
-    expect(pinnedToolDomainsFromMessages([{ role: "system", content: block }])).toEqual(["crm"]);
+    expect(pinnedToolDomainsFromMessages([{ role: "system", content: block }])).toEqual([
+      "business",
+    ]);
   });
 
   it("an unavailable target selects NOTHING - the gate is not routed around", () => {
@@ -162,6 +180,94 @@ describe("pinnedToolDomainsFromMessages", () => {
       new Map([["p1", active("A")]]),
     )!;
     expect(block.startsWith(PIN_BLOCK_HEADER)).toBe(true);
+  });
+});
+
+describe("a pinned record reaches the WIRE, not just a domain string (WARP-2583)", () => {
+  // The two blocks above prove renderer and reader agree. This one proves the
+  // thing they agree on still has tools in it: `effectiveAdvertisedToolNames`
+  // is the ONE derivation both routes/llm.ts and the agent loop call, so what
+  // it returns is what goes on the wire. MUTATION: point
+  // PIN_KIND_TOOL_DOMAIN.customer back at "crm" (an empty domain since
+  // ADR-045) -> `business_find` drops out of the set below and this goes red,
+  // while every string-level test in this file stays green. That is the gap
+  // the #2005 review found, closed.
+  const POOL = [
+    "search_content",
+    "read_file",
+    "memory_recall",
+    "list_cameras",
+    "business_find",
+    "business_timeline",
+    "business_create",
+  ];
+  // A sentence NO DOMAIN_RULES entry matches - the header's own example. The
+  // control case below asserts that, so a rule growing to claim it would
+  // fail loudly here rather than quietly make the pin assertion vacuous.
+  const sentence = "summarise the last month";
+
+  it("a pinned customer admits business_find on a sentence no rule matches", () => {
+    const block = renderContextPinBlock(
+      [pin("p1", "customer", "c-uuid")],
+      new Map([["p1", active("Northwind Dental")]]),
+    )!;
+    const withPin = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [
+        { role: "system", content: block },
+        { role: "user", content: sentence },
+      ],
+      pool: POOL,
+    });
+    expect(withPin.has("business_find")).toBe(true);
+    expect(withPin.has("business_timeline")).toBe(true);
+
+    // Control: the sentence alone opens nothing, so the pin did it.
+    const withoutPin = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [{ role: "user", content: sentence }],
+      pool: POOL,
+    });
+    expect(withoutPin.has("business_find")).toBe(false);
+
+    // A pin admits its OWN domain and never widens past the pool's other
+    // domains: the RBAC / chat-scope ceiling is untouched.
+    expect(withPin.has("list_cameras")).toBe(false);
+  });
+
+  it("a pinned work item admits the same tools - the tracker is the same graph", () => {
+    const block = renderContextPinBlock(
+      [pin("p1", "work_item", "w-uuid")],
+      new Map([["p1", active("Order chairs", "NW-14")]]),
+    )!;
+    const advertised = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [
+        { role: "system", content: block },
+        { role: "user", content: sentence },
+      ],
+      pool: POOL,
+    });
+    expect(advertised.has("business_find")).toBe(true);
+  });
+
+  it("a pin cannot re-admit a tool the pool has already removed", () => {
+    // `business_create` is in POOL above; take it out and the pin must not
+    // put it back. Selection only ever narrows.
+    const block = renderContextPinBlock(
+      [pin("p1", "deal", "d-uuid")],
+      new Map([["p1", active("Annual contract", "Northwind Dental")]]),
+    )!;
+    const advertised = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [
+        { role: "system", content: block },
+        { role: "user", content: sentence },
+      ],
+      pool: POOL.filter((n) => n !== "business_create"),
+    });
+    expect(advertised.has("business_find")).toBe(true);
+    expect(advertised.has("business_create")).toBe(false);
   });
 });
 

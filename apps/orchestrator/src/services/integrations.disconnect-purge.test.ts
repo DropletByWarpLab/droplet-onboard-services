@@ -52,7 +52,13 @@ const { recordActivityMock } = vi.hoisted(() => ({
 }));
 vi.mock("./activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 
-import { ConnectorBlockedError } from "@droplet/erp-connector";
+import {
+  ConnectorBlockedError,
+  XeroConnector,
+  pruneExpiredXeroTokens,
+  __resetXeroTokenCacheForTest,
+} from "@droplet/erp-connector";
+import { mcpProviderIds, providerDescriptor } from "@droplet/shared-types";
 import { createIntegrationsService } from "./integrations.service.js";
 // WARP-2500 — the provider table is DERIVED from the live registry, never
 // hand-written here: a provider added to `provider-registry.ts` has to join
@@ -489,6 +495,129 @@ describe("disconnect() purges the connection's secrets and identity", () => {
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
     expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
     expect(detail.status).toBe("NOT_CONFIGURED");
+  });
+});
+
+/**
+ * WARP-2383 — the copy of the credential Postgres cannot reach.
+ *
+ * Raised on #1946: the Xero track keeps its minted access token in a
+ * process-lifetime `Map` keyed by connection id, because `erp.service` builds
+ * and closes a connector per read. `forgetXeroToken` existed and was called
+ * from the two 401 paths and `decommission()` — but never from
+ * `disconnect()`, so the columns were purged while a live bearer token for the
+ * organisation stayed usable in memory for up to the 30-minute TTL plus the
+ * prune cron's lag.
+ *
+ * These assert against the REAL module-level cache, through a real
+ * `XeroConnector` with an injected fetch — not against a spy on
+ * `forgetXeroToken`. A spy would only prove a function was called; the claim
+ * is that the token is gone, and a mutation that called it with the wrong key
+ * (`row.provider` instead of `row.id`, say) would satisfy the spy and leave
+ * the token exactly where it was.
+ */
+describe("disconnect() also drops the token that never reached Postgres", () => {
+  const XERO_CONNECTION_ID = "conn_1";
+  const XERO_CLIENT_ID = "FAKE-XERO-CLIENT-ID-0000";
+  const XERO_CLIENT_SECRET = "FAKE-XERO-CLIENT-SECRET-do-not-use-0000";
+
+  beforeEach(() => {
+    __resetXeroTokenCacheForTest();
+  });
+
+  /** A connector on the connection id the fixture row carries, with a token
+   *  already minted into the shared cache. */
+  async function mintedXeroToken() {
+    const connector = new XeroConnector(
+      {
+        connectionId: XERO_CONNECTION_ID,
+        clientId: XERO_CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "FAKE-XERO-ACCESS-TOKEN-0000",
+              expires_in: 1800,
+              token_type: "Bearer",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )) as never,
+        now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
+        resolveSecret: async () => XERO_CLIENT_SECRET,
+      },
+    );
+    await connector.connect();
+    expect((await connector.status()).hasAccessToken).toBe(true);
+    return connector;
+  }
+
+  it("leaves no minted Xero token behind after the purge commits", async () => {
+    // Mutation: delete the `forgetXeroToken(row.id)` line in
+    // `integrations.service.ts` `disconnect()` → red. That mutation IS the
+    // code #1946 was reviewed at.
+    const connector = await mintedXeroToken();
+    const prisma = stubPrisma(connectedRow({ provider: "xero" }));
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    expect((await connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("keys the forget on the connection id, not on the provider name", async () => {
+    // Mutation: `forgetXeroToken(row.provider)` → the cache is keyed by
+    // connection id, so "xero" deletes nothing and this stays true. The test
+    // above would still pass a spy-based assertion; only reading the cache
+    // catches it.
+    const connector = await mintedXeroToken();
+    const prisma = stubPrisma(
+      connectedRow({ id: XERO_CONNECTION_ID, provider: "xero", status: "CONNECTED" }),
+    );
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    // Nothing is left for the prune cron to find — the count it returns is the
+    // map's own answer about what it still holds.
+    expect(pruneExpiredXeroTokens(Date.UTC(2026, 8, 3, 12, 0, 0))).toBe(0);
+    expect((await connector.status()).hasAccessToken).toBe(false);
+  });
+
+  it("does not disturb another connection's token", async () => {
+    // The delete is scoped, not a `clear()`. Mutation: swap
+    // `forgetXeroToken(row.id)` for `__resetXeroTokenCacheForTest()` → red,
+    // and every other connected organisation on the box re-mints on its next
+    // read, spending a daily allowance the four-hour cadence exists to protect.
+    const other = new XeroConnector(
+      {
+        connectionId: "conn_someone_else",
+        clientId: XERO_CLIENT_ID,
+        credentialVariant: "custom-connection",
+        credentialsSecretRef: "xero:pending",
+      },
+      {
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "FAKE-XERO-ACCESS-TOKEN-0001",
+              expires_in: 1800,
+              token_type: "Bearer",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )) as never,
+        now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
+        resolveSecret: async () => XERO_CLIENT_SECRET,
+      },
+    );
+    await other.connect();
+    const disconnected = await mintedXeroToken();
+    const prisma = stubPrisma(connectedRow({ provider: "xero" }));
+
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "xero");
+
+    expect((await disconnected.status()).hasAccessToken).toBe(false);
+    expect((await other.status()).hasAccessToken).toBe(true);
   });
 });
 
@@ -1345,5 +1474,139 @@ describe("WARP-2549 — disconnecting also removes what the connection landed", 
     ];
     expect(call[0].data.scope).toMatchObject({ landedDeleted: 1, landedArchived: 1 });
     expect(JSON.stringify(call[0].data.scope)).not.toContain("co-1");
+  });
+});
+
+// ===========================================================================
+// WARP-2659 — the mcp track
+// ===========================================================================
+
+/**
+ * `disconnect()` read `requireKnownProvider`, whose predicate has been an
+ * explicit `lan | cloud` allow-list since WARP-2650, so an `mcp` provider was
+ * refused with a 404 — while stage's `DisconnectControl` rendered on its hub
+ * tile and on its credentials form. The purge is track-agnostic; only the
+ * gate excluded the track. These pin the admission, the teardown the track
+ * needs beyond the purge, and the one gate that must NOT widen with it.
+ */
+describe("disconnect() admits the mcp track (WARP-2659)", () => {
+  const MCP_ID = mcpProviderIds()[0]!;
+  const MCP_SERVER_ID = (() => {
+    const d = providerDescriptor(MCP_ID);
+    if (d?.track !== "mcp") throw new Error("fixture is not an mcp track");
+    return d.mcpServerId;
+  })();
+
+  /** A connected MCP row as `saas-credential.service.ts` writes it: the secret
+   *  sealed in `providerTokensEnc`, the two connection facts in
+   *  `providerConfig`, every LAN column empty. */
+  function mcpRow() {
+    return connectedRow({
+      id: "conn_mcp",
+      provider: MCP_ID,
+      host: null,
+      databaseName: null,
+      secretRef: `${MCP_ID}:pending`,
+      writeEnabled: false,
+      apiCredentialsEnc: null,
+      apiRouteMap: null,
+      apiCaCert: null,
+      schemaVersion: null,
+      schemaHash: null,
+      providerConfig: { email: "ops@vendor.example", cloudId: "cloud-1" },
+    });
+  }
+
+  function serviceWithDetach(
+    prisma: ReturnType<typeof stubPrisma>,
+    detach: (id: string) => Promise<void>,
+  ) {
+    return createIntegrationsService(prisma as never, {
+      connectorFor: () => blockedConnector(),
+      remoteMcp: { detach },
+    });
+  }
+
+  it("purges the mcp credential — the sealed token and the config it is used with", async () => {
+    // Mutation: revert `disconnect()` to `requireKnownProvider` → 404 → red.
+    const prisma = stubPrisma(mcpRow());
+    const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, MCP_ID);
+    expect(detail.provider).toBe(MCP_ID);
+    expect(detail.status).toBe("DISABLED");
+
+    const data = updateData(prisma);
+    expect(data.providerTokensEnc).toBeNull();
+    expect(data).toHaveProperty("providerConfig");
+    expect(data.providerConfig).not.toEqual(mcpRow().providerConfig);
+
+    // And the hub reads the purge back as a fact, exactly as for a cloud row.
+    const listed = (await serviceFor(prisma).list()).find((r) => r.provider === MCP_ID);
+    expect(listed?.status).toBe("DISABLED");
+    expect(listed?.credentialsPurged).toBe(true);
+  });
+
+  it("tears down the remote server by the descriptor's server id, once the purge is on the row", async () => {
+    // Mutation: drop the detach block → red. Mutation: pass `scoped` instead
+    // of `descriptor.mcpServerId` → red the day the two differ, and the
+    // assertion is written against the descriptor so it will.
+    const prisma = stubPrisma(mcpRow());
+    const seen: Array<{ serverId: string; statusAtCall: unknown; tokenAtCall: unknown }> = [];
+    const detach = vi.fn(async (serverId: string) => {
+      seen.push({
+        serverId,
+        statusAtCall: prisma.rows[0]!.status,
+        tokenAtCall: prisma.rows[0]!.providerTokensEnc,
+      });
+    });
+
+    await serviceWithDetach(prisma, detach).disconnect({ actor: "romain" }, MCP_ID);
+
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([
+      { serverId: MCP_SERVER_ID, statusAtCall: "DISABLED", tokenAtCall: null },
+    ]);
+  });
+
+  it("tears nothing down when there was nothing to disconnect", async () => {
+    const prisma = stubPrisma(null);
+    const detach = vi.fn(async () => {});
+    const detail = await serviceWithDetach(prisma, detach).disconnect(
+      { actor: "romain" },
+      MCP_ID,
+    );
+    expect(detail.status).toBe("NOT_CONFIGURED");
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it("never tears down a remote server for a track that has none", async () => {
+    const prisma = stubPrisma(connectedRow());
+    const detach = vi.fn(async () => {});
+    await serviceWithDetach(prisma, detach).disconnect({ actor: "romain" }, EAGLESOFT_PROVIDER);
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it("reports the purge even when the teardown fails — the row is the durable fact", async () => {
+    const prisma = stubPrisma(mcpRow());
+    const detach = vi.fn(async () => {
+      throw new Error("bridge unreachable");
+    });
+    const detail = await serviceWithDetach(prisma, detach).disconnect(
+      { actor: "romain" },
+      MCP_ID,
+    );
+    expect(detail.status).toBe("DISABLED");
+    expect(prisma.rows[0]!.providerTokensEnc).toBeNull();
+    expect(detach).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses the write toggle for an mcp track (ADR-043 §3)", async () => {
+    // Mutation: switch `setWriteEnabled` to `requireConnectionProvider` → red.
+    // `writeEnabled: true` on an MCP row would be a flag nothing honours, and
+    // the remote write interceptor (WARP-2305) does not exist yet.
+    const prisma = stubPrisma(mcpRow());
+    await expect(
+      serviceFor(prisma).setWriteEnabled({ actor: "romain" }, MCP_ID, true),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
   });
 });

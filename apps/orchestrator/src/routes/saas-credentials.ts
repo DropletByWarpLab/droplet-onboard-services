@@ -29,12 +29,16 @@
  *     and the browser).
  *
  * The file carries NO vendor knowledge. Fields, secrecy, requiredness and
- * format all come from the WARP-2217 descriptor.
+ * format all come from the WARP-2217 descriptor. The one thing it knows that a
+ * descriptor does not say is that a credential write must also drop whatever
+ * a connector has minted FROM the previous credential and is holding in
+ * process memory — see `forgetXeroToken` in the PATCH handler.
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { providerDescriptors } from "@droplet/shared-types";
+import { forgetXeroToken } from "@droplet/erp-connector";
 
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -195,6 +199,27 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
           where: { id: row.id },
           data: data as never,
         })) as SaasConnectionRow;
+
+        // WARP-2383 — the copy of the OLD credential Postgres cannot reach. The
+        // Xero track caches the access token it minted from the client secret
+        // in a process-lifetime map keyed by connection id, for up to 30
+        // minutes. The row above now holds the NEW secret, but without this
+        // line the next `token()` still serves the token minted under the old
+        // one: the owner re-pastes a rotated secret (the descriptor's own help
+        // text: "Rotating it is a re-paste here"), the connect probe passes on
+        // the stale token, the row goes CONNECTED with a `lastHealthyAt` — and a
+        // mis-paste surfaces half an hour later as NEEDS_RECONNECT, when the
+        // stale token expires and the first mint under the new secret fails.
+        //
+        // Unconditional, and keyed on the ROW id, for the reasons `disconnect()`
+        // gives in integrations.service.ts: the map is keyed by connection id,
+        // so for a provider without a token cache this deletes nothing, and a
+        // `provider === "xero"` branch here would be one more place for a
+        // provider key to drift from the connector that owns it. After the
+        // update rather than before, so a failed write leaves the token and the
+        // column agreeing with each other. It is a `Map.delete` — it cannot
+        // hang, 429, or fail.
+        forgetXeroToken(row.id);
 
         // AFTER the write commits. Recording first would log a change that a
         // failed update never made — the audit log would be describing a box

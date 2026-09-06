@@ -5,8 +5,10 @@
  */
 import { describe, it, expect } from "vitest";
 import { ConnectorBlockedError } from "@droplet/erp-connector";
+import { mcpProviderIds } from "@droplet/shared-types";
 import {
   connectorForProvider,
+  isConnectionProvider,
   isKnownErpProvider,
   EAGLESOFT_PROVIDER,
   EAGLESOFT_API_PROVIDER,
@@ -122,5 +124,39 @@ describe("erp-provider export-drop track (WARP-1964)", () => {
     // a folder reports that rather than reporting a connection failure.
     const c = connectorForProvider({ provider: "eaglesoft-export", host: "" });
     await expect(c.connect()).rejects.toThrow(/CONNECTOR_BLOCKED|blocked/i);
+  });
+});
+
+/**
+ * WARP-2659 — two predicates, one track apart.
+ *
+ * `isKnownErpProvider` is "can this factory build a connector" and gates
+ * `connect()`, `test()` and the write toggle. `isConnectionProvider` is "can
+ * this key hold a connection row" and gates `disconnect()`. The `mcp` track is
+ * the whole difference: a row, a credential, no connector.
+ */
+describe("erp-provider connection-row providers (WARP-2659)", () => {
+  it("admits the mcp track as a connection provider while still refusing it a connector", () => {
+    expect(mcpProviderIds().length).toBeGreaterThan(0);
+    for (const id of mcpProviderIds()) {
+      expect(isConnectionProvider(id), `${id} holds a row`).toBe(true);
+      // Mutation: collapse the two predicates → red here, and the write
+      // toggle would admit a track ADR-043 §3 forbids writing through.
+      expect(isKnownErpProvider(id), `${id} has no connector`).toBe(false);
+    }
+  });
+
+  it("agrees with isKnownErpProvider on every other key", () => {
+    for (const id of KNOWN_ERP_PROVIDERS) {
+      expect(isConnectionProvider(id), id).toBe(true);
+    }
+    for (const id of ["eaglesoft-export", "generic-export"]) {
+      expect(isConnectionProvider(id), id).toBe(isKnownErpProvider(id));
+      expect(isConnectionProvider(id), id).toBe(true);
+    }
+    // Catalog placeholders, a profile-less export key, and a stranger: no row.
+    for (const id of ["dentrix", "opendental", "nosuchpms-export", "mystery"]) {
+      expect(isConnectionProvider(id), id).toBe(false);
+    }
   });
 });

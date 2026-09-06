@@ -65,6 +65,11 @@ import {
   // module stays the name every existing caller imports it under.
   type SaasConnectionState,
 } from "@droplet/shared-types";
+import {
+  remoteMcpLifecycle,
+  type RemoteMcpAttachView,
+  type RemoteMcpLifecycleRegistry,
+} from "./remote-mcp-lifecycle.service.js";
 
 import {
   decryptColumn,
@@ -232,6 +237,25 @@ export interface SaasCredentialView {
    * action. Two facts, two fields — never one field guessing at both.
    */
   credentialExpiry: CredentialExpiryVerdict | null;
+  /**
+   * WARP-2651 — whether this box is actually ATTACHED to the vendor's MCP
+   * server right now, or `null` for every track that has no such concept.
+   *
+   * Carried alongside `state` rather than folded into it, for the same reason
+   * `credentialExpiry` is: `IntegrationStatus` is what the OPERATOR configured
+   * and it is persisted; this is what the RUNTIME currently is, it lives in
+   * this process's memory, and the two are legitimately different. A connection
+   * whose credential is perfect and whose bridge container is restarting is
+   * genuinely `CONNECTED` *and* genuinely not reaching anything — one field
+   * guessing at both is how "looks connected and quietly does nothing" ships.
+   *
+   * `null` for a `cloud` or `lan` track is "there is no session concept here",
+   * and `null` for an `mcp` track is "no attach has ever been attempted on this
+   * box" — which is the shipping default (the allowlist is empty) and is not an
+   * error state. Both are absence of a REGISTRATION, never absence of a session
+   * id: the state itself is always a declared value.
+   */
+  remoteMcp: RemoteMcpAttachView | null;
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The
@@ -392,6 +416,9 @@ export function buildCredentialView(
   /** Injected so the expiry verdict is testable without freezing a clock
    *  process-wide. Defaults to now, like every other read of the time here. */
   now: Date = new Date(),
+  /** Injected for the same reason: a test drives its own registry instead of
+   *  the process-wide attachment. */
+  lifecycle: RemoteMcpLifecycleRegistry = remoteMcpLifecycle,
 ): SaasCredentialView {
   const storedSecrets: Record<string, string> = (() => {
     if (!row?.providerTokensEnc) return {};
@@ -512,6 +539,11 @@ export function buildCredentialView(
     credentialExpiry: hasCredentials
       ? (credentialExpiryVerdict(descriptor, config, now) ?? null)
       : null,
+    // Keyed on the TRACK, never on a provider id: an `mcp` vendor added later
+    // gets this for free, and no other track can accidentally grow a session
+    // state it has no session for.
+    remoteMcp:
+      descriptor.track === "mcp" ? lifecycle.view(descriptor.mcpServerId) : null,
   };
 }
 
@@ -748,7 +780,9 @@ export function resolveCredentialUpdate(
  * a weaker claim than a cloud track's CONNECTED, and it is written down here
  * rather than left for a reader to assume.
  *
- * The DISABLED and no-credential rules are unchanged and apply to every track.
+ * The no-credential rule applies to every track. The DISABLED rule applies to
+ * every track that has a SEPARATE turn-back-on gesture — which is every track
+ * but `mcp` (WARP-2659, below).
  */
 export function statusAfterCredentialUpdate(
   descriptor: ProviderDescriptor,
@@ -756,10 +790,19 @@ export function statusAfterCredentialUpdate(
   hasSecret: boolean,
 ): IntegrationStatusName {
   if (!hasSecret) return "NOT_CONFIGURED";
-  // A row that was DISABLED stays DISABLED — pasting a key is not the same
-  // gesture as turning the connector back on.
-  if (current === "DISABLED") return "DISABLED";
+  // WARP-2659 — for an `mcp` track the paste IS the connection (above), and
+  // it is also the ONLY connect gesture the track has: `connect()` refuses it
+  // at `resolveProvider`, and nothing else writes CONNECTED. `disconnect()`
+  // now admits the track, and it is the sole writer of DISABLED — always with
+  // a purge. So a DISABLED row holding a fresh credential can only be an owner
+  // who disconnected and then pasted a new token into the one surface that
+  // takes one; keeping that row DISABLED would make Disconnect a one-way door.
+  // Ahead of the DISABLED rule for exactly that reason.
   if (descriptor.track === "mcp") return "CONNECTED";
+  // A row that was DISABLED stays DISABLED — pasting a key is not the same
+  // gesture as turning the connector back on; for these tracks that gesture is
+  // `connect()`'s probe, which writes the verdict.
+  if (current === "DISABLED") return "DISABLED";
   // A fresh credential deserves a fresh verdict: whatever the vendor said about
   // the OLD key is no longer evidence about this one.
   return "PROVISIONING";

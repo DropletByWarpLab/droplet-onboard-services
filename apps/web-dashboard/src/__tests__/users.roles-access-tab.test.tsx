@@ -25,6 +25,8 @@ const listAccessRolesMock = vi.fn();
 const setPersonAccessMock = vi.fn();
 const putAccessExceptionsMock = vi.fn();
 const fetchEffectiveAccessMock = vi.fn();
+const listRoleTemplatesMock = vi.fn();
+const createRoleFromTemplateMock = vi.fn();
 const fetchUserUsageMock = vi.fn();
 const updateUserUsageMock = vi.fn();
 
@@ -54,6 +56,10 @@ vi.mock("@/lib/api", () => ({
   fetchHealth: vi.fn().mockResolvedValue({}),
   // WARP-1532 access surface
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
+  // WARP-2738 role templates. A named export missing from this factory throws
+  // the moment the component reads it, so the mock moves with the imports.
+  listRoleTemplates: (...a: any[]) => listRoleTemplatesMock(...a),
+  createRoleFromTemplate: (...a: any[]) => createRoleFromTemplateMock(...a),
   createAccessRole: vi.fn(),
   updateAccessRole: vi.fn(),
   deleteAccessRole: vi.fn(),
@@ -123,6 +129,27 @@ beforeEach(() => {
   fetchUsersMock.mockResolvedValue({ users: ROSTER });
   listInvitesMock.mockResolvedValue({ invites: [] });
   listAccessRolesMock.mockResolvedValue({ roles: [FINANCE_ROLE] });
+  listRoleTemplatesMock.mockResolvedValue({
+    // Small and made-up: the real catalogue is the SERVER's to get right
+    // (`access-role-templates.test.ts`), and this file covers page seams only.
+    roleTemplates: [
+      {
+        id: "front-desk",
+        name: "Front Desk",
+        description: "Reception and front-of-house.",
+        startingPoint: "family",
+        featureGrants: [{ moduleId: "files", level: "act" }],
+        toolGrants: [{ domain: "files", level: "view" }],
+        connectorGrants: [],
+        cloudModelsAllowed: false,
+        mayOperateLocks: false,
+        storageQuotaBytes: null,
+        maxUploadSizeMb: null,
+        llmDailyMessageCap: null,
+      },
+    ],
+    enforcedModuleIds: ["files"],
+  });
   fetchUserUsageMock.mockResolvedValue({ policy: null, usedBytes: null });
   fetchEffectiveAccessMock.mockResolvedValue({
     tier: "family",
@@ -347,5 +374,52 @@ describe("person editor — role change flow", () => {
     const exceptions = screen.getByText("Exceptions");
     // eslint-disable-next-line no-bitwise
     expect(usage.compareDocumentPosition(exceptions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+// ── WARP-2738: the page seam for role templates ──────────────────────
+//
+// The panel keeps its own roles list; THIS page keeps a second one, for the
+// roster chips, the person editor's role select and the invite picker. A role
+// created from a template has to reach both, or it is invisible everywhere a
+// person is actually assigned until the tab remounts.
+describe("role templates — the page seam", () => {
+  it("the gallery is reachable from the Roles tab and its empty state", async () => {
+    // A fresh box: no custom roles, so the empty card is the ONLY create CTA
+    // and the gallery has to be there with it.
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: ACCESS_COPY.tab }));
+    expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
+    // The catalogue is its own read, so the card lands after the section does.
+    expect(await screen.findByText("Front Desk")).toBeInTheDocument();
+    // Starting from nothing survives alongside it.
+    expect(screen.getByRole("button", { name: /New role/ })).toBeInTheDocument();
+  });
+
+  it("instantiating a template refreshes the PAGE's roles list, not just the panel's", async () => {
+    listAccessRolesMock.mockResolvedValue({ roles: [] });
+    createRoleFromTemplateMock.mockResolvedValue({
+      role: { ...FINANCE_ROLE, id: "r-fd", name: "Front Desk", slug: "front-desk", peopleCount: 0 },
+      syncState: "synced",
+    });
+    render(<UsersPage />);
+    await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: ACCESS_COPY.tab }));
+    await screen.findByTestId("access-template-gallery");
+    await screen.findByText("Front Desk");
+
+    const before = listAccessRolesMock.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: ACCESS_COPY.templatesUse })[0]!);
+    const dialog = await screen.findByRole("dialog", { name: ACCESS_COPY.templateCreateHeading });
+    fireEvent.click(within(dialog).getByRole("button", { name: ACCESS_COPY.templateCreateSubmit }));
+
+    await waitFor(() => expect(createRoleFromTemplateMock).toHaveBeenCalledWith("front-desk", undefined));
+    // TWO refreshes: the panel's own `reload()` and the page's
+    // `reloadAccessRoles`. One of them alone leaves a picker stale.
+    await waitFor(() =>
+      expect(listAccessRolesMock.mock.calls.length).toBeGreaterThanOrEqual(before + 2),
+    );
   });
 });

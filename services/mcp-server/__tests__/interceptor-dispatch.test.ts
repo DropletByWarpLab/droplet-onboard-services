@@ -289,16 +289,18 @@ describe("registry tools on the MCP path are gated too (WARP-2312)", () => {
   afterEach(() => defaultToolCallInterceptor.denyTier.clear());
 
   it("refuses a registry tool that declares requiresConfirmation but has no handler-side check", async () => {
-    // `pm_create_project` ships with `requiresConfirmation: true` and, on
-    // origin/stage, zero confirmation code in its handler — its own
-    // description says "Requires confirmation." while nothing enforced it.
-    // The interceptor closes that without touching the handler.
+    // `business_create` ships with `requiresConfirmation: true` and zero
+    // confirmation code in its handler; the interceptor closes that without
+    // touching the handler. (It replaced `pm_create_project`, which held
+    // this role until ADR-045 slice D — same property, and the tool this
+    // test drives has to exist in the LIVE registry or the server answers
+    // "unknown tool" and the assertion below passes for the wrong reason.)
     const { client, close } = await connect({});
 
     const payload = parse(
       await client.callTool({
-        name: "pm_create_project",
-        arguments: { name: "Q4 rollout" },
+        name: "business_create",
+        arguments: { entity: "project", name: "Q4 rollout" },
       }),
     );
 

@@ -16,6 +16,7 @@
 import { AlertTriangle, BookOpen } from "lucide-react";
 import { Badge } from "@/components/shell/primitives";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
+import { credentialExpiryCopy } from "@/lib/credential-expiry";
 import type { HubEntry } from "@/lib/hooks/useIntegrations";
 import { connectorIcon, statusView } from "./connector-visuals";
 import { DisconnectControl } from "./DisconnectControl";
@@ -41,6 +42,17 @@ export function ConnectorCard({
   const reported = state.kind === "reported" ? state.connection : null;
   const status = reported ? reported.status : null;
   const sv = reported ? statusView(reported.status, reported.credentialsPurged) : null;
+
+  /**
+   * WARP-2659 — "for how much longer", beside "does it work".
+   *
+   * Only from a REPORTED connection: a tile in `loading`/`error`/`absent` has
+   * no verdict, and the box is the only thing that computes one. Rendered
+   * through the shared `credentialExpiryCopy` so this tile and the credential
+   * configurator cannot phrase one credential two ways, and null for every
+   * provider whose credential has no hard stop.
+   */
+  const expiry = reported ? credentialExpiryCopy(reported.credentialExpiry) : null;
 
   // WARP-2291: a tile the box reports an actual connection for cannot claim to
   // be coming soon — that would be the hub denying a connection that exists,
@@ -197,6 +209,20 @@ export function ConnectorCard({
           data-testid="connector-state-line"
         >
           {sv.detail}
+        </p>
+      )}
+
+      {/* WARP-2659 — the expiry line. Its own line rather than a second badge,
+          for the reason `StatusView.detail` gives: `.badge` is
+          `flex-shrink: 0`, so a sentence in a pill pushes the connector's name
+          out of its own card. */}
+      {expiry && (
+        <p
+          className={`type-caption-1 ${expiry.tone === "warn" ? "text-system-red" : "text-label-tertiary"}`}
+          style={{ margin: "-6px 0 16px" }}
+          data-testid="connector-expiry-line"
+        >
+          {expiry.label}
         </p>
       )}
 

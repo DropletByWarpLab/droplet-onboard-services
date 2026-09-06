@@ -1,12 +1,17 @@
 /**
- * Orchestrator-backed client for the `crm_*` tool handlers (WARP-2546).
+ * CRM wire shapes for the business graph (WARP-2546, then ADR-045).
  *
- * The transport is `callOrch` from the PM handlers, imported rather than
- * copied. It carries the WARP-887 fix — reject the race AND abort the request,
- * in that order, so a slow orchestrator does not leak a socket per tool call —
- * and a second copy of that would be a second place to get it wrong. Only the
- * error CODES differ between the two domains, and those live in `crmError`
- * below.
+ * This file was the client for seven `crm_*` handlers. ADR-045 slices C and D
+ * collapsed those into the `business_*` verbs, and what survives here is what
+ * `handlers/business/_graph.ts` imports: the three mappers below and the two
+ * rules they encode. Error mapping went with the handlers — `businessError`
+ * in `_graph.ts` is the one entry point now, and unlike the `crmError` that
+ * used to live here it can tell a switched-off module from a missing record.
+ * There is no transport re-export either: the graph imports `callOrch` from
+ * `../pm/pm-orch.js` directly, where it lives.
+ *
+ * Provenance: `synced_from` is reported from the explicit `origin` column,
+ * never inferred from `externalSystem != null` — see `toCompany`.
  *
  * Money: `amountMinor` is a decimal STRING of minor units at every hop, from
  * the Postgres BigInt to the model. It is never parsed into a number here.
@@ -14,16 +19,6 @@
  * off by one, silently, in a figure somebody is about to quote to a customer —
  * so nothing on this path treats it as arithmetic.
  */
-
-import type { ToolResult } from "../../types.js";
-import { callOrch, OrchPmError } from "../pm/pm-orch.js";
-
-export { callOrch };
-// WARP-2556 — `OrchPmError` was re-exported here as `OrchError` and imported
-// by nobody: all seven handlers and the test go through `crmError()`. A second
-// public name for the same class is a second error-mapping path for a future
-// handler author to find, so it is gone. `crmError()` is the one entry point.
-
 
 // ── Wire shapes the tools return ─────────────────────────────────────────────
 // Deliberately a SUBSET of the orchestrator's Api* shapes: a tool result is
@@ -122,23 +117,4 @@ export function toDeal(row: ApiDeal): CrmDealOut {
 
 export function toActivity(row: ApiActivity): CrmActivityOut {
   return { id: row.id, kind: row.kind, summary: row.summary, occurred_at: row.occurredAt };
-}
-
-/**
- * One error mapping for every `crm_*` handler.
- *
- * 404 → NOT_FOUND so the model can say "I couldn't find that customer" rather
- * than "something went wrong". 422 keeps its message, because the orchestrator's
- * 422s (`invalid_stage`, `amount_needs_currency`) name a fixable mistake and the
- * model can act on them. Everything else is CRM_API_ERROR.
- */
-export function crmError(err: unknown): ToolResult {
-  if (err instanceof OrchPmError) {
-    const code =
-      err.status === 404 ? "CRM_NOT_FOUND" : err.status === 422 ? "CRM_INVALID_REQUEST" : "CRM_API_ERROR";
-    return { ok: false, status: "error", error: { code, message: err.message } };
-  }
-  // Not a transport error — let the agent loop see it rather than flattening
-  // a programming mistake into a tidy tool failure.
-  throw err;
 }

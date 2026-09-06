@@ -9,7 +9,7 @@
  * these specs keep the two from drifting on the load-bearing values.
  */
 import { describe, it, expect } from "vitest";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   GATEABLE_MODULE_IDS,
   ALWAYS_ON_FEATURES,
@@ -154,6 +154,25 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
     }
     expect(GRANTABLE_TOOL_DOMAINS.length).toBe(TOOL_DOMAINS.length - 1);
   });
+
+  it("`business` is grantable in its own right and holds every business_* tool (WARP-2583)", () => {
+    // ADR-045 moved the PM and CRM tools into one domain. A grant on `pm` or
+    // `crm` reaches nothing local any more (both are empty landing slots for
+    // remote catalogs), so a role that lacks `business` reaches none of them.
+    expect(GRANTABLE_TOOL_DOMAINS).toContain("business");
+    const business = TOOL_CATALOG.filter((t) => t.name.startsWith("business_"));
+    expect(business.map((t) => t.name)).toEqual(
+      expect.arrayContaining([
+        "business_find",
+        "business_timeline",
+        "business_create",
+        "business_update",
+        "business_link",
+      ]),
+    );
+    for (const t of business) expect(t.domain, t.name).toBe("business");
+    expect(TOOL_CATALOG.filter((t) => t.domain === "pm" || t.domain === "crm")).toEqual([]);
+  });
 });
 
 describe("access-catalog — tier write-filter reachability", () => {
@@ -170,6 +189,42 @@ describe("access-catalog — tier write-filter reachability", () => {
     // and the set never exceeds the catalog union
     for (const d of family) expect(TOOL_DOMAINS).toContain(d);
     expect(tierReachableDomains("guest")).toEqual(family);
+  });
+
+  /**
+   * WARP-2761 — an EMPTY domain is unreachable too, and that is a DECISION,
+   * not a side effect nobody looked at.
+   *
+   * The function adds a domain only on finding a non-write tool in it, so
+   * "every tool here writes" and "no tool here yet" produce the same answer.
+   * `crm` and `pm` are the second kind: ADR-045 moved their tools into
+   * `business` and catalog.ts keeps them declared as landing slots for a
+   * remote catalog. The alternative — returning a toolless domain as
+   * reachable — was rejected because this set is a live term in the
+   * effective-access intersection, and the first tool a remote catalog
+   * registers into such a domain may be a write that family and guest would
+   * already hold a grant for. The role templates gave up the grants instead.
+   *
+   * This pin is what makes reversing that a deliberate act. MUTATION: add
+   * `for (const d of TOOL_DOMAINS) if (!TOOL_CATALOG.some((t) => t.domain === d)) out.add(d)`
+   * to `tierReachableDomains` -> red.
+   */
+  it("a domain with no tools is NOT reachable for family/guest (the decision, pinned)", () => {
+    const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
+    const empty = TOOL_DOMAINS.filter((d) => !populated.has(d));
+    // Guard the premise: if the catalogue ever refills these, this spec is
+    // about nothing and should be re-read rather than deleted.
+    expect(empty).toContain("crm");
+    expect(empty).toContain("pm");
+    const family = tierReachableDomains("family");
+    const guest = tierReachableDomains("guest");
+    for (const d of empty) {
+      expect(family.has(d), `${d} holds no tools`).toBe(false);
+      expect(guest.has(d), `${d} holds no tools`).toBe(false);
+      // …while owner/admin keep it, by taking the union unconditionally —
+      // which is why the emptying showed up on family/guest templates only.
+      expect(tierReachableDomains("admin").has(d)).toBe(true);
+    }
   });
 });
 

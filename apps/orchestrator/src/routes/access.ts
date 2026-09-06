@@ -6,7 +6,9 @@
  * its status, every mutation Activity-audited kind="auth"):
  *
  *   GET    /api/access/roles             — { roles: AccessRole[] }
- *   POST   /api/access/roles             — create; { sourceRoleId } duplicates
+ *   GET    /api/access/role-templates    — { roleTemplates, enforcedModuleIds }
+ *   POST   /api/access/roles             — create; { sourceRoleId } duplicates,
+ *                                          { templateId } instantiates a template
  *   GET    /api/access/roles/:id         — { role }
  *   PATCH  /api/access/roles/:id         — update / archive + restore ({ state })
  *   DELETE /api/access/roles/:id         — blocked while in use (reassign first)
@@ -46,6 +48,20 @@
  * until edited — for the UI's honest confirm line (consumed by the role
  * editor as of WARP-1576).
  *
+ * Role templates (WARP-2738). ADR-032 shipped the engine and nothing to start
+ * from. `services/access-role-templates.ts` holds eight code-resident starting
+ * points; `GET /access/role-templates` serves the catalogue and
+ * `POST /access/roles { templateId }` instantiates one. A template is NOT a
+ * seeded row and gets NO private write path: the branch expands the template
+ * to the ordinary create payload and then runs the same rails a hand-authored
+ * body runs — `assertAssignableForCreate`, `normalizeGrants`, `createRoleTx`
+ * inside the same SERIALIZABLE transaction — so what lands is an ordinary,
+ * fully editable AccessRole row. The GET also ships `enforcedModuleIds`
+ * (derived from `FEATURE_GATED_MODULES`) because a feature grant NARROWS what
+ * a person reaches only on the modules whose layer-2 gate is mounted; on the
+ * rest it drives the nav and the API still answers, and the panel has to be
+ * able to say which is which.
+ *
  * Archive/restore (WARP-1560, WARP-1569). `state` moves both ways through
  * this same PATCH, and each TRANSITION — not the requested value — gets its
  * own Activity string ("Access role archived" / "Access role restored"); a
@@ -75,6 +91,7 @@ import {
   assertAssignableForCreate,
   assertRoleChangeAllowed,
   assertRoleChangeInvariantsTx,
+  isConcurrencyConflict,
   runRoleChangePostEffects,
 } from "../services/role-mutation-guard.service.js";
 import { revokeAllSessions } from "../services/session.service.js";
@@ -88,6 +105,20 @@ import {
   type FeatureLevel,
   type GateableModuleId,
 } from "../services/access-catalog.js";
+import {
+  ROLE_TEMPLATES,
+  ROLE_TEMPLATE_BY_ID,
+  isRoleTemplateId,
+  roleTemplateCreatePayload,
+  type RoleTemplate,
+} from "../services/access-role-templates.js";
+// The layer-2 (per-person) gate roster, straight from the composition that
+// mounts it. Imported, never restated: this set has moved twice already
+// (WARP-1585 added knowledge/docs; crm/money followed), and a dashboard-side
+// copy would go stale silently — labelling a grant "enforced" that isn't.
+// No cycle: module-mounts reaches the registry, the two gate middlewares and
+// effective-access, none of which import a route module.
+import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("access-route");
@@ -147,6 +178,34 @@ const rolePayloadSchema = z.object({
 });
 
 const duplicateSchema = z.object({ sourceRoleId: z.string().min(1).max(128) });
+
+/**
+ * WARP-2738 — template instantiation: POST /access/roles { templateId }.
+ *
+ * `templateId` is a plain bounded string, deliberately NOT a `z.enum` over the
+ * catalogue ids: a well-formed id that names no template is a MISSING
+ * RESOURCE (404 — the same answer an unknown `sourceRoleId` already gets), and
+ * an enum would turn it into a 400 "Invalid request" that tells the operator
+ * their request was malformed when it wasn't. Membership is checked in the
+ * handler with `isRoleTemplateId`, which is itself derived from
+ * ROLE_TEMPLATES — the id vocabulary is never restated here.
+ *
+ * `sourceRoleId` is declared only in order to REFUSE it. The duplicate branch
+ * silently ignores every other body field, so a body carrying both ids would
+ * otherwise have one of them quietly win; the two shapes are mutually
+ * exclusive instead.
+ */
+const templateCreateSchema = z.object({
+  templateId: z.string().min(1).max(128),
+  /** Optional rename at instantiation. Same constraints as
+   *  `rolePayloadSchema.name` (reused, not restated) — and the slug stays
+   *  server-derived from whichever name wins, never client-supplied. */
+  name: rolePayloadSchema.shape.name.optional(),
+  sourceRoleId: z.unknown().refine((v) => v === undefined, {
+    message:
+      "Send templateId or sourceRoleId, never both — a create is an instantiation or a duplicate.",
+  }),
+});
 
 const rolePatchSchema = rolePayloadSchema
   .partial()
@@ -245,6 +304,36 @@ function serializeAccessRole(row: RoleWithMeta) {
   };
 }
 
+/**
+ * WARP-2738 — the role-template wire shape.
+ *
+ * An explicit projection rather than `res.json(ROLE_TEMPLATES)`: the catalogue
+ * is an internal code object and a field added there must be a DELIBERATE API
+ * change here, not one that ships by accident. The grant arrays are copied out
+ * of the frozen literals for the same reason `roleTemplateCreatePayload` does
+ * it — nothing hands a caller a live reference into a process-wide constant.
+ *
+ * A template has no id-in-the-database, no people and no state, so this shape
+ * is deliberately NOT the AccessRole shape: it is what the builder needs to
+ * render a card and post `{ templateId }` back.
+ */
+function serializeRoleTemplate(t: RoleTemplate) {
+  return {
+    id: t.id,
+    name: t.name,
+    description: t.description,
+    startingPoint: t.startingPoint,
+    featureGrants: t.featureGrants.map((g) => ({ moduleId: g.moduleId, level: g.level })),
+    toolGrants: t.toolGrants.map((g) => ({ domain: g.domain, level: g.level })),
+    connectorGrants: t.connectorGrants.map((g) => ({ provider: g.provider, level: g.level })),
+    cloudModelsAllowed: t.cloudModelsAllowed,
+    mayOperateLocks: t.mayOperateLocks,
+    storageQuotaBytes: t.storageQuotaBytes,
+    maxUploadSizeMb: t.maxUploadSizeMb,
+    llmDailyMessageCap: t.llmDailyMessageCap,
+  };
+}
+
 /** Server-owned slug derivation (carried obligation 1) — lowercase, dashed,
  *  uniquified against existing slugs with a numeric suffix. */
 export function slugifyRoleName(name: string): string {
@@ -324,6 +413,41 @@ async function createRoleTx(
   return role.id;
 }
 
+/**
+ * The refusal→response mapping every mutating route in this file shares.
+ * Returns true when it answered, so the caller falls through to `next(err)`
+ * only for genuinely unexpected failures.
+ *
+ * The second branch is WARP-2738's fix to a shipped gap. Every mutation here
+ * opens at SERIALIZABLE, which means the LOSER of a conflict aborts with
+ * P2034 by design — that is the whole point of the isolation level, not an
+ * error. This file never imported `isConcurrencyConflict`, so that abort fell
+ * through to the generic error handler and the operator got a 500 for a
+ * request that simply needs retrying; access.routes.test.ts pinned exactly
+ * that as a known gap. Role templates make the race routine rather than
+ * exotic — two operators clicking "Front Desk" at once both derive the same
+ * slug base — so the mapping lands with them.
+ *
+ * P2025 rides along for the same reason people.ts maps it: our writes are
+ * keyed on rows re-read inside the transaction, and "the row moved under us"
+ * is the same story to the caller as "we lost the serialization race" —
+ * nothing was applied, retry. Neither is attributed to a specific rail: we
+ * cannot know which invariant the concurrent writer would have tripped, and
+ * naming one would be a lie in the audit trail.
+ */
+function mapMutationRefusal(res: Response, err: unknown): boolean {
+  if (err instanceof RoleMutationRefusedError) {
+    res.status(err.status).json(err.toJSON());
+    return true;
+  }
+  if (isConcurrencyConflict(err)) {
+    const conflict = RoleMutationRefusedError.concurrentMutation();
+    res.status(conflict.status).json(conflict.toJSON());
+    return true;
+  }
+  return false;
+}
+
 function isForeignKeyError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2003";
 }
@@ -357,6 +481,39 @@ export function createAccessRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // ── GET /api/access/role-templates ──────────────────────────
+  //
+  // WARP-2738 — the catalogue the builder starts from. Code-resident, static,
+  // and identical on every box, so it caches exactly like /api/business-types
+  // (private, max-age=300) and holds no per-box state; owner+admin like every
+  // other surface in this file, because it is part of the Access panel rather
+  // than something a narrowed person has any use for.
+  //
+  // `enforcedModuleIds` is the half that makes the catalogue honest, and the
+  // reason this endpoint exists at all rather than the dashboard bundling the
+  // templates. A feature grant only NARROWS what a person can reach on the
+  // modules whose layer-2 gate is actually mounted (FEATURE_GATED_MODULES,
+  // modules/module-mounts.ts); on every other module the grant drives the nav
+  // and nothing else — the menu entry hides and the API still answers. The
+  // panel must be able to say which is which, and denial on the enforced ones
+  // is a 404 `module_disabled` that is byte-identical to the box-wide toggle,
+  // so the honest copy is "they will not see it", never "they will be told
+  // they lack permission".
+  //
+  // Path note: the second segment is `role-templates`, not `roles`, so the
+  // `/access/roles/:id` route below cannot shadow it whatever the order.
+  router.get(
+    "/access/role-templates",
+    requireRole("owner", "admin"),
+    (_req: Request, res: Response) => {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      res.json({
+        roleTemplates: ROLE_TEMPLATES.map(serializeRoleTemplate),
+        enforcedModuleIds: [...FEATURE_GATED_MODULES],
+      });
+    },
+  );
+
   // ── GET /api/access/roles/:id ───────────────────────────────
   router.get(
     "/access/roles/:id",
@@ -372,7 +529,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
     },
   );
 
-  // ── POST /api/access/roles (create | duplicate) ─────────────
+  // ── POST /api/access/roles (create | duplicate | instantiate) ──
   router.post(
     "/access/roles",
     requireRole("owner", "admin"),
@@ -380,10 +537,22 @@ export function createAccessRouter(prisma: PrismaClient): Router {
       try {
         const actorId = req.user?.id ?? "unknown";
 
-        // Duplicate = POST { sourceRoleId } — the server copies the grant
-        // set and derives a fresh name/slug (§5).
-        const isDuplicate =
-          typeof (req.body as { sourceRoleId?: unknown })?.sourceRoleId === "string";
+        // Three request shapes on one verb, discriminated by the body:
+        //   { templateId }    instantiate a catalogue template (WARP-2738)
+        //   { sourceRoleId }  duplicate an existing role — the server copies
+        //                     the grant set and derives a fresh name/slug (§5)
+        //   full payload      hand-authored create
+        //
+        // templateId is tested FIRST, and the two id fields are mutually
+        // exclusive (refused below, not silently resolved): the duplicate
+        // branch ignores every other field in the body, so a body carrying
+        // both would have one id quietly win and the other vanish.
+        const idFields = (req.body ?? {}) as {
+          templateId?: unknown;
+          sourceRoleId?: unknown;
+        };
+        const isTemplate = typeof idFields.templateId === "string";
+        const isDuplicate = !isTemplate && typeof idFields.sourceRoleId === "string";
 
         let name: string;
         let description: string | null;
@@ -394,8 +563,67 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         let cloudModelsAllowed: boolean;
         let grants: NormalizedGrants;
         let duplicatedFrom: string | null = null;
+        /** The template this role was instantiated from — the Activity `refs`
+         *  slot that mirrors `duplicatedFrom`, and null on the other two
+         *  branches. Provenance only: the row is ordinary and editable the
+         *  moment it lands, and nothing reads this back. */
+        let instantiatedFrom: string | null = null;
 
-        if (isDuplicate) {
+        if (isTemplate) {
+          const parsed = templateCreateSchema.safeParse(req.body);
+          if (!parsed.success) {
+            return res
+              .status(400)
+              .json({ error: "Invalid request", details: parsed.error.flatten() });
+          }
+          const template = isRoleTemplateId(parsed.data.templateId)
+            ? ROLE_TEMPLATE_BY_ID.get(parsed.data.templateId)
+            : undefined;
+          if (!template) return res.status(404).json({ error: "Role template not found" });
+
+          // Expanded through the catalogue's own projection — the route never
+          // reads the template's internal shape, so a payload-contract change
+          // breaks at compile time in one place.
+          const templatePayload = roleTemplateCreatePayload(template);
+
+          // Rails 3 + 7, exactly as the hand-authored branch runs them, and
+          // deliberately NOT the duplicate branch's behaviour below (which
+          // skips this — a known wart, not a pattern to copy). Three of the
+          // eight templates are admin-based; without this rail a template
+          // would be a way around the rank cap. An admin instantiating an
+          // admin-based template passes — equal rank is allowed.
+          assertAssignableForCreate({
+            actorRole: req.user?.role,
+            requestedRole: templatePayload.startingPoint,
+            rankMessage: "You cannot create a role above your own rank",
+          });
+
+          instantiatedFrom = template.id;
+          // The optional rename; the SLUG is derived server-side from
+          // whichever name wins (deriveUniqueSlug, inside the transaction).
+          name = parsed.data.name ?? templatePayload.name;
+          description = templatePayload.description;
+          startingPoint = templatePayload.startingPoint;
+          storageQuotaBytes =
+            templatePayload.storageQuotaBytes === null
+              ? null
+              : BigInt(templatePayload.storageQuotaBytes);
+          maxUploadSizeMb = templatePayload.maxUploadSizeMb;
+          llmDailyMessageCap = templatePayload.llmDailyMessageCap;
+          cloudModelsAllowed = templatePayload.cloudModelsAllowed;
+          // Through the SAME server re-clamp as any hand-authored body. The
+          // templates are authored so this is a no-op — access-role-
+          // templates.test.ts is what proves that, by re-running these exact
+          // clamps — but the clamp stays the boundary rather than a claim the
+          // catalogue makes about itself.
+          grants = normalizeGrants({
+            startingPoint,
+            featureGrants: templatePayload.featureGrants,
+            toolGrants: templatePayload.toolGrants,
+            connectorGrants: templatePayload.connectorGrants,
+            mayOperateLocks: templatePayload.mayOperateLocks,
+          });
+        } else if (isDuplicate) {
           const parsed = duplicateSchema.safeParse(req.body);
           if (!parsed.success) {
             return res
@@ -495,6 +723,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
             roleName: created.name,
             startingPoint,
             duplicatedFrom,
+            templateId: instantiatedFrom,
           },
           actor: actorFromRequest(req),
         });
@@ -502,9 +731,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // No members yet — nothing NC-affecting to converge.
         res.json({ role: serializeAccessRole(created), syncState: "synced" });
       } catch (err) {
-        if (err instanceof RoleMutationRefusedError) {
-          return res.status(err.status).json(err.toJSON());
-        }
+        if (mapMutationRefusal(res, err)) return;
         next(err);
       }
     },
@@ -790,9 +1017,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           ...(retainedQuotaCount !== undefined ? { retainedQuotaCount } : {}),
         });
       } catch (err) {
-        if (err instanceof RoleMutationRefusedError) {
-          return res.status(err.status).json(err.toJSON());
-        }
+        if (mapMutationRefusal(res, err)) return;
         next(err);
       }
     },
@@ -892,6 +1117,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           );
           return res.status(409).json(ROLE_IN_USE);
         }
+        if (mapMutationRefusal(res, err)) return;
         next(err);
       }
     },
@@ -1033,12 +1259,13 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // follows) — the UI's "Saved. Applying…" line keys off pending.
         res.json({ syncState: "pending" });
       } catch (err) {
-        // One shape for both: a precondition and a rail refusal are the same
-        // story to the caller — the transaction unwound, nothing was applied
-        // (WARP-1583).
-        if (isAccessPreconditionError(err) || err instanceof RoleMutationRefusedError) {
+        // One shape for all three: a precondition, a rail refusal and a lost
+        // serialization race are the same story to the caller — the
+        // transaction unwound, nothing was applied (WARP-1583, WARP-2738).
+        if (isAccessPreconditionError(err)) {
           return res.status(err.status).json(err.toJSON());
         }
+        if (mapMutationRefusal(res, err)) return;
         next(err);
       }
     },
