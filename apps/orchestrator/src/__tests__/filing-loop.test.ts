@@ -752,6 +752,7 @@ describe("🔴 the settings row fails closed", () => {
         pathDenylist: [],
         hourlyApplyCap: 0,
         dailyCreateCap: 0,
+        digestHour: 8,
       }),
     ).toEqual([]);
   });
@@ -771,6 +772,7 @@ describe("🔴 the settings row fails closed", () => {
         pathDenylist: [],
         hourlyApplyCap: 0,
         dailyCreateCap: 0,
+        digestHour: 8,
       }),
     ).toEqual(["stefan", "__household__"]);
   });

@@ -41,6 +41,8 @@ export interface ResolvedFilingSettings {
   pathDenylist: string[];
   hourlyApplyCap: number;
   dailyCreateCap: number;
+  /** Local hour the morning digest is sent. WARP-2731. */
+  digestHour: number;
 }
 
 const OFF_DEFAULTS: ResolvedFilingSettings = {
@@ -53,6 +55,7 @@ const OFF_DEFAULTS: ResolvedFilingSettings = {
   pathDenylist: [...DEFAULT_PATH_DENYLIST],
   hourlyApplyCap: 0,
   dailyCreateCap: 0,
+  digestHour: 8,
 };
 
 /** A `Json` column holding a list of strings, read defensively: it is a Json
@@ -83,6 +86,7 @@ export async function readFilingSettings(
     pathDenylist: stringList(row.pathDenylist) ?? [...DEFAULT_PATH_DENYLIST],
     hourlyApplyCap: row.hourlyApplyCap,
     dailyCreateCap: row.dailyCreateCap,
+    digestHour: row.digestHour,
   };
 }
 

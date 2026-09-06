@@ -54,6 +54,8 @@ export const FILING_ERRORS = {
   PAYLOAD_UNREADABLE: "proposal_payload_unreadable",
   /** The file is gone, or the path now holds a different file. */
   SOURCE_CHANGED: "proposal_source_changed",
+  /** WARP-2731 — undo asked for on something that was never applied. */
+  NOT_APPLIED: "proposal_not_applied",
   /** `MATCH_REVIEW` applied without saying which candidate. */
   CHOICE_REQUIRED: "proposal_choice_required",
   /** The chosen id is not one of the candidates the proposal offered. */
@@ -85,6 +87,8 @@ export interface ApplyResult {
   createdContactId?: string;
   createdProjectId?: string;
   createdEntityLinkId?: string;
+  /** The box-written timeline caption, so undo can reach it. */
+  createdActivityId?: string;
 }
 
 /**
@@ -143,6 +147,7 @@ export async function applyProposal(
         createdContactId: result.createdContactId ?? null,
         createdProjectId: result.createdProjectId ?? null,
         createdEntityLinkId: result.createdEntityLinkId ?? null,
+        createdActivityId: result.createdActivityId ?? null,
       },
     });
 
@@ -285,7 +290,11 @@ async function performApply(
 
     case "LOG_EMAIL_ACTIVITY": {
       const p = payload as PayloadFor<"LOG_EMAIL_ACTIVITY">;
-      await crm.logActivity(
+      // The id is CAPTURED, not discarded: WARP-2731's undo reverses only
+      // through the proposal's own back-pointers, and a caption with no
+      // pointer is a row undo cannot reach — it would sit on the customer's
+      // timeline forever after the owner took the filing back.
+      const activity = await crm.logActivity(
         prisma,
         {
           subjectType: "COMPANY",
@@ -299,8 +308,11 @@ async function performApply(
           summary: p.subject ?? "Email logged",
         },
         ctx.actorId,
+        // Box-written, so it must not read as a human note — see the
+        // `filing` parameter on `logActivity`.
+        { proposalId: proposal.id },
       );
-      return {};
+      return { createdActivityId: activity.id };
     }
 
     case "CREATE_MONEY_DOC":

@@ -1,0 +1,24 @@
+ACME Dental Supply Ltd
+14 Mill Road, Reading RG1 8LS
+acme-dental.example  ·  accounts@acme-dental.example  ·  +44 118 496 0112
+VAT GB 412 8891 03
+
+INVOICE  1042
+
+Bill to:      Northgate Dental Practice
+Issued:       2026-03-12
+Due:          2026-04-11
+Terms:        Net 30
+
+  Qty  Description                              Unit        Amount
+    6  Composite refill kit, A2 shade          120.00        720.00
+   12  Prophy angles, disposable (box of 100)   85.00      1,020.00
+    2  Curing light, cordless                  980.00      1,960.00
+       Delivery                                             120.00
+
+                                          Subtotal        3,820.00
+                                          VAT 20%           430.00
+                                          TOTAL USD       4,250.00
+
+Payment to ACME Dental Supply Ltd, sort 20-45-77, account 8891 0421.
+Queries to accounts@acme-dental.example quoting invoice 1042.

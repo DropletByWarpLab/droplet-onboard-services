@@ -169,3 +169,171 @@
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* ── WARP-2731 — tabs, health, rules, skipped, undo ────────────────────────
+   Built from the same tokens as the cards above; nothing here introduces a
+   colour. The tab strip deliberately reuses the pill shape the CRM's own
+   ViewSwitcher uses rather than inventing a second tablist idiom. */
+
+.pm-scope .filing-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-tint);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.pm-scope .filing-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pm-scope .filing-tab:hover { color: var(--text); }
+
+.pm-scope .filing-tab.is-active {
+  background: var(--bg-canvas);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+
+.pm-scope .filing-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.pm-scope .filing-tab-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.pm-scope .filing-health {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-4);
+}
+
+.pm-scope .filing-health-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.pm-scope .filing-health-note.is-warn { color: var(--err); }
+.pm-scope .filing-health-note.is-info { color: var(--text-2); }
+
+.pm-scope .filing-recent {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tint);
+}
+
+.pm-scope .filing-recent h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.pm-scope .filing-recent ul,
+.pm-scope .filing-rules,
+.pm-scope .filing-skipped {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.pm-scope .filing-recent li,
+.pm-scope .filing-rules li,
+.pm-scope .filing-skipped li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+  font-size: 13px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.pm-scope .filing-recent li:last-child,
+.pm-scope .filing-rules li:last-child,
+.pm-scope .filing-skipped li:last-child { border-bottom: 0; }
+
+.pm-scope .filing-recent li > span:first-child,
+.pm-scope .filing-rule-text,
+.pm-scope .filing-skipped-why {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pm-scope .filing-skipped-when {
+  color: var(--text-4);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .pm-scope .filing-recent li,
+  .pm-scope .filing-rules li,
+  .pm-scope .filing-skipped li {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
+
+/* The "stop filing here" correction, on the record drawer. Collapsed to a
+   single ghost button until it is wanted — a control that is always expanded
+   is one that reads as an instruction rather than an option. */
+.pm-scope .filing-stop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0 4px;
+}
+
+.pm-scope .filing-stop label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.pm-scope .filing-stop-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pm-scope .filing-stop-row .pm-input { flex: 1; min-width: 180px; }

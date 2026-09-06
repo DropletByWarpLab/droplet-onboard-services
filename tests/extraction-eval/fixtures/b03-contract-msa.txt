@@ -1,0 +1,28 @@
+MASTER SERVICES AGREEMENT
+
+This agreement is made between:
+
+  (1) Pellew Analytics Limited, a company registered in England, whose
+      registered office is at 5 Cotham Hill, Bristol BS6 6LD
+      ("the Supplier"), pellew-analytics.example; and
+
+  (2) Northgate Dental Practice ("the Client").
+
+1. TERM
+   This agreement commences on 1 April 2026 and continues for twelve months,
+   renewing annually unless either party gives ninety days' written notice.
+
+2. CHARGES
+   The Client shall pay the Supplier a fixed annual fee of 18,000.00 GBP,
+   invoiced quarterly in advance.
+
+3. CONFIDENTIALITY
+   Each party shall keep confidential all information disclosed by the other
+   which is marked confidential or would reasonably be understood to be so.
+
+4. DATA PROTECTION
+   The Supplier acts as a processor. The Supplier shall not transfer personal
+   data outside the United Kingdom without the Client's prior written consent.
+
+Signed for and on behalf of Pellew Analytics Limited
+Signed for and on behalf of Northgate Dental Practice

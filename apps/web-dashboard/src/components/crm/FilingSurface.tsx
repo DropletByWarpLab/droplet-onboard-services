@@ -43,6 +43,14 @@ import {
   useFilingSummary,
   type FilingProposal,
 } from "./useFiling";
+import {
+  FilingTabList,
+  HealthRow,
+  RecentlyFiled,
+  RulesTab,
+  SkippedTab,
+  type FilingTab,
+} from "./FilingTabs";
 
 /** One line saying what would happen, in the owner's words. */
 export function headlineFor(p: FilingProposal): string {
@@ -238,6 +246,7 @@ export function FilingSurface(): JSX.Element {
   const { proposals, error, isLoading, mutate } = useFilingProposals("pending");
   const actions = useFilingActions();
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [tab, setTab] = useState<FilingTab>("review");
 
   const run = async (id: string, fn: () => Promise<void>, done: string) => {
     setBusyId(id);
@@ -288,20 +297,53 @@ export function FilingSurface(): JSX.Element {
     );
   }
 
-  if (isLoading) return <div className="pm-skel" style={{ height: 160 }} />;
+  const chrome = (body: JSX.Element) => (
+    <>
+      {/* WARP-2731 — the Health row sits ABOVE the tabs, because the state it
+          reports ("Droplet has not read a new file in three days") explains an
+          empty list on every one of them. Below the tabs it would read as a
+          note about the review queue alone. */}
+      <HealthRow health={summary?.health} />
+      <FilingTabList tab={tab} onTab={setTab} pending={summary?.pending ?? 0} />
+      {body}
+    </>
+  );
+
+  if (tab === "rules") return chrome(<RulesTab />);
+  if (tab === "skipped") return chrome(<SkippedTab />);
+
+  if (isLoading) return chrome(<div className="pm-skel" style={{ height: 160 }} />);
 
   if (!proposals || proposals.length === 0) {
-    return (
-      <EmptyBlock
-        icon="check"
-        heading="Nothing needs a look"
-        body="Droplet is reading new files as they arrive. Anything it is unsure about will show up here."
-      />
+    // The undo strip renders here too. An empty queue is exactly when an owner
+    // is looking BACK at what was filed rather than forward at what is waiting.
+    return chrome(
+      <>
+        <RecentlyFiled
+          busyId={busyId}
+          onUndo={(id) => run(id, () => actions.undo(id), "Taken back")}
+        />
+        <EmptyBlock
+          icon="check"
+          heading="Nothing needs a look"
+          body="Droplet is reading new files as they arrive. Anything it is unsure about will show up here."
+        />
+      </>,
     );
   }
 
-  return (
+  const undoStrip = (
+    <RecentlyFiled
+      busyId={busyId}
+      onUndo={(id) =>
+        run(id, () => actions.undo(id), "Taken back")
+      }
+    />
+  );
+
+  return chrome(
     <div className="filing-list">
+      {undoStrip}
       {proposals.map((p) => (
         <FilingCard
           key={p.id}
@@ -320,7 +362,7 @@ export function FilingSurface(): JSX.Element {
           }
         />
       ))}
-    </div>
+    </div>,
   );
 }
 

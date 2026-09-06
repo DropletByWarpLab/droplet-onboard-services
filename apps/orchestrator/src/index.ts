@@ -115,6 +115,8 @@ import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { runFilingTick } from "./services/filing/worker.js";
 import { runFilingReconcile } from "./services/filing/reconcile.js";
+import { runFilingMaintenance } from "./services/filing/maintenance.js";
+import { runFilingDigest } from "./services/filing/digest.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -1205,6 +1207,41 @@ async function main() {
       }
     },
     { lockKey: "droplet:filing-stale-claim-reconcile" },
+  );
+
+  // WARP-2731 — the daily forgetting arm. Expires proposals whose source file
+  // was deleted in Nextcloud (there is no FK to do it: `IngestProposal
+  // .ncFileId` is a plain Int by design), lapses ones nobody decided, and
+  // nulls the quotes on applied ones past their retention window.
+  //
+  // 🔴 Without this a proposal outlives its source forever, holding names,
+  // amounts and verbatim quotes for a document the owner deleted months ago.
+  // 03:40 rather than on the hour: nothing else on the box runs there, and a
+  // sweep that contends with the nightly backup is a sweep that gets blamed
+  // for it.
+  cronRuntime.scheduleCron(
+    "40 3 * * *",
+    async () => {
+      const result = await runFilingMaintenance(prisma);
+      if (result.orphaned > 0 || result.lapsed > 0 || result.evidenceForgotten > 0) {
+        logger.info(result, "filing maintenance");
+      }
+    },
+    { lockKey: "droplet:filing-maintenance" },
+  );
+
+  // The morning digest. Hourly rather than at a fixed time, because the hour
+  // is the OWNER's setting and a cron spec cannot read the database — the
+  // handler checks whether this is their hour and whether anything is waiting,
+  // and is idempotent within the day by reading NotificationLog rather than by
+  // holding state a restart would lose.
+  cronRuntime.scheduleCron(
+    "5 * * * *",
+    async () => {
+      const result = await runFilingDigest(prisma);
+      if (result.sent) logger.info(result, "filing digest");
+    },
+    { lockKey: "droplet:filing-digest" },
   );
 
   // WARP-475's nightly camera-retention purge used to fire here at 03:30.

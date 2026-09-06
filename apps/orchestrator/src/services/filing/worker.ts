@@ -53,6 +53,8 @@ import { extractFromText, resolveFilingModel, type ExtractFailureReason } from "
 import { readFileContent } from "./read-content.js";
 import { buildDrafts, persistDrafts, prismaMatcher } from "./propose.js";
 import { isInScope, permittedOwnerIds, readFilingSettings } from "./settings.js";
+import { noteTickCompleted } from "./digest.js";
+import { AUDIT_PHRASES, recordFilingAuditBestEffort, type FilingAuditRefs } from "./audit.js";
 
 const logger = createLogger("filing-worker");
 
@@ -67,7 +69,10 @@ export const MAX_ATTEMPTS = 3;
 const DEFAULT_FILE_SPACE = "files";
 
 export type TickOutcome =
-  | { status: "idle"; reason: "off" | "no_owner" | "nothing_pending" | "in_flight" }
+  | {
+      status: "idle";
+      reason: "off" | "no_owner" | "nothing_pending" | "in_flight" | "paused";
+    }
   | { status: "blocked"; reason: "model_unreachable" | "cloud_model_refused"; detail?: string }
   | {
       status: "processed";
@@ -86,6 +91,52 @@ interface ClaimRow {
 }
 
 let inFlight = false;
+
+/**
+ * WARP-2731 — the consecutive-failure canary.
+ *
+ * Five `model_unreachable` in a row means the gateway is down, not that five
+ * documents were unlucky. Without a pause the tick keeps claiming rows, each
+ * one burns an attempt from its budget, and by the time the gateway comes back
+ * a chunk of the corpus has been retired `failed` for a reason that had
+ * nothing to do with the documents.
+ *
+ * A pause, not a stop: it clears itself after ten minutes, because the failure
+ * it protects against is transient by nature and a worker that needs a restart
+ * to resume is a worker somebody has to notice first. `readFilingHealth` shows
+ * it, so the silence is legible while it lasts.
+ */
+export const CANARY_THRESHOLD = 5;
+export const CANARY_PAUSE_MS = 10 * 60_000;
+
+let consecutiveModelFailures = 0;
+let pausedUntil: number | null = null;
+
+/** What the Health row reads. Exported rather than inferred from a log line. */
+export function filingPauseState(): { paused: boolean; reason: string | null } {
+  if (pausedUntil !== null && Date.now() < pausedUntil) {
+    return { paused: true, reason: "model_unreachable" };
+  }
+  return { paused: false, reason: null };
+}
+
+function noteModelFailure(): void {
+  consecutiveModelFailures += 1;
+  if (consecutiveModelFailures >= CANARY_THRESHOLD) {
+    pausedUntil = Date.now() + CANARY_PAUSE_MS;
+    consecutiveModelFailures = 0;
+    logger.warn(
+      { pauseMs: CANARY_PAUSE_MS },
+      "filing: pausing — the AI service has been unreachable for five ticks running",
+    );
+  }
+}
+
+/** Any tick that got as far as a real answer clears the streak. The counter is
+ *  CONSECUTIVE failures; one success in the middle means the gateway is up. */
+function noteModelSuccess(): void {
+  consecutiveModelFailures = 0;
+}
 
 /**
  * The reason → status map, written once.
@@ -120,7 +171,28 @@ const RETRYABLE: ReadonlySet<string> = new Set(["bad_json", "model_unreachable"]
  * to `safeRun`, matching every other handler in `index.ts`.
  */
 export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> {
+  // `in_flight` is the ONE outcome that must not stamp the clock: another
+  // invocation owns this tick and will stamp when it finishes.
   if (inFlight) return { status: "idle", reason: "in_flight" };
+  try {
+    return await runOneTick(prisma);
+  } finally {
+    // 🔴 Stamped on EVERY completed tick — the idle ones AND the blocked ones.
+    //
+    // This used to live in the `finally` of the claim block below, which is
+    // entered only after the model resolves. During a sustained gateway outage
+    // every tick returns `blocked` BEFORE that point, so `lastTickAt` froze at
+    // its pre-outage value and the Health row understated the outage by exactly
+    // as long as the outage lasted — "a panel that counted only what filing did
+    // would look healthiest the moment it stopped", which is the failure this
+    // row exists to prevent. Same for the `off` / `no_owner` / `paused` returns:
+    // the worker IS running, it has simply been told to do nothing.
+    noteTickCompleted();
+  }
+}
+
+async function runOneTick(prisma: PrismaClient): Promise<TickOutcome> {
+  if (filingPauseState().paused) return { status: "idle", reason: "paused" };
 
   const settings = await readFilingSettings(prisma);
   if (settings.mode === "off") return { status: "idle", reason: "off" };
@@ -137,9 +209,19 @@ export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> 
   // would turn a one-line settings mistake into thousands of rows to re-arm.
   const model = await resolveFilingModel(prisma);
   if (!model.ok) {
+    if (model.reason === "model_unreachable") noteModelFailure();
     logger.warn({ reason: model.reason, detail: model.detail }, "filing: no usable local model");
     return { status: "blocked", reason: model.reason, detail: model.detail };
   }
+  // 🔴 `noteModelSuccess()` is deliberately NOT called here.
+  //
+  // `resolveFilingModel` probes the model LIST. Reaching it proves the gateway
+  // answers, not that it can complete a chat — and the partial outage where the
+  // list answers while completions fail is precisely the shape the five-strike
+  // breaker exists to catch. Clearing the streak on the pre-flight reset the
+  // counter to zero on every tick, so a per-document failure could never
+  // accumulate and the breaker could never fire. The streak is now cleared and
+  // incremented in `processClaim`, on real answers only.
 
   inFlight = true;
   try {
@@ -222,12 +304,40 @@ async function processClaim(
   owners: string[],
   model: string,
 ): Promise<TickOutcome> {
-  const finish = (
+  const finish = async (
     extractStatus: ExtractStatus,
     reason: ExtractReason | null,
     fingerprint: string | null,
     proposalsCreated = 0,
-  ) => complete(prisma, claim, extractStatus, reason, fingerprint, proposalsCreated);
+    /** Extra refs and a phrase for the one path that has more to say. */
+    extra?: { what: string; refs: Partial<FilingAuditRefs> },
+  ) => {
+    // Every terminal outcome is audited, not just the interesting ones. A skip
+    // that leaves no trace is the silent mode this feature is most likely to
+    // fail into — the owner sees nothing and there is nowhere to look.
+    if (settings.enabledById) {
+      await recordFilingAuditBestEffort({
+        ownerId: settings.enabledById,
+        severity: extractStatus === "failed" ? "warn" : "ok",
+        what:
+          extra?.what ??
+          (extractStatus === "failed"
+            ? AUDIT_PHRASES.failed
+            : extractStatus === "skipped"
+              ? AUDIT_PHRASES.skipped
+              : AUDIT_PHRASES.nothing),
+        refs: {
+          sourceRef: `file:${claim.ncFileId}`,
+          sourceKind: "FILE",
+          extractStatus,
+          extractReason: reason,
+          proposalsCreated,
+          ...extra?.refs,
+        },
+      });
+    }
+    return complete(prisma, claim, extractStatus, reason, fingerprint, proposalsCreated);
+  };
 
   if (!isInScope(claim.path, settings.folders)) {
     return finish("not_needed", "out_of_scope", null);
@@ -243,12 +353,38 @@ async function processClaim(
     return finish("done", "unchanged", read.content.fingerprint);
   }
 
-  const outcome = await extractFromText({
-    model,
-    storedPath: claim.path,
-    text: read.content.text,
-    denylist: settings.pathDenylist,
-  });
+  // 🔴 The canary's OTHER input, and the one it was missing.
+  //
+  // `resolveFilingModel`'s pre-flight only proves the model LIST answers. The
+  // partial outage where the list answers while COMPLETIONS fail shows up here
+  // and nowhere else — and it shows up as a THROW, not as an `outcome`:
+  // `askForJson` does not wrap `completeOnce`, and `extractFromText` can only
+  // ever return `bad_json` / `phi_*` / `not_business`, never `model_unreachable`
+  // (that reason belongs to `resolveFilingModel`). So the breaker whose doc
+  // comment promises to stop exactly this could never see it.
+  //
+  // The throw is still re-raised: a genuine fault propagating naked to
+  // `safeRun` is this file's deliberate contract, and swallowing it here would
+  // leave the claimed row `running` with nothing counting the failure. All this
+  // adds is that the breaker gets to watch.
+  let outcome;
+  try {
+    outcome = await extractFromText({
+      model,
+      storedPath: claim.path,
+      text: read.content.text,
+      denylist: settings.pathDenylist,
+    });
+  } catch (err) {
+    noteModelFailure();
+    throw err;
+  }
+  // A completed round-trip clears the streak — including one that came back as
+  // `bad_json`. The counter is about REACHABILITY, not answer quality: bytes
+  // came back, so the gateway is up, and a model that answers badly is a
+  // different problem with a different remedy. Placing this after the
+  // `!outcome.ok` block below would miss it, because that block returns.
+  noteModelSuccess();
 
   if (!outcome.ok) {
     const status = STATUS_FOR[outcome.reason];
@@ -316,7 +452,22 @@ async function processClaim(
     "filing: extracted",
   );
 
-  return finish("done", null, read.content.fingerprint, persisted.created);
+  // WARP-2731 — the durable audit row, ids and counts only, written by
+  // `finish` so there is exactly ONE row per source. Deliberately not wrapped
+  // in a try/catch: a background job has no user-facing flow to protect, and a
+  // swallowed failure here is an unaudited write. `safeRun` turns the throw
+  // into a logged failure with the canary attached.
+  return finish("done", null, read.content.fingerprint, persisted.created, {
+    what: persisted.created > 0 ? AUDIT_PHRASES.filed : AUDIT_PHRASES.nothing,
+    refs: {
+      phiVerdict: outcome.result.phiVerdict,
+      proposalsDuplicate: persisted.duplicate,
+      droppedUnverified: outcome.result.droppedUnverified,
+      droppedPhi: outcome.result.droppedPhi,
+      model: outcome.result.model,
+      phiSignals: outcome.result.phiSignals,
+    },
+  });
 }
 
 async function currentAttempts(prisma: PrismaClient, claim: ClaimRow): Promise<number> {
@@ -364,8 +515,18 @@ async function complete(
   };
 }
 
-/** Test seam: the in-flight flag is module state, and a test that leaves it
- *  set would silently turn every later tick into a no-op. */
+/** Test seam: this module's state is a flag, a counter and a deadline, and a
+ *  test that leaves any of them set turns every later tick into a no-op for a
+ *  reason the next test cannot see. */
+/** Test seam — the canary's counters are module state, and state that leaks
+ *  between tests is a test that passes for the wrong reason. */
+export function __resetCanaryForTests(): void {
+  consecutiveModelFailures = 0;
+  pausedUntil = null;
+}
+
 export function __resetInFlightForTests(): void {
   inFlight = false;
+  consecutiveModelFailures = 0;
+  pausedUntil = null;
 }
