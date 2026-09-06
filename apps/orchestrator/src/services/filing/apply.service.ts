@@ -39,6 +39,8 @@ import * as crm from "../crm/crm.service.js";
 import * as links from "../crm/entity-link.service.js";
 import * as contacts from "../contacts/contacts.service.js";
 import * as pm from "../pm/pm.service.js";
+import * as documents from "../money/document-status.js";
+import * as money from "../money/money.service.js";
 
 import { normalizeCompanyName } from "./match.js";
 import { parsePayload, type AnyPayload, type PayloadFor } from "./payloads.js";
@@ -60,6 +62,26 @@ export const FILING_ERRORS = {
   CHOICE_REQUIRED: "proposal_choice_required",
   /** The chosen id is not one of the candidates the proposal offered. */
   CHOICE_NOT_OFFERED: "proposal_choice_not_offered",
+  /** WARP-2737 — the Money module is switched off, so a filed invoice would
+   *  land in a table with no surface to show it on. */
+  MONEY_MODULE_OFF: "proposal_money_module_off",
+} as const;
+
+/**
+ * Which `EntityLinkRole` a filed money document's source file carries.
+ *
+ * Spelled out per kind rather than defaulted, because the role is what the
+ * customer record SAYS — "Invoice · acme-invoice.pdf" — and a wrong word there
+ * is a wrong statement about a document somebody will act on. `OTHER` for the
+ * three kinds `EntityLinkRole` has no word for: a receipt is not an invoice and
+ * calling it one would be worse than saying nothing.
+ */
+const ROLE_FOR_MONEY_KIND = {
+  INVOICE: "INVOICE",
+  QUOTE: "QUOTE",
+  BILL: "OTHER",
+  RECEIPT: "OTHER",
+  CREDIT_NOTE: "OTHER",
 } as const;
 
 export interface ApplyOptions {
@@ -89,6 +111,10 @@ export interface ApplyResult {
   createdEntityLinkId?: string;
   /** The box-written timeline caption, so undo can reach it. */
   createdActivityId?: string;
+  /** WARP-2737 — the money document, so undo can delete it while it is a
+   *  draft. Same reason as the caption above: a row with no back-pointer is a
+   *  row undo cannot reach. */
+  createdErpDocumentId?: string;
 }
 
 /**
@@ -148,6 +174,7 @@ export async function applyProposal(
         createdProjectId: result.createdProjectId ?? null,
         createdEntityLinkId: result.createdEntityLinkId ?? null,
         createdActivityId: result.createdActivityId ?? null,
+        createdErpDocumentId: result.createdErpDocumentId ?? null,
       },
     });
 
@@ -315,12 +342,86 @@ async function performApply(
       return { createdActivityId: activity.id };
     }
 
-    case "CREATE_MONEY_DOC":
-      // Unreachable: `policyClass` is NEVER for this kind and the caller
-      // refused above. Written as a throw rather than omitted so adding a
-      // money path later is a deliberate edit here and not an accident of a
-      // policy-table change somewhere else.
-      throw new Error(FILING_ERRORS.NEVER_APPLIABLE);
+    case "CREATE_MONEY_DOC": {
+      const p = payload as PayloadFor<"CREATE_MONEY_DOC">;
+
+      // 🔴 Refuse while the Money module is off, rather than writing a row the
+      // owner cannot see.
+      //
+      // `mountModuleGates` gates `/api/crm`, not `/api/money`, so this route
+      // is reachable with Money switched off — and `ErpDocument` has no
+      // surface at all until it is on. Filing an invoice into it would be a
+      // write that succeeds, reports success, and shows the owner nothing:
+      // indistinguishable, from where they are standing, from a filing that
+      // never happened. This whole feature rests on the opposite promise.
+      //
+      // Named, not silent, and the way out is one switch — `friendly-errors`
+      // turns it into "Turn on Money first, then file this."
+      const moneyModule = await prisma.moduleSetting.findUnique({
+        where: { moduleId: "money" },
+      });
+      if (!moneyModule?.enabled) throw new Error(FILING_ERRORS.MONEY_MODULE_OFF);
+
+      // 🔴 A money document must have a customer, and this is where that is
+      // refused rather than discovered. `createLocalDocument` throws
+      // NEEDS_PARTY too, but by then we are inside the transaction and the
+      // owner would get a 500 for a card the surface should never have offered
+      // an Apply button on.
+      if (!p.companyId) throw new Error(FILING_ERRORS.CHOICE_REQUIRED);
+
+      // 🔴 The extractor reports a DIRECTION and WARP-2739 deleted the column
+      // that used to hold one — direction is now derived from the kind. That
+      // makes the payload's `direction` a second opinion about the same fact,
+      // and two opinions that disagree mean the extraction is incoherent: a
+      // document read as a BILL but described as money owed TO us is not a
+      // document to file, it is one to look at again.
+      //
+      // Refusing beats silently preferring one. Preferring the derived value
+      // would file a plausible row built from a reading we know was confused.
+      if (money.directionOf(p.kind) !== p.direction) {
+        throw new Error(FILING_ERRORS.PAYLOAD_UNREADABLE);
+      }
+
+      const doc = await documents.createLocalDocument(prisma, {
+        kind: p.kind,
+        companyId: p.companyId,
+        documentNumber: p.number ?? null,
+        currency: p.currency,
+        // Strings, straight through. Prisma accepts a string for a Decimal
+        // column, and that is the whole point: the value never becomes a JS
+        // number on the way to NUMERIC(20,6).
+        total: p.total,
+        balance: p.balance ?? null,
+        issuedAt: p.issuedAt ? new Date(`${p.issuedAt}T00:00:00.000Z`) : null,
+        dueAt: p.dueAt ? new Date(`${p.dueAt}T00:00:00.000Z`) : null,
+        counterpartyName: p.counterpartyName ?? null,
+      });
+
+      // The source PDF, attached to the CUSTOMER — `EntityLinkSubject` has no
+      // DOCUMENT member, so the document itself cannot be a link target. That
+      // is not a workaround: the owner looks for "what did this customer send
+      // us" on the customer, and the money row carries the figures.
+      let createdEntityLinkId: string | undefined;
+      if (p.file) {
+        const link = await links.linkFileToRecord(
+          prisma,
+          {
+            ncFileId: p.file.ncFileId,
+            filePath: p.file.filePath,
+            fileSpace: p.file.fileSpace,
+            subjectType: "COMPANY",
+            subjectId: p.companyId,
+            role: ROLE_FOR_MONEY_KIND[p.kind],
+            linkedBy: "EXTRACTED",
+            confidence: proposal.confidence,
+          },
+          ctx.actorId,
+        );
+        createdEntityLinkId = link.id;
+      }
+
+      return { createdErpDocumentId: doc.id, createdEntityLinkId };
+    }
 
     default: {
       const exhaustive: never = proposal.kind;

@@ -553,7 +553,7 @@ describe("drafts: canned JSON to exact rows", () => {
     expect(ignored).toBe(true);
   });
 
-  it("a money document is proposed but classed NEVER", async () => {
+  it("a money document is proposed for review, with its figures intact", async () => {
     const { drafts } = await buildDrafts({
       source: FILE_SOURCE,
       phiVerdict: "CLEAN",
@@ -570,7 +570,12 @@ describe("drafts: canned JSON to exact rows", () => {
             number: "1042",
             currency: "USD",
             total: "4250.00",
-            direction: "PAYABLE",
+            // WARP-2737: RECEIVABLE, corrected. This fixture said PAYABLE, and
+            // an INVOICE is money owed TO the business — it was harmless only
+            // because nothing had ever read the field. The apply path now
+            // refuses a document whose kind and direction disagree, so an
+            // incoherent fixture would be asserting a shape the box rejects.
+            direction: "RECEIVABLE",
             confidence: 90,
             evidence: [{ quote: "Total $4,250.00" }],
           },
@@ -580,7 +585,7 @@ describe("drafts: canned JSON to exact rows", () => {
     expect(drafts).toHaveLength(1);
     expect(drafts[0]).toMatchObject({
       kind: "CREATE_MONEY_DOC",
-      policyClass: "NEVER",
+      policyClass: "REVIEW",
       dedupeKey: "INVOICE:1042:USD:4250.00",
     });
     // Money is a string all the way to the payload. `Number()` rounds above
@@ -619,9 +624,15 @@ describe("🔴 the policy table", () => {
     }
   });
 
-  it("CREATE_MONEY_DOC is NEVER, in every mode", () => {
+  // WARP-2737 moved money from NEVER to REVIEW: the ErpDocument widening gave a
+  // local invoice a row to live in, so a person can file one. Nothing gave the
+  // box permission to — see `filing-money-documents.test.ts`, which walks all
+  // 768 cells rather than the three modes here.
+  it("CREATE_MONEY_DOC is REVIEW and never AUTO, in every mode", () => {
     for (const mode of ["off", "propose", "auto"] as const) {
-      expect(classify({ ...base, kind: "CREATE_MONEY_DOC", mode }).policyClass).toBe("NEVER");
+      const v = classify({ ...base, kind: "CREATE_MONEY_DOC", mode });
+      expect(v.policyClass, mode).toBe("REVIEW");
+      expect(v.policyClass, mode).not.toBe("AUTO");
     }
   });
 
