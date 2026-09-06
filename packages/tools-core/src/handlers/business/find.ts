@@ -76,6 +76,7 @@ import {
   fail,
   FIND_ENTITIES,
   normalizeStatus,
+  normalizeFindingStatus,
   rejectMisusedArgs,
   toGraphCompany,
   toGraphContact,
@@ -83,6 +84,8 @@ import {
   toGraphWorkItem,
   toPlaneProject,
   toStageRollup,
+  toBrainFinding,
+  toBrainDigest,
   type ApiCrmContactRow,
   type FindEntity,
 } from "./_graph.js";
@@ -92,12 +95,25 @@ const inputSchema = {
   properties: {
     entity: {
       type: "string",
-      enum: ["customer", "contact", "deal", "project", "work_item", "pipeline"],
+      enum: [
+        "customer",
+        "contact",
+        "deal",
+        "project",
+        "work_item",
+        "pipeline",
+        "finding",
+        "digest",
+      ],
       description: "What to look for.",
     },
     id: { type: "string", description: "One record plus its links; omit to search." },
     query: { type: "string", description: "Free text over name, title or web domain." },
-    status: { type: "string", description: "Deals only: OPEN, WON or LOST." },
+    status: {
+      type: "string",
+      description:
+        "Deals: OPEN, WON or LOST. Findings: new, acknowledged, actioned, dismissed or stale (default new).",
+    },
     parent_id: {
       type: "string",
       description: "Customer id for deal/contact; project id for work_item.",
@@ -161,8 +177,21 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const misuse = rejectMisusedArgs(entity, a as unknown as Record<string, unknown>);
   if (misuse) return misuse;
 
-  const status = normalizeStatus(a.status);
+  // WARP-2752 — `status` carries TWO vocabularies and the normalizer only
+  // knows one. `normalizeStatus` upper-cases and checks against DEAL_STATUSES
+  // (OPEN/WON/LOST); a finding's status is a lower-case review state
+  // (new/acknowledged/...), so running it unconditionally rejected every
+  // finding filter before its branch was reached.
+  //
+  // Gated on the entity rather than widened, because the two sets must not
+  // merge: accepting "WON" for a finding, or "dismissed" for a deal, would
+  // make a filter that silently matches nothing — worse than a refusal,
+  // because the model believes the answer applied it. `HONOURED_ARGS` decides
+  // WHETHER an arg is accepted; this decides what it MEANS.
+  const status = entity === "deal" ? normalizeStatus(a.status) : undefined;
   if (status !== undefined && typeof status !== "string") return status;
+  const findingStatus = entity === "finding" ? normalizeFindingStatus(a.status) : undefined;
+  if (findingStatus !== undefined && typeof findingStatus !== "string") return findingStatus;
 
   const limit = clampLimit(a.limit);
   const id = a.id?.trim() ? encodeURIComponent(a.id.trim()) : null;
@@ -455,6 +484,56 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
 
       // ── pipeline ────────────────────────────────────────────────────────
+      // WARP-2752 (ADR-051) — the brain. What the box worked out about this
+      // business overnight, and what it thinks you should do about it.
+      //
+      // These read the SAME `visibleScopeFilter` the /brief page does, on the
+      // orchestrator side: a company-scope row never reaches a family or guest
+      // caller even though the model asked on their behalf. The filter lives
+      // next to the data, not here.
+      case "finding": {
+        const qs = new URLSearchParams();
+        // Default `new`: the model asking "what needs attention" means open
+        // work, and returning dismissed rows alongside would make the answer
+        // an archive rather than a to-do list.
+        qs.set("status", typeof findingStatus === "string" ? findingStatus : "new");
+        if (a.limit) qs.set("limit", String(a.limit));
+        const data = await callOrch<{
+          findings?: Array<Record<string, unknown>>;
+          total?: number;
+        }>(ctx, "get", `/api/brain/findings?${qs.toString()}`);
+        return {
+          ok: true,
+          data: {
+            entity,
+            findings: (data.findings ?? []).map(toBrainFinding),
+            total: data.total ?? 0,
+          },
+        };
+      }
+
+      case "digest": {
+        const qs = new URLSearchParams();
+        if (a.limit) qs.set("limit", String(a.limit));
+        const data = await callOrch<{
+          digests?: Array<Record<string, unknown>>;
+          total?: number;
+        }>(ctx, "get", `/api/brain/digests?${qs.toString()}`);
+        const q = typeof a.query === "string" ? a.query.trim().toLowerCase() : "";
+        // Filtered HERE rather than by the route: /api/brain/digests has no
+        // free-text parameter, and inventing one on the client keeps this tool
+        // honest about `total` — which stays the SERVER's count, so a narrowed
+        // list never claims the corpus is smaller than it is.
+        const rows = (data.digests ?? []).map(toBrainDigest);
+        const shown = q
+          ? rows.filter(
+              (d) =>
+                d.title.toLowerCase().includes(q) || d.body.toLowerCase().includes(q),
+            )
+          : rows;
+        return { ok: true, data: { entity, digests: shown, total: data.total ?? 0 } };
+      }
+
       case "pipeline": {
         const data = await callOrch<{
           pipelineId: string;
@@ -474,7 +553,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "business_find",
   description:
-    "Look up business records: customers, contacts, deals, projects, work items, or the pipeline roll-up. With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are minor-unit strings, never numbers.",
+    "Look up business records: customers, contacts, deals, projects, work items, the pipeline roll-up, or what the box worked out on its own — `finding` (something that needs attention: overdue money, a slipping deal) and `digest` (standing facts read out of documents). With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are minor-unit strings, never numbers.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -51,6 +51,45 @@ describe("sendNotification", () => {
     expect((prisma as any)._created[0].error).toBeNull();
   });
 
+  // WARP-2752 — web push is a SECOND channel, and its failures must not be
+  // mistaken for a delivery failure.
+  //
+  // The stub below has no `pushSubscription` delegate, so `dispatchToUser`
+  // throws — which is also what a box with push misconfigured does. On such a
+  // box EVERY notification would otherwise carry an error string, `error`
+  // would be uniformly non-null, and a real failure would be invisible in
+  // exactly the column someone would check. `error` answers "why did this not
+  // arrive"; if the toast carried it, nothing failed to arrive.
+  it("a push failure does NOT mask a delivered toast", async () => {
+    const prisma = makePrismaStub();
+    const result = await sendNotification(prisma, {
+      userId: "alice",
+      kind: "ai",
+      title: "Acme is 90 days past due",
+    });
+    expect(result.delivered).toBe(true);
+    expect(result.channels).toEqual(["toast"]);
+    expect(result.error).toBeUndefined();
+    expect((prisma as any)._created[0].error).toBeNull();
+  });
+
+  it("records the push failure when NOTHING delivered", async () => {
+    // The other side of the same rule: with no channel carrying it, the push
+    // error is the only explanation there is, so it must reach the row.
+    mqttPublish.mockImplementationOnce(() => {
+      throw new Error("mqtt down");
+    });
+    const prisma = makePrismaStub();
+    const result = await sendNotification(prisma, {
+      userId: "alice",
+      kind: "ai",
+      title: "Acme is 90 days past due",
+    });
+    expect(result.delivered).toBe(false);
+    expect(result.channels).toEqual([]);
+    expect(String((prisma as any)._created[0].error)).toContain("push:");
+  });
+
   it("publishes even without a body field", async () => {
     const prisma = makePrismaStub();
     const result = await sendNotification(prisma, {

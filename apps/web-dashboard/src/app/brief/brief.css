@@ -1,0 +1,194 @@
+/* ============================================================
+   WARP-2752 (ADR-051) — /brief.
+
+   Scoped to `.brief-*` inside `.droplet-shell` (ShellPage), and built ONLY
+   from the indigo shell scope's tokens (`--surface`, `--text`,
+   `--text-muted`, `--card-bg`, `--card-bd`, `--radius-card`, `--brand`) plus
+   the global `--color-system-*` status ramp — the same split /reports
+   documents, so this page reads as a sibling of Files / Network / Health
+   rather than a bolt-on.
+
+   No hard-coded hex. A finding's severity colour comes from the status ramp
+   so it tracks the theme, and so a `loss` here is the same red the rest of
+   the product already means by "money problem".
+   ============================================================ */
+
+.brief-coverage {
+  margin: 0 0 1.25rem;
+  padding: 0.75rem 1rem;
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.brief-coverage p {
+  margin: 0;
+}
+
+/* The second line carries staleness and errors — real but secondary, so it
+   is muted rather than hidden. A pass that has been failing all week must be
+   readable without opening a log. */
+.brief-coverage-detail {
+  margin-top: 0.35rem !important;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.brief-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.brief-card {
+  padding: 0.9rem 1rem;
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  /* Severity reads on the leading edge, so a scan down the list sorts itself
+     without the reader parsing any text. */
+  border-left: 3px solid var(--card-bd);
+  border-radius: var(--radius-card);
+}
+
+.brief-card--loss {
+  border-left-color: var(--color-system-danger, var(--brand));
+}
+.brief-card--risk,
+.brief-card--inconsistency {
+  border-left-color: var(--color-system-warning, var(--brand));
+}
+.brief-card--opportunity {
+  border-left-color: var(--color-system-success, var(--brand));
+}
+.brief-card--inefficiency {
+  border-left-color: var(--brand);
+}
+
+.brief-card > header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.brief-card h3 {
+  margin: 0;
+  flex: 1;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Tabular numerals so a column of amounts lines up on the decimal — a money
+   list that jitters is a money list nobody scans. */
+.brief-impact {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.brief-rationale {
+  margin: 0.4rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.brief-evidence {
+  margin-top: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.brief-evidence summary {
+  cursor: pointer;
+}
+
+.brief-evidence ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.brief-source-kind {
+  margin-right: 0.4rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+.brief-actions,
+.brief-dismiss {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.7rem;
+}
+
+.brief-dismiss label {
+  width: 100%;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.brief-dismiss input {
+  flex: 1;
+  min-width: 14rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--card-bd);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.85rem;
+}
+
+.brief-actions button,
+.brief-dismiss button {
+  padding: 0.3rem 0.7rem;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--card-bd);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: background 120ms var(--ease, ease);
+}
+
+.brief-actions button:hover:not(:disabled),
+.brief-dismiss button:hover:not(:disabled) {
+  background: var(--brand-subtle, var(--surface));
+}
+
+.brief-actions button:disabled,
+.brief-dismiss button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.brief-error {
+  margin: 0.5rem 0 0;
+  color: var(--color-system-danger, var(--text));
+  font-size: 0.82rem;
+}
+
+.brief-empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* The action row wraps to full-width targets on a phone: a 0.3rem-tall
+   button beside two others is not a tap target (cross-viewport rule). */
+@media (max-width: 480px) {
+  .brief-actions button,
+  .brief-dismiss button {
+    flex: 1;
+    min-height: 2.25rem;
+  }
+}

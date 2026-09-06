@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { buildBrainBlock } from "../services/brain/brain-block.service.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import {
   attachImageBlocksToLastUserMessage,
@@ -1711,6 +1712,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           console.warn("[llm/chat] memory-fact load failed:", err);
         }
 
+        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
+        // memory block above: an unreadable brain degrades the turn, it never
+        // fails it. `buildBrainBlock` resolves the caller's scope itself and
+        // returns "" if it cannot, so a family turn can never inherit
+        // company-scope rows through an error path.
+        let brainBlock = "";
+        try {
+          brainBlock = await buildBrainBlock(prisma, {
+            id: req.user?.id ?? "",
+            role: role ?? "",
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] brain block load failed:", err);
+        }
+
         // WARP-1118 — compose the personality block fresh from Prisma each
         // request (§7.2: single-row read, no cache to invalidate). Fail-open
         // to no persona block on any error, same posture as the memory block.
@@ -1856,6 +1873,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           businessBlock, // WARP-1120 — role-filtered, BUSINESS-only, dropped 1st.
           toolGuidance: "", // folded into identityBlock above.
           memoryFactsBlock: memoryBlock,
+          // WARP-2752 (ADR-051) — what the box worked out on its own. Dropped
+          // LAST of the three: it is the only one derived from the business's
+          // own data, so a busy turn should lose the typed summary and the
+          // persona before it loses what was actually read.
+          brainBlock,
           toolSchemasJson,
           pinsText: "",
           attachmentsText: "",
@@ -1884,6 +1906,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               degraded.businessBlock,
             ) +
             memoryBlock +
+            // WARP-2752 (ADR-051) — the brain block, AFTER degradation so a
+            // turn that overflowed sends "" here rather than the pre-drop text.
+            degraded.brainBlock +
             // WARP-1121 (§9.3) — conductor appended AFTER the base prompt on
             // interview turns; "" on every other turn.
             (interviewBlock ? "\n\n" + interviewBlock : "") +

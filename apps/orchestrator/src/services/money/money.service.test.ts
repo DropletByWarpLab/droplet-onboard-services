@@ -105,7 +105,7 @@ describe("summary", () => {
   it("separates what is owed from what is owed BY the business", async () => {
     const { svc } = service([
       doc({ balance: "100.00" }),
-      doc({ id: "doc-2", kind: "PAYABLE", externalId: "BILL-9", balance: "40.00" }),
+      doc({ id: "doc-2", kind: "BILL", externalId: "BILL-9", balance: "40.00" }),
     ]);
 
     const summary = await svc.summary(NOW);
@@ -206,11 +206,31 @@ describe("documents", () => {
   });
 
   it("filters to one direction, at the database", async () => {
-    const { svc, erpDocument } = service([doc({ kind: "PAYABLE" })]);
-    await svc.documents({ kind: "PAYABLE", now: NOW });
+    const { svc, erpDocument } = service([doc({ kind: "BILL" })]);
+    await svc.documents({ direction: "PAYABLE", now: NOW });
+    // WARP-2739 — a direction is a SET of kinds now, and the narrowing has to
+    // survive the `OPEN` predicate's own `kind` clause. Asserting the resolved
+    // `in` list is what catches a spread that puts them the wrong way round
+    // and silently returns both directions.
     expect(erpDocument.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ kind: "PAYABLE" }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ kind: { in: ["BILL"] } }),
+      }),
     );
+  });
+
+  it("🔴 never counts a quote or an order as money owed", async () => {
+    const { svc, erpDocument } = service([]);
+    await svc.documents({ now: NOW });
+    const where = erpDocument.findMany.mock.calls[0][0].where as {
+      kind: { in: string[] };
+    };
+    // An unaccepted quote in "what you are owed" is a number the business has
+    // no claim to, added to numbers it does.
+    expect(where.kind.in).not.toContain("QUOTE");
+    expect(where.kind.in).not.toContain("ORDER");
+    expect(where.kind.in).toContain("INVOICE");
+    expect(where.kind.in).toContain("BILL");
   });
 
   it("lists only what is outstanding", async () => {

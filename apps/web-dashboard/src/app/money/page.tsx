@@ -45,14 +45,14 @@ import {
   useMoneyDocuments,
   useMoneySummary,
   type MoneyDocument,
-  type MoneyKind,
+  type MoneyDirection,
   type MoneyLedgerTotal,
   type MoneySide,
   type MoneySummary,
 } from "./useMoney";
 import "./money.css";
 
-type Filter = "ALL" | MoneyKind;
+type Filter = "ALL" | MoneyDirection;
 
 export default function MoneyPage(): JSX.Element {
   const [filter, setFilter] = useState<Filter>("ALL");
@@ -177,7 +177,9 @@ function Stat({
       ) : (
         <>
           <span className="money-stat__withheld">
-            {side.ledgers.map((ledger) => ledger.currency ?? ledger.provider).join(" · ")}
+            {side.ledgers
+              .map((ledger) => ledger.currency ?? ledger.provider ?? "This Droplet")
+              .join(" · ")}
           </span>
           <span className="money-stat__sub">Totals aren&rsquo;t shown across ledgers.</span>
         </>
@@ -260,7 +262,10 @@ function Ledger({
 }
 
 function Row({ doc }: { doc: MoneyDocument }): JSX.Element {
-  const receivable = doc.kind === "RECEIVABLE";
+  // WARP-2739 — the server sends `direction`; the page does not derive it from
+  // the kind. A credit note is receivable and negative, and a client deciding
+  // that for itself would get it wrong the first time one arrives.
+  const receivable = doc.direction === "RECEIVABLE";
   return (
     <tr>
       <td>
@@ -272,7 +277,9 @@ function Row({ doc }: { doc: MoneyDocument }): JSX.Element {
           {receivable ? <ArrowDownLeft size={16} /> : <ArrowUpRight size={16} />}
         </span>
       </td>
-      <td className="money-cell--mono">{doc.externalId}</td>
+      {/* A local document has no vendor number. Its own id is not a number a
+          person recognises, so the cell says what it is instead. */}
+      <td className="money-cell--mono">{doc.externalId ?? "Not sent"}</td>
       <td>{doc.counterparty.name ?? doc.counterparty.externalId ?? "—"}</td>
       <td className="money-cell--mono">{formatDate(doc.issuedAt)}</td>
       <td className={`money-cell--mono${doc.isOverdue ? " money-cell--overdue" : ""}`}>
@@ -283,7 +290,9 @@ function Row({ doc }: { doc: MoneyDocument }): JSX.Element {
       <td>
         <StatusChip doc={doc} />
       </td>
-      <td className="money-source">{doc.externalSystem}</td>
+      {/* 🔴 Never blank, and never a vendor's name for a row no vendor has
+          seen. "Blank" would read as a failed read of a landed row. */}
+      <td className="money-source">{doc.externalSystem ?? "This Droplet"}</td>
     </tr>
   );
 }
@@ -297,13 +306,34 @@ function Row({ doc }: { doc: MoneyDocument }): JSX.Element {
  * workflow-closed document as outstanding forever.
  */
 function StatusChip({ doc }: { doc: MoneyDocument }): JSX.Element {
-  const word = doc.status?.trim() ?? "";
-  const cls = statusClassFor(doc.status, doc.isOverdue);
+  // WARP-2739 — one chip, two sources. A landed row carries the vendor's word;
+  // a local one carries the box's own lifecycle. The box's first: on a local
+  // row the vendor word is NULL by CHECK, so this cannot pick the wrong one.
+  const raw = doc.status ?? doc.vendorStatus;
+  const word = statusWord(raw);
+  const cls = statusClassFor(raw, doc.isOverdue);
   return (
     <span className={`money-chip${cls === "open" ? "" : ` money-chip--${cls}`}`}>
       {word === "" ? (doc.isOverdue ? "Overdue" : "Open") : word}
     </span>
   );
+}
+
+/**
+ * The word on the chip.
+ *
+ * A vendor's word is shown VERBATIM — that rule is WARP-2581's and unchanged.
+ * The box's own statuses are enum constants, and `PART_PAID` on a page a
+ * practice owner reads is the machine's spelling, not theirs.
+ */
+function statusWord(raw: string | null): string {
+  const word = raw?.trim() ?? "";
+  if (word === "") return "";
+  if (!/^[A-Z_]+$/.test(word)) return word;
+  return word
+    .split("_")
+    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+    .join(" ");
 }
 
 // ── states ──────────────────────────────────────────────────────────────────
