@@ -150,7 +150,8 @@ network. Host-published ports and host-network services are called out.
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
   `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
   (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
-  `activity` (signed audit log), `settings*`, `aps` (coverage-extender onboarding),
+  `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
+  `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
 - **Data model:** `prisma/schema.prisma` — **55 models, 21 enums**, PostgreSQL
   (`DATABASE_URL`). Notable: `BrainMemoryItemStatus` / `ApDeviceStatus` are
@@ -161,9 +162,14 @@ network. Host-published ports and host-network services are called out.
   `mcp-client*` (stdio MCP child lifecycle + registry), `matter.service.ts`
   (HTTP client for the matter-controller host sidecar, ADR-022), `encryption.service.ts` (AES-256-GCM),
   `cron-runtime.service.ts` (Postgres advisory-lock scheduler — **the** sanctioned
-  scheduler), `openwrt.client.ts`, `switch.client.ts`, `camera.service.ts`,
-  `nextcloud.client.ts`, plus pollers/tickers (device-reconcile,
-  AP discovery, schedule, reminders, tool-schedule, screen-QR).
+  scheduler), `agent-run-worker.service.ts` + `agent-run-schedule-ticker.service.ts`
+  (durable background agent runs, WARP-2176: `AgentRun` rows claimed under a
+  lease, checkpointed per iteration, parked on Tier-2 confirmations; RRULE
+  schedules enqueue runs; design in [`agent-runs-design.md`](agent-runs-design.md);
+  surface `/api/agent-runs`, panel on `/admin/audit`), `openwrt.client.ts`,
+  `switch.client.ts`, `camera.service.ts`, `nextcloud.client.ts`, plus
+  pollers/tickers (device-reconcile, AP discovery, schedule, reminders,
+  tool-schedule, agent-run claim/heartbeat, agent-run-schedule, screen-QR).
 - **Talks to:** ai-gateway (gRPC + REST), mcp-server (stdio child), routing /
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the

@@ -75,6 +75,10 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
         if (!(c.in as unknown[]).includes(actual)) return false;
         continue;
       }
+      if ("notIn" in c) {
+        if ((c.notIn as unknown[]).includes(actual)) return false;
+        continue;
+      }
       if ("lt" in c || "lte" in c) {
         if (typeof actual === "string") {
           if ("lt" in c && !(actual < (c.lt as string))) return false;

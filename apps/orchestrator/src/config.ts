@@ -225,6 +225,13 @@ const envSchema = z.object({
   // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
   // The epic sizes agentic work at 5–40 minutes.
   AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2749 — a run's iteration cap, SEPARATE from the chat cap.
+  // AGENT_MAX_ITER_CAP bounds an interactive turn, where a person is waiting
+  // and ten model calls is a latency budget. A run has a wall clock instead
+  // (AGENT_RUN_MAX_WALL_MS) and nobody waiting, so it gets its own cap. The
+  // loop honours it through `AgentDeps.maxIterCap`, which only in-process
+  // callers can set — /api/llm/chat never does, so chat is byte-identical.
+  AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
   // WARP-2178 — characters of ONE tool result the model is fed per call
   // (tool-result-bounding.ts). 8000 is the value the loop has always used and
   // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
@@ -1364,13 +1371,16 @@ export const config = {
     parsed.AGENT_MAX_ITER_CAP,
   ),
   // WARP-2177 — see resolveAgentRunLimits.
-  agentRuns: resolveAgentRunLimits({
-    concurrency: parsed.AGENT_RUN_CONCURRENCY,
-    tickMs: parsed.AGENT_RUN_TICK_MS,
-    heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
-    reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
-    maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
-    maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
-  }),
+  agentRuns: {
+    ...resolveAgentRunLimits({
+      concurrency: parsed.AGENT_RUN_CONCURRENCY,
+      tickMs: parsed.AGENT_RUN_TICK_MS,
+      heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
+      reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
+      maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
+      maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
+    }),
+    maxIter: parsed.AGENT_RUN_MAX_ITER,
+  },
 };
 export type Config = typeof config;

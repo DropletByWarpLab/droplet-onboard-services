@@ -36,7 +36,7 @@ vi.mock("../config.js", () => ({
       heartbeatMs: 15_000,
       reclaimAfterMs: 60_000,
       maxAttempts: 3,
-      maxWallMs: 2_400_000,
+      maxWallMs: 2_400_000, maxIter: 10,
     },
   },
 }));
@@ -59,7 +59,8 @@ import {
   type AgentRunTraceEntry,
 } from "../services/agent-run-worker.service.js";
 import { DENY_ALL_TOOL_SCOPE } from "../services/tool-access.service.js";
-import { TOOL_CATALOG } from "@droplet/tools-core";
+import { TOOL_CATALOG, confirmationOwnerOf } from "@droplet/tools-core";
+import { sendNotification } from "../services/notifications.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 
 // ── a deterministic "model" ─────────────────────────────────────────────
@@ -371,7 +372,7 @@ describe("agent-run worker — checkpoint, crash, resume (WARP-2177)", () => {
     });
     // Concurrency 0 capacity: fill the slot so the tick only reclaims.
     const { worker } = makeWorker(db, { now: () => clock, limits: {
-      concurrency: 0, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000,
+      concurrency: 0, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10,
     } });
     expect(await worker.tickOnce()).toEqual({ reclaimed: 1, failed: 0, claimed: 0 });
     expect(db.row(id)).toMatchObject({ status: "queued", attempts: 2, claimedBy: null, heartbeatAt: null });
@@ -441,6 +442,20 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     expect(unattendedWrites).toEqual(["send_notification"]);
   });
 
+  it("the run pool holds NO route-owned confirmation: a run cannot redeem a route's token (WARP-2744 item 2)", () => {
+    // `confirmationOwner: "route"` means the interceptor stands down and the
+    // route asks with a dashboard-only token. A run would never park on it
+    // and could never complete it.
+    const pool = new Set(runToolPool());
+    expect(pool.has("block_network_device")).toBe(false);
+    expect(pool.has("share_clip")).toBe(false);
+    expect(pool.has("set_port_vlan")).toBe(false);
+    // Interceptor-owned Tier-2 stays: it parks (WARP-2179).
+    expect(pool.has("delete_file")).toBe(true);
+    const routeOwned = TOOL_CATALOG.filter((t) => pool.has(t.name) && confirmationOwnerOf(t) === "route").map((t) => t.name);
+    expect(routeOwned).toEqual([]);
+  });
+
   it("the user row vanished between attribution and dispatch: the run fails as attribution_failed:user_missing, nothing dispatched", async () => {
     // No users on the mock: reach resolves (mocked owner), the row does not.
     const db = createAgentRunPrismaMock();
@@ -498,6 +513,10 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     releaseFirst();
     await settle(worker);
     expect(callTool.mock.calls.map((c) => c[0])).toEqual(["get_current_datetime"]);
+    // WARP-2744 item 6 — the person who cancelled gets no toast about it; the
+    // cancel route's audit row is the record.
+    const toasts = vi.mocked(sendNotification).mock.calls.map((c) => (c[1] as { title: string }).title);
+    expect(toasts.some((t) => t.startsWith("Background run cancelled"))).toBe(false);
     expect(db.row(id).status).toBe("cancelled");
     expect(db.row(id).stopReason).toBe("cancelled");
     expect(db.row(id).endedAt).toBeInstanceOf(Date);
@@ -539,5 +558,145 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     release();
     await releasing;
     expect(db.row(id)).toMatchObject({ status: "queued", claimedBy: null, attempts: 0 });
+  });
+});
+
+// ── WARP-2744 item 1 / WARP-2749 — lease identity, priority, yielding ────────
+
+/** A model whose FIRST call hangs until released; every later call answers threeStep. */
+function stallingModel() {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const chat = vi.fn(async (req: { messages: Array<{ role: string }> }) => {
+    calls += 1;
+    if (calls === 1) await gate;
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: threeStep(req.messages.filter((m) => m.role === "tool").length) }],
+      }),
+    };
+  }) as unknown as ReturnType<typeof scriptedModel>;
+  return { chat, release: () => release() };
+}
+
+const LIMITS_2 = {
+  concurrency: 2, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10,
+};
+
+describe("agent-run worker — a lease is (worker, claimedAt), not the worker id (WARP-2744 item 1)", () => {
+  it("never re-claims a run it is still executing, even after reclaiming its own stalled lease", async () => {
+    let clock = new Date("2026-09-05T12:00:00Z");
+    const now = () => clock;
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    const stalled = stallingModel();
+    const { worker, callTool } = makeWorker(db, { now, chat: stalled.chat, limits: LIMITS_2 });
+    expect((await worker.tickOnce()).claimed).toBe(1);
+
+    // The heartbeat never beats (a paused process) and the model call hangs.
+    // The worker's own next tick reclaims the row — and must NOT claim it
+    // back while the zombie execution still holds it in `inFlight`.
+    clock = new Date(clock.getTime() + 61_000);
+    expect(await worker.tickOnce()).toEqual({ reclaimed: 1, failed: 0, claimed: 0 });
+    expect(db.row(id)).toMatchObject({ status: "queued", attempts: 1, claimedBy: null });
+
+    // The zombie wakes up: its lease is gone, so it stops before any dispatch.
+    stalled.release();
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "queued", attempts: 1 });
+    expect(callTool).not.toHaveBeenCalled();
+
+    // Now free, the row is claimed afresh and runs to completion — once.
+    expect((await worker.tickOnce()).claimed).toBe(1);
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "succeeded", attempts: 1, result: "Notified you at noon." });
+    expect(callTool.mock.calls.map((c) => c[0])).toEqual(["get_current_datetime", "send_notification"]);
+  });
+
+  it("a same-named process that reclaimed and re-claimed the row fences the old execution by claimedAt", async () => {
+    let clock = new Date("2026-09-05T12:00:00Z");
+    const now = () => clock;
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    const shared = fakeMcp();
+    // Two processes configured with the SAME worker id (the per-process
+    // string the bot's finding named). Only claimedAt tells them apart.
+    const one = stallingModel();
+    const two = stallingModel();
+    const a1 = makeWorker(db, { workerId: "worker-A", now, chat: one.chat, mcp: shared });
+    const a2 = makeWorker(db, { workerId: "worker-A", now, chat: two.chat, mcp: shared });
+    expect((await a1.worker.tickOnce()).claimed).toBe(1);
+    const firstLease = db.row(id).claimedAt as Date;
+
+    clock = new Date(clock.getTime() + 61_000);
+    expect(await a2.worker.tickOnce()).toEqual({ reclaimed: 1, failed: 0, claimed: 1 });
+    expect(db.row(id)).toMatchObject({ status: "running", claimedBy: "worker-A", attempts: 1 });
+    expect((db.row(id).claimedAt as Date).getTime()).toBeGreaterThan(firstLease.getTime());
+
+    // A1's model answers now, with a tool call. Same worker id, same
+    // `running` status — only the lease timestamp says A1 no longer owns
+    // the row. It must stop before dispatching.
+    one.release();
+    await settle(a1.worker);
+    expect(shared.callTool).not.toHaveBeenCalled();
+    expect(db.row(id)).toMatchObject({ status: "running", claimedBy: "worker-A" });
+
+    two.release();
+    await settle(a2.worker);
+    expect(db.row(id)).toMatchObject({ status: "succeeded", result: "Notified you at noon." });
+    expect(shared.callTool.mock.calls.map((c) => c[0])).toEqual(["get_current_datetime", "send_notification"]);
+  });
+});
+
+describe("agent-run worker — inference priority and yielding to chat (WARP-2749)", () => {
+  it("stamps every model call with the gateway's background priority", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    const { worker, chat } = makeWorker(db);
+    await worker.tickOnce();
+    await settle(worker);
+    expect(chat).toHaveBeenCalledTimes(3);
+    for (const call of chat.mock.calls as unknown as Array<[unknown, unknown, unknown, unknown]>) {
+      expect(call[2]).toBeUndefined(); // no userId is ever asserted by the worker
+      expect(call[3]).toEqual({ priority: 10 });
+    }
+  });
+
+  it("a 429 from the gateway re-queues the run at its checkpoint a minute later — no attempt charged, not a failure", async () => {
+    let clock = new Date("2026-09-05T12:00:00Z");
+    const now = () => clock;
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "g", model: "m" });
+    let calls = 0;
+    const chat = vi.fn(async (req: { messages: Array<{ role: string }> }) => {
+      calls += 1;
+      // The real client throws on a non-OK blocking response.
+      if (calls === 1) throw new Error('AI Gateway error 429: {"detail":"Queue full"}');
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: threeStep(req.messages.filter((m) => m.role === "tool").length) }],
+        }),
+      };
+    }) as unknown as ReturnType<typeof scriptedModel>;
+    const { worker, callTool } = makeWorker(db, { now, chat });
+    await worker.tickOnce();
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "queued", attempts: 0, claimedBy: null, iteration: 0, error: null });
+    expect((db.row(id).runAfter as Date).getTime()).toBe(clock.getTime() + 60_000);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run failed" }));
+
+    // Not due yet.
+    clock = new Date(clock.getTime() + 30_000);
+    expect((await worker.tickOnce()).claimed).toBe(0);
+    // Due: the resume re-runs iteration 0 and the run completes.
+    clock = new Date(clock.getTime() + 31_000);
+    expect((await worker.tickOnce()).claimed).toBe(1);
+    await settle(worker);
+    expect(db.row(id)).toMatchObject({ status: "succeeded", attempts: 0, result: "Notified you at noon." });
+    expect(chat).toHaveBeenCalledTimes(4);
   });
 });

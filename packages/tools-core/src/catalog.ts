@@ -36,6 +36,7 @@
  */
 
 import { TOOLS } from "./registry.js";
+import type { ConfirmationOwner } from "./types.js";
 
 /** A tool's home surface. Ordered to match the dashboard IA so the
  *  filter chips read top-to-bottom the way the sidebar does. */
@@ -86,6 +87,13 @@ export interface ToolCatalogEntry {
   domain: ToolDomain;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2472 / WARP-2744 — which layer asks for a confirming tool, carried
+   * from the registry ONLY when declared. Read it through
+   * `confirmationOwnerOf()` (`./interceptor.ts`), never off the field: absent
+   * means the interceptor, and that default lives in one place.
+   */
+  confirmationOwner?: ConfirmationOwner;
 }
 
 /**
@@ -514,6 +522,10 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = Array.from(TOOLS.values()).map(
       domain,
       requiresWrite: tool.requiresWrite,
       requiresConfirmation: tool.requiresConfirmation,
+      // WARP-2744 — carried through only when declared, so an entry without
+      // it still resolves to the interceptor default via confirmationOwnerOf()
+      // and no consumer can read a second, disagreeing default off the field.
+      ...(tool.confirmationOwner ? { confirmationOwner: tool.confirmationOwner } : {}),
     };
   },
 );

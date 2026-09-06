@@ -34,6 +34,12 @@ import {
   type AgentRunStatus,
   type AgentRunSummary,
   type TraceEntry,
+  RRULE_PRESETS,
+  describeRrule,
+  listAgentRunSchedules,
+  createAgentRunSchedule,
+  deleteAgentRunSchedule,
+  type AgentRunSchedule,
 } from "./agent-runs/api";
 
 const POLL_MS = 3_000;
@@ -142,6 +148,62 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
   const [loading, setLoading] = useState(true);
   const genRef = useRef(0);
 
+  // ── Recurring runs (AgentRunSchedule) — the surface the API had and the
+  // dashboard did not: list, add from a preset (or a custom RRULE), delete.
+  const [schedules, setSchedules] = useState<AgentRunSchedule[]>([]);
+  const [schedulesError, setSchedulesError] = useState<string | null>(null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [newGoal, setNewGoal] = useState("");
+  const [preset, setPreset] = useState<string>(RRULE_PRESETS[0]!.key);
+  const [customRrule, setCustomRrule] = useState("");
+  const [timezone, setTimezone] = useState<string>(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+      return "UTC";
+    }
+  });
+
+  const loadSchedules = useCallback(async () => {
+    try {
+      setSchedules(await listAgentRunSchedules());
+      setSchedulesError(null);
+    } catch (err) {
+      setSchedulesError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const rruleToAdd = preset === "custom" ? customRrule.trim() : (RRULE_PRESETS.find((p) => p.key === preset)?.rrule ?? "");
+
+  const addSchedule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const goal = newGoal.trim();
+    if (!goal || !rruleToAdd) return;
+    setScheduleBusy(true);
+    try {
+      await createAgentRunSchedule({ goal, rrule: rruleToAdd, timezone: timezone.trim() || "UTC" });
+      setNewGoal("");
+      setCustomRrule("");
+      await loadSchedules();
+    } catch (err) {
+      setSchedulesError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
+
+  const removeSchedule = async (id: string) => {
+    setScheduleBusy(true);
+    try {
+      await deleteAgentRunSchedule(id);
+      await loadSchedules();
+    } catch (err) {
+      setSchedulesError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
+
   const loadList = useCallback(async () => {
     const gen = ++genRef.current;
     try {
@@ -176,6 +238,10 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
       genRef.current += 1;
     };
   }, [loadList]);
+
+  useEffect(() => {
+    void loadSchedules();
+  }, [loadSchedules]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -404,6 +470,96 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
             </article>
           )}
         </div>
+      </div>
+
+      <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--border, #d0d0d0)" }}>
+        <h3 id="agent-run-schedules-heading" className="text-[13px] font-semibold m-0 mb-2">
+          Recurring runs
+        </h3>
+        {schedulesError && (
+          <p role="status" className="text-[13px] mb-2" title={schedulesError}>
+            {CALM_ERROR}
+          </p>
+        )}
+        <ul className="m-0 p-0 list-none" aria-label="Recurring runs">
+          {schedules.length === 0 && (
+            <li className="text-[13px] py-2" style={{ color: "var(--text-muted)" }}>
+              No recurring runs yet. Add one below and it will start on the box at the chosen time.
+            </li>
+          )}
+          {schedules.map((s) => (
+            <li key={s.id} className="flex items-center gap-2 py-1 min-w-0">
+              <span className="flex-1 min-w-0">
+                <span className="block truncate text-[13px] font-medium">{s.goal}</span>
+                <span className="block text-[12px]" style={{ color: "var(--text-muted)" }}>
+                  {describeRrule(s.rrule)} · {s.timezone} ·{" "}
+                  {s.enabled ? `next ${when(s.nextFireAt)}` : "disabled — see the activity log for why"}
+                </span>
+              </span>
+              {!s.enabled && <span className="badge muted">Disabled</span>}
+              <button
+                type="button"
+                className="btn sm ghost"
+                disabled={scheduleBusy}
+                aria-label={`Delete recurring run: ${s.goal}`}
+                onClick={() => void removeSchedule(s.id)}
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+        <form onSubmit={(e) => void addSchedule(e)} aria-label="Add a recurring run" className="flex flex-wrap gap-2 mt-2 items-end">
+          <label className="flex flex-col gap-1 text-[12px] flex-1 min-w-[220px]">
+            Goal
+            <input
+              type="text"
+              required
+              maxLength={4000}
+              value={newGoal}
+              onChange={(e) => setNewGoal(e.target.value)}
+              placeholder="e.g. sweep last night's camera clips"
+              className="rounded px-2 py-1 text-[13px]"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[12px]">
+            When
+            <select value={preset} onChange={(e) => setPreset(e.target.value)} className="rounded px-2 py-1 text-[13px]">
+              {RRULE_PRESETS.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+              <option value="custom">Custom RRULE…</option>
+            </select>
+          </label>
+          {preset === "custom" && (
+            <label className="flex flex-col gap-1 text-[12px] min-w-[240px]">
+              RRULE
+              <input
+                type="text"
+                required
+                value={customRrule}
+                onChange={(e) => setCustomRrule(e.target.value)}
+                placeholder="FREQ=DAILY;BYHOUR=6;BYMINUTE=0"
+                className="rounded px-2 py-1 text-[13px] font-mono"
+              />
+            </label>
+          )}
+          <label className="flex flex-col gap-1 text-[12px]">
+            Time zone
+            <input
+              type="text"
+              required
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              className="rounded px-2 py-1 text-[13px]"
+            />
+          </label>
+          <button type="submit" className="btn" disabled={scheduleBusy || !newGoal.trim() || !rruleToAdd}>
+            Add recurring run
+          </button>
+        </form>
       </div>
     </section>
   );

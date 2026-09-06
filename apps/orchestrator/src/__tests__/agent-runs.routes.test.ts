@@ -33,7 +33,7 @@ vi.mock("../config.js", () => ({
       heartbeatMs: 15_000,
       reclaimAfterMs: 60_000,
       maxAttempts: 3,
-      maxWallMs: 2_400_000,
+      maxWallMs: 2_400_000, maxIter: 12,
     },
   },
 }));
@@ -98,7 +98,8 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ status: "queued" });
     const row = db.row(res.body.id);
-    expect(row).toMatchObject({ userId: "u-owner", goal: "tidy old files", model: "gpt-oss:20b", status: "queued", maxIter: 10 });
+    // WARP-2749 — the default is the RUN cap (12 here), not the chat cap (10).
+    expect(row).toMatchObject({ userId: "u-owner", goal: "tidy old files", model: "gpt-oss:20b", status: "queued", maxIter: 12 });
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "tool_run", refs: expect.objectContaining({ agentRunId: res.body.id }) }),
     );
@@ -280,10 +281,11 @@ describe("agent-runs routes — recurring runs (WARP-2180)", () => {
     expect(bad.status).toBe(400);
     const res = await request(app)
       .post("/api/agent-runs/schedules")
-      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "America/Los_Angeles" });
+      .send({ goal: "sweep clips", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "America/Los_Angeles", maxIter: 50 });
     expect(res.status).toBe(201);
     expect(res.body.nextFireAt).toBeTruthy();
-    expect(db.schedules[0]).toMatchObject({ userId: "u-owner", goal: "sweep clips", model: "gpt-oss:20b", maxIter: 10, timezone: "America/Los_Angeles" });
+    // WARP-2749 — clamped to the RUN cap (12), not the chat cap (10).
+    expect(db.schedules[0]).toMatchObject({ userId: "u-owner", goal: "sweep clips", model: "gpt-oss:20b", maxIter: 12, timezone: "America/Los_Angeles" });
 
     const mine = await request(app).get("/api/agent-runs/schedules");
     expect(mine.body.schedules).toHaveLength(1);
