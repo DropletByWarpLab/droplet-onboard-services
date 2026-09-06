@@ -26,15 +26,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
-const connectMailboxMock = vi.hoisted(() => vi.fn());
-const disconnectMailboxMock = vi.hoisted(() => vi.fn());
+const connectMailboxMock = vi.hoisted(() => vi.fn<(...a: unknown[]) => Promise<unknown>>());
+const disconnectMailboxMock = vi.hoisted(() => vi.fn<(...a: unknown[]) => Promise<unknown>>());
 vi.mock("../services/email/provision.service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/email/provision.service.js")>()),
   connectMailbox: connectMailboxMock,
   disconnectMailbox: disconnectMailboxMock,
 }));
 
-const recordActivityMock = vi.hoisted(() => vi.fn(async () => undefined));
+const recordActivityMock = vi.hoisted(() =>
+  vi.fn(async (_a: Record<string, unknown>) => undefined),
+);
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
@@ -43,6 +45,10 @@ import { createEmailRouter } from "./email.js";
 import { PROVISION_ERRORS } from "../services/email/provision.service.js";
 
 const PASSWORD = "hunter2-correct-horse-battery-staple";
+
+/** The outbound-channel gate. Irrelevant to account provisioning — it guards
+ *  the SEND path — so it is stubbed permissive and never asserted on. */
+const GATE = { isOutboundAllowed: async () => true } as never;
 
 const BODY = {
   displayName: "Front desk",
@@ -68,7 +74,7 @@ function app(role: string, prisma: unknown = {}) {
     (req as unknown as { user: unknown }).user = { id: "u-owner", role, username: "ada" };
     next();
   });
-  a.use("/api", createEmailRouter(prisma as never));
+  a.use("/api", createEmailRouter(prisma as never, GATE));
   return a;
 }
 
@@ -80,7 +86,7 @@ beforeEach(() => {
     displayName: BODY.displayName,
     imapStatus: "idle",
   });
-  disconnectMailboxMock.mockResolvedValue(true);
+  disconnectMailboxMock.mockResolvedValue({ removed: true, address: BODY.address });
 });
 
 describe("🔴 the password never comes back out", () => {
@@ -151,7 +157,7 @@ describe("🔴 userId is always populated", () => {
       (req as unknown as { user: unknown }).user = { role: "owner" }; // no id
       next();
     });
-    a.use("/api", createEmailRouter({} as never));
+    a.use("/api", createEmailRouter({} as never, GATE));
 
     const res = await request(a).post("/api/email/accounts").send(BODY);
     expect(res.status).toBe(403);
@@ -237,7 +243,7 @@ describe("🔴 the body is an allow-list", () => {
 
 describe("disconnecting", () => {
   it("404s an account that is not there, rather than reporting a delete", async () => {
-    disconnectMailboxMock.mockResolvedValue(false);
+    disconnectMailboxMock.mockResolvedValue({ removed: false, address: null });
     const res = await request(app("owner")).delete("/api/email/accounts/nope");
     expect(res.status).toBe(404);
     expect(recordActivityMock).not.toHaveBeenCalled();

@@ -138,7 +138,26 @@ export function EmailAccountCard(): JSX.Element {
     }
   };
 
-  const disconnect = async (id: string) => {
+  /**
+   * 🔴 Confirmed, because it is not reversible.
+   *
+   * `EmailThread`, `EmailMessage` and `EmailDraft` all cascade on `accountId`,
+   * so disconnecting deletes the entire stored archive for that mailbox — and
+   * a security review pointed out this was one unconfirmed click sitting next
+   * to a "Connected" label. The mail itself still exists on the mail server;
+   * what is destroyed is everything Droplet had indexed about it, which is the
+   * part search and the customer timeline read.
+   *
+   * The prompt names the mailbox and says what goes, rather than asking "are
+   * you sure" about an unnamed thing.
+   */
+  const disconnect = async (id: string, address: string) => {
+    const ok = window.confirm(
+      `Disconnect ${address}?\n\n` +
+        "Droplet will delete its copy of this mailbox's mail, including anything " +
+        "shown on your customers' timelines. The mail stays on your mail server.",
+    );
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {
@@ -176,7 +195,7 @@ export function EmailAccountCard(): JSX.Element {
               <button
                 className="btn"
                 disabled={busy}
-                onClick={() => void disconnect(a.id)}
+                onClick={() => void disconnect(a.id, a.address)}
               >
                 Disconnect
               </button>

@@ -102,9 +102,30 @@ async def probe_imap(
         return ProbeResult(False, REASONS["unreachable"])
     finally:
         if client is not None:
+            # 🔴 LOGOUT, then CLOSE THE TRANSPORT — and the second half is the
+            # one that matters.
+            #
+            # A security review found that `logout()` alone leaks the socket in
+            # exactly the cases that fail: against a host that accepts the
+            # connection and then stays silent, the pre-greeting path raises
+            # `Abort` before a session exists, and the post-greeting path
+            # writes LOGOUT and waits five seconds for a reply that never
+            # comes. aioimaplib 2.0.1 never closes a transport itself, so the
+            # socket and its protocol object survive for the life of the
+            # process.
+            #
+            # An operator retrying a wrong password against an unresponsive
+            # host is an ordinary thing to do, so this is a file-descriptor
+            # leak on the ordinary path rather than an exotic one.
             try:
                 await asyncio.wait_for(client.logout(), 5.0)
             except Exception:  # noqa: BLE001 — a failed logout is not a failed probe
+                pass
+            try:
+                transport = getattr(getattr(client, "protocol", None), "transport", None)
+                if transport is not None:
+                    transport.close()
+            except Exception:  # noqa: BLE001 — best effort; never mask the probe result
                 pass
 
 

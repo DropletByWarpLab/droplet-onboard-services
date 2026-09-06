@@ -35,6 +35,22 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const lookupMock = vi.hoisted(() => vi.fn());
 vi.mock("node:dns/promises", () => ({ lookup: lookupMock }));
 
+/**
+ * 🔴 The hop is mocked at `internalFetch`, NOT at the global `fetch`.
+ *
+ * An adversarial review found this suite's original `vi.stubGlobal("fetch")`
+ * was precisely what hid the bug it should have caught: the service was using
+ * the bare global instead of the house client, so it never presented the
+ * orchestrator's mTLS certificate — and stubbing the global made both spellings
+ * pass identically. Mocking the module the code is REQUIRED to use turns "which
+ * client did you call" into an assertion instead of an invisible choice.
+ */
+const internalFetchMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/internal-tls.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/internal-tls.js")>()),
+  internalFetch: internalFetchMock,
+}));
+
 import { connectMailbox, PROVISION_ERRORS } from "../services/email/provision.service.js";
 
 const BODY = {
@@ -51,7 +67,7 @@ const BODY = {
 };
 
 function prismaMock() {
-  const create = vi.fn(async () => ({
+  const create = vi.fn(async (_a: { data: Record<string, unknown> }) => ({
     id: "acct-1",
     address: BODY.address,
     displayName: BODY.displayName,
@@ -67,13 +83,20 @@ function prismaMock() {
 
 /** Every request to the indexer fails loudly, so any test that reaches the hop
  *  is visibly reaching it rather than quietly passing. */
-const fetchMock = vi.fn(async () => {
-  throw new Error("the SSRF guard should have refused before this hop");
+const fetchMock = internalFetchMock;
+
+/** If the code ever goes back to the global, this fires instead of the mock
+ *  above and the suite says so by name rather than passing. */
+const globalFetchTrap = vi.fn(async () => {
+  throw new Error("provision.service must call internalFetch, not the global fetch");
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("fetch", globalFetchTrap);
+  fetchMock.mockImplementation(async () => {
+    throw new Error("the SSRF guard should have refused before this hop");
+  });
   lookupMock.mockResolvedValue([{ address: "203.0.113.10", family: 4 }]);
 });
 
@@ -161,6 +184,37 @@ describe("a public mail host reaches the indexer", () => {
       PROVISION_ERRORS.INDEXER_UNAVAILABLE,
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    // 🔴 And it went through the mTLS client, not the global.
+    expect(globalFetchTrap).not.toHaveBeenCalled();
+  });
+
+  it("🔴 stores the VETTED hostname, not the string that was typed", async () => {
+    // The divergence an adversarial review found: Node's URL parser normalises
+    // a hostname with UTS-46 IDNA and CPython's idna codec uses IDNA2003, so a
+    // guard that vets one string while the row stores another lets the pollers
+    // dial a name nothing checked. `idle.py` re-reads this row forever.
+    const { prisma, create } = prismaMock();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, passwordEnc: "gAAAAA-ciphertext" }),
+    } as never);
+
+    await connectMailbox(
+      prisma,
+      { ...BODY, imapHost: "MAIL.Northgate.Example.", smtpHost: "SMTP.Northgate.Example" },
+      "u-1",
+    );
+    const data = create.mock.calls[0][0].data;
+    // Lower-cased — the parser's own answer, which is also the exact string
+    // that was resolved and vetted.
+    //
+    // ⚠ The trailing dot SURVIVES, and that is correct rather than a gap: a
+    // root-anchored FQDN is a different name from the unanchored one, and the
+    // guard resolved the anchored form. Normalising it away here would
+    // reintroduce the very divergence this assertion exists to prevent.
+    expect(data.imapHost).toBe("mail.northgate.example.");
+    expect(data.smtpHost).toBe("smtp.northgate.example");
   });
 
   it("🔴 writes userId on the row, not just past the route", async () => {

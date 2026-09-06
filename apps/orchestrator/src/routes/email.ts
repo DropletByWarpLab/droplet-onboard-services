@@ -250,10 +250,24 @@ const connectAccountBody = z
     address: z.string().trim().email().max(320),
     imapHost: z.string().trim().min(1).max(255),
     imapPort: z.number().int().min(1).max(65535).default(993),
-    imapTls: z.boolean().default(true),
     smtpHost: z.string().trim().min(1).max(255),
     smtpPort: z.number().int().min(1).max(65535).default(465),
-    smtpTls: z.boolean().default(true),
+
+    // 🔴 `z.literal(true)`, not `z.boolean()`. TLS is not optional here.
+    //
+    // A security review asked what `imapTls: false` actually does, and the
+    // answer is: the probe sends `LOGIN <user> <password>` in cleartext to a
+    // host the caller named, and then `idle.py` re-sends it on every
+    // reconnect, forever. The form hardcodes `true`, so the only way to reach
+    // that is a hand-crafted body — exactly the shape an API should refuse
+    // rather than accept quietly.
+    //
+    // A literal rather than a `.refine()` so the refusal lives in the SCHEMA
+    // and lands in `flatten()` as a field error the form can point at. If a
+    // LAN mail server without TLS ever has to be supported, that is a
+    // deliberate decision with its own opt-in, not a default nobody notices.
+    imapTls: z.literal(true).default(true),
+    smtpTls: z.literal(true).default(true),
     username: z.string().trim().min(1).max(320),
     password: z.string().min(1).max(1024),
   })
@@ -398,7 +412,7 @@ export function createEmailRouter(
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const removed = await disconnectMailbox(prisma, req.params.id);
+        const { removed, address } = await disconnectMailbox(prisma, req.params.id);
         if (!removed) {
           res.status(404).json({ error: "account_not_found" });
           return;
@@ -411,7 +425,11 @@ export function createEmailRouter(
           // message and draft with the account. That is worth a row somebody
           // can find later when the mail is gone.
           what: "Mailbox disconnected",
-          refs: { accountId: req.params.id },
+          // 🔴 The ADDRESS, read before the delete. An audit row carrying a
+          // bare uuid for a row that no longer exists tells somebody
+          // investigating a missing mail archive nothing at all.
+          sub: address ?? undefined,
+          refs: { accountId: req.params.id, ...(address ? { address } : {}) },
           actor: actorFromRequest(req),
         });
         res.status(204).end();
