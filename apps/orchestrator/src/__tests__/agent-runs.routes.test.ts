@@ -182,6 +182,40 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(page1.body.items[0]).not.toHaveProperty("trace");
   });
 
+  it("pages by (createdAt, id): rows created in the same millisecond straddling a page boundary are not skipped", async () => {
+    const same = new Date("2026-09-04T10:00:00Z");
+    const db = createAgentRunPrismaMock({ users: [owner], now: () => same });
+    for (let i = 0; i < 4; i++) await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: `g${i}`, model: "m" });
+    const { app } = buildApp(owner, db);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 5 && (page === 0 || cursor); page++) {
+      const res = await request(app).get("/api/agent-runs").query({ limit: 2, ...(cursor ? { cursor } : {}) });
+      expect(res.status).toBe(200);
+      seen.push(...res.body.items.map((r: { goal: string }) => r.goal));
+      cursor = res.body.nextCursor;
+    }
+    expect(seen).toEqual(["g3", "g2", "g1", "g0"]);
+    expect((await request(app).get("/api/agent-runs").query({ cursor: "not-a-cursor" })).status).toBe(400);
+  });
+
+  it("a finished run never reports a pending call, even if the columns were left behind", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "g", model: "m" });
+    Object.assign(db.row(id), {
+      status: "succeeded",
+      pendingTool: "delete_file",
+      pendingArgs: { path: "/old.txt" },
+      parkedAt: new Date("2026-09-04T03:00:00Z"),
+    });
+    const { app } = buildApp(owner, db);
+    const res = await request(app).get(`/api/agent-runs/${id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.pending).toBeNull();
+    const list = await request(app).get("/api/agent-runs");
+    expect(list.body.items[0].pending).toBeNull();
+  });
+
   it("detail carries the trace and the parked call with its provenance", async () => {
     const db = createAgentRunPrismaMock({ users: [owner] });
     const { id } = await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "tidy up", model: "m" });

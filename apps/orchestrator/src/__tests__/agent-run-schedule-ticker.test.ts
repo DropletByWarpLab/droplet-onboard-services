@@ -2,7 +2,9 @@
  * WARP-2180 — agent-run-schedule ticker: due rows ENQUEUE a run attributed
  * to the schedule's creator (never executed here), `nextFireAt` advances,
  * in-future rows do not fire, and a rule that no longer parses disables the
- * schedule with a `system` row instead of pinning the ticker.
+ * schedule with a `system` row instead of pinning the ticker. Enqueue and
+ * advance are one transaction: a failed advance leaves no run behind, and
+ * the next tick fires the slot exactly once.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -55,5 +57,25 @@ describe("agent-run-schedule ticker (WARP-2180)", () => {
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "system", severity: "warn", refs: expect.objectContaining({ rrule: "FREQ=NONSENSE" }) }),
     );
+  });
+
+  it("enqueue + advance are atomic: a failed advance leaves no run, the next tick fires the slot once", async () => {
+    const now = new Date("2026-09-04T06:00:30Z");
+    const db = createAgentRunPrismaMock({ now: () => now });
+    await db.prisma.agentRunSchedule.create({
+      data: { userId: "u-owner", goal: "g", model: "m", maxIter: 10, rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "UTC", nextFireAt: new Date("2026-09-04T06:00:00Z") },
+    });
+    db.prisma.agentRunSchedule.update.mockImplementationOnce(async () => {
+      throw new Error("connection reset");
+    });
+    expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 1, fired: 0, disabled: 0, skipped: 1 });
+    // Rolled back: no run was enqueued for a schedule that is still due.
+    expect(db.rows).toHaveLength(0);
+    expect(db.schedules[0]!.lastFiredAt).toBeNull();
+    // The next tick retries the whole fire — one run, not two.
+    expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 1, fired: 1, disabled: 0, skipped: 0 });
+    expect(db.rows).toHaveLength(1);
+    expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 0, fired: 0, disabled: 0, skipped: 0 });
+    expect(db.rows).toHaveLength(1);
   });
 });

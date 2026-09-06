@@ -24,6 +24,12 @@
  *   5. Tier-3 is refused, never parked: a tool outside the run's pool, and a
  *      tool the interceptor's deny tier blocks.
  *   6. Every outcome writes a `tool_call` ActivityRow with `refs.agentRunId`.
+ *   7. Review findings (Stefan, #2013): the handshake is crash-safe — the
+ *      decision is consumed before the first dispatch, so a crash between
+ *      dispatch and completion write re-PARKS on resume instead of re-running
+ *      the approved write; a thrown or refused redeem leg is a tool error the
+ *      run survives, audited as "approved but did not run"; a cancel while
+ *      parked clears the parked call.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -55,6 +61,7 @@ vi.mock("../services/notifications.service.js", () => ({ sendNotification: sendN
 
 import { confirmationBindingHash } from "@droplet/tools-core";
 import {
+  cancelAgentRun,
   createAgentRunWorker,
   decideAgentRun,
   enqueueAgentRun,
@@ -79,6 +86,9 @@ const deleteThenReport = (req: { messages: Array<{ role: string; content: unknow
   }
   const last = String(replies[replies.length - 1]!.content);
   if (last.includes("CONFIRMATION_DENIED")) return { role: "assistant", content: "Left it alone, as you asked." };
+  if (last.includes("tool_dispatch_failed") || last.includes("CONFIRMATION_REJECTED")) {
+    return { role: "assistant", content: "The delete did not go through; nothing changed." };
+  }
   if (last.includes("confirmation_required")) return { role: "assistant", content: "Waiting for your approval." };
   return { role: "assistant", content: "Deleted /old.txt." };
 };
@@ -91,7 +101,12 @@ function scripted(script: (req: { messages: Array<{ role: string; content: unkno
 }
 
 /** An MCP port with the interceptor's behaviour in front of `tier2`. */
-function interceptingMcp(tools: string[], tier2: Set<string>, denied: Set<string> = new Set()) {
+function interceptingMcp(
+  tools: string[],
+  tier2: Set<string>,
+  denied: Set<string> = new Set(),
+  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean } = {},
+) {
   let minted = 0;
   const live = new Set<string>();
   const executed: Array<{ name: string; args: Record<string, unknown>; token?: string }> = [];
@@ -117,7 +132,8 @@ function interceptingMcp(tools: string[], tier2: Set<string>, denied: Set<string
       if (tier2.has(name)) {
         const presented = ctx?.confirmationToken;
         if (presented) {
-          if (!live.has(presented)) {
+          if (opts.throwOnRedeem) throw new Error("mcp transport closed");
+          if (opts.refuseRedeem || !live.has(presented)) {
             return wire({
               status: "confirmation_required",
               error: {
@@ -437,5 +453,141 @@ describe("agent runs — Tier-3 is refused, never parked (WARP-2179)", () => {
     expect(db.row(id).pendingTool).toBeNull();
     expect(mcp.executed).toHaveLength(0);
     expect(sendNotificationMock.mock.calls.some((c) => (c[1] as { title: string }).title.startsWith("Approval needed"))).toBe(false);
+  });
+});
+
+describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 review)", () => {
+  /** Park, approve, and hand back a DB whose row is queued with the approval. */
+  async function approvedRun(mcp: ReturnType<typeof interceptingMcp>, now: () => Date) {
+    const db = createAgentRunPrismaMock({ users: [OWNER], now });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "tidy up", model: "m" });
+    const a = makeWorker(db, mcp, { workerId: "A", now });
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    const decided = await decideAgentRun(db.prisma, {
+      id,
+      decision: "approved",
+      decidedBy: { id: OWNER.id, role: "owner" },
+      resolveAccess: ownerAccess as never,
+      now: now(),
+    });
+    expect(decided).toMatchObject({ ok: true });
+    return { db, id };
+  }
+
+  it("a crash between the redeem dispatch and the completion write re-PARKS on resume — the approved write runs once, never twice", async () => {
+    let clock = new Date("2026-09-04T03:00:00Z");
+    const now = () => clock;
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]));
+    const { db, id } = await approvedRun(mcp, now);
+
+    // The DB dies at the completion write: the entry already carries the
+    // consumed decision and now a result — and stays dead for that worker.
+    let dead = false;
+    db.setFailOn((op, args) => {
+      const trace = (args as { data?: { trace?: AgentRunTraceEntry[] } }).data?.trace;
+      if (op === "updateMany" && Array.isArray(trace) && trace.some((e) => e.confirmation === "confirmed" && e.completedAt)) {
+        dead = true;
+      }
+      return dead;
+    });
+    const b = makeWorker(db, mcp, { workerId: "B", now });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    db.setFailOn(null);
+    const crashed = db.row(id);
+    expect(crashed.status).toBe("running"); // no terminal write survived
+    expect(mcp.executed).toHaveLength(1); // the approved delete DID run, once
+    // The decision was consumed BEFORE the dispatch: nothing approved is left
+    // on the row for a resumed worker to redeem again.
+    expect(crashed.pendingDecision).toBeNull();
+    expect(crashed.pendingTool).toBeNull();
+    const consumed = (crashed.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed");
+    expect(consumed).toBeDefined();
+    expect(consumed!.text).toBeUndefined(); // outcome never recorded
+
+    // Reclaim + resume on C: the model re-issues the same call; with no
+    // decision left the worker dispatches WITHOUT a token, the interceptor
+    // challenges again, and the run parks again — a second prompt, not a
+    // silent second delete.
+    clock = new Date(clock.getTime() + 61_000);
+    const c = makeWorker(db, mcp, { workerId: "C", now });
+    const tick = await c.worker.tickOnce();
+    expect(tick.reclaimed).toBe(1);
+    await settle(c.worker);
+    const reparked = db.row(id);
+    expect(reparked.status).toBe("awaiting_confirmation");
+    expect(reparked.pendingTool).toBe("delete_file");
+    expect(reparked.pendingDecision).toBeNull();
+    expect(mcp.executed).toHaveLength(1); // still exactly one execution
+    expect(mcp.minted()).toBe(3); // park, resume leg 1, re-park
+    const titles = sendNotificationMock.mock.calls.map((x) => (x[1] as { title: string }).title);
+    expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(2);
+  });
+
+  it("a redeem leg that THROWS is a tool error the run survives, audited as approved-but-did-not-run", async () => {
+    const clock = new Date("2026-09-04T03:00:00Z");
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]), new Set(), { throwOnRedeem: true });
+    const { db, id } = await approvedRun(mcp, () => clock);
+    recordActivityMock.mockClear();
+    const b = makeWorker(db, mcp, { workerId: "B", now: () => clock });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("The delete did not go through; nothing changed.");
+    expect(done.pendingTool).toBeNull();
+    expect(mcp.executed).toHaveLength(0);
+    const entry = (done.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed");
+    expect(entry).toMatchObject({ isError: true });
+    expect(String(entry!.text)).toContain("tool_dispatch_failed");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        what: "delete_file approved but did not run",
+        refs: expect.objectContaining({ agentRunId: id, confirmation: "confirmed_failed" }),
+      }),
+    );
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "delete_file approved and run" }));
+  });
+
+  it("a REFUSED token on the redeem leg is an error for the model, not a success; audited as approved-but-did-not-run", async () => {
+    const clock = new Date("2026-09-04T03:00:00Z");
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]), new Set(), { refuseRedeem: true });
+    const { db, id } = await approvedRun(mcp, () => clock);
+    recordActivityMock.mockClear();
+    const b = makeWorker(db, mcp, { workerId: "B", now: () => clock });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(done.result).toBe("The delete did not go through; nothing changed.");
+    expect(mcp.executed).toHaveLength(0);
+    expect((done.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed")).toMatchObject({ isError: true });
+    expect(rowText(done)).not.toMatch(/tok-\d/); // the refused token never persisted either
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "delete_file approved but did not run",
+        refs: expect.objectContaining({ agentRunId: id, confirmation: "confirmed_failed" }),
+      }),
+    );
+  });
+
+  it("cancelling a parked run clears the parked call with the terminal write", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "tidy up", model: "m" });
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]));
+    const { worker } = makeWorker(db, mcp);
+    await worker.tickOnce();
+    await settle(worker);
+    expect(db.row(id).pendingTool).toBe("delete_file");
+    expect(await cancelAgentRun(db.prisma, id)).toBe(true);
+    const row = db.row(id);
+    expect(row.status).toBe("cancelled");
+    expect(row.pendingTool).toBeNull();
+    expect(row.pendingBindingHash).toBeNull();
+    expect(row.pendingArgs).toBeNull();
+    expect(row.parkedAt).toBeNull();
   });
 });

@@ -14,6 +14,7 @@
  * how the suites simulate a worker dying between two checkpoints.
  */
 import { vi } from "vitest";
+import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 export interface AgentRunRow {
@@ -55,6 +56,10 @@ export type MockOp = "create" | "findMany" | "findUnique" | "updateMany";
 
 function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
   for (const [key, cond] of Object.entries(where)) {
+    if (key === "OR") {
+      if (!(cond as Record<string, unknown>[]).some((w) => matches(row, w))) return false;
+      continue;
+    }
     const actual = row[key];
     if (cond === null) {
       if (actual !== null && actual !== undefined) return false;
@@ -71,6 +76,11 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
         continue;
       }
       if ("lt" in c || "lte" in c) {
+        if (typeof actual === "string") {
+          if ("lt" in c && !(actual < (c.lt as string))) return false;
+          if ("lte" in c && !(actual <= (c.lte as string))) return false;
+          continue;
+        }
         const a = actual instanceof Date ? actual.getTime() : Number.NaN;
         if (Number.isNaN(a)) return false;
         if ("lt" in c && !(a < (c.lt as Date).getTime())) return false;
@@ -87,7 +97,14 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
 function applyData(row: Record<string, unknown>, data: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(data)) {
     const ctor = value && typeof value === "object" ? (value as object).constructor?.name : undefined;
-    if (ctor === "DbNull" || ctor === "JsonNull" || ctor === "AnyNull") {
+    const isNullSentinel =
+      value === Prisma.DbNull ||
+      value === Prisma.JsonNull ||
+      value === Prisma.AnyNull ||
+      ctor === "DbNull" ||
+      ctor === "JsonNull" ||
+      ctor === "AnyNull";
+    if (isNullSentinel) {
       // Prisma's JSON-null sentinels (WARP-2484 mirrors them in setup.ts):
       // `Prisma.DbNull` on a nullable Json column is SQL NULL.
       row[key] = null;
@@ -279,7 +296,19 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     agentRun,
     agentRunSchedule,
     user,
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
+    // Rolls back on a throw, like the real thing: the ticker's enqueue+advance
+    // atomicity test depends on a failed advance leaving no run behind.
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+      const rowsBefore = structuredClone(rows);
+      const schedulesBefore = structuredClone(schedules);
+      try {
+        return await fn(prisma);
+      } catch (err) {
+        rows.splice(0, rows.length, ...rowsBefore);
+        schedules.splice(0, schedules.length, ...schedulesBefore);
+        throw err;
+      }
+    }),
   };
 
   return {

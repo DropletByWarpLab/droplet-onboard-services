@@ -147,9 +147,14 @@ ticker's skip-and-audit posture, rather than running at DENY_ALL reach and
 burning GPU on a turn that can call nothing. The scope passed to the loop is
 always the resolved one, never `null` standing in for "unknown".
 
-**Pool.** Tier-1 only until WARP-2179: the chat pool minus every
-`requiresConfirmation` tool, narrowed per principal across both axes
-(`narrowToolNamesForPrincipal`). One deliberate re-admission:
+**Pool.** The chat pool, narrowed per principal across both axes
+(`narrowToolNamesForPrincipal`). Confirming tools are in and park (§7);
+**non-confirming write tools are out** (Romain, 2026-09-04): the interceptor
+challenges only what the catalog declares `requiresConfirmation`, so a Tier-1
+write in a run would simply happen with nobody watching — in chat it at least
+happens in front of the person who asked. Held until WARP-2002 and WARP-2008
+make confirmation a mechanism end to end and the eighteen Tier-1 writes have
+been judged for unattended use. One deliberate re-admission:
 `send_notification` is excluded from chat as a window-budget/UX call, not a
 safety tier; a run has no reader, so a notification is its completion channel,
 and it is Tier-1 in the catalog. A model that reaches for a Tier-2 tool hits
@@ -300,8 +305,19 @@ consumed:
 
 Either way the pending columns clear, the trace entry carries
 `confirmation: "confirmed" | "denied"`, and a `tool_call` row with
-`refs.agentRunId` records the outcome. A run resumed after a box restart
-loses nothing: the park is the checkpoint plus the pending columns.
+`refs.agentRunId` records the outcome. Two rules from review: the decision is
+**consumed and the call's trace entry written before the first dispatch**
+(the replay guard's discipline), so a crash mid-handshake leaves an entry with
+no result that the resume re-dispatches without a token — the interceptor
+challenges again and the run re-parks, a second prompt rather than a silent
+duplicate — and both legs are wrapped so a thrown dispatch is a tool error,
+not the death of the run. The audit label follows what happened: an approval
+whose redeem leg did not run the tool records `approved but did not run`.
+Every terminal write clears the parked-call columns, and both readers
+(`serializeRun`, `list_agent_runs`) gate on `status = awaiting_confirmation`,
+so a finished run can never be reported as still needing approval. A run
+resumed after a box restart loses nothing: the park is the checkpoint plus the
+pending columns.
 
 **Tier-3.** A tool outside the run's pool hits the loop's unknown-tool guard;
 a tool the interceptor's deny tier refuses comes back as a `TOOL_DENIED`
@@ -322,7 +338,7 @@ and Romain's sign-off, as ADR-014 §③ required for desktop tools).
 ## 8. API, Activity view, scheduling, LLM tools (WARP-2180)
 
 **API** — `apps/orchestrator/src/routes/agent-runs.ts`: `POST /api/agent-runs`,
-`GET /api/agent-runs` (status filter, cursor = the tail row's `createdAt`),
+`GET /api/agent-runs` (status filter, cursor = the tail row's `(createdAt, id)` tuple),
 `GET /api/agent-runs/:id` (with the trace and the parked call's PHI-free
 summary), `POST /api/agent-runs/:id/cancel`, `POST /api/agent-runs/:id/confirm`
 (`{ decision: "approved" | "denied" }` → `decideAgentRun`), and

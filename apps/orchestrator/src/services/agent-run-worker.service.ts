@@ -136,18 +136,47 @@ export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run
 
 /**
  * The pool a run starts from, before per-principal narrowing: the chat pool
- * (chat-tool-scope.ts) plus {@link RUN_READMITTED_TOOLS}. Confirming (Tier-2)
- * tools are IN — the interceptor challenges them and the run parks
- * (WARP-2179). What chat excludes on policy grounds ("chat must not delete
- * camera evidence") stays out: that is the run's Tier-3.
+ * (chat-tool-scope.ts) plus {@link RUN_READMITTED_TOOLS}, minus
+ * {@link RUN_EXCLUDED_TOOLS}. Confirming (Tier-2) tools are IN — the
+ * interceptor challenges them and the run parks (WARP-2179). What chat
+ * excludes on policy grounds ("chat must not delete camera evidence") stays
+ * out: that is the run's Tier-3.
+ *
+ * NON-CONFIRMING WRITES ARE OUT (Romain, 2026-09-04). A Tier-1 write in
+ * chat happens in front of the person who asked for it; in a run nobody is
+ * watching, and the interceptor (WARP-2305) challenges only what the catalog
+ * declares `requiresConfirmation`, so a Tier-1 write would simply happen.
+ * The confirmation story is being made a mechanism end to end under
+ * WARP-2002 (self-attested `confirmed` flags) and WARP-2008 (declared-but-
+ * ungated tools); until both are Done and the eighteen Tier-1 writes have
+ * been judged for unattended use, the pool is reads plus confirming writes.
+ * The one Tier-1 write kept is the notification channel. Lift this clause —
+ * and its test — when that is done.
+ *
+ * Computed from the static catalog at module load, on purpose: runtime
+ * (remote, ADR-043) tools are never in a run's `allowed_tools`, so a tool the
+ * catalog does not know cannot reach a run at all.
  */
 export function runToolPool(): string[] {
   return TOOL_CATALOG.filter(
     (t) =>
       !RUN_EXCLUDED_TOOLS.has(t.name) &&
-      (RUN_READMITTED_TOOLS.has(t.name) || !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
+      (RUN_READMITTED_TOOLS.has(t.name) ||
+        (!EXCLUDED_FROM_CHAT_TOOLS.has(t.name) && !(t.requiresWrite && !t.requiresConfirmation))),
   ).map((t) => t.name);
 }
+
+/** WARP-2179 — the parked-call columns, always cleared together. */
+const CLEAR_PENDING: Prisma.AgentRunUpdateManyMutationInput = {
+  pendingTool: null,
+  pendingBindingHash: null,
+  pendingArgs: Prisma.DbNull,
+  pendingToolCallId: null,
+  pendingDecision: null,
+  pendingDecidedAt: null,
+  pendingDecidedBy: null,
+  parkedAt: null,
+};
 
 /** One dispatched tool call, as persisted in `AgentRun.trace`. */
 export interface AgentRunTraceEntry {
@@ -199,7 +228,10 @@ export interface EnqueueAgentRunInput {
 
 /** Create a `queued` run. The worker's next tick claims it. */
 export async function enqueueAgentRun(
-  prisma: PrismaClient,
+  // A transaction client too: the schedule ticker enqueues and advances in
+  // one transaction so a failed advance cannot leave a fired-but-unadvanced
+  // schedule behind to fire again.
+  prisma: PrismaClient | Prisma.TransactionClient,
   input: EnqueueAgentRunInput,
 ): Promise<{ id: string }> {
   const cap = config.agentMaxIter.capIter;
@@ -231,7 +263,9 @@ export async function cancelAgentRun(
 ): Promise<boolean> {
   const res = await prisma.agentRun.updateMany({
     where: { id, status: { in: ["queued", "running", "awaiting_confirmation"] } },
-    data: { status: "cancelled", endedAt: now },
+    // A parked run can be cancelled: the terminal write clears the parked
+    // call too, like every other terminal write.
+    data: { status: "cancelled", endedAt: now, ...CLEAR_PENDING },
   });
   return res.count === 1;
 }
@@ -401,6 +435,15 @@ function interceptorTokenOf(text: string): string | null {
       : null;
   } catch {
     return null;
+  }
+}
+
+/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
+function isConfirmationEnvelope(text: string): boolean {
+  try {
+    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
+  } catch {
+    return false;
   }
 }
 
@@ -685,6 +728,28 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       where: { id: run.userId },
       select: { username: true, role: true },
     })) as { username: string; role: string } | null;
+    if (!user) {
+      // The row vanished between the attribution read and this one (a
+      // deleted account with a queued run). Refuse like an unresolvable
+      // principal rather than dispatch with no attribution on the rows
+      // (Stefan, #2011 review).
+      await finish(runId, {
+        status: "failed",
+        endedAt: at,
+        error: "attribution_failed:user_missing",
+        ...CLEAR_PENDING,
+      });
+      await recordActivity({
+        kind: "tool_run",
+        severity: "warn",
+        sourceIcon: "shield",
+        what: "Agent run refused (access)",
+        actor: { type: "system" },
+        sub: `run ${runId}: no resolvable owner (user_missing)`,
+        refs: { agentRunId: runId, userId: run.userId, reason: "user_missing" },
+      });
+      return;
+    }
 
     const allowedTools = narrowToolNamesForPrincipal(
       runToolPool(),
@@ -732,17 +797,25 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       } | null;
     } = { request: null };
 
-    const auditConfirmation = (tool: string, outcome: "parked" | "confirmed" | "denied") =>
+    // `confirmed_failed`: the human approved but the redeem leg did not run the
+    // tool (refused token, deny tier, dispatch error). The label follows what
+    // happened, not what was decided (Stefan, #2013 review).
+    const auditConfirmation = (
+      tool: string,
+      outcome: "parked" | "confirmed" | "confirmed_failed" | "denied",
+    ) =>
       recordActivity({
         kind: "tool_call",
-        severity: outcome === "confirmed" ? "ok" : outcome === "denied" ? "warn" : "info",
+        severity: outcome === "confirmed" ? "ok" : outcome === "parked" ? "info" : "warn",
         sourceIcon: "shield",
         what:
           outcome === "parked"
             ? `${tool} parked for approval`
             : outcome === "confirmed"
               ? `${tool} approved and run`
-              : `${tool} declined by user`,
+              : outcome === "confirmed_failed"
+                ? `${tool} approved but did not run`
+                : `${tool} declined by user`,
         sub: user ? `for ${user.username}` : null,
         actor: { type: "ai", id: run.userId },
         refs: {
@@ -801,39 +874,64 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
               replayed.add(e.tool_call_id);
             }
           }
-          const record = async (
-            text: string,
-            isError: boolean,
-            confirmation: "confirmed" | "denied",
-          ) => {
-            trace.push({
-              tool_call_id: call.tool_call_id,
-              tool: call.tool,
-              args: call.args,
-              iteration: abs,
-              dispatchedAt: now().toISOString(),
-              text,
-              isError,
-              completedAt: now().toISOString(),
-              confirmation,
-            });
+          // The entry for this call is written BEFORE anything is dispatched and
+          // the decision is consumed in the same write — the replay guard's own
+          // discipline. A crash between a dispatch and the completion write must
+          // never leave `pendingDecision = approved` behind: the resumed run would
+          // re-run the confirmed write. Consumed first, a crash leaves an entry
+          // with no result; the resume re-dispatches it WITHOUT a token, the
+          // interceptor challenges again and the run parks again — a human sees
+          // a second prompt instead of a silent duplicate.
+          const entry: AgentRunTraceEntry = {
+            tool_call_id: call.tool_call_id,
+            tool: call.tool,
+            args: call.args,
+            iteration: abs,
+            dispatchedAt: now().toISOString(),
+          };
+          const consume = async (confirmation: "confirmed" | "denied") => {
+            entry.confirmation = confirmation;
+            trace.push(entry);
             const ok = await finish(runId, {
               trace: trace as unknown as Prisma.InputJsonValue,
               heartbeatAt: now(),
-              pendingTool: null,
-              pendingBindingHash: null,
-              pendingArgs: Prisma.DbNull,
-              pendingToolCallId: null,
-              pendingDecision: null,
-              pendingDecidedAt: null,
-              pendingDecidedBy: null,
-              parkedAt: null,
+              ...CLEAR_PENDING,
             });
             if (!ok) {
               stop(runId, "fenced");
               throw new AgentRunStopped("fenced", "lease no longer held");
             }
-            await auditConfirmation(call.tool, confirmation);
+          };
+          const complete = async (text: string, isError: boolean) => {
+            entry.text = scrubInterceptorToken(text);
+            entry.isError = isError;
+            entry.completedAt = now().toISOString();
+            await persistTrace();
+            const decided = entry.confirmation ?? "confirmed";
+            await auditConfirmation(
+              call.tool,
+              decided === "confirmed" && isError ? "confirmed_failed" : decided,
+            );
+          };
+          // Both legs wrapped the way the loop wraps a live dispatch (ORCH-05):
+          // a thrown dispatch is a bounded tool error the model can recover
+          // from, never the death of a run whose whole point is surviving
+          // transient failures.
+          const dispatch = async (ctx: typeof toolCallContext & { confirmationToken?: string }) => {
+            try {
+              const r = await deps.agent.mcp.callTool(call.tool, call.args, ctx);
+              return { text: r.content[0]?.text ?? "{}", isError: Boolean(r.isError) };
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              return {
+                text: JSON.stringify({
+                  error: "tool_dispatch_failed",
+                  tool: call.tool,
+                  message: message.slice(0, 500),
+                }),
+                isError: true,
+              };
+            }
           };
           if (decision === "denied") {
             const text = JSON.stringify({
@@ -845,7 +943,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
                   "adapt, or finish with what you have and say what was not done.",
               },
             });
-            await record(text, true, "denied");
+            await consume("denied");
+            await complete(text, true);
             return { text, isError: true };
           }
           // Approved: the interceptor handshake, both legs here. Leg 1 asks
@@ -853,30 +952,32 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           // seconds after the human decided. Leg 2 presents it. Anything
           // other than a challenge on leg 1 (deny tier, a tool that no
           // longer confirms, an error) is the box's honest answer and is
-          // handed back as-is.
-          const first = await deps.agent.mcp.callTool(call.tool, call.args, toolCallContext);
-          const firstText = first.content[0]?.text ?? "{}";
-          const token = interceptorTokenOf(firstText);
-          if (!token) {
-            await record(firstText, Boolean(first.isError), "confirmed");
-            return { text: firstText, isError: Boolean(first.isError) };
-          }
-          const second = await deps.agent.mcp.callTool(call.tool, call.args, {
-            ...toolCallContext,
-            confirmationToken: token,
-          });
-          const text = second.content[0]?.text ?? "{}";
-          await record(text, Boolean(second.isError), "confirmed");
-          logger.info({ runId, tool: call.tool, iteration: abs }, "agent_run_tool_confirmed");
-          return { text, isError: Boolean(second.isError) };
+          // handed back as-is. A refused token on leg 2 comes back as the
+          // interceptor's `confirmation_required` envelope, which is an error
+          // for this run's purposes: the tool did not run.
+          await consume("confirmed");
+          const first = await dispatch(toolCallContext);
+          const token = first.isError ? null : interceptorTokenOf(first.text);
+          const outcome = token
+            ? await dispatch({ ...toolCallContext, confirmationToken: token })
+            : first;
+          const ran = !outcome.isError && !isConfirmationEnvelope(outcome.text);
+          await complete(outcome.text, !ran);
+          if (ran) logger.info({ runId, tool: call.tool, iteration: abs }, "agent_run_tool_confirmed");
+          return { text: outcome.text, isError: !ran };
         }
 
         // Replay: a completed entry from an interrupted segment of THIS
-        // iteration, same tool, same args, not yet served.
+        // iteration, same tool, same args, not yet served. A confirmation
+        // envelope is never a result: the park's own challenge entry must not
+        // be served back after a crashed handshake (the resumed worker's
+        // `replayed` set is empty), or the model would be told the tool is
+        // "waiting for approval" while the approved decision is already spent.
         const hit = trace.find(
           (e) =>
             e.iteration === abs &&
             e.text !== undefined &&
+            !isConfirmationEnvelope(e.text) &&
             e.tool === call.tool &&
             !replayed.has(e.tool_call_id) &&
             canonical(e.args) === key,
@@ -1014,7 +1115,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // loop got to. Fence on `cancelled` so this cannot resurrect the row.
       await finish(
         runId,
-        { iteration: base + (result?.iterations ?? 0), stopReason: "cancelled" },
+        { iteration: base + (result?.iterations ?? 0), stopReason: "cancelled", ...CLEAR_PENDING },
         ["cancelled"],
       );
       await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
@@ -1075,6 +1176,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         iteration: base + (result?.iterations ?? 0),
         stopReason: reason,
         error,
+        ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
         user ? { username: user.username, goal: run.goal } : undefined);
@@ -1082,7 +1184,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     }
     if (threw !== null || result === null) {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
-      await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000) });
+      await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
         user ? { username: user.username, goal: run.goal } : undefined);
       return;
@@ -1101,6 +1203,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           stopReason: result.stop_reason,
           result: text,
           error: null,
+          ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
           user ? { username: user.username, goal: run.goal, result: text } : undefined);
@@ -1114,6 +1217,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           iteration,
           stopReason: result.stop_reason,
           error,
+          ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
           user ? { username: user.username, goal: run.goal } : undefined);
@@ -1128,6 +1232,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           iteration,
           stopReason: result.stop_reason,
           error,
+          ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
           user ? { username: user.username, goal: run.goal } : undefined);

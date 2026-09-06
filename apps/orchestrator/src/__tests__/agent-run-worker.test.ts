@@ -59,6 +59,7 @@ import {
   type AgentRunTraceEntry,
 } from "../services/agent-run-worker.service.js";
 import { DENY_ALL_TOOL_SCOPE } from "../services/tool-access.service.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 
 // ── a deterministic "model" ─────────────────────────────────────────────
@@ -425,6 +426,35 @@ describe("agent-run worker — access, tiers, ceilings, cancellation (WARP-2177)
     // WARP-2180 — a run may not start a run.
     expect(pool).not.toContain("start_agent_run");
     expect(pool).toContain("list_agent_runs");
+  });
+
+  it("the run pool holds NO non-confirming write but send_notification until WARP-2002/WARP-2008 land (Romain, 2026-09-04)", () => {
+    // A run parks only when the interceptor challenges; a write it would not
+    // challenge would run unattended with nobody approving.
+    const pool = new Set(runToolPool());
+    expect(pool.has("write_file")).toBe(false);
+    expect(pool.has("create_document")).toBe(false);
+    expect(pool.has("email_draft_reply")).toBe(false);
+    const unattendedWrites = TOOL_CATALOG.filter(
+      (t) => pool.has(t.name) && t.requiresWrite && !t.requiresConfirmation,
+    ).map((t) => t.name);
+    expect(unattendedWrites).toEqual(["send_notification"]);
+  });
+
+  it("the user row vanished between attribution and dispatch: the run fails as attribution_failed:user_missing, nothing dispatched", async () => {
+    // No users on the mock: reach resolves (mocked owner), the row does not.
+    const db = createAgentRunPrismaMock();
+    const { id } = await enqueueAgentRun(db.prisma, { userId: "u-deleted", goal: "g", model: "m" });
+    const { worker, chat, callTool } = makeWorker(db);
+    await worker.tickOnce();
+    await settle(worker);
+    expect(db.row(id).status).toBe("failed");
+    expect(db.row(id).error).toBe("attribution_failed:user_missing");
+    expect(chat).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "tool_run", refs: expect.objectContaining({ agentRunId: id, reason: "user_missing" }) }),
+    );
   });
 
   it("cancellation stops the run before its next tool dispatch and leaves it cancelled", async () => {

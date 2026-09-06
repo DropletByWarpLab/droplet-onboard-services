@@ -125,7 +125,16 @@ function TraceRow({ entry }: { entry: TraceEntry }) {
 export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null }) {
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("");
-  const [selectedId, setSelectedId] = useState<string | null>(initialRunId ?? null);
+  const [selectedId, setSelectedIdState] = useState<string | null>(initialRunId ?? null);
+  // The id whose detail may be shown. Written synchronously on selection so a
+  // detail fetch that resolves after the person moved on is dropped — a
+  // previous run's late response must never overwrite the selected run's
+  // panel, least of all its approval prompt.
+  const selectedRef = useRef<string | null>(initialRunId ?? null);
+  const setSelectedId = useCallback((id: string | null) => {
+    selectedRef.current = id;
+    setSelectedIdState(id);
+  }, []);
   const [detail, setDetail] = useState<AgentRunDetail | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -151,9 +160,11 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
   const loadDetail = useCallback(async (id: string) => {
     try {
       const d = await getAgentRun(id);
-      setDetail((prev) => (prev?.id === id || prev === null || prev.id !== id ? d : prev));
+      if (selectedRef.current !== id) return;
+      setDetail(d);
       setDetailError(null);
     } catch (err) {
+      if (selectedRef.current !== id) return;
       setDetailError(err instanceof Error ? err.message : String(err));
     }
   }, []);

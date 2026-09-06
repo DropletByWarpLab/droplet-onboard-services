@@ -58,29 +58,41 @@ export async function tickAgentRunSchedules(
   let disabled = 0;
   let skipped = 0;
   for (const schedule of due) {
+    // Enqueue and advance in ONE transaction. Done as two statements, a
+    // failed advance after a successful enqueue left the schedule still due
+    // and the next tick fired it again — a second run for the same slot.
+    // Inside one transaction a failure anywhere leaves nothing behind, and
+    // the next tick retries the whole fire.
+    const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone);
+    let runId: string;
     try {
-      const { id } = await enqueueAgentRun(prisma, {
-        userId: schedule.userId,
-        goal: schedule.goal,
-        model: schedule.model,
-        maxIter: schedule.maxIter,
-        runAfter: schedule.nextFireAt,
-      });
-      fired += 1;
-      logger.info({ scheduleId: schedule.id, runId: id }, "agent_run_schedule_fired");
+      runId = (
+        await prisma.$transaction(async (tx) => {
+          const created = await enqueueAgentRun(tx, {
+            userId: schedule.userId,
+            goal: schedule.goal,
+            model: schedule.model,
+            maxIter: schedule.maxIter,
+            runAfter: schedule.nextFireAt,
+          });
+          await tx.agentRunSchedule.update({
+            where: { id: schedule.id },
+            data:
+              next === null
+                ? { enabled: false, lastFiredAt: now }
+                : { nextFireAt: next, lastFiredAt: now },
+          });
+          return created;
+        })
+      ).id;
     } catch (err) {
-      // Enqueue is one insert; a failure here is infrastructure. Do not
-      // advance — the next tick retries this fire instead of dropping it.
-      logger.warn({ err, scheduleId: schedule.id }, "agent_run_schedule_enqueue_failed");
+      logger.warn({ err, scheduleId: schedule.id }, "agent_run_schedule_fire_failed");
       skipped += 1;
       continue;
     }
-    const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone);
+    fired += 1;
+    logger.info({ scheduleId: schedule.id, runId }, "agent_run_schedule_fired");
     if (next === null) {
-      await prisma.agentRunSchedule.update({
-        where: { id: schedule.id },
-        data: { enabled: false, lastFiredAt: now },
-      });
       await recordActivity({
         kind: "system",
         severity: "warn",
@@ -91,12 +103,7 @@ export async function tickAgentRunSchedules(
         refs: { agentRunScheduleId: schedule.id, rrule: schedule.rrule },
       });
       disabled += 1;
-      continue;
     }
-    await prisma.agentRunSchedule.update({
-      where: { id: schedule.id },
-      data: { nextFireAt: next, lastFiredAt: now },
-    });
   }
   return { inspected: due.length, fired, disabled, skipped };
 }

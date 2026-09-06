@@ -2509,7 +2509,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-2178 — the per-tool result-size distribution, one line per
       // dispatch at debug level (a chat turn must not pay an info line per
       // tool). This is what the cap is meant to be chosen from: run the
-      // staging suite with LOG_LEVEL=debug and aggregate by `tool`. Sizes and
+      // orchestrator at LOG_LEVEL=debug (docs/ENVIRONMENT.md), run the staging
+      // suite, aggregate by `tool`. Sizes and
       // names only — never the payload.
       logger.debug(
         {

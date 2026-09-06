@@ -6,6 +6,9 @@
  *      and Approve posts the decision to the confirm route.
  *   2. A finished run shows its result and trace, and no approve buttons.
  *   3. Deny posts `denied`; Cancel posts to the cancel route.
+ *   4. A detail response that arrives after the person selected another run
+ *      is dropped — a stale run's approval prompt never overwrites the
+ *      selected run's panel.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -136,5 +139,37 @@ describe("Background runs panel (WARP-2180)", () => {
     expect(list.textContent).toContain("Finished");
     fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
     await screen.findByText("Reviewed 12 clips; nothing unusual.");
+  });
+
+  it("drops a late detail response for a run that is no longer selected", async () => {
+    const pending: Record<string, (v: unknown) => void> = {};
+    authFetchMock.mockImplementation(async (url: string) => {
+      const m = /^\/api\/agent-runs\/([^/?]+)$/.exec(url);
+      if (m) {
+        const id = decodeURIComponent(m[1]!);
+        const run = [parked, finished].find((r) => r.id === id)!;
+        // Each detail fetch resolves only when the test says so.
+        await new Promise((resolve) => {
+          pending[id] = resolve;
+        });
+        return okJson({ ...run, trace: [] });
+      }
+      if (url.startsWith("/api/agent-runs")) return okJson({ items: [parked, finished], nextCursor: null });
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<AgentRunsPanel />);
+    await screen.findByRole("list", { name: "Background runs" });
+    // Select the parked run (slow), then the finished one (fast).
+    fireEvent.click(screen.getByRole("button", { name: /tidy up the old files/i }));
+    await waitFor(() => expect(pending["run-1"]).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
+    await waitFor(() => expect(pending["run-2"]).toBeTruthy());
+    pending["run-2"]!(undefined);
+    await screen.findByText("Reviewed 12 clips; nothing unusual.");
+    // The slow response lands last — and must not take over the panel.
+    pending["run-1"]!(undefined);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText("Reviewed 12 clips; nothing unusual.")).toBeTruthy();
+    expect(screen.queryByText("This run is waiting for your approval")).toBeNull();
   });
 });
