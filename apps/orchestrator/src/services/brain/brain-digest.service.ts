@@ -238,9 +238,15 @@ export async function upsertFinding(
   const hasCurrency = input.currency !== null && input.currency !== undefined;
   if (hasImpact !== hasCurrency) throw new Error("impact_needs_currency");
 
+  // NOTE the literal "finding" where a digest passes its `kind`. A finding is
+  // identified by (detector, subject) and NOT by kind, because `kind` is a
+  // mutable judgement: a slipping deal that is reclassified `risk` -> `loss`
+  // must UPDATE its row, not orphan it and create a second one that the
+  // staleness sweep would then never retire. Digests key on `kind` because
+  // there a different kind genuinely is a different claim about the subject.
   const dedupeKey = brainDedupeKey({
     detectorKey: input.detectorKey,
-    kind: input.kind,
+    kind: "finding",
     subjectType: null,
     subjectId: input.subjectKey ?? null,
   });

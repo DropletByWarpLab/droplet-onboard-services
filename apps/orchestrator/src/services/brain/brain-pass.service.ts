@@ -1,0 +1,164 @@
+/**
+ * Brain pass runner (WARP-2749, ADR-051) — the thing that runs overnight and
+ * updates the saved state, so a question never triggers a scan.
+ *
+ * TWO PASSES, ONE CLOCK.
+ *
+ *   `detectors`        deterministic queries over landed rows. No model call at
+ *                      all: the box runs ONE inference at a time and has no
+ *                      turn-level timeout, so a sweep must never hold the slot.
+ *                      "Is this invoice 90 days overdue" is arithmetic, and
+ *                      Postgres is better at it than a 20B model.
+ *   `corpus.documents` the LLM pass, cursored over changed files. Bounded per
+ *                      run and yielding between units — see
+ *                      `brain-corpus.service.ts`.
+ *
+ * Both are registered on `cronRuntime` with advisory locks, alongside every
+ * other tick. There is exactly one scheduler in this repo and a guard test pins
+ * that; this adds no second one.
+ *
+ * THE STALENESS SWEEP IS THE PART THAT MAKES IT LIVEABLE. A detector returns
+ * everything currently true. The runner diffs that against the detector's own
+ * OPEN findings and marks the disappeared ones `stale`. So when an invoice is
+ * paid, its finding stops being reported on the next pass — the detector never
+ * has to remember what it said last night, and nobody has to dismiss a finding
+ * that fixed itself. Without this, /brief accumulates resolved problems and
+ * becomes a list nobody reads.
+ *
+ * WHAT IS DELIBERATELY NOT SWEPT: `dismissed` and `actioned` rows. A human's
+ * decision is not the runner's to revise, in either direction — it neither
+ * resurrects them (see `upsertFinding`) nor re-stales them.
+ */
+import type { PrismaClient } from "@prisma/client";
+import { DETECTORS, type Detector } from "./detectors";
+import { upsertFinding } from "./brain-digest.service";
+
+export const DETECTOR_PASS_KEY = "detectors";
+export const BRAIN_PASS_LOCK_KEY = "droplet:brain-pass";
+
+/** Statuses a pass may transition to `stale`. A human's decision (`dismissed`,
+ *  `actioned`) is left exactly where they put it. */
+const SWEEPABLE = ["new", "acknowledged"] as const;
+
+export type PassOutcome = {
+  passKey: string;
+  ran: boolean;
+  found: number;
+  written: number;
+  staled: number;
+  errors: string[];
+};
+
+/**
+ * Run every detector once and reconcile the results.
+ *
+ * Never throws for a single detector's failure: one bad detector must not stop
+ * the others from reporting, and the operator needs to know WHICH one broke.
+ * Errors are collected, recorded on the pass row, and returned.
+ */
+export async function runDetectorPass(
+  prisma: PrismaClient,
+  opts: { now?: Date; detectors?: readonly Detector[] } = {},
+): Promise<PassOutcome> {
+  const now = opts.now ?? new Date();
+  const detectors = opts.detectors ?? DETECTORS;
+
+  const pass = await prisma.brainPass.upsert({
+    where: { passKey: DETECTOR_PASS_KEY },
+    create: { passKey: DETECTOR_PASS_KEY },
+    update: {},
+    select: { enabled: true },
+  });
+  if (!pass.enabled) {
+    return { passKey: DETECTOR_PASS_KEY, ran: false, found: 0, written: 0, staled: 0, errors: [] };
+  }
+
+  let found = 0;
+  let written = 0;
+  let staled = 0;
+  const errors: string[] = [];
+
+  for (const detector of detectors) {
+    try {
+      const results = await detector.run(prisma, now);
+      found += results.length;
+
+      const seen = new Set<string>();
+      for (const r of results) {
+        seen.add(r.subjectKey);
+        await upsertFinding(prisma, {
+          kind: r.kind,
+          title: r.title,
+          rationale: r.rationale,
+          impactMinor: r.impactMinor ?? null,
+          currency: r.currency ?? null,
+          evidence: r.evidence,
+          confidence: r.confidence ?? null,
+          detectorKey: detector.key,
+          subjectKey: r.subjectKey,
+        });
+        written += 1;
+      }
+
+      // The sweep. Anything this detector previously raised and did NOT raise
+      // now has resolved itself; say so rather than leaving it on the list.
+      //
+      // The subject is recovered from the dedupeKey the writer built:
+      // `${detectorKey}:finding:-:${subjectKey}`. `detectorKey` has a closed
+      // alphabet with no ":" and the two middle slots are fixed, so everything
+      // from index 3 on is the subject — rejoined rather than indexed, so a
+      // subject containing ":" survives the round trip.
+      const open = await prisma.brainFinding.findMany({
+        where: { detectorKey: detector.key, status: { in: [...SWEEPABLE] } },
+        select: { id: true, dedupeKey: true },
+      });
+      const gone = open.filter(
+        (row) => !seen.has(row.dedupeKey.split(":").slice(3).join(":")),
+      );
+      if (gone.length > 0) {
+        const res = await prisma.brainFinding.updateMany({
+          where: { id: { in: gone.map((g) => g.id) } },
+          data: { status: "stale" },
+        });
+        staled += res.count;
+      }
+    } catch (err) {
+      errors.push(`${detector.key}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  await prisma.brainPass.update({
+    where: { passKey: DETECTOR_PASS_KEY },
+    data: {
+      lastRunAt: now,
+      // Only a clean run counts as a success; a partial one leaves the previous
+      // success timestamp alone so a freshness check cannot be fooled.
+      ...(errors.length === 0 ? { lastSucceededAt: now, lastError: null } : {}),
+      ...(errors.length > 0 ? { lastError: errors.join(" | ").slice(0, 1000) } : {}),
+      unitsSeen: { increment: detectors.length },
+      unitsDigested: { increment: detectors.length - errors.length },
+      rowsWritten: { increment: written },
+    },
+  });
+
+  return { passKey: DETECTOR_PASS_KEY, ran: true, found, written, staled, errors };
+}
+
+/**
+ * Seed the pass rows. Called from `app.ts` boot — NOT from `prisma/seed.ts`.
+ *
+ * That distinction is the whole point of this function. `seedDailyReportSpec`
+ * has exactly one non-test caller, `prisma/seed.ts:70`, and `prisma/seed.ts` is
+ * invoked NOWHERE in `scripts/` or `docker/` — only `docker/dev/` runs
+ * `seed.dev.ts`. So on a shipped box the daily-report spec does not exist and
+ * its /reports button 404s. A brain seeded the same way would silently never
+ * run, and nobody would find out until they asked why /brief was empty.
+ */
+export async function seedBrainPasses(prisma: PrismaClient): Promise<void> {
+  await prisma.brainPass.upsert({
+    where: { passKey: DETECTOR_PASS_KEY },
+    create: { passKey: DETECTOR_PASS_KEY },
+    // Deliberately empty: never re-enable a pass an operator switched off.
+    update: {},
+  });
+}

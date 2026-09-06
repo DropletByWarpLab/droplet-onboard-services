@@ -659,6 +659,63 @@ enum BrainFindingStatus {
   stale
 }
 
+/// WARP-2749 (ADR-051) — the durable position of a brain pass.
+///
+/// ONE ROW PER PASS, and the row IS the cursor. A pass re-reads its own row on
+/// every tick, works from `cursor` forward, and writes the new position back in
+/// the SAME transaction as the rows it produced. That is what makes a crash
+/// mid-pass re-digest at most one unit instead of skipping one: there is no
+/// window in which the cursor has moved but the output has not landed.
+///
+/// NOT AN `AgentRun`, and not a second scheduler. `AgentRun` is a durable LLM
+/// conversation with a lease, a heartbeat and an iteration budget; this is a
+/// bookmark. The deterministic detector pass needs no model call at all (see
+/// `detectors/`), so giving it an AgentRun would buy a lease it does not need
+/// and an inference slot it must not hold. The corpus pass, which DOES call the
+/// model, still records its position here and runs under the one sanctioned
+/// clock (`cronRuntime.scheduleInterval` with an advisory lock), because the
+/// repo has exactly one scheduler and a guard test pins that.
+///
+/// COUNTERS ARE ON THE SURFACE ON PURPOSE. An operator who believes the brain
+/// read everything on night one stops trusting it the first time it misses
+/// something. `unitsSeen` / `unitsDigested` / `lastError` are what `/brief`
+/// renders as coverage, so "three weeks to first-pass a 5,000-document corpus"
+/// is a visible fact rather than a footnote in a brief nobody opened.
+model BrainPass {
+  /// Stable identifier for the pass, e.g. "detectors" or "corpus.documents".
+  /// Primary key: exactly one row per pass, upserted at boot, so a pass can
+  /// never accidentally run two positions in parallel.
+  passKey String @id
+
+  /// Opaque, pass-defined. The corpus pass stores an "updatedAt|id" watermark
+  /// (a bare timestamp loses rows that share a millisecond — the WARP-2743
+  /// pagination bug, avoided here rather than relearned). The detector pass
+  /// stores nothing: it is a set of deterministic queries over landed rows and
+  /// re-running it is the point, so it has no position to keep.
+  cursor String?
+
+  /// Explicit enable switch, never derived from absence. A pass that is off
+  /// must look different from a pass that has never run — the no-guessing
+  /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  enabled Boolean @default(true)
+
+  lastRunAt      DateTime?
+  lastSucceededAt DateTime?
+  /// Cleared on every success. A stale error string on a healthy pass is the
+  /// same lie as a status column nothing resets.
+  lastError      String?  @db.VarChar(1000)
+
+  /// Cumulative coverage counters, for the /brief coverage line.
+  unitsSeen     Int @default(0)
+  unitsDigested Int @default(0)
+  rowsWritten   Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+}
+
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
 ///
 /// A 60 s apscheduler tick in `services/routing/scheduler.py` polls
