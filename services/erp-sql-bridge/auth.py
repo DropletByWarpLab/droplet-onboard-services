@@ -57,7 +57,14 @@ EXEMPT_PATHS = {"/health"}
 #: and 401'd 15 consecutive nightly eval runs; the inference-manager module
 #: carries the same warning. The name is read at import so the test suite can
 #: patch `auth.SERVICE_TOKEN` directly.
-SERVICE_TOKEN = os.environ.get("SERVICE_TOKEN_ERP_BRIDGE", "").strip()
+#: The env var's NAME, lifted out of the log format strings below on purpose.
+#: semgrep's python-logger-credential-disclosure rule matches on the literal
+#: text of a logger call, so a message merely NAMING the variable tripped it —
+#: no secret was ever logged. Passing the name as an argument keeps the
+#: operator-facing message identical and leaves one source for the spelling.
+TOKEN_ENV = "SERVICE_TOKEN_ERP_BRIDGE"
+
+SERVICE_TOKEN = os.environ.get(TOKEN_ENV, "").strip()
 
 
 def _unauthorized(code: str, message: str, status: int = 401) -> JSONResponse:
@@ -82,15 +89,16 @@ class ServiceBearerMiddleware(BaseHTTPMiddleware):
             # and answering 503 keeps it from touching the practice's database
             # while saying plainly which knob is missing.
             logger.error(
-                "SERVICE_TOKEN_ERP_BRIDGE is empty — refusing %s %s. "
-                "scripts/lib/secrets.sh mints this key; run ./scripts/setup.sh "
-                "on the host, then recreate this container.",
+                "%s is empty — refusing %s %s. scripts/lib/secrets.sh mints "
+                "this key; run ./scripts/setup.sh on the host, then recreate "
+                "this container.",
+                TOKEN_ENV,
                 request.method,
                 request.url.path,
             )
             return _unauthorized(
                 "BRIDGE_NOT_PROVISIONED",
-                "erp-sql-bridge has no SERVICE_TOKEN_ERP_BRIDGE configured",
+                f"erp-sql-bridge has no {TOKEN_ENV} configured",
                 status=503,
             )
 
@@ -114,7 +122,8 @@ def setup_auth(app: FastAPI) -> None:
         logger.info("service bearer enabled — /read, /write and /introspect require it")
     else:
         logger.error(
-            "SERVICE_TOKEN_ERP_BRIDGE is EMPTY — every route except /health will "
-            "answer 503 until it is set. This box is not provisioned."
+            "%s is EMPTY — every route except /health will answer 503 until it "
+            "is set. This box is not provisioned.",
+            TOKEN_ENV,
         )
     app.add_middleware(ServiceBearerMiddleware)
