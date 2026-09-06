@@ -128,3 +128,60 @@ export async function decideAgentRun(id: string, decision: "approved" | "denied"
   });
   if (!res?.ok) throw await readError(res, decision === "approved" ? "Couldn't approve" : "Couldn't deny");
 }
+
+// ── Recurring runs (AgentRunSchedule, WARP-2180) ────────────────────────────
+
+export interface AgentRunSchedule {
+  id: string;
+  goal: string;
+  model: string;
+  maxIter: number;
+  rrule: string;
+  timezone: string;
+  nextFireAt: string;
+  enabled: boolean;
+  lastFiredAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * The RRULE subset the ticker accepts (`utils/rrule.ts`): FREQ=DAILY or
+ * FREQ=WEEKLY with BYDAY/BYHOUR/BYMINUTE, wall-clock in the schedule's IANA
+ * timezone. Offered as presets so the common cases never need the syntax.
+ */
+export const RRULE_PRESETS: ReadonlyArray<{ key: string; label: string; rrule: string }> = [
+  { key: "daily-6", label: "Every day at 06:00", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" },
+  { key: "weekdays-9", label: "Weekdays at 09:00", rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0" },
+  { key: "monday-8", label: "Every Monday at 08:00", rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=8;BYMINUTE=0" },
+];
+
+/** A preset's label when the rule is one, else the rule itself. */
+export function describeRrule(rrule: string): string {
+  return RRULE_PRESETS.find((p) => p.rrule === rrule)?.label ?? rrule;
+}
+
+export async function listAgentRunSchedules(): Promise<AgentRunSchedule[]> {
+  const res = await authFetch("/api/agent-runs/schedules");
+  if (!res?.ok) throw await readError(res, "Couldn't load recurring runs");
+  const body = (await res.json()) as { schedules?: AgentRunSchedule[] };
+  return body.schedules ?? [];
+}
+
+export async function createAgentRunSchedule(input: {
+  goal: string;
+  rrule: string;
+  timezone: string;
+}): Promise<{ id: string; nextFireAt: string }> {
+  const res = await authFetch("/api/agent-runs/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res?.ok) throw await readError(res, "Couldn't add this recurring run");
+  return (await res.json()) as { id: string; nextFireAt: string };
+}
+
+export async function deleteAgentRunSchedule(id: string): Promise<void> {
+  const res = await authFetch(`/api/agent-runs/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res?.ok) throw await readError(res, "Couldn't delete this recurring run");
+}

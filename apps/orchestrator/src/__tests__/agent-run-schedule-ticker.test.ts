@@ -4,7 +4,9 @@
  * in-future rows do not fire, and a rule that no longer parses disables the
  * schedule with a `system` row instead of pinning the ticker. Enqueue and
  * advance are one transaction: a failed advance leaves no run behind, and
- * the next tick fires the slot exactly once.
+ * the next tick fires the slot exactly once. A schedule whose owner no longer
+ * exists is disabled with a `system` row instead of firing a run that could
+ * only fail (`AgentRunSchedule.userId` has no FK — WARP-2744 item 4).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -22,12 +24,14 @@ vi.mock("../services/notifications.service.js", () => ({ sendNotification: vi.fn
 import { tickAgentRunSchedules } from "../services/agent-run-schedule-ticker.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 
+const OWNER = { id: "u-owner", username: "romain", role: "owner" };
+
 beforeEach(() => recordActivityMock.mockClear());
 
 describe("agent-run-schedule ticker (WARP-2180)", () => {
   it("fires due schedules as queued runs attributed to the creator, advances nextFireAt, leaves future ones alone", async () => {
     const now = new Date("2026-09-04T06:00:30Z");
-    const db = createAgentRunPrismaMock({ now: () => now });
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
     await db.prisma.agentRunSchedule.create({
       data: { userId: "u-owner", goal: "sweep last night's clips", model: "m", maxIter: 10, rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "UTC", nextFireAt: new Date("2026-09-04T06:00:00Z") },
     });
@@ -47,7 +51,7 @@ describe("agent-run-schedule ticker (WARP-2180)", () => {
 
   it("disables a schedule whose RRULE no longer parses, with a system row", async () => {
     const now = new Date("2026-09-04T06:00:30Z");
-    const db = createAgentRunPrismaMock({ now: () => now });
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
     await db.prisma.agentRunSchedule.create({
       data: { userId: "u-owner", goal: "g", model: "m", maxIter: 10, rrule: "FREQ=NONSENSE", timezone: "UTC", nextFireAt: new Date("2026-09-04T06:00:00Z") },
     });
@@ -61,7 +65,7 @@ describe("agent-run-schedule ticker (WARP-2180)", () => {
 
   it("enqueue + advance are atomic: a failed advance leaves no run, the next tick fires the slot once", async () => {
     const now = new Date("2026-09-04T06:00:30Z");
-    const db = createAgentRunPrismaMock({ now: () => now });
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
     await db.prisma.agentRunSchedule.create({
       data: { userId: "u-owner", goal: "g", model: "m", maxIter: 10, rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "UTC", nextFireAt: new Date("2026-09-04T06:00:00Z") },
     });
@@ -77,5 +81,26 @@ describe("agent-run-schedule ticker (WARP-2180)", () => {
     expect(db.rows).toHaveLength(1);
     expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 0, fired: 0, disabled: 0, skipped: 0 });
     expect(db.rows).toHaveLength(1);
+  });
+
+  it("disables a schedule whose owner no longer exists, with a system row, and enqueues nothing", async () => {
+    const now = new Date("2026-09-04T06:00:30Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
+    await db.prisma.agentRunSchedule.create({
+      data: { userId: "u-deleted", goal: "g", model: "m", maxIter: 10, rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "UTC", nextFireAt: new Date("2026-09-04T06:00:00Z") },
+    });
+    expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 1, fired: 0, disabled: 1, skipped: 0 });
+    expect(db.rows).toHaveLength(0);
+    expect(db.schedules[0]).toMatchObject({ enabled: false, lastFiredAt: now });
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system",
+        severity: "warn",
+        what: "Agent run schedule disabled (owner no longer exists)",
+        refs: expect.objectContaining({ userId: "u-deleted", reason: "user_missing" }),
+      }),
+    );
+    // Disabled means gone from the due set: the next tick inspects nothing.
+    expect(await tickAgentRunSchedules(db.prisma, now)).toEqual({ inspected: 0, fired: 0, disabled: 0, skipped: 0 });
   });
 });

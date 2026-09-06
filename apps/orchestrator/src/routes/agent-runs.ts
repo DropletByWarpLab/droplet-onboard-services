@@ -422,7 +422,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Unsupported RRULE" });
         return;
       }
-      const cap = config.agentMaxIter.capIter;
+      // WARP-2749 — a schedule's runs get the RUN cap, not the chat cap; the
+      // ticker enqueues with this maxIter verbatim.
+      const cap = config.agentRuns.maxIter;
       const created = (await prisma.agentRunSchedule.create({
         data: {
           userId: actor.id,

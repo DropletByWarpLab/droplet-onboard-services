@@ -379,7 +379,10 @@ another's is a 404, a wrong role a 403.
 with lock key `droplet:agent-run-schedule-ticker`. A due row **enqueues** a
 run (never executes one); the worker claims it and re-resolves the creator's
 reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
-disables the schedule with a `system` row. No second clock.
+disables the schedule with a `system` row. No second clock. A due schedule whose owner row is gone
+is disabled inside the fire transaction with a `system` activity row
+(`reason: user_missing`) instead of enqueuing a run that could only fail —
+`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4).
 
 **Completion** — a terminal status notifies the owner over the same
 `droplet/notifications/<username>` topic the park uses, with the result
