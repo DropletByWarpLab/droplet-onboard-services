@@ -26,7 +26,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { classify, type PolicyInput } from "../services/filing/policy.js";
-import { FILING_ERRORS } from "../services/filing/apply.service.js";
+import { FILING_ERRORS, applyProposal } from "../services/filing/apply.service.js";
 import {
   DOCUMENT_ERRORS,
   INITIAL_STATUS,
@@ -284,4 +284,138 @@ describe("🔴 a document whose kind and direction disagree is not filed", () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+
+// ── the three apply-time refusals, driven through applyProposal ─────────────
+
+/**
+ * 🔴 THE GUARDS ABOVE ARE UNIT-TESTED; THESE ARE THE SAME GUARDS AS THEY
+ * ACTUALLY FIRE.
+ *
+ * Everything else in this file tests `directionOf()`, `createLocalDocument()`
+ * and the policy table in isolation. None of it proves the three refusals in
+ * `apply.service.ts`'s `CREATE_MONEY_DOC` branch ever run — a branch that is
+ * deleted, reordered, or made unreachable by an early return would leave every
+ * one of those tests green (Romain, review of 2026-09-06).
+ *
+ * So these call `applyProposal` for real and assert the refusal AND that
+ * nothing was written. The prisma double is deliberately minimal: any table
+ * the branch reaches that is not stubbed here throws, which is itself a signal.
+ *
+ * ORDER MATTERS AND IS ASSERTED BY CONSTRUCTION. The branch checks the module
+ * first, then the customer, then the direction — so each test below satisfies
+ * every earlier guard, which is the only way to prove the guard under test is
+ * the one that fired rather than the first one.
+ */
+describe("🔴 the CREATE_MONEY_DOC refusals, as they actually fire", () => {
+  const BASE_PAYLOAD = {
+    kind: "INVOICE" as const,
+    currency: "USD",
+    total: "1250.00",
+    direction: "RECEIVABLE" as const,
+    companyId: "11111111-1111-4111-8111-111111111111",
+  };
+
+  function harness(opts: {
+    moneyEnabled: boolean;
+    payload: Record<string, unknown>;
+  }) {
+    const erpCreate = vi.fn(async () => {
+      // A sentinel: reaching here means all three refusals let this through.
+      throw new Error("REACHED_CREATE");
+    });
+    // The proposal is CLAIMED inside the transaction, before the branch runs —
+    // so the refusals below all throw with the claim already written, and the
+    // rollback is what un-writes it. (The PR body used to say the no-customer
+    // refusal happened "before the transaction opens"; it does not, and
+    // `apply.service.ts`'s own comment says "we are inside the transaction".)
+    const resultWrite = vi.fn(async () => ({}));
+    const db = {
+      ingestProposal: {
+        findUnique: vi.fn(async () => ({
+          id: "prop-1",
+          status: "PENDING",
+          policyClass: "REVIEW",
+          kind: "CREATE_MONEY_DOC",
+          confidence: 95,
+          payload: opts.payload,
+        })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        update: resultWrite,
+      },
+      moduleSetting: {
+        findUnique: vi.fn(async () => ({ moduleId: "money", enabled: opts.moneyEnabled })),
+      },
+      erpDocument: { create: erpCreate },
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+    };
+    const ctx = {
+      actorId: "u-owner",
+      resolveFileId: vi.fn(async () => null),
+    };
+    return { db, ctx, erpCreate, resultWrite };
+  }
+
+  const run = (h: ReturnType<typeof harness>) =>
+    applyProposal(h.db as never, "prop-1", h.ctx as never);
+
+  it("refuses while the Money module is off, and writes nothing", async () => {
+    // A write the owner cannot see is indistinguishable from one that never
+    // happened — the opposite of what this feature promises.
+    const h = harness({ moneyEnabled: false, payload: { ...BASE_PAYLOAD } });
+    await expect(run(h)).rejects.toThrow(FILING_ERRORS.MONEY_MODULE_OFF);
+    expect(h.erpCreate).not.toHaveBeenCalled();
+    // The claim is written before the branch runs, so the ONLY thing that
+    // un-writes it is the transaction rolling back — nothing downstream ran.
+    expect(h.resultWrite).not.toHaveBeenCalled();
+  });
+
+  it("refuses a money document with no customer, with the module ON", async () => {
+    // Module enabled, so this can only be the companyId guard. An invoice
+    // filed against nobody is a claim on nobody.
+    const { companyId: _drop, ...noParty } = BASE_PAYLOAD;
+    const h = harness({ moneyEnabled: true, payload: noParty });
+    await expect(run(h)).rejects.toThrow(FILING_ERRORS.CHOICE_REQUIRED);
+    expect(h.erpCreate).not.toHaveBeenCalled();
+    // The claim is written before the branch runs, so the ONLY thing that
+    // un-writes it is the transaction rolling back — nothing downstream ran.
+    expect(h.resultWrite).not.toHaveBeenCalled();
+  });
+
+  it("refuses a kind and direction that disagree, with module ON and a customer", async () => {
+    // A BILL is money owed BY the business, so RECEIVABLE is a second opinion
+    // that contradicts the kind. Two opinions that disagree mean the
+    // extraction is incoherent — refuse rather than silently prefer one.
+    const h = harness({
+      moneyEnabled: true,
+      payload: { ...BASE_PAYLOAD, kind: "BILL", direction: "RECEIVABLE" },
+    });
+    await expect(run(h)).rejects.toThrow(FILING_ERRORS.PAYLOAD_UNREADABLE);
+    expect(h.erpCreate).not.toHaveBeenCalled();
+    // The claim is written before the branch runs, so the ONLY thing that
+    // un-writes it is the transaction rolling back — nothing downstream ran.
+    expect(h.resultWrite).not.toHaveBeenCalled();
+  });
+
+  it("VACUITY: a coherent payload gets past all three and reaches the write", async () => {
+    // Without this, all three tests above would pass just as happily if
+    // applyProposal threw on everything.
+    const h = harness({ moneyEnabled: true, payload: { ...BASE_PAYLOAD } });
+    await expect(run(h)).rejects.toThrow("REACHED_CREATE");
+    expect(h.erpCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("MUTATION: a module row that is absent entirely still refuses", async () => {
+    // `!moneyModule?.enabled` — the optional chain is load-bearing. A box that
+    // has never touched the Money switch has no row at all, and reading that
+    // as "not off" would file into a module the owner never turned on.
+    const h = harness({ moneyEnabled: true, payload: { ...BASE_PAYLOAD } });
+    h.db.moduleSetting.findUnique = vi.fn(async () => null) as never;
+    await expect(run(h)).rejects.toThrow(FILING_ERRORS.MONEY_MODULE_OFF);
+    expect(h.erpCreate).not.toHaveBeenCalled();
+    // The claim is written before the branch runs, so the ONLY thing that
+    // un-writes it is the transaction rolling back — nothing downstream ran.
+    expect(h.resultWrite).not.toHaveBeenCalled();
+  });
 });
