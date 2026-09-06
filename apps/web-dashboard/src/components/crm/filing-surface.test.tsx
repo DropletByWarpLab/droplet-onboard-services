@@ -45,6 +45,7 @@ const base: FilingProposal = {
   ncFileId: 8891,
   createdAt: "2026-09-05T10:00:00.000Z",
   decidedAt: null,
+  autoApplied: false,
   readable: true,
   payload: {
     name: "ACME Dental Supply Ltd",

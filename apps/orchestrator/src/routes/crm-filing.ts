@@ -57,6 +57,12 @@ import {
 import { listSkipped } from "../services/filing/skipped.service.js";
 import { readFilingHealth } from "../services/filing/digest.js";
 import { filingPauseState } from "../services/filing/worker.js";
+import { preflight } from "../services/filing/auto-apply.js";
+import {
+  buildReadback,
+  promotionSentence,
+  shouldOfferPromotion,
+} from "../services/filing/readback.js";
 import { AUDIT_PHRASES, recordFilingAuditBestEffort } from "../services/filing/audit.js";
 
 const REVIEWER = ["owner", "admin"] as const;
@@ -173,6 +179,7 @@ function toCard(row: {
   evidence: unknown;
   sourceKind: string;
   ncFileId: number | null;
+  autoApplied: boolean;
   createdAt: Date;
   decidedAt: Date | null;
 }) {
@@ -188,6 +195,11 @@ function toCard(row: {
     matchKind: row.matchKind,
     sourceKind: row.sourceKind,
     ncFileId: row.ncFileId,
+    // WARP-2733 — whether the BOX did this one, so the card can say so. An
+    // unattended write that looked hand-made would leave an owner unable to
+    // tell what they approved from what was approved on their behalf, which is
+    // the one distinction the whole consent argument rests on.
+    autoApplied: row.autoApplied,
     createdAt: row.createdAt.toISOString(),
     decidedAt: row.decidedAt?.toISOString() ?? null,
     readable: payload !== null,
@@ -223,13 +235,56 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       // (`lastTickAt`). Neither is a count of successes — a feature whose
       // health page reports only what it did looks healthiest once it stops.
       const health = await readFilingHealth(prisma, filingPauseState());
+
+      // WARP-2733 — the consent record, DERIVED from the policy table rather
+      // than written as prose. A hand-written sentence and a changed table
+      // means the box does something the owner was never told about while the
+      // screen still shows the old promise.
+      const owner = settings.enabledById
+        ? await prisma.user.findUnique({
+            where: { id: settings.enabledById },
+            select: { displayName: true },
+          })
+        : null;
+      const readback = buildReadback({
+        mode: settings.mode,
+        level: settings.level,
+        vertical: settings.vertical,
+        ownerName: owner?.displayName ?? null,
+        enabledAt: settings.enabledAt,
+      });
+
+      // Decision D1 — offer the promotion on EVIDENCE, from this owner's own
+      // corpus on this box's own model, rather than on a timer.
+      const [applied, corrections] = await Promise.all([
+        prisma.ingestProposal.count({ where: { status: "APPLIED" } }),
+        prisma.ingestProposal.count({ where: { status: { in: ["NOT_SAME", "UNDONE"] } } }),
+      ]);
+      const offerPromotion = shouldOfferPromotion({
+        applied,
+        corrections,
+        mode: settings.mode,
+      });
+
+      // Why auto mode is not running, when it is switched on but held back.
+      const pre = settings.mode === "auto" ? await preflight(prisma, settings) : null;
+
       res.json({
         mode: settings.mode,
         level: settings.level,
         vertical: settings.vertical,
         enabled: settings.mode !== "off",
         pending,
-        health,
+        health: {
+          ...health,
+          ...(pre && !pre.ok && pre.message
+            ? { paused: true, pausedReason: pre.reason, pausedMessage: pre.message }
+            : {}),
+        },
+        readback,
+        promotion: offerPromotion
+          ? { offer: true, sentence: promotionSentence({ applied, corrections }) }
+          : { offer: false },
       });
     } catch (err) {
       next(err);

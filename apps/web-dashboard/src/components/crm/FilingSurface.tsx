@@ -51,6 +51,7 @@ import {
   SkippedTab,
   type FilingTab,
 } from "./FilingTabs";
+import { FilingPromotion, FilingSettings } from "./FilingSettings";
 
 /** One line saying what would happen, in the owner's words. */
 export function headlineFor(p: FilingProposal): string {
@@ -304,6 +305,10 @@ export function FilingSurface(): JSX.Element {
           empty list on every one of them. Below the tabs it would read as a
           note about the review queue alone. */}
       <HealthRow health={summary?.health} />
+      {/* WARP-2733 — the offer sits with the health row, above the tabs,
+          because it is about the feature and not about the queue. It renders
+          itself into nothing unless the server says the evidence is there. */}
+      <FilingPromotion />
       <FilingTabList tab={tab} onTab={setTab} pending={summary?.pending ?? 0} />
       {body}
     </>
@@ -311,6 +316,7 @@ export function FilingSurface(): JSX.Element {
 
   if (tab === "rules") return chrome(<RulesTab />);
   if (tab === "skipped") return chrome(<SkippedTab />);
+  if (tab === "settings") return chrome(<FilingSettings />);
 
   if (isLoading) return chrome(<div className="pm-skel" style={{ height: 160 }} />);
 
