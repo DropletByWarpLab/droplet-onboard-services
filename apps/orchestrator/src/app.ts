@@ -58,6 +58,8 @@ import { createCrmFilingRouter } from "./routes/crm-filing.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
+// WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
+import { createBrainRouter } from "./routes/brain.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -454,6 +456,7 @@ export function createApp(
   // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
   // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
   app.use("/api", createAgentRunsRouter(prisma));
+  app.use("/api", createBrainRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.

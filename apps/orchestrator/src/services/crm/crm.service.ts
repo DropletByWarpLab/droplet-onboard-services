@@ -48,6 +48,8 @@ export const CRM_ERRORS = {
   /// it. Mirrors CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD (WARP-2554); the route
   /// answers both with a 409 that names `archive` as the action that works.
   COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD: "company_is_external_archive_instead",
+  /** WARP-2739 — the customer still has money documents this box wrote. */
+  COMPANY_HAS_LOCAL_DOCUMENTS: "company_has_local_documents",
   DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD: "deal_is_external_archive_instead",
   /// WARP-2577 — the five nullable FK columns this service used to write
   /// without checking. Each names the column the caller got wrong, which is
@@ -759,6 +761,26 @@ export async function deleteCompany(prisma: PrismaClient, id: string): Promise<v
   if (existing.origin === "EXTERNAL") {
     throw new Error(CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD);
   }
+  // 🔴 WARP-2739 — a LOCAL money document may not be orphaned, and this is
+  // where that is enforced rather than in a CHECK constraint.
+  //
+  // `ErpDocument_companyId_fkey` is `ON DELETE SET NULL`, so a CHECK requiring
+  // a non-null party on a local row would fire INSIDE the statement that nulls
+  // it: the delete would fail with a constraint error naming a table nobody
+  // was touching, and the company would be permanently un-deletable with no
+  // readable way out. (That trap is recorded twice in the schema already — see
+  // the ADR-048 actor-column note.) A named refusal here says the true thing
+  // instead, and the route turns it into a 409.
+  //
+  // LANDED documents are deliberately NOT counted: they keep the WARP-2581
+  // behaviour of surviving with `companyId = NULL`, because the vendor still
+  // holds the document and losing the account record must not lose the record
+  // of the money.
+  const localDocuments = await prisma.erpDocument.count({
+    where: { companyId: id, origin: "LOCAL" },
+  });
+  if (localDocuments > 0) throw new Error(CRM_ERRORS.COMPANY_HAS_LOCAL_DOCUMENTS);
+
   // Deals survive with `companyId = NULL` (SetNull in the schema): losing the
   // account record must not lose the record of the money.
   await prisma.crmCompany.delete({ where: { id } });

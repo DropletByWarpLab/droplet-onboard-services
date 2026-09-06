@@ -48,6 +48,17 @@ import {
   AGENT_RUN_SCHEDULE_LOCK_KEY,
   tickAgentRunSchedules,
 } from "./services/agent-run-schedule-ticker.service.js";
+// WARP-2749 (ADR-051) — the brain passes.
+import {
+  runDetectorPass,
+  seedBrainPasses,
+  BRAIN_PASS_LOCK_KEY,
+} from "./services/brain/brain-pass.service.js";
+import {
+  runCorpusPass,
+  BRAIN_CORPUS_LOCK_KEY,
+} from "./services/brain/brain-corpus.service.js";
+import { notifyFindings } from "./services/brain/brain-notify.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -635,6 +646,65 @@ async function main() {
     },
     { lockKey: AGENT_RUN_SCHEDULE_LOCK_KEY },
   );
+
+  // WARP-2749 (ADR-051) — the brain passes. Same clock, own lock keys, no
+  // second scheduler. Seeding happens HERE at boot rather than in
+  // `prisma/seed.ts`, which is invoked nowhere in scripts/ or docker/ on a
+  // shipped box — the reason the daily-report ToolSpec does not exist in
+  // production and its /reports button 404s.
+  if (config.brain.enabled) {
+    await seedBrainPasses(prisma);
+
+    // Deterministic pass: no model call, so it never contends for the box's
+    // single inference slot.
+    cronRuntime.scheduleInterval(
+      config.brain.detectorTickMs,
+      async () => {
+        const outcome = await runDetectorPass(prisma);
+        if (outcome.errors.length > 0) {
+          logger.warn({ outcome }, "brain.detector_pass.partial");
+        }
+        // Delivery runs INSIDE the same lock as the pass that produced the
+        // findings. Two instances notifying concurrently would double-announce
+        // the window between one stamping `notifiedAt` and the other reading it.
+        const notified = await notifyFindings(prisma);
+        if (notified.immediate > 0 || notified.digestSent) {
+          logger.info({ notified }, "brain.findings.notified");
+        }
+      },
+      { lockKey: BRAIN_PASS_LOCK_KEY },
+    );
+
+    // Corpus pass: DOES call the model, and therefore competes with
+    // interactive chat for the only inference slot. Bounded units per tick.
+    cronRuntime.scheduleInterval(
+      config.brain.corpusTickMs,
+      async () => {
+        // Same resolution the agent-run routes use. No model configured =
+        // nothing to call, so the pass is skipped rather than scheduled to
+        // fail hourly and fill `lastError` with noise.
+        const brainModel = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+        if (!brainModel) return;
+        const outcome = await runCorpusPass(
+          { prisma, chat: aiGateway.chat, model: brainModel },
+          { limit: config.brain.corpusUnitsPerRun },
+        );
+        if (outcome.errors.length > 0) {
+          logger.warn({ outcome }, "brain.corpus_pass.partial");
+        }
+      },
+      { lockKey: BRAIN_CORPUS_LOCK_KEY },
+    );
+
+    logger.info(
+      {
+        detectorTickMs: config.brain.detectorTickMs,
+        corpusTickMs: config.brain.corpusTickMs,
+        corpusUnitsPerRun: config.brain.corpusUnitsPerRun,
+      },
+      "brain.passes.scheduled",
+    );
+  }
   logger.info(
     {
       workerId: agentRunWorker.workerId,

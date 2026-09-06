@@ -132,7 +132,11 @@ export async function landMoneyDocuments(
     return { entity, landed: 0, skipped: rows.length, reason: "not-cloud" };
   }
 
-  const kind = entity === "invoice" ? "RECEIVABLE" : "PAYABLE";
+  // WARP-2739 — the kind enum widened from a direction into a kind. An
+  // `invoice` dataset lands an INVOICE and a `bill` dataset lands a BILL; the
+  // receivable/payable split that used to live in this column is now derived
+  // from kind in `money.service.ts`.
+  const kind = entity === "invoice" ? "INVOICE" : "BILL";
   const idField = entity === "invoice" ? "invoice_id" : "bill_id";
   const counterpartyField = entity === "invoice" ? "customer_id" : "vendor_id";
 
@@ -169,7 +173,10 @@ export async function landMoneyDocuments(
       amount: decimal(row, "amount"),
       balance: decimal(row, "balance"),
       currency: currency(row),
-      status: str(row, "status"),
+      // WARP-2739 — the vendor's own word, in its own column. `status` is now
+      // the BOX's lifecycle and is NULL on every landed row, enforced by
+      // `ErpDocument_provenance`.
+      vendorStatus: str(row, "status"),
       vendorUpdatedAt: date(row, "updated_at"),
       // The only freshness claim this box is entitled to make. Never "up to
       // date": Xero's modification timestamp does not fire on a due-date edit
@@ -186,6 +193,11 @@ export async function landMoneyDocuments(
         await db.erpDocument.create({
           data: {
             ...vendorOwned,
+            // WARP-2739 — stated, not defaulted. The column's default is
+            // LANDED, but a landing path that relied on a default would keep
+            // landing correctly if the default ever changed and would say
+            // nothing about which branch of the provenance CHECK it means.
+            origin: "LANDED",
             connectionId: connection.id,
             externalSystem: connection.provider,
             externalId,
