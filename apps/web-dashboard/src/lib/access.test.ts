@@ -568,7 +568,13 @@ describe("role wire shape → editable draft", () => {
 // operator clicked, with nothing on screen saying so.
 describe("WARP-2738 — role template → draft → payload round trip", () => {
   /** One shape per shipped template, in presentation order. Mirrors the
-   *  orchestrator catalogue; see the note above on why that is acceptable. */
+   *  orchestrator catalogue; see the note above on why that is acceptable.
+   *
+   *  ⚠ NOTHING ENFORCES THE MIRROR. WARP-2760/2761 moved the `crm`/`pm` tool
+   *  grants in `access-role-templates.ts` and this copy had to be edited by
+   *  hand in the same commit to stay true. The header above calls the server
+   *  suite "the drift alarm" — it is not one for THIS table; it cannot see it.
+   *  Re-read both halves together whenever either moves. */
   const ROLE_TEMPLATES: RoleTemplate[] = [
     {
       id: "front-desk",
@@ -592,7 +598,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "email", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "memory", level: "view" },
       ],
       connectorGrants: [],
@@ -656,8 +661,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "calendar", level: "use" },
         { domain: "reminders", level: "use" },
         { domain: "notifications", level: "use" },
-        { domain: "crm", level: "use" },
-        { domain: "pm", level: "use" },
         { domain: "memory", level: "use" },
         { domain: "money", level: "use" },
         { domain: "team_chat", level: "use" },
@@ -688,7 +691,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       toolGrants: [
         { domain: "money", level: "use" },
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "business", level: "view" },
         { domain: "data", level: "view" },
       ],
@@ -745,7 +747,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { moduleId: "team_chat", level: "act" },
       ],
       toolGrants: [
-        { domain: "crm", level: "view" },
         { domain: "email", level: "view" },
         { domain: "files", level: "view" },
         { domain: "calendar", level: "view" },
@@ -777,12 +778,11 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       ],
       toolGrants: [
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
+        { domain: "business", level: "view" },
         { domain: "calendar", level: "view" },
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "memory", level: "view" },
-        { domain: "pm", level: "view" },
       ],
       connectorGrants: [],
       cloudModelsAllowed: false,
@@ -892,13 +892,23 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
 
   // ── Trap: the four domains no UI group covers ───────────────────────────
   describe("ungrouped tool domains (the silent-drop trap)", () => {
-    it("TOOL_DOMAIN_GROUPS covers neither crm, money, team_chat nor agent_runs", () => {
+    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat nor agent_runs", () => {
       // The premise the whole seeding strategy rests on. If a group ever adopts
       // one of these, this pin fails and `templateToDraft` needs re-reading — a
       // grouped domain is fanned out, not passed through.
-      for (const ungrouped of ["crm", "money", "team_chat", "agent_runs"]) {
+      //
+      // WARP-2760: `crm` used to be on this list and is NOT any more. The
+      // Business row adopted it (with `pm`) when WARP-2583 moved `business` out
+      // from under System — both are ADR-045 legacy domains holding zero tools,
+      // grouped so a grant stored before the move still renders somewhere. That
+      // is the adoption this pin exists to announce, so it is stated here
+      // rather than silently dropped.
+      for (const ungrouped of ["money", "team_chat", "agent_runs"]) {
         expect(GROUPED_DOMAINS.has(ungrouped)).toBe(false);
       }
+      // ...and the other half of the same fact, so a future ungrouping is just
+      // as loud as an adoption was.
+      expect(GROUPED_DOMAINS.has("crm")).toBe(true);
     });
 
     it("seeds originalToolGrants with the template's rows VERBATIM, ungrouped included", () => {
@@ -907,21 +917,24 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         sortTools(byTemplateId("office-manager").toolGrants),
       );
       expect(draft.originalToolGrants.map((t) => t.domain)).toEqual(
-        expect.arrayContaining(["crm", "money", "team_chat"]),
+        expect.arrayContaining(["money", "team_chat"]),
       );
     });
 
-    it("REGRESSION: dropping the ungrouped rows loses crm, money and team_chat silently", () => {
+    it("REGRESSION: dropping the ungrouped rows loses money and team_chat silently", () => {
       // The defect this seeding exists to prevent. A draft that trusted the
       // groups to cover the tool axis — seeding originalToolGrants with only
       // the domains TOOL_DOMAIN_GROUPS knows — ships an Office Manager with no
-      // CRM, no Money and no Messages tools, and nothing anywhere says so.
+      // Money and no Messages tools, and nothing anywhere says so.
+      //
+      // WARP-2760: `crm` is deliberately absent from these assertions now. It
+      // is GROUPED (see the pin above), so it survives this filter — asserting
+      // it is dropped tested the old grouping, not the seeding strategy.
       const draft = templateToDraft(byTemplateId("office-manager"));
       draft.originalToolGrants = draft.originalToolGrants.filter((t) =>
         GROUPED_DOMAINS.has(t.domain),
       );
       const domains = draftToRolePayload(draft).toolGrants.map((t) => t.domain);
-      expect(domains).not.toContain("crm");
       expect(domains).not.toContain("money");
       expect(domains).not.toContain("team_chat");
     });
