@@ -40,9 +40,13 @@ describe("the Business group (WARP-2558)", () => {
     expect(labels.indexOf("Operations")).toBe(labels.indexOf("Business") + 1);
   });
 
-  it("holds Planning, Customers, Projects, Money and Practice, in that order", () => {
+  it("holds Planning, Brief, Customers, Projects, Money and Practice, in that order", () => {
+    // WARP-2752 — /brief sits second, beside Planning: both answer a question
+    // about the business as a whole rather than about one record, and both are
+    // role-gated rather than module-gated.
     expect(businessItems().map((i) => i.href)).toEqual([
       "/business",
+      "/brief",
       "/customers",
       "/projects",
       "/money",
@@ -59,12 +63,12 @@ describe("the Business group (WARP-2558)", () => {
 describe("each entry survives its neighbour being off (WARP-2558)", () => {
   it("shows Customers alone on a CRM-on, Projects-off box", () => {
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only("crm"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/customers", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/customers", "/practice"]);
   });
 
   it("shows Projects alone on a Projects-on, CRM-off box", () => {
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only("projects"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/projects", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/projects", "/practice"]);
   });
 
   it("shows Money alone on a books-on, CRM-off, Projects-off box", () => {
@@ -73,7 +77,7 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     // role-gated entries stand either side of it regardless, which is the
     // whole point of the split.
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only("money"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/money", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/money", "/practice"]);
   });
 
   it("keeps Practice with every module off — it is role-gated, not module-gated", () => {
@@ -82,7 +86,9 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     // else's module id would delete the practice's whole day the moment that
     // module was toggled, which is the /reports lesson one surface over.
     const visible = visibleItems(businessItems(), "owner", openCapabilities, only());
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/practice"]);
+    // /brief survives every module being off for the same reason /business and
+    // /practice do — none of the three is module-gated.
+    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/practice"]);
   });
 
   it("shows all three when the modules are on", () => {
@@ -92,7 +98,13 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
       openCapabilities,
       only("crm", "projects"),
     );
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
+    expect(visible.map((i) => i.href)).toEqual([
+      "/business",
+      "/brief",
+      "/customers",
+      "/projects",
+      "/practice",
+    ]);
   });
 
   it("shows the whole group when every module gate is on", () => {
@@ -104,6 +116,7 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     );
     expect(visible.map((i) => i.href)).toEqual([
       "/business",
+      "/brief",
       "/customers",
       "/projects",
       "/money",

@@ -410,6 +410,324 @@ model BusinessProfile {
   updatedAt         DateTime                @updatedAt
 }
 
+/// WARP-2748 (ADR-051) — the DERIVED half of the company's self-knowledge.
+///
+/// `BusinessProfile` above is what a human TYPED about the business: 1,500
+/// characters, written once by an onboarding interview, never refreshed from
+/// the company's own data. `BrainDigest` is what the box WORKED OUT by reading
+/// that data, one bounded pass at a time, and it accumulates.
+///
+/// WHY A TABLE AND NOT A BIGGER PROMPT. The shipped window is 16,384 tokens
+/// (`config.ts` OLLAMA_CONTEXT_LENGTH); a turn spends ~2,950 on fixed blocks
+/// plus ~3,426 on tool schemas, every tool result is capped at 8,000 chars by
+/// a Zod `.max(8000)` an operator cannot raise, and the in-loop guard
+/// force-finalizes past 13,824 tokens. That is ~40-45 KB of readable text per
+/// turn against a corpus five orders of magnitude larger. A question therefore
+/// CANNOT scan the company; it reads rows a scheduled run wrote earlier. The
+/// scan is offline and incremental, the read is cheap and always in budget.
+///
+/// WORKSPACE-WIDE, NO `workspaceId`. `Workspace` is a singleton (`id = 1`, and
+/// its own docstring calls it "the company brain"), so these rows follow the
+/// `MemoryFact` precedent and carry no workspace column. Visibility is `scope`
+/// plus the reader's role, not a tenancy key.
+///
+/// PROVENANCE IS NOT OPTIONAL. `sources` is a non-empty JSON array enforced by
+/// a CHECK in the migration, not by application code. A digest nobody can
+/// trace back to a document is a hallucination that has been given a row id,
+/// which is strictly worse than having no row: it reads as fact, it survives
+/// restarts, and it gets prompt-injected. The constraint is the feature.
+model BrainDigest {
+  id String @id @default(uuid())
+
+  kind BrainDigestKind
+
+  /// Short human-readable claim. `body` is length-capped so N rows fit the
+  /// fixed prompt block without the assembler truncating mid-row — the
+  /// `MemoryFact` MEMORY_FACTS_CHAR_BUDGET posture, applied at write time
+  /// instead of at splice time.
+  title String @db.VarChar(200)
+  body  String @db.VarChar(1200)
+
+  /// A LOOSE pointer, deliberately without a foreign key — the posture
+  /// `EntityLink` takes toward `File`, for the same reason plus one more.
+  ///
+  /// (1) Not every subject has a local row. An obligation found in a lease, a
+  /// theme across twenty documents, a project that exists only as a folder
+  /// nobody turned into a `PmProject` — these are exactly the things this
+  /// table exists to surface, and an FK would reject all of them.
+  /// (2) Evidence outlives its subject. A deleted deal's digest is still a
+  /// true statement about what happened; cascading it away destroys the record
+  /// of why a finding was ever raised.
+  ///
+  /// So a subject pointer CAN dangle, and the UI shows that. No column
+  /// pretends to track liveness: a `subjectState` nothing maintains is a
+  /// column that always lies (the `EntityLink.fileState` ruling).
+  subjectType BrainSubjectType?
+  subjectId   String?
+
+  /// Non-empty JSON array of `{sourceKind, sourceId, quote}`. See the CHECK
+  /// `BrainDigest_sources_not_empty` in the migration — the emptiness rule is
+  /// a database constraint on purpose, so a detector with a bug cannot write
+  /// an unfalsifiable row.
+  sources Json
+
+  /// Integer 0-100, NOT a 0..1 float — matching `EntityLink.confidence` and
+  /// `CrmPipelineStage.probability`. Two confidence scales in one schema is
+  /// how a 0.85 gets rendered as "85%" beside an 85 rendered as "8500%".
+  confidence Int?
+
+  /// Which corpus scope this was derived FROM, and therefore the widest
+  /// audience it may be shown TO. A `company` digest must never surface to a
+  /// `family` or `guest` reader: the enforcement point is this column, because
+  /// the corpus that produced the row is the only thing that knows.
+  scope BrainScope @default(personal)
+
+  /// WHICH department, when `scope` is `department`. Required exactly then
+  /// (`BrainDigest_department_scope_needs_id`), because a department-scoped row
+  /// with no department is unenforceable: the reader check is "is this person a
+  /// member of THAT groupfolder", and there is nothing to ask about. An enum
+  /// value nothing can enforce is the same defect as a column nothing maintains.
+  ///
+  /// Cascade, unlike the loose subject pointer above. This one is an
+  /// ACCESS-CONTROL key, and an access key that dangles is a leak: a digest
+  /// naming a deleted department would fall through the membership test.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  /// Accumulation and decay. A re-run over unchanged input advances
+  /// `lastConfirmedAt` and writes nothing else; a superseding row points back
+  /// here rather than deleting, so the reason a claim changed stays readable.
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+  supersededById  String?
+
+  /// The detector or pass that produced this. Lets one noisy producer be
+  /// switched off without touching the others.
+  detectorKey String
+
+  /// The idempotency key, computed and stored by the service — NOT a compound
+  /// `@@unique` over the nullable subject columns.
+  ///
+  /// READ THIS BEFORE "SIMPLIFYING" IT AWAY. `subjectType` and `subjectId` are
+  /// null on every theme-shaped row, and Postgres never treats two rows as
+  /// duplicates when an indexed column is NULL — so `@@unique([kind,
+  /// subjectType, subjectId, detectorKey])` would reject nothing and P2002
+  /// would never fire. `EntityLink` hit exactly this and paid for it with five
+  /// partial unique indexes that `prisma.upsert` cannot address, forcing an
+  /// updateMany-then-create retry at every call site. A single NOT NULL
+  /// derived column makes the uniqueness real AND keeps `upsert` usable, which
+  /// is precisely what an idempotent nightly loop needs.
+  dedupeKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  @@index([kind, scope])
+  @@index([subjectType, subjectId])
+  @@index([scope, lastConfirmedAt(sort: Desc)])
+  @@index([departmentId, scope])
+  @@index([detectorKey])
+}
+
+/// WARP-2748 (ADR-051) — what the box thinks you should DO about what it read.
+///
+/// A digest is a claim; a finding is a claim with a consequence and a status a
+/// human moves. They are separate tables because their lifecycles differ: a
+/// digest is superseded silently as understanding improves, a finding is
+/// acknowledged, actioned or dismissed BY SOMEBODY and that decision must
+/// stick.
+///
+/// IDEMPOTENCY IS THE WHOLE DESIGN. `dedupeKey` (detector + subject) is what
+/// makes the same overdue invoice on Tuesday UPDATE Monday's row instead of
+/// creating a second one. Without it a nightly loop produces a growing pile of
+/// near-duplicates, the operator mutes the feature inside a week, and a muted
+/// feature is a deleted feature. This is the most likely way the brain fails in
+/// production, and it is a schema problem rather than a prompt problem.
+model BrainFinding {
+  id String @id @default(uuid())
+
+  kind BrainFindingKind
+
+  title     String @db.VarChar(200)
+  rationale String @db.VarChar(2000)
+
+  /// Minor units plus currency, the `CrmDeal.amountMinor` shape, and NULLABLE
+  /// on purpose. A finding without a number is still a finding ("this contract
+  /// auto-renews in 9 days and nobody has looked at it"); a finding carrying a
+  /// number the box invented is worse than one carrying none, so a detector
+  /// that cannot compute an impact must leave it null rather than guess. The
+  /// migration's `BrainFinding_impact_needs_currency` CHECK is the same
+  /// all-or-nothing pairing as `CrmDeal_amount_needs_currency`.
+  impactMinor BigInt?
+  currency    String?
+
+  /// Non-empty JSON `{digestIds, sources}`. Same rule and same reason as
+  /// `BrainDigest.sources`, enforced by CHECK: a finding whose evidence array
+  /// is empty must fail at the database, not merely look weak in review.
+  evidence Json
+
+  confidence Int?
+
+  /// EXPLICIT status column, never derived from a timestamp being null — the
+  /// no-guessing rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  status BrainFindingStatus @default(new)
+
+  /// Required when `status` is `dismissed` (`BrainFinding_dismissed_needs_reason`).
+  /// A dismissal with no reason is indistinguishable from a bug in the
+  /// detector, and the reason is the only thing that stops the same finding
+  /// being raised again next week.
+  dismissedReason String? @db.VarChar(500)
+
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for and `EntityLink.createdById` restates. SetNull:
+  /// removing a person must not delete the business's findings.
+  assignee   User?   @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  assigneeId String?
+
+  detectorKey String
+
+  /// See `BrainDigest.dedupeKey` — same reasoning, same NULL trap avoided.
+  dedupeKey String
+
+  scope BrainScope @default(personal)
+
+  /// See `BrainDigest.departmentId` — same rule, same CHECK, same Cascade.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+
+  /// WARP-2752 — when this finding was last TOLD to somebody.
+  ///
+  /// Without it an hourly pass re-notifies the same overdue invoice every hour
+  /// forever, which is precisely how a nightly feature earns a mute. Null means
+  /// "nobody has been told yet", and it is the queue the digest drains.
+  /// Deliberately NOT derived from `status`: a finding can be acknowledged in
+  /// the UI without ever having been pushed, and re-notifying it then would be
+  /// telling someone what they just read.
+  notifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  /// The notification queue: unnotified findings, newest first.
+  @@index([notifiedAt, status])
+  @@index([departmentId, status])
+  @@index([status, kind])
+  @@index([detectorKey, status])
+  @@index([status, impactMinor(sort: Desc)])
+  @@index([assigneeId, status])
+  @@index([scope, status])
+}
+
+/// What a digest is ABOUT, structurally. `metric` and `theme` rows normally
+/// carry no subject at all.
+enum BrainDigestKind {
+  entity
+  project
+  obligation
+  theme
+  metric
+  relationship
+}
+
+/// Mirrors `EntityLinkSubject` and extends it with the two things a digest can
+/// describe that a file-link cannot: a document and a bare file.
+enum BrainSubjectType {
+  COMPANY
+  CONTACT
+  DEAL
+  PROJECT
+  WORK_ITEM
+  DOCUMENT
+  FILE
+}
+
+/// The corpus a row was derived from, which bounds who may read it.
+/// `personal` = one user's own space; `department` = a groupfolder its members
+/// share; `company` = the household / whole-business corpus, owner+admin only.
+enum BrainScope {
+  personal
+  department
+  company
+}
+
+enum BrainFindingKind {
+  loss
+  risk
+  inefficiency
+  opportunity
+  inconsistency
+}
+
+enum BrainFindingStatus {
+  new
+  acknowledged
+  actioned
+  dismissed
+  stale
+}
+
+/// WARP-2749 (ADR-051) — the durable position of a brain pass.
+///
+/// ONE ROW PER PASS, and the row IS the cursor. A pass re-reads its own row on
+/// every tick, works from `cursor` forward, and writes the new position back in
+/// the SAME transaction as the rows it produced. That is what makes a crash
+/// mid-pass re-digest at most one unit instead of skipping one: there is no
+/// window in which the cursor has moved but the output has not landed.
+///
+/// NOT AN `AgentRun`, and not a second scheduler. `AgentRun` is a durable LLM
+/// conversation with a lease, a heartbeat and an iteration budget; this is a
+/// bookmark. The deterministic detector pass needs no model call at all (see
+/// `detectors/`), so giving it an AgentRun would buy a lease it does not need
+/// and an inference slot it must not hold. The corpus pass, which DOES call the
+/// model, still records its position here and runs under the one sanctioned
+/// clock (`cronRuntime.scheduleInterval` with an advisory lock), because the
+/// repo has exactly one scheduler and a guard test pins that.
+///
+/// COUNTERS ARE ON THE SURFACE ON PURPOSE. An operator who believes the brain
+/// read everything on night one stops trusting it the first time it misses
+/// something. `unitsSeen` / `unitsDigested` / `lastError` are what `/brief`
+/// renders as coverage, so "three weeks to first-pass a 5,000-document corpus"
+/// is a visible fact rather than a footnote in a brief nobody opened.
+model BrainPass {
+  /// Stable identifier for the pass, e.g. "detectors" or "corpus.documents".
+  /// Primary key: exactly one row per pass, upserted at boot, so a pass can
+  /// never accidentally run two positions in parallel.
+  passKey String @id
+
+  /// Opaque, pass-defined. The corpus pass stores an "updatedAt|id" watermark
+  /// (a bare timestamp loses rows that share a millisecond — the WARP-2743
+  /// pagination bug, avoided here rather than relearned). The detector pass
+  /// stores nothing: it is a set of deterministic queries over landed rows and
+  /// re-running it is the point, so it has no position to keep.
+  cursor String?
+
+  /// Explicit enable switch, never derived from absence. A pass that is off
+  /// must look different from a pass that has never run — the no-guessing
+  /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  enabled Boolean @default(true)
+
+  lastRunAt      DateTime?
+  lastSucceededAt DateTime?
+  /// Cleared on every success. A stale error string on a healthy pass is the
+  /// same lie as a status column nothing resets.
+  lastError      String?  @db.VarChar(1000)
+
+  /// Cumulative coverage counters, for the /brief coverage line.
+  unitsSeen     Int @default(0)
+  unitsDigested Int @default(0)
+  rowsWritten   Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+}
+
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
 ///
 /// A 60 s apscheduler tick in `services/routing/scheduler.py` polls
@@ -2221,6 +2539,9 @@ model User {
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
+  // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
+  // owning side — removing a person must not delete the business's findings.
+  brainFindings    BrainFinding[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -5308,6 +5629,11 @@ model Department {
   /// two halves share a row and nothing else.
   pmProjects        PmProject[]            @relation("PmProjectDepartment")
   pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
+  // WARP-2748 (ADR-051): department-scoped brain rows. Cascade on the owning
+  // side — a digest naming a deleted department would fall through the
+  // membership test, so an access key must never dangle.
+  brainDigests      BrainDigest[]
+  brainFindings     BrainFinding[]
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which

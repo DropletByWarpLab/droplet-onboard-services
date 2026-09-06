@@ -234,6 +234,27 @@ const envSchema = z.object({
   // measured per-tool result-size distribution (`agent_tool_result_size`
   // debug lines), not by feel.
   AGENT_TOOL_RESULT_CAP_CHARS: z.coerce.number().int().min(1000).max(8000).default(8000),
+  // WARP-2749 (ADR-051) — the brain passes.
+  //
+  // BRAIN_DETECTOR_TICK_MS drives the DETERMINISTIC pass. It makes no model
+  // call, so it is cheap and can run often; hourly is a compromise between
+  // "an overdue invoice is noticed the same day" and "nothing is gained by
+  // re-querying the same rows every minute".
+  BRAIN_DETECTOR_TICK_MS: z.coerce.number().int().positive().default(60 * 60_000),
+  // BRAIN_CORPUS_TICK_MS drives the LLM pass, and its floor is the reason it
+  // is a separate knob. The box runs ONE inference at a time
+  // (scheduler max_concurrent=1) with no turn-level timeout, so this pass
+  // COMPETES WITH INTERACTIVE CHAT for the only slot. Hourly, ten units a
+  // tick, is ~240 documents/day — deliberately slow. Raising it does not make
+  // the brain smarter, it makes chat feel broken at night.
+  BRAIN_CORPUS_TICK_MS: z.coerce.number().int().min(60_000).default(60 * 60_000),
+  // Documents digested per corpus tick. Bounded so one tick is a predictable
+  // slice of the inference slot rather than an open-ended sweep.
+  BRAIN_CORPUS_UNITS_PER_RUN: z.coerce.number().int().min(1).max(100).default(10),
+  // Master switch. OFF by default: the corpus pass reads the user's documents
+  // and writes derived rows, which is a capability an operator opts into (see
+  // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  BRAIN_ENABLED: z.coerce.boolean().default(false),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
@@ -1363,6 +1384,14 @@ export const config = {
     parsed.AGENT_MAX_ITER_DEFAULT,
     parsed.AGENT_MAX_ITER_CAP,
   ),
+  // WARP-2749 (ADR-051) — brain pass cadence. See the env docs above; the
+  // corpus tick is the one that shares the box's single inference slot.
+  brain: {
+    enabled: parsed.BRAIN_ENABLED,
+    detectorTickMs: parsed.BRAIN_DETECTOR_TICK_MS,
+    corpusTickMs: parsed.BRAIN_CORPUS_TICK_MS,
+    corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
+  },
   // WARP-2177 — see resolveAgentRunLimits.
   agentRuns: resolveAgentRunLimits({
     concurrency: parsed.AGENT_RUN_CONCURRENCY,
