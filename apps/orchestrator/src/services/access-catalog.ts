@@ -329,6 +329,25 @@ export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter
  * (routes/llm.ts narrowAllowedToolsForRole — owner/admin keep everything,
  * family/guest lose every `requiresWrite` tool). A domain whose every tool
  * is a write tool is unreachable for the family/guest tiers.
+ *
+ * AN EMPTY DOMAIN IS UNREACHABLE TOO, and that is a DIFFERENT statement this
+ * function cannot tell apart from the one above: it adds a domain only on
+ * FINDING a non-write tool in it, so a domain holding no tools at all reads
+ * as "every tool here writes" when the truth is "no tool here yet". Today
+ * that is `crm` and `pm` — ADR-045 slices C and D moved every CRM and PM tool
+ * into `business`, and catalog.ts keeps the two declared but empty as the
+ * landing slots for a remote catalog (HubSpot, Atlassian).
+ *
+ * WARP-2760/2761 resolved the collision that produced — five role templates
+ * granting `crm` — by dropping those grants, NOT by returning empty domains
+ * from here. This is a live term in the effective-access intersection
+ * (effective-access.service.ts `reachable ∩ featureDomains ∩ granted`), so
+ * widening it would leave family and guest holding a standing grant on every
+ * toolless domain, and the FIRST tool a remote catalog registers into one may
+ * be a write — the exact case this filter exists to catch. Deciding otherwise
+ * is a change to the write filter and belongs in its own ticket;
+ * `access-catalog.test.ts` pins the current answer so it cannot be reversed
+ * by accident.
  */
 export function tierReachableDomains(tier: Role): Set<string> {
   if (tier === "owner" || tier === "admin") {
