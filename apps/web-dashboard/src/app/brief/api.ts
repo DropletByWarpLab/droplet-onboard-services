@@ -7,6 +7,7 @@
  * BRAIN_ENABLED is false, which is the default.
  */
 import { authFetch } from "@/lib/auth";
+import { formatMinor } from "@/components/crm/types";
 
 export type Finding = {
   id: string;
@@ -70,22 +71,18 @@ export async function moveFinding(
 /**
  * Minor units + ISO currency -> a string a human reads.
  *
- * Returns null for a missing amount rather than "0" or "—" baked in: a finding
- * with no impact is a real finding, and rendering a zero would state a number
- * the detector explicitly refused to invent.
+ * DELEGATES to `formatMinor` (components/crm/types.ts) rather than
+ * reimplementing it. The first draft did `Number(minor) / 100`, which is the
+ * exact float64 coercion `formatMinor`'s own docstring says it exists to avoid
+ * — "correct for every deal a demo contains and wrong for the one that
+ * matters" — and left two currency formatters to keep in step.
+ *
+ * The one thing kept from the local version is the non-numeric guard: this
+ * value arrives from JSON as an unvalidated string, and a null is the honest
+ * answer for something that is not a number at all.
  */
 export function formatImpact(minor: string | null, currency: string | null): string | null {
   if (minor === null || currency === null) return null;
-  const n = Number(minor);
-  if (!Number.isFinite(n)) return null;
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency,
-      maximumFractionDigits: 0,
-    }).format(n / 100);
-  } catch {
-    // An unknown or malformed vendor currency code must not blank the row.
-    return `${(n / 100).toFixed(0)} ${currency}`;
-  }
+  if (!/^-?\d+$/.test(minor)) return null;
+  return formatMinor(minor, currency);
 }

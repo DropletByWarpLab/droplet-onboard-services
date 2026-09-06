@@ -254,7 +254,16 @@ const envSchema = z.object({
   // Master switch. OFF by default: the corpus pass reads the user's documents
   // and writes derived rows, which is a capability an operator opts into (see
   // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
-  BRAIN_ENABLED: z.coerce.boolean().default(false),
+  // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
+  // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
+  // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
+  // corpus pass reading their documents would have switched it ON. This file
+  // already documents that trap two hundred lines up; the first draft of this
+  // line walked into it anyway.
+  BRAIN_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
