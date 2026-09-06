@@ -76,6 +76,10 @@ const prisma = {
     deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   crmCompany: { findMany: vi.fn().mockResolvedValue([]) },
+  // The settings PATCH reads the STORED mode and writes in one transaction, so
+  // the callback gets the same stub back — this mock is not modelling isolation,
+  // only the shape.
+  $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
 } as never;
 
 function appAs(user: Principal) {
@@ -87,6 +91,25 @@ function appAs(user: Principal) {
   });
   app.use("/api", createCrmFilingRouter(prisma));
   return app;
+}
+
+/** The argument the handler passed to `autoFilingSetting.upsert`. */
+function upsertArg(): { create: Record<string, unknown>; update: Record<string, unknown> } {
+  const m = (prisma as unknown as {
+    autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
+  }).autoFilingSetting.upsert.mock;
+  return m.calls[0][0] as { create: Record<string, unknown>; update: Record<string, unknown> };
+}
+
+/** Put a stored row behind the read the handler now does first. */
+function storedMode(mode: string | null): void {
+  (prisma as unknown as {
+    autoFilingSetting: { findUnique: ReturnType<typeof vi.fn> };
+  }).autoFilingSetting.findUnique.mockResolvedValue(
+    mode === null
+      ? null
+      : { id: "singleton", mode, enabledById: "u-owner", enabledAt: new Date("2026-09-01") },
+  );
 }
 
 const OWNER = { id: "u-owner", username: "owner", displayName: "Owner", role: "owner" as Role };
@@ -299,15 +322,11 @@ describe("undo is a human's decision", () => {
 
 describe("turning filing on", () => {
   it("stamps the enabling owner from the SESSION, never the body", async () => {
+    storedMode(null); // no row yet — this IS the off -> on edge
     await request(appAs(OWNER))
       .patch("/api/crm/filing/settings")
       .send({ mode: "propose" });
-    const call = (prisma as unknown as {
-      autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
-    }).autoFilingSetting.upsert.mock.calls[0][0] as {
-      create: { enabledById: string | null };
-      update: { enabledById?: string };
-    };
+    const call = upsertArg();
     expect(call.create.enabledById).toBe("u-owner");
     expect(call.update.enabledById).toBe("u-owner");
   });
@@ -316,12 +335,11 @@ describe("turning filing on", () => {
     // `enabledAt` is the BACKLOG BOUNDARY as well as the consent stamp: the
     // worker will not claim a source older than it. An unrelated settings edit
     // must not move it.
+    storedMode("propose");
     await request(appAs(OWNER))
       .patch("/api/crm/filing/settings")
       .send({ level: "also_create" });
-    const call = (prisma as unknown as {
-      autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
-    }).autoFilingSetting.upsert.mock.calls[0][0] as { update: Record<string, unknown> };
+    const call = upsertArg();
     expect(call.update).not.toHaveProperty("enabledAt");
     expect(call.update).toMatchObject({ level: "also_create" });
   });
@@ -331,6 +349,65 @@ describe("turning filing on", () => {
       .patch("/api/crm/filing/settings")
       .send({ mode: "propose", canaryPassedAt: "2026-01-01T00:00:00.000Z" });
     expect(res.status).toBe(400);
+  });
+
+  it("🔴 MUTATION: turning filing OFF clears the actor pair — or the CHECK 500s and filing stays ON", async () => {
+    // `AutoFilingSetting_enabled_has_actor` is a BICONDITIONAL:
+    //
+    //     ("mode" <> 'off') = ("enabledById" IS NOT NULL AND "enabledAt" IS NOT NULL)
+    //
+    // so when filing goes off the actor pair is REQUIRED TO BE ABSENT, not
+    // merely allowed to be. Leaving it populated is `false = true` — a 23514
+    // the route's catch does not recognise, so a 500, and because the statement
+    // rolls back the row still says 'propose'. The off switch did not turn
+    // filing off, and the worker kept reading the owner's files.
+    //
+    // Asserted on the WRITE rather than the response, because a mocked prisma
+    // has no CHECK to violate: the invariant this test defends lives in
+    // Postgres, and the pg-lane companion in filing-schema.pg.test.ts exercises
+    // it for real.
+    storedMode("propose");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "off" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "off", enabledById: null, enabledAt: null });
+  });
+
+  it("🔴 MUTATION: re-stamp enabledAt on propose -> auto — accepting the promotion retires the queue", async () => {
+    // The one click this feature is built around. `enabledAt` is the backlog
+    // BOUNDARY as well as the consent stamp, so moving it to now excludes every
+    // document still waiting from ever being claimed. Those rows never reach a
+    // terminal status, so they show up in no tab and in no count: saying yes to
+    // Droplet would silently discard the queue it had just offered to file.
+    //
+    // The pre-existing no-refresh test could not catch this: it sends a
+    // `level`-only body, where the old `turningOn` was already false because no
+    // mode was named at all. The mode CHANGE is the case that mattered.
+    storedMode("propose");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "auto" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "auto" });
+    expect(call.update).not.toHaveProperty("enabledAt");
+    expect(call.update).not.toHaveProperty("enabledById");
+  });
+
+  it("switching back on from OFF does stamp again — consent is re-taken", async () => {
+    // The complement of the two above: off -> propose is a genuine new grant,
+    // so it takes a fresh actor and a fresh boundary. Without this, a fix for
+    // the two cases above could simply never stamp and both would still pass.
+    storedMode("off");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "propose" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "propose", enabledById: "u-owner" });
+    expect(call.update.enabledAt).toBeInstanceOf(Date);
   });
 
   it("the canary CHECK surfaces as 422, not 500", async () => {

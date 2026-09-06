@@ -132,6 +132,55 @@ describe.skipIf(!RUN)("filing schema invariants live in the database (WARP-2729)
       expect(row.level).toBe("links_only"); // the safe default, not also_create
     });
 
+    it("🔴 refuses the UPDATE that turns filing off while the actor pair stays set", async () => {
+      // The direction above is tested on CREATE only, and CREATE is not how a
+      // box ever reaches this state — the route upserts a singleton, so
+      // turning filing off is an UPDATE of a row that already carries consent.
+      // That path shipped writing mode='off' and leaving enabledById/enabledAt
+      // populated: `false = true`, 23514, a 500 the route did not recognise,
+      // and a rolled-back statement leaving the row still saying 'propose'.
+      // The off switch did not turn filing off.
+      await prisma.autoFilingSetting.create({
+        data: {
+          id: "singleton",
+          mode: "propose",
+          enabledById: `${P}owner`,
+          enabledAt: new Date(),
+        },
+      });
+
+      await expect(
+        prisma.autoFilingSetting.update({
+          where: { id: "singleton" },
+          data: { mode: "off" },
+        }),
+      ).rejects.toThrow(/AutoFilingSetting_enabled_has_actor/);
+
+      // And the row is untouched, which is the part that made this dangerous:
+      // the owner saw an error and filing carried on reading their files.
+      const after = await prisma.autoFilingSetting.findUnique({ where: { id: "singleton" } });
+      expect(after?.mode).toBe("propose");
+    });
+
+    it("accepts the same update when mode and the actor pair are cleared together", async () => {
+      await prisma.autoFilingSetting.create({
+        data: {
+          id: "singleton",
+          mode: "propose",
+          enabledById: `${P}owner`,
+          enabledAt: new Date(),
+        },
+      });
+
+      const off = await prisma.autoFilingSetting.update({
+        where: { id: "singleton" },
+        data: { mode: "off", enabledById: null, enabledAt: null },
+      });
+      expect(off.mode).toBe("off");
+      expect(off.enabledById).toBeNull();
+      expect(off.enabledAt).toBeNull();
+    });
+
     it("🔴 refuses auto mode until a canary pass is recorded on this box", async () => {
       // WARP-2732 is auto mode's own stated merge condition. PR #2005 set
       // itself an equivalent condition and shipped without ever running it;
