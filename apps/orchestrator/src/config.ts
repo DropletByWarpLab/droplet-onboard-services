@@ -936,6 +936,20 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- Email indexer (WARP-2734 mailbox provisioning) ---
+  //
+  // The hop that lets an owner connect a mailbox at all. `services/email-indexer`
+  // owns the Fernet key at /data/secrets/email.key and the IMAP client, so it
+  // is the only process that can verify a mailbox and produce a `passwordEnc`;
+  // this orchestrator owns the `EmailAccount` row. Mounting the key here
+  // instead would put a new secret and a hand-rolled Fernet encoder into the
+  // process that already holds every other credential, to save one mesh hop.
+  //
+  // Defaulted like FILE_INDEXER_URL rather than left empty: the service is
+  // compose-internal, and a box that has the `email` profile has it at this
+  // name. A box that does not simply never reaches the route.
+  EMAIL_INDEXER_URL: z.string().default("http://email-indexer:8086"),
+
   // --- ERP direct-SQL bridge (WARP-1106) ---
   // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
   // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there

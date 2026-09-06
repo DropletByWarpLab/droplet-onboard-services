@@ -920,7 +920,18 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 #             install doesn't scan the LAN or hit a missing switch on boot)
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+#
+# WARP-2734: `email` is appended below, not listed here, because it is
+# CONDITIONAL. The email-indexer is the only service whose profile depends on
+# a secret rather than on the platform: it needs SERVICE_TOKEN_EMAIL both to
+# call the orchestrator and to authenticate the provisioning endpoint that
+# takes a mailbox password. Same predicate the module registry already uses
+# (`id: "email"`, `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`).
+#
+# 🔴 It shipped under `profiles: ["full"]` alone, and `full` is never in this
+# default — so the IMAP subsystem has never run on any box that ever shipped.
+# That is the defect WARP-2734 exists to close; the conditional is the close.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
 
 # --- NVR recordings target (WARP-2099) ---
 # Where Frigate writes 24/7 camera footage. Written EXPLICITLY on every

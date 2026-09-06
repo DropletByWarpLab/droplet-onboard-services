@@ -34,6 +34,11 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
+import {
+  connectMailbox,
+  disconnectMailbox,
+  PROVISION_ERRORS,
+} from "../services/email/provision.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("email-route");
@@ -224,6 +229,59 @@ export interface EmailGate {
   outboundEmailEnabled(): Promise<boolean>;
 }
 
+
+/**
+ * WARP-2734 — the shape of "connect a mailbox".
+ *
+ * 🔴 `.strict()`, and that is not decoration. This is the only body on the box
+ * that carries a third-party plaintext password, so an unknown key is refused
+ * rather than ignored: a caller must not be able to smuggle a field past the
+ * allow-list and have it reach a create.
+ *
+ * The hostnames are deliberately NOT validated against a pattern here. A
+ * regex would be a second, weaker opinion about what a safe destination is —
+ * `assertOutboundDestinationAllowed` in the service RESOLVES the name and
+ * rejects a private answer, which is the check that actually matters and the
+ * one a pattern cannot make.
+ */
+const connectAccountBody = z
+  .object({
+    displayName: z.string().trim().min(1).max(200),
+    address: z.string().trim().email().max(320),
+    imapHost: z.string().trim().min(1).max(255),
+    imapPort: z.number().int().min(1).max(65535).default(993),
+    imapTls: z.boolean().default(true),
+    smtpHost: z.string().trim().min(1).max(255),
+    smtpPort: z.number().int().min(1).max(65535).default(465),
+    smtpTls: z.boolean().default(true),
+    username: z.string().trim().min(1).max(320),
+    password: z.string().min(1).max(1024),
+  })
+  .strict();
+
+/**
+ * Which HTTP answer each provisioning refusal earns.
+ *
+ * Separated from the route so the mapping is readable as a table. Every one of
+ * these is a state the owner can do something about, and the dashboard turns
+ * each code into one sentence naming the thing to do.
+ */
+function provisionStatusFor(code: string): number {
+  switch (code) {
+    case PROVISION_ERRORS.DUPLICATE_ADDRESS:
+      return 409;
+    case PROVISION_ERRORS.BLOCKED_HOST:
+    case PROVISION_ERRORS.MAILBOX_REFUSED:
+      // 422, not 400: the request was well formed. The mailbox refused it, or
+      // the destination is one this box will not dial.
+      return 422;
+    case PROVISION_ERRORS.INDEXER_UNAVAILABLE:
+      return 503;
+    default:
+      return 500;
+  }
+}
+
 export function createEmailRouter(
   prisma: PrismaClient,
   gate: EmailGate,
@@ -254,6 +312,109 @@ export function createEmailRouter(
           },
         })) as unknown as AccountRow[];
         res.json({ accounts: rows });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  /**
+   * Connect a mailbox. The first writer `EmailAccount` has ever had.
+   *
+   * 🔴 `requireRole` is passed AT REGISTRATION, never as an inline check. An
+   * inline `if (role !== "admin") return 403` returns the same status and
+   * skips `recordAccessDenied`, so the attempt leaves no policy-violation row
+   * — the ADR-042 rule, and there is a test that fails only on that
+   * difference.
+   *
+   * owner/admin only, and NOT `family`: connecting a mailbox hands this box a
+   * credential to a third-party account and starts an outbound connection on a
+   * schedule. That is an administrative act even when the mailbox is personal.
+   */
+  router.post(
+    "/email/accounts",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      const parsed = connectAccountBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        // `flatten()` is the ADR-042 house shape for a rejected body — the
+        // same `{error, details}` every credential route answers with.
+        //
+        // ⚠ It is NOT the reason the password stays out: zod v3 carries no
+        // input value in `issues` either (`invalid_string` reports a
+        // validation name, `unrecognized_keys` reports KEY names). Verified,
+        // because the comment that used to be here claimed otherwise and a
+        // mutation proved it wrong. The password stays out because nothing on
+        // this path ever writes `req.body` — asserted by
+        // `email.accounts.test.ts`, which is a claim about THIS code rather
+        // than about a library's current behaviour.
+        res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+        return;
+      }
+      const actorId = req.user?.id;
+      if (!actorId) {
+        res.status(403).json({ error: "human_required" });
+        return;
+      }
+      try {
+        const account = await connectMailbox(prisma, parsed.data, actorId);
+        await recordActivity({
+          kind: "email",
+          severity: "info",
+          sourceIcon: "mail",
+          what: "Mailbox connected",
+          sub: account.address,
+          // 🔴 The address and the id. NEVER the username and never the
+          // password — the address is what the owner typed into a field
+          // labelled with it; the other two are credentials, and this row is
+          // read by more people than the mailbox is.
+          refs: { accountId: account.id, address: account.address },
+          actor: actorFromRequest(req),
+        });
+        // 🔴 The response carries no credential material — not the password,
+        // not the ciphertext, not the username. There is no endpoint anywhere
+        // that reveals a stored password, by construction.
+        res.status(201).json({ account });
+      } catch (err) {
+        const code = err instanceof Error ? err.message : "";
+        if ((Object.values(PROVISION_ERRORS) as string[]).includes(code)) {
+          res.status(provisionStatusFor(code)).json({ error: code });
+          return;
+        }
+        next(err);
+      }
+    },
+  );
+
+  /**
+   * Disconnect a mailbox.
+   *
+   * ⚠ `EmailThread`, `EmailMessage` and `EmailDraft` cascade on `accountId`,
+   * so this takes the stored mail with it. That is the shipped schema's
+   * decision; the route states it rather than discovering it.
+   */
+  router.delete(
+    "/email/accounts/:id",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const removed = await disconnectMailbox(prisma, req.params.id);
+        if (!removed) {
+          res.status(404).json({ error: "account_not_found" });
+          return;
+        }
+        await recordActivity({
+          kind: "email",
+          severity: "warn",
+          sourceIcon: "mail",
+          // `warn`, not `info`: the cascade takes every stored thread,
+          // message and draft with the account. That is worth a row somebody
+          // can find later when the mail is gone.
+          what: "Mailbox disconnected",
+          refs: { accountId: req.params.id },
+          actor: actorFromRequest(req),
+        });
+        res.status(204).end();
       } catch (err) {
         next(err);
       }
