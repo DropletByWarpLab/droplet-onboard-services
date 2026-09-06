@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,7 @@ def collect(conn, goldens: list[dict[str, Any]], corpus_prefix: str) -> list[dic
                 FROM "IngestProposal" p
                 JOIN "FileIndexStatus" f ON f."ncFileId" = p."ncFileId"
                 WHERE f."path" LIKE %s
+                ORDER BY p.id
                 """,
                 (f"%{corpus_prefix}%{fid}%",),
             )
@@ -91,8 +93,24 @@ def collect(conn, goldens: list[dict[str, Any]], corpus_prefix: str) -> list[dic
             status = cur.fetchone()
 
             payloads = [r[2] or {} for r in rows]
+            # 🔴 `if p and (...)`, not `if p`. The looser filter returned the
+            # FIRST payload's name even when that payload had no name key at
+            # all — and a fixture can plausibly produce both a
+            # CREATE_MONEY_DOC proposal (no `name`/`companyName`) and a
+            # CREATE_CUSTOMER one. With no ORDER BY, Postgres row order is
+            # unspecified, so `company_name_exact` could score a spurious miss
+            # on a fixture the model got right, and that metric gates `auto`
+            # mode at >= 0.90. A canary that returns a different verdict on
+            # identical corpora is the exact failure this suite exists to
+            # eliminate elsewhere. The ORDER BY above makes the tie-break
+            # deterministic regardless.
             company = next(
-                (p.get("name") or p.get("companyName") for p in payloads if p), None
+                (
+                    p.get("name") or p.get("companyName")
+                    for p in payloads
+                    if p and (p.get("name") or p.get("companyName"))
+                ),
+                None,
             )
             domain = next((p.get("domain") for p in payloads if p and p.get("domain")), None)
             total = next((p.get("total") for p in payloads if p and p.get("total")), None)
@@ -232,11 +250,29 @@ EXIT_FAIL = 1
 EXIT_CANNOT_RUN = 2
 
 
+DEFAULT_CORPUS_PREFIX = "extraction-eval"
+
+
+def resolve_corpus_prefix(explicit: str | None = None) -> str:
+    """Which seeded corpus the canary reads — explicit flag, then env, then default.
+
+    🔴 A FUNCTION rather than a signature default, because a signature default
+    cannot be overridden by the environment and both in-process callers
+    (`main.py`'s `cmd_run_extraction` and the server's `/run-extraction`) call
+    `run()` positionally with no prefix. `scripts/seed-filing-fixtures.sh` seeds
+    into `${FILING_EVAL_FOLDER:-extraction-eval}`, so an operator who set that
+    variable to avoid clobbering a previous corpus got a seed that succeeded and
+    a canary whose LIKE query still matched nothing — every golden reporting 0
+    proposals, a total failure with a completely misleading cause.
+    """
+    return explicit or os.environ.get("FILING_EVAL_FOLDER") or DEFAULT_CORPUS_PREFIX
+
+
 def run(
     database_url: str,
     model: str,
     out: str | Path | None = None,
-    corpus_prefix: str = "extraction-eval",
+    corpus_prefix: str | None = None,
 ) -> int:
     """Run the canary in-process and return one of the EXIT_* codes.
 
@@ -254,6 +290,8 @@ def run(
     Removing it removes the finding, an argv round-trip, and a whole class of
     "did the child inherit the right environment" questions.
     """
+    prefix = resolve_corpus_prefix(corpus_prefix)
+
     if psycopg is None:  # pragma: no cover - the box has it
         print("psycopg is not installed — this runner only works on a box", file=sys.stderr)
         return EXIT_CANNOT_RUN
@@ -266,8 +304,8 @@ def run(
     goldens = load_goldens(Path(__file__).parent)
 
     with psycopg.connect(database_url) as conn:
-        fixtures = collect(conn, goldens, corpus_prefix)
-        landed = assert_nothing_landed_from_phi(conn, fixtures, corpus_prefix)
+        fixtures = collect(conn, goldens, prefix)
+        landed = assert_nothing_landed_from_phi(conn, fixtures, prefix)
 
     verdict = evaluate(score_run(fixtures))
     if landed:
@@ -298,8 +336,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", help="write the results JSON here")
     parser.add_argument(
         "--corpus-prefix",
-        default="extraction-eval",
-        help="path fragment identifying the seeded corpus",
+        # `None`, not the literal default: a default here would ALWAYS beat
+        # FILING_EVAL_FOLDER, so the CLI would silently target the wrong corpus
+        # for an operator who set it. `run()` resolves the precedence —
+        # explicit flag, then env, then "extraction-eval".
+        default=None,
+        help="path fragment identifying the seeded corpus "
+        "(default: $FILING_EVAL_FOLDER, else 'extraction-eval')",
     )
     args = parser.parse_args(argv)
     return run(args.database_url, args.model, args.out, args.corpus_prefix)
