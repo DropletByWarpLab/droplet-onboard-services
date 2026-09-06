@@ -96,6 +96,13 @@ export async function runDetectorPass(
           confidence: r.confidence ?? null,
           detectorKey: detector.key,
           subjectKey: r.subjectKey,
+          // COMPANY scope, not personal. Every detector reads business-shared
+          // rows — `ErpDocument`, `CrmDeal` — which the CRM/ERP surfaces treat
+          // as household-shared with no per-user scoping. Labelling their
+          // output `personal` would have been a lie in both directions: it has
+          // no single owner to attribute it to, and /brief is owner/admin-only
+          // anyway, which is exactly who `company` admits.
+          scope: "company",
         });
         written += 1;
       }

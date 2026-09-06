@@ -482,6 +482,23 @@ model BrainDigest {
   /// the corpus that produced the row is the only thing that knows.
   scope BrainScope @default(personal)
 
+
+  /// WARP-2752 — WHOSE personal row this is. Required exactly when `scope` is
+  /// `personal`, and forbidden otherwise (`*_personal_scope_needs_owner`).
+  ///
+  /// Without it `personal` was UNENFORCEABLE: neither table had an owner
+  /// column, so `visibleScopeFilter` OR'd in `{ scope: "personal" }` for every
+  /// caller and every user saw every other user's personal rows — the exact
+  /// opposite of what the `BrainScope` docstring promises. An enum value
+  /// nothing can enforce is the same defect as a column nothing maintains, and
+  /// this is the second time that rule bit this schema.
+  ///
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for. Cascade: it is an ACCESS-CONTROL key, and an
+  /// access key that dangles is a leak.
+  owner   User?   @relation("BrainDigestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
   /// WHICH department, when `scope` is `department`. Required exactly then
   /// (`BrainDigest_department_scope_needs_id`), because a department-scoped row
   /// with no department is unenforceable: the reader check is "is this person a
@@ -526,6 +543,7 @@ model BrainDigest {
   @@index([kind, scope])
   @@index([subjectType, subjectId])
   @@index([scope, lastConfirmedAt(sort: Desc)])
+  @@index([ownerId, scope])
   @@index([departmentId, scope])
   @@index([detectorKey])
 }
@@ -592,6 +610,10 @@ model BrainFinding {
 
   scope BrainScope @default(personal)
 
+  /// See `BrainDigest.ownerId` — same rule, same CHECK, same Cascade.
+  owner   User?   @relation("BrainFindingOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
   /// See `BrainDigest.departmentId` — same rule, same CHECK, same Cascade.
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   departmentId String?
@@ -613,6 +635,8 @@ model BrainFinding {
   updatedAt DateTime @updatedAt
 
   @@unique([dedupeKey])
+  /// Personal reads lead with the owner — "my open findings".
+  @@index([ownerId, status])
   /// The notification queue: unnotified findings, newest first.
   @@index([notifiedAt, status])
   @@index([departmentId, status])
@@ -2541,7 +2565,14 @@ model User {
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
   // owning side — removing a person must not delete the business's findings.
-  brainFindings    BrainFinding[]
+  // WARP-2748: findings ASSIGNED to this person (SetNull — removing someone
+  // must not delete the business's findings).
+  brainFindings      BrainFinding[]
+  // WARP-2752: personal-scope rows this person OWNS. Distinct relations, and
+  // distinct delete behaviour: an owned row is Cascade because `ownerId` is an
+  // access-control key, where an assignment is mere provenance.
+  brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
+  brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
 
   @@index([role])
   @@index([accessRoleId])

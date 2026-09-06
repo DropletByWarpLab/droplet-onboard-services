@@ -305,22 +305,38 @@ describe("parseDigests (WARP-2749)", () => {
   });
 });
 
-describe("decimalToMinor (WARP-2754)", () => {
-  it("converts without a float round-trip", () => {
-    expect(decimalToMinor("1234.565")).toBe(123457n); // half-up, not 123456
-    expect(decimalToMinor("10")).toBe(1000n);
-    expect(decimalToMinor("0.005")).toBe(1n);
-    expect(decimalToMinor("0.004")).toBe(0n);
+describe("decimalToMinor — CURRENCY-AWARE (WARP-2754)", () => {
+  it("converts major units without a float round-trip", () => {
+    expect(decimalToMinor("1234.56", "USD")).toBe(123456n);
+    expect(decimalToMinor("10", "USD")).toBe(1000n);
+  });
+
+  it("uses the currency's OWN exponent, not a hardcoded 2", () => {
+    // The bug this replaced: hundredths for everything, which is 100x wrong
+    // for a 0-decimal currency and 10x wrong for a 3-decimal one — a
+    // confident, fabricated impact figure read straight to the model.
+    expect(decimalToMinor("1000", "JPY")).toBe(1000n); // 0 decimals
+    expect(decimalToMinor("1000", "KRW")).toBe(1000n);
+    expect(decimalToMinor("1.5", "KWD")).toBe(1500n); // 3 decimals
   });
 
   it("handles negatives symmetrically", () => {
-    expect(decimalToMinor("-10.50")).toBe(-1050n);
+    expect(decimalToMinor("-10.50", "USD")).toBe(-1050n);
+  });
+
+  it("defaults a well-formed but unlisted code to 2, and refuses a malformed one", () => {
+    // `minorUnitExponent`'s own contract: null means "that is not an alpha-3
+    // code at all", NOT "I have not heard of it". A well-formed unknown gets
+    // the default rather than being dropped.
+    expect(decimalToMinor("10", "ZZZ")).toBe(1000n);
+    expect(decimalToMinor("10", "not-a-code")).toBeNull();
   });
 
   it("returns null for absent or non-numeric input", () => {
-    expect(decimalToMinor(null)).toBeNull();
-    expect(decimalToMinor(undefined)).toBeNull();
-    expect(decimalToMinor("abc")).toBeNull();
+    expect(decimalToMinor(null, "USD")).toBeNull();
+    expect(decimalToMinor(undefined, "USD")).toBeNull();
+    expect(decimalToMinor("abc", "USD")).toBeNull();
+    expect(decimalToMinor("10", null)).toBeNull();
   });
 });
 

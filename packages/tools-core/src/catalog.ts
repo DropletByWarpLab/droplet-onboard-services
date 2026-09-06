@@ -441,7 +441,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
   business_find:
-    "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
+    "Look up a customer, a contact, a deal, a project, a job, your sales pipeline, or what the box worked out on its own — findings that need attention and standing facts read out of your documents",
   business_timeline: "See what has happened recently on a customer, deal or job",
   // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
   // it names what the OWNER gets, and says the quiet part — these three ask

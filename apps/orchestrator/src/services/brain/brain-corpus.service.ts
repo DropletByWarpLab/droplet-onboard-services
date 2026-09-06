@@ -242,7 +242,16 @@ export async function runCorpusPass(
         .join("\n")
         .slice(0, CORPUS_CHARS_PER_UNIT);
 
-      if (text.trim().length > 0) {
+      // The file's owner, as a local User.id. `FileIndexStatus.userId` is the
+      // Nextcloud username, which is NOT the local id — storing one and
+      // filtering on the other is the IDOR bug `FileComment` already paid for.
+      const ownerRow = await prisma.user.findFirst({
+        where: { OR: [{ username: f.userId }, { nextcloudUsername: f.userId }] },
+        select: { id: true },
+      });
+      const ownerId = ownerRow?.id ?? null;
+
+      if (text.trim().length > 0 && ownerId) {
         const res = await chat({
           model,
           messages: [
@@ -272,7 +281,15 @@ export async function runCorpusPass(
             // and WARP-2753 lands the consent posture. Writing `company` here
             // would widen the audience of every digest ahead of the decision
             // that governs it.
+            //
+            // `ownerId` is what MAKES that personal — the local User.id behind
+            // the file's Nextcloud owner. Without it `personal` was a label
+            // nothing enforced and every reader saw every other reader's rows.
+            // A file whose owner cannot be resolved is SKIPPED rather than
+            // written unscoped: an unattributable digest is exactly the row
+            // that would leak.
             scope: "personal",
+            ownerId,
           });
           digestsWritten += 1;
         }
@@ -287,10 +304,27 @@ export async function runCorpusPass(
       });
     } catch (err) {
       errors.push(`${f.path}: ${err instanceof Error ? err.message : String(err)}`);
-      // Do NOT advance past a unit that failed for an infrastructure reason —
-      // the next tick retries it. A poison document would stall the pass, which
-      // is why the error is recorded on the row where an operator can see it
-      // rather than swallowed.
+      // ADVANCE PAST IT, then stop this tick.
+      //
+      // The first draft did NOT advance, reasoning "the next tick retries it".
+      // That is right for a transient failure and catastrophic for a
+      // deterministic one: an oversized document, a decrypt failure, a chat()
+      // call that always errors on this input is refetched FIRST on every
+      // subsequent tick and breaks again — halting all corpus digestion for the
+      // whole box, indefinitely, with nothing but a passive `lastError` to say
+      // so. One poison document must not be able to stop the brain.
+      //
+      // So the cursor moves past the unit and the tick ends. The cost of the
+      // trade is explicit: a document that failed transiently is SKIPPED rather
+      // than retried, and is only revisited if it changes (its `updatedAt`
+      // moves it back into the window). A retry budget would be better and
+      // needs a column BrainPass does not have — that is the follow-up, not a
+      // reason to ship a wedge.
+      cursor = encodeCursor(f.updatedAt, f.userId, f.path);
+      await prisma.brainPass.update({
+        where: { passKey: CORPUS_PASS_KEY },
+        data: { cursor, unitsSeen: { increment: 1 } },
+      });
       break;
     }
   }
