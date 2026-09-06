@@ -49,22 +49,34 @@ interface DocumentOut {
   balance: string | null;
   /** Null means "this ledger's own currency", which the box does not know. */
   currency: string | null;
+  /** The document's state: the box's own lifecycle, or the vendor's word. */
   status: string | null;
+  /** WARP-2739 — quote, order, invoice, bill, credit note or receipt. */
+  kind: string;
   overdue: boolean;
   source: string;
 }
 
 interface WireDocument {
-  externalId: string;
-  kind: "RECEIVABLE" | "PAYABLE";
+  id: string;
+  /** WARP-2739 — null on a document this box wrote itself. */
+  externalId: string | null;
+  /** WARP-2739 — the six-value kind. Direction is a separate field now,
+   *  because a quote and an invoice are both receivable. */
+  kind: string;
+  direction: "RECEIVABLE" | "PAYABLE";
+  origin: "LANDED" | "LOCAL";
   counterparty: { name: string | null; externalId: string | null };
   dueAt: string | null;
   amount: string | null;
   balance: string | null;
   currency: string | null;
+  /** The vendor's own word, on a landed row. */
+  vendorStatus: string | null;
+  /** The box's own lifecycle, on a local row. */
   status: string | null;
   isOverdue: boolean;
-  externalSystem: string;
+  externalSystem: string | null;
   lastReadAt: string;
 }
 
@@ -99,16 +111,30 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       `/api/money/documents${suffix}`,
     );
     const documents: DocumentOut[] = wire.documents.map((doc) => ({
-      document: doc.externalId,
-      direction: doc.kind === "RECEIVABLE" ? "owed_to_us" : "owed_by_us",
+      // A landed document is known by the vendor's number; one this box wrote
+      // has no vendor number and is known by its own id. Never blank: the
+      // model is asked follow-up questions about a specific row, and "" is not
+      // something anybody can name.
+      document: doc.externalId ?? doc.id,
+      // WARP-2739 — read off the server's own `direction`, not re-derived from
+      // the kind. Two places deciding which way the money runs is one place too
+      // many, and this one would be the one nobody updates.
+      direction: doc.direction === "RECEIVABLE" ? "owed_to_us" : "owed_by_us",
+      kind: doc.kind,
       counterparty: doc.counterparty.name ?? doc.counterparty.externalId,
       due: doc.dueAt,
       amount: doc.amount,
       balance: doc.balance,
       currency: doc.currency,
-      status: doc.status,
+      // One field, because a person asking "what state is this in" does not
+      // care which of two columns holds the answer. The box's own lifecycle
+      // first: on a local row the vendor word is NULL by CHECK anyway.
+      status: doc.status ?? doc.vendorStatus,
       overdue: doc.isOverdue,
-      source: doc.externalSystem,
+      // 🔴 Never "Droplet" as if it were a vendor. A document this box wrote is
+      // sourced HERE, and saying so is what stops the model from telling
+      // somebody to go look it up in an accounting package.
+      source: doc.externalSystem ?? "this Droplet",
     }));
 
     return {

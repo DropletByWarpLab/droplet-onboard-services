@@ -515,6 +515,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-2739 — a customer with money documents this box wrote. Names the
+    // obstacle and the way past it; "archive instead" is deliberately NOT
+    // offered, because archiving leaves the documents attached and does not
+    // resolve the refusal.
+    company_has_local_documents:
+      "This customer has invoices or quotes on this Droplet. Delete or void those first, then remove the customer.",
     // ADR-045 §5.3 — the three department-assignment refusals. Each names the
     // situation and the way out; none mentions Nextcloud, provisioning or a
     // groupfolder, because none of those is what the person did.
