@@ -9,6 +9,9 @@
  *   4. A detail response that arrives after the person selected another run
  *      is dropped — a stale run's approval prompt never overwrites the
  *      selected run's panel.
+ *   5. Recurring runs: the panel lists schedules with a human rule and next
+ *      fire, adds one from a preset (POST with the preset's RRULE and the
+ *      typed time zone), and deletes one.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -21,7 +24,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { AgentRunsPanel } from "@/components/audit/AgentRunsPanel";
-import type { AgentRunSummary } from "@/components/audit/agent-runs/api";
+import type { AgentRunSummary, AgentRunSchedule } from "@/components/audit/agent-runs/api";
 
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
@@ -63,8 +66,13 @@ const finished: AgentRunSummary = {
   pending: null,
 };
 
-function wire(runs: AgentRunSummary[], traces: Record<string, unknown[]> = {}) {
+function wire(runs: AgentRunSummary[], traces: Record<string, unknown[]> = {}, schedules: AgentRunSchedule[] = []) {
   authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/agent-runs/schedules")) {
+      if (init?.method === "POST") return { ok: true, status: 201, json: async () => ({ id: "sched-new", nextFireAt: "2026-09-06T13:00:00.000Z" }) };
+      if (init?.method === "DELETE") return { ok: true, status: 204, json: async () => ({}) };
+      return okJson({ schedules });
+    }
     if (init?.method === "POST") return okJson({ ok: true });
     const m = /^\/api\/agent-runs\/([^/?]+)$/.exec(url);
     if (m) {
@@ -171,5 +179,51 @@ describe("Background runs panel (WARP-2180)", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByText("Reviewed 12 clips; nothing unusual.")).toBeTruthy();
     expect(screen.queryByText("This run is waiting for your approval")).toBeNull();
+  });
+
+  it("lists recurring runs, adds one from a preset with the typed time zone, and deletes one", async () => {
+    const schedule: AgentRunSchedule = {
+      id: "sched-1",
+      goal: "sweep last night's clips every morning",
+      model: "m",
+      maxIter: 30,
+      rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0",
+      timezone: "America/Los_Angeles",
+      nextFireAt: "2026-09-06T13:00:00.000Z",
+      enabled: true,
+      lastFiredAt: null,
+      createdAt: "2026-09-04T03:00:00.000Z",
+    };
+    wire([], {}, [schedule]);
+    render(<AgentRunsPanel />);
+    const list = await screen.findByRole("list", { name: "Recurring runs" });
+    await waitFor(() => expect(list.textContent).toContain("sweep last night's clips every morning"));
+    expect(list.textContent).toContain("Every day at 06:00");
+    expect(list.textContent).toContain("America/Los_Angeles");
+
+    fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "check the front door camera" } });
+    fireEvent.change(screen.getByLabelText("When"), { target: { value: "weekdays-9" } });
+    fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "Europe/Paris" } });
+    fireEvent.click(screen.getByRole("button", { name: /add recurring run/i }));
+    await waitFor(() => {
+      const post = authFetchMock.mock.calls.find(
+        (c) => c[0] === "/api/agent-runs/schedules" && (c[1] as RequestInit)?.method === "POST",
+      );
+      expect(post).toBeTruthy();
+      expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({
+        goal: "check the front door camera",
+        rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0",
+        timezone: "Europe/Paris",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /delete recurring run: sweep last night's clips/i }));
+    await waitFor(() => {
+      expect(
+        authFetchMock.mock.calls.some(
+          (c) => c[0] === "/api/agent-runs/schedules/sched-1" && (c[1] as RequestInit)?.method === "DELETE",
+        ),
+      ).toBe(true);
+    });
   });
 });
