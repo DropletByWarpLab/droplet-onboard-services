@@ -568,7 +568,13 @@ describe("role wire shape → editable draft", () => {
 // operator clicked, with nothing on screen saying so.
 describe("WARP-2738 — role template → draft → payload round trip", () => {
   /** One shape per shipped template, in presentation order. Mirrors the
-   *  orchestrator catalogue; see the note above on why that is acceptable. */
+   *  orchestrator catalogue; see the note above on why that is acceptable.
+   *
+   *  ⚠ NOTHING ENFORCES THE MIRROR. WARP-2760/2761 moved the `crm`/`pm` tool
+   *  grants in `access-role-templates.ts` and this copy had to be edited by
+   *  hand in the same commit to stay true. The header above calls the server
+   *  suite "the drift alarm" — it is not one for THIS table; it cannot see it.
+   *  Re-read both halves together whenever either moves. */
   const ROLE_TEMPLATES: RoleTemplate[] = [
     {
       id: "front-desk",
@@ -592,7 +598,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "email", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "memory", level: "view" },
       ],
       connectorGrants: [],
@@ -656,8 +661,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { domain: "calendar", level: "use" },
         { domain: "reminders", level: "use" },
         { domain: "notifications", level: "use" },
-        { domain: "crm", level: "use" },
-        { domain: "pm", level: "use" },
         { domain: "memory", level: "use" },
         { domain: "money", level: "use" },
         { domain: "team_chat", level: "use" },
@@ -688,7 +691,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       toolGrants: [
         { domain: "money", level: "use" },
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
         { domain: "business", level: "view" },
         { domain: "data", level: "view" },
       ],
@@ -745,7 +747,6 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         { moduleId: "team_chat", level: "act" },
       ],
       toolGrants: [
-        { domain: "crm", level: "view" },
         { domain: "email", level: "view" },
         { domain: "files", level: "view" },
         { domain: "calendar", level: "view" },
@@ -777,12 +778,11 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       ],
       toolGrants: [
         { domain: "files", level: "view" },
-        { domain: "crm", level: "view" },
+        { domain: "business", level: "view" },
         { domain: "calendar", level: "view" },
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
         { domain: "memory", level: "view" },
-        { domain: "pm", level: "view" },
       ],
       connectorGrants: [],
       cloudModelsAllowed: false,
@@ -917,7 +917,7 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
         sortTools(byTemplateId("office-manager").toolGrants),
       );
       expect(draft.originalToolGrants.map((t) => t.domain)).toEqual(
-        expect.arrayContaining(["crm", "money", "team_chat"]),
+        expect.arrayContaining(["money", "team_chat"]),
       );
     });
 
