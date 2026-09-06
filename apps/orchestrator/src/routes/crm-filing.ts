@@ -147,6 +147,7 @@ function mapError(err: unknown, res: Response): boolean {
     case FILING_ERRORS.PAYLOAD_UNREADABLE:
     case FILING_ERRORS.SOURCE_CHANGED:
     case FILING_ERRORS.CHOICE_REQUIRED:
+    case FILING_ERRORS.MONEY_MODULE_OFF:
     case FILING_ERRORS.CHOICE_NOT_OFFERED:
       // Well-formed request, refused on its merits. 422 rather than 400 so it
       // does not read as a malformed body the client could fix by retrying.

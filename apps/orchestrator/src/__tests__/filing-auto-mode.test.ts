@@ -220,9 +220,25 @@ describe("🔴 NEVER means never, including for a human", () => {
     }
   });
 
-  it("money documents are NEVER in every mode", () => {
+  /**
+   * 🔴 WARP-2737 changed this assertion from NEVER to REVIEW, and the change is
+   * a narrowing of the guarantee, not a loosening of it.
+   *
+   * NEVER was right while `ErpDocument` was landed-only: there was no row shape
+   * a local invoice could take, so offering an Apply button would have been a
+   * lie. WARP-2739 widened the table, so a PERSON can now file one.
+   *
+   * What did not change — and what this test is really pinning — is that only a
+   * person ever can. The assertion below is deliberately `not.toBe("AUTO")`
+   * rather than `toBe("REVIEW")`, because the invariant worth defending is the
+   * absence of the automatic path, and a future third class must not slip
+   * through an equality check written for two.
+   */
+  it("money documents are never AUTO, in any mode", () => {
     for (const mode of MODES) {
-      expect(classify(best({ kind: "CREATE_MONEY_DOC", mode })).policyClass).toBe("NEVER");
+      const v = classify(best({ kind: "CREATE_MONEY_DOC", mode }));
+      expect(v.policyClass, mode).not.toBe("AUTO");
+      expect(v.policyClass, mode).toBe("REVIEW");
     }
   });
 });

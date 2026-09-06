@@ -538,6 +538,9 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That customer wasn't one of the choices. Refresh and try again.",
     human_reviewer_required:
       "Only a person signed in to this Droplet can file these.",
+    // WARP-2737 — names the switch, because the switch is the whole fix.
+    proposal_money_module_off:
+      "Turn on Money in Settings first — otherwise there's nowhere on this Droplet for the invoice to go.",
     auto_needs_canary:
       "Droplet needs to check how well it reads your documents before it can file anything on its own.",
     // WARP-2739 — a customer with money documents this box wrote. Names the
