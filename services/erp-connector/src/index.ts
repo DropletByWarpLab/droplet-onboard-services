@@ -540,6 +540,58 @@ export {
   type ShopifyStatus,
 } from "./shopify/connector.js";
 
+// WARP-2383 — Xero: the second accounting cloud track. Read-through over a
+// customer-created **Custom Connection** (client id + secret, a MODIFIED
+// client-credentials grant that reaches exactly one organisation, 30-minute
+// access tokens and no refresh token). The customer-owned PKCE app is declared
+// as a second credential variant and REFUSED, because it needs an
+// authorization-code redirect an appliance with no inbound path cannot receive.
+// `UpdatedDateUTC` is the canonical `updated_at` and is documented-incomplete —
+// read the module docstring before trusting an incremental pass.
+export {
+  XeroConnector,
+  UnknownXeroVariantError,
+  UnsafeXeroBaseUrlError,
+  XeroRateLimitedError,
+  XeroReauthorizationRequiredError,
+  XeroScopeMissingError,
+  XeroVariantNotImplementedError,
+  assertReadableXeroResource,
+  assertSafeXeroBaseUrl,
+  assertXeroVariantImplemented,
+  blockedXeroSecretResolver,
+  forgetXeroToken,
+  pruneExpiredXeroTokens,
+  xeroIfModifiedSince,
+  xeroInstant,
+  __resetXeroTokenCacheForTest,
+  XERO_ACCESS_TOKEN_TTL_MS,
+  XERO_ALLOWED_API_HOSTS,
+  XERO_API_BASE_URL,
+  XERO_CREDENTIAL_VARIANTS,
+  XERO_DATASETS,
+  XERO_IDENTITY_BASE_URL,
+  XERO_IMPLEMENTED_VARIANT,
+  XERO_MAX_PAGES,
+  XERO_MAX_READ_WALL_MS,
+  XERO_PAGE_SIZE,
+  XERO_PKCE_NOT_IMPLEMENTED_REMEDIATION,
+  XERO_POLL_INTERVAL_FLOOR_MS,
+  XERO_PROVIDER,
+  XERO_READABLE_RESOURCES,
+  XERO_SCOPES,
+  XERO_TOKEN_EARLY_MINT_MS,
+  XERO_TRACK_REMEDIATION,
+  type XeroAccessToken,
+  type XeroConnectionState,
+  type XeroConnectorConfig,
+  type XeroConnectorDeps,
+  type XeroCredentialVariant,
+  type XeroDecommissionResult,
+  type XeroSecretResolver,
+  type XeroStatus,
+  type XeroTenantConnection,
+} from "./xero/connector.js";
 // WARP-2708 — Brevo: the contacts-lists-and-campaigns marketing track, plus the
 // CRM half (companies, deals) and e-commerce orders Brevo carries alongside it.
 // One FIXED host, so unlike Mailchimp its base URL is a whole-string literal the

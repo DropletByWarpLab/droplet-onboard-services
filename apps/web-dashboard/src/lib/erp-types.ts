@@ -9,7 +9,7 @@
  * host/IP, chart numbers, schema version) is rendered mono + read-only.
  */
 
-import type { IntegrationStatus } from "@droplet/shared-types";
+import type { CredentialExpiryVerdict, IntegrationStatus } from "@droplet/shared-types";
 
 /**
  * Explicit connection lifecycle — never derived from absence (arch rule 10).
@@ -43,6 +43,12 @@ export type ConnectorId =
   | "mailchimp"
   // WARP-2296 — the fourth SaaS vendor.
   | "shopify"
+  // WARP-2383 — the fifth, and the second accounting card next to
+  // `quickbooks`. Added HERE, by hand, rather than widening the union to
+  // whatever `catalogDescriptors()` returns: deriving it would delete the
+  // tripwire above, which is the only thing that makes a descriptor landing a
+  // card the hub cannot route go red instead of silent.
+  | "xero"
   // WARP-2708 / WARP-2709 / WARP-2710 — wave 1 of the ADR-046 vendor
   // programme. Added by hand, like every entry above: the union is the thing
   // that makes the `as ConnectorId` cast in `connectors.ts` honest, so it has
@@ -132,6 +138,24 @@ export interface IntegrationConnection {
    * from a connection that is still connected, or was never configured.
    */
   credentialsPurged?: boolean;
+
+  /**
+   * WARP-2659 — the credential's expiry verdict, as the box computed it
+   * (`integrations.service.ts` `credentialExpiryFor`).
+   *
+   * `null` is a real answer — "this provider's credential cannot expire", or
+   * "there is no credential yet" — and is emphatically not `VALID`. Optional
+   * for the same reason `credentialsPurged` is: this interface mirrors a JSON
+   * payload, and a response that carries no key at all (an older box) must not
+   * be read as either answer.
+   *
+   * The verdict type is imported rather than restated so the tile, the
+   * credential configurator and the orchestrator all name one shape. Its
+   * `EXPIRING_SOON` is deliberately NOT an `IntegrationStatus` member: a token
+   * twelve days from a hard stop is genuinely CONNECTED *and* genuinely needs
+   * action, so the two facts travel in two fields.
+   */
+  credentialExpiry?: CredentialExpiryVerdict | null;
 }
 
 export function writeModeOf(c: Pick<IntegrationConnection, "writeEnabled" | "writesPaused">): WriteMode {

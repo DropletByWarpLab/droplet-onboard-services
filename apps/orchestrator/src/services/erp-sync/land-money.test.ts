@@ -86,14 +86,14 @@ describe("🔴 only cloud accounting tracks land money", () => {
   });
 });
 
-describe("an invoice becomes a RECEIVABLE", () => {
+describe("an invoice becomes an INVOICE", () => {
   it("lands with complete provenance and both figures", async () => {
     const client = db();
     await land(client, "invoice", [INVOICE]);
 
     expect(client.erpDocument.create).toHaveBeenCalledWith({
       data: {
-        kind: "RECEIVABLE",
+        kind: "INVOICE",
         issuedAt: new Date("2026-08-10T00:00:00Z"),
         dueAt: new Date("2026-09-10T00:00:00Z"),
         counterpartyExternalId: "cust-7",
@@ -101,9 +101,14 @@ describe("an invoice becomes a RECEIVABLE", () => {
         amount: "4210.55",
         balance: "1200.00",
         currency: null,
-        status: "Open",
+        // WARP-2739 — the VENDOR's word, in its own column. `status` is the
+        // box's own lifecycle now and is NULL on every landed row by CHECK.
+        vendorStatus: "Open",
         vendorUpdatedAt: new Date("2026-08-21T00:00:00Z"),
         lastReadAt: NOW,
+        // Stated, not defaulted: a landing path relying on the column default
+        // would say nothing about which branch of the CHECK it means.
+        origin: "LANDED",
         connectionId: "conn-1",
         externalSystem: "quickbooks-online",
         externalId: "INV-1001",
@@ -179,7 +184,7 @@ describe("an invoice becomes a RECEIVABLE", () => {
   });
 });
 
-describe("a bill becomes a PAYABLE", () => {
+describe("a bill becomes a BILL", () => {
   const BILL = {
     bill_id: "BILL-9",
     issued_at: "2026-08-01T00:00:00Z",
@@ -196,7 +201,7 @@ describe("a bill becomes a PAYABLE", () => {
     expect(client.erpDocument.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          kind: "PAYABLE",
+          kind: "BILL",
           counterpartyExternalId: "supplier-3",
           externalId: "BILL-9",
         }),
@@ -208,7 +213,7 @@ describe("a bill becomes a PAYABLE", () => {
     const client = db();
     await land(client, "bill", [BILL]);
     expect(client.erpDocument.updateMany).toHaveBeenCalledWith({
-      where: { connectionId: "conn-1", kind: "PAYABLE", externalId: "BILL-9" },
+      where: { connectionId: "conn-1", kind: "BILL", externalId: "BILL-9" },
       data: expect.any(Object),
     });
   });

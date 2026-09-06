@@ -31,11 +31,20 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import {
   createMoneyService,
   MONEY_PAGE_LIMIT,
-  type MoneyKind,
+  type MoneyDirection,
 } from "../services/money/money.service.js";
 
-/** `?kind=` accepts the two words a person would type, not the enum's casing. */
-function kindFrom(req: Request): MoneyKind | undefined {
+/**
+ * `?kind=` accepts the two words a person would type, not the enum's casing.
+ *
+ * 🔴 WARP-2739 kept these four words EXACTLY as they were, and the parameter
+ * name with them, even though the column underneath is no longer
+ * `RECEIVABLE | PAYABLE`. They were always a DIRECTION — "owed to us", "owed by
+ * us" — and a direction is still what a caller wants to ask for. Renaming the
+ * parameter would have broken `useMoney.ts` and the `money_list_open_documents`
+ * tool for a change neither of them can observe.
+ */
+function directionFrom(req: Request): MoneyDirection | undefined {
   const raw = typeof req.query.kind === "string" ? req.query.kind.toLowerCase() : "";
   if (raw === "receivable" || raw === "owed_to_us") return "RECEIVABLE";
   if (raw === "payable" || raw === "owed_by_us") return "PAYABLE";
@@ -85,7 +94,7 @@ export function createMoneyRouter(prisma: PrismaClient, now: () => Date = () => 
     async (req: Request, res: Response, next) => {
       try {
         const documents = await money.documents({
-          kind: kindFrom(req),
+          direction: directionFrom(req),
           overdueOnly: req.query.overdue === "1" || req.query.overdue === "true",
           limit: limitFrom(req),
           now: now(),

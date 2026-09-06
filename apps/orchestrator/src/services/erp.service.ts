@@ -262,6 +262,12 @@ function defaultConnectorFor(conn: ConnRow): Connector {
 const READ_REASON_BY_CODE: ReadonlyMap<string, "QUOTA_EXHAUSTED" | "REAUTHORIZE_REQUIRED"> =
   new Map([
     ["QUOTA_EXHAUSTED", "QUOTA_EXHAUSTED"],
+    // WARP-2383 — `XeroReauthorizationRequiredError` carries this code, and a
+    // Xero Custom Connection reaches it ROUTINELY rather than only on
+    // revocation: editing the app in Xero's developer portal (to change
+    // scopes, say) DEACTIVATES it until it is re-authorised, so the owner's
+    // own maintenance produces it. Reporting that as ERROR would send them
+    // looking for a fault on the box.
     ["REAUTHORIZE_REQUIRED", "REAUTHORIZE_REQUIRED"],
     ["USER_DOES_NOT_HAVE_PERMISSIONS", "REAUTHORIZE_REQUIRED"],
   ]);
@@ -398,11 +404,15 @@ function reasonForConnectorError(err: unknown, phase: string): string {
  * assistant can read from a cloud account is this list, not "whatever the
  * registry happens to contain after the next connector lands".
  *
- * ## Why these thirteen
+ * ## Why these fourteen
  *
- * They are exactly the datasets the four shipped cloud tracks declare in
+ * They are exactly the datasets the five shipped cloud tracks declare in
  * `servesDatasets` (Stripe `invoice`/`charge`, HubSpot's five, Mailchimp's
- * three, Shopify's three). The practice-management datasets are deliberately ABSENT: those are
+ * three, Shopify's three, Xero's `invoice`/`bill`/`contact`). Two of Xero's
+ * three were already here — which is the registry doing its job:
+ * `cloudRowForDataset` resolves a dataset to whichever CONNECTED provider
+ * declares it, so a fifth vendor needed one new key rather than a vendor arm.
+ * The practice-management datasets are deliberately ABSENT: those are
  * PHI, they are reached through the dedicated `/erp/*` routes under
  * `erpConnectorReadGate`'s O-2 grant machinery, and routing them through a
  * chat tool would move a PHI decision into a keyword regex.
@@ -413,9 +423,15 @@ function reasonForConnectorError(err: unknown, phase: string): string {
  * `TOOL_ROUTES` exists to prevent.
  */
 export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
-  // payments / accounting — Stripe
+  // payments / accounting — Stripe, QuickBooks Online, Xero
   charge: "get_recent_charges",
   invoice: "get_open_invoices",
+  // WARP-2383 — money owed BY the business. Xero is the first cloud track to
+  // serve it, and it is the half `docs/integrations/README.md` recorded as
+  // having no data source anywhere in the product. `[]` here would read as
+  // "you owe nobody anything", which is why it is a dataset rather than a
+  // silent omission.
+  bill: "get_open_bills",
   // CRM — HubSpot
   contact: "find_contact",
   company: "get_company",

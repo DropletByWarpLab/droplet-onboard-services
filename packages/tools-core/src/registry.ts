@@ -162,32 +162,16 @@ import emailSend from "./handlers/email/send.js";
 // WARP-1452: contacts derived on-read from indexed mail senders (pure prisma)
 import searchContacts from "./handlers/email/search-contacts.js";
 
-// Native PM module (ADR-026) — tools dispatch through the orchestrator
-// WARP-509 — write tools
-// Project creation — completes the write surface: work items could only
-// ever be added to a project a human had already made by hand.
-import pmCreateProject from "./handlers/pm/create-project.js";
-import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
-import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
-import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
-import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
-// WARP-508 — read tools
-import pmListWorkspaces from "./handlers/pm/list-workspaces.js";
-import pmListProjects from "./handlers/pm/list-projects.js";
-import pmListWorkItems from "./handlers/pm/list-work-items.js";
-import pmGetWorkItem from "./handlers/pm/get-work-item.js";
-import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
-
-// WARP-2546 — CRM tools. The differentiator a cloud CRM cannot ship: the model
-// that reads the pipeline runs on the box, so "draft a follow-up to every deal
-// idle 14+ days" never sends a customer list to a vendor.
-import crmSearchCustomers from "./handlers/crm/search-customers.js";
-import crmGetCustomer from "./handlers/crm/get-customer.js";
-import crmListDeals from "./handlers/crm/list-deals.js";
-import crmGetDeal from "./handlers/crm/get-deal.js";
-import crmPipelineSummary from "./handlers/crm/pipeline-summary.js";
-import crmLogActivity from "./handlers/crm/log-activity.js";
-import crmMoveDealStage from "./handlers/crm/move-deal-stage.js";
+// Native PM module (ADR-026) and the CRM (WARP-2546): every `pm_*` and
+// `crm_*` tool is GONE (ADR-045 slices C and D). The reads collapsed into
+// `business_find` / `business_timeline` and the writes into
+// `business_create` / `business_update` / `business_link`, all imported
+// under "business" below. `handlers/pm/pm-orch.ts` (transport + PM mappers)
+// and `handlers/crm/crm-orch.ts` (CRM mappers) survive because
+// `handlers/business/_graph.ts` imports them. The differentiator is
+// unchanged: the model that reads the pipeline runs on the box, so "draft a
+// follow-up to every deal idle 14+ days" never sends a customer list to a
+// vendor.
 
 // ERP-connector framework (WARP-1094) — Eaglesoft as provider #1. DB-
 // independent slice: handlers return ERP_NOT_CONNECTED; the live read/write
@@ -207,6 +191,18 @@ import cloudQueryDataset from "./handlers/cloud/query-dataset.js";
 
 // business (WARP-1120) — read-only structured business-profile access
 import businessProfileGet from "./handlers/business/profile-get.js";
+// ADR-045 slice D — the WRITE half of the tool collapse. Three verbs over
+// the CRM and the tracker together, replacing seven single-purpose tools.
+// All three are Tier-2 (requiresWrite + requiresConfirmation, enforced by
+// the WARP-2305 interceptor; no handler-side prompt).
+import businessCreate from "./handlers/business/create.js";
+import businessUpdate from "./handlers/business/update.js";
+import businessLink from "./handlers/business/link.js";
+// business graph (ADR-045 slice C) — two verbs over one typed graph, replacing
+// ten noun-shaped CRM/PM reads. See handlers/business/find.ts for the full
+// rationale, including why `entity` is an enum and what the fallback is.
+import businessFind from "./handlers/business/find.js";
+import businessTimeline from "./handlers/business/timeline.js";
 
 // team chat (WARP-1685) — Messages sends on the acting human's behalf.
 // Both Tier-2 (requiresWrite + handler-enforced two-phase confirmation);
@@ -380,25 +376,8 @@ const allTools: Tool[] = [
   // WARP-1425: forget a remembered fact (Tier-2: write + confirmation)
   memoryForget,
   // WARP-509: native PM (write tools — requiresWrite + requiresConfirmation)
-  pmCreateProject,
-  pmCreateWorkItem,
-  pmUpdateWorkItem,
-  pmAddWorkItemComment,
-  pmTransitionWorkItem,
-  // WARP-508: native PM (read tools — list/get/search)
-  pmListWorkspaces,
-  pmListProjects,
-  pmListWorkItems,
-  pmGetWorkItem,
-  pmSearchWorkItems,
-
-  crmSearchCustomers,
-  crmGetCustomer,
-  crmListDeals,
-  crmGetDeal,
-  crmPipelineSummary,
-  crmLogActivity,
-  crmMoveDealStage,
+  // ADR-045 slice C: the PM read tools and the CRM read tools were replaced by
+  // `business_find` / `business_timeline` (registered under business, below).
   // WARP-1094: ERP-connector (Eaglesoft) — 3 Read-tier + 1 Write-tier
   erpGetScheduleToday,
   erpFindPatient,
@@ -410,6 +389,13 @@ const allTools: Tool[] = [
   cloudQueryDataset,
   // WARP-1120: business-knowledge layer (read-only Tier 1)
   businessProfileGet,
+  // ADR-045 slice D: business writes (Tier-2 — write + confirmation)
+  businessCreate,
+  businessUpdate,
+  businessLink,
+  // ADR-045 slice C: the business graph (both read-only Tier 1)
+  businessFind,
+  businessTimeline,
   // WARP-1685: Messages sends (Tier-2: write + two-phase confirmation)
   teamChatSendMessage,
   teamChatSendMeetingInvite,

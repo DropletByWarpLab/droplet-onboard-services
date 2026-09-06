@@ -20,6 +20,7 @@ import {
   Building2,
   Calendar as CalendarIcon,
   ChartColumn,
+  Repeat,
   Cpu,
   Download,
   Film,
@@ -175,6 +176,25 @@ export const NAV_GROUPS: NavGroup[] = [
         roles: ["owner", "admin", "family"],
       },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
+      // WARP-2671: Routines sits in Workspace, NOT Admin, and deliberately
+      // apart from /tools. `/tools` is under Admin because a catalog of the
+      // box's built-in capabilities is administrative reference material; a
+      // routine is a sequence somebody composed to do their own job, which
+      // makes it their work and not an admin artefact.
+      //
+      // Placed AFTER Ask AI rather than between Reports and Ask AI: WARP-1992
+      // pins Reports as directly after Overview and directly before Ask AI
+      // (reports.nav.test.ts), and that adjacency was chosen on purpose.
+      //
+      // Role-gated rather than module-gated: routines compose tools from
+      // every surface, so there is no single module whose absence should
+      // hide the page. Guests cannot run or publish anything here.
+      {
+        href: "/routines",
+        label: "Routines",
+        icon: Repeat,
+        roles: ["owner", "admin", "family"],
+      },
       // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
       // are conversation surfaces); gated by the team_chat module and
       // carrying the unread-count badge the Sidebar resolves.

@@ -209,31 +209,24 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "search_contacts",
   ],
   memory: ["memory_recall", "memory_extract_fact", "memory_forget"],
-  pm: [
-    "pm_create_project",
-    "pm_create_work_item",
-    "pm_update_work_item",
-    "pm_add_work_item_comment",
-    "pm_transition_work_item",
-    "pm_list_workspaces",
-    "pm_list_projects",
-    "pm_list_work_items",
-    "pm_get_work_item",
-    "pm_search_work_items",
-  ],
-  crm: [
-    "crm_search_customers",
-    "crm_get_customer",
-    "crm_list_deals",
-    "crm_get_deal",
-    "crm_pipeline_summary",
-    "crm_log_activity",
-    "crm_move_deal_stage",
-  ],
+  // ADR-045 — EMPTY, and deliberately still declared. Slice C moved the five
+  // PM reads into `business_find`/`business_timeline`; slice D moved the five
+  // PM writes into `business_create`/`business_update`. The domain survives
+  // because it is the slot a REMOTE tracker catalog (Atlassian, WARP-2316)
+  // registers into, and its DOMAIN_RULES entry is how such a tool becomes
+  // selectable — the exclusion list names LOCAL tools only. It is also what
+  // the `projects` module's `toolDomains: ["pm"]` resolves against
+  // (module-registry.ts's unknown-domain invariant).
+  pm: [],
   // WARP-2581 — money at rest. Excluded from the chat pool (see
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
+  // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
+  // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
+  // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
+  // Kept as the landing slot for a remote HubSpot catalog.
+  crm: [],
   erp: [
     "erp_get_schedule_today",
     "erp_find_patient",
@@ -242,7 +235,24 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
   cloud: ["cloud_query_dataset"],
-  business: ["business_profile_get"],
+  // ADR-045 slice C — `business` is an UNCLAIMED domain (access-catalog.ts's
+  // UNCLAIMED_DOMAINS: system / business / data / erp are not feature-gated),
+  // so unlike `crm`/`pm` these two are advertised regardless of the module
+  // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
+  // `/api/crm/*` and `/api/pm/projects*`), and `_graph.ts`'s `businessError`
+  // turns that 404 into a sentence naming the switch — the same bargain
+  // `cloud_query_dataset` makes with `DatasetNotServedError`.
+  // ADR-045 — `business` is now the ONE door to the CRM and the tracker
+  // alike, reads and writes together. That is the point of the collapse: the
+  // owner does not have to know which of two vocabularies their question is in.
+  business: [
+    "business_profile_get",
+    "business_find",
+    "business_timeline",
+    "business_create",
+    "business_update",
+    "business_link",
+  ],
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
@@ -417,24 +427,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   email_send: "Send an email you've approved",
   search_contacts: "Find people you email, with their addresses",
   // Project tracker
-  pm_create_project: "Start a new project in your project tracker",
-  pm_create_work_item: "Add a new task to your project tracker",
-  pm_update_work_item: "Update the details of a task",
-  pm_add_work_item_comment: "Add a comment to a task",
-  pm_transition_work_item: "Move a task to a new status, like done",
-  pm_list_workspaces: "See your project tracker workspaces",
-  pm_list_projects: "See your projects",
-  pm_list_work_items: "See the tasks in a project",
-  pm_get_work_item: "See the full details of one task",
-  pm_search_work_items: "Search your tasks",
-  // CRM (customers, deals, pipeline)
-  crm_search_customers: "Find a customer by name or website",
-  crm_get_customer: "See one customer, their open deals and recent history",
-  crm_list_deals: "See your deals — including the ones going quiet",
-  crm_get_deal: "See one deal and what has happened on it",
-  crm_pipeline_summary: "See how much is in each stage of your pipeline",
-  crm_log_activity: "Add a call or note to a customer's history (you approve it first)",
-  crm_move_deal_stage: "Move a deal to a different stage (you approve it first)",
+  // CRM (customers, deals, pipeline) — reads moved to the business graph
   // ERP (Eaglesoft practice-management integration)
   erp_get_schedule_today: "See the day's appointment schedule from your practice software",
   erp_find_patient: "Look up a patient in your practice software",
@@ -445,8 +438,20 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
-  // Business (business-knowledge profile)
+  // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
+  business_find:
+    "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
+  business_timeline: "See what has happened recently on a customer, deal or job",
+  // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
+  // it names what the OWNER gets, and says the quiet part — these three ask
+  // first, every time, because they change the record.
+  business_create:
+    "Add a customer, a deal, a project, a task or a note to the record (you approve it first)",
+  business_update:
+    "Change a customer, a deal or a task — including moving it to a new stage or status (you approve it first)",
+  business_link:
+    "Connect two things to each other, like a deal to the job that delivers it (you approve it first)",
   // Team chat (Messages)
   team_chat_send_message: "Send a Messages chat to someone for you (you approve it first)",
   team_chat_send_meeting_invite:

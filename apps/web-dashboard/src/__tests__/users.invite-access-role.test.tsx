@@ -42,6 +42,11 @@ vi.mock("@/lib/api", () => ({
   fetchUserUsage: vi.fn().mockResolvedValue({ policy: null, usedBytes: null }),
   updateUserUsage: vi.fn().mockResolvedValue({}),
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
+  // WARP-2738 role templates. Panel-mounting suites need BOTH: a named
+  // export missing from this factory throws the moment the component reads
+  // it, so the mock has to move with the imports.
+  listRoleTemplates: vi.fn().mockResolvedValue({ roleTemplates: [], enforcedModuleIds: [] }),
+  createRoleFromTemplate: vi.fn(),
   createAccessRole: vi.fn(),
   updateAccessRole: vi.fn(),
   deleteAccessRole: vi.fn(),

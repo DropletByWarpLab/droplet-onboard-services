@@ -540,6 +540,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Only a person signed in to this Droplet can file these.",
     auto_needs_canary:
       "Droplet needs to check how well it reads your documents before it can file anything on its own.",
+    // WARP-2739 — a customer with money documents this box wrote. Names the
+    // obstacle and the way past it; "archive instead" is deliberately NOT
+    // offered, because archiving leaves the documents attached and does not
+    // resolve the refusal.
+    company_has_local_documents:
+      "This customer has invoices or quotes on this Droplet. Delete or void those first, then remove the customer.",
     // ADR-045 §5.3 — the three department-assignment refusals. Each names the
     // situation and the way out; none mentions Nextcloud, provisioning or a
     // groupfolder, because none of those is what the person did.

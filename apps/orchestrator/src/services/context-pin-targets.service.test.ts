@@ -116,18 +116,36 @@ describe("resolveBusinessPinTargets", () => {
     expect(p.crmCompany.findMany).not.toHaveBeenCalled();
   });
 
-  it("AXIS 2 - a narrowed AccessRole loses the kinds its role does not grant", async () => {
+  it("AXIS 2 - a narrowed AccessRole loses every business pin unless it grants `business`", async () => {
+    // ADR-045 (WARP-2583) put all four kinds behind ONE tool domain, so the
+    // s3 grant that matters is `business`. This case used to hand a role
+    // `pm` alone and expect its work-item pin to survive, because
+    // `pm_get_work_item` lived in `pm`; that tool is gone and `pm` / `crm`
+    // are empty landing slots for a remote catalog. A role granted only
+    // those has NO tool that can read the record, so it must not be shown
+    // the record's name - be29bf51's effective-access test pins the same
+    // fact from the grant side. Per-KIND narrowing is the module axis above.
+    const pins = [
+      { id: "p1", kind: "customer", ref: "c1" },
+      { id: "p2", kind: "work_item", ref: "w1" },
+    ];
+
     const p = db();
-    const out = await resolveBusinessPinTargets(
-      p as unknown as PinTargetReadClient,
-      [
-        { id: "p1", kind: "customer", ref: "c1" },
-        { id: "p2", kind: "work_item", ref: "w1" },
-      ],
-      { scope: scopeWith("pm") },
-    );
-    expect(out.get("p1")?.state).toBe("unavailable");
-    expect(out.get("p2")?.state).toBe("active");
+    const legacy = await resolveBusinessPinTargets(p as unknown as PinTargetReadClient, pins, {
+      scope: scopeWith("pm", "crm"),
+    });
+    expect(legacy.get("p1")?.state).toBe("unavailable");
+    expect(legacy.get("p2")?.state).toBe("unavailable");
+    // Never even read - exactly as for a module that is off.
+    expect(p.crmCompany.findMany).not.toHaveBeenCalled();
+    expect(p.pmWorkItem.findMany).not.toHaveBeenCalled();
+
+    const q = db();
+    const granted = await resolveBusinessPinTargets(q as unknown as PinTargetReadClient, pins, {
+      scope: scopeWith("business"),
+    });
+    expect(granted.get("p1")?.state).toBe("active");
+    expect(granted.get("p2")?.state).toBe("active");
   });
 
   it("a null scope narrows nothing (owner / no AccessRole - today's box)", async () => {

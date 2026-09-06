@@ -41,6 +41,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   createIntegrationsService,
   type ConnectInput,
+  type IntegrationsServiceDeps,
 } from "../services/integrations.service.js";
 import { ErpError } from "../services/erp-error.js";
 import { isConcurrencyConflict } from "../services/role-mutation-guard.service.js";
@@ -110,9 +111,14 @@ const connectSchema = z.object({
   apiCaCert: z.string().min(1).optional(),
 });
 
-export function createIntegrationsRouter(prisma: PrismaClient): Router {
+export function createIntegrationsRouter(
+  prisma: PrismaClient,
+  /** WARP-2659 — the remote MCP lifecycle `disconnect()` tears down for an
+   *  `mcp` track. Optional so every existing test and mount is unchanged. */
+  deps: IntegrationsServiceDeps = {},
+): Router {
   const router = Router();
-  const svc = createIntegrationsService(prisma);
+  const svc = createIntegrationsService(prisma, deps);
 
   router.get(
     "/integrations",

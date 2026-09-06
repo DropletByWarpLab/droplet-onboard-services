@@ -170,6 +170,9 @@ export interface RunTraceEntry {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /** WARP-2670 — the name this step's result was published under, when it
+   *  was given one. Mirrors the orchestrator's `RunStepTrace.as`. */
+  as?: string;
 }
 
 export interface ToolRunRow {
