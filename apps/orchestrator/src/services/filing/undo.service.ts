@@ -294,14 +294,32 @@ async function rememberNotSame(
       : ((payload as { companyId?: string }).companyId ?? null);
   if (!companyId) return false;
 
-  await tx.filingDecision.create({
-    data: {
-      keyKind: key.keyKind,
-      keyValue: key.keyValue,
-      verdict: "NOT_SAME",
-      companyId,
-      createdById: actorId,
-    },
+  // 🔴 `createMany({ skipDuplicates })`, not `create`, and the reason is the
+  // TRANSACTION.
+  //
+  // Undoing the same wrong match from a second document writes the same
+  // (keyKind, keyValue, NOT_SAME, companyId) rule, which
+  // `FilingDecision_not_same_key` refuses with P2002. A plain `create` would
+  // therefore throw and roll back the WHOLE undo — the customer, link and
+  // activity removals included — so the owner's second undo would fail
+  // outright. Catching it here would not help either: inside a Postgres
+  // transaction a failed statement aborts the transaction, and every later
+  // statement fails too.
+  //
+  // `skipDuplicates` emits `ON CONFLICT DO NOTHING`, which is one statement
+  // that never errors, so the conflict never poisons the transaction. Either
+  // way the rule is in place afterwards, which is what the caller reports.
+  await tx.filingDecision.createMany({
+    data: [
+      {
+        keyKind: key.keyKind,
+        keyValue: key.keyValue,
+        verdict: "NOT_SAME",
+        companyId,
+        createdById: actorId,
+      },
+    ],
+    skipDuplicates: true,
   });
   return true;
 }

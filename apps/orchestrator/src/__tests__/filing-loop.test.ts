@@ -922,3 +922,75 @@ describe("the folder fence", () => {
     expect(folderOf(FILE_SOURCE)).toBe("/Customers");
   });
 });
+
+// ── WARP-2730 review finding — the MATCH_REVIEW dedupeKey ────────────────────
+
+describe("two ambiguous companies whose names normalise to nothing", () => {
+  /** `normalizeCompanyName` strips the legal-form words, so a name that is
+   *  ONLY a legal form ("Ltd", "LLC") collapses to "". Real extractions produce
+   *  these: a letterhead fragment, a truncated OCR line, a signature block. */
+  const ambiguous = async (): Promise<MatchOutcome> => ({
+    kind: "AMBIGUOUS",
+    candidates: [
+      {
+        companyId: "11111111-1111-4111-8111-111111111111",
+        name: "Acme Dental",
+        via: "NAME",
+        viaValue: "acme dental",
+      },
+      {
+        companyId: "22222222-2222-4222-8222-222222222222",
+        name: "Acme Dental Supply",
+        via: "NAME",
+        viaValue: "acme dental supply",
+      },
+    ],
+  });
+
+  it("each gets its OWN dedupeKey, so neither is silently dropped", async () => {
+    // The defect: MATCH_REVIEW's dedupeKey was `normalizeCompanyName(name)` with
+    // no fallback, unlike its CREATE_CUSTOMER / CREATE_PROJECT siblings. Both
+    // companies keyed on "" for the same sourceRef, so `persistDrafts`' unique
+    // catch counted the second as a duplicate and dropped it — a real ambiguous
+    // match never reaching the owner's review queue, with nothing saying why.
+    const { drafts } = await buildDrafts({
+      source: FILE_SOURCE,
+      phiVerdict: "CLEAN",
+      settings: PROPOSE_SETTINGS,
+      resolveMatch: ambiguous,
+      entities: {
+        companies: [
+          {
+            name: "Ltd",
+            emails: [],
+            phones: [],
+            role: "vendor",
+            confidence: 70,
+            evidence: [{ quote: "Ltd" }],
+          },
+          {
+            name: "LLC",
+            emails: [],
+            phones: [],
+            role: "vendor",
+            confidence: 70,
+            evidence: [{ quote: "LLC" }],
+          },
+        ],
+        people: [],
+        projects: [],
+        moneyDocuments: [],
+        deals: [],
+      },
+    });
+
+    const reviews = drafts.filter((d) => d.kind === "MATCH_REVIEW");
+    expect(reviews).toHaveLength(2);
+
+    const keys = reviews.map((d) => d.dedupeKey);
+    // Neither may be empty, and the two must differ — the whole point.
+    expect(keys).not.toContain("");
+    expect(new Set(keys).size).toBe(2);
+    expect(keys.sort()).toEqual(["llc", "ltd"]);
+  });
+});

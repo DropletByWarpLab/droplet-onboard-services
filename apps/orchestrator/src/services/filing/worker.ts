@@ -54,7 +54,7 @@ import { readFileContent } from "./read-content.js";
 import { buildDrafts, persistDrafts, prismaMatcher } from "./propose.js";
 import { isInScope, permittedOwnerIds, readFilingSettings } from "./settings.js";
 import { noteTickCompleted } from "./digest.js";
-import { AUDIT_PHRASES, recordFilingAudit, type FilingAuditRefs } from "./audit.js";
+import { AUDIT_PHRASES, recordFilingAuditBestEffort, type FilingAuditRefs } from "./audit.js";
 import { indexBackedFileCheck, runAutoApply } from "./auto-apply.js";
 import { capReachedFor, readCaps } from "./caps.js";
 
@@ -173,7 +173,27 @@ const RETRYABLE: ReadonlySet<string> = new Set(["bad_json", "model_unreachable"]
  * to `safeRun`, matching every other handler in `index.ts`.
  */
 export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> {
+  // `in_flight` is the ONE outcome that must not stamp the clock: another
+  // invocation owns this tick and will stamp when it finishes.
   if (inFlight) return { status: "idle", reason: "in_flight" };
+  try {
+    return await runOneTick(prisma);
+  } finally {
+    // 🔴 Stamped on EVERY completed tick — the idle ones AND the blocked ones.
+    //
+    // This used to live in the `finally` of the claim block below, which is
+    // entered only after the model resolves. During a sustained gateway outage
+    // every tick returns `blocked` BEFORE that point, so `lastTickAt` froze at
+    // its pre-outage value and the Health row understated the outage by exactly
+    // as long as the outage lasted — "a panel that counted only what filing did
+    // would look healthiest the moment it stopped", which is the failure this
+    // row exists to prevent. Same for the `off` / `no_owner` / `paused` returns:
+    // the worker IS running, it has simply been told to do nothing.
+    noteTickCompleted();
+  }
+}
+
+async function runOneTick(prisma: PrismaClient): Promise<TickOutcome> {
   if (filingPauseState().paused) return { status: "idle", reason: "paused" };
 
   const settings = await readFilingSettings(prisma);
@@ -195,7 +215,15 @@ export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> 
     logger.warn({ reason: model.reason, detail: model.detail }, "filing: no usable local model");
     return { status: "blocked", reason: model.reason, detail: model.detail };
   }
-  noteModelSuccess();
+  // 🔴 `noteModelSuccess()` is deliberately NOT called here.
+  //
+  // `resolveFilingModel` probes the model LIST. Reaching it proves the gateway
+  // answers, not that it can complete a chat — and the partial outage where the
+  // list answers while completions fail is precisely the shape the five-strike
+  // breaker exists to catch. Clearing the streak on the pre-flight reset the
+  // counter to zero on every tick, so a per-document failure could never
+  // accumulate and the breaker could never fire. The streak is now cleared and
+  // incremented in `processClaim`, on real answers only.
 
   inFlight = true;
   try {
@@ -215,10 +243,6 @@ export async function runFilingTick(prisma: PrismaClient): Promise<TickOutcome> 
     return await processClaim(prisma, claim, settings, owners, model.model);
   } finally {
     inFlight = false;
-    // Stamped on EVERY completed tick, including the idle ones: the Health row
-    // asks "is the worker running", not "did it find anything", and a clock
-    // that only moves on success reads as dead on a quiet week.
-    noteTickCompleted();
   }
 }
 
@@ -304,7 +328,7 @@ async function processClaim(
     // that leaves no trace is the silent mode this feature is most likely to
     // fail into — the owner sees nothing and there is nowhere to look.
     if (settings.enabledById) {
-      await recordFilingAudit({
+      await recordFilingAuditBestEffort({
         ownerId: settings.enabledById,
         severity: extractStatus === "failed" ? "warn" : "ok",
         what:
@@ -341,12 +365,38 @@ async function processClaim(
     return finish("done", "unchanged", read.content.fingerprint);
   }
 
-  const outcome = await extractFromText({
-    model,
-    storedPath: claim.path,
-    text: read.content.text,
-    denylist: settings.pathDenylist,
-  });
+  // 🔴 The canary's OTHER input, and the one it was missing.
+  //
+  // `resolveFilingModel`'s pre-flight only proves the model LIST answers. The
+  // partial outage where the list answers while COMPLETIONS fail shows up here
+  // and nowhere else — and it shows up as a THROW, not as an `outcome`:
+  // `askForJson` does not wrap `completeOnce`, and `extractFromText` can only
+  // ever return `bad_json` / `phi_*` / `not_business`, never `model_unreachable`
+  // (that reason belongs to `resolveFilingModel`). So the breaker whose doc
+  // comment promises to stop exactly this could never see it.
+  //
+  // The throw is still re-raised: a genuine fault propagating naked to
+  // `safeRun` is this file's deliberate contract, and swallowing it here would
+  // leave the claimed row `running` with nothing counting the failure. All this
+  // adds is that the breaker gets to watch.
+  let outcome;
+  try {
+    outcome = await extractFromText({
+      model,
+      storedPath: claim.path,
+      text: read.content.text,
+      denylist: settings.pathDenylist,
+    });
+  } catch (err) {
+    noteModelFailure();
+    throw err;
+  }
+  // A completed round-trip clears the streak — including one that came back as
+  // `bad_json`. The counter is about REACHABILITY, not answer quality: bytes
+  // came back, so the gateway is up, and a model that answers badly is a
+  // different problem with a different remedy. Placing this after the
+  // `!outcome.ok` block below would miss it, because that block returns.
+  noteModelSuccess();
 
   if (!outcome.ok) {
     const status = STATUS_FOR[outcome.reason];
@@ -503,6 +553,13 @@ async function complete(
 /** Test seam: this module's state is a flag, a counter and a deadline, and a
  *  test that leaves any of them set turns every later tick into a no-op for a
  *  reason the next test cannot see. */
+/** Test seam — the canary's counters are module state, and state that leaks
+ *  between tests is a test that passes for the wrong reason. */
+export function __resetCanaryForTests(): void {
+  consecutiveModelFailures = 0;
+  pausedUntil = null;
+}
+
 export function __resetInFlightForTests(): void {
   inFlight = false;
   consecutiveModelFailures = 0;

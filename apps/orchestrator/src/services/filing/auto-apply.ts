@@ -48,7 +48,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../../lib/logger.js";
 import { resolveAttributedToolAccess } from "../tool-access.service.js";
 import { applyProposal, FILING_ERRORS } from "./apply.service.js";
-import { AUDIT_PHRASES, recordFilingAudit } from "./audit.js";
+import { AUDIT_PHRASES, recordFilingAuditBestEffort } from "./audit.js";
 import { capReachedFor, readCaps, reconsiderBounded, type CapState } from "./caps.js";
 import type { ResolvedFilingSettings } from "./settings.js";
 
@@ -239,7 +239,11 @@ export async function runAutoApply(
       pre.caps.hourlyReached = pre.caps.appliedThisHour >= pre.caps.hourlyCap;
       pre.caps.dailyReached = pre.caps.createdToday >= pre.caps.dailyCap;
 
-      await recordFilingAudit({
+      // WARP-2732 gave the audit a best-effort variant, and this call is
+      // exactly the class it was written for: `applyProposal` has ALREADY
+      // committed by the time we get here, so a throwing audit would abort the
+      // tick after the write landed and leave the counter blaming the apply.
+      await recordFilingAuditBestEffort({
         ownerId: settings.enabledById!,
         what: AUDIT_PHRASES.applied,
         refs: {

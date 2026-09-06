@@ -63,7 +63,7 @@ import {
   promotionSentence,
   shouldOfferPromotion,
 } from "../services/filing/readback.js";
-import { AUDIT_PHRASES, recordFilingAudit } from "../services/filing/audit.js";
+import { AUDIT_PHRASES, recordFilingAuditBestEffort } from "../services/filing/audit.js";
 
 const REVIEWER = ["owner", "admin"] as const;
 
@@ -492,7 +492,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       }
       try {
         const result = await undoProposal(prisma, req.params.id, actorId);
-        await recordFilingAudit({
+        await recordFilingAuditBestEffort({
           ownerId: actorId,
           what: AUDIT_PHRASES.undone,
           refs: {
@@ -529,7 +529,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
       await revokeRule(prisma, req.params.id);
       // The rule is gone; the fact it existed survives here. Without this the
       // Rules page could be emptied with nothing anywhere recording it.
-      await recordFilingAudit({
+      await recordFilingAuditBestEffort({
         ownerId: actorId,
         what: AUDIT_PHRASES.ruleRevoked,
         refs: {
@@ -558,7 +558,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
     }
     try {
       const rule = await teachNotSame(prisma, parsed.data, actorId);
-      await recordFilingAudit({
+      await recordFilingAuditBestEffort({
         ownerId: actorId,
         what: AUDIT_PHRASES.ruleWritten,
         refs: {

@@ -11,8 +11,24 @@ record — cannot be gated pre-merge by anything that exists in this repo.
 Without a measurement, `auto` mode would ship on an unmeasured model. So the
 measurement is a database invariant rather than a promise: `AutoFilingSetting`
 carries a CHECK that refuses `mode = 'auto'` until `canaryPassedAt` and
-`canaryModel` are both set, and the only thing that sets them is a run of this
-scorer clearing the floors below on the box's own model.
+`canaryModel` are both set.
+
+🔴 THIS SLICE MEASURES; IT DOES NOT YET ARM THE GATE.
+
+Nothing here writes `canaryPassedAt` / `canaryModel`. `extraction_runner.run()`
+reads Postgres, scores, and writes a JSON/markdown report to disk — that is all
+it does. `PATCH /crm/filing/settings` cannot write those columns either: its
+body is `.strict()` and it deliberately rejects them, so the only way to arm the
+gate today is a manual SQL UPDATE, outside every actor-stamping and audit
+convention the rest of ADR-048 enforces. Wiring the write-back — through the
+orchestrator, so the pass is attributed and audited like every other consent
+write — is WARP-2733's job.
+
+So read the CHECK as: a genuine measurement is NECESSARY for auto mode and
+cannot be faked away, but the loop from "canary passed" to "gate armed" is not
+closed by this PR. An earlier draft of this docstring claimed a run of this
+scorer was "the only thing that sets them", which was never true of the code as
+shipped.
 
 PR #2005 set itself the same unrun condition (a DMR grammar canary) and it has
 never been run. This module is the thing that stops that repeating: the

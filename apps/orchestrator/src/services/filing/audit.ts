@@ -145,3 +145,34 @@ function pickAllowed(refs: FilingAuditRefs): Record<string, unknown> {
   }
   return out;
 }
+
+/**
+ * The same audit write, for callers whose OWN work is already committed.
+ *
+ * `recordFilingAudit` deliberately does not swallow — `cron-runtime`'s `safeRun`
+ * wants the throw so its failure counter sees an unaudited run. That default is
+ * wrong for two classes of caller that arrived later:
+ *
+ *   - **HTTP routes** that mutate, then audit, inside one `try`. The mutation is
+ *     already committed; a throwing audit turns a successful undo into a 500 and
+ *     the owner cannot tell whether their click worked.
+ *   - **`worker.ts`'s `finish()`**, which audits BEFORE `complete()` writes the
+ *     terminal state. A throw there leaves the row `running` until the stale-claim
+ *     reconciler re-arms it — a core state transition gated on an observability
+ *     write, which is the very coupling `worker.ts` was shaped to avoid.
+ *
+ * Both want the audit attempted and the failure LOUD in the log, but neither
+ * wants it to undo or mask work that already happened.
+ */
+export async function recordFilingAuditBestEffort(
+  args: Parameters<typeof recordFilingAudit>[0],
+): Promise<void> {
+  try {
+    await recordFilingAudit(args);
+  } catch (err) {
+    logger.error(
+      { err, what: args.what, sourceRef: args.refs.sourceRef },
+      "filing: audit write failed — the action it describes ALREADY happened",
+    );
+  }
+}

@@ -10,10 +10,21 @@ WARP-2732, ADR-048.
 CHECK ("mode" <> 'auto' OR ("canaryPassedAt" IS NOT NULL AND "canaryModel" IS NOT NULL))
 ```
 
-Nothing in this repo can set those two columns except a passing run of this
-suite. So auto mode is not gated by a promise, a review comment or a ticket
-checkbox — it is gated by a database constraint whose only key is a
-measurement taken on the box's own model.
+Auto mode is therefore not gated by a promise, a review comment or a ticket
+checkbox: it is gated by a database constraint that no application code can
+satisfy by accident. `PATCH /crm/filing/settings` has a `.strict()` body and
+refuses those two columns outright.
+
+> 🔴 **This slice measures; it does not yet arm the gate.** Nothing in this
+> repo writes `canaryPassedAt` / `canaryModel` — `extraction_runner.py` reads
+> the database, scores, and writes a report file. Arming the gate today means a
+> manual SQL `UPDATE`, outside the actor-stamping and audit conventions the rest
+> of ADR-048 enforces, which is why it is deliberately NOT done from this
+> container. Wiring the write-back through the orchestrator, so a pass is
+> attributed and audited like every other consent write, is **WARP-2733**.
+>
+> Until then: run the canary, read the verdict, and treat a pass as the
+> *precondition* for arming auto mode rather than the act of arming it.
 
 ## Why it is split in two
 

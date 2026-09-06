@@ -462,3 +462,153 @@ class TestReport:
         assert "FAIL" in md
         assert "Failures" in md
         assert "PHI FALSE NEGATIVE" in md
+
+
+# ── WARP-2732 review findings ───────────────────────────────────────────────
+
+
+class _FakeCursor:
+    """Replays a scripted result per `execute`, and records the SQL it saw."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._last = []
+        self.queries = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.queries.append((" ".join(sql.split()), params))
+        self._last = self._script.pop(0)
+
+    def fetchall(self):
+        return self._last
+
+    def fetchone(self):
+        return self._last[0] if self._last else None
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+
+class TestCollectIsOrderIndependent:
+    """🔴 The company lookup fed `company_name_exact`, which gates auto mode.
+
+    The filter was `if p` only, so `next()` returned the FIRST payload's name
+    even when that payload had no name key at all — and one fixture can produce
+    both a CREATE_MONEY_DOC proposal (no `name`/`companyName`) and a
+    CREATE_CUSTOMER one. With no ORDER BY, Postgres row order is unspecified, so
+    the canary could return a different verdict on two runs over an identical
+    corpus.
+    """
+
+    GOLDEN = [{"id": "b01", "kind": "business", "company_name": "ACME Dental Supply Ltd"}]
+
+    def test_a_nameless_payload_first_does_not_shadow_the_real_name(self):
+        import extraction_runner as r
+
+        cur = _FakeCursor(
+            [
+                # The money doc sorts first — the exact order that used to lose.
+                [
+                    ("p1", "CREATE_MONEY_DOC", {"total": "4250.00"}),
+                    ("p2", "CREATE_CUSTOMER", {"name": "ACME Dental Supply Ltd"}),
+                ],
+                [("done", None)],
+            ]
+        )
+        out = r.collect(_FakeConn(cur), self.GOLDEN, "extraction-eval")
+        assert out[0]["actual"]["company_name"] == "ACME Dental Supply Ltd"
+
+    def test_the_same_rows_in_the_other_order_score_identically(self):
+        # The property that matters is not "this order works" but "order does
+        # not matter" — a single-order test passes with the bug half-fixed.
+        import extraction_runner as r
+
+        cur = _FakeCursor(
+            [
+                [
+                    ("p2", "CREATE_CUSTOMER", {"name": "ACME Dental Supply Ltd"}),
+                    ("p1", "CREATE_MONEY_DOC", {"total": "4250.00"}),
+                ],
+                [("done", None)],
+            ]
+        )
+        out = r.collect(_FakeConn(cur), self.GOLDEN, "extraction-eval")
+        assert out[0]["actual"]["company_name"] == "ACME Dental Supply Ltd"
+
+    def test_the_proposal_query_is_deterministically_ordered(self):
+        # Belt and braces: the filter fix makes the NAME order-independent, and
+        # the ORDER BY makes every other column read from `payloads` so too.
+        import extraction_runner as r
+
+        cur = _FakeCursor([[], [("done", None)]])
+        r.collect(_FakeConn(cur), self.GOLDEN, "extraction-eval")
+        assert "ORDER BY" in cur.queries[0][0]
+
+    def test_a_genuinely_absent_name_is_still_None(self):
+        # The fix must not invent a name — a miss has to stay a miss.
+        import extraction_runner as r
+
+        cur = _FakeCursor([[("p1", "CREATE_MONEY_DOC", {"total": "1.00"})], [("done", None)]])
+        out = r.collect(_FakeConn(cur), self.GOLDEN, "extraction-eval")
+        assert out[0]["actual"]["company_name"] is None
+
+
+class TestCorpusPrefixResolution:
+    """🔴 `FILING_EVAL_FOLDER` reached the seeder but never the canary.
+
+    Both in-process callers invoke `run()` positionally with no prefix, so a
+    signature default could not be overridden. An operator who set the variable
+    got a seed that succeeded and a canary that matched nothing.
+    """
+
+    def test_env_is_honoured_when_no_explicit_prefix(self, monkeypatch):
+        import extraction_runner as r
+
+        monkeypatch.setenv("FILING_EVAL_FOLDER", "extraction-eval-run2")
+        assert r.resolve_corpus_prefix() == "extraction-eval-run2"
+        assert r.resolve_corpus_prefix(None) == "extraction-eval-run2"
+
+    def test_an_explicit_prefix_still_wins(self, monkeypatch):
+        import extraction_runner as r
+
+        monkeypatch.setenv("FILING_EVAL_FOLDER", "extraction-eval-run2")
+        assert r.resolve_corpus_prefix("something-else") == "something-else"
+
+    def test_the_default_survives_an_unset_and_an_empty_env(self, monkeypatch):
+        import extraction_runner as r
+
+        monkeypatch.delenv("FILING_EVAL_FOLDER", raising=False)
+        assert r.resolve_corpus_prefix() == "extraction-eval"
+        # Empty is not a folder name — it would make the LIKE match everything.
+        monkeypatch.setenv("FILING_EVAL_FOLDER", "")
+        assert r.resolve_corpus_prefix() == "extraction-eval"
+
+    def test_the_cli_flag_does_not_shadow_the_env(self):
+        # `--corpus-prefix` must default to None, not to the literal, or the
+        # flag's own default beats the environment for every CLI run.
+        src = (Path(__file__).parent / "extraction_runner.py").read_text(encoding="utf-8")
+        flag = src[src.index('"--corpus-prefix"') : src.index('"--corpus-prefix"') + 400]
+        assert "default=None" in flag
+
+
+class TestTheCanaryShipsWithItsDatabaseDriver:
+    def test_psycopg_is_declared_in_the_image_it_runs_in(self):
+        # The runner imports psycopg in a try/except and returns
+        # EXIT_CANNOT_RUN without it, so a missing requirement is not a build
+        # failure — it is a canary that silently cannot measure anything on the
+        # very image built to run it.
+        req = (
+            Path(__file__).parents[2] / "services" / "rag-eval" / "requirements.txt"
+        ).read_text(encoding="utf-8")
+        assert "psycopg" in req
