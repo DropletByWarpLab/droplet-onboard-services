@@ -12,12 +12,18 @@
  * the LLM `list_notifications` tool both read from this log so the user
  * has a single source of truth.
  *
- * (Push / phone routing will land later through a dedicated notifier
- * service — for now the in-app toast is the only delivery channel.)
+ * WARP-2752 (ADR-051) — WEB PUSH IS NOW A SECOND CHANNEL. It was fully built
+ * (`push-dispatch.service.ts`, `PushSubscription`, a service worker, subscribe
+ * routes) and `sendNotification` never called it: `dispatchToUser` had exactly
+ * two production callers, the camera detection fan-out and a manual test
+ * button. So a camera seeing a person reached your phone and nothing else ever
+ * did. Both channels are attempted here, both are best-effort, and the
+ * NotificationLog row records which ones actually carried it.
  */
 
 import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
 import { publish } from "./mqtt.service.js";
+import { dispatchToUser, ensurePushDispatch } from "./push-dispatch.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("notifications");
@@ -121,6 +127,25 @@ export async function sendNotification(
   input: DispatchInput,
 ): Promise<DispatchResult> {
   const { channels, errors } = publishNotificationToast(input);
+
+  // Channel 2: web push. The toast only exists while a tab is open, so without
+  // this a notification raised at 3am is gone by morning — the log row survives
+  // but nothing renders it.
+  //
+  // Best-effort like the toast, and for the same reason: a push service being
+  // slow or a keypair being unconfigured must never fail the caller's write.
+  // The difference is that push failures are RECORDED rather than swallowed, so
+  // "delivered: false" on a box with subscribers is diagnosable.
+  try {
+    await ensurePushDispatch(prisma);
+    const { sent } = await dispatchToUser(prisma, input.userId, {
+      title: input.title,
+      body: input.body ?? "",
+    });
+    if (sent > 0) channels.push("push");
+  } catch (err) {
+    errors.push(`push: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({

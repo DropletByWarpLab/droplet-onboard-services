@@ -58,6 +58,7 @@ import {
   runCorpusPass,
   BRAIN_CORPUS_LOCK_KEY,
 } from "./services/brain/brain-corpus.service.js";
+import { notifyFindings } from "./services/brain/brain-notify.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -658,6 +659,13 @@ async function main() {
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
           logger.warn({ outcome }, "brain.detector_pass.partial");
+        }
+        // Delivery runs INSIDE the same lock as the pass that produced the
+        // findings. Two instances notifying concurrently would double-announce
+        // the window between one stamping `notifiedAt` and the other reading it.
+        const notified = await notifyFindings(prisma);
+        if (notified.immediate > 0 || notified.digestSent) {
+          logger.info({ notified }, "brain.findings.notified");
         }
       },
       { lockKey: BRAIN_PASS_LOCK_KEY },

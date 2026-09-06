@@ -599,10 +599,22 @@ model BrainFinding {
   firstSeenAt     DateTime @default(now())
   lastConfirmedAt DateTime @default(now())
 
+  /// WARP-2752 — when this finding was last TOLD to somebody.
+  ///
+  /// Without it an hourly pass re-notifies the same overdue invoice every hour
+  /// forever, which is precisely how a nightly feature earns a mute. Null means
+  /// "nobody has been told yet", and it is the queue the digest drains.
+  /// Deliberately NOT derived from `status`: a finding can be acknowledged in
+  /// the UI without ever having been pushed, and re-notifying it then would be
+  /// telling someone what they just read.
+  notifiedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([dedupeKey])
+  /// The notification queue: unnotified findings, newest first.
+  @@index([notifiedAt, status])
   @@index([departmentId, status])
   @@index([status, kind])
   @@index([detectorKey, status])
