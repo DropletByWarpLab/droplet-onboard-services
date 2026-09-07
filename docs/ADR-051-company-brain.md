@@ -167,12 +167,16 @@ The brain adds **no notification channel of its own**: `sendNotification` carrie
 
 A `personal` row **must** name its owner (`ownerId`, the local `User.id` UUID — never a Nextcloud username), and a `department` row **must** name its department; both by CHECK. An enum value nothing can enforce is the same defect as a column nothing maintains.
 
-**9.3 — Two gates, doing two different jobs.** These are not redundancy, and conflating them is what made one comment in the codebase wrong.
+**9.3 — Two gates, and WHICH ONE FIRES DEPENDS ON THE PATH.** They are not redundancy, and reading either half alone gives the wrong answer.
 
-- **(a) The CAPABILITY gate.** The brain's own HTTP surface (`/api/brain/*`, including the `PATCH`) and the `/brief` nav entry are **owner/admin**. `family` and `guest` are refused with a **403** and the nav does not advertise the door. Refusing a capability leaks nothing, because the capability's *existence* is not the secret.
-- **(b) The ROW rule.** Wherever a non-owner/admin can legitimately reach brain rows, visibility is a **filter composed into the query** — `visibleScopeFilter`, resolving readable departments through the existing `readableDepartmentIdsFor`, admitting `company` only for owner/admin, and qualifying the `personal` arm by the caller's **own** id. Rows are **omitted, never refused**, and any reported total is the **post-filter** count: a total that counted hidden rows would leak exactly the existence the filter exists to hide.
+- **(a) The CAPABILITY gate.** On the **browser** path, the brain's HTTP surface (`/api/brain/*`, including the `PATCH`) and the `/brief` nav entry are **owner/admin**: `family` and `guest` are refused with a **403** and the nav does not advertise the door. Refusing a capability leaks nothing, because the capability's *existence* is not the secret.
+- **(b) The ROW rule.** Visibility is a **filter composed into the query** — `visibleScopeFilter`, resolving readable departments through the existing `readableDepartmentIdsFor`, admitting `company` only for owner/admin, and qualifying the `personal` arm by the caller's **own** id. Rows are **omitted, never refused**, and any reported total is the **post-filter** count: a total that counted hidden rows would leak exactly the existence the filter exists to hide.
 
-The `_service:mcp` principal may reach these routes on behalf of a chat user. **The middleware admits the principal; it does not turn it into a person** — the route resolves `X-Nextcloud-User` to a `User` row and scopes on *that* human's id and role, failing closed with a 403 when no human can be established (WARP-2810). Before that resolution existed, the filter received the literal string `_service:mcp`, whose role is not privileged and whose id matches no row, so every brain read through `business_find` returned an empty list on every box — a silence indistinguishable from good news.
+🔴 **On the TOOL path, (a) does not fire at all, and (b) is the whole protection.** `requireRoleOrMcpService` calls `next()` for `_service:mcp` **before** it ever evaluates a role (`middleware/auth.ts:864-869`). So a `family` user asking through chat passes the gate as the service principal; the route then resolves `X-Nextcloud-User` to a `User` row and hands *that human's* id and role to `visibleScopeFilter`, which is precisely and solely what keeps a company-scope row away from them.
+
+That makes the resolution load-bearing rather than tidy. **The middleware admits the principal; it does not turn it into a person** — the route must, and it fails closed with a 403 when no human can be established (WARP-2810). Before that resolution existed the filter received the literal string `_service:mcp`, whose role is not privileged and whose id matches no row, so every brain read through `business_find` returned an empty list on every box — a silence indistinguishable from good news.
+
+The two paths therefore have **different** protections for the same rows, and a reader who checks only `requireRole(...)` on the route will conclude, wrongly, that a `family` caller can never reach the handler.
 
 **9.4 — Today, tier (b) does real work in exactly one place:** the brain block spliced into `/llm/chat`, whose caller set includes `family`, `guest` and service principals. Scoping the block is therefore load-bearing, not defence in depth. The first draft OR'd in a bare `{ scope: "personal" }` when neither table had an owner column, which meant *every personal row on the box* for every reader — a guest received other people's document digests in their system prompt every turn. That is why `ownerId` exists and why the filter reads it back.
 
@@ -258,7 +262,10 @@ Its design in four rules:
 
 **Costly.** Findings are only as good as the detector slate, which is deliberately short. The corpus pass digests ~10 documents an hour by design, so a 5,000-document business is weeks from first-pass coverage — which is exactly why `/brief` leads with the coverage line.
 
-🔴 **Two corrections this ADR forces on existing code:**
+🔴 **One correction this ADR forces on existing code:**
 
-1. `packages/tools-core/src/handlers/business/find.ts` states that a company-scope row "never reaches a family or guest caller even though the model asked on their behalf", attributing that to `visibleScopeFilter`. Per §9.3, the *filter* is not what protects that path — the **capability gate** is, and since WARP-2810 the MCP path resolves the acting human and then filters. The comment describes the right outcome by the wrong mechanism and should be corrected.
-2. Several docstrings call the detector pass **"nightly"**. Per §5 it is **hourly** and operator-tunable. The word should go, because it makes the delivery policy in §8 look like over-engineering when it is the thing that makes an hourly pass survivable.
+1. Several docstrings call the detector pass **"nightly"**. Per §5 it is **hourly** and operator-tunable. The word should go, because it makes the delivery policy in §8 look like over-engineering when it is the thing that makes an hourly pass survivable.
+
+**A second "correction" was drafted here and is WITHDRAWN**, recorded rather than deleted because the mistake is the easy one to make twice. This ADR originally instructed the next engineer to fix `packages/tools-core/src/handlers/business/find.ts`, whose comment credits `visibleScopeFilter` with keeping company-scope rows from a `family` or `guest` caller — on the grounds that the capability gate was the real protection there.
+
+**That is backwards, and `find.ts` is right.** `requireRoleOrMcpService` admits `_service:mcp` before any role check, so on the path `business_find` actually uses, the gate never evaluates the human's role and the filter is the only thing standing between that caller and a company-scope row (§9.3). Applying the "correction" would have put `find.ts` into disagreement with `brain-block.service.ts`, and taught readers to trust a gate that does not run there.
