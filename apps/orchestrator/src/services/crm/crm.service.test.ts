@@ -293,6 +293,43 @@ describe("getPipelineSummary", () => {
     expect(out.omitted).toEqual([]);
     expect(out.covered).toHaveLength(1);
   });
+
+  it("🔴 an ARCHIVED default board is still what this answer COVERS", async () => {
+    // The reachable operator action: archive the default board. `updatePipeline`
+    // does not stop it, `ensureDefaultPipeline` resolves `{ isDefault: true }`
+    // with no `isArchived` filter and so keeps returning it — but the board
+    // list is active-only, so a `covered` computed by filtering that list found
+    // nothing. The summary then reported the OPPOSITE of what happened: the one
+    // board it actually summed was absent from `covered`, and `omitted` read as
+    // though every other board had been left out of an answer about nothing.
+    const prisma = {
+      crmPipeline: {
+        findFirst: async () => ({ ...pipelineWithStages, isArchived: true }),
+        findMany: async () => [{ id: "p2", name: "HubSpot", isDefault: false }],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma);
+    expect(out.pipelineId).toBe("p1");
+    expect(out.covered).toEqual([{ id: "p1", name: "Sales", isDefault: true }]);
+    expect(out.omitted.map((b) => b.id)).toEqual(["p2"]);
+  });
+
+  it("covers an archived board asked for BY ID too, not only the default", async () => {
+    // `getPipeline` is a bare `findUnique` with no `isArchived` filter either,
+    // so `business_find(entity:"pipeline", id:…)` reaches the same state by the
+    // other door.
+    const prisma = {
+      crmPipeline: {
+        findUnique: async () => ({ ...pipelineWithStages, isDefault: false, isArchived: true }),
+        findMany: async () => [{ id: "p2", name: "HubSpot", isDefault: true }],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma, "p1");
+    expect(out.covered).toEqual([{ id: "p1", name: "Sales", isDefault: false }]);
+    expect(out.omitted.map((b) => b.id)).toEqual(["p2"]);
+  });
 });
 
 describe("moveDealStage", () => {

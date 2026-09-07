@@ -1685,10 +1685,22 @@ export async function getPipelineSummary(
 
   return {
     pipelineId: pipeline.id,
-    covered: boards.filter((b) => b.id === pipeline.id),
+    // 🔴 THE RESOLVED BOARD ITSELF, never `boards.filter(…)`.
+    //
+    // `boards` is active-only, and NEITHER resolver above filters on
+    // `isArchived`: `ensureDefaultPipeline` reads `{ isDefault: true }`, and
+    // `getPipeline` is a bare `findUnique`. Archiving the default board is a
+    // reachable operator action — `updatePipeline` does not stop it — and the
+    // board then keeps being resolved while being absent from this list. A
+    // filter over the list therefore came back EMPTY for the one pipeline this
+    // answer is entirely about, while `omitted` named every other board, and
+    // the pair reported the exact opposite of what happened. Deriving
+    // `covered` from the resolved pipeline makes the two impossible to invert.
+    covered: [{ id: pipeline.id, name: pipeline.name, isDefault: pipeline.isDefault }],
     // Everything this answer does NOT speak for. Empty on a box with one
     // board, which is the ordinary case and reads correctly as "nothing was
-    // left out" rather than as a missing field.
+    // left out" rather than as a missing field. Active boards only: an
+    // archived one is not something to be told to "ask again" for.
     omitted: boards.filter((b) => b.id !== pipeline.id),
     stages: pipeline.stages.map((stage) => {
       const bucket = byStage.get(stage.id)!;
