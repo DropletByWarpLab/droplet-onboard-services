@@ -15,6 +15,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
+import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
@@ -316,6 +317,11 @@ export function createApp(
   app.use("/api", createProtectedWebAuthnRouter(prisma));
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
+  // WARP-2823 — the admin console's prompt + tool inspector. Read-only, and
+  // deliberately NOT under a module gate: no module in `module-registry.ts`
+  // claims an `/api/admin` prefix, and a console that disappears when a module
+  // is switched off is a console you cannot use to find out why.
+  app.use("/api", createAdminPromptInspectorRouter(prisma));
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
