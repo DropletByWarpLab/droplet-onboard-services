@@ -1718,6 +1718,12 @@ services:
       # to call the orchestrator"); the orchestrator stores it as
       # SERVICE_TOKEN_EMAIL (TS convention SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_EMAIL:-}
+      # WARP-2734 — the SAME secret, the OTHER direction. The line above is the
+      # token this service PRESENTS when it calls the orchestrator; this one is
+      # the token it REQUIRES on `/accounts/provision`, the endpoint that takes
+      # a mailbox password. Without it the middleware fails closed with a 503
+      # rather than serving that route unauthenticated.
+      - SERVICE_TOKEN_EMAIL=${SERVICE_TOKEN_EMAIL:-}
       # WARP-235: mTLS broker — identity is the client cert CN
       # ("email-indexer"); the username/password pair is retired.
       - MQTT_HOST=${MQTT_HOST:-broker}
@@ -1760,7 +1766,16 @@ services:
       - orchestrator
     restart: always
     <<: *default-logging
-    profiles: ["full"]
+    # WARP-2734 — `email` joins `full`, and `scripts/lib/secrets.sh` appends
+    # that token to COMPOSE_PROFILES exactly when it provisions
+    # SERVICE_TOKEN_EMAIL. That is the same predicate the module registry
+    # already uses (`id: "email"`, `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`),
+    # so a box gets the container precisely when it can authenticate it.
+    #
+    # Better than both alternatives: an idle container on every box that will
+    # never have a mailbox, or a profile nobody remembers to set — which is
+    # what shipped, and why the IMAP subsystem has never run anywhere.
+    profiles: ["full", "email"]
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}

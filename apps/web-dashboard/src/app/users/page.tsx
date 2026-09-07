@@ -85,6 +85,14 @@ import {
 // WARP-1533 (design §7): the invite picker defaults to the most-restrictive
 // sensible role — the built-in Guest tier (fail-toward-least-privilege; a
 // hasty invite can only under-grant, never over-grant).
+/**
+ * How long a sync line ("Applied", the session-revoke notice) stays visible
+ * after its write lands, before the Edit dialog closes. WARP-1270 introduced
+ * the pause so the operator sees the box finish the job; it is a deliberate
+ * beat, not a delay to tune away.
+ */
+const SYNC_BEAT_MS = 700;
+
 const INVITE_ROLE_DEFAULT = "tier:guest";
 
 const DEPT_RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
@@ -308,6 +316,56 @@ export default function UsersPage() {
   // (or a previous open of the same person) must never seed the currently
   // open editor, or a later Save would PUT someone else's exception rows.
   const editSeedTokenRef = useRef(0);
+
+  /**
+   * WARP-2696 — the sync line's "beat" must not outlive the page.
+   *
+   * `handleEditSave` deliberately holds "Applied" / the session-revoke line
+   * visible for {@link SYNC_BEAT_MS} after the write lands, so the operator
+   * sees the box finish rather than watching the dialog vanish mid-sentence.
+   * That pause is an `await` in the middle of the handler, and everything
+   * after it — `closeEdit()`, `reload()` — is a state update. If the page
+   * goes away inside that window (a route change mid-save; in a test, the
+   * case that ends while the beat is pending) the continuation used to resume
+   * into an unmounted tree.
+   *
+   * Under jsdom that lands AFTER environment teardown, where `window` no
+   * longer exists, so it surfaced as an unhandled `ReferenceError: window is
+   * not defined` that failed the whole dashboard run with every one of its
+   * 563 test files green — a failure with no test to point at.
+   *
+   * So: unmounting clears any pending beat and flips `mountedRef`, and every
+   * `await beat()` is followed by a bail-out.
+   */
+  const mountedRef = useRef(true);
+  const beatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (beatTimerRef.current !== null) {
+        clearTimeout(beatTimerRef.current);
+        beatTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  /** Hold the current sync line visible for a beat; resolves at once if the
+   *  page unmounts inside it, so the caller's bail-out runs immediately. */
+  const beat = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        if (!mountedRef.current) {
+          resolve();
+          return;
+        }
+        beatTimerRef.current = setTimeout(() => {
+          beatTimerRef.current = null;
+          resolve();
+        }, SYNC_BEAT_MS);
+      }),
+    [],
+  );
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -863,7 +921,8 @@ export default function UsersPage() {
         await updateUserUsage(editing.userId, usagePatch);
         setEditUsageSyncText("Applied");
         // Let "Applied" stay visible for a beat before the dialog closes.
-        await new Promise((resolve) => setTimeout(resolve, 700));
+        await beat();
+        if (!mountedRef.current) return;
       }
       if (accessChanged && editing.userId) {
         // §8/§12 — the change revokes the target's sessions (WARP-116), so
@@ -878,15 +937,20 @@ export default function UsersPage() {
             };
         await setPersonAccess(editing.userId, body);
         setEditAccessSyncText(ACCESS_COPY.applied);
-        await new Promise((resolve) => setTimeout(resolve, 700));
+        await beat();
+        if (!mountedRef.current) return;
       }
       if (exceptionsChanged && editing.userId) {
         await putAccessExceptions(editing.userId, editExceptions);
       }
+      // Every branch above awaits the box. The page may be gone by now even
+      // with no beat in play, so the close/reload pair is guarded too.
+      if (!mountedRef.current) return;
       closeEdit();
       await reload();
       if (accessChanged) reloadAccessRoles();
     } catch (err: any) {
+      if (!mountedRef.current) return;
       setEditUsageSyncText(null);
       setEditAccessSyncText(null);
       setError(err?.message || "Failed to update user");
@@ -977,6 +1041,10 @@ export default function UsersPage() {
     const label = u.displayName || u.id;
     const roleLabel = roleLabelFor(u);
     const isOwnerRow = u.role === "owner";
+    // Strict `=== false` on purpose: an orchestrator that predates the
+    // roster's `enabled` field sends nothing, and an undefined value has to
+    // read as active. Only an explicit false deactivates a row.
+    const isDeactivated = u.enabled === false;
     return (
     <div key={u.id} className="lrow">
       <span className="ri brand">
@@ -998,6 +1066,17 @@ export default function UsersPage() {
         <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
           <KeyRound size={11} aria-hidden="true" />
           {roleLabel}
+        </span>
+      )}
+      {/* State, not just the affordance: without this the roster looked
+          identical whether a person could sign in or not. */}
+      {isDeactivated && (
+        <span
+          className="chip"
+          style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12, color: "var(--text-faint)" }}
+        >
+          <Shield size={11} aria-hidden="true" />
+          Deactivated
         </span>
       )}
       {/* WARP-1271 (T19a): "used / limit" — mono, matches the
@@ -1049,15 +1128,32 @@ export default function UsersPage() {
         </button>
         {!isSelf(u) && (
           <>
-            <button
-              onClick={() => handleSetEnabled(u, false)}
-              aria-label={`Disable user ${label}`}
-              disabled={isOwnerRow}
-              title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Disable"}
-              className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
-            >
-              <Shield size={14} />
-            </button>
+            {/* The row offers the action that is actually available. A
+                deactivated person used to render the same Disable control as
+                everyone else, so an admin could cut someone off and had no
+                way to undo it from any screen — `performEnable` existed and
+                nothing ever called it with `true`. */}
+            {isDeactivated ? (
+              <button
+                onClick={() => handleSetEnabled(u, true)}
+                aria-label={`Enable user ${label}`}
+                disabled={isOwnerRow}
+                title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Enable"}
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-system-green hover:bg-system-green/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <ShieldCheck size={14} />
+              </button>
+            ) : (
+              <button
+                onClick={() => handleSetEnabled(u, false)}
+                aria-label={`Disable user ${label}`}
+                disabled={isOwnerRow}
+                title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Disable"}
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <Shield size={14} />
+              </button>
+            )}
             <button
               onClick={() => handleDelete(u)}
               aria-label={`Delete user ${label}`}

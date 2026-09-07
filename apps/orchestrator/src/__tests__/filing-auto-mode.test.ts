@@ -315,6 +315,88 @@ describe("🔴 caps bound, they do not discard", () => {
       policyClass: "AUTO",
       policyReason: null,
     });
+
+    // 🔴 And the WHERE, which nothing asserted. `data` alone says what the
+    // sweep writes; it says nothing about HOW MANY rows it writes it to.
+    // Without `id: { in: freed }` this updateMany promotes every PENDING REVIEW
+    // proposal on the box to AUTO with its reason cleared — every card the
+    // owner was meant to look at, applied unattended on the next tick, with
+    // the sentence explaining why it needed a person deleted in the same
+    // statement. The suite stayed green through exactly that mutation.
+    const where = updateMany.mock.calls[0][0].where as {
+      id?: { in?: string[] };
+      status?: string;
+      policyClass?: string;
+    };
+    expect(where.id).toEqual({ in: ["p1"] });
+    // Re-checked under the same conditions they were read under, so a row a
+    // person decided between the read and the write is not clobbered.
+    expect(where.status).toBe("PENDING");
+    expect(where.policyClass).toBe("REVIEW");
+  });
+
+  it("🔴 MUTATION: sweep every REVIEW card, not just the ones a CAP held", async () => {
+    // The other half of the same guard, one query earlier. `findMany`'s own
+    // `where` is what limits the sweep to proposals held back by a CAP —
+    // `policyReason` carrying BOUNDED_MARKER. Drop it and the sweep collects
+    // every card in review, including the ones a person is meant to decide
+    // because they are LOW CONFIDENCE or mention PHI, and hands them all to
+    // the filter below on grounds that have nothing to do with why they are
+    // there.
+    const findMany = vi.fn(async (_a: { where: Record<string, unknown> }) => []);
+    const prisma = { ingestProposal: { findMany, updateMany: vi.fn() } } as never;
+    await reconsiderBounded(prisma, {
+      appliedThisHour: 0,
+      createdToday: 0,
+      hourlyCap: 50,
+      dailyCap: 10,
+      hourlyReached: false,
+      dailyReached: false,
+    });
+    const where = findMany.mock.calls[0][0].where as {
+      status?: string;
+      policyClass?: string;
+      policyReason?: { contains?: string };
+    };
+    expect(where.status).toBe("PENDING");
+    expect(where.policyClass).toBe("REVIEW");
+    // Matched on the reason rather than a column, because `policyReason` is
+    // already the durable record of why a proposal is in review.
+    expect(where.policyReason?.contains).toBe(BOUNDED_MARKER);
+  });
+
+  it("🔴 frees a LINK held by the daily CREATE cap, and never a CREATE", async () => {
+    // The daily cap counts CREATE kinds only, so when it alone is spent a link
+    // may go and a create may not. Asserted through the sweep rather than on
+    // `capReachedFor` directly: the sweep is where the two are joined, and a
+    // filter that dropped the kind check would free a create against a cap
+    // that is still spent — the caps' whole purpose being that an unattended
+    // box cannot invent an unbounded number of customers in a day.
+    const updateMany = vi.fn(
+      async (_a: { where: { id: { in: string[] } } }) => ({ count: 1 }),
+    );
+    const prisma = {
+      ingestProposal: {
+        findMany: vi.fn(async () => [
+          { id: "link-1", kind: "LINK_FILE" },
+          { id: "create-1", kind: "CREATE_CUSTOMER" },
+        ]),
+        updateMany,
+      },
+    } as never;
+
+    await reconsiderBounded(prisma, {
+      appliedThisHour: 0,
+      createdToday: 10,
+      hourlyCap: 50,
+      dailyCap: 10,
+      hourlyReached: false,
+      dailyReached: true,
+    });
+
+    const where = updateMany.mock.calls[0]![0].where;
+    expect(where.id.in).toEqual(["link-1"]);
+    expect(where.id.in).not.toContain("create-1");
   });
 
   it("does not free anything while the window is still spent", async () => {

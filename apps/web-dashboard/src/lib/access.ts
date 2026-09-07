@@ -45,6 +45,22 @@ export const TIER_RANK: Record<AccessTier, number> = {
   owner: 4,
 };
 
+/**
+ * "May this person operate the box?" — the operator tiers, in one place.
+ *
+ * This predicate was copy-pasted into five files (the four /admin pages and
+ * /models), spelled two different ways, and the copies had already drifted
+ * apart in behaviour around auth hydration. One definition, so a future
+ * change to who counts as an operator lands everywhere at once.
+ *
+ * CLIENT-SIDE ONLY. This decides what to render, never what is permitted —
+ * the boundary is `requireRole()` in the orchestrator, and every route this
+ * gates is enforced there independently.
+ */
+export function isAdminRole(role?: string | null): boolean {
+  return role === "owner" || role === "admin";
+}
+
 /** Display label — the ONE place the `family` → "Staff" relabel lives
  *  (§0.1 / O-1). The enum value never changes. */
 export function tierLabel(tier: AccessTier): string {

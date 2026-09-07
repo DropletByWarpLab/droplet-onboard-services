@@ -163,6 +163,7 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 // WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
+import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
 import { runNightlyChainVerification } from "./services/audit-verify.service.js";
@@ -1602,6 +1603,29 @@ async function main() {
       onTrimmed: (result) => {
         if (result.deleted > 0 || result.skipped) {
           logger.info(result, "erp drift record retention trim");
+        }
+      },
+    });
+
+    // WARP-2751 — the money time axis: capture today's row for every document,
+    // then downsample the tail beyond the daily window.
+    //
+    // Its own leg at 03:45, continuing the 03:00 / 03:15 / 03:30 spacing, for
+    // the reason audit-retention-purge.service.ts argues at length: the daily
+    // purge handler runs every sweep on the box inside ONE 60 s advisory-lock
+    // transaction, and adding a table spends from that same budget.
+    //
+    // The capture here is UNSCOPED and is the only path that reaches a LOCAL
+    // document — the per-tick capture in erp-sync.service.ts is scoped to the
+    // vendor that just landed, and a LOCAL row has no connection at all.
+    registerMoneySnapshotMaintenance(cronRuntime, prisma as never, {
+      dailyDays: config.DROPLET_MONEY_SNAPSHOT_DAILY_DAYS,
+      onRun: ({ capture, trim }) => {
+        if (capture.error !== null) {
+          logger.warn({ error: capture.error }, "money snapshot capture failed");
+        }
+        if (capture.captured > 0 || trim.deleted > 0 || trim.skipped) {
+          logger.info({ capture: capture.captured, trim }, "money snapshot maintenance");
         }
       },
     });

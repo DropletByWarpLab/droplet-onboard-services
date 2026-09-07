@@ -482,6 +482,23 @@ model BrainDigest {
   /// the corpus that produced the row is the only thing that knows.
   scope BrainScope @default(personal)
 
+
+  /// WARP-2752 — WHOSE personal row this is. Required exactly when `scope` is
+  /// `personal`, and forbidden otherwise (`*_personal_scope_needs_owner`).
+  ///
+  /// Without it `personal` was UNENFORCEABLE: neither table had an owner
+  /// column, so `visibleScopeFilter` OR'd in `{ scope: "personal" }` for every
+  /// caller and every user saw every other user's personal rows — the exact
+  /// opposite of what the `BrainScope` docstring promises. An enum value
+  /// nothing can enforce is the same defect as a column nothing maintains, and
+  /// this is the second time that rule bit this schema.
+  ///
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for. Cascade: it is an ACCESS-CONTROL key, and an
+  /// access key that dangles is a leak.
+  owner   User?   @relation("BrainDigestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
   /// WHICH department, when `scope` is `department`. Required exactly then
   /// (`BrainDigest_department_scope_needs_id`), because a department-scoped row
   /// with no department is unenforceable: the reader check is "is this person a
@@ -526,6 +543,7 @@ model BrainDigest {
   @@index([kind, scope])
   @@index([subjectType, subjectId])
   @@index([scope, lastConfirmedAt(sort: Desc)])
+  @@index([ownerId, scope])
   @@index([departmentId, scope])
   @@index([detectorKey])
 }
@@ -592,6 +610,10 @@ model BrainFinding {
 
   scope BrainScope @default(personal)
 
+  /// See `BrainDigest.ownerId` — same rule, same CHECK, same Cascade.
+  owner   User?   @relation("BrainFindingOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
   /// See `BrainDigest.departmentId` — same rule, same CHECK, same Cascade.
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   departmentId String?
@@ -613,6 +635,8 @@ model BrainFinding {
   updatedAt DateTime @updatedAt
 
   @@unique([dedupeKey])
+  /// Personal reads lead with the owner — "my open findings".
+  @@index([ownerId, status])
   /// The notification queue: unnotified findings, newest first.
   @@index([notifiedAt, status])
   @@index([departmentId, status])
@@ -2631,7 +2655,14 @@ model User {
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
   // owning side — removing a person must not delete the business's findings.
-  brainFindings    BrainFinding[]
+  // WARP-2748: findings ASSIGNED to this person (SetNull — removing someone
+  // must not delete the business's findings).
+  brainFindings      BrainFinding[]
+  // WARP-2752: personal-scope rows this person OWNS. Distinct relations, and
+  // distinct delete behaviour: an owned row is Cascade because `ownerId` is an
+  // access-control key, where an assignment is mere provenance.
+  brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
+  brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
 
   @@index([role])
   @@index([accessRoleId])
@@ -5780,6 +5811,68 @@ model ErpDocument {
   /// list is always filtered by all three.
   @@index([origin, kind, status])
 }
+
+/// WARP-2751 (ADR-051) — the TIME AXIS for money. `ErpDocument` holds one row
+/// per document carrying only its LATEST state, because `land-money.ts`
+/// overwrites `amount`/`balance`/`vendorStatus` in place on every sync tick.
+/// Yesterday is destroyed 96 times a day. Ageing, DSO drift, "our overdue
+/// balance has doubled since June", "which customers slowed down" are all
+/// structurally unanswerable against that, however good the model is.
+///
+/// Append-only, one row per subject per DAY.
+///
+/// 🔴 WHY A SNAPSHOT AND NOT AN AUDIT LOG. An audit log answers "what changed";
+/// this answers "what was it worth on this date", which is the shape every
+/// trend question has and the shape a `GROUP BY capturedOn` serves cheaply.
+/// `ErpAuditLog` already exists and does not do this.
+///
+/// 🔴 NO `workspaceId`, despite the ticket proposing one. This schema has no
+/// tenancy concept — `workspaceId` appears on `PmProject` alone, and inventing
+/// a second, unenforced one here would be a column every future query has to
+/// remember to filter and no constraint would ever check. `subjectId` is a
+/// uuid and globally unique, so the unique key below is complete without it.
+model MoneySnapshot {
+  id String @id @default(uuid())
+
+  /// The DAY this value was true. `@db.Date`, not a timestamp: the grain IS
+  /// one day, and storing a time would let two rows for the same day differ
+  /// and defeat the unique key that makes the 15-minute cadence idempotent.
+  capturedOn DateTime @db.Date
+
+  /// What was measured. A string rather than an enum because the next two
+  /// subjects (`crm_deal`, `pipeline`) are not landed yet and an enum whose
+  /// members arrive one migration at a time buys nothing over a documented
+  /// vocabulary.
+  subjectType String
+  /// The subject's own id. NOT a foreign key: a snapshot must survive the
+  /// document it describes, or the series ends the moment a vendor deletes an
+  /// invoice — which is exactly the history worth keeping.
+  subjectId   String
+
+  /// The same shape `ErpDocument` carries, so the series and the live row are
+  /// directly comparable. `Decimal(20,6)` and NOT minor units, for the reason
+  /// `ErpDocument.amount` gives: a ledger's exponent is unknowable when its
+  /// currency is null, and guessing 2 is wrong by 100x on a yen ledger.
+  amount   Decimal? @db.Decimal(20, 6)
+  balance  Decimal? @db.Decimal(20, 6)
+  currency String?
+  /// The vendor's own word, carried verbatim — see `ErpDocument.vendorStatus`.
+  /// Free text, because five vendors spell this five ways.
+  status   String?
+
+  createdAt DateTime @default(now())
+
+  /// The idempotency key. A document synced twelve times in one day must
+  /// produce ONE row, and this is what makes the upsert converge on the day's
+  /// last-seen value instead of appending ninety-six near-duplicates.
+  @@unique([capturedOn, subjectType, subjectId])
+  /// "The 90-day series for this document" — the query the whole table exists
+  /// to serve, and the one the retention downsample scans.
+  @@index([subjectType, subjectId, capturedOn])
+  /// Retention sweeps by date across all subjects.
+  @@index([capturedOn])
+}
+
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these

@@ -160,6 +160,15 @@ export interface AgentDeps {
    * pre-WARP-2469 behaviour and is fail-closed.
    */
   approvals?: ChatApprovalPort;
+  /**
+   * WARP-2749 — the iteration cap this caller is entitled to. Absent → the
+   * interactive cap (`config.agentMaxIter.capIter`), so every chat turn is
+   * byte-identical. Only in-process callers construct deps — it is not
+   * reachable from an HTTP body — and the durable-run worker sets it to
+   * `config.agentRuns.maxIter`, because a run has a wall clock, not a person
+   * waiting.
+   */
+  maxIterCap?: number;
   aiGateway: {
     chat: (
       req: {
@@ -182,6 +191,12 @@ export interface AgentDeps {
       // `req.signal` so an in-flight inference fetch is cancelled when the
       // client goes away mid-turn.
       signal?: AbortSignal,
+      // Mirrors ai-gateway.client's trailing parameters so a caller may hand
+      // the module function over directly (index.ts does, for the run
+      // worker). The loop itself never sets either; the worker wraps `chat`
+      // to stamp its inference priority (WARP-2749).
+      userId?: string,
+      opts?: { priority?: number },
     ) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
     /**
      * WARP-1442 — optional SERVER-SIDE token streaming. When present AND the
@@ -209,6 +224,8 @@ export interface AgentDeps {
         tool_choice?: "auto" | "none";
       },
       signal?: AbortSignal,
+      userId?: string,
+      opts?: { priority?: number },
     ) => AsyncIterable<ChatStreamChunk>;
   };
   /**
@@ -1254,12 +1271,13 @@ async function consumeChatStream(
 
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
-  // bound) read config.agentMaxIter, so they cannot drift.
+  // bound) read config.agentMaxIter, so they cannot drift. WARP-2749: a
+  // durable run brings its own cap on deps (see AgentDeps.maxIterCap).
   const maxIter = Math.max(
     1,
     Math.min(
       req.max_iter ?? config.agentMaxIter.defaultIter,
-      config.agentMaxIter.capIter,
+      deps.maxIterCap ?? config.agentMaxIter.capIter,
     ),
   );
   const trace: AgentTraceEntry[] = [];
@@ -2509,7 +2527,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-2178 — the per-tool result-size distribution, one line per
       // dispatch at debug level (a chat turn must not pay an info line per
       // tool). This is what the cap is meant to be chosen from: run the
-      // staging suite with LOG_LEVEL=debug and aggregate by `tool`. Sizes and
+      // orchestrator at LOG_LEVEL=debug (docs/ENVIRONMENT.md), run the staging
+      // suite, aggregate by `tool`. Sizes and
       // names only — never the payload.
       logger.debug(
         {

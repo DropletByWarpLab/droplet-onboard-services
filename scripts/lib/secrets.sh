@@ -611,7 +611,7 @@ POSTGRES_DB=droplet
 DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet?sslmode=require
 
 # --- Redis ---
-# WARP-234: REDIS_PASSWORD is the ping-only `default` ACL user (health
+# WARP-234: REDIS_PASSWORD is the ping-only \`default\` ACL user (health
 # probes / the WARP-966 harness). Real clients authenticate as their own
 # ACL user via the per-service rediss:// URLs in docker-compose.yml.
 REDIS_PASSWORD=$redis_password
@@ -619,7 +619,7 @@ REDIS_URL=rediss://:${redis_password}@cache:6380
 REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
 REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
 REDIS_PASSWORD_MCP=$redis_mcp_password
-# Nextcloud expects this name for the Redis password (ACL user `nextcloud`)
+# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`)
 REDIS_HOST_PASSWORD=$redis_password
 
 # --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
@@ -887,7 +887,7 @@ OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
 OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
-#   relay OFF — single-box.sh only activates the `relay` compose profile
+#   relay OFF — single-box.sh only activates the \`relay\` compose profile
 #   (cloudflared) when this is set, so an un-provisioned box never brings up a
 #   tokenless connector.
 TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
@@ -896,7 +896,7 @@ TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
 #   FACTORY-RESET box can re-enroll itself into the HQ registry. Factory-reset
 #   sends the ADR-023 signed deregister, which DELETES the device from the HQ
 #   registry — on the next boot tls-issuance is then rejected with 404
-#   `device_id not in registry` and the box would stay on the self-signed
+#   \`device_id not in registry\` and the box would stay on the self-signed
 #   bootstrap cert forever. When this token is set, the orchestrator self-provisions
 #   (POST /api/issuance/provision with a TPM proof-of-possession over the token)
 #   on that 404, then retries issuance and installs its droplet-us.com cert.
@@ -920,7 +920,18 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 #             install doesn't scan the LAN or hit a missing switch on boot)
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+#
+# WARP-2734: \`email\` is appended below, not listed here, because it is
+# CONDITIONAL. The email-indexer is the only service whose profile depends on
+# a secret rather than on the platform: it needs SERVICE_TOKEN_EMAIL both to
+# call the orchestrator and to authenticate the provisioning endpoint that
+# takes a mailbox password. Same predicate the module registry already uses
+# (\`id: "email"\`, \`available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)\`).
+#
+# 🔴 It shipped under \`profiles: ["full"]\` alone, and \`full\` is never in this
+# default — so the IMAP subsystem has never run on any box that ever shipped.
+# That is the defect WARP-2734 exists to close; the conditional is the close.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
 
 # --- NVR recordings target (WARP-2099) ---
 # Where Frigate writes 24/7 camera footage. Written EXPLICITLY on every
@@ -1170,6 +1181,39 @@ migrate_env() {
   # routing egress/throughput samplers 401 (WARP-268 egress-anomaly feed dies),
   # and an empty JWT_SECRET bricks the orchestrator at boot. Backfill on upgrade.
   _migrate_ensure_key SERVICE_TOKEN_EMAIL "$(openssl rand -hex 32)"
+  # WARP-2734 — the token above is not enough on an UPGRADE.
+  #
+  # `_migrate_ensure_key COMPOSE_PROFILES` only writes when the key is ABSENT,
+  # and it is present on every previously-provisioned box. So the backfill gave
+  # those boxes `SERVICE_TOKEN_EMAIL` — which is exactly what the dashboard's
+  # module registry keys availability off (`id: "email"`,
+  # `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`) — while `email-indexer`
+  # stayed out of COMPOSE_PROFILES and never started. The Email module lit up
+  # as available on a box where nothing was ingesting mail: the worst shape,
+  # because it fails silently and looks fine.
+  #
+  # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
+  # path's half of the same decision. Compared as a whole list element (the
+  # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
+  # for it, and an empty value does not gain a leading comma.
+  if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
+    # Last assignment wins, which is how docker compose reads a .env.
+    _current_profiles="$(sed -nE 's|^COMPOSE_PROFILES=[[:space:]]*(.*)$|\1|p' "$stage" | tail -n 1)"
+    _current_profiles="${_current_profiles%"${_current_profiles##*[![:space:]]}"}"
+    if ! printf ',%s,' "$_current_profiles" | grep -q ',email,'; then
+      if [ -n "$_current_profiles" ]; then
+        _new_profiles="$_current_profiles,email"
+      else
+        _new_profiles="email"
+      fi
+      awk -v v="$_new_profiles" '
+        /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
+      ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
+      normalized=true
+      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+    fi
+    unset _current_profiles _new_profiles
+  fi
   _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"

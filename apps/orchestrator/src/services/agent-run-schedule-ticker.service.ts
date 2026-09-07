@@ -58,29 +58,69 @@ export async function tickAgentRunSchedules(
   let disabled = 0;
   let skipped = 0;
   for (const schedule of due) {
+    // Enqueue and advance in ONE transaction. Done as two statements, a
+    // failed advance after a successful enqueue left the schedule still due
+    // and the next tick fired it again — a second run for the same slot.
+    // Inside one transaction a failure anywhere leaves nothing behind, and
+    // the next tick retries the whole fire.
+    const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone);
+    // `null` = the owner is gone and the schedule was disabled instead of fired.
+    let runId: string | null;
     try {
-      const { id } = await enqueueAgentRun(prisma, {
-        userId: schedule.userId,
-        goal: schedule.goal,
-        model: schedule.model,
-        maxIter: schedule.maxIter,
-        runAfter: schedule.nextFireAt,
+      runId = await prisma.$transaction(async (tx) => {
+        // WARP-2744 item 4 — `AgentRunSchedule.userId` carries no FK, so a
+        // deleted account's schedule would fire every slot and every run
+        // would fail as attribution_failed:user_missing. Disable it here,
+        // once, in the same transaction, with a system row below.
+        const owner = await tx.user.findUnique({
+          where: { id: schedule.userId },
+          select: { id: true },
+        });
+        if (!owner) {
+          await tx.agentRunSchedule.update({
+            where: { id: schedule.id },
+            data: { enabled: false, lastFiredAt: now },
+          });
+          return null;
+        }
+        const created = await enqueueAgentRun(tx, {
+          userId: schedule.userId,
+          goal: schedule.goal,
+          model: schedule.model,
+          maxIter: schedule.maxIter,
+          runAfter: schedule.nextFireAt,
+        });
+        await tx.agentRunSchedule.update({
+          where: { id: schedule.id },
+          data:
+            next === null
+              ? { enabled: false, lastFiredAt: now }
+              : { nextFireAt: next, lastFiredAt: now },
+        });
+        return created.id;
       });
-      fired += 1;
-      logger.info({ scheduleId: schedule.id, runId: id }, "agent_run_schedule_fired");
     } catch (err) {
-      // Enqueue is one insert; a failure here is infrastructure. Do not
-      // advance — the next tick retries this fire instead of dropping it.
-      logger.warn({ err, scheduleId: schedule.id }, "agent_run_schedule_enqueue_failed");
+      logger.warn({ err, scheduleId: schedule.id }, "agent_run_schedule_fire_failed");
       skipped += 1;
       continue;
     }
-    const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone);
-    if (next === null) {
-      await prisma.agentRunSchedule.update({
-        where: { id: schedule.id },
-        data: { enabled: false, lastFiredAt: now },
+    if (runId === null) {
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "clock",
+        what: "Agent run schedule disabled (owner no longer exists)",
+        actor: { type: "system" },
+        sub: `schedule ${schedule.id}`,
+        refs: { agentRunScheduleId: schedule.id, userId: schedule.userId, reason: "user_missing" },
       });
+      logger.warn({ scheduleId: schedule.id, userId: schedule.userId }, "agent_run_schedule_owner_missing");
+      disabled += 1;
+      continue;
+    }
+    fired += 1;
+    logger.info({ scheduleId: schedule.id, runId }, "agent_run_schedule_fired");
+    if (next === null) {
       await recordActivity({
         kind: "system",
         severity: "warn",
@@ -91,12 +131,7 @@ export async function tickAgentRunSchedules(
         refs: { agentRunScheduleId: schedule.id, rrule: schedule.rrule },
       });
       disabled += 1;
-      continue;
     }
-    await prisma.agentRunSchedule.update({
-      where: { id: schedule.id },
-      data: { nextFireAt: next, lastFiredAt: now },
-    });
   }
   return { inspected: due.length, fired, disabled, skipped };
 }

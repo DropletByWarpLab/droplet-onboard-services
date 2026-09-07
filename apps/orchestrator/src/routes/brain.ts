@@ -66,8 +66,40 @@ function callerOf(req: Request): { id: string; role: string } {
   return { id: user?.id ?? "", role: user?.role ?? "" };
 }
 
+// One declaration of each vocabulary, reused by the GET validators and the
+// PATCH body. The GETs used to cast `req.query.status` straight into a Prisma
+// `where`, so `?status=bogus` reached the driver, threw a
+// PrismaClientValidationError that nothing maps, and came back a 500 — while
+// the PATCH in this same file validated properly. Same file, two standards.
+const FINDING_STATUS = ["new", "acknowledged", "actioned", "dismissed", "stale"] as const;
+const DIGEST_KIND = [
+  "entity",
+  "project",
+  "obligation",
+  "theme",
+  "metric",
+  "relationship",
+] as const;
+const FINDING_KIND = [
+  "loss",
+  "risk",
+  "inefficiency",
+  "opportunity",
+  "inconsistency",
+] as const;
+
+const findingQuerySchema = z.object({
+  status: z.enum(FINDING_STATUS).optional(),
+  kind: z.enum(FINDING_KIND).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+const digestQuerySchema = z.object({
+  kind: z.enum(DIGEST_KIND).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 const patchSchema = z.object({
-  status: z.enum(["new", "acknowledged", "actioned", "dismissed", "stale"]),
+  status: z.enum(FINDING_STATUS),
   dismissedReason: z.string().max(500).optional(),
   assigneeId: z.string().uuid().nullable().optional(),
 });
@@ -77,12 +109,16 @@ export function createBrainRouter(prisma: PrismaClient): Router {
   const gate = requireRoleOrMcpService("owner", "admin");
 
   router.get("/brain/findings", gate, async (req: Request, res: Response, next: NextFunction) => {
+    const q = findingQuerySchema.safeParse(req.query);
+    if (!q.success) {
+      res.status(400).json({ error: "invalid_query" });
+      return;
+    }
     try {
-      const status = typeof req.query.status === "string" ? req.query.status : undefined;
-      const limit = Number.parseInt(String(req.query.limit ?? ""), 10);
       const { rows, total } = await listFindings(prisma, callerOf(req), {
-        status: status as "new" | undefined,
-        limit: Number.isFinite(limit) ? limit : undefined,
+        status: q.data.status,
+        kind: q.data.kind,
+        limit: q.data.limit,
       });
       // BigInt is not JSON-serialisable and Express would throw on it — the
       // amount goes out as a string, the `CrmDeal.amountMinor` wire shape.
@@ -99,12 +135,15 @@ export function createBrainRouter(prisma: PrismaClient): Router {
   });
 
   router.get("/brain/digests", gate, async (req: Request, res: Response, next: NextFunction) => {
+    const q = digestQuerySchema.safeParse(req.query);
+    if (!q.success) {
+      res.status(400).json({ error: "invalid_query" });
+      return;
+    }
     try {
-      const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
-      const limit = Number.parseInt(String(req.query.limit ?? ""), 10);
       const { rows, total } = await listDigests(prisma, callerOf(req), {
-        kind: kind as "entity" | undefined,
-        limit: Number.isFinite(limit) ? limit : undefined,
+        kind: q.data.kind,
+        limit: q.data.limit,
       });
       res.json({ digests: rows, total });
     } catch (err) {
@@ -114,12 +153,16 @@ export function createBrainRouter(prisma: PrismaClient): Router {
 
   router.get("/brain/coverage", gate, async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const passes = await prisma.brainPass.findMany({
-        where: { passKey: { in: [DETECTOR_PASS_KEY, CORPUS_PASS_KEY] } },
-      });
-      // How much there is to read, so "digested" has a denominator. Without it
-      // the number is a count with no scale and reads as completeness.
-      const totalIndexed = await prisma.fileIndexStatus.count({ where: { status: "ready" } });
+      // Neither read depends on the other, and `brain-digest.service.ts`
+      // already uses Promise.all for the equivalent rows/count pair.
+      const [passes, totalIndexed] = await Promise.all([
+        prisma.brainPass.findMany({
+          where: { passKey: { in: [DETECTOR_PASS_KEY, CORPUS_PASS_KEY] } },
+        }),
+        // How much there is to read, so "digested" has a denominator. Without
+        // it the number is a count with no scale and reads as completeness.
+        prisma.fileIndexStatus.count({ where: { status: "ready" } }),
+      ]);
       res.json({
         passes: passes.map((p) => ({
           passKey: p.passKey,

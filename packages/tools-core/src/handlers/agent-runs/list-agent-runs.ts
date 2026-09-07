@@ -66,7 +66,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     steps: `${r.iteration}/${r.maxIter}`,
     ...(r.error ? { error: r.error } : {}),
     ...(r.result ? { resultPreview: r.result.slice(0, 300) } : {}),
-    ...(r.pending ? { needsApproval: { tool: r.pending.tool, since: r.pending.parkedAt } } : {}),
+    ...(r.status === "awaiting_confirmation" && r.pending
+      ? { needsApproval: { tool: r.pending.tool, since: r.pending.parkedAt } }
+      : {}),
   }));
   return { ok: true, data: { runs, count: runs.length } };
 }

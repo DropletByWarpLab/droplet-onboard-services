@@ -26,6 +26,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Download, FileLock2, ScrollText, Search, ShieldOff } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { fetchUsers } from "@/lib/api";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { AuditTimeline } from "@/components/audit/AuditTimeline";
@@ -64,10 +65,6 @@ const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
 interface LoadError {
   message: string;
   detail?: string;
-}
-
-function isAdminRole(role?: string): boolean {
-  return role === "owner" || role === "admin";
 }
 
 /** WARP-1058: validate a ?kind= deep-link value against the wire enum
