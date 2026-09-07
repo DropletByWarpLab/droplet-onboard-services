@@ -162,6 +162,21 @@ else
   fail "🔴 an already-Done ticket is skipped — rc=$RC calls: $(cat "$CALLS")"
 fi
 
+# The terminal status that is not NAMED "Done". Every other terminal test in
+# this file uses the literal "Done", which the `STATUS == TARGET_STATUS` check
+# already catches in `done` mode — so the CATEGORY guard below it is
+# unreachable under test, and deleting those four lines leaves the suite green
+# (measured: 21/21 still passed). "Won't Do" is the case the guard exists for,
+# and without this test a regression that re-closes a Won't Do ticket — on a
+# board with no undo — would ship green.
+issue "Won't Do" "Done" "Story"; transitions "$TRANSITIONS_DEFAULT"
+run done "fix: follow-up on a Won't Do key (WARP-24)"
+if ! posted_transition && ! posted_comment && [ $RC -eq 0 ]    && echo "$OUT_TXT" | grep -q "already Won't Do"; then
+  pass "🔴 a terminal status not named \"Done\" is matched on CATEGORY, not re-closed"
+else
+  fail "🔴 a Won't Do ticket is not re-closed — rc=$RC calls: $(cat "$CALLS")"
+fi
+
 issue "Done" "Done" "Story"; transitions "$TRANSITIONS_DEFAULT"
 run in-review "fix: a PR that mentions a closed ticket (WARP-8)"
 if ! posted_transition && echo "$OUT_TXT" | grep -q "not reopened"; then
