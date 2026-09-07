@@ -75,7 +75,18 @@ Coverage:
 network plumbing is not exercised by these unit tests. Standard
 deploy checklist:
 
-1. Add an EmailAccount via the dashboard with a known-test mailbox.
+1. Connect a mailbox in **Settings → Email → Connect a mailbox**
+   (owner/admin only), using a known-test mailbox.
+
+   ⚠ This line used to read *"Add an EmailAccount via the dashboard"*
+   and **was never true on any box that shipped**. No code anywhere
+   created an `EmailAccount` row, and `creds.py` could only DECRYPT —
+   so the only account that could ever exist was a hand-written SQL
+   INSERT carrying a ciphertext produced out of band. WARP-2734 built
+   the form: it posts to `POST /api/email/accounts`, which guards both
+   hosts against SSRF, asks this service to verify the mailbox and
+   encrypt the password (`POST /accounts/provision`), and writes the
+   row with `imapStatus = idle` only after the probe succeeds.
 2. Tail `email-indexer` logs — should see `IDLE session` + `ingest`
    lines within ~10s.
 3. Send a test mail; confirm an EmailMessage row lands in postgres

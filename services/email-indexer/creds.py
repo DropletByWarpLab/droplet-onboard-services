@@ -65,6 +65,25 @@ def decrypt(ciphertext: str) -> Optional[str]:
         return None
 
 
+def encrypt(plaintext: str) -> str:
+    """Encrypt one mailbox password for storage in EmailAccount.passwordEnc.
+
+    WARP-2734. Until this existed the module could only DECRYPT, which is why
+    no code anywhere had ever created an EmailAccount row: the orchestrator
+    holds the Prisma pool but not the key, and nothing held both. The key stays
+    here — putting it in the process that already holds every other credential
+    would widen that blast radius for no gain.
+
+    Raises rather than returning None, unlike `decrypt`. The asymmetry is
+    deliberate: a failed decrypt is one account the IDLE pool skips, and a
+    failed encrypt is an account the operator believes they connected. The
+    first is survivable and the second is a silent lie.
+    """
+    if _fernet is None:
+        raise RuntimeError("encrypt called before init_or_exit")
+    return _fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
 def _set_for_tests(fernet: Optional[Fernet]) -> None:
     """Test-only seam — inject a Fernet with a known key so the
     decryption path is exercisable without /data/secrets present."""
