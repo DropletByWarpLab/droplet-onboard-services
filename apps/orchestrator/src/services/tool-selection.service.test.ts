@@ -750,6 +750,113 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
     });
   });
 
+  // ── WARP-2719 — the DEPARTMENT vocabulary, and the `team` it must not take ──
+  //
+  // The first cut of this ticket put `departments?|teams?` straight into the
+  // pm noun list. `departments?` is fine there; a bare `teams?` was not. It
+  // matched this repo's own team_chat continuity fixture — "and post that
+  // where the team will see it" — and opened `pm` and `business` on a turn
+  // that must reach Slack and nothing else, plus every household sentence
+  // with the word in it. Nothing went red, because that fixture only ever
+  // asserted `slack_send_message` was PRESENT, and an over-matching rule
+  // ADDS domains: no present-tool assertion anywhere in this repo can see
+  // one. Both halves are therefore pinned here, explicitly.
+  describe("department / team vocabulary is bounded (WARP-2719)", () => {
+    const GRAPH_POOL = ["business_find", "business_create", "search_content"];
+    const domainsFor = (message: string) =>
+      selectAdvertisedTools({
+        mode: "domains",
+        userMessage: message,
+        pool: GRAPH_POOL,
+        conversationToolNames: [],
+      }).matchedDomains;
+
+    // ── positives: each of these is carried by THIS rule and nothing else ──
+    //
+    // MUTATION for this group: delete the `departments? … teams?` rule
+    // from tool-selection.service.ts and every one goes red. Verified by
+    // deleting it — none of them survives on another rule, which is what
+    // makes them a pin rather than a restatement of the ruleset.
+    it.each([
+      // `departments?`, bare — the word the tool's own schema uses.
+      "which department does Sam sit in",
+      "move the new hire into the billing department",
+      // `on|in the <name> team` — membership in a NAMED team. One name word
+      // and two both have to work; "front desk" is the ticket's own example.
+      "who is on the clinical team",
+      "who is on the front desk team",
+      // `which|whose team` — the question is about the team itself.
+      "which team should this go to",
+      // `team('s) <work noun>` — the team as an owner of work.
+      "how does the clinical team's roster look",
+      "show me the team's capacity",
+    ])("%s reaches the business graph", (message) => {
+      expect(
+        domainsFor(message),
+        `"${message}" matched only [${domainsFor(message).join(", ")}]`,
+      ).toContain("business");
+    });
+
+    // ── the negative that the first cut of this rule failed ────────────────
+    it("the team_chat continuity fixture stays a Slack-only turn", () => {
+      // THE regression. `advertisedFor(..., [prior call])` elsewhere in this
+      // file proves the continuity path still delivers Slack; what was never
+      // asserted is that the fixture's own WORDS reach no domain rule — and
+      // `tool-selection.regression.test.ts` depends on exactly that to keep
+      // the keyword path and the continuity path separable. A bare `teams?`
+      // in the pm rule breaks it, and this is the assertion that says so.
+      expect(
+        domainsFor("and post that where the team will see it"),
+        "the continuity fixture's own wording must match NO domain rule",
+      ).toEqual([]);
+    });
+
+    it.each([
+      // The household senses of the same noun. Two whole domains of tool
+      // schema on any of these is pure waste on the turn that pays for it.
+      "the team is coming over for dinner",
+      "my football team lost again",
+      "the away team scored in the last minute",
+      // `in the team meeting` has no team NAME between determiner and noun,
+      // so the membership frame does not fire. (It reaches `calendar`, which
+      // is the right domain for it — `business` is what must stay out.)
+      "we are in the team meeting until four",
+      // The one household use of `department`, and the reason that half of
+      // the rule carries a lookahead rather than standing bare.
+      "I need to go to the department store",
+    ])("%s does NOT", (message) => {
+      expect(domainsFor(message)).not.toContain("business");
+      expect(domainsFor(message)).not.toContain("pm");
+    });
+
+    it("MUTATION: put `teams?` back in the pm noun list and four of these flip", () => {
+      // Written down because it is exactly the widening that shipped, and
+      // the one a later reader will be tempted to redo: `teams?` alongside
+      // `projects?|tickets?|…` reads harmless and takes the Slack fixture,
+      // the dinner, the football and the meeting with it.
+      for (const message of [
+        "and post that where the team will see it",
+        "the team is coming over for dinner",
+        "my football team lost again",
+        "we are in the team meeting until four",
+      ]) {
+        expect(domainsFor(message), message).not.toContain("business");
+      }
+    });
+
+    it("the ticket's own two sentences do not depend on this rule at all", () => {
+      // The narrowing costs the ticket nothing, stated as a test rather than
+      // as prose: both acceptance sentences are carried by the
+      // `work(ing|ed) on` / `assigned to` rule, so someone tightening the
+      // department rule further can see immediately what is and is not
+      // resting on it.
+      expect(domainsFor("what is Front Desk working on?")).toContain("business");
+      expect(domainsFor("what is assigned to the Clinical team right now?")).toContain(
+        "business",
+      );
+    });
+  });
+
   it("does not let `open` alone reach the payments reader", () => {
     // `(open|click|bounce) rates?` and `(sales|open|closed|won|lost) deals?`
     // both REQUIRE their noun. Without that, "open" — one of the commonest
