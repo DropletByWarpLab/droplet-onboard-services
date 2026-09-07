@@ -79,6 +79,9 @@ export type UpsertDigestInput = {
   confidence?: number | null;
   scope?: "personal" | "department" | "company";
   departmentId?: string | null;
+  /** REQUIRED when scope is `personal` — the local `User.id` whose space this
+   *  was derived from. See the `ownerId` docstring in schema.prisma. */
+  ownerId?: string | null;
   detectorKey: string;
 };
 
@@ -92,6 +95,8 @@ export type UpsertFindingInput = {
   confidence?: number | null;
   scope?: "personal" | "department" | "company";
   departmentId?: string | null;
+  /** REQUIRED when scope is `personal`. */
+  ownerId?: string | null;
   detectorKey: string;
   /** Distinguishes findings the same detector raises about different things.
    *  Omit for a detector that produces at most one finding overall. */
@@ -146,14 +151,19 @@ function assertConfidence(confidence: number | null | undefined): void {
     throw new Error("confidence_out_of_range");
 }
 
-/** `department` scope names its department, and only `department` scope may.
- *  Mirrors the `*_department_scope_needs_id` CHECKs. */
+/** Each scope names the thing that bounds it, and only that scope may.
+ *  Mirrors the `*_department_scope_needs_id` and `*_personal_scope_needs_owner`
+ *  CHECKs — validated here too so a caller gets a stable code instead of a raw
+ *  constraint violation. */
 function assertScopeShape(
   scope: "personal" | "department" | "company",
   departmentId: string | null | undefined,
+  ownerId: string | null | undefined,
 ): void {
   const hasDept = departmentId !== null && departmentId !== undefined;
   if ((scope === "department") !== hasDept) throw new Error("scope_department_mismatch");
+  const hasOwner = typeof ownerId === "string" && ownerId.length > 0;
+  if ((scope === "personal") !== hasOwner) throw new Error("scope_owner_mismatch");
 }
 
 /**
@@ -171,7 +181,7 @@ export async function upsertDigest(
   assertSources(input.sources);
   assertConfidence(input.confidence);
   const scope = input.scope ?? "personal";
-  assertScopeShape(scope, input.departmentId);
+  assertScopeShape(scope, input.departmentId, input.ownerId);
 
   const dedupeKey = brainDedupeKey({
     detectorKey: input.detectorKey,
@@ -196,6 +206,7 @@ export async function upsertDigest(
     confidence: input.confidence ?? null,
     scope,
     departmentId: input.departmentId ?? null,
+    ownerId: input.ownerId ?? null,
     detectorKey: input.detectorKey,
     lastConfirmedAt: now,
   };
@@ -229,7 +240,7 @@ export async function upsertFinding(
   assertSources(input.evidence?.sources);
   assertConfidence(input.confidence);
   const scope = input.scope ?? "personal";
-  assertScopeShape(scope, input.departmentId);
+  assertScopeShape(scope, input.departmentId, input.ownerId);
 
   // All-or-nothing, mirroring BrainFinding_impact_needs_currency. A detector
   // that cannot compute an impact leaves BOTH null rather than guessing: a
@@ -267,6 +278,7 @@ export async function upsertFinding(
     confidence: input.confidence ?? null,
     scope,
     departmentId: input.departmentId ?? null,
+    ownerId: input.ownerId ?? null,
     detectorKey: input.detectorKey,
     lastConfirmedAt: now,
   };
@@ -280,10 +292,35 @@ export async function upsertFinding(
     select: { id: true },
   });
 
+  // `stale` was set by the SWEEP, not by a human: it means "the detector
+  // stopped reporting this". The detector is reporting it again, so the row is
+  // OPEN again. Without this a condition that resolves and recurs — an invoice
+  // paid, then overdue a second time — is invisible forever, because /brief and
+  // the notifier both read `status: "new"` only.
+  //
+  // `dismissed` and `actioned` are a person's decision and are NOT touched. The
+  // guard lives in the WHERE rather than in a branch on the read above, so it
+  // is one atomic UPDATE: a human dismissing between the two statements still
+  // wins, and this is not the findUnique -> check -> update shape the repo's own
+  // review-patterns skill lists as a caught anti-pattern.
+  //
+  // `notifiedAt` clears with it. Announce-once is about a condition that never
+  // went away; one that RESOLVED and came back is a new event and deserves to
+  // be told again.
+  let revived = 0;
+  if (existing?.status === "stale") {
+    const res = await prisma.brainFinding.updateMany({
+      where: { dedupeKey, status: "stale" },
+      data: { status: "new", notifiedAt: null },
+    });
+    revived = res.count;
+  }
+
   return {
     id: row.id,
     created: existing === null,
-    statusPreserved: existing !== null && existing.status !== "new",
+    // `revived === 0` so this stops claiming a preservation that did not happen.
+    statusPreserved: existing !== null && existing.status !== "new" && revived === 0,
   };
 }
 
@@ -304,7 +341,11 @@ export async function visibleScopeFilter(
   const privileged = caller.role === "owner" || caller.role === "admin";
   const deptIds = [...(await readableDepartmentIdsFor(prisma, caller))];
 
-  const or: Prisma.BrainDigestWhereInput[] = [{ scope: "personal" }];
+  // SCOPED TO THE CALLER. An unqualified `{ scope: "personal" }` was a
+  // cross-user leak: neither table had an owner column, so every authenticated
+  // reader saw every other person's personal rows. `ownerId` is now required
+  // for that scope by a CHECK, and this is the half that reads it back.
+  const or: Prisma.BrainDigestWhereInput[] = [{ scope: "personal", ownerId: caller.id }];
   if (deptIds.length > 0) or.push({ scope: "department", departmentId: { in: deptIds } });
   if (privileged) or.push({ scope: "company" });
 
@@ -406,7 +447,14 @@ export async function setFindingStatus(
     where: { id },
     data: {
       status: next.status,
-      dismissedReason: next.dismissedReason ?? null,
+      // Only written when the CALLER supplied it. Writing `?? null`
+      // unconditionally wiped an existing reason whenever someone PATCHed
+      // something else — reassigning a finding would silently delete the note
+      // explaining it. The schema deliberately allows a reason to survive on a
+      // non-dismissed row, so absence here means "unchanged", not "clear it".
+      ...(next.dismissedReason !== undefined
+        ? { dismissedReason: next.dismissedReason }
+        : {}),
       ...(next.assigneeId !== undefined ? { assigneeId: next.assigneeId } : {}),
     },
   });

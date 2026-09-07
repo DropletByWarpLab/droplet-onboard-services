@@ -41,6 +41,9 @@ function digestInput(over: Record<string, unknown> = {}) {
     body: "The 2026 MSA sets payment terms at net 30 from delivery.",
     sources: SOURCES,
     detectorKey: "obligations.terms",
+    // WARP-2752: `personal` scope now REQUIRES an owner — that is what makes
+    // it personal rather than a label every reader could see past.
+    ownerId: "u-owner",
     ...over,
   };
 }
@@ -168,6 +171,7 @@ describe("upsertFinding (WARP-2748)", () => {
         impactMinor: 4000n,
         evidence: { sources: SOURCES },
         detectorKey: "money.ageing",
+        ownerId: "u-owner",
       }),
     ).rejects.toThrow("impact_needs_currency");
   });
@@ -194,6 +198,7 @@ describe("upsertFinding (WARP-2748)", () => {
       evidence: { sources: SOURCES },
       detectorKey: "money.ageing",
       subjectKey: "inv-1",
+      ownerId: "u-owner",
     });
 
     const call = upsert.mock.calls[0]![0];
@@ -206,6 +211,31 @@ describe("upsertFinding (WARP-2748)", () => {
 
 describe("visibleScopeFilter — the ADR-051 privacy line (WARP-2748)", () => {
   const prisma = {} as never;
+
+  it("scopes the PERSONAL arm to the caller — the leak that mattered", async () => {
+    // The shipped first draft OR'd in a bare `{ scope: "personal" }`. Neither
+    // table had an owner column, so that meant "every personal row in the box"
+    // for every reader — and the reachable path was not the owner/admin-gated
+    // HTTP route but `buildBrainBlock`, which rides /llm/chat and admits
+    // family, guest and service. A guest got other people's document digests
+    // spliced into their system prompt every turn.
+    vi.mocked(readableDepartmentIdsFor).mockResolvedValueOnce(new Set<string>());
+    const f = await visibleScopeFilter(prisma, { id: "u-guest", role: "guest" });
+    const json = JSON.stringify(f);
+    expect(json).toContain("u-guest");
+    // and never an unqualified personal arm
+    expect(json).not.toContain('{"scope":"personal"}');
+  });
+
+  it("gives two different callers two different filters", async () => {
+    vi.mocked(readableDepartmentIdsFor).mockResolvedValueOnce(new Set<string>());
+    const a = JSON.stringify(await visibleScopeFilter(prisma, { id: "u-a", role: "family" }));
+    vi.mocked(readableDepartmentIdsFor).mockResolvedValueOnce(new Set<string>());
+    const b = JSON.stringify(await visibleScopeFilter(prisma, { id: "u-b", role: "family" }));
+    expect(a).not.toBe(b);
+    expect(a).toContain("u-a");
+    expect(a).not.toContain("u-b");
+  });
 
   it("gives owner the company scope", async () => {
     vi.mocked(readableDepartmentIdsFor).mockResolvedValueOnce(new Set<string>());
@@ -253,6 +283,60 @@ describe("visibleScopeFilter — the ADR-051 privacy line (WARP-2748)", () => {
     vi.mocked(readableDepartmentIdsFor).mockResolvedValueOnce(new Set<string>());
     const f = await visibleScopeFilter(prisma, { id: "u2", role: "family" });
     expect(JSON.stringify(f)).not.toContain("department");
+  });
+});
+
+describe("upsertFinding — a resolved condition that RECURS (WARP-2752)", () => {
+  it("revives a `stale` row and clears notifiedAt", async () => {
+    // The sweep sets `stale` when a detector stops reporting. If the condition
+    // comes back — an invoice paid, then overdue again — nothing flipped it
+    // back, and /brief and the notifier both read `new` only, so it was
+    // invisible forever. notifiedAt clears too: announce-once is about a
+    // condition that never went away.
+    const updateMany = vi.fn(async (_a: { data: Record<string, unknown> }) => ({ count: 1 }));
+    const prisma = {
+      brainFinding: {
+        findUnique: vi.fn(async () => ({ id: "f1", status: "stale" })),
+        upsert: vi.fn(async () => ({ id: "f1" })),
+        updateMany,
+      },
+    } as never;
+
+    const res = await upsertFinding(prisma, {
+      kind: "loss",
+      title: "t",
+      rationale: "r",
+      evidence: { sources: SOURCES },
+      detectorKey: "money.ageing",
+      subjectKey: "inv-1",
+      ownerId: "u-owner",
+    });
+
+    expect(updateMany).toHaveBeenCalledOnce();
+    expect(updateMany.mock.calls[0]![0].data).toEqual({ status: "new", notifiedAt: null });
+    expect(res.statusPreserved).toBe(false);
+  });
+
+  it("does NOT revive a human's dismissal", async () => {
+    const updateMany = vi.fn(async () => ({ count: 0 }));
+    const prisma = {
+      brainFinding: {
+        findUnique: vi.fn(async () => ({ id: "f1", status: "dismissed" })),
+        upsert: vi.fn(async () => ({ id: "f1" })),
+        updateMany,
+      },
+    } as never;
+    const res = await upsertFinding(prisma, {
+      kind: "loss",
+      title: "t",
+      rationale: "r",
+      evidence: { sources: SOURCES },
+      detectorKey: "money.ageing",
+      subjectKey: "inv-1",
+      ownerId: "u-owner",
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(res.statusPreserved).toBe(true);
   });
 });
 

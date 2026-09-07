@@ -54,27 +54,43 @@
  * pass rather than nag forever.
  */
 import type { PrismaClient } from "@prisma/client";
+import { toMinorUnits } from "@droplet/shared-types";
 import type { Detector, DetectedFinding } from "./types";
 
 /** Below this, an overdue invoice is noise. Reporting a $2 balance next to a
  *  $40,000 one trains the operator to skim. */
 const MIN_REPORTABLE_MINOR = 100n; // 1.00 in minor units
 
-/** Decimal(20,6) -> minor units (integer cents), rounded half-up on the
- *  absolute value so a negative balance rounds symmetrically. Prisma hands
- *  back a Decimal.js instance; going through its string form avoids the
- *  float64 round-trip that turns 1234.565 into 1234.5649999. */
-export function decimalToMinor(value: unknown): bigint | null {
-  if (value === null || value === undefined) return null;
-  const s = String(value);
-  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-  const neg = s.startsWith("-");
-  const [intPart, fracRaw = ""] = (neg ? s.slice(1) : s).split(".");
-  const frac = (fracRaw + "000").slice(0, 3);
-  const thousandths = BigInt(intPart) * 1000n + BigInt(frac);
-  // Round half-up from thousandths to hundredths.
-  const minor = (thousandths + 5n) / 10n;
-  return neg ? -minor : minor;
+/**
+ * `Decimal(20,6)` (major units, as the vendor sent them) -> minor units.
+ *
+ * 🔴 CURRENCY-AWARE, AND THE FIRST VERSION WAS NOT. It converted to hundredths
+ * for every currency. That is right for USD and wrong by 100x for JPY and KRW
+ * (0 decimals) and by 10x for KWD and BHD (3) — a confident impact figure two
+ * orders of magnitude out, persisted into `BrainFinding`, rendered on /brief
+ * and read to the model. This module's own docstring says it refuses to
+ * produce a fabricated number; that was one.
+ *
+ * DELEGATES to `toMinorUnits` (@droplet/shared-types money.ts) rather than
+ * re-deriving the exponent here. That helper already existed when the first
+ * version was written, and a second implementation of a currency table is a
+ * second thing to keep correct.
+ *
+ * Returns null for an unknown currency rather than assuming two decimals: a
+ * detector that cannot compute an impact must leave it null, and the caller
+ * reports the overdue invoice WITHOUT an amount instead of dropping it.
+ */
+export function decimalToMinor(value: unknown, currency: string | null): bigint | null {
+  if (value === null || value === undefined || !currency) return null;
+  return toMinorUnits(String(value), currency);
+}
+
+/** A balance that is all zeros however it was written ("0", "0.00", "-0.0").
+ *  Used only on the path where the currency is unreadable, so `decimalToMinor`
+ *  could not give us a number to compare — a settled-but-unreaped row must
+ *  still be skipped, and `money.service.ts` records that such rows exist. */
+export function isZeroish(balance: unknown): boolean {
+  return /^\s*-?0*\.?0*\s*$/.test(String(balance ?? "0"));
 }
 
 export function daysBetween(a: Date, b: Date): number {
@@ -183,8 +199,15 @@ export const overdueReceivables: Detector = {
 
     for (const r of rows) {
       if (!isOpen(r)) continue;
-      const minor = decimalToMinor(r.balance);
-      if (minor === null || minor <= 0n || minor < MIN_REPORTABLE_MINOR) continue;
+      // A missing or unreadable currency costs the AMOUNT, not the finding:
+      // the invoice is still overdue and "90 days past due, amount unknown"
+      // beats silently omitting a real debt. The threshold can only be applied
+      // when there IS an amount.
+      const minor = decimalToMinor(r.balance, r.currency);
+      if (minor !== null && (minor <= 0n || minor < MIN_REPORTABLE_MINOR)) continue;
+      // With no computable amount, fall back to the raw balance so a
+      // settled-but-unreaped zero row is still skipped.
+      if (minor === null && isZeroish(r.balance)) continue;
 
       const days = r.dueAt ? daysBetween(now, r.dueAt) : 0;
       if (days <= 0) continue;
@@ -194,7 +217,10 @@ export const overdueReceivables: Detector = {
       // Impact and currency are all-or-nothing. A document with a balance and
       // no currency is unrenderable, so it is reported WITHOUT a number rather
       // than with a guessed one.
-      const haveCurrency = Boolean(r.currency);
+      // All-or-nothing: a balance whose currency is unreadable is
+      // unrenderable, so it is reported without a number rather than with a
+      // guessed one.
+      const haveCurrency = minor !== null;
 
       out.push({
         subjectKey: r.id,
@@ -236,15 +262,25 @@ export const overduePayables: Detector = {
 
     for (const r of rows) {
       if (!isOpen(r)) continue;
-      const minor = decimalToMinor(r.balance);
-      if (minor === null || minor <= 0n || minor < MIN_REPORTABLE_MINOR) continue;
+      // A missing or unreadable currency costs the AMOUNT, not the finding:
+      // the invoice is still overdue and "90 days past due, amount unknown"
+      // beats silently omitting a real debt. The threshold can only be applied
+      // when there IS an amount.
+      const minor = decimalToMinor(r.balance, r.currency);
+      if (minor !== null && (minor <= 0n || minor < MIN_REPORTABLE_MINOR)) continue;
+      // With no computable amount, fall back to the raw balance so a
+      // settled-but-unreaped zero row is still skipped.
+      if (minor === null && isZeroish(r.balance)) continue;
 
       const days = r.dueAt ? daysBetween(now, r.dueAt) : 0;
       if (days <= 0) continue;
 
       const who = r.counterpartyName?.trim() || "an unnamed supplier";
       const from = sourceName(r.externalSystem);
-      const haveCurrency = Boolean(r.currency);
+      // All-or-nothing: a balance whose currency is unreadable is
+      // unrenderable, so it is reported without a number rather than with a
+      // guessed one.
+      const haveCurrency = minor !== null;
 
       out.push({
         subjectKey: r.id,

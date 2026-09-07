@@ -160,6 +160,10 @@ interface CustomerRecordSlice {
  *  when a free-text query has to be matched here — see the deal branch. */
 const DEAL_SEARCH_PAGE = 200;
 
+/** Same reasoning as `DEAL_SEARCH_PAGE`: a client-side free-text filter can
+ *  only match what it fetched, so a search reads the route's maximum page. */
+const DIGEST_SEARCH_PAGE = 200;
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const a = args as unknown as Args;
 
@@ -513,25 +517,44 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
 
       case "digest": {
+        const q = typeof a.query === "string" ? a.query.trim().toLowerCase() : "";
         const qs = new URLSearchParams();
-        if (a.limit) qs.set("limit", String(a.limit));
+        // A free-text search reads the WIDEST page the route allows, the
+        // `DEAL_SEARCH_PAGE` treatment: /api/brain/digests has no query
+        // parameter, so anything not fetched cannot be matched.
+        qs.set("limit", String(q ? DIGEST_SEARCH_PAGE : clampLimit(a.limit)));
         const data = await callOrch<{
           digests?: Array<Record<string, unknown>>;
           total?: number;
         }>(ctx, "get", `/api/brain/digests?${qs.toString()}`);
-        const q = typeof a.query === "string" ? a.query.trim().toLowerCase() : "";
-        // Filtered HERE rather than by the route: /api/brain/digests has no
-        // free-text parameter, and inventing one on the client keeps this tool
-        // honest about `total` — which stays the SERVER's count, so a narrowed
-        // list never claims the corpus is smaller than it is.
+
         const rows = (data.digests ?? []).map(toBrainDigest);
-        const shown = q
-          ? rows.filter(
-              (d) =>
-                d.title.toLowerCase().includes(q) || d.body.toLowerCase().includes(q),
-            )
-          : rows;
-        return { ok: true, data: { entity, digests: shown, total: data.total ?? 0 } };
+        const serverTotal = data.total ?? 0;
+        if (!q) return { ok: true, data: { entity, digests: rows, total: serverTotal } };
+
+        const shown = rows.filter(
+          (d) => d.title.toLowerCase().includes(q) || d.body.toLowerCase().includes(q),
+        );
+        // `total` is the MATCH count, not the corpus count. Reporting the
+        // server's full total beside a filtered list said "I searched
+        // everything and found 2 of 900" when what happened was "I searched the
+        // newest 200 and found 2". `searched` names the window so a model that
+        // finds nothing can say WHY rather than assert absence — the
+        // never-infer-absence-from-a-listing rule.
+        return {
+          ok: true,
+          data: {
+            entity,
+            digests: shown,
+            total: shown.length,
+            searched: { most_recent: rows.length, corpus_total: serverTotal },
+            ...(rows.length < serverTotal
+              ? {
+                  note: `searched the ${rows.length} most recently confirmed digests of ${serverTotal}; older ones were not read`,
+                }
+              : {}),
+          },
+        };
       }
 
       case "pipeline": {

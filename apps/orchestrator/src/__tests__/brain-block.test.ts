@@ -57,12 +57,22 @@ describe("buildBrainBlock (WARP-2752)", () => {
     expect(out).toContain("Acme is 90 days past due");
   });
 
-  it("renders money in whole units with its currency", async () => {
+  it("renders money in MAJOR units with its currency", async () => {
     const out = await buildBrainBlock(db([finding], []), owner);
-    // 4,000,000 minor = 40000 USD. Prompt text, so no separators — but it must
-    // not be the raw minor figure, which would overstate by 100x.
-    expect(out).toContain("40000 USD");
-    expect(out).not.toContain("4000000");
+    // 4,000,000 minor = 40000.00 USD, via the currency-aware
+    // `formatMinorUnits`. The raw minor figure would overstate by 100x, and a
+    // hardcoded /100 would understate JPY by the same factor.
+    expect(out).toContain("40000.00 USD");
+    expect(out).not.toContain("4000000 USD");
+  });
+
+  it("uses the currency's own exponent for a 0-decimal currency", async () => {
+    const out = await buildBrainBlock(
+      db([{ ...finding, impactMinor: 1000n, currency: "JPY" }], []),
+      owner,
+    );
+    // JPY has no minor unit: 1000 minor IS 1000 yen, not 10.
+    expect(out).toContain("1000 JPY");
   });
 
   it("omits money entirely when the detector computed none", async () => {

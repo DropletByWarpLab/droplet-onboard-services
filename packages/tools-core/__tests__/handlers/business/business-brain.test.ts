@@ -124,15 +124,41 @@ describe("business_find entity:digest (WARP-2752)", () => {
     expect(d.scope).toBe("personal");
   });
 
-  it("filters free text client-side but keeps the SERVER's total", async () => {
-    // A narrowed list must not claim the corpus is smaller than it is.
+  it("reports the MATCH count and names the window it searched", async () => {
+    // The first draft returned the server's full corpus total beside a
+    // filtered list, which said "I searched everything and found 1 of 2" when
+    // what happened was "I searched the newest N and found 1". A model cannot
+    // tell absence from an unsearched window unless the result says which.
     get.mockResolvedValueOnce(
-      res(true, 200, { digests: [apiDigest, { ...apiDigest, id: "g2", title: "Unrelated", body: "x" }], total: 2 }),
+      res(true, 200, {
+        digests: [apiDigest, { ...apiDigest, id: "g2", title: "Unrelated", body: "x" }],
+        total: 900,
+      }),
     );
     const out = expectOk(await businessFind.handler({ entity: "digest", query: "net 30" }, ctx));
-    const data = out.data as { digests: unknown[]; total: number };
+    const data = out.data as {
+      digests: unknown[];
+      total: number;
+      searched: { most_recent: number; corpus_total: number };
+      note?: string;
+    };
     expect(data.digests).toHaveLength(1);
-    expect(data.total).toBe(2);
+    expect(data.total).toBe(1);
+    expect(data.searched).toEqual({ most_recent: 2, corpus_total: 900 });
+    expect(data.note).toContain("older ones were not read");
+  });
+
+  it("reads the WIDEST page when searching, so the filter can match", async () => {
+    // A client-side filter can only match what it fetched.
+    get.mockResolvedValueOnce(res(true, 200, { digests: [], total: 0 }));
+    await businessFind.handler({ entity: "digest", query: "lease" }, ctx);
+    expect(get.mock.calls[0]![0]).toContain("limit=200");
+  });
+
+  it("omits the window note when it did read the whole corpus", async () => {
+    get.mockResolvedValueOnce(res(true, 200, { digests: [apiDigest], total: 1 }));
+    const out = expectOk(await businessFind.handler({ entity: "digest", query: "net 30" }, ctx));
+    expect(out.data as { note?: string }).not.toHaveProperty("note");
   });
 
   it("returns everything when no query is given", async () => {

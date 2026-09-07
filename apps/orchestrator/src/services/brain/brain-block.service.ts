@@ -26,6 +26,7 @@
  * at each call site.
  */
 import type { PrismaClient } from "@prisma/client";
+import { formatMinorUnits } from "@droplet/shared-types";
 import { visibleScopeFilter } from "./brain-digest.service.js";
 import type { Prisma } from "@prisma/client";
 
@@ -36,9 +37,11 @@ export const BRAIN_BLOCK_CHAR_BUDGET = 1800;
 
 function money(minor: bigint | null, currency: string | null): string {
   if (minor === null || currency === null) return "";
-  // Whole units, no separators: this is prompt text, not a UI. A model reads
-  // "40000 USD" as reliably as "$40,000.00" and it costs a third of the chars.
-  return ` (${(minor / 100n).toString()} ${currency})`;
+  // CURRENCY-AWARE via formatMinorUnits. Dividing by 100n was wrong by 100x
+  // for JPY/KRW and 10x for KWD/BHD — and a wrong number read to the model is
+  // worse than no number, because it will quote it.
+  const shown = formatMinorUnits(minor, currency);
+  return shown ? ` (${shown} ${currency})` : "";
 }
 
 export async function buildBrainBlock(

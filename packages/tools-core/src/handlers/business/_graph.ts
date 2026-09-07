@@ -152,6 +152,16 @@ export function rejectMisusedArgs(
     );
   }
   const id = supplied.id;
+  // WARP-2752: an entity that does not READ `id` must refuse it, not ignore it.
+  // `finding` and `digest` are list-only, and a silently-dropped `id` returned
+  // the whole list while the tool description promised "that one record" — the
+  // model then reports a list as if it were the record it asked for.
+  if (typeof id === "string" && id.trim().length > 0 && !honoured.has("id")) {
+    return fail(
+      "BUSINESS_INVALID_REQUEST",
+      `entity "${entity}" is a list and takes no id; drop id to list them`,
+    );
+  }
   if (typeof id === "string" && id.trim().length > 0) {
     const filters = SEARCH_ARGS.filter((k) => supplied[k] !== undefined && supplied[k] !== null);
     if (filters.length > 0) {
