@@ -73,7 +73,13 @@ case "$URL" in
     printf '%s' "${COMMENT_CODE:-201}" ;;
   *)
     [ -n "$OUT" ] && cp "$ISSUE_JSON" "$OUT"
-    printf '%s' "${ISSUE_CODE:-200}" ;;
+    # Per-key override, e.g. ISSUE_CODE_WARP_103=401, falling back to the
+    # run-wide ISSUE_CODE. Without it a test cannot make one key fail one way
+    # and another key fail a different way, which is the whole mixed case.
+    KEYNAME=""
+    [[ "$URL" =~ (WARP-[0-9]+) ]] && KEYNAME="${BASH_REMATCH[1]}"
+    PERKEY="ISSUE_CODE_${KEYNAME//-/_}"
+    printf '%s' "${!PERKEY:-${ISSUE_CODE:-200}}" ;;
 esac
 STUB
 chmod +x "$WORK/bin/curl"
@@ -301,6 +307,29 @@ if [ $RC -eq 1 ] && echo "$OUT_TXT" | grep -q "credential looks dead"; then
   pass "🔴 a dead credential DOES turn it red — the one thing that must not rot"
 else
   fail "🔴 a dead credential turns it red — rc=$RC out=$OUT_TXT"
+fi
+
+# "401/403 on every key" is what the header promises, and now what the
+# arithmetic says. One key that auth-fails while another fails some OTHER way
+# is not evidence about the credential — the old `MOVED == 0 && SKIPPED == 0`
+# form said it was, and blamed the token for Jira's 500.
+issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"
+ISSUE_CODE_WARP_103=401 ISSUE_CODE_WARP_104=500 run done "feat: mixed failures (WARP-103, WARP-104)"
+unset ISSUE_CODE_WARP_103 ISSUE_CODE_WARP_104
+if [ $RC -eq 0 ] && echo "$OUT_TXT" | grep -q "keys=2 .*auth_failures=1 other_failures=1"; then
+  pass "🔴 one key 401 + one key 500 is NOT a dead credential"
+else
+  fail "🔴 one 401 + one 500 stays green — rc=$RC out=$OUT_TXT"
+fi
+
+# ...and the canary still fires when it IS every key, on more than one of them.
+issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"
+ISSUE_CODE=403 run done "feat: token really is dead (WARP-105, WARP-106)"
+unset ISSUE_CODE
+if [ $RC -eq 1 ] && echo "$OUT_TXT" | grep -q "credential looks dead"; then
+  pass "🔴 401/403 on EVERY key of a multi-key title is still red"
+else
+  fail "🔴 every key auth-failing is still red — rc=$RC out=$OUT_TXT"
 fi
 
 issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"

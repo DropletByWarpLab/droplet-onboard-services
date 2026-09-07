@@ -51,10 +51,10 @@
 #
 # A Jira hiccup is a ::warning. The merge already happened and a red X on a
 # merged PR is pure noise. The ONE thing that turns this red is a credential
-# that no longer works — 401/403 on the READ of every key — because a silently
-# dead token is how this automation would rot back into hand sweeps without
-# anyone noticing. A REJECTED transition (400/409) is not that, and is counted
-# apart.
+# that no longer works — 401/403 on the READ of EVERY key, counted against the
+# number of keys in the title — because a silently dead token is how this
+# automation would rot back into hand sweeps without anyone noticing. A
+# REJECTED transition (400/409) is not that, and is counted apart.
 #
 # "on the READ" is load-bearing, not a hedge. Jira Cloud documents 403 on
 # POST /rest/api/3/issue/{key}/transitions as "the user does not have the
@@ -172,6 +172,7 @@ jira_post() { # $1 = path, $2 = json → HTTP code on stdout
 # problem. Every non-2xx after the read is an OTHER failure, by construction.
 read_is_auth_failure() { case "$1" in 401|403) return 0 ;; *) return 1 ;; esac; }
 
+KEY_COUNT=0  # keys in the title, so "on every key" can be arithmetic
 MOVED=0      # transitions that happened
 SKIPPED=0    # deliberately left alone — a guard fired
 REJECTED=0   # Jira said no to the transition itself
@@ -179,6 +180,7 @@ AUTH_FAIL=0  # a READ answered 401/403 — the only credential evidence there is
 OTHER_FAIL=0 # everything else
 
 for KEY in $KEYS; do
+  KEY_COUNT=$((KEY_COUNT + 1))
   CODE=$(jira_get "/rest/api/3/issue/$KEY?fields=status,issuetype")
   BODY=$(cat /tmp/jira-body.$$ 2>/dev/null || echo '{}')
   rm -f /tmp/jira-body.$$
@@ -304,12 +306,23 @@ for KEY in $KEYS; do
   esac
 done
 
-note "moved=$MOVED skipped=$SKIPPED rejected=$REJECTED auth_failures=$AUTH_FAIL other_failures=$OTHER_FAIL"
+note "keys=$KEY_COUNT moved=$MOVED skipped=$SKIPPED rejected=$REJECTED auth_failures=$AUTH_FAIL other_failures=$OTHER_FAIL"
 
-# The ONLY red. Nothing worked AND the reason was the credential on every key
-# — the dead-token case, which must not rot silently. A rejected transition or
-# a single flaky call leaves this green, because the merge already happened.
-if [ "$AUTH_FAIL" -gt 0 ] && [ "$MOVED" -eq 0 ] && [ "$SKIPPED" -eq 0 ]; then
+# The ONLY red: the READ answered 401/403 on EVERY key. That is the dead-token
+# case and nothing else. A rejected transition or a single flaky call leaves
+# this green, because the merge already happened.
+#
+# Counted against KEY_COUNT rather than inferred from "nothing worked", which
+# the old `MOVED == 0 && SKIPPED == 0` form did. That form also fired when one
+# key auth-failed and the rest failed some OTHER way — a two-key title where
+# WARP-103 401s and WARP-104 500s went red and blamed the token for Jira's
+# 500 — which is narrower in the comment than it was in the arithmetic. Those
+# two terms are gone rather than kept alongside this one, because
+# AUTH_FAIL == KEY_COUNT already implies them: if every key failed its read,
+# nothing was moved and nothing was skipped. `-gt 0` is what stops an empty
+# key set satisfying 0 == 0; unreachable today, since a title with no key
+# returns above, and kept so it stays unreachable if that ever moves.
+if [ "$AUTH_FAIL" -gt 0 ] && [ "$AUTH_FAIL" -eq "$KEY_COUNT" ]; then
   echo "::error title=Jira credential looks dead::Every ticket failed with an auth error. Rotate JIRA_EMAIL / JIRA_API_TOKEN."
   exit 1
 fi
