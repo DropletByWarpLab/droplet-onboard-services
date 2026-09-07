@@ -229,6 +229,73 @@ export async function expandDepartmentScope(
 }
 
 /**
+ * The sentinel a caller passes to mean "owned by nobody", rather than
+ * "no filter". Spelled out because the three-way encoding — absent / a target /
+ * unowned — is the whole reason a plain `string | undefined` is not enough.
+ */
+export const DEPARTMENT_FILTER_NONE = "none";
+
+/**
+ * Turn whatever a caller typed into a department id, or refuse.
+ *
+ * WARP-2719. `expandDepartmentScope` matches on `id` ONLY, and deliberately
+ * returns `[departmentId]` for an unknown one so the filter matches nothing
+ * rather than degrading into "no filter". That is right for an id and wrong for
+ * a NAME: a person — or a model — asking about "Front Desk" and getting an
+ * empty board back has been told, silently, that the department has no work.
+ * The distinction between "nothing matched your filter" and "there is no such
+ * department" is the entire value of the answer, so a name that resolves to
+ * nothing throws `department_not_found` here, BEFORE the scope expansion.
+ *
+ * 🔴 THE RESOLUTION LIVES SERVER-SIDE, AND IT HAS TO. `GET /api/departments`
+ * scopes its listing to the caller's own memberships for anyone below
+ * owner/admin, and the assistant's principal (`_service:mcp`) holds none — it
+ * receives `{departments: []}`. So an LLM tool cannot look a name up first and
+ * pass an id; if the name is not resolved here, the feature does not exist for
+ * the caller it was built for.
+ *
+ * Order is id, then slug, then name, and the last two are case-insensitive
+ * because nobody types "Front desk" the way it was created. `Department.name`
+ * and `.slug` are both `@unique` but case-SENSITIVELY, so two rows differing
+ * only in case can in principle both match — first row wins, which is the same
+ * answer a person would give and better than refusing.
+ *
+ * Returns `null` for the "unowned" sentinel and `undefined` for "no filter",
+ * so a caller can pass the result straight through without re-deriving which
+ * of the three cases it is in.
+ */
+export async function resolveDepartmentFilter(
+  db: Db,
+  raw: string | null | undefined,
+): Promise<string | null | undefined> {
+  if (raw === undefined || raw === null || raw.trim().length === 0) return undefined;
+  const needle = raw.trim();
+  if (needle === DEPARTMENT_FILTER_NONE) return null;
+
+  const byId = await db.department.findUnique({
+    where: { id: needle },
+    select: { id: true },
+  });
+  if (byId) return byId.id;
+
+  // `mode: "insensitive"` on both, in ONE query, so a box with a "Front Desk"
+  // slug and a "front desk" name cannot answer differently depending on which
+  // lookup ran first.
+  const byWord = await db.department.findFirst({
+    where: {
+      OR: [
+        { slug: { equals: needle, mode: "insensitive" } },
+        { name: { equals: needle, mode: "insensitive" } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (byWord) return byWord.id;
+
+  throw new Error(PM_DEPARTMENT_ERRORS.DEPARTMENT_NOT_FOUND);
+}
+
+/**
  * The work-item predicate for a department filter, honouring the override rule
  * on the DB side so `?department=` and the board agree.
  *

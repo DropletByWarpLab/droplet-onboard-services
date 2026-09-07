@@ -426,11 +426,33 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
 
 export async function listProjects(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; includeArchived?: boolean; perPage?: number } = {},
+  opts: {
+    workspaceSlug?: string;
+    includeArchived?: boolean;
+    perPage?: number;
+    /**
+     * WARP-2719 — an id filters to that department AND its teams; `null`
+     * filters to projects no department owns; `undefined` applies no filter.
+     * The same three-way encoding `listWorkItems` uses.
+     *
+     * 🔴 NO INHERITANCE HERE, and `departmentWorkItemWhere` must not be used.
+     * A work item can borrow its project's department when it has none of its
+     * own; a project has nothing to borrow from. Reaching for the work-item
+     * helper would ask whether the project's own project has a department,
+     * which is not a question.
+     */
+    departmentId?: string | null;
+  } = {},
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.isArchived = false;
+  if (opts.departmentId !== undefined) {
+    where.departmentId =
+      opts.departmentId === null
+        ? null
+        : { in: await expandDepartmentScope(prisma, opts.departmentId) };
+  }
   const take =
     opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
@@ -1019,18 +1041,46 @@ export async function getWorkItem(prisma: PrismaClient, id: string): Promise<Api
  *  `pm_search_work_items` MCP tool, which keys on workspace_slug (not project). */
 export async function searchWorkItems(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; q: string; perPage?: number },
+  opts: {
+    workspaceSlug?: string;
+    q: string;
+    perPage?: number;
+    /** WARP-2719 — same three-way encoding as `listWorkItems`, and the same
+     *  override rule: an item's own department wins, and an item with none
+     *  inherits its project's. */
+    departmentId?: string | null;
+  },
 ): Promise<ApiWorkItem[]> {
   const q = opts.q.trim();
-  if (q.length === 0) return [];
+  // 🔴 An empty `q` used to be an unconditional empty list, which was right
+  // while free text was the only filter this reader had. It is now the answer
+  // to "what is Front Desk working on?" — a question with no search term in it
+  // at all — so the short-circuit narrows to "no filter of any kind".
+  if (q.length === 0 && opts.departmentId === undefined) return [];
   const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
-  const where: Prisma.PmWorkItemWhereInput = {
-    isArchived: false,
-    OR: [
+  // 🔴 The free-text `OR` is added CONDITIONALLY, and it did not used to be:
+  // it was an unconditional member of this literal, safe only because the
+  // guard above made an empty `q` unreachable. With that guard relaxed, an
+  // unconditional member would run `contains: ""` — an `ILIKE '%%'` pair — on
+  // every department-only query.
+  const where: Prisma.PmWorkItemWhereInput = { isArchived: false };
+  if (q.length > 0) {
+    where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { descriptionHtml: { contains: q, mode: "insensitive" } },
-    ],
-  };
+    ];
+  }
+  // `where.AND`, never `where.OR` — the free-text filter above owns `OR`, and
+  // `departmentWorkItemWhere` returns a bare-`OR` fragment for exactly this
+  // reason. Writing it to `where.OR` would turn "items in Front Desk matching
+  // X" into "items in Front Desk".
+  if (opts.departmentId !== undefined) {
+    const scope =
+      opts.departmentId === null
+        ? null
+        : await expandDepartmentScope(prisma, opts.departmentId);
+    where.AND = [departmentWorkItemWhere(scope)];
+  }
   if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
   const rows = await prisma.pmWorkItem.findMany({
     where,
