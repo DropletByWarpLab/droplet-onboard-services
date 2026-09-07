@@ -15,6 +15,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ToolContext } from "../../../src/types.js";
 import { expectOk } from "../../helpers/tool-result.js";
 import businessFind from "../../../src/handlers/business/find.js";
+// WARP-2719 review, finding 5 — the refusal cases are derived from this list
+// rather than hand-copied, so they cannot fall behind it.
+import { FIND_ENTITIES } from "../../../src/handlers/business/_graph.js";
 import businessTimeline from "../../../src/handlers/business/timeline.js";
 
 const get = vi.fn();
@@ -317,19 +320,49 @@ describe("business_find — searches", () => {
     expect(url).toContain("department=Front+Desk");
   });
 
-  it("🔴 refuses department on an entity that has none, instead of ignoring it", async () => {
-    // No CRM model carries a departmentId. Accepting it on a customer or a
-    // deal would be a filter that silently matched everything, and the model
-    // would report "these are Front Desk's customers" having never asked.
+  it("🔴 refuses department on EVERY entity that has none, instead of ignoring it", async () => {
+    // No CRM model carries a departmentId, and neither brain entity does.
+    // Accepting it would be a filter that silently matched everything, and the
+    // model would report "these are Front Desk's customers" having never asked.
+    //
+    // WARP-2719 review, finding 5 — this used to name three of the six
+    // refusing entities by hand and left `pipeline`, `finding` and `digest`
+    // unasserted. The list is DERIVED from `FIND_ENTITIES` now, so it cannot
+    // be short, and a seventh entity added tomorrow is covered on the day it
+    // lands rather than the day someone remembers this file.
+    //
     // MUTATION: drop "department" from SEARCH_ARGS -> rejectMisusedArgs stops
-    // iterating it and both of these silently succeed unfiltered.
-    for (const entity of ["customer", "deal", "contact"]) {
+    // iterating it and all six silently succeed unfiltered.
+    const HONOURS_DEPARTMENT = new Set(["project", "work_item"]);
+    const refusing = FIND_ENTITIES.filter((e) => !HONOURS_DEPARTMENT.has(e));
+    // Non-vacuity: a filter that silently emptied would make this test pass
+    // while asserting nothing, which is the shape of green this repo keeps
+    // catching. Six entities refuse; two honour.
+    expect(refusing).toEqual(["customer", "contact", "deal", "pipeline", "finding", "digest"]);
+
+    for (const entity of refusing) {
       const out = await businessFind.handler({ entity, department: "Front Desk" }, ctx);
       expect(out.ok, entity).toBe(false);
-      expect((out as { error: { message: string } }).error.message).toContain("department");
-      expect((out as { error: { code: string } }).error.code).toBe("BUSINESS_INVALID_REQUEST");
+      const err = (out as { error: { code: string; message: string } }).error;
+      expect(err.message, entity).toContain("department");
+      // The hint names the fix, not the rule — it must say WHERE the argument
+      // does apply, or the model's next turn is the same call again.
+      expect(err.message, entity).toContain("project");
+      expect(err.message, entity).toContain("work_item");
+      expect(err.code, entity).toBe("BUSINESS_INVALID_REQUEST");
     }
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("and honours it on exactly the two that do — the same list, from the other side", async () => {
+    // The complement of the assertion above, so neither half can be quietly
+    // widened: if `department` were added to a third entity's HONOURED_ARGS,
+    // the derived `refusing` list above shrinks and its equality check goes
+    // red. This one proves the two that DO honour it actually send it.
+    get.mockResolvedValue(res(true, 200, { projects: [apiProject] }));
+    expect((await businessFind.handler({ entity: "project", department: "Clinical" }, ctx)).ok).toBe(true);
+    get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
+    expect((await businessFind.handler({ entity: "work_item", department: "Clinical" }, ctx)).ok).toBe(true);
   });
 
   it("refuses it alongside an id, like every other search filter", async () => {

@@ -448,8 +448,14 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
   // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
+  // WARP-2719 review, finding 5 — this copy went stale the day the department
+  // filter landed. INVENTORY.md was updated and this was not, so the /tools
+  // page and the chat tool-picker both described a business_find that could
+  // not answer "what is Front Desk working on?" — the sentence the filter was
+  // built for. The second sentence is deliberately in the owner's words
+  // ("department or team"), not the schema's (`department`), per ADR-002.
   business_find:
-    "Look up a customer, a contact, a deal, a project, a job, your sales pipeline, or what the box worked out on its own — findings that need attention and standing facts read out of your documents",
+    "Look up a customer, a contact, a deal, a project, a job, your sales pipeline, or what the box worked out on its own — findings that need attention and standing facts read out of your documents. Projects and jobs can be narrowed to the department or team that owns them.",
   business_timeline: "See what has happened recently on a customer, deal or job",
   // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
   // it names what the OWNER gets, and says the quiet part — these three ask
