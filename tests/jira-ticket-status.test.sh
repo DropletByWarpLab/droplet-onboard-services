@@ -177,7 +177,7 @@ fi
 # board with no undo — would ship green.
 issue "Won't Do" "Done" "Story"; transitions "$TRANSITIONS_DEFAULT"
 run done "fix: follow-up on a Won't Do key (WARP-24)"
-if ! posted_transition && ! posted_comment && [ $RC -eq 0 ]    && echo "$OUT_TXT" | grep -q "already Won't Do"; then
+if ! posted_transition && ! posted_comment && [ $RC -eq 0 ] && echo "$OUT_TXT" | grep -q "already Won't Do"; then
   pass "🔴 a terminal status not named \"Done\" is matched on CATEGORY, not re-closed"
 else
   fail "🔴 a Won't Do ticket is not re-closed — rc=$RC calls: $(cat "$CALLS")"
