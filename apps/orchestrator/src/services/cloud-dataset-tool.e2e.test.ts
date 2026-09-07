@@ -32,7 +32,13 @@
 // repo file it reads. Drop the pragma and it stops being derived from.
 
 import { describe, it, expect, vi } from "vitest";
-import { StripeConnector, STRIPE_PROVIDER } from "@droplet/erp-connector";
+import {
+  StripeConnector,
+  STRIPE_PROVIDER,
+  RestProfileConnector,
+  restProfileFor,
+  SQUARE_PROVIDER,
+} from "@droplet/erp-connector";
 import { TOOLS, CLOUD_QUERY_DATASETS } from "@droplet/tools-core";
 import { createErpService, CLOUD_DATASET_READS } from "./erp.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
@@ -138,6 +144,62 @@ function serviceWithConnectedStripe() {
       ),
   });
   return { svc, fetch, auditLog };
+}
+
+/** One Square `PaymentRefund`, shaped as ListPaymentRefunds documents it. */
+const SQUARE_REFUND_PAGE = {
+  refunds: [
+    {
+      id: "rf_1",
+      created_at: "2026-08-19T09:00:00Z",
+      updated_at: "2026-08-20T09:30:00Z",
+      payment_id: "pay_7",
+      amount_money: { amount: 2_500, currency: "USD" },
+      status: "COMPLETED",
+      reason: "Customer returned item",
+    },
+  ],
+};
+
+/** The REAL Square profile through the REAL REST connector, transport stubbed. */
+function serviceWithConnectedSquare() {
+  const calls: string[] = [];
+  const impl = async (url: string) => {
+    calls.push(url);
+    const body = url.includes("/v2/refunds") ? SQUARE_REFUND_PAGE : { refunds: [] };
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null } as unknown as Headers,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as unknown as Response;
+  };
+  const row = {
+    id: "conn-square-1",
+    provider: SQUARE_PROVIDER,
+    status: "CONNECTED",
+    host: null,
+    port: null,
+    databaseName: null,
+    secretRef: null,
+    writeEnabled: false,
+    providerConfig: null,
+    providerTokensEnc: null,
+  };
+  const prisma = {
+    integrationConnection: { findFirst: vi.fn(async () => ({ ...row })) },
+    erpAuditLog: { create: vi.fn(async ({ data }: { data: unknown }) => data) },
+  };
+  const svc = createErpService(prisma as never, {
+    connectorFor: () =>
+      new RestProfileConnector(
+        restProfileFor(SQUARE_PROVIDER)!,
+        { provider: SQUARE_PROVIDER },
+        { fetchImpl: impl as never, resolveCredentials: async () => ({ accessToken: "t" }) },
+      ),
+  });
+  return { svc, calls };
 }
 
 describe("WARP-2497 — 'what did we bill last week', end to end", () => {
@@ -251,14 +313,6 @@ describe("WARP-2497 — 'what did we bill last week', end to end", () => {
     // vocabulary. Neither is typed `DatasetName`, so they can lag it forever,
     // in lockstep, with every test green.
     //
-    // Deliberately NOT "every declared dataset is reachable" — that is false
-    // today and knowingly so: Stripe serves `refund`, `payout`,
-    // `balance_transaction` and `subscription`, none of which is wired, and
-    // the test below records `refund`'s unreachability as a decision rather
-    // than an accident. The property that actually matters is weaker and
-    // sharper: a connector the model cannot ask ANYTHING about is a connector
-    // that does nothing for the owner who connected it.
-    //
     // Mutation: drop `booking` from CLOUD_DATASET_READS → red, naming calcom.
     const askable = new Set(Object.keys(CLOUD_DATASET_READS));
     const dark = providerDescriptors()
@@ -269,16 +323,109 @@ describe("WARP-2497 — 'what did we bill last week', end to end", () => {
     expect(dark, "these providers ship an available card the assistant cannot query").toEqual([]);
   });
 
+  it("🔴 EVERY dataset an available provider declares can be asked for", () => {
+    // WARP-2833. The assertion above was deliberately weak — "at least one
+    // askable dataset per provider" — and its own comment recorded why:
+    // "Deliberately NOT 'every declared dataset is reachable' — that is false
+    // today and knowingly so". It was true when written, for Stripe, whose
+    // `refund`/`payout`/`balance_transaction`/`subscription` have no connector
+    // behind them.
+    //
+    // 🔴 It stopped being a defensible weakening the moment a provider shipped
+    // that DOES serve those datasets, and nothing noticed, because a per-
+    // provider "≥1" gate passes on one wired dataset out of three. What it let
+    // through, all of it fully built on both sides and reachable from nowhere:
+    //
+    //   audience  Brevo + Klaviyo — canonical projection, delta clause, and
+    //             `get_audiences` in read-queries.ts. TWO available cards.
+    //   refund    Square — a real `updated_at` filter, and the dataset whose
+    //   payout    status moves AFTER creation, so it is the one a poll must see.
+    //
+    // The weaker gate is kept above rather than replaced: it names the failing
+    // PROVIDER, which is the sentence an owner cares about ("Cal.com does
+    // nothing"), while this one names the failing DATASET. A regression that
+    // strands one dataset of three trips only this test; one that strands a
+    // whole connector trips both, and the pair reads as a diagnosis.
+    //
+    // Mutation: drop `refund` from CLOUD_DATASET_READS → red, naming square/refund.
+    const askable = new Set(Object.keys(CLOUD_DATASET_READS));
+    const unreachable = providerDescriptors()
+      .filter((d) => d.track === "cloud" || d.track === "rest")
+      .filter((d) => d.catalog?.availability === "available")
+      .flatMap((d) => d.datasets.filter((name) => !askable.has(name)).map((name) => `${d.id}/${name}`));
+    expect(
+      [...new Set(unreachable)].sort(),
+      "a shipped connector produces these rows and no surface on the box can ask for them",
+    ).toEqual([]);
+  });
+
   it("refuses a dataset outside the enum instead of answering it empty", async () => {
-    // `refund` is real vocabulary with a real read query, and no shipped cloud
-    // track serves it. Answering "no refunds" would be a confident false
-    // statement about money; the honest answer is that the question cannot be
-    // asked yet.
+    // `balance_transaction` is real vocabulary with a real read query
+    // (`get_processing_fees`) and no available provider declares it.
+    // Answering "no processing fees" would be a confident false statement
+    // about money; the honest answer is that the question cannot be asked yet.
+    //
+    // 🔴 This case was `refund` until WARP-2833, and the swap is the finding
+    // rather than a fixture detail. The original comment read "no shipped
+    // cloud track serves it" — TRUE of a Stripe-only product, and falsified in
+    // this same repo the day Square shipped serving `refund` and `payout`.
+    // Nothing went red, because a test whose premise dies keeps passing: it
+    // went on proving that an unwired dataset is refused, while the reason it
+    // was unwired had evaporated. When this fixture next needs swapping,
+    // that is the signal to wire the dataset, not to find another unwired one.
+    //
     // Mutation: make queryDataset fall through to runReadOrBlocked on an
     // unknown dataset → red (it would resolve to a NOT_CONFIGURED empty).
     const { svc, fetch } = serviceWithConnectedStripe();
-    await expect(svc.queryDataset({ dataset: "refund", params: {} }, OWNER)).rejects.toThrow();
+    await expect(
+      svc.queryDataset({ dataset: "balance_transaction", params: {} }, OWNER),
+    ).rejects.toThrow();
     expect(fetch.calls).toHaveLength(0);
+  });
+
+  it("🔴 WARP-2833 — a connected Square answers a refund question, from Square", async () => {
+    // The list-agreement tests above prove the vocabulary lines up. This one
+    // proves the wiring carries a request all the way to the vendor and a
+    // canonical row all the way back, which is the claim that actually failed
+    // before this ticket: `refund` was in the vocabulary, had a read query,
+    // had a connector that served it, and resolved to NOTHING because two
+    // orchestrator-side lists had never heard of it.
+    //
+    // Asserted on the CALLS, not just the rows — the house pattern. A test
+    // that only checks the returned array is green against a connector that
+    // fabricates one.
+    //
+    // Mutation: remove `refund` from CLOUD_DATASET_READS → `queryDataset`
+    // throws `unknown dataset "refund"` and this goes red before any fetch.
+    const { svc, calls } = serviceWithConnectedSquare();
+
+    const res = await svc.queryDataset({ dataset: "refund", params: {} }, OWNER);
+
+    // The dataset picked the provider — no vendor argument exists anywhere in
+    // the tool, the route or the service.
+    expect(res.provider).toBe(SQUARE_PROVIDER);
+    expect(res.connected).toBe(true);
+    expect(calls.some((u) => u.includes("/v2/refunds"))).toBe(true);
+    // Square's host, and only Square's. Mutation: point the profile's baseUrl
+    // elsewhere → red here as well as in square-profile.test.ts.
+    for (const url of calls) expect(new URL(url).hostname).toBe("connect.squareup.com");
+
+    // The canonical projection, including the minor-units conversion the
+    // profile declares: 2500 USD cents → 25. A refund that reports 2500 is
+    // the money bug this column's `transform` exists to prevent.
+    expect(res.rows).toEqual([
+      {
+        refund_id: "rf_1",
+        // Canonicalised to a full ISO instant by the track, not passed through.
+        created_at: "2026-08-19T09:00:00.000Z",
+        charge_id: "pay_7",
+        amount: 25,
+        currency: "USD",
+        status: "COMPLETED",
+        reason: "Customer returned item",
+        updated_at: "2026-08-20T09:30:00.000Z",
+      },
+    ]);
   });
 
   it("refuses a non-admin caller before any connection is resolved", async () => {

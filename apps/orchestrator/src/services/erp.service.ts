@@ -463,6 +463,33 @@ export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
   order: "get_recent_orders",
   product: "get_low_stock_products",
   customer: "find_customer",
+  // ── WARP-2833 — the three datasets shipped connectors already produce and
+  //    no surface could reach ────────────────────────────────────────────────
+  //
+  // 🔴 Each of these was fully built on BOTH sides and wired on neither. The
+  // connectors project canonical rows for them, `read-queries.ts` defines the
+  // named query, `CANONICAL_COLUMNS` names the columns — and because this
+  // table and `CLOUD_QUERY_DATASETS` are gated only against EACH OTHER, the
+  // pair agreed perfectly while both lagged what the connectors served. That
+  // is the same mechanism that shipped Cal.com unaskable (WARP-2832); widening
+  // the vocabulary did not close it, because the gate cannot see a dataset a
+  // provider declares.
+  //
+  // `audience` — Brevo and Klaviyo BOTH serve it (`brevo/connector.ts:385`,
+  // `klaviyo/connector.ts:362`, each with its own delta clause and canonical
+  // projection). Two available cards, one list-level marketing dataset, zero
+  // ways to ask for it.
+  //
+  // `refund` and `payout` — Square serves both (`rest/vendors/square.ts`), and
+  // `tool-selection.service.ts` has claimed the words `refunds?` and `payouts?`
+  // for the cloud domain since WARP-2497. So the model was already being
+  // steered to this tool by exactly those questions and then handed an enum
+  // with no way to ask them. That comment's stated reason for claiming the
+  // words anyway — "the Stripe track REFUSES their dedicated datasets" — was
+  // true of a Stripe-only product and stopped being true when Square shipped.
+  audience: "get_audiences",
+  refund: "get_refunds",
+  payout: "get_payouts",
 };
 
 /** The result of a cloud dataset read. `connected` and `reason` carry the same
