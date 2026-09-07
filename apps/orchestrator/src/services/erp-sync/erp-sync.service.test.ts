@@ -933,29 +933,60 @@ describe("registerCursors", () => {
     expect(entities).toEqual(["invoice"]);
   });
 
-  it("keeps BOTH accounting cursors for an SQL-track provider, and gains none of the eight", async () => {
-    // Two rules meeting, and the reason `openToUndeclaredTracks` exists.
+  it("🔴 WARP-2840 registers NOTHING for `eaglesoft` — it declares three datasets and none is synced", async () => {
+    // This test replaces one that asserted the OPPOSITE and was green.
     //
-    // KEEP invoice/bill: the lan track's descriptor lists only the practice
-    // datasets, but the export-drop connector genuinely serves invoices and
-    // bills when the practice's export carries them — that served set is
-    // computed from the export, not declared. Filtering lan tracks by the
-    // descriptor would silently stop the accounting sync the track shipped
-    // with (WARP-2533).
+    // The old one — "keeps BOTH accounting cursors for an SQL-track provider" —
+    // asserted `["invoice", "bill"]` against `provider: "eaglesoft"`, justified
+    // by WARP-2533: "the export-drop connector genuinely serves invoices and
+    // bills when the practice's export carries them". That justification is
+    // TRUE, and it is about a DIFFERENT PROVIDER. `connectorFactoryFor` routes
+    // to `exportDropFactory` only when `vendorFromExportProvider` matches, and
+    // that needs the `-export` suffix; bare `"eaglesoft"` falls through to the
+    // direct-SQL factory, whose `servesDatasets` is `PRACTICE_DATASETS` and
+    // which refuses `get_open_invoices` in `assertDatasetsServed` BEFORE any
+    // I/O.
     //
-    // REFUSE the other eight: no lan track serves a CRM or marketing dataset,
-    // and the failure is not symmetric with a missing cursor. Each unserved
-    // cursor fails its first tick with DatasetNotServedError, is classified
-    // FATAL, parks FAILED, and `foldSyncState` renders the WHOLE connection as
-    // a failed sync — so eight of them would make every Eaglesoft box on earth
-    // report a broken integration it never asked for.
+    // 🔴 What that cost, and why it is the flagship integration's worst bug:
+    // `DatasetNotServedError` is not in `isCapabilityBlocked`, so it classifies
+    // FATAL; FATAL parks the cursor FAILED with `nextAttemptAt: null`; FAILED
+    // is not in CLAIMABLE_ERP_SYNC_STATES and `upsertErpCursor`'s `update: {}`
+    // never revives it; and FAILED outranks every state in `foldSyncState`. So
+    // one dead cursor renders the WHOLE connection as a failed sync forever,
+    // clearable only by disconnect-then-reconnect.
     //
-    // Mutation: flip `openToUndeclaredTracks` to true on any WARP-2509 row, or
-    //           restore `entityServedBy`'s bare `return true` → red, and the
-    //           extra entity is named in the diff.
-    const h = harness({
-      connections: [connectionRow({ provider: "eaglesoft" })],
-    });
+    // And it INVERTS: `connect()` calls `requireBridge` first, so a box with no
+    // SQL bridge throws ConnectorBlockedError → 503 → TRANSIENT → BACKOFF and
+    // looks fine. The FATAL only fires once the bridge WORKS. The integration
+    // reported itself permanently broken exactly when the practice's database
+    // came up.
+    //
+    // The old test's own comment described this failure mode, in detail, while
+    // asserting the cursors that cause it.
+    //
+    // Mutation: restore `descriptor.track === "lan"` to `entityServedBy`'s
+    //           first arm → red, naming invoice and bill.
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft" })] });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
+  it("registers nothing for `eaglesoft-api` either — same declaration, same refusal", async () => {
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft-api" })] });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
+  it("🔴 KEEPS both accounting cursors for `eaglesoft-export`, which is what WARP-2533 protected", async () => {
+    // The other half, and the one the replaced test was actually arguing for.
+    // An export-drop provider has NO descriptor at all — its served set is
+    // computed from the operator's export profiles at runtime — so it is the
+    // genuine "no evidence" case `openToUndeclaredTracks` exists to decide,
+    // and it must keep syncing invoices and bills exactly as it always has.
+    //
+    // Mutation: make `entityServedBy` return false for a provider with no
+    //           descriptor → red, and the accounting sync silently stops.
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft-export" })] });
     await runnerFor(h).registerCursors();
     const entities = h.prisma.erpSyncCursor.upsert.mock.calls.map(
       (c: any[]) => c[0].where.connectionId_entity.entity,

@@ -688,11 +688,56 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
    * sync is failing" forever. That is WARP-2533's defect exactly, reintroduced
    * by a fourth track rather than by a new entity.
    */
+  /*
+   * 🔴 WARP-2840 — the `lan` arm above was the bug, and it was the flagship
+   * integration's worst one.
+   *
+   * The comment's own rule is right: the split is "does this track DECLARE its
+   * served set". It then named `lan` as a track that does not — and `eaglesoft`
+   * DOES. `provider-registry.ts` gives it `datasets: PRACTICE_DATASETS`
+   * (`appointment`, `patient`, `account`), and `EaglesoftConnector` refuses
+   * everything else in `assertDatasetsServed` before any I/O. Discarding that
+   * declaration handed every Eaglesoft connection an `invoice` and a `bill`
+   * cursor for reads the connector is built to refuse.
+   *
+   * The cost was total and silent. `DatasetNotServedError` is absent from
+   * `isCapabilityBlocked`, so it classifies FATAL; FATAL parks the cursor
+   * FAILED with `nextAttemptAt: null`; FAILED is not in
+   * `CLAIMABLE_ERP_SYNC_STATES` and `upsertErpCursor`'s `update: {}` never
+   * revives it; and FAILED outranks every other state in `foldSyncState`. One
+   * dead cursor rendered the WHOLE connection a failed sync forever, clearable
+   * only by disconnect-then-reconnect — Reconnect alone resets cursors only
+   * from `DISABLED`.
+   *
+   * And it INVERTED, which is why nobody hit it in a lab: `connect()` calls
+   * `requireBridge` first, so a box with no SQL bridge throws
+   * `ConnectorBlockedError` → 503 → TRANSIENT → BACKOFF and looks fine. The
+   * FATAL only fires once the bridge WORKS. The integration reported itself
+   * permanently broken exactly when the practice's database came up.
+   *
+   * What the `lan` arm was really protecting is the `<vendor>-export` family,
+   * which genuinely computes its served set at runtime from the operator's
+   * export profiles (WARP-2533) — and those providers have NO DESCRIPTOR at
+   * all, so they are already covered by the single clause below. The track
+   * name was never what distinguished them.
+   */
   function entityServedBy(provider: string, spec: ErpSyncEntity): boolean {
     const descriptor = providerDescriptor(provider);
-    if (!descriptor || descriptor.track === "lan" || descriptor.track === "catalog") {
-      return spec.openToUndeclaredTracks;
-    }
+    // No descriptor at all — the open `<vendor>-export` family. No evidence
+    // either way, so the ENTITY decides. WARP-2533's behaviour, unchanged.
+    if (!descriptor) return spec.openToUndeclaredTracks;
+    // Otherwise the descriptor HAS spoken, whatever its track, and it is
+    // reconciled against the connector's own `servesDatasets` by
+    // `erp-provider.descriptor.test.ts` — so it is the trustworthy answer.
+    //
+    // 🔴 The EMPTY tuple is a declaration too, and treating it as silence was
+    // my first attempt at this fix. It reddened WARP-2650's guard immediately:
+    // `atlassian` declares `datasets: []`, meaning "I serve nothing", and
+    // routing that to `openToUndeclaredTracks` hands every CONNECTED Atlassian
+    // row an invoice and a bill cursor — the exact defect that test exists to
+    // prevent. `opendental`'s empty `catalog` tuple is the same statement, and
+    // giving it zero cursors is a fix rather than a regression: it has no
+    // connector class, so any cursor it received would park FATAL too.
     return (descriptor.datasets as readonly string[]).includes(spec.entity);
   }
 
