@@ -31,6 +31,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { createProject, createWorkItem } from "./pm.service.js";
 import { PM_DEPARTMENT_ERRORS } from "./pm-department.js";
+// 🔴 The shared seam, not a hand-rolled `$transaction: async (fn) => fn(self)`.
+// `prisma-tx-seam-adoption.test.ts` (WARP-1570) refuses the hand-rolled shape
+// in suites that drive isolation-declaring code, and it is right to: this file
+// exercises `createWorkItem`, which asks for SERIALIZABLE_TX, and that stub
+// discards the options argument, never rolls back and runs transactions
+// strictly serially — so "the guard refused, therefore nothing was written"
+// would be unprovable, which is the entire claim these tests make.
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 const ACTOR = "user-owner";
 
@@ -80,7 +88,7 @@ function makeFake(opts: { department?: Record<string, unknown> | null } = {}) {
             },
       create: projectCreate,
     },
-    $transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
+    $transaction: createTransactionSeam({ client: () => tx }).$transaction,
   } as never;
 
   return { prisma, seen, projectCreate, workItemCreate };
