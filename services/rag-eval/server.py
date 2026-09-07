@@ -310,6 +310,49 @@ def _list_runs_sync() -> dict[str, dict[str, Any]]:
     return items
 
 
+def _attach_extraction(body: dict[str, Any], run_id: str) -> None:
+    """Put the extraction canary's VERDICT on the wire (WARP-2733, ADR-048).
+
+    🔴 Without this there is no way to read the verdict over HTTP at all.
+    `_extraction_blocking` writes `extraction-<runId>.json` beside the results
+    file, but `_get_run_sync` above only ever attached `results-<runId>.json`,
+    so a caller could see that a canary RAN and never what it decided.
+
+    Worse, `STORE.finish(run_id, SUCCEEDED)` is called for a measured FAIL as
+    well as a pass — deliberately, because run status answers "did the harness
+    complete", and a harness that ran correctly and found the model wanting has
+    not failed. But that leaves `status: "succeeded"` as the strongest signal on
+    the wire, and a caller reading it as "the box passed" would arm auto mode on
+    a measured FAIL. This is the field that tells them apart.
+
+    Read from the FILE rather than from the run record: the verdict belongs
+    beside the evidence it was computed from, and the file survives a restart
+    that clears the in-memory store.
+    """
+    path = config.RESULTS_DIR / f"extraction-{run_id}.json"
+    if not path.exists():
+        return
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            report = json.load(fh)
+    except (OSError, ValueError):
+        logger.exception("extraction report unreadable (run_id=%s)", run_id)
+        return
+    verdict = report.get("verdict") or {}
+    body["extractionPath"] = str(path)
+    body["extraction"] = {
+        # `passed` is the whole point. Absent or non-boolean means UNKNOWN, and
+        # a consumer must treat that as "not passed" — never as a default.
+        "passed": verdict.get("passed") if isinstance(verdict.get("passed"), bool) else None,
+        # The model the box actually served during the run. The gate records
+        # THIS, not whatever a caller claims, so a pass cannot be transplanted
+        # onto a different model.
+        "model": report.get("model"),
+        "failures": verdict.get("failures") or [],
+        "nFixtures": report.get("n_fixtures"),
+    }
+
+
 def _get_run_sync(
     run_id: str, body: Optional[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -335,6 +378,7 @@ def _get_run_sync(
     if results_path.exists():
         body["resultsPath"] = str(results_path)
         body["metrics"] = _load_metrics(results_path)
+    _attach_extraction(body, run_id)
     return body
 
 
