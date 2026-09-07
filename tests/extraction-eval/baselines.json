@@ -1,0 +1,12 @@
+{
+  "_comment": "WARP-2732 (ADR-048) — the extraction canary's recorded runs. EMPTY until a real run happens on a box with a model; see the README.",
+  "_why_empty": "🔴 This file is deliberately empty rather than seeded with plausible numbers. PR #2005 set itself a DMR grammar canary as a merge condition and it has never been run; a baselines file pre-filled with invented values is how that becomes invisible. An empty `runs` array means `auto` mode has never been measured on any box, which is the truth, and `AutoFilingSetting`'s CHECK enforces the consequence: `mode = 'auto'` is refused until `canaryPassedAt` and `canaryModel` are set by an actual pass.",
+  "_floors_are_absolute": "The floors live in score.py as NUMBERS, not as a p50 − 1.5·IQR band derived from these runs. tests/retrieval-eval/ragas/baselines.json records factual_correctness floor 0.0 from eight runs that all scored zero — an envelope cannot tell 'stable and good' from 'stable and broken'. Anything recorded here may only ever RAISE a floor.",
+  "_promotion_rule": "A baseline is promoted from at least THREE INDEPENDENT SESSIONS, not three back-to-back runs. Correlated samples collapse the envelope, which is how the 0.0 floor happened.",
+  "recorded_at": null,
+  "model": null,
+  "n_fixtures": 12,
+  "n_runs": 0,
+  "runs": [],
+  "envelopes": {}
+}
