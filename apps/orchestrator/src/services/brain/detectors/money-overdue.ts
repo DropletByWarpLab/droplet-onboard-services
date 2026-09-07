@@ -13,34 +13,38 @@
  * live read-through vocabulary and are never landed, so there is nothing at
  * rest to sweep.
  *
- * What IS landed is `ErpDocument`: `kind`, `balance`, `dueAt`, `currency`, a
- * status, and an `@@index([kind, dueAt])` that these queries ride.
- * POINT-IN-TIME overdue needs no history — only a trend does — so these two
- * run today, against real vendor-synced money, and they are the proof that the
- * loop, the table, the surface and the delivery all work.
+ * What IS landed is `ErpDocument`: `kind` (INVOICE | BILL), `balance`,
+ * `dueAt`, `currency`, `vendorStatus`, and an `@@index([kind, dueAt])` that
+ * these queries ride. POINT-IN-TIME overdue needs no history — only a trend
+ * does — so these two run today, against real vendor-synced money, and they are
+ * the proof that the loop, the table, the surface and the delivery all work.
  *
- * WARP-2739 RESHAPED `ErpDocument` UNDER THIS FILE (ADR-049 §4.2), and these
- * detectors were written against the old shape. Three columns moved:
+ * -- WARP-2773: what the ErpDocument widening changed under this file --------
  *
- *   - `kind` stopped being RECEIVABLE | PAYABLE and became the document type.
- *     Direction is now DERIVED from kind, and `money.service.ts` already owns
- *     that mapping — `KINDS_BY_DIRECTION`, reachable as `kindsFor(direction)`.
- *     These queries ask IT rather than naming kinds here, so the detector and
- *     `directionOf()` cannot drift: RECEIVABLE is INVOICE + CREDIT_NOTE +
- *     RECEIPT, PAYABLE is BILL, and QUOTE/ORDER are excluded by an allow-list
- *     whose whole point is that a seventh kind stays out until somebody
- *     decides it belongs. Hand-picking `INVOICE` here would have been a second,
- *     quieter opinion about the same question.
- *   - the vendor's own status word was renamed `status` -> `vendorStatus`, so
- *     the box's own lifecycle could take the name `status`.
- *   - `externalSystem` became nullable — a LOCAL row has no vendor.
+ * 🔴 WARP-2739 (#2023) and this detector (#2033) merged into `stage` within
+ * hours of each other and collided. The widening renamed three things this
+ * file reads, and `tsc` said so — but the `node / orchestrator` leg is
+ * affected-legs-gated and does not run on a `stage` PUSH (WARP-2761), so the
+ * break landed green. The unit tests did not catch it either: they hand the
+ * detector a `findMany` mock that ignores `where` entirely, so a query naming
+ * an enum value that no longer exists still returns rows.
  *
- * SO "OPEN" NOW HAS TWO SOURCES, and both must be consulted. A LANDED row
- * carries vendor prose in `vendorStatus` and no lifecycle; a LOCAL row carries
- * a lifecycle in `status` and no vendor word (the schema CHECK enforces the
- * exclusivity). Reading only the renamed column would have reported every
- * PAID, VOID or still-DRAFT local invoice as overdue, because `isOpen(null)`
- * deliberately answers "not known settled".
+ *   `kind`     RECEIVABLE -> INVOICE, PAYABLE -> BILL. The migration mapped the
+ *              existing rows with a `USING CASE`, so the DATA is fine; only the
+ *              two string literals in this file pointed at nothing.
+ *   `status`   The vendor's prose word moved to `vendorStatus`, and `status`
+ *              became the box's OWN lifecycle enum. Reading `status` here would
+ *              have compared `"PAID"`-shaped enum values against a lowercased
+ *              vendor-prose set and matched neither.
+ *   provenance `externalSystem` became nullable, because a document the box
+ *              wrote itself has no vendor to name.
+ *
+ * 🔴 And the sweep is now `origin: "LANDED"`. That is not tidiness — WARP-2737
+ * lets a person create a LOCAL invoice, which is born DRAFT with no vendor. A
+ * detector that swept those too would tell an owner their own unsent draft is
+ * "96 days past due, and nothing in the box has chased it". Local documents
+ * deserve their own detector with its own sentence; they do not belong in a
+ * paragraph that ends "from QuickBooks".
  *
  * A NOTE ON `balance` AND `status`. `money.service.ts` records that a document
  * the vendor stops serving — paid, voided, deleted upstream — is NOT reaped, so
@@ -50,7 +54,6 @@
  * pass rather than nag forever.
  */
 import type { PrismaClient } from "@prisma/client";
-import { kindsFor, type MoneyDirection } from "../../money/money.service.js";
 import type { Detector, DetectedFinding } from "./types";
 
 /** Below this, an overdue invoice is noise. Reporting a $2 balance next to a
@@ -80,42 +83,50 @@ export function daysBetween(a: Date, b: Date): number {
 
 /** Documents a vendor has told us are settled. Compared lowercased because the
  *  string is vendor prose, not an enum — QuickBooks, Xero and Stripe do not
- *  agree on capitalisation. */
-const SETTLED = new Set(["paid", "void", "voided", "cancelled", "canceled", "closed", "refunded"]);
+ *  agree on capitalisation. Post-WARP-2739 this reads `vendorStatus`; the field
+ *  called `status` is now the box's own enum and is null on every landed row. */
+const SETTLED_VENDOR = new Set([
+  "paid",
+  "void",
+  "voided",
+  "cancelled",
+  "canceled",
+  "closed",
+  "refunded",
+]);
 
 /**
- * The box's own lifecycle states that mean this document is not money to
- * chase. PAID/VOID/WRITTEN_OFF are an INVOICE/BILL's terminal states;
- * CANCELLED is reachable on the shared enum and means the same thing here.
- * DRAFT is in the set for a different reason: a draft was never sent, so it is
- * not owed yet and a past `dueAt` on one is a placeholder, not a debt.
- * PART_PAID is deliberately ABSENT — a partly-paid invoice still owes.
+ * The box's own terminal states, for the day a LOCAL document reaches this
+ * sweep. Kept BESIDE the vendor set rather than merged into it: one is a closed
+ * enum the box controls, the other is prose from somebody else's API, and
+ * collapsing them would invite a vendor's word to be treated as a lifecycle
+ * fact. A plain string set rather than `Set<ErpDocumentStatus>` because the
+ * enum's runtime object is a Prisma client export, and importing it for seven
+ * literals would pull the generated client into a module that needs only
+ * shapes — this file imports `PrismaClient` as a TYPE for the same reason.
  */
-const SETTLED_LIFECYCLE: ReadonlySet<string> = new Set([
-  "DRAFT",
+const SETTLED_STATUS = new Set<string>([
   "PAID",
   "VOID",
   "WRITTEN_OFF",
   "CANCELLED",
+  "DECLINED",
+  "EXPIRED",
+  "APPLIED",
 ]);
 
-/**
- * A document is open unless EITHER source says otherwise. `vendorStatus` is
- * vendor prose (LANDED rows), `status` is the box's lifecycle (LOCAL rows);
- * the two are mutually exclusive by origin, so in practice one is always null
- * — but this reads both rather than branching on `origin`, so a row that ever
- * carried both cannot slip through as open.
- */
-function isOpen(vendorStatus: string | null, status: string | null): boolean {
-  if (status && SETTLED_LIFECYCLE.has(status)) return false;
-  if (!vendorStatus) return true; // no vendor word = not known settled; the balance decides
-  return !SETTLED.has(vendorStatus.trim().toLowerCase());
+function isOpen(row: { vendorStatus: string | null; status: string | null }): boolean {
+  // The box's own word wins where there is one: it is an enum this code owns,
+  // and the provenance CHECK guarantees a LOCAL row has it.
+  if (row.status && SETTLED_STATUS.has(row.status)) return false;
+  if (!row.vendorStatus) return true; // nothing said = not known settled; the balance decides
+  return !SETTLED_VENDOR.has(row.vendorStatus.trim().toLowerCase());
 }
 
 async function overdue(
   prisma: PrismaClient,
   now: Date,
-  direction: MoneyDirection,
+  kind: "INVOICE" | "BILL",
 ): Promise<
   Array<{
     id: string;
@@ -129,7 +140,10 @@ async function overdue(
   }>
 > {
   return prisma.erpDocument.findMany({
-    where: { kind: { in: [...kindsFor(direction)] }, dueAt: { lt: now } },
+    // 🔴 `origin: "LANDED"` — vendor-synced money only. See the note at the top
+    // of this file: a LOCAL document is one a person on this box wrote, is born
+    // DRAFT, and must never be reported to its own author as an unchased debt.
+    where: { origin: "LANDED", kind, dueAt: { lt: now } },
     select: {
       id: true,
       balance: true,
@@ -148,23 +162,27 @@ async function overdue(
 }
 
 /**
- * How to name where a document came from. `externalSystem` is NULL on a LOCAL
- * row (WARP-2739) — a document this box raised itself — so the prose says so
- * rather than interpolating `null` into a sentence an operator reads.
+ * What to call the source in a sentence an owner reads.
+ *
+ * The provenance CHECK makes `externalSystem` non-null for every LANDED row and
+ * this sweep asks for LANDED only, so the fallback is unreachable today. It
+ * exists rather than a `!` because a non-null assertion would print the word
+ * "null" into a finding's rationale the day that constraint is relaxed, and a
+ * sentence an owner cannot parse is worse than a vague one.
  */
-function sourceLabel(externalSystem: string | null): string {
-  return externalSystem?.trim() || "this box";
+function sourceName(externalSystem: string | null): string {
+  return externalSystem ?? "your accounting system";
 }
 
 export const overdueReceivables: Detector = {
   key: "money.overdue-receivable",
   description: "Invoices past their due date with a balance still outstanding",
   async run(prisma: PrismaClient, now: Date): Promise<DetectedFinding[]> {
-    const rows = await overdue(prisma, now, "RECEIVABLE");
+    const rows = await overdue(prisma, now, "INVOICE");
     const out: DetectedFinding[] = [];
 
     for (const r of rows) {
-      if (!isOpen(r.vendorStatus, r.status)) continue;
+      if (!isOpen(r)) continue;
       const minor = decimalToMinor(r.balance);
       if (minor === null || minor <= 0n || minor < MIN_REPORTABLE_MINOR) continue;
 
@@ -172,6 +190,7 @@ export const overdueReceivables: Detector = {
       if (days <= 0) continue;
 
       const who = r.counterpartyName?.trim() || "an unnamed customer";
+      const from = sourceName(r.externalSystem);
       // Impact and currency are all-or-nothing. A document with a balance and
       // no currency is unrenderable, so it is reported WITHOUT a number rather
       // than with a guessed one.
@@ -182,7 +201,7 @@ export const overdueReceivables: Detector = {
         kind: "loss",
         title: `${who} is ${days} days past due`,
         rationale:
-          `An invoice from ${sourceLabel(r.externalSystem)} fell due ${days} days ago and still ` +
+          `An invoice from ${from} fell due ${days} days ago and still ` +
           `carries a balance. Nothing in the box has chased it.` +
           (haveCurrency ? "" : " The vendor sent no currency, so no amount is shown."),
         impactMinor: haveCurrency ? minor : null,
@@ -192,7 +211,7 @@ export const overdueReceivables: Detector = {
             {
               sourceKind: "erp_document",
               sourceId: r.id,
-              quote: `${sourceLabel(r.externalSystem)} receivable, due ${
+              quote: `${from} receivable, due ${
                 r.dueAt?.toISOString().slice(0, 10) ?? "unknown"
               }, balance ${String(r.balance)} ${r.currency ?? "(no currency)"}`,
             },
@@ -212,11 +231,11 @@ export const overduePayables: Detector = {
   key: "money.overdue-payable",
   description: "Bills the business owes that are past their due date",
   async run(prisma: PrismaClient, now: Date): Promise<DetectedFinding[]> {
-    const rows = await overdue(prisma, now, "PAYABLE");
+    const rows = await overdue(prisma, now, "BILL");
     const out: DetectedFinding[] = [];
 
     for (const r of rows) {
-      if (!isOpen(r.vendorStatus, r.status)) continue;
+      if (!isOpen(r)) continue;
       const minor = decimalToMinor(r.balance);
       if (minor === null || minor <= 0n || minor < MIN_REPORTABLE_MINOR) continue;
 
@@ -224,6 +243,7 @@ export const overduePayables: Detector = {
       if (days <= 0) continue;
 
       const who = r.counterpartyName?.trim() || "an unnamed supplier";
+      const from = sourceName(r.externalSystem);
       const haveCurrency = Boolean(r.currency);
 
       out.push({
@@ -235,7 +255,7 @@ export const overduePayables: Detector = {
         kind: "risk",
         title: `A bill to ${who} is ${days} days overdue`,
         rationale:
-          `A payable from ${sourceLabel(r.externalSystem)} fell due ${days} days ago and is ` +
+          `A payable from ${from} fell due ${days} days ago and is ` +
           `still open. Late payment costs standing, and sometimes a fee.`,
         impactMinor: haveCurrency ? minor : null,
         currency: haveCurrency ? r.currency : null,
@@ -244,7 +264,7 @@ export const overduePayables: Detector = {
             {
               sourceKind: "erp_document",
               sourceId: r.id,
-              quote: `${sourceLabel(r.externalSystem)} payable, due ${
+              quote: `${from} payable, due ${
                 r.dueAt?.toISOString().slice(0, 10) ?? "unknown"
               }, balance ${String(r.balance)} ${r.currency ?? "(no currency)"}`,
             },

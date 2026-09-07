@@ -127,6 +127,35 @@ async function openEditDialog() {
   return Object.assign(screen.getByRole("dialog"), { __view: view });
 }
 
+/**
+ * 🔴 WARP-2775 — wait for the usage section to have LOADED, not for the fetch
+ * to have been CALLED.
+ *
+ * `users/page.tsx` renders
+ *
+ *     {editUsageLoading ? "Loading usage…" : `${formatUsedBytes(…)} used`}
+ *
+ * and every test below used to wait on
+ * `expect(fetchUserUsageMock).toHaveBeenCalled()`. That is satisfied the
+ * moment the effect fires — before the promise settles, and before React
+ * flushes the state update that clears `editUsageLoading`. The assertion after
+ * it is synchronous, so on a loaded CI runner it reads the loading frame and
+ * the test fails with the product code working perfectly.
+ *
+ * It failed exactly that way in the `node / web-dashboard` leg while the same
+ * spec passed in isolation on a developer machine — the signature of a race,
+ * not a defect. And because that leg is affected-legs-gated and does not run
+ * on a `stage` push (WARP-2761), the flake only ever surfaced on somebody
+ * else's PR, attributed to their change.
+ *
+ * Waiting on the rendered outcome removes the timing question entirely: the
+ * dialog either says "Loading usage…" or it does not, and no test proceeds
+ * until it does not.
+ */
+async function awaitUsageLoaded(dialog: HTMLElement) {
+  await waitFor(() => expect(dialog.textContent).not.toMatch(/Loading usage…/));
+}
+
 describe("Users page — roster used/limit column (WARP-1271)", () => {
   it("shows a mono used/limit column sourced from the admin usage roster", async () => {
     render(<UsersPage />);
@@ -161,6 +190,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     });
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalledWith("u1"));
+    await awaitUsageLoaded(dialog);
 
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     await waitFor(() => expect(storageInput.value).toBe("2"));
@@ -171,7 +201,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("empty storage value means No limit (placeholder), never a fabricated 0", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     expect(storageInput.value).toBe("");
     expect(storageInput.placeholder).toMatch(/no limit/i);
@@ -179,7 +209,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("saving a storage value + unit sends the correct byte string", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -225,13 +255,13 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
   it("shows an em dash when used bytes is unknown (never fabricates 0)", async () => {
     fetchUserUsageMock.mockResolvedValueOnce({ policy: null, usedBytes: null });
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     expect(dialog.textContent).toMatch(/— used/);
   });
 
   it("shows the sync-state transition (Applying to storage… -> Applied) after save", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -280,7 +310,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("rejects a non-positive upload cap without saving", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     fireEvent.change(within(dialog).getByLabelText(/upload cap in megabytes/i), {
       target: { value: "0" },
     });

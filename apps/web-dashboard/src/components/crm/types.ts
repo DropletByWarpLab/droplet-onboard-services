@@ -4,7 +4,11 @@
 
 export type CrmStageKind = "OPEN" | "WON" | "LOST";
 export type CrmSubject = "COMPANY" | "CONTACT" | "DEAL";
-export type CrmOrigin = "LOCAL" | "EXTERNAL";
+/// ADR-048 added EXTRACTED: created by Droplet from a document or an email.
+/// It behaves like LOCAL for editing (the service guards key on EXTERNAL
+/// specifically), and the "Created by Droplet" chip reads this value rather
+/// than inferring authorship from a null createdById.
+export type CrmOrigin = "LOCAL" | "EXTERNAL" | "EXTRACTED";
 
 export interface CrmStage {
   id: string;
