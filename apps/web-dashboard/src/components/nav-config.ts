@@ -51,6 +51,7 @@ import {
   Star,
   Clock,
   Share2,
+  ServerCog,
   Users,
   Video,
   Wrench,
@@ -425,6 +426,25 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Admin",
     items: [
+      // The console's front door. /admin used to 404 and the pages beneath
+      // it were reachable only by typing their URLs, so nothing in the
+      // product ever pointed at them.
+      //
+      // `exact: true` on purpose: the default startsWith match would keep
+      // this entry lit while the operator is on /admin/audit or
+      // /admin/files, which have their own entries below.
+      //
+      // Carries no `requiresModule` — deliberately. moduleForPath() picks
+      // the longest matching href, so an /admin entry with a module would
+      // start claiming every /admin/* route and ModuleRouteGuard would
+      // blank all of them on a positive denial.
+      {
+        href: "/admin",
+        label: "Console",
+        icon: ServerCog,
+        exact: true,
+        roles: ["owner", "admin"],
+      },
       // /users is the existing People surface. Label kept as "Users" in
       // Phase 1 so the WARP-290 a11y test contract (queries by /users/i)
       // doesn't regress; Phase 3 renames to "People" alongside test
