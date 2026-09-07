@@ -12,6 +12,18 @@ import { landCanonicalRows, landsInCrm, NEVER_LANDED_ENTITIES } from "./land.js"
 const CONNECTION = { id: "conn-1", provider: "hubspot" };
 const NOW = new Date("2026-09-01T04:00:00.000Z");
 
+/**
+ * The stage id the double hands back for a vendor stage key.
+ *
+ * 🔴 DERIVED FROM THE KEY, never a constant. A double that returned one id for
+ * every key made `after.stageId` equal `before.stageId` in every deal fixture,
+ * so the STAGE_CHANGE branch of `timelineEntryFor` could not fire — and the
+ * tests that read as though they covered a stage move were passing through the
+ * field-diff branch instead. Distinct ids are what make those assertions mean
+ * what they say.
+ */
+const stageIdFor = (externalKey: string) => `stage-${externalKey}`;
+
 /** A Prisma double whose every method is a spy, so a test can assert absence. */
 function db(overrides: Record<string, Record<string, unknown>> = {}) {
   const table = (extra: Record<string, unknown> = {}) => ({
@@ -35,8 +47,14 @@ function db(overrides: Record<string, Record<string, unknown>> = {}) {
       create: vi.fn(async () => ({ id: "pipeline-1" })),
     }),
     crmPipelineStage: table({
-      create: vi.fn(async () => ({ id: "stage-1" })),
+      create: vi.fn(async (args: { data?: { externalKey?: string } }) => ({
+        id: stageIdFor(args?.data?.externalKey ?? "unstaged"),
+      })),
     }),
+    // WARP-2750 — the timeline table. Part of `LandingDb` now, so it is part of
+    // the double: a landing that could not reach it is what made every synced
+    // deal read as permanently idle.
+    crmActivity: table(),
   };
   for (const [name, methods] of Object.entries(overrides)) {
     Object.assign((client as Record<string, Record<string, unknown>>)[name], methods);
@@ -383,4 +401,183 @@ describe("deal", () => {
       expect.objectContaining({ data: expect.objectContaining({ companyId: "company-1" }) }),
     );
   });
+
+  // ── WARP-2750: the timeline ────────────────────────────────────────────────
+  //
+  // Before this, `LandingDb` had no `crmActivity` key at all, so a synced deal
+  // could not acquire a timeline row even in principle — and `listDeals({
+  // idleDays })` judges idleness on the timeline, so the entire connector book
+  // read as untouched forever however active it was upstream.
+
+  /** A deal already on the box, in the shape the landing reads back. */
+  const stored = (over: Record<string, unknown> = {}) => ({
+    id: "deal-1",
+    title: "Retainer",
+    stageId: stageIdFor("appointmentscheduled"),
+    amountMinor: 123450n,
+    currency: "USD",
+    closedAt: null,
+    ...over,
+  });
+
+  it("writes a CREATED entry for a deal landing for the first time", async () => {
+    const client = db();
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        subjectType: "DEAL",
+        dealId: "new-id",
+        kind: "CREATED",
+        summary: "Landed from HubSpot",
+      }),
+    });
+  });
+
+  it("🔴 writes NOTHING when the vendor re-sends an unchanged deal", async () => {
+    // THE CASE THAT MATTERS MOST, and the one whose absence would invert this
+    // ticket. A row on every pass keeps the newest activity minutes old
+    // forever, so `every: { occurredAt: { lt: cutoff } }` is never true again
+    // and NO connector deal is ever reported idle — the mirror of the bug we
+    // are fixing, and harder to spot because an empty chase list reads as
+    // "nothing needs doing".
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () => stored()),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).not.toHaveBeenCalled();
+  });
+
+  it("writes STAGE_CHANGE carrying the vendor's own stage word, and both stage ids", async () => {
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () => stored({ stageId: "stage-old" })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "STAGE_CHANGE",
+        summary: "HubSpot moved this to appointmentscheduled",
+        fromStageId: "stage-old",
+        toStageId: stageIdFor("appointmentscheduled"),
+      }),
+    });
+  });
+
+  it("writes SYNCED naming what moved, when the stage did not", async () => {
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () => stored({ amountMinor: 999n, title: "Old name" })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ kind: "SYNCED", summary: "HubSpot changed name, amount" }),
+    });
+  });
+
+  it("notices a close date moving on its own", async () => {
+    // ON ITS OWN means the deal is ALREADY in the stage the vendor is sending,
+    // so the only thing that moved is the date. Held at the same stage id
+    // deliberately: with a different one this would be a stage move, and the
+    // close-date arm of the diff would never be reached.
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () =>
+          stored({
+            stageId: stageIdFor("closedwon"),
+            closedAt: new Date("2020-01-01T00:00:00.000Z"),
+          }),
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [{ ...DEAL, stage: "closedwon", closed_at: "2026-01-01" }]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ kind: "SYNCED", summary: "HubSpot changed close date" }),
+    });
+  });
+
+  it("🔴 records the amount too when the vendor moves the stage in the SAME push", async () => {
+    // The failure this ticket exists to fix, recurring inside the fix for it.
+    // A vendor payload that re-prices a deal AND advances it writes BOTH
+    // columns, and an early return on the stage move left the money change
+    // recorded nowhere — the sync audit log is counts-only, so "why is this
+    // 9,999 now" had no answer anywhere on the box. A timeline whose whole
+    // thesis is admitting what it omits must not omit this.
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () =>
+          stored({ stageId: "stage-old", amountMinor: 999n, title: "Retainer" }),
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+
+    // ONE row, not two: the stage move stays the headline (it is what
+    // `activity-notify.service.ts` reads, and it is what carries the stage
+    // ids), and the other changed fields are named in the same summary.
+    expect(client.crmActivity.create).toHaveBeenCalledTimes(1);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "STAGE_CHANGE",
+        summary: "HubSpot moved this to appointmentscheduled and changed amount",
+        fromStageId: "stage-old",
+        toStageId: stageIdFor("appointmentscheduled"),
+      }),
+    });
+  });
+
+  it("names every field that moved alongside the stage, in diff order", async () => {
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () =>
+          stored({
+            stageId: "stage-old",
+            title: "Old name",
+            amountMinor: 999n,
+            closedAt: new Date("2020-01-01T00:00:00.000Z"),
+          }),
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "STAGE_CHANGE",
+        summary:
+          "HubSpot moved this to appointmentscheduled and changed name, amount, close date",
+      }),
+    });
+  });
+
+  it("🔴 stamps EXTERNAL provenance, never the LOCAL default", async () => {
+    // `landed-purge.ts` decides whether a disconnected record may be DELETED by
+    // asking whether any `origin: "LOCAL"` activity hangs off it — its test for
+    // "did a human write prose here". A machine row left at the default answers
+    // yes, and every synced deal on every box silently becomes archive-only.
+    const client = db();
+    await land(client, "deal", [DEAL]);
+    const data = client.crmActivity.create.mock.calls[0]![0].data as Record<string, unknown>;
+    expect(data.origin).toBe("EXTERNAL");
+    expect(data.externalSystem).toBe("hubspot");
+  });
+
+  it("leaves externalId NULL rather than inventing a vendor id", async () => {
+    // The table carries a global `@@unique([externalSystem, externalId])`.
+    // NULLs are distinct in Postgres, so landed rows coexist — and the slot
+    // stays free for a real vendor activity id if one is ever landed.
+    const client = db();
+    await land(client, "deal", [DEAL]);
+    const data = client.crmActivity.create.mock.calls[0]![0].data as Record<string, unknown>;
+    expect(data.externalId).toBeUndefined();
+  });
 });
+

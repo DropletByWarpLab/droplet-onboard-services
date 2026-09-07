@@ -679,6 +679,102 @@ describe("business_find — the pipeline entity", () => {
     await businessFind.handler({ entity: "pipeline", id: "pl2" }, ctx);
     expect(get.mock.calls[0][0]).toContain("pipeline=pl2");
   });
+
+  // ── WARP-2750: the roll-up must say what it does NOT cover ────────────────
+
+  it("🔴 SAYS SO when other pipelines exist and this answer excludes them", async () => {
+    // The bug was never that the tool could not name a pipeline — `id` has
+    // always worked. It was that a no-id answer described the default board
+    // only, while every connector pipeline is created `isDefault: false`. A
+    // business whose deals live in HubSpot got an empty local funnel and not
+    // one word saying another board existed.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "pl1",
+        stages: [],
+        covered: [{ id: "pl1", name: "Sales", isDefault: true }],
+        omitted: [{ id: "pl2", name: "HubSpot", isDefault: false }],
+      }),
+    );
+    const out = await businessFind.handler({ entity: "pipeline" }, ctx);
+    const data = expectOk(out).data as Record<string, unknown>;
+    expect(data.pipeline_id).toBe("pl1");
+    expect(data.covers_only).toBe("pl1");
+    expect(data.other_pipelines).toEqual([{ id: "pl2", name: "HubSpot" }]);
+    expect(String(data.note)).toContain("NOT included");
+  });
+
+  it("stays quiet on a one-board box, where nothing was left out", async () => {
+    // An omission note on a box with a single pipeline would be noise, and
+    // worse, would imply a second board the owner does not have.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "pl1",
+        stages: [],
+        covered: [{ id: "pl1", name: "Sales", isDefault: true }],
+        omitted: [],
+      }),
+    );
+    const data = expectOk(await businessFind.handler({ entity: "pipeline" }, ctx)).data as Record<
+      string,
+      unknown
+    >;
+    expect(data.pipeline_id).toBe("pl1");
+    expect(data).not.toHaveProperty("note");
+    expect(data).not.toHaveProperty("other_pipelines");
+  });
+
+  it("pluralises the omission honestly", async () => {
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "pl1",
+        stages: [],
+        omitted: [
+          { id: "pl2", name: "HubSpot", isDefault: false },
+          { id: "pl3", name: "Pipedrive", isDefault: false },
+        ],
+      }),
+    );
+    const data = expectOk(await businessFind.handler({ entity: "pipeline" }, ctx)).data as Record<
+      string,
+      unknown
+    >;
+    expect(String(data.note)).toContain("2 others exist");
+  });
+
+  it("keeps the verb agreeing with the count when exactly ONE board is left out", async () => {
+    // The plural assertion above is satisfied by a note that reads "1 other
+    // exist and are NOT included": the count was pluralised and the verb was
+    // not. The one sentence whose whole job is to be relayed verbatim to the
+    // owner was ungrammatical in the commonest case — a box with the local
+    // board plus a single connector's.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "pl1",
+        stages: [],
+        omitted: [{ id: "pl2", name: "HubSpot", isDefault: false }],
+      }),
+    );
+    const data = expectOk(await businessFind.handler({ entity: "pipeline" }, ctx)).data as Record<
+      string,
+      unknown
+    >;
+    expect(String(data.note)).toContain("1 other exists and is NOT included");
+    expect(String(data.note)).not.toContain("exist and are");
+  });
+
+  it("survives an orchestrator that has not shipped the coverage fields yet", async () => {
+    // Version skew between the tool package and the box is a real state on a
+    // partially-updated appliance; an undefined `omitted` must read as "no
+    // omission known", never as a crash.
+    get.mockResolvedValue(res(true, 200, { pipelineId: "pl1", stages: [] }));
+    const data = expectOk(await businessFind.handler({ entity: "pipeline" }, ctx)).data as Record<
+      string,
+      unknown
+    >;
+    expect(data.pipeline_id).toBe("pl1");
+    expect(data).not.toHaveProperty("note");
+  });
 });
 
 describe("business_timeline", () => {

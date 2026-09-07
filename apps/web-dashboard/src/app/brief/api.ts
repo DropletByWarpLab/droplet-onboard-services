@@ -26,6 +26,13 @@ export type Finding = {
 };
 
 export type Coverage = {
+  /** WARP-2812 — whether the brain is scheduled at all. The page cannot infer
+   *  this from a failed fetch: /coverage answers 200 with a well-formed body on
+   *  a box where BRAIN_ENABLED is false, because it reads BrainPass rows that
+   *  were never seeded and counts files nothing will ever digest. Optional so a
+   *  dashboard newer than its orchestrator does not read `undefined` as off and
+   *  paint a running brain disabled. */
+  enabled?: boolean;
   passes: {
     passKey: string;
     enabled: boolean;
@@ -38,6 +45,26 @@ export type Coverage = {
   }[];
   corpus: { documentsReady: number; documentsDigested: number };
 };
+
+/**
+ * Is the brain switched off, or simply quiet? (WARP-2812)
+ *
+ * These are DIFFERENT ANSWERS to "no findings", and the page says different
+ * things for them: a quiet brain is good news, an off one is a setup step.
+ *
+ * The page used to key that on whether `fetchCoverage` returned a value, which
+ * could never distinguish them — `GET /api/brain/coverage` answers 200 with a
+ * well-formed body whichever way BRAIN_ENABLED is set, because it reads
+ * BrainPass rows that were never seeded and counts files nothing will ever
+ * digest. So a box where the brain had never run reported an all-clear.
+ *
+ * `enabled` is optional on the wire: a dashboard newer than its orchestrator
+ * gets `undefined`, which must read as "cannot tell, assume running" rather
+ * than painting a working brain disabled. Only an explicit `false` is off.
+ */
+export function brainIsOff(coverage: Coverage | null): boolean {
+  return coverage === null || coverage.enabled === false;
+}
 
 export async function fetchFindings(status?: string): Promise<{ findings: Finding[]; total: number }> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";

@@ -46,6 +46,13 @@ function db(over: Record<string, unknown> = {}) {
     },
     brainPass: { findMany: vi.fn(async () => []) },
     fileIndexStatus: { count: vi.fn(async () => 0) },
+    // The directory the mcp principal's asserted username is resolved against
+    // (WARP-2810). `stefan` is the owner; anyone else does not exist.
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { username: string } }) =>
+        where.username === "stefan" ? { id: "u-owner", role: "owner" } : null,
+      ),
+    },
     ...over,
   } as never;
 }
@@ -185,5 +192,92 @@ describe("brain routes — status moves (WARP-2752)", () => {
       .patch("/api/brain/findings/f1")
       .send({ status: "acknowledged" });
     expect(res.status).toBe(204);
+  });
+});
+
+/**
+ * WARP-2810 — the mcp principal is not a person.
+ *
+ * `requireRoleOrMcpService` admits `_service:mcp` untouched; it does not turn
+ * it into a human. Until this was fixed nothing else did either, so the
+ * principal reached `visibleScopeFilter` verbatim: role `service` is not
+ * privileged, so the `{ scope: "company" }` arm — the scope every shipped
+ * detector writes — was never added, and the remaining arm was
+ * `{ scope: "personal", ownerId: "_service:mcp" }`, false for every row that
+ * can exist. `business_find` then answered an empty list on every box, which
+ * reads exactly like a healthy brain with nothing to report.
+ */
+const mcp: AuthUser = {
+  id: "_service:mcp",
+  username: "_service:mcp",
+  displayName: "mcp",
+  role: "service" as AuthUser["role"],
+};
+
+describe("brain routes — the acting human behind the mcp principal (WARP-2810)", () => {
+  it("scopes on the asserted USER, and never on the service principal", async () => {
+    const prisma = db();
+    const res = await request(buildApp(mcp, prisma))
+      .get("/api/brain/findings")
+      .set("X-Nextcloud-User", "stefan");
+    expect(res.status).toBe(200);
+
+    const where = (
+      prisma as unknown as {
+        brainFinding: { findMany: ReturnType<typeof vi.fn> };
+      }
+    ).brainFinding.findMany.mock.calls[0]![0]!.where as { OR: Record<string, unknown>[] };
+
+    // The resolved owner is privileged, so company-scope rows are readable.
+    expect(where.OR).toContainEqual({ scope: "company" });
+    // And the personal arm names the human's id, not the principal string.
+    expect(where.OR).toContainEqual({ scope: "personal", ownerId: "u-owner" });
+    expect(JSON.stringify(where)).not.toContain("_service:mcp");
+  });
+
+  it("403s when the principal asserts nobody", async () => {
+    // Fail closed. An empty 200 here is worse than an error: it is
+    // indistinguishable from a brain that has nothing to say.
+    const res = await request(buildApp(mcp)).get("/api/brain/findings");
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("actor_unresolved");
+  });
+
+  it("403s when the asserted user does not exist", async () => {
+    const res = await request(buildApp(mcp))
+      .get("/api/brain/findings")
+      .set("X-Nextcloud-User", "nobody");
+    expect(res.status).toBe(403);
+  });
+
+  it("applies to digests and to the PATCH, not only to findings", async () => {
+    expect((await request(buildApp(mcp)).get("/api/brain/digests")).status).toBe(403);
+    expect(
+      (await request(buildApp(mcp)).patch("/api/brain/findings/f1").send({ status: "acknowledged" }))
+        .status,
+    ).toBe(403);
+  });
+
+  it("leaves a browser caller alone", async () => {
+    const prisma = db();
+    // A header on a browser session must not re-point the scope at someone
+    // else — only the service principal is allowed to assert an identity.
+    const res = await request(buildApp(owner, prisma))
+      .get("/api/brain/findings")
+      .set("X-Nextcloud-User", "romain");
+    expect(res.status).toBe(200);
+    const where = (
+      prisma as unknown as { brainFinding: { findMany: ReturnType<typeof vi.fn> } }
+    ).brainFinding.findMany.mock.calls[0]![0]!.where as { OR: Record<string, unknown>[] };
+    expect(where.OR).toContainEqual({ scope: "personal", ownerId: "u-owner" });
+  });
+});
+
+describe("brain coverage — says whether the brain runs at all (WARP-2812)", () => {
+  it("reports `enabled`, so the page need not infer it from a failed fetch", async () => {
+    const res = await request(buildApp(owner)).get("/api/brain/coverage");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("enabled");
+    expect(typeof res.body.enabled).toBe("boolean");
   });
 });
