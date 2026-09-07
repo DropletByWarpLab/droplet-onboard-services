@@ -163,6 +163,15 @@
   border-color: var(--border-strong);
 }
 
+/* The OFF state: an offer, not an alarm. Quieter than the pending banner —
+   no accent wash — because it is the one that can sit on the page for a long
+   time without being acted on, and the pending banner must stay the louder of
+   the two when both states exist on the same box over its life. */
+.filing-banner-offer {
+  background: var(--bg-subtle, var(--bg-canvas));
+  color: var(--text-secondary, var(--text));
+}
+
 .filing-banner-go {
   margin-left: auto;
   color: var(--accent);

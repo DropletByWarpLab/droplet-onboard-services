@@ -375,14 +375,47 @@ export function FilingSurface(): JSX.Element {
 /**
  * The banner on `/customers`.
  *
- * Renders nothing at all when there is nothing waiting, when filing is off, or
- * when the reader is not an owner or admin (the summary 403s, which is the
- * ordinary answer for a `family` member and not a fault). A banner that is
- * always there stops being read.
+ * Renders nothing when the reader is not an owner or admin (the summary 403s,
+ * which is the ordinary answer for a `family` member and not a fault), and
+ * nothing when filing is on with an empty queue. A banner that is always there
+ * stops being read.
+ *
+ * ── 🔴 Why the OFF state is the exception ──────────────────────────────────
+ *
+ * It was not, and that made the whole feature unreachable. `/customers/filing`
+ * has no nav entry — deliberately, and `CrmTabs` argues the case: a link to a
+ * different section is a nav entry, not a tab. But this banner was the ONLY
+ * link to that route in the entire dashboard, and it returned null unless
+ * filing was ALREADY on. The switch that turns filing on lives inside the
+ * route. A fresh box defaults to off (`settings.ts` OFF_DEFAULTS), so the
+ * circle was closed: an owner could not reach the on-switch without first
+ * having reached the on-switch, and the only way in was to type the URL.
+ *
+ * So the off state gets an entry, and it is deliberately NOT the same banner.
+ * The pending banner is an alarm — it says a number and asks for attention.
+ * This one is an offer: it says what Droplet could do, once, and it is gone
+ * the moment filing is switched on. That is the honest reading of "a banner
+ * that is always there stops being read": the sentence is about repetition of
+ * an ALARM. An entry point that disappears as soon as it has been used is not
+ * that.
  */
 export function FilingBanner(): JSX.Element | null {
   const { summary } = useFilingSummary();
-  if (!summary || !summary.enabled || summary.pending === 0) return null;
+  if (!summary) return null;
+
+  if (!summary.enabled) {
+    return (
+      <Link className="filing-banner filing-banner-offer" href="/customers/filing">
+        <PmIcon name="inbox" size={14} />
+        <span>
+          Droplet can read new files and tell you which customer they belong to.
+        </span>
+        <span className="filing-banner-go">See how</span>
+      </Link>
+    );
+  }
+
+  if (summary.pending === 0) return null;
   return (
     <Link className="filing-banner" href="/customers/filing">
       <PmIcon name="inbox" size={14} />
