@@ -511,6 +511,60 @@ class TestLuksAutomount:
         assert re.search(r'mount -o "?ro,', "\n".join(cmds)), cmds
         assert '"trust": "untrusted-ro"' in mounts_json, mounts_json
 
+    # ---- hostile-media mount options -------------------------------------
+    # This script runs as ROOT from a udev unit and mounts whatever partition
+    # appears, so the media is attacker-supplied. `ro` is not a mitigation:
+    # a read-only mount still executes setuid-root binaries and still honours
+    # device nodes. Before these, a USB stick carrying a setuid-root shell was
+    # a mount away from root on the host that owns the docker socket.
+
+    def test_untrusted_media_is_mounted_nosuid_nodev_noexec(self, tmp_path):
+        proc, cmds, _logged, _mounts_json, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        line = next(c for c in cmds if c.startswith("mount "))
+        for opt in ("nosuid", "nodev", "noexec"):
+            assert opt in line, (opt, line)
+
+    def test_trusted_media_is_still_nosuid_nodev(self, tmp_path):
+        """Enrolment says the DISK is ours, not that its CONTENTS are.
+
+        A setuid binary or a device node on a data drive is never legitimate,
+        so these two are unconditional — a drive being on trusted.list must
+        not buy it the right to carry root.
+        """
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "trusted.list").write_text(
+            "cafef00d-9360\n", encoding="utf-8")
+        proc, cmds, _logged, _mounts_json, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        line = next(c for c in cmds if c.startswith("mount "))
+        assert "nosuid" in line, line
+        assert "nodev" in line, line
+
+    def test_trusted_media_keeps_exec(self, tmp_path):
+        """`noexec` is deliberately NOT unconditional.
+
+        The same code path mounts the md RAID pool, and an operator keeping a
+        script on their own pool is a reasonable thing this must not break.
+        Pinning it so a later "harden everything" sweep has to make that call
+        on purpose rather than by accident.
+        """
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "trusted.list").write_text(
+            "cafef00d-9360\n", encoding="utf-8")
+        proc, cmds, _logged, _mounts_json, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        line = next(c for c in cmds if c.startswith("mount "))
+        assert "noexec" not in line, line
+
     def test_trusted_plain_drive_mounts_rw(self, tmp_path):
         # A plain drive whose uuid is on the trusted list mounts rw.
         state_dir = tmp_path / "state"
