@@ -6,7 +6,7 @@ pydantic>=2.13.4
 httpx>=0.28.1
 sse-starlette>=3.4.10
 redis>=8.1.0
-grpcio>=1.83.0
+grpcio>=1.83.1
 grpcio-tools>=1.83.1
 sentence-transformers>=5.7.0
 # NOTE (WARP-1948): keep this torch line EXACTLY as-is. Appending a version
