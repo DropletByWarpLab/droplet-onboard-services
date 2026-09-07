@@ -48,7 +48,10 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
   // running". The second used to be unreachable here, because /coverage
   // succeeds whichever way BRAIN_ENABLED is set, so a disabled brain rendered
   // as a working one that had simply not got very far yet.
-  if (brainIsOff(coverage)) {
+  // `!coverage` is spelled out rather than left to brainIsOff so TypeScript
+  // narrows `coverage` for the rest of this function; a predicate hidden
+  // behind a call does not narrow at the call site.
+  if (!coverage || brainIsOff(coverage)) {
     return (
       <p className="brief-coverage">
         The brain is off. Nothing has been read, and no findings are being produced.
