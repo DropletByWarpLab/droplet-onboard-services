@@ -103,13 +103,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v4.37.6
+      - uses: github/codeql-action/init@v4.37.9
         with:
           languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4.37.6
+      - uses: github/codeql-action/analyze@v4.37.9
         with:
           category: "/language:javascript-typescript"
 
@@ -120,13 +120,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v4.37.6
+      - uses: github/codeql-action/init@v4.37.9
         with:
           languages: python
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4.37.6
+      - uses: github/codeql-action/analyze@v4.37.9
         with:
           category: "/language:python"
 
@@ -142,12 +142,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v4.37.6
+      - uses: github/codeql-action/init@v4.37.9
         with:
           languages: actions
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4.37.6
+      - uses: github/codeql-action/analyze@v4.37.9
         with:
           category: "/language:actions"
