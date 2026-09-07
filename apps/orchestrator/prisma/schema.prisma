@@ -5653,6 +5653,68 @@ model ErpDocument {
   @@index([origin, kind, status])
 }
 
+/// WARP-2751 (ADR-051) — the TIME AXIS for money. `ErpDocument` holds one row
+/// per document carrying only its LATEST state, because `land-money.ts`
+/// overwrites `amount`/`balance`/`vendorStatus` in place on every sync tick.
+/// Yesterday is destroyed 96 times a day. Ageing, DSO drift, "our overdue
+/// balance has doubled since June", "which customers slowed down" are all
+/// structurally unanswerable against that, however good the model is.
+///
+/// Append-only, one row per subject per DAY.
+///
+/// 🔴 WHY A SNAPSHOT AND NOT AN AUDIT LOG. An audit log answers "what changed";
+/// this answers "what was it worth on this date", which is the shape every
+/// trend question has and the shape a `GROUP BY capturedOn` serves cheaply.
+/// `ErpAuditLog` already exists and does not do this.
+///
+/// 🔴 NO `workspaceId`, despite the ticket proposing one. This schema has no
+/// tenancy concept — `workspaceId` appears on `PmProject` alone, and inventing
+/// a second, unenforced one here would be a column every future query has to
+/// remember to filter and no constraint would ever check. `subjectId` is a
+/// uuid and globally unique, so the unique key below is complete without it.
+model MoneySnapshot {
+  id String @id @default(uuid())
+
+  /// The DAY this value was true. `@db.Date`, not a timestamp: the grain IS
+  /// one day, and storing a time would let two rows for the same day differ
+  /// and defeat the unique key that makes the 15-minute cadence idempotent.
+  capturedOn DateTime @db.Date
+
+  /// What was measured. A string rather than an enum because the next two
+  /// subjects (`crm_deal`, `pipeline`) are not landed yet and an enum whose
+  /// members arrive one migration at a time buys nothing over a documented
+  /// vocabulary.
+  subjectType String
+  /// The subject's own id. NOT a foreign key: a snapshot must survive the
+  /// document it describes, or the series ends the moment a vendor deletes an
+  /// invoice — which is exactly the history worth keeping.
+  subjectId   String
+
+  /// The same shape `ErpDocument` carries, so the series and the live row are
+  /// directly comparable. `Decimal(20,6)` and NOT minor units, for the reason
+  /// `ErpDocument.amount` gives: a ledger's exponent is unknowable when its
+  /// currency is null, and guessing 2 is wrong by 100x on a yen ledger.
+  amount   Decimal? @db.Decimal(20, 6)
+  balance  Decimal? @db.Decimal(20, 6)
+  currency String?
+  /// The vendor's own word, carried verbatim — see `ErpDocument.vendorStatus`.
+  /// Free text, because five vendors spell this five ways.
+  status   String?
+
+  createdAt DateTime @default(now())
+
+  /// The idempotency key. A document synced twelve times in one day must
+  /// produce ONE row, and this is what makes the upsert converge on the day's
+  /// last-seen value instead of appending ninety-six near-duplicates.
+  @@unique([capturedOn, subjectType, subjectId])
+  /// "The 90-day series for this document" — the query the whole table exists
+  /// to serve, and the one the retention downsample scans.
+  @@index([subjectType, subjectId, capturedOn])
+  /// Retention sweeps by date across all subjects.
+  @@index([capturedOn])
+}
+
+
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these
 /// states and is never derived from a NULL. DISCREPANCY = Eaglesoft's own

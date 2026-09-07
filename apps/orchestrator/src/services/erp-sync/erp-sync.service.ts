@@ -109,6 +109,8 @@ import {
   type LandingConnection,
   type LandingDb,
 } from "./land.js";
+import { landsMoney } from "./land-money.js";
+import { captureMoneySnapshots } from "./money-snapshot.service.js";
 import { redactSyncText } from "./redact.js";
 
 const logger = createLogger("erp-sync");
@@ -412,7 +414,36 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
       $transaction?: <T>(fn: (tx: LandingDb) => Promise<T>) => Promise<T>;
     };
     if (typeof client.$transaction !== "function") return null;
-    return client.$transaction((tx) => landCanonicalRows(tx, args));
+    const outcome = await client.$transaction((tx) => landCanonicalRows(tx, args));
+
+    // WARP-2751 — snapshot the day's money AFTER the landing commits.
+    //
+    // 🔴 OUTSIDE THE TRANSACTION ON PURPOSE, and it is not a style choice. The
+    // requirement is that a snapshot failure must not fail the tick; inside
+    // the `$transaction` above that is impossible to honour, because Postgres
+    // aborts the whole transaction on the first failed statement and a
+    // try/catch would leave the landing rolled back while pretending it
+    // succeeded. Out here the containment is real: `captureMoneySnapshots`
+    // never throws, and a lost day of history costs history, not invoices.
+    //
+    // Gated on the entity because only `invoice`/`bill` become `ErpDocument`
+    // rows — a contact page landing has no money to snapshot.
+    if (landsMoney(args.entity)) {
+      const snap = await captureMoneySnapshots(prisma as never, {
+        now: now(),
+        connectionId: args.connection.id,
+      });
+      // Logged, never swallowed: a capture that fails silently every night is
+      // exactly how a table ends up empty on the day someone first asks it a
+      // question.
+      if (snap.error !== null) {
+        logger.warn(
+          { connectionId: args.connection.id, entity: args.entity, error: snap.error },
+          "money snapshot capture failed; landing kept",
+        );
+      }
+    }
+    return outcome;
   };
   const land = deps.land ?? defaultLand;
   const sweepIntervalMs = deps.sweepIntervalMs ?? 24 * 60 * 60 * 1000;
