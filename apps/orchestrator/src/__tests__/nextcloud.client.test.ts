@@ -45,6 +45,7 @@ import {
   ncEnsureGroup,
   ncDeleteFile,
   ncCreateRichdocumentsDirectUrl,
+  ncListUsers,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -1530,5 +1531,59 @@ describe("nextcloud.client — ncCreateRichdocumentsDirectUrl (WARP-1688)", () =
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("nextcloud.client — ncListUsers", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  /** `/cloud/users/details` returns `enabled` per user; the mapper used to
+   *  drop it, which is why the People roster could deactivate someone and
+   *  then never offer to undo it. */
+  it("carries `enabled` through from the OCS payload", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: {
+          ocs: {
+            data: {
+              users: {
+                ana: { displayname: "Ana", email: "ana@x.test", enabled: true },
+                tomas: { displayname: "Tomas", email: null, enabled: false },
+              },
+            },
+          },
+        },
+      })
+    ) as unknown as typeof fetch;
+
+    const users = await ncListUsers("token");
+
+    expect(users).toEqual([
+      { id: "ana", displayName: "Ana", email: "ana@x.test", enabled: true },
+      { id: "tomas", displayName: "Tomas", email: null, enabled: false },
+    ]);
+  });
+
+  it("treats an absent `enabled` as active rather than deactivating the directory", async () => {
+    // Defaulting the other way would paint every row Deactivated on any NC
+    // build or API version that omits the field.
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: {
+          ocs: { data: { users: { ana: { displayname: "Ana" } } } },
+        },
+      })
+    ) as unknown as typeof fetch;
+
+    const [ana] = await ncListUsers("token");
+
+    expect(ana!.enabled).toBe(true);
   });
 });
