@@ -93,7 +93,7 @@ cryptography>=50.0.0
 # dependencies, so it adds nothing to the image beyond itself. The extractor
 # still falls back to a regex strip if the import fails, matching how HTML
 # degrades.
-striprtf>=0.0.29
+striprtf>=0.0.33
 
 # WARP-1948 — OSV floors (see block rationale in sibling services):
 # idna via httpx, scipy via imagehash.
