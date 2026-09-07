@@ -570,9 +570,23 @@ export interface SessionsForUser {
   sessions: LiveSession[] | null;
 }
 
+/**
+ * The failure carries `res.status` (same `Error & { status?: number }` shape
+ * the invite helpers above use) because /admin/sessions has to tell two very
+ * different failures apart. A 403 is the orchestrator's `requireRole` doing
+ * its job — a permissions answer. Anything else is the box or the session
+ * store not answering. Collapsing them into one bare Error is what made a
+ * refusal render as an outage (WARP-2820 review round 2).
+ */
 export async function fetchSessions(): Promise<{ users: SessionsForUser[] }> {
   const res = await authFetch(`${BASE}/api/auth/sessions`);
-  if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`Failed to fetch sessions: ${res.status}`) as Error & {
+      status?: number;
+    };
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 

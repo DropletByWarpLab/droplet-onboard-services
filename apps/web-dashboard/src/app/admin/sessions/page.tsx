@@ -17,12 +17,24 @@
  * The deadlines come from the box, not from arithmetic here: the idle and
  * absolute limits are policy the orchestrator owns, and a second copy would
  * drift the moment they become configurable.
+ *
+ * A REFUSAL IS NOT AN OUTAGE. The role gate below mirrors /admin/audit and
+ * /admin/files: client check here, real enforcement in the orchestrator's
+ * `requireRole("owner","admin")` on GET /api/auth/sessions. Without it a
+ * `family` account fired the read, took the 403 the route correctly returns,
+ * and landed in the generic failure branch - so "you may not see this" was
+ * reported as "the box did not answer", on the one page whose whole premise
+ * is that it never overstates what it knows. Both the client-side refusal and
+ * a 403 off the wire now render as permissions; only a genuine failure to
+ * reach the store keeps the outage copy and its retry.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { KeyRound, LogOut, ShieldOff } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, Card, Row, Sect } from "@/components/shell/primitives";
+import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { fetchSessions, revokeUserSessions, type SessionsForUser } from "@/lib/api";
 import { ago, untilPhrase } from "./format";
 
@@ -135,25 +147,64 @@ function SessionsCard({
   );
 }
 
+/** The refusal card. One shape for both refusals - the client already knowing
+ *  the role is too low, and the box saying so - because to the person reading
+ *  it they are the same answer. Deliberately NOT the outage card: no retry,
+ *  because retrying a permissions decision only fails again. Matches the empty
+ *  state /admin/audit, /admin/files and the console gate all render. */
+function NotAuthorized({ detail }: { detail: ReactNode }) {
+  return (
+    <div className="card">
+      <div className="empty">
+        <span className="ei">
+          <ShieldOff size={24} />
+        </span>
+        <span className="eh">Admin access required</span>
+        <span style={{ maxWidth: "38ch" }}>{detail}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminSessionsPage() {
+  const { user, isLoading: authLoading } = useAuth();
+  const isAdmin = !authLoading && isAdminRole(user?.role);
+
   const [people, setPeople] = useState<SessionsForUser[] | null>(null);
   const [failed, setFailed] = useState(false);
+  // Distinct from `failed` on purpose: the box refusing to answer this person
+  // and the box being unable to answer at all are different sentences.
+  const [refused, setRefused] = useState(false);
   const [loading, setLoading] = useState(true);
   // Captured once per load rather than read per render, so every row on one
   // screen is measured against the same instant.
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   const load = useCallback(() => {
+    // Nothing is asked of the box until the auth probe has settled AND the
+    // answer is owner/admin. A non-admin never generates the 403 that used to
+    // be mistranslated downstream.
+    if (!isAdmin) return;
     setLoading(true);
     void fetchSessions()
       .then(({ users }) => {
         setPeople(users);
         setNow(Math.floor(Date.now() / 1000));
         setFailed(false);
+        setRefused(false);
       })
-      .catch(() => setFailed(true))
+      .catch((err: unknown) => {
+        // 403 is `requireRole` answering, not Redis failing.
+        if ((err as { status?: number } | null)?.status === 403) {
+          setRefused(true);
+          setFailed(false);
+        } else {
+          setFailed(true);
+          setRefused(false);
+        }
+      })
       .finally(() => setLoading(false));
-  }, []);
+  }, [isAdmin]);
 
   useEffect(load, [load]);
 
@@ -161,6 +212,51 @@ export default function AdminSessionsPage() {
   // with the signed-in group where an operator will actually look at them.
   const active = (people ?? []).filter((p) => p.sessions === null || p.sessions.length > 0);
   const rest = (people ?? []).filter((p) => p.sessions !== null && p.sessions.length === 0);
+
+  // Hydrating. Neutral chrome rather than the page, the same branch the other
+  // /admin surfaces render while the auth probe is in flight.
+  if (authLoading) {
+    return (
+      <ShellPage icon={ICON} label="Sessions" title="Sessions">
+        <div
+          className="card"
+          aria-busy="true"
+          style={{ textAlign: "center", padding: 48, color: "var(--text-muted)" }}
+        >
+          Loading...
+        </div>
+      </ShellPage>
+    );
+  }
+
+  // Refused - by this check, or by the box. No subtitle: the page's own
+  // strapline describes a capability this person does not have.
+  if (!isAdmin || refused) {
+    return (
+      <ShellPage icon={ICON} label="Sessions" title="Sessions">
+        <NotAuthorized
+          detail={
+            isAdmin ? (
+              // The client thought this was allowed and the box disagreed - a
+              // role changed under a live token, or the route tightened. Say
+              // that, rather than blaming a store that answered fine.
+              <>
+                The box refused this request because of your role, not because
+                anything is down. Nobody has been signed out. Sign in again, or
+                ask an <code>owner</code> to check your access.
+              </>
+            ) : (
+              <>
+                Sessions shows who is signed in to this box and can sign them
+                out, so it is limited to <code>owner</code> and{" "}
+                <code>admin</code>. Ask an admin if you need access.
+              </>
+            )
+          }
+        />
+      </ShellPage>
+    );
+  }
 
   return (
     <ShellPage icon={ICON} label="Sessions" title="Sessions" sub={SUB}>
