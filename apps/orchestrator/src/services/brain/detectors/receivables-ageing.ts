@@ -49,6 +49,12 @@
  * number that is wrong in a way nobody can see. Each currency is its own
  * finding with its own `subjectKey`, which is also what keeps the dedupe key
  * stable when a second currency appears on the box.
+ *
+ * 🔴 AND THE GATES RUN EVEN WHEN THE CURRENCY IS NULL, which on a shipped box
+ * is the ordinary case rather than the exception — `ErpDocument.currency` is
+ * NULL "when the ledger's own home currency is the only answer", and the
+ * snapshot copies it. A gate that only fires when a currency happens to be
+ * named is a gate that mostly does not fire. See `MIN_INCREASE_MAJOR`.
  */
 import type { PrismaClient } from "@prisma/client";
 import { toMinorUnits } from "@droplet/shared-types";
@@ -79,6 +85,34 @@ export const GROWTH_RATIO = 1.25;
 /** ...and only when the INCREASE itself is material. A book that went from
  *  $8 to $12 is up 50% and is not news. Minor units. */
 export const MIN_INCREASE_MINOR = 50_000n; // 500.00
+
+/**
+ * 🔴 THE SAME FLOOR, IN MAJOR UNITS, FOR THE SERIES WHOSE CURRENCY NOBODY NAMED.
+ *
+ * `ErpDocument.currency` is NULL "when the ledger's own home currency is the
+ * only answer — which is the ordinary case today" (schema, `ErpDocument`), and
+ * `MoneySnapshot` copies that column verbatim. So the null-currency path is not
+ * an edge case on a shipped box, it is the DEFAULT one.
+ *
+ * The first version of this detector applied `MIN_INCREASE_MINOR` only when a
+ * minor-unit amount could be computed, which is exactly when a currency IS
+ * known. A 2.00 → 8.00 move was therefore correctly silent in USD and fired a
+ * digest finding with the currency omitted — the materiality gate did not
+ * merely weaken on the common path, it did not run at all.
+ *
+ * Skipping such rows outright was the other candidate and is worse: it would
+ * silence the detector on most boxes, which is the same as not shipping it.
+ * So the gate falls back to the one unit that needs no exponent — the ledger's
+ * own MAJOR units, as the vendor stated them. It is the identical 500.00 figure
+ * for a two-decimal currency, which is what an unnamed home currency almost
+ * always is, and `holds MIN_INCREASE_MAJOR and MIN_INCREASE_MINOR to the same
+ * real figure` in the DB-less suite pins the two together so they cannot drift.
+ *
+ * Deliberately NOT used when the currency IS readable: there the exponent is
+ * known, the minor-unit comparison is exact, and an approximation would be a
+ * downgrade.
+ */
+export const MIN_INCREASE_MAJOR = 500; // 500.00 major units, exponent unknown
 
 /**
  * Words a vendor uses for "this is settled", lowercased. Deliberately a COPY of
@@ -215,13 +249,21 @@ export const receivablesAgeing: Detector = {
         thenMinor !== null && nowMinor !== null ? nowMinor - thenMinor : null;
 
       // Two independent gates. The ratio keeps ordinary breathing out; the
-      // absolute increase keeps a small book's noise out. Both must clear.
+      // absolute increase keeps a small book's noise out. Both must clear —
+      // and 🔴 BOTH MUST CLEAR ON EVERY PATH, including the null-currency one
+      // that is the ordinary case on a shipped box. See MIN_INCREASE_MAJOR.
       if (thenNum > 0 && nowNum / thenNum < GROWTH_RATIO) continue;
-      if (increaseMinor !== null && increaseMinor < MIN_INCREASE_MINOR) continue;
-      // With no readable currency there is no minor-unit gate to apply, so the
-      // ratio alone decides. A book that went from nothing to something has no
-      // ratio either, and is reported on the strength of the absolute rise.
-      if (increaseMinor === null && thenNum <= 0) continue;
+      if (increaseMinor !== null) {
+        // Currency known: compare exactly, in that currency's own minor unit.
+        if (increaseMinor < MIN_INCREASE_MINOR) continue;
+      } else if (nowNum - thenNum < MIN_INCREASE_MAJOR) {
+        // Currency unknown or the totals unrepresentable in it: fall back to
+        // the ledger's own major units. `Number` is safe HERE and nowhere else
+        // in this file — this is a threshold test whose answer cannot flip
+        // from the rounding a 2^53-scale total would suffer, not a figure that
+        // gets reported. The reported amount stays null a few lines below.
+        continue;
+      }
 
       const pct = percentGrowth(thenNum, nowNum);
       const cur = r.currency ?? "";

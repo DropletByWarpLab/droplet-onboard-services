@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { toMinorUnits } from "@droplet/shared-types";
 import {
   receivablesAgeing,
   daysBetween,
@@ -30,6 +31,7 @@ import {
   MIN_SERIES_DAYS,
   GROWTH_RATIO,
   MIN_INCREASE_MINOR,
+  MIN_INCREASE_MAJOR,
 } from "../services/brain/detectors/receivables-ageing";
 
 const NOW = new Date("2033-06-10T00:00:00.000Z");
@@ -215,5 +217,95 @@ describe("receivables-ageing — the decision (WARP-2825)", () => {
     const a = await receivablesAgeing.run(prismaReturning([row()]), NOW);
     const b = await receivablesAgeing.run(prismaReturning([row({ nowTotal: "40000.00" })]), NOW);
     expect(a[0]!.subjectKey).toBe(b[0]!.subjectKey);
+  });
+});
+
+/**
+ * 🔴 THE MATERIALITY GATE ON THE PATH IT ACTUALLY RUNS ON.
+ *
+ * `ErpDocument.currency` is NULL "when the ledger's own home currency is the
+ * only answer — which is the ordinary case today" (schema), and `MoneySnapshot`
+ * copies that column. The first version of this detector applied
+ * `MIN_INCREASE_MINOR` only where a minor-unit amount existed — i.e. only where
+ * a currency was named — so the 500.00 floor did not fire on the common path at
+ * all: 2.00 → 8.00 was silent in USD and a digest finding with no currency.
+ *
+ * Every case below is written as a PAIR, USD against NULL, because the defect
+ * was invisible precisely as an asymmetry: each half looked reasonable alone.
+ */
+describe("receivables-ageing — the floor applies with or without a currency (WARP-2825)", () => {
+  it("holds MIN_INCREASE_MAJOR and MIN_INCREASE_MINOR to the same real figure", () => {
+    // Two constants, one materiality decision. Changing 500.00 in one place and
+    // not the other would make the gate mean different things on the two paths,
+    // which is the class of bug this whole block exists to close.
+    expect(toMinorUnits(String(MIN_INCREASE_MAJOR), "USD")).toBe(MIN_INCREASE_MINOR);
+  });
+
+  it("stays silent below the floor — USD and NULL currency alike", async () => {
+    // Up 300%, by six units. Not news in either.
+    const usd = await receivablesAgeing.run(
+      prismaReturning([row({ thenTotal: "2.00", nowTotal: "8.00" })]),
+      NOW,
+    );
+    const none = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: "2.00", nowTotal: "8.00" })]),
+      NOW,
+    );
+    expect(usd).toEqual([]);
+    // 🔴 This is the assertion the shipped code failed: with no currency there
+    // was no minor-unit amount, so the floor was skipped and this fired.
+    expect(none).toEqual([]);
+  });
+
+  it("reports above the floor — USD and NULL currency alike", async () => {
+    const usd = await receivablesAgeing.run(
+      prismaReturning([row({ thenTotal: "2000.00", nowTotal: "9000.00" })]),
+      NOW,
+    );
+    const none = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: "2000.00", nowTotal: "9000.00" })]),
+      NOW,
+    );
+    expect(usd).toHaveLength(1);
+    expect(usd[0]!.impactMinor).toBe(700_000n);
+    expect(none).toHaveLength(1);
+    // The finding survives; the AMOUNT does not get guessed. All-or-nothing.
+    expect(none[0]!.impactMinor).toBeNull();
+    expect(none[0]!.currency).toBeNull();
+    expect(none[0]!.subjectKey).toBe("unknown-currency");
+  });
+
+  it("sits the boundary on the floor itself, not near it", async () => {
+    // Exactly 500.00 clears; a hundredth under does not. Pins the comparison as
+    // `<` on the floor rather than an approximation of it.
+    const at = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: "100.00", nowTotal: "600.00" })]),
+      NOW,
+    );
+    const under = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: "100.00", nowTotal: "599.99" })]),
+      NOW,
+    );
+    expect(at).toHaveLength(1);
+    expect(under).toEqual([]);
+  });
+
+  it("gates a NULL-currency book that appeared from nothing on the same floor", async () => {
+    // No ratio exists against zero, so the floor is the ONLY gate here. The
+    // shipped code dropped this row unconditionally, which was the mirror image
+    // of the same asymmetry: a currency-less book could never be reported no
+    // matter how large, while a currency-less 6.00 rise always was.
+    const big = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: null, nowTotal: "30000.00" })]),
+      NOW,
+    );
+    const small = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null, thenTotal: null, nowTotal: "40.00" })]),
+      NOW,
+    );
+    expect(big).toHaveLength(1);
+    expect(big[0]!.title).toContain("appeared");
+    expect(big[0]!.impactMinor).toBeNull();
+    expect(small).toEqual([]);
   });
 });

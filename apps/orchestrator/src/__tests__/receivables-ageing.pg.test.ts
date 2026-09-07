@@ -148,8 +148,11 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     ).id;
   });
 
-  /** A vendor-synced receivable. `dueAt` decides which endpoints it counts at. */
-  async function invoice(dueAt: Date, currency = "USD") {
+  /** A vendor-synced receivable. `dueAt` decides which endpoints it counts at.
+   *  `currency` is nullable for the same reason `snap`'s is: a QuickBooks
+   *  company file has one home currency and its export carries no per-row
+   *  currency column, so NULL here is the shipped default, not a defect. */
+  async function invoice(dueAt: Date, currency: string | null = "USD") {
     return prisma.erpDocument.create({
       data: {
         origin: "LANDED",
@@ -208,12 +211,19 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
   /** Write one day's snapshot row directly — the detector reads the series, it
    *  does not care which writer produced it, and this lets a case place an
-   *  exact balance on an exact day. */
+   *  exact balance on an exact day.
+   *
+   *  🔴 `currency` uses the `=== undefined` form, not `??`. The first version
+   *  wrote `over.currency ?? "USD"`, which cannot express a NULL currency at
+   *  all — and NULL is the ORDINARY value on a shipped box, because
+   *  `ErpDocument.currency` is NULL "when the ledger's own home currency is the
+   *  only answer". A helper that cannot write the common case guarantees the
+   *  common case is never tested, which is exactly what happened. */
   async function snap(
     docId: string,
     day: Date,
     balance: string,
-    over: { currency?: string; status?: string | null } = {},
+    over: { currency?: string | null; status?: string | null } = {},
   ) {
     await prisma.moneySnapshot.create({
       data: {
@@ -222,7 +232,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
         subjectId: docId,
         amount: balance,
         balance,
-        currency: over.currency ?? "USD",
+        currency: over.currency === undefined ? "USD" : over.currency,
         status: over.status === undefined ? "Open" : over.status,
       },
     });
@@ -363,6 +373,60 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     await snap(a.id, THEN, "2.00");
     await snap(a.id, NOW, "8.00");
     await expect(run()).resolves.toEqual([]);
+  });
+
+  // ── the NULL-currency path, which is the ORDINARY one ─────────────────────
+  //
+  // 🔴 `ErpDocument.currency` is NULL "when the ledger's own home currency is
+  // the only answer — which is the ordinary case today", and `MoneySnapshot`
+  // copies it. Until these four cases existed, every fixture in this file named
+  // a currency, so the whole common path ran unexercised against real SQL —
+  // including the `IS NOT DISTINCT FROM` correlation that only a NULL currency
+  // can exercise at all.
+
+  it("stays silent on a trivial increase when the ledger named NO currency", async () => {
+    // The identical 2.00 → 8.00 shape as the USD case above. The shipped
+    // detector emitted a finding here and stayed silent there — the materiality
+    // gate simply did not run without a currency to convert with.
+    const a = await invoice(DUE_BEFORE_ANCHOR, null);
+    await snap(a.id, THEN, "2.00", { currency: null });
+    await snap(a.id, NOW, "8.00", { currency: null });
+    await expect(run()).resolves.toEqual([]);
+  });
+
+  it("reports a material rise when the ledger named NO currency, without an amount", async () => {
+    // Above the floor, so the finding is real. The AMOUNT stays absent because
+    // no exponent is knowable — all-or-nothing, the sibling detector's rule.
+    const a = await invoice(DUE_BEFORE_ANCHOR, null);
+    await snap(a.id, THEN, "2000.00", { currency: null });
+    await snap(a.id, NOW, "9000.00", { currency: null });
+
+    const found = await run();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.subjectKey).toBe("unknown-currency");
+    expect(found[0]!.impactMinor).toBeNull();
+    expect(found[0]!.currency).toBeNull();
+    expect(found[0]!.rationale).toContain("no readable currency");
+  });
+
+  it("gives USD the same two answers on the same two shapes", async () => {
+    // The USD half of the pair, in one case, so the parity is visible in one
+    // place rather than inferred across the file. Trivial rise: silent.
+    const small = await invoice(DUE_BEFORE_ANCHOR);
+    await snap(small.id, THEN, "2.00");
+    await snap(small.id, NOW, "8.00");
+    await expect(run()).resolves.toEqual([]);
+
+    // Material rise on the SAME series: reported, and with an exact amount.
+    await prisma.moneySnapshot.deleteMany({ where: { subjectId: small.id } });
+    await snap(small.id, THEN, "2000.00");
+    await snap(small.id, NOW, "9000.00");
+
+    const found = await run();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.subjectKey).toBe("USD");
+    expect(found[0]!.impactMinor).toBe(700_000n); // +7,000.00
+    expect(found[0]!.currency).toBe("USD");
   });
 
   it("skips a zero-balance snapshot row", async () => {
