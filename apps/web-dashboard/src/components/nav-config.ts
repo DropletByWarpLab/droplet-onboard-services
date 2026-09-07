@@ -51,6 +51,7 @@ import {
   Star,
   Clock,
   Share2,
+  Bot,
   ServerCog,
   Users,
   Video,
@@ -443,6 +444,16 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Console",
         icon: ServerCog,
         exact: true,
+        roles: ["owner", "admin"],
+      },
+      // WARP-2823 — the prompt + tool inspector. Same posture as the Console
+      // entry above and for the same reason: no `requiresModule`, because a
+      // page whose whole job is explaining why the assistant cannot reach
+      // something must not itself disappear when a module is switched off.
+      {
+        href: "/admin/prompt",
+        label: "Assistant",
+        icon: Bot,
         roles: ["owner", "admin"],
       },
       // /users is the existing People surface. Label kept as "Users" in

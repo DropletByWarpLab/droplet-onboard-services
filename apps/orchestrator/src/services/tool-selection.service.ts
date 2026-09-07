@@ -162,13 +162,15 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * the exclusion list names local tools, so an Atlassian `pm` tool matched by
  * the `pm` rule is advertised even though nine of ten local `pm_*` tools are not.
  *
- * ⚠ WARP-2580 — this paragraph named `pm` as the dead-rule example and had
- * been wrong since 2026-08-17, when `pm_create_project` landed and was not
- * added to the exclusion block beside its nine siblings. `pm` is NOT dead:
- * exactly one local tool survives in it. `chat-tool-scope.test.ts` has pinned
- * that ("the pm rule is NOT dead — WARP-2058's comment is stale") since before
- * this correction; the comment simply never followed. `notifications` is the
- * genuine dead-rule case and is what that test's `deadRules` set contains.
+ * ⚠ This paragraph has now been wrong twice, in opposite directions, and the
+ * lesson is the same both times: the answer is measured, not remembered.
+ * WARP-2580 corrected an older claim that `pm` was the dead-rule example (one
+ * local tool had survived in it). ADR-045 slice C then deleted every local
+ * `pm_*` and `crm_*` tool, so `catalog.ts` now carries `pm: []` and `crm: []`
+ * and BOTH rules are dead after all — along with `notifications`.
+ * `chat-tool-scope.test.ts` computes `deadRules` from the catalog rather than
+ * asserting a list, which is why it stayed green through both changes while
+ * this comment did not. Read the test, not this paragraph (WARP-2823).
  *
  * WARP-1921 — vocabulary widened from the original WARP-1207 cut, which was
  * written from the TOOL NAMES rather than from how people talk. The tell:
@@ -362,12 +364,14 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // reaches one place, and keeping two rules would mean two places to add a
   // word and one of them silently not mattering.
   //
-  // `domains` is still BOTH. `crm` is not vestigial: `crm_log_activity` is in
-  // the chat pool and `crm_move_deal_stage` is registered, and
-  // `chat-tool-scope.test.ts` fails when a domain with in-scope tools has no
-  // rule that can advertise them. Dropping `crm` here would recreate exactly
-  // the WARP-2058 / WARP-2454 / WARP-2546 defect this rule was written to end.
-  // ADR-045 slice D is what retires the `crm` half.
+  // `domains` is still BOTH, and the reason has changed. This used to say
+  // `crm` is "not vestigial: `crm_log_activity` is in the chat pool and
+  // `crm_move_deal_stage` is registered" — true until slice D, which deleted
+  // both. `catalog.ts` now carries `crm: []`, so the rule advertises no LOCAL
+  // tool at all. It is kept because a domain is also the unit a REMOTE tool
+  // registers into (`extraDomains`, `runtimeTools`): dropping the word would
+  // make a future connector's CRM tools unreachable by the only vocabulary a
+  // person would use for them. Measured, not remembered — WARP-2823.
   //
   // WARP-2552 — `customers` claimed both domains on purpose, and still does.
   // The word is the natural way to ask either "what does Droplet know about my
