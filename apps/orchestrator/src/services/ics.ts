@@ -23,10 +23,14 @@
  * DQUOTEd name both resolve.
  *
  * We still do not read VTIMEZONE blocks, so a TZID the runtime cannot resolve
- * — Exchange's Windows zone names, e.g. `W. Europe Standard Time` — yields an
- * Invalid Date and the event is dropped by the shape check at END:VEVENT.
- * Dropping is deliberate: the alternative is inventing an instant, which is
- * exactly the defect WARP-2764 fixed. That is now the ONLY drop class.
+ * yields an Invalid Date and the event is dropped by the shape check at
+ * END:VEVENT. Two spellings land there: Exchange's Windows zone names, e.g.
+ * `W. Europe Standard Time`, and the legal-but-empty `TZID=` (§3.2's
+ * `paramtext` permits zero characters). Both name a zone we cannot resolve,
+ * so both drop. Dropping is deliberate: the alternative is inventing an
+ * instant, which is exactly the defect WARP-2764 fixed. Unresolvable-TZID is
+ * still the ONLY drop class — and which values are unresolvable is decided by
+ * the PRESENCE of the parameter, never by its truthiness.
  *
  * ⚠ Known gap, separate ticket: `parseLine` splits name from value on the
  * first `:`, so a quoted parameter that CONTAINS one — Exchange's
@@ -75,14 +79,21 @@ function unfold(text: string): string[] {
 /** Split a content line into name/params/value (RFC 5545 §3.1).
  *  Example: `DTSTART;TZID=America/Los_Angeles:20260423T090000` →
  *  `{ name: "DTSTART", params: { TZID: "America/Los_Angeles" }, value: "20260423T090000" }` */
-function parseLine(line: string): { name: string; params: Record<string, string>; value: string } | null {
+function parseLine(
+  line: string,
+): { name: string; params: Record<string, string | undefined>; value: string } | null {
   const colonAt = line.indexOf(":");
   if (colonAt < 0) return null;
   const head = line.slice(0, colonAt);
   const value = line.slice(colonAt + 1);
   const parts = head.split(";");
   const name = parts[0].toUpperCase();
-  const params: Record<string, string> = {};
+  // `string | undefined`, not `string`: a parameter that is ABSENT and one
+  // present with an EMPTY value are different facts, and callers have to be
+  // able to tell them apart. Typing this map as `Record<string, string>` let a
+  // lookup that is `undefined` at runtime typecheck as a `string`, which is
+  // what invited the truthiness test `parseIcsDateTime` used to run on TZID.
+  const params: Record<string, string | undefined> = {};
   for (let i = 1; i < parts.length; i++) {
     const eq = parts[i].indexOf("=");
     // RFC 5545 §3.2: `param-value = paramtext / quoted-string`. The DQUOTEs are
@@ -257,10 +268,13 @@ function normalizeTzid(tzid: string): string | undefined {
  *  - `20260423T090000` + `tzid` → resolved in that zone (WARP-2764)
  *  - `20260423T140000` with no tzid (genuinely floating) → treated as UTC
  *
- *  `tzid` comes from the property's own `TZID` parameter. RFC 5545 §3.3.5
- *  forbids TZID on a value that already carries `Z`, so an explicit `Z` wins
- *  and the parameter is ignored rather than double-applied. */
-function parseIcsDateTime(value: string, tzid?: string): Date {
+ *  `tzid` comes from the property's own `TZID` parameter, and `undefined`
+ *  means the parameter was ABSENT — the only genuinely floating case. It is a
+ *  REQUIRED argument rather than an optional one so that every call site has
+ *  to state which of the two it is passing. RFC 5545 §3.3.5 forbids TZID on a
+ *  value that already carries `Z`, so an explicit `Z` wins and the parameter
+ *  is ignored rather than double-applied. */
+function parseIcsDateTime(value: string, tzid: string | undefined): Date {
   const v = value.trim();
   // DATE form: YYYYMMDD. TZID does not apply — a DATE has no time of day.
   if (/^\d{8}$/.test(v)) {
@@ -270,7 +284,15 @@ function parseIcsDateTime(value: string, tzid?: string): Date {
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(v);
   if (m) {
     const isUtc = m[7] === "Z";
-    if (!isUtc && tzid) {
+    // PRESENCE, not truthiness. §3.2's `paramtext = *SAFE-CHAR` permits zero
+    // characters, so `DTSTART;TZID=:20260423T090000` is legal and yields a
+    // TZID whose value is "". That is a zone the emitter failed to NAME, not
+    // the absence of a zone: the value is still a local wall clock. Testing
+    // `tzid` for truthiness sends it to the floating branch below, which
+    // stamps a Z on that wall clock — the WARP-2764 defect itself, alive again
+    // for one input shape. Handing it to `normalizeTzid` instead resolves
+    // nothing and drops the event, which is what an unresolvable zone gets.
+    if (!isUtc && tzid !== undefined) {
       const zone = normalizeTzid(tzid);
       // Unresolvable zone ⇒ Invalid Date ⇒ the shape check at END:VEVENT drops
       // the event. Deliberate: see the module header.

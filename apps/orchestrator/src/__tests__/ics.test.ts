@@ -640,6 +640,77 @@ END:VCALENDAR
     expect(events).toHaveLength(0);
   });
 
+  // ── TZID present but empty: legal, and NOT the floating case ──
+  //
+  // RFC 5545 §3.2 defines `param-value = paramtext / quoted-string` and
+  // `paramtext = *SAFE-CHAR` — zero characters is a legal paramtext, so
+  // `TZID=` parses to a TZID parameter whose value is the empty string. That
+  // is "a zone the emitter failed to name", not "no zone": the value is still
+  // a local wall clock. Guarding the zone branch on the parameter's TRUTHINESS
+  // rather than its PRESENCE routes it to the floating path, which stamps a Z
+  // on 09:00 local — the exact WARP-2764 defect, reintroduced for one input
+  // shape. An unnameable zone is an unresolvable zone, so it belongs in the
+  // module header's one documented drop class.
+
+  it("drops an event whose TZID is present but empty — never stores the wall clock as UTC", () => {
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=:20260423T090000", "DTEND;TZID=:20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops a DQUOTEd empty TZID too — unquoting `\"\"` must not read as absent", () => {
+    const events = parseIcs(
+      eventWith('DTSTART;TZID="":20260423T090000', 'DTEND;TZID="":20260423T100000'),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops a whitespace-only TZID — trimming to empty resolves no zone", () => {
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=   :20260423T090000", "DTEND;TZID=   :20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops the event when only DTEND carries the empty TZID", () => {
+    // Half a mis-stored event is still a mis-stored event: DTEND runs the same
+    // path as DTSTART, so an empty TZID on either end drops the whole row
+    // rather than silently stretching one boundary.
+    //
+    // The zone is deliberately EAST of UTC. West of UTC the mis-stored DTEND
+    // lands BEFORE the DTSTART and the §3.6.1 inversion check at END:VEVENT
+    // drops the event anyway — the test would pass without the presence check
+    // and prove nothing. Berlin 09:00 CEST is 07:00Z, so a DTEND wrongly read
+    // as 10:00Z still sorts after it and survives that check, silently
+    // tripling a one-hour event.
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=Europe/Berlin:20260423T090000", "DTEND;TZID=:20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("an explicit Z still wins over an empty TZID — §3.3.5 order is unchanged", () => {
+    // The presence check must not promote a UTC value into the zone branch:
+    // §3.3.5 forbids TZID on a Z-suffixed value, so Z keeps winning.
+    const [ev] = parseIcs(
+      eventWith("DTSTART;TZID=:20260423T140000Z", "DTEND;TZID=:20260423T150000Z"),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
+    expect(ev.endsAt.toISOString()).toBe("2026-04-23T15:00:00.000Z");
+  });
+
+  it("an all-day DATE with an empty TZID is still an all-day DATE", () => {
+    // The DATE form returns before the zone branch — TZID does not apply to a
+    // value with no time of day, empty or not.
+    const [ev] = parseIcs(
+      eventWith("DTSTART;VALUE=DATE;TZID=:20260501", "DTEND;VALUE=DATE;TZID=:20260508"),
+    );
+    expect(ev.allDay).toBe(true);
+    expect(ev.startsAt.toISOString()).toBe("2026-05-01T00:00:00.000Z");
+    expect(ev.endsAt.toISOString()).toBe("2026-05-08T00:00:00.000Z");
+  });
+
   it("an all-day DATE is unaffected by a TZID parameter", () => {
     const [ev] = parseIcs(
       eventWith(
