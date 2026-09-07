@@ -18,8 +18,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import {
   HOUSEHOLD_INDEX_USER,
@@ -147,8 +146,11 @@ describe("maxAclVersion (WARP-1556 cache key)", () => {
  * values is Python and cannot import this module.
  */
 describe("sentinel parity with the file-indexer (WARP-2821)", () => {
-  const HERE = dirname(fileURLToPath(import.meta.url));
-  const REPO = resolve(HERE, "..", "..", "..");
+  // `__dirname`, not `import.meta.url`: this package builds to CommonJS, and
+  // `typecheck:tests` (WARP-2606) rejects `import.meta` in a CJS target. The
+  // old parity test lived in the mcp-server, which is ESM, so this only bites
+  // now that the check moved here.
+  const REPO = resolve(__dirname, "..", "..", "..");
   const read = (rel: string) => readFileSync(resolve(REPO, rel), "utf8");
 
   it("uses the household sentinel config.py writes", () => {
