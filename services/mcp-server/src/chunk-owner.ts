@@ -34,6 +34,21 @@ const UUID_SHAPE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The legacy sentinel the file-indexer writes for groupfolder content
+ * (`services/file-indexer/config.py:100`). Mirrored, not imported: the
+ * mcp-server is a standalone process and the indexer is Python — the same
+ * rationale as the UUID_SHAPE mirror above.
+ */
+const HOUSEHOLD_INDEX_USER = "__household__";
+
+/** One department's corpus sentinel. MUST match `watcher.py:176`
+ *  (`f"__dept_{dept['id']}__"`) and `routes/files.ts:625` exactly — a
+ *  mismatch here is silent, and reads as "the department has no documents". */
+function deptSentinel(departmentId: string): string {
+  return `__dept_${departmentId}__`;
+}
+
+/**
  * Resolve every `FileContentChunk.userId` key shape for one caller.
  *
  * Returns the incoming key first (so single-shape callers keep the
@@ -44,7 +59,30 @@ const UUID_SHAPE =
  *
  * Unknown keys (service principals, the auth-disabled dev stub, rows
  * orphaned from the directory) return the incoming key alone — exactly
- * the pre-WARP-1014 single-shape scope.
+ * the pre-WARP-1014 single-shape scope, and NO department corpora: an
+ * unresolvable caller must never widen into shared content.
+ *
+ * 🔴 WARP-2821 — SHARED AND DEPARTMENT CORPORA. Until this ticket the
+ * result was the caller's own two key shapes and nothing else, while the
+ * file-indexer writes every groupfolder document under a sentinel owner
+ * (`__household__`, or `__dept_<uuid>__` since WARP-1264). So the Files
+ * page listed a shared document and the assistant could not see it:
+ * `search_content` silently returned fewer hits and `read_document_text`
+ * answered NOT_INDEXED for a file the user was looking at. For a business
+ * the shared drive IS the corpus, so that was most of it.
+ *
+ * The visibility rule is `deptSearchCorpora`/`visibleDeptsForCaller` in
+ * `apps/orchestrator/src/routes/files.ts`, reproduced here rather than
+ * widened: owner/admin see every ACTIVE department, everyone else sees the
+ * ones they are a member of, and the HOUSEHOLD department is
+ * dual-sentinelled so content indexed by either watcher generation stays
+ * readable without a reindex. Two resolvers that disagree are the defect
+ * this fixes, so `chunk-owner.parity.test.ts` fails if they drift apart.
+ *
+ * FAILS CLOSED. Any error in the department lookup returns the personal
+ * keys alone. Narrowing this list can only hide content; widening it on a
+ * half-answered query would disclose it. The Files route makes the same
+ * call for the same reason ("best-effort by design … personal only").
  */
 export async function resolveChunkOwnerIds(
   prisma: PrismaClient,
@@ -53,12 +91,40 @@ export async function resolveChunkOwnerIds(
   const row = UUID_SHAPE.test(userId)
     ? await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, username: true },
+        select: { id: true, username: true, role: true },
       })
     : await prisma.user.findUnique({
         where: { username: userId },
-        select: { id: true, username: true },
+        select: { id: true, username: true, role: true },
       });
   if (!row) return [userId];
-  return [...new Set([userId, row.username, row.id])];
+
+  const keys = [userId, row.username, row.id];
+
+  try {
+    const isOwnerOrAdmin = row.role === "owner" || row.role === "admin";
+    const depts = isOwnerOrAdmin
+      ? await prisma.department.findMany({
+          where: { state: "active" },
+          select: { id: true, kind: true },
+        })
+      : (
+          await prisma.departmentMembership.findMany({
+            where: { userId: row.id, department: { state: "active" } },
+            select: { department: { select: { id: true, kind: true } } },
+          })
+        ).map((m) => m.department);
+
+    for (const dept of depts) {
+      // The HOUSEHOLD department carries BOTH forms during the WARP-1264
+      // rollout: old watcher builds wrote `__household__`, new ones write
+      // the `__dept_<uuid>__` form, and neither is reindexed.
+      if (dept.kind === "HOUSEHOLD") keys.push(HOUSEHOLD_INDEX_USER);
+      keys.push(deptSentinel(dept.id));
+    }
+  } catch {
+    // Personal only. See the fail-closed note above.
+  }
+
+  return [...new Set(keys)];
 }
