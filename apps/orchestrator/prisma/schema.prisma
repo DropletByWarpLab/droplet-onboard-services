@@ -482,7 +482,6 @@ model BrainDigest {
   /// the corpus that produced the row is the only thing that knows.
   scope BrainScope @default(personal)
 
-
   /// WARP-2752 — WHOSE personal row this is. Required exactly when `scope` is
   /// `personal`, and forbidden otherwise (`*_personal_scope_needs_owner`).
   ///
@@ -735,21 +734,66 @@ model BrainPass {
   /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
   enabled Boolean @default(true)
 
-  lastRunAt      DateTime?
+  lastRunAt       DateTime?
   lastSucceededAt DateTime?
   /// Cleared on every success. A stale error string on a healthy pass is the
   /// same lie as a status column nothing resets.
-  lastError      String?  @db.VarChar(1000)
+  lastError       String?   @db.VarChar(1000)
 
   /// Cumulative coverage counters, for the /brief coverage line.
   unitsSeen     Int @default(0)
   unitsDigested Int @default(0)
   rowsWritten   Int @default(0)
 
+  /// WARP-2837 — the LEASE, and the reason it exists.
+  ///
+  /// The corpus pass was registered with cron-runtime's `lockKey`, which runs
+  /// the handler inside `prisma.$transaction(..., { timeout: 60_000 })`. That
+  /// handler makes up to ten sequential model calls on a box with one
+  /// inference slot and no turn-level timeout. Ten CPU inferences do not fit
+  /// in sixty seconds, and when the transaction expired the advisory lock was
+  /// released MID-RUN while the pass kept going — its writes use the outer
+  /// client, so they had already committed out of band.
+  ///
+  /// `agent-run-worker.service.ts` reached this conclusion first and states
+  /// it: the transaction-scoped lock is "exactly right for a tick and exactly
+  /// wrong for a forty-minute run". So exclusion moves off the lock and onto
+  /// these columns: a conditional `updateMany` wins the row or does not, and
+  /// the pass then executes OUTSIDE any transaction.
+  ///
+  /// An explicit enum, never a `claimedAt IS NULL` — the repo's standing rule,
+  /// and the one that keeps "idle" distinguishable from "claimed by a process
+  /// that has since died".
+  runState BrainPassRunState @default(idle)
+
+  /// Which process holds the lease. The FENCE: every write the executing pass
+  /// makes is conditioned on this still being its own worker id, so a run
+  /// whose lease was reclaimed cannot overwrite its successor's cursor with an
+  /// older one.
+  claimedBy   String?
+  /// When the current run started. Rendered as "running since" rather than
+  /// inferred from `lastRunAt`, which means "last STARTED" and keeps moving.
+  claimedAt   DateTime?
+  /// Beaten while the pass runs. A claim is stale — and reclaimable — once
+  /// this is older than the lease window. Without it a process killed
+  /// mid-corpus would wedge the pass forever, and `/coverage` reports
+  /// `lastRunAt`, which is liveness-blind.
+  heartbeatAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([enabled])
+  /// The stale-lease predicate the claim rides.
+  @@index([runState, heartbeatAt])
+}
+
+/// WARP-2837 — whether a pass is executing right now. Explicit, not derived
+/// from a nullable timestamp: `claimedAt IS NOT NULL` cannot tell a live run
+/// from a crashed one, and that distinction is the whole point of the lease.
+enum BrainPassRunState {
+  idle
+  running
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
@@ -2649,10 +2693,10 @@ model User {
   // SetNull/Cascade): deleting an in-use role is blocked server-side
   // ("reassign first") and the DB backs that up — a role delete must never
   // silently strip or downgrade a person's assignment.
-  accessRoleId     String?
-  accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId       String?
+  accessRole         AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
-  accessExceptions UserAccessException[]
+  accessExceptions   UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
   // owning side — removing a person must not delete the business's findings.
   // WARP-2748: findings ASSIGNED to this person (SetNull — removing someone
@@ -2661,8 +2705,8 @@ model User {
   // WARP-2752: personal-scope rows this person OWNS. Distinct relations, and
   // distinct delete behaviour: an owned row is Cascade because `ownerId` is an
   // access-control key, where an assignment is mere provenance.
-  brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
-  brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
+  brainFindingsOwned BrainFinding[]        @relation("BrainFindingOwner")
+  brainDigestsOwned  BrainDigest[]         @relation("BrainDigestOwner")
 
   @@index([role])
   @@index([accessRoleId])
@@ -5872,7 +5916,6 @@ model MoneySnapshot {
   /// Retention sweeps by date across all subjects.
   @@index([capturedOn])
 }
-
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these

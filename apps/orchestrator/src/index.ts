@@ -54,10 +54,8 @@ import {
   seedBrainPasses,
   BRAIN_PASS_LOCK_KEY,
 } from "./services/brain/brain-pass.service.js";
-import {
-  runCorpusPass,
-  BRAIN_CORPUS_LOCK_KEY,
-} from "./services/brain/brain-corpus.service.js";
+import { CORPUS_PASS_KEY, runCorpusPass } from "./services/brain/brain-corpus.service.js";
+import { runWithLease, releaseAllPasses } from "./services/brain/brain-lease.service.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
@@ -685,23 +683,49 @@ async function main() {
 
     // Corpus pass: DOES call the model, and therefore competes with
     // interactive chat for the only inference slot. Bounded units per tick.
+    //
+    // 🔴 WARP-2837 — NO `lockKey`, deliberately, and this must not be added
+    // back. cron-runtime's lock is `pg_try_advisory_xact_lock` inside
+    // `prisma.$transaction(..., { timeout: 60_000 })`; this handler makes up
+    // to ten sequential model calls, which do not fit in sixty seconds on a
+    // CPU box. Under the lock the transaction expired mid-run, released the
+    // lock while the pass was still working, and threw P2028 on a pass whose
+    // writes (outer client, not `tx`) had already committed. The rule is the
+    // one agent-run-worker.service.ts states for the same reason: the
+    // transaction-scoped lock is right for a tick and wrong for a long run.
+    //
+    // Exclusion is `runWithLease`'s conditional UPDATE instead — atomic in
+    // Postgres with nothing held open, correct across replicas, and it SKIPS
+    // rather than queues, which is what a cursor-shaped job wants.
     cronRuntime.scheduleInterval(
       config.brain.corpusTickMs,
       async () => {
         // Same resolution the agent-run routes use. No model configured =
         // nothing to call, so the pass is skipped rather than scheduled to
-        // fail hourly and fill `lastError` with noise.
+        // fail hourly and fill `lastError` with noise. Checked BEFORE the
+        // claim, so a box with no model never marks the pass `running`.
         const brainModel = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
         if (!brainModel) return;
-        const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: brainModel },
-          { limit: config.brain.corpusUnitsPerRun },
-        );
-        if (outcome.errors.length > 0) {
-          logger.warn({ outcome }, "brain.corpus_pass.partial");
+
+        // The tick claims and returns. It does NOT await the pass: that is
+        // the whole point, and awaiting here would put a ten-inference run
+        // back on the cron tick's shoulders.
+        const lease = await runWithLease(prisma, CORPUS_PASS_KEY, async () => {
+          const outcome = await runCorpusPass(
+            { prisma, chat: aiGateway.chat, model: brainModel },
+            { limit: config.brain.corpusUnitsPerRun },
+          );
+          if (outcome.errors.length > 0) {
+            logger.warn({ outcome }, "brain.corpus_pass.partial");
+          }
+        });
+        if (!lease.started) {
+          // Debug, not warn. A tick that arrives while the previous one is
+          // still working is the design behaving correctly, and logging it
+          // loudly would train an operator to ignore this pass's warnings.
+          logger.debug({ reason: lease.reason }, "brain.corpus_pass.skipped");
         }
       },
-      { lockKey: BRAIN_CORPUS_LOCK_KEY },
     );
 
     logger.info(
@@ -1735,6 +1759,13 @@ async function main() {
     // on its first tick instead of after the reclaim threshold.
     await agentRunWorker.releaseAll().catch((err) => {
       logger.warn("agent run release failed: %s", (err as Error).message);
+    });
+    // WARP-2837 — wait for an in-flight brain pass so it releases its own
+    // lease. Without this a redeploy leaves the row `running` until the
+    // 15-minute lease expires, and the box that just restarted skips its
+    // first tick for no reason. Bounded: a corpus tick is ten units.
+    await releaseAllPasses().catch((err) => {
+      logger.warn("brain pass release failed: %s", (err as Error).message);
     });
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
