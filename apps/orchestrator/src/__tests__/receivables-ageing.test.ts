@@ -32,6 +32,8 @@ import {
   GROWTH_RATIO,
   MIN_INCREASE_MINOR,
   MIN_INCREASE_MAJOR,
+  amountGap,
+  currencyIsReadable,
 } from "../services/brain/detectors/receivables-ageing";
 
 const NOW = new Date("2033-06-10T00:00:00.000Z");
@@ -307,5 +309,73 @@ describe("receivables-ageing — the floor applies with or without a currency (W
     expect(big[0]!.title).toContain("appeared");
     expect(big[0]!.impactMinor).toBeNull();
     expect(small).toEqual([]);
+  });
+});
+
+/**
+ * 🔴 TWO CAUSES, TWO EXPLANATIONS.
+ *
+ * `toMinorUnits` returns null on an unrecognised currency AND on a value it
+ * cannot represent exactly in that currency's minor unit. The shipped detector
+ * read one null and reported one sentence — "the ledger sent no readable
+ * currency" — for both, then set `currency: null` on a row whose currency it
+ * knew perfectly well.
+ *
+ * Sub-cent totals are not hypothetical here: `MoneySnapshot.balance` is
+ * `Decimal(20,6)`, six places, chosen so a vendor's sub-cent pricing survives
+ * the round trip. A USD ledger priced in thousandths hits this on every row.
+ *
+ * A wrong explanation is worse than a missing one — it sends an owner to
+ * inspect a connector that is working.
+ */
+describe("receivables-ageing — no amount, and WHY (WARP-2825)", () => {
+  it("names the cause apart, rather than folding both into one", () => {
+    expect(amountGap(700_000n, "USD")).toBeNull();
+    expect(amountGap(null, "USD")).toBe("inexact-in-currency");
+    expect(amountGap(null, null)).toBe("no-currency");
+    // A string that is not an ISO-4217 code is not a readable currency, so it
+    // takes the no-currency sentence rather than claiming a precision problem
+    // in a denomination nobody can name.
+    expect(amountGap(null, "US$")).toBe("no-currency");
+    expect(currencyIsReadable("JPY")).toBe(true);
+    expect(currencyIsReadable("")).toBe(false);
+    expect(currencyIsReadable(null)).toBe(false);
+  });
+
+  it("keeps the USD currency, and blames precision, on sub-cent totals", async () => {
+    // `Decimal(20,6)` — a tenth of a cent. `toMinorUnits` refuses to round it,
+    // which is right; erasing "USD" over it was not.
+    const found = await receivablesAgeing.run(
+      prismaReturning([row({ thenTotal: "10000.000000", nowTotal: "30000.000500" })]),
+      NOW,
+    );
+    expect(found).toHaveLength(1);
+    // No amount — all-or-nothing survives untouched.
+    expect(found[0]!.impactMinor).toBeNull();
+    // 🔴 ...but the currency does NOT get erased along with it.
+    expect(found[0]!.currency).toBe("USD");
+    expect(found[0]!.subjectKey).toBe("USD");
+    // 🔴 ...and the sentence names the real cause.
+    expect(found[0]!.rationale).not.toContain("no readable currency");
+    expect(found[0]!.rationale).toContain("more precision than USD can express");
+  });
+
+  it("still says 'no readable currency' when that is actually true", async () => {
+    // The other half of the pair: the original sentence has to survive on the
+    // case it was written for, or this fix has just moved the lie.
+    const none = await receivablesAgeing.run(
+      prismaReturning([row({ currency: null })]),
+      NOW,
+    );
+    expect(none[0]!.currency).toBeNull();
+    expect(none[0]!.rationale).toContain("no readable currency");
+    expect(none[0]!.rationale).not.toContain("precision");
+
+    const junk = await receivablesAgeing.run(
+      prismaReturning([row({ currency: "US$" })]),
+      NOW,
+    );
+    expect(junk[0]!.currency).toBeNull();
+    expect(junk[0]!.rationale).toContain("no readable currency");
   });
 });

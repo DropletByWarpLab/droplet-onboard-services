@@ -409,6 +409,27 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     expect(found[0]!.rationale).toContain("no readable currency");
   });
 
+  it("keeps USD, and blames precision, on totals `Decimal(20,6)` can hold and USD cannot", async () => {
+    // 🔴 Only a real `numeric(20,6)` column can produce this row. The mock in
+    // the DB-less suite is handed whatever string the test author types; here
+    // Postgres SUMs and casts, and the sub-cent tail is the database's own
+    // output. `MoneySnapshot.balance` has six places precisely so a vendor's
+    // sub-cent pricing survives, so this is a shipped shape, not a contrivance.
+    const a = await invoice(DUE_BEFORE_ANCHOR);
+    await snap(a.id, THEN, "10000.000000");
+    await snap(a.id, NOW, "30000.000500");
+
+    const found = await run();
+    expect(found).toHaveLength(1);
+    // The amount is withheld — rounding a tenth of a cent is a different number.
+    expect(found[0]!.impactMinor).toBeNull();
+    // But the currency is not forgotten, and the sentence names the real cause
+    // instead of accusing the connector of sending no currency.
+    expect(found[0]!.currency).toBe("USD");
+    expect(found[0]!.rationale).not.toContain("no readable currency");
+    expect(found[0]!.rationale).toContain("more precision than USD can express");
+  });
+
   it("gives USD the same two answers on the same two shapes", async () => {
     // The USD half of the pair, in one case, so the parity is visible in one
     // place rather than inferred across the file. Trivial rise: silent.

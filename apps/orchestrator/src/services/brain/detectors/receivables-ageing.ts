@@ -57,7 +57,7 @@
  * named is a gate that mostly does not fire. See `MIN_INCREASE_MAJOR`.
  */
 import type { PrismaClient } from "@prisma/client";
-import { toMinorUnits } from "@droplet/shared-types";
+import { minorUnitExponent, toMinorUnits } from "@droplet/shared-types";
 import { SUBJECT_ERP_DOCUMENT } from "../../erp-sync/money-snapshot.service.js";
 import type { Detector, DetectedFinding } from "./types";
 
@@ -151,6 +151,46 @@ export function daysBetween(a: Date, b: Date): number {
 export function toMinor(value: string | null, currency: string | null): bigint | null {
   if (value === null || !currency) return null;
   return toMinorUnits(value, currency);
+}
+
+/**
+ * 🔴 WHY NO AMOUNT COULD BE COMPUTED — because there are TWO reasons and they
+ * are not interchangeable.
+ *
+ * `toMinorUnits` returns null on an unrecognised currency AND on a value it
+ * cannot represent exactly in that currency's minor unit. The first version of
+ * this detector read a null back and reported ONE explanation for both:
+ * "the ledger sent no readable currency". For a perfectly good USD series whose
+ * `Decimal(20,6)` totals carry a fraction of a cent — which `MoneySnapshot`
+ * stores to six places precisely so a vendor's sub-cent pricing survives — that
+ * sentence is false, and the finding then erased a currency it knew perfectly
+ * well.
+ *
+ * Wrong explanations are worse than missing ones here: an owner told the ledger
+ * sent no currency will go looking at a connector that is working fine.
+ *
+ * `inexact-in-currency` is the only remaining cause once the currency is known:
+ * the totals reach this function as a `::text` cast of a `SUM(numeric)`, which
+ * is always a plain decimal, so `toMinorUnits`'s other refusals (separators,
+ * exponent notation, no digits at all) cannot arise from this caller.
+ */
+export type AmountGap = "no-currency" | "inexact-in-currency";
+
+/** Whether this string names a currency whose minor unit is knowable. Empty and
+ *  non-ISO-4217 both count as absent — `minorUnitExponent` deliberately
+ *  distinguishes "yen, exponent 0" from "I do not know what this is". */
+export function currencyIsReadable(currency: string | null): boolean {
+  return (
+    typeof currency === "string" &&
+    currency.trim() !== "" &&
+    minorUnitExponent(currency) !== null
+  );
+}
+
+/** `null` when an amount WAS computed; otherwise which of the two causes. */
+export function amountGap(increaseMinor: bigint | null, currency: string | null): AmountGap | null {
+  if (increaseMinor !== null) return null;
+  return currencyIsReadable(currency) ? "inexact-in-currency" : "no-currency";
 }
 
 /** A percentage an owner reads, not a ratio. `120` means "up 120%". */
@@ -270,6 +310,18 @@ export const receivablesAgeing: Detector = {
       const from = r.thenDay.toISOString().slice(0, 10);
       const to = r.nowDay.toISOString().slice(0, 10);
 
+      // Which of the two reasons cost us the amount, if either. The currency
+      // survives whenever it is READABLE — an amount we could not express is
+      // not a reason to forget which denomination the totals are in.
+      const gap = amountGap(increaseMinor, r.currency);
+      const readable = currencyIsReadable(r.currency);
+      const noAmountBecause =
+        gap === null
+          ? ""
+          : gap === "no-currency"
+            ? " The ledger sent no readable currency, so no amount is shown."
+            : ` The totals carry more precision than ${cur} can express exactly, so no amount is shown.`;
+
       const rose =
         thenNum > 0
           ? `has grown ${pct}% in ${span} days`
@@ -286,14 +338,15 @@ export const receivablesAgeing: Detector = {
           `on ${to} that figure is ${r.nowTotal ?? "0"}. ` +
           `New invoices cannot cause this — only invoices already past due are counted ` +
           `at either date — so money is being collected more slowly than it is falling due.` +
-          (increaseMinor === null
-            ? " The ledger sent no readable currency, so no amount is shown."
-            : ""),
+          noAmountBecause,
         // `risk`, not `loss`: the money is still owed and may well arrive. The
         // notification policy interrupts only for a large `loss`, which is
         // right — a trend is something to read on /brief, not a 3am buzz.
         impactMinor: increaseMinor,
-        currency: increaseMinor === null ? null : r.currency,
+        // Keyed off READABILITY, not off whether an amount came out. A USD
+        // series whose totals are sub-cent still IS a USD series, and blanking
+        // the currency there loses a fact the ledger stated plainly.
+        currency: readable ? r.currency : null,
         evidence: {
           sources: [
             {
