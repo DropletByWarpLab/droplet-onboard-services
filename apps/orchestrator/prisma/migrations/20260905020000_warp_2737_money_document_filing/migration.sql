@@ -1,0 +1,45 @@
+-- WARP-2737 (ADR-048 slice 8) — an uploaded invoice becomes a money document.
+--
+-- Two columns, and each exists because a value had nowhere honest to go.
+--
+-- ── 1. The number printed on the document ──────────────────────────────────
+--
+-- 🔴 NOT `externalId`. That column is the VENDOR's identifier — it is NULL on
+-- every LOCAL row by `ErpDocument_provenance`, and it is what the reconcile
+-- unique index `(connectionId, kind, externalId)` is built from. Writing a
+-- number this box read off a PDF into it would put a value no vendor ever
+-- issued into the key used to match vendor rows.
+--
+-- Nullable: a quote often carries no number until it is sent, and nothing on
+-- this box ISSUES numbers yet. Sequence allocation is a decision about how a
+-- business's books read, not a detail for a filing slice.
+ALTER TABLE "ErpDocument" ADD COLUMN "documentNumber" TEXT;
+
+-- ── 2. The back-pointer undo reads ─────────────────────────────────────────
+--
+-- Undo reverses ONLY through the proposal's own back-pointers and never
+-- searches for a row that "looks like" what it made. Without this column a
+-- filed invoice would be unreachable from the proposal that created it, and
+-- "everything Droplet does can be undone" would be false for the one class
+-- that touches money.
+--
+-- A plain TEXT with NO foreign key, exactly like its four siblings
+-- (createdCompanyId, createdContactId, createdProjectId, createdEntityLinkId,
+-- createdActivityId). An FK would add nothing — the column is an AUDIT of what
+-- was created, and that fact stays true after the row is gone — and it would
+-- drag in the SetNull-under-a-CHECK trap this schema has already been bitten
+-- by twice.
+ALTER TABLE "IngestProposal" ADD COLUMN "createdErpDocumentId" TEXT;
+
+-- ── Deliberately NOT here ──────────────────────────────────────────────────
+--
+-- 🔴 No new `ErpDocumentStatus` / `ErpDocumentKind` / `ErpDocumentOrigin`
+-- value. `erp-document-widening.schema.test.ts` asserts that the datamodel's
+-- enum labels equal the `CREATE TYPE` inside WARP-2739's FROZEN migration, so
+-- an `ALTER TYPE ... ADD VALUE` here would turn that guard red with no way to
+-- satisfy it except editing the guard itself. Everything this slice needs is
+-- expressible in the fourteen states that already exist.
+--
+-- No `isArchived` on ErpDocument either. Undo deletes a DRAFT and refuses
+-- anything further; an archive column for money documents changes how a
+-- business's books read and is not a filing slice's call to make.

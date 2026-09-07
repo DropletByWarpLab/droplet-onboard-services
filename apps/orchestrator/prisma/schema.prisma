@@ -5709,6 +5709,19 @@ model ErpDocument {
   /// QuickBooks companies both number their invoices from 1.
   externalId     String?
 
+  /// WARP-2737 — the number printed ON the document, for a LOCAL row.
+  ///
+  /// 🔴 NOT `externalId`, and the distinction is load-bearing. `externalId` is
+  /// the VENDOR's identifier and is NULL on every local row by the provenance
+  /// CHECK; reusing it for a number this box read off a PDF would put a value
+  /// no vendor ever issued into the column the reconcile key is built from.
+  ///
+  /// Nullable because a document can arrive without one — a quote often has
+  /// none until it is sent — and because nothing on this box ISSUES numbers
+  /// yet. Sequence allocation is a decision about a business's books, not a
+  /// detail for a filing slice.
+  documentNumber String?
+
   kind ErpDocumentKind
 
   issuedAt DateTime?
@@ -6031,6 +6044,14 @@ model IngestProposal {
   createdProjectId    String?
   createdEntityLinkId String?
   createdActivityId   String?
+
+  /// WARP-2737 — the money document this proposal created, if it created one.
+  ///
+  /// A plain `String?` with NO foreign key, exactly like its four siblings and
+  /// for the same reason: undo reverses ONLY through these back-pointers and
+  /// never searches for a row that "looks like" what it made. An FK would add
+  /// nothing to that and would drag the SetNull-under-a-CHECK trap in with it.
+  createdErpDocumentId String?
 
   /// A child proposal (e.g. LINK_FILE against a customer this run also
   /// proposes creating) that cannot apply until its parent does.

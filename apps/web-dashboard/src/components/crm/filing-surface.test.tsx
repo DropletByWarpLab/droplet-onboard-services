@@ -174,6 +174,108 @@ describe("MATCH_REVIEW cannot be filed until a customer is picked", () => {
 });
 
 /**
+ * 🔴 WARP-2737 — the money card that could never be filed.
+ *
+ * The first invoice from a business that is not in the customer list yet is the
+ * ordinary way a money document arrives, and it produced a card with an ENABLED
+ * "Yes, file it" that returned 422 on every click, forever. The picker and the
+ * `disabled` gate below it were both scoped to `MATCH_REVIEW`, so a money card
+ * had neither: no way to say which customer, and nothing stopping the owner
+ * from asking for the impossible. The only way to clear the card was to reject
+ * a perfectly good reading of a real invoice.
+ *
+ * A picker would not have fixed it, because there is nothing to pick — the
+ * customer does not exist. So the card waits on the `CREATE_CUSTOMER` card
+ * beside it, and says so.
+ */
+describe("🔴 a money card waits for the customer it has not got", () => {
+  const MONEY = {
+    kind: "CREATE_MONEY_DOC" as const,
+    policyReason:
+      "Droplet read an invoice here. Money is never filed automatically — check the figures and file it yourself.",
+    payload: {
+      kind: "INVOICE",
+      number: "1042",
+      currency: "USD",
+      total: "4250.00",
+      counterpartyName: "ACME Dental Supply Ltd",
+    },
+  };
+
+  it("🔴 REGRESSION: does not offer to file an invoice with no customer", () => {
+    renderCard(MONEY);
+    expect(
+      (screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("says what the person has to do, and names who", () => {
+    // Not "choose a customer" — there is none to choose. The sentence points at
+    // the other card in the same queue, which is the thing that unblocks this.
+    renderCard(MONEY);
+    expect(screen.getByText(/Add ACME Dental Supply Ltd as a customer first/i)).toBeTruthy();
+  });
+
+  it("can still be cleared — a card nobody can act on is a queue nobody finishes", () => {
+    renderCard(MONEY);
+    expect(
+      (screen.getByRole("button", { name: "No thanks" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("says something honest when it could not tell who sent it either", () => {
+    const { counterpartyName: _drop, ...anonymous } = MONEY.payload;
+    renderCard({ ...MONEY, payload: anonymous });
+    const text = screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement;
+    expect(text.disabled).toBe(true);
+    expect(screen.getByText(/could not tell which customer/i)).toBeTruthy();
+  });
+
+  it("🔴 MUTATION: files it once the customer card above has been applied", () => {
+    // The other half, and the reason this is a gate rather than a blanket
+    // refusal for money. A gate that never opens is the same dead end with a
+    // politer sentence on it.
+    renderCard({
+      ...MONEY,
+      resolvedCustomer: {
+        companyId: "22222222-2222-4222-8222-222222222222",
+        companyName: "ACME Dental Supply Ltd",
+      },
+    });
+    expect(
+      (screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    // And it names the customer it is about to file under. A money payload
+    // carries no company NAME, so without this the owner would be approving a
+    // filing whose subject appears nowhere on the card.
+    expect(screen.getByText("Files under")).toBeTruthy();
+    expect(screen.getAllByText("ACME Dental Supply Ltd").length).toBeGreaterThan(0);
+  });
+
+  it("MUTATION: a money card that already names its customer is untouched", () => {
+    // The repeat-customer path, which always worked and must keep working — a
+    // fix that gated every money card would have broken it.
+    renderCard({
+      ...MONEY,
+      payload: { ...MONEY.payload, companyId: "33333333-3333-4333-8333-333333333333" },
+    });
+    expect(
+      (screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("MUTATION: the gate is money's alone — a customer card is not held back", () => {
+    // `CREATE_CUSTOMER` has no companyId either, by definition. Reading "no
+    // companyId" as "not ready" would freeze the one card that unblocks the
+    // money one, and the queue would deadlock.
+    renderCard();
+    expect(
+      (screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+});
+
+/**
  * 🔴 The entry point, which did not exist.
  *
  * `/customers/filing` has no nav entry — `CrmTabs` argues that case and is
