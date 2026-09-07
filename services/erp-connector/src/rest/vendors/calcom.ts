@@ -131,7 +131,7 @@ export const CALCOM_PROFILE: RestVendorProfile = {
   minRequestIntervalMs: CALCOM_MIN_REQUEST_INTERVAL_MS,
   datasets: [
     {
-      dataset: "appointment",
+      dataset: "booking",
       path: "/v2/bookings",
       watermark: {
         name: "afterUpdatedAt",
@@ -151,16 +151,29 @@ export const CALCOM_PROFILE: RestVendorProfile = {
         // `uid`, NOT `id`. `uid` is the API's own addressing key, used as
         // `{bookingUid}` in every other bookings path; `id` is a numeric
         // per-row key that is not the documented identifier.
-        appt_id: "uid",
-        appt_time: "start",
+        booking_id: "uid",
+        starts_at: "start",
+        ends_at: "end",
+        status: "status",
         // LOSSY and knowingly so: round-robin and collective event types return
         // MULTIPLE hosts and this column holds one. The first host is the
         // organiser in Cal.com's own ordering, which is the closest thing to
-        // "the provider" the canonical column means.
-        provider_id: "hosts[0].id",
-        status: "status",
-        // patient_id and operatory_id are ABSENT ON PURPOSE — see the module
-        // docstring. `calcom-profile.test.ts` pins them undefined.
+        // "the staff member" the canonical column means.
+        staff_id: "hosts[0].id",
+        // 🔴 `customer_id` stays UNMAPPED and `customer_name` carries the
+        // attendee instead. Cal.com's `BookingAttendee` has no `id` field at
+        // all — only name, email, displayEmail, timeZone, language, absent and
+        // phoneNumber — so there is no identifier to put in an `_id` column.
+        // Using the email would make a contact detail a join key, which is the
+        // exact defect `customer_name` was added to this dataset to avoid.
+        customer_name: "attendees[0].name",
+        service_name: "title",
+        created_at: "createdAt",
+        // The watermark's own value, landing in a column for the first time:
+        // `appointment` is one of the datasets WARP-2464 withheld `updated_at`
+        // from, so while Cal.com served that name its complete
+        // `afterUpdatedAt` filter had nowhere to go.
+        updated_at: "updatedAt",
       },
     },
   ],

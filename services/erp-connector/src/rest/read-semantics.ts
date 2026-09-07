@@ -246,6 +246,33 @@ export const REST_READ_SEMANTICS: Readonly<Record<string, RestReadSemantics>> = 
     filter: { kind: "window", column: "processed_at" },
     orderBy: ["processed_at", "ecommerce_order_id"],
   },
+
+  // ── WARP-2832 — scheduling, people, projects ──────────────────────────────
+  //
+  // 🔴 These three entries are the SILENT half of adding a dataset. This table
+  // is keyed by a bare `string`, so a REST vendor can declare a dataset, ship
+  // its descriptor, pass every drift gate, fingerprint it at connect — and
+  // then refuse every read with `DatasetNotServedError`, because `runRead`
+  // finds no semantics for the query name. Nothing goes red. That is exactly
+  // how Cal.com came to be connectable and unreadable.
+  get_bookings: {
+    dataset: "booking",
+    // Half-open on the START time, matching the LAN query: a booking at
+    // exactly midnight belongs to one day, not to both.
+    filter: { kind: "window", column: "starts_at" },
+    orderBy: ["starts_at", "booking_id"],
+  },
+  find_employee: {
+    dataset: "employee",
+    filter: { kind: "prefix", column: "last_name", param: "query" },
+    orderBy: ["last_name", "first_name"],
+  },
+  get_tasks_by_status: {
+    dataset: "task",
+    filter: { kind: "equals", column: "status", param: "status" },
+    // Oldest first: the item waiting longest is the one worth surfacing.
+    orderBy: ["created_at", "task_id"],
+  },
 };
 
 /** Read one canonical column as comparable text, or `undefined` when absent. */

@@ -192,3 +192,26 @@ scheduling, storage and task-tracker vendors can declare what they serve honestl
 is not a later nicety. It is the gate on the remaining ~127 vendors, and it should be
 the next ticket rather than a fifth vendor.
 
+### Resolved by WARP-2832, same day
+
+The vocabulary went 23 → 26: **`booking`, `employee`, `task`**. `appointment` was NOT
+touched — it is a WIRE FORMAT, named as a bare string in export-drop profile JSON that
+operators author on their own sites and Warp Lab does not hold, so renaming it would
+have been an un-migratable field change. `booking` was added beside it and Cal.com
+moved there, filling nine of eleven columns where it had filled four of six.
+
+🔴 **That ticket also fixed a defect this one shipped.** Cal.com was connectable and
+UNREADABLE: `appointment` is in neither `ERP_SYNC_ENTITIES` nor `CLOUD_DATASET_READS`,
+so a healthy connection was never polled and could not be asked anything, and
+`erp.service.ts`'s `getSchedule()` resolves the Eaglesoft row specifically. Nothing went
+red, because those two lists are gated **only against each other** and neither is typed
+`DatasetName` — they can lag the vocabulary indefinitely, in lockstep, with every test
+green. `cloud-dataset-tool.e2e.test.ts` now also asserts that every `available` cloud or
+rest provider has at least one dataset the assistant can ask about.
+
+**One correction to this ADR's own cost estimate, above:** the Follow-ups say three
+*total* `Record`s key off `DATASET_NAMES`. There are **four** — `NATURAL_KEY` in
+`export-drop/scan.ts` is the missed one, and it is the only one with no totality fixture
+in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and would
+silently key dedup on `undefined` for every dataset at once.
+

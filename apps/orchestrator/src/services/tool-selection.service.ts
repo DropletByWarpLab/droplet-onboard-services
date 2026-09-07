@@ -414,7 +414,18 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // served the `bill` dataset — so "what do we owe?" selected this reader and
   // met an enum with no way to ask. The Xero track serves it, and the enum
   // now carries it; the words did not change, the answer did.
-  { pattern: /\b(stripe|hubspot|mailchimp|shopify|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
+  // WARP-2832 added the scheduling, people and projects words alongside the
+  // `booking`, `employee` and `task` datasets — in the SAME commit, because
+  // WARP-2383's lesson is that neither half is any use alone: words claimed
+  // here with nothing behind them select this reader and then meet an enum
+  // that cannot answer, and datasets added to the enum with no words here are
+  // never advertised on the turns that want them.
+  //
+  // Bare `appointment` and bare `ticket` are deliberately NOT claimed. The
+  // first belongs to the practice track's own tools and the second is already
+  // the support-ticket vocabulary; taking either would drag the cloud reader
+  // into questions another tool answers better.
+  { pattern: /\b(stripe|hubspot|mailchimp|shopify|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.

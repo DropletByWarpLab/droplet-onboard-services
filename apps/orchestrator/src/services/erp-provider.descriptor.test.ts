@@ -35,6 +35,7 @@ import {
   RestProfileConnector,
   restProfileFor,
   type DatasetName as ConnectorDatasetName,
+  REST_VENDOR_PROFILES,
 } from "@droplet/erp-connector";
 import {
   DATASET_NAMES,
@@ -290,38 +291,66 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     }
   });
 
-  it("🔴 registers NO sync cursor for either REST vendor — a declared state, not an accident", () => {
-    // `registerCursors` walks `ERP_SYNC_ENTITIES` and keeps `spec.entity` when
-    // the descriptor declares it. Square declares charge/refund/payout and
-    // Cal.com declares appointment; none of the four is in that table. So both
-    // vendors register ZERO cursors: no incremental tick, no reconciliation
-    // sweep, no landing. Their rows are reached on demand through `runRead` and
-    // nowhere else.
+  it("🔴 schedules no REST dataset whose watermark is documented to MISS edits", () => {
+    // WARP-2832 narrowed this. It was "registers NO sync cursor for either REST
+    // vendor", which was true — and it was true because the track was DARK.
+    // Cal.com declared `appointment`, a name in neither `ERP_SYNC_ENTITIES` nor
+    // `CLOUD_DATASET_READS`, so a healthy connection was never polled and could
+    // not be asked anything. Pinning that as "a declared state" recorded the
+    // defect faithfully; it did not make it correct.
     //
-    // Asserted rather than left implicit, because the absence is silent in
-    // every direction: nothing fails, nothing logs, and an owner's Square card
-    // reads CONNECTED while nothing is ever stored. Absence is declared, never
-    // inferred — the same rule `SQUARE_PROFILE`'s "serves ONLY the money story"
-    // test applies one level down.
+    // `booking` now HAS a row, so Cal.com is ticked and swept like any other
+    // connection. What survives from the original tripwire is the half that was
+    // always the real risk, and it is sharper stated this way:
     //
-    // 🔴 This is also the tripwire for `RestWatermark.complete`, which is
-    // recorded by every profile and read by NOTHING. Adding any of these four
-    // to `ERP_SYNC_ENTITIES` turns this test red and is the moment that flag
-    // needs a reader — the sweep's cadence is uniform today, so a
-    // `complete: false` dataset (Square's `payout`, whose `begin_time` filters
-    // on CREATION) would otherwise be swept exactly as often as a complete one
-    // and could freeze at the status it had when its window closed.
+    // 🔴 `RestWatermark.complete` is recorded by every profile and read by
+    // NOTHING. The reconciliation sweep's cadence is uniform, so a dataset
+    // whose watermark is documented to miss edits — Square's `payout`, whose
+    // `begin_time` filters on CREATION, so a payout that moves SENT → PAID
+    // after its window closes is never re-read — would be swept exactly as
+    // often as a complete one and could freeze at a stale status.
+    //
+    // Scheduling a COMPLETE watermark is fine and is what `booking` does.
+    // Scheduling an INCOMPLETE one is the moment `complete` needs a reader.
+    //
+    // Mutation: add `payout` to ERP_SYNC_ENTITIES, or flip Cal.com's watermark
+    // to `complete: false` → red, naming the dataset.
     const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
+    const scheduledButIncomplete: string[] = [];
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        if (!syncedEntities.has(spec.dataset)) continue;
+        if (spec.watermark && !spec.watermark.complete) {
+          scheduledButIncomplete.push(`${profile.provider}.${spec.dataset}`);
+        }
+      }
+    }
+    expect(
+      scheduledButIncomplete,
+      "these are scheduled on a watermark documented to miss edits — give " +
+        "RestWatermark.complete a reader before this ships, or the sweep " +
+        "cadence is uniform over a watermark that cannot see a status change",
+    ).toEqual([]);
+  });
+
+  it("🔴 every REST vendor's declared datasets are all schedulable or all deliberate", () => {
+    // The other half of the original tripwire, kept: a REST dataset that is
+    // declared but has no `ERP_SYNC_ENTITIES` row is reached on demand through
+    // `runRead` and nowhere else. That is a legitimate state — Square's
+    // `charge` is deliberately unscheduled because `get_recent_charges` needs a
+    // window a poller has no basis to choose — but it must be VISIBLE, because
+    // it is silent in every direction: nothing fails, nothing logs, and the
+    // owner's card reads CONNECTED while nothing is stored.
+    const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
+    const unscheduled: Record<string, string[]> = {};
     for (const id of REST_PROVIDERS_WARP_2707) {
       const declared = providerDescriptor(id)!.datasets as readonly string[];
-      const overlap = declared.filter((d) => syncedEntities.has(d));
-      expect(
-        overlap,
-        `${id} now declares a scheduled entity (${overlap.join(", ")}) — give ` +
-          "RestWatermark.complete a reader before this ships, or the sweep " +
-          "cadence is uniform over a watermark that is documented to miss edits",
-      ).toEqual([]);
+      const missing = declared.filter((d) => !syncedEntities.has(d));
+      if (missing.length > 0) unscheduled[id] = missing;
     }
+    // Square's three money datasets are on-demand by design; Cal.com's
+    // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
   it("keeps the catalog-only placeholder OUT of the buildable set", () => {

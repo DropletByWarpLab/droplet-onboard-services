@@ -51,6 +51,14 @@ export const CLOUD_QUERY_DATASETS = [
   "order",
   "product",
   "customer",
+  // ── WARP-2832 ──
+  // Kept in lockstep with `CLOUD_DATASET_READS`; their agreement is gated, and
+  // as of this ticket so is their agreement with the canonical vocabulary. A
+  // dataset a connector serves but this enum omits is a connection the model
+  // cannot ask about — which is precisely the state Cal.com shipped in.
+  "booking",
+  "employee",
+  "task",
 ] as const;
 
 const DATASET_SET: ReadonlySet<string> = new Set(CLOUD_QUERY_DATASETS);

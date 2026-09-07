@@ -195,7 +195,7 @@ describe("cloud_query_dataset (WARP-2497)", () => {
     }
   });
 
-  it("exports the fourteen dataset names the schema advertises, in one list", async () => {
+  it("exports the seventeen dataset names the schema advertises, in one list", async () => {
     const schema = cloudQueryDataset.inputSchema as {
       properties: { dataset: { enum: readonly string[] } };
       required: string[];
@@ -232,6 +232,16 @@ describe("cloud_query_dataset (WARP-2497)", () => {
       "order",
       "product",
       "customer",
+      // WARP-2832 — scheduling, people and projects. Appended, and appended
+      // for a reason worth stating: Cal.com shipped on WARP-2707 serving a
+      // dataset that was in NEITHER this enum nor `CLOUD_DATASET_READS`, so a
+      // connected, healthy connection could not be asked anything. The two
+      // lists agreed perfectly while both lagged the canonical vocabulary,
+      // which is why `cloud-dataset-tool.e2e.test.ts` now also gates a
+      // provider against having at least one askable dataset.
+      "booking",
+      "employee",
+      "task",
     ]);
     // Mutation: drop `additionalProperties: false` → an unknown arg reaches
     // the route as a query param nobody validated.

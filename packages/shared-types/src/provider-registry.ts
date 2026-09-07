@@ -1184,10 +1184,14 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       },
     ],
     egressHosts: ["api.cal.com"],
-    // One dataset. `patient_id` and `operatory_id` have no honest Cal.com
-    // source and are left undefined — see `rest/vendors/calcom.ts`, which also
-    // records the open vocabulary question this raises.
-    datasets: ["appointment"],
+    // WARP-2832 — moved from `appointment` to `booking`. `appointment` is the
+    // WARP-1964 DENTAL shape (`patient_id`, `operatory_id`), which Cal.com had
+    // no honest source for and shipped `undefined`; worse, it is in neither
+    // `CLOUD_DATASET_READS` nor `ERP_SYNC_ENTITIES`, so a connected Cal.com
+    // was unreadable from every surface on the box. `booking` is a scheduling
+    // dataset that is wired to both, and Cal.com fills nine of its eleven
+    // columns rather than four of six.
+    datasets: ["booking"],
     // 120 requests per minute for API-key auth, documented. Expressed as the
     // hourly figure the `ProviderRateLimit` shape holds.
     rateLimit: { callCeiling: 7_200, periodMs: 3_600_000 },

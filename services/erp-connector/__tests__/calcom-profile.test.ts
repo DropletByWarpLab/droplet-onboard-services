@@ -137,7 +137,8 @@ const rowsOf = (rows: unknown[]) => rows as Record<string, unknown>[];
 /**
  * One Cal.com `Booking`, shaped as the 2026-05-01 bookings response documents
  * it — and carrying exactly the two values a later pass would be tempted to put
- * in `patient_id` and `operatory_id`.
+ * in `customer_id`, which Cal.com cannot fill (WARP-2832 moved this profile
+ * from `appointment` to `booking`).
  *
  * TWO hosts, because that is the round-robin / collective shape the `provider_id`
  * projection is knowingly lossy about.
@@ -198,7 +199,7 @@ describe("Cal.com — the profile the track actually dispatches", () => {
     // Compared as SETS: ordering carries no meaning in either place.
     const served = CALCOM_PROFILE.datasets.map((d) => d.dataset);
     expect([...served].sort()).toEqual([...providerDescriptor(CALCOM_PROVIDER)!.datasets].sort());
-    expect(served).toEqual(["appointment"]);
+    expect(served).toEqual(["booking"]);
   });
 
   it("🔴 declares NO credential-field pattern, and here the reason is stronger than usual", () => {
@@ -250,7 +251,7 @@ describe("Cal.com — the profile the track actually dispatches", () => {
       { body: { data: [BOOKING], pagination: { nextCursor: "CUR1", hasMore: true } } },
       { body: { data: [], pagination: { nextCursor: null, hasMore: false } } },
     ]);
-    await connector.runRead("get_schedule_today", { since: SINCE });
+    await connector.runRead("get_bookings", { since: SINCE });
     expect(slept).toEqual([CALCOM_MIN_REQUEST_INTERVAL_MS]);
   });
 });
@@ -266,7 +267,7 @@ describe("Cal.com — auth and the version header, read off the wire", () => {
     const { connector, calls } = connectorWith([
       { body: { data: [], pagination: { nextCursor: null, hasMore: false } } },
     ]);
-    await connector.runRead("get_schedule_today", { since: SINCE });
+    await connector.runRead("get_bookings", { since: SINCE });
 
     expect(CALCOM_PROFILE.auth).toEqual({
       headerName: "Authorization",
@@ -291,7 +292,7 @@ describe("Cal.com — auth and the version header, read off the wire", () => {
       { body: { data: [], pagination: { nextCursor: null, hasMore: false } } },
     ]);
     await connector.connect();
-    await connector.runRead("get_schedule_today", { since: SINCE });
+    await connector.runRead("get_bookings", { since: SINCE });
 
     expect(calls).toHaveLength(2);
     for (const call of calls) {
@@ -332,7 +333,7 @@ describe("Cal.com — auth and the version header, read off the wire", () => {
 
 // ── the one dataset, read off the wire ──────────────────────────────────────
 
-describe("Cal.com appointment — GET /v2/bookings", () => {
+describe("Cal.com booking — GET /v2/bookings", () => {
   it("🔴 filters on afterUpdatedAt and pages on cursor / pagination.nextCursor", async () => {
     const { connector, calls } = connectorWith([
       {
@@ -346,7 +347,7 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
       },
       { body: { data: [{ ...BOOKING, uid: "bk_2" }], pagination: { nextCursor: null, hasMore: false } } },
     ]);
-    const rows = rowsOf(await connector.runRead("get_schedule_today", { since: SINCE }));
+    const rows = rowsOf(await connector.runRead("get_bookings", { since: SINCE }));
 
     const first = new URL(calls[0]!.url);
     expect(first.host).toBe("api.cal.com");
@@ -376,57 +377,59 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
       expect(url.searchParams.has("skip")).toBe(false);
     }
 
-    expect(rows.map((r) => r.appt_id)).toEqual(["bk_1", "bk_2"]);
+    expect(rows.map((r) => r.booking_id)).toEqual(["bk_1", "bk_2"]);
   });
 
   it("declares the watermark COMPLETE, the cursor paths, and the rows path", () => {
     // `afterUpdatedAt` filters on the booking's own modification time, so a
-    // status change (accepted -> cancelled) comes back on the next pass. That
-    // is the vendor fact `complete: true` records.
+    // status change (accepted -> cancelled) comes back on the next pass, and a
+    // creation-time filter would freeze every cancellation out of view while
+    // the sync kept reporting success. That is the vendor fact `complete: true`
+    // records.
     //
-    // ⚠ It is a RECORDED FACT, not a control: nothing reads `complete` today.
-    // The reconciliation sweep's cadence is uniform, and `appointment` is not
-    // in `ERP_SYNC_ENTITIES`, so a Cal.com connection registers no cursor and
-    // is neither ticked nor swept — its rows are reached on demand through
-    // `runRead` and nowhere else. See `RestWatermark.complete`, and the
-    // orchestrator test that pins the empty intersection.
+    // ⚠ It is still a RECORDED FACT rather than a control: nothing reads
+    // `complete` today, and the reconciliation sweep's cadence is uniform.
+    // WARP-2832 changed the second half of this note, though — `booking` DOES
+    // have an `ERP_SYNC_ENTITIES` row, so a Cal.com connection now registers a
+    // cursor and is ticked and swept like any other. While it served
+    // `appointment` it registered none, which is what made it dark.
     // Mutation: flip it to false -> red here, and nowhere else.
-    const appointment = CALCOM_PROFILE.datasets.find((d) => d.dataset === "appointment")!;
-    expect(appointment.path).toBe("/v2/bookings");
-    expect(appointment.watermark).toEqual({
+    const booking = CALCOM_PROFILE.datasets.find((d) => d.dataset === "booking")!;
+    expect(booking.path).toBe("/v2/bookings");
+    expect(booking.watermark).toEqual({
       name: "afterUpdatedAt",
       location: "query",
       format: "iso",
       complete: true,
     });
-    expect(appointment.pagination).toEqual({
+    expect(booking.pagination).toEqual({
       kind: "cursor",
       nextCursorPath: "pagination.nextCursor",
       cursorParam: "cursor",
     });
-    expect(appointment.rowsPath).toBe("data");
+    expect(booking.rowsPath).toBe("data");
   });
 
-  it("🔴 takes appt_id from `uid`, NOT from `id`", async () => {
+  it("🔴 takes booking_id from `uid`, NOT from `id`", async () => {
     // `uid` is the API's own addressing key — it is the `{bookingUid}` path
     // segment in every other bookings route — while `id` is a numeric per-row key
     // that is not the documented identifier. Both are present on every booking,
     // both are stable, and only one of them can be handed back to Cal.com.
-    // Mutation: map `appt_id: "id"` -> nothing fails, rows land, and every
+    // Mutation: map `booking_id: "id"` -> nothing fails, rows land, and every
     // identifier the box holds for a booking is one Cal.com's own API will not
     // accept. The fixture's `id` is asserted absent so a "helpful" fallback
     // (`uid ?? id`) cannot pass this either.
     const { connector } = connectorWith([
       { body: { data: [BOOKING], pagination: { nextCursor: null, hasMore: false } } },
     ]);
-    const row = rowsOf(await connector.runRead("get_schedule_today", { since: SINCE }))[0]!;
-    expect(row.appt_id).toBe("bk_abc");
-    expect(row.appt_id).not.toBe("123");
-    expect(row.appt_time).toBe("2026-09-08T15:30:00.000Z");
+    const row = rowsOf(await connector.runRead("get_bookings", { since: SINCE }))[0]!;
+    expect(row.booking_id).toBe("bk_abc");
+    expect(row.booking_id).not.toBe("123");
+    expect(row.starts_at).toBe("2026-09-08T15:30:00.000Z");
     expect(row.status).toBe("accepted");
   });
 
-  it("🔴 takes provider_id from the FIRST host — knowingly lossy for round-robin", async () => {
+  it("🔴 takes staff_id from the FIRST host — knowingly lossy for round-robin", async () => {
     // The canonical column holds ONE provider. Round-robin and collective event
     // types return MULTIPLE hosts, and this fixture has two. The first host is the
     // organiser in Cal.com's own ordering, which is the closest thing to "the
@@ -440,67 +443,100 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
     const { connector } = connectorWith([
       { body: { data: [BOOKING], pagination: { nextCursor: null, hasMore: false } } },
     ]);
-    const row = rowsOf(await connector.runRead("get_schedule_today", { since: SINCE }))[0]!;
+    const row = rowsOf(await connector.runRead("get_bookings", { since: SINCE }))[0]!;
     // A numeric vendor id, stringified by the canonical text coercion — ids
     // arrive as JSON numbers and a canonical identifier column is text.
-    expect(row.provider_id).toBe("42");
+    expect(row.staff_id).toBe("42");
   });
 
-  it("🔴 leaves patient_id and operatory_id UNDEFINED — Cal.com has no honest source for either", async () => {
-    // THE pin this file exists for. `CANONICAL_COLUMNS.appointment` is the
-    // PRACTICE-MANAGEMENT vocabulary (WARP-1964, dental) and Cal.com is a general
-    // booking product:
+  it("🔴 leaves customer_id UNDEFINED and carries the attendee in customer_name", async () => {
+    // THE pin this file exists for, restated for `booking` (WARP-2832).
     //
-    //  • `patient_id` — the `BookingAttendee` schema this endpoint returns has NO
-    //    `id` field at all (absent, displayEmail, email, language, name,
-    //    phoneNumber, timeZone), and Cal.com serves no `patient` dataset, so there
-    //    is nothing for a patient id to point AT. Using the attendee's EMAIL would
-    //    put a contact detail in an identifier column and silently make a
-    //    customer's email address a join key — personal data promoted to an index,
-    //    by a one-line mapping. (The older `BookingAttendeeWithId_2024_08_13`
-    //    variant does carry an `id`; it is an attendee-row key on a version this
-    //    profile does not request, and it still points at no dataset the box
-    //    holds, so finding it is not a reason to unpin this.)
-    //  • `operatory_id` — Cal.com has no room, chair or operatory concept.
-    //    `location` is free text that is variously a meeting URL, a phone number,
-    //    a street address, or the literal "Cal Video": four kinds of value for a
-    //    column that means one thing.
+    // Until this ticket Cal.com served `appointment`, whose columns are the
+    // WARP-1964 DENTAL vocabulary — `patient_id` and `operatory_id` — and it
+    // had no honest source for either, so both shipped `undefined` and this
+    // test pinned them that way. `booking` removes that mismatch: there is no
+    // patient and no operatory to be undefined about.
     //
-    // The fixture deliberately carries both temptations — an attendee email and a
-    // meeting-URL location — so the assertions below fail for the mapping a later
-    // pass would actually write.
-    // Mutation: `patient_id: "attendees.0.email"` or
-    // `operatory_id: "location"` -> red, twice.
+    // What survives is the narrower, real absence. Cal.com's
+    // `BookingAttendee` schema has NO `id` field at all — only name, email,
+    // displayEmail, timeZone, language, absent and phoneNumber — so there is
+    // nothing to put in `customer_id`. The email is the tempting substitute
+    // and it is exactly wrong: an `_id` column is a join key, and joining
+    // customers on an email address silently makes a contact detail an
+    // identity.
+    //
+    // `customer_name` exists on this dataset for precisely this case — a row
+    // that can name who booked is more useful than one that can only say it
+    // does not know.
+    //
+    // Mutation: `customer_id: "attendees[0].email"` -> red.
     const { connector } = connectorWith([
-      { body: { data: [BOOKING], pagination: { nextCursor: null, hasMore: false } } },
+      {
+        body: {
+          data: [
+            {
+              uid: "bk_1",
+              start: "2026-09-08T15:30:00.000Z",
+              end: "2026-09-08T16:00:00.000Z",
+              title: "Intro call",
+              status: "accepted",
+              createdAt: "2026-09-01T09:00:00.000Z",
+              updatedAt: "2026-09-02T09:00:00.000Z",
+              hosts: [{ id: 42 }],
+              attendees: [{ name: "Sam Rubinchik", email: "sam@example.test" }],
+            },
+          ],
+          pagination: { nextCursor: null },
+        },
+      },
     ]);
-    const row = rowsOf(await connector.runRead("get_schedule_today", { since: SINCE }))[0]!;
+    const row = rowsOf(await connector.runRead("get_bookings", { since: SINCE }))[0]!;
 
-    // Present-and-undefined, not missing: the projection is driven by the
-    // vocabulary, and "the vendor does not carry this fact" is an undefined value
-    // on a column that exists — never an absent column and never a fabricated one.
-    expect(Object.keys(row).sort()).toEqual([...CANONICAL_COLUMNS.appointment].sort());
-    expect("patient_id" in row).toBe(true);
-    expect("operatory_id" in row).toBe(true);
-    expect(row.patient_id).toBeUndefined();
-    expect(row.operatory_id).toBeUndefined();
+    // Present as a KEY (the projection writes every canonical column) and
+    // undefined as a VALUE — the honest representation of "this vendor does
+    // not carry that fact".
+    expect("customer_id" in row).toBe(true);
+    expect(row.customer_id).toBeUndefined();
+    expect(row.customer_name).toBe("Sam Rubinchik");
+    expect(Object.values(row)).not.toContain("sam@example.test");
+  });
 
-    // Whole-row sweep: whichever column someone routed them to, the attendee's
-    // email and the free-text location must not appear anywhere in a canonical
-    // appointment row.
-    expect(Object.values(row)).not.toContain("casey@example.com");
-    expect(Object.values(row)).not.toContain("https://meet.example.com/room-7");
-    expect(Object.values(row)).not.toContain("+33123456789");
-
-    // And the field map does not mention them at all — the absence is in the
-    // profile, not merely in the outcome.
-    const appointment = CALCOM_PROFILE.datasets.find((d) => d.dataset === "appointment")!;
-    expect(Object.keys(appointment.fieldMap).sort()).toEqual([
-      "appt_id",
-      "appt_time",
-      "provider_id",
-      "status",
+  it("🔴 fills the five columns `appointment` had nowhere to put", async () => {
+    // The concrete payoff of the move, and the reason it is a defect fix
+    // rather than a rename: on `appointment` Cal.com filled 4 of 6 columns
+    // with 2 permanently undefined. On `booking` it fills 9 of 11.
+    //
+    // `updated_at` is the load-bearing one — Cal.com's `afterUpdatedAt` is a
+    // COMPLETE last-modified filter, and while it served `appointment` (one of
+    // the datasets WARP-2464 withheld `updated_at` from) that value was
+    // fetched and thrown away.
+    const { connector } = connectorWith([
+      {
+        body: {
+          data: [
+            {
+              uid: "bk_1",
+              start: "2026-09-08T15:30:00.000Z",
+              end: "2026-09-08T16:00:00.000Z",
+              title: "Intro call",
+              status: "accepted",
+              createdAt: "2026-09-01T09:00:00.000Z",
+              updatedAt: "2026-09-02T09:00:00.000Z",
+              hosts: [{ id: 42 }],
+              attendees: [{ name: "Sam Rubinchik" }],
+            },
+          ],
+          pagination: { nextCursor: null },
+        },
+      },
     ]);
+    const row = rowsOf(await connector.runRead("get_bookings", { since: SINCE }))[0]!;
+    expect(row.ends_at).toBe("2026-09-08T16:00:00.000Z");
+    expect(row.service_name).toBe("Intro call");
+    expect(row.created_at).toBe("2026-09-01T09:00:00.000Z");
+    expect(row.updated_at).toBe("2026-09-02T09:00:00.000Z");
+    expect(row.customer_name).toBe("Sam Rubinchik");
   });
 
   it("🔴 does NOT tolerate an absent `data` array — that is a Square fact, not a Cal.com one", async () => {
@@ -512,11 +548,11 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
     // every sync, which is a confident false statement about an owner's calendar.
     // Mutation: copy `absentRowsMeansEmpty: true` across from the Square profile
     // "for symmetry" -> this goes red, and it should.
-    const appointment = CALCOM_PROFILE.datasets.find((d) => d.dataset === "appointment")!;
-    expect(appointment.absentRowsMeansEmpty).toBeUndefined();
+    const booking = CALCOM_PROFILE.datasets.find((d) => d.dataset === "booking")!;
+    expect(booking.absentRowsMeansEmpty).toBeUndefined();
 
     const { connector } = connectorWith([{ body: { pagination: { nextCursor: null, hasMore: false } } }]);
-    await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
+    await expect(connector.runRead("get_bookings", { since: SINCE })).rejects.toThrow(
       RestPaginationContractError,
     );
   });
@@ -561,7 +597,7 @@ describe("Cal.com — the refusals, each costing ZERO fetch calls", () => {
     // Mutation: fall back to "" instead of refusing an empty placeholder -> the
     // request goes out and the call count goes to 1.
     const { connector, calls } = connectorWithCredentials({});
-    await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
+    await expect(connector.runRead("get_bookings", { since: SINCE })).rejects.toThrow(
       /has no "apiKey"/,
     );
     expect(calls).toHaveLength(0);
@@ -577,7 +613,7 @@ describe("Cal.com — the refusals, each costing ZERO fetch calls", () => {
   });
 
   it("🔴 refuses a dataset Cal.com does not serve — ZERO fetch calls, and NOT an empty array", async () => {
-    // This profile serves `appointment` and nothing else. Asked for money or
+    // This profile serves `booking` and nothing else. Asked for money or
     // for a patient record, the connection refuses by NAME.
     // `[]` would be a confident false statement no caller can tell from a
     // genuinely empty result — and on `get_ar_summary` that statement is about
@@ -629,7 +665,7 @@ describe("Cal.com — the refusals, each costing ZERO fetch calls", () => {
     const { connector, calls } = connectorWith([
       { body: {}, status: 302, headers: { location: "https://evil.example.net/v2/bookings" } },
     ]);
-    await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
+    await expect(connector.runRead("get_bookings", { since: SINCE })).rejects.toThrow(
       UnsafeBaseUrlError,
     );
     expect(calls).toHaveLength(1);

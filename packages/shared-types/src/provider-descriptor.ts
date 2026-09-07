@@ -46,7 +46,8 @@
  * splitting the vocabulary in two.
  *
  * Widened six → twenty alongside WARP-2280, then twenty → twenty-three by
- * WARP-2466's reconciliation, with that drift test as the guard throughout.
+ * WARP-2466's reconciliation, and twenty-three → twenty-six by WARP-2832,
+ * with that drift test as the guard throughout.
  */
 export const DATASET_NAMES = [
   // practice-management (WARP-1964)
@@ -78,10 +79,25 @@ export const DATASET_NAMES = [
   "audience",
   "audience_member",
   "ecommerce_order",
+  // ── WARP-2832 — scheduling, people, projects.
+  // Appended at the SAME INDEXES as the connector package's `DATASETS`: the
+  // drift test in `erp-provider.descriptor.test.ts` is an ORDERED `toEqual`,
+  // so a name added to both lists at different positions is still red — which
+  // is the property that makes this a mirror rather than two lists that happen
+  // to agree.
+  //
+  // `booking` is added BESIDE `appointment`, never instead of it. `appointment`
+  // is WARP-1964's dental shape (`patient_id`, `operatory_id`) and it is also a
+  // WIRE FORMAT — operators author export-drop profile JSON on their own sites
+  // naming datasets as bare strings, and Warp Lab does not hold those files, so
+  // renaming it would be an un-migratable field change.
+  "booking",
+  "employee",
+  "task",
 ] as const;
 
 /**
- * The closed union of twenty-three. A descriptor's `datasets` is typed with THIS, never
+ * The closed union of twenty-six. A descriptor's `datasets` is typed with THIS, never
  * `string[]`: the exhaustive `Record`s keyed by it (`DATASET_CATEGORY`,
  * `CANONICAL_COLUMNS`) only buy exhaustiveness while the union stays closed,
  * and a widened `string[]` throws that away silently.

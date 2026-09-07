@@ -442,6 +442,18 @@ export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
   campaign: "get_campaign_performance",
   audience_member: "get_audience_members",
   ecommerce_order: "get_ecommerce_orders",
+  // ── WARP-2832 — scheduling, people, projects ──────────────────────────────
+  //
+  // 🔴 The entry that makes a connected vendor ANSWERABLE. Cal.com shipped on
+  // WARP-2707 serving `appointment`, which is in neither this map nor
+  // `CLOUD_QUERY_DATASETS` — so a healthy, connected Cal.com could not be
+  // asked anything by the assistant, and nothing went red, because the two
+  // lists are gated only against EACH OTHER and neither is typed `DatasetName`.
+  // `cloud-dataset-tool.e2e.test.ts` now also gates them against the
+  // vocabulary, so the next omission is loud.
+  booking: "get_bookings",
+  employee: "find_employee",
+  task: "get_tasks_by_status",
   // commerce — Shopify (WARP-2354). The resolution of that subtask is that
   // there is nothing per-vendor to add: `cloud_query_dataset` picks the
   // provider from the DATASET, so a fourth vendor becomes reachable by naming
