@@ -68,3 +68,39 @@ describe("what this module deliberately does NOT own", () => {
     expect(owned).toEqual([]);
   });
 });
+
+/**
+ * WARP-2739 — the box's own lifecycle values reach the same chip.
+ *
+ * They are matched in the same two sets as a vendor's word rather than a
+ * parallel map, because the chip asks one question — is this settled, dead, or
+ * still out — and the answer does not depend on who wrote the document. Two
+ * maps would be the same list twice, and the copy nobody updates is always the
+ * one that decides the colour.
+ */
+describe("🔴 the box's own statuses classify too", () => {
+  it("treats a written-off invoice as dead, not as outstanding", () => {
+    // Not "void" in accounting — the invoice was real and the money was not
+    // collected — but on this chip the question is whether it is still a live
+    // claim, and it is not. Rendering it open keeps a debt somebody has already
+    // given up on in the outstanding total forever.
+    expect(statusClassFor("WRITTEN_OFF", false)).toBe("void");
+    expect(statusClassFor("written_off", true)).toBe("void");
+  });
+
+  it("treats a spent credit note as settled", () => {
+    expect(statusClassFor("APPLIED", false)).toBe("paid");
+  });
+
+  it("leaves the states that are genuinely still out as open", () => {
+    expect(statusClassFor("DRAFT", false)).toBe("open");
+    expect(statusClassFor("SENT", false)).toBe("open");
+    expect(statusClassFor("PART_PAID", false)).toBe("open");
+    // Overdue still wins over open — a part-paid invoice past its date is late.
+    expect(statusClassFor("PART_PAID", true)).toBe("overdue");
+  });
+
+  it("MUTATION: classify PAID as open — a settled invoice reads as owed", () => {
+    expect(statusClassFor("PAID", true)).toBe("paid");
+  });
+});

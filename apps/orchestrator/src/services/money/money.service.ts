@@ -43,14 +43,68 @@
  */
 import type { Prisma, PrismaClient } from "@prisma/client";
 
-export type MoneyKind = "RECEIVABLE" | "PAYABLE";
+/**
+ * WARP-2739 — RECEIVABLE and PAYABLE are a DIRECTION, and they stopped being
+ * the `kind` column when `ErpDocumentKind` widened to six values.
+ *
+ * 🔴 They were never a kind. A quote and an invoice are both receivable; a
+ * credit note is receivable and negative. Deriving direction from kind, in one
+ * place, is what lets kinds be added without every read path learning about
+ * them — and it is why the API's `?kind=receivable` words could stay exactly as
+ * they were while the column underneath changed shape.
+ */
+export type MoneyDirection = "RECEIVABLE" | "PAYABLE";
+
+/** Every document kind. Wider than what this surface reads — see below. */
+export type MoneyDocumentKind =
+  | "QUOTE"
+  | "ORDER"
+  | "INVOICE"
+  | "BILL"
+  | "CREDIT_NOTE"
+  | "RECEIPT";
+
+/**
+ * 🔴 QUOTE AND ORDER ARE NOT MONEY OWED, and this surface must never show them.
+ *
+ * An unaccepted quote in "what you are owed" is the single most misleading
+ * thing this page could say: it is a number the business has no claim to, added
+ * to numbers it does. The exclusion is expressed as an allow-list rather than a
+ * pair of `not` clauses so that a seventh kind added later is EXCLUDED until
+ * somebody decides it belongs, rather than silently appearing in a total.
+ */
+const KINDS_BY_DIRECTION: Readonly<Record<MoneyDirection, readonly MoneyDocumentKind[]>> = {
+  // A receipt records money that arrived and a credit note reduces what is
+  // owed; both belong on the receivable side. A settled receipt carries a zero
+  // balance and is excluded by `OPEN` anyway.
+  RECEIVABLE: ["INVOICE", "CREDIT_NOTE", "RECEIPT"],
+  PAYABLE: ["BILL"],
+};
+
+/** The kinds this surface reads at all. */
+export const MONEY_KINDS: readonly MoneyDocumentKind[] = [
+  ...KINDS_BY_DIRECTION.RECEIVABLE,
+  ...KINDS_BY_DIRECTION.PAYABLE,
+];
+
+export function directionOf(kind: MoneyDocumentKind): MoneyDirection | null {
+  if (KINDS_BY_DIRECTION.RECEIVABLE.includes(kind)) return "RECEIVABLE";
+  if (KINDS_BY_DIRECTION.PAYABLE.includes(kind)) return "PAYABLE";
+  return null;
+}
+
+export function kindsFor(direction: MoneyDirection): readonly MoneyDocumentKind[] {
+  return KINDS_BY_DIRECTION[direction];
+}
 
 export type MoneyDb = Pick<PrismaClient, "erpDocument">;
 
 /** One ledger's own total. Never added to another's. */
 export interface MoneyLedgerTotal {
-  readonly connectionId: string;
-  readonly provider: string;
+  /** WARP-2739 — NULL for the box's own documents. They are one book, with no
+   *  connection behind them and no vendor to name. */
+  readonly connectionId: string | null;
+  readonly provider: string | null;
   /** The vendor's code when it names one; null means "this ledger's own". */
   readonly currency: string | null;
   /** Sum of BALANCES — what remains unpaid — as a decimal string. */
@@ -82,10 +136,17 @@ export interface MoneySummary {
 
 export interface MoneyDocumentView {
   readonly id: string;
-  readonly kind: MoneyKind;
-  readonly externalId: string;
-  readonly externalSystem: string;
-  readonly connectionId: string;
+  /** What it IS. Six values since WARP-2739. */
+  readonly kind: MoneyDocumentKind;
+  /** Which way the money runs. Derived here so no client re-derives it. */
+  readonly direction: MoneyDirection;
+  /** WARP-2739 — LANDED or LOCAL. A caller may not infer it from a null
+   *  `externalId`: that is the shape, not the fact. */
+  readonly origin: "LANDED" | "LOCAL";
+  /** NULL on a local document — nothing outside this box has ever seen it. */
+  readonly externalId: string | null;
+  readonly externalSystem: string | null;
+  readonly connectionId: string | null;
   readonly issuedAt: string | null;
   readonly dueAt: string | null;
   readonly counterparty: {
@@ -99,6 +160,9 @@ export interface MoneyDocumentView {
   /** What remains unpaid. NOT the same number as `amount`. */
   readonly balance: string | null;
   readonly currency: string | null;
+  /** The VENDOR's own word, verbatim, on a landed row. Null on a local one. */
+  readonly vendorStatus: string | null;
+  /** The BOX's own lifecycle, on a local row. Null on a landed one. */
   readonly status: string | null;
   readonly isOverdue: boolean;
   readonly vendorUpdatedAt: string | null;
@@ -108,10 +172,11 @@ export interface MoneyDocumentView {
 /** A row as Prisma returns it, narrowed to what this service reads. */
 type DocumentRow = {
   id: string;
-  kind: MoneyKind;
-  externalId: string;
-  externalSystem: string;
-  connectionId: string;
+  kind: MoneyDocumentKind;
+  origin: "LANDED" | "LOCAL";
+  externalId: string | null;
+  externalSystem: string | null;
+  connectionId: string | null;
   issuedAt: Date | null;
   dueAt: Date | null;
   counterpartyExternalId: string | null;
@@ -120,6 +185,7 @@ type DocumentRow = {
   amount: Prisma.Decimal | null;
   balance: Prisma.Decimal | null;
   currency: string | null;
+  vendorStatus: string | null;
   status: string | null;
   vendorUpdatedAt: Date | null;
   lastReadAt: Date;
@@ -149,6 +215,11 @@ function money(value: Prisma.Decimal | null): string | null {
  * can never drift apart.
  */
 const OPEN: Prisma.ErpDocumentWhereInput = {
+  // WARP-2739 — and only the kinds that ARE money owed. A quote is an offer,
+  // an order is a commitment to deliver; neither is a claim on anybody's bank
+  // account, and putting them in a receivables figure would overstate it by
+  // exactly the value of the work that has not been agreed yet.
+  kind: { in: [...MONEY_KINDS] },
   OR: [{ balance: null }, { balance: { not: 0 } }],
 };
 
@@ -166,6 +237,13 @@ function toView(row: DocumentRow, now: Date): MoneyDocumentView {
   return {
     id: row.id,
     kind: row.kind,
+    // Non-null by construction: `OPEN` restricts every query here to the money
+    // kinds, and `directionOf` answers for all of them. The fallback exists so
+    // a seventh kind reaching this function is a visible RECEIVABLE rather than
+    // a crash on a page about money — and the allow-list above keeps it from
+    // getting here at all.
+    direction: directionOf(row.kind) ?? "RECEIVABLE",
+    origin: row.origin,
     externalId: row.externalId,
     externalSystem: row.externalSystem,
     connectionId: row.connectionId,
@@ -179,6 +257,7 @@ function toView(row: DocumentRow, now: Date): MoneyDocumentView {
     amount: money(row.amount),
     balance: money(row.balance),
     currency: row.currency,
+    vendorStatus: row.vendorStatus,
     status: row.status,
     isOverdue: isOverdue(row, now),
     vendorUpdatedAt: row.vendorUpdatedAt?.toISOString() ?? null,
@@ -199,16 +278,20 @@ const LEDGER_KEY = ["kind", "connectionId", "externalSystem", "currency"] as con
 
 /** One row of `GROUP BY kind, connectionId, externalSystem, currency`. */
 interface LedgerGroup {
-  kind: MoneyKind;
-  connectionId: string;
-  externalSystem: string;
+  kind: MoneyDocumentKind;
+  connectionId: string | null;
+  externalSystem: string | null;
   currency: string | null;
   _count: { _all: number };
   _sum: { balance: Prisma.Decimal | null };
 }
 
 function ledgerKey(group: LedgerGroup): string {
-  return `${group.connectionId} ${group.currency ?? ""}`;
+  // WARP-2739 — a LOCAL document has no connection, so every local row falls
+  // into ONE ledger keyed by the empty string plus its currency. That is right:
+  // the box's own documents are one book, and they are the only rows here whose
+  // currency is reliably named.
+  return `${group.connectionId ?? ""} ${group.currency ?? ""}`;
 }
 
 /**
@@ -244,7 +327,7 @@ function sideFrom(open: readonly LedgerGroup[], overdue: readonly LedgerGroup[])
   ledgers.sort((a, b) =>
     a.connectionId === b.connectionId
       ? (a.currency ?? "").localeCompare(b.currency ?? "")
-      : a.connectionId.localeCompare(b.connectionId),
+      : (a.connectionId ?? "").localeCompare(b.connectionId ?? ""),
   );
 
   return {
@@ -257,7 +340,8 @@ function sideFrom(open: readonly LedgerGroup[], overdue: readonly LedgerGroup[])
 export interface MoneyService {
   summary(now: Date): Promise<MoneySummary>;
   documents(args: {
-    kind?: MoneyKind;
+    /** Which way the money runs. Absent = both. */
+    direction?: MoneyDirection;
     overdueOnly?: boolean;
     limit?: number;
     now: Date;
@@ -304,10 +388,14 @@ export function createMoneyService(prisma: MoneyDb): MoneyService {
         }),
       ]);
 
-      const ofKind = (kind: MoneyKind) => (group: LedgerGroup) => group.kind === kind;
+      // 🔴 Grouped by KIND in SQL and folded into DIRECTIONS here. Grouping by
+      // a direction is not possible — it is not a column — and computing it in
+      // SQL would put the kind→direction table in two places, which is the one
+      // way this could start disagreeing with itself.
+      const facing = (d: MoneyDirection) => (g: LedgerGroup) => directionOf(g.kind) === d;
       return {
-        receivable: sideFrom(open.filter(ofKind("RECEIVABLE")), overdue.filter(ofKind("RECEIVABLE"))),
-        payable: sideFrom(open.filter(ofKind("PAYABLE")), overdue.filter(ofKind("PAYABLE"))),
+        receivable: sideFrom(open.filter(facing("RECEIVABLE")), overdue.filter(facing("RECEIVABLE"))),
+        payable: sideFrom(open.filter(facing("PAYABLE")), overdue.filter(facing("PAYABLE"))),
         // Both ends, because one number cannot describe a box whose Xero
         // connection answered this morning and whose Stripe one has been
         // failing for a week.
@@ -322,11 +410,14 @@ export function createMoneyService(prisma: MoneyDb): MoneyService {
      * the summary counts under, so the ledger and the figure above it always
      * describe the same rows.
      */
-    async documents({ kind, overdueOnly = false, limit = MONEY_PAGE_LIMIT, now }) {
+    async documents({ direction, overdueOnly = false, limit = MONEY_PAGE_LIMIT, now }) {
       const rows = (await prisma.erpDocument.findMany({
         where: {
-          ...(kind === undefined ? {} : { kind }),
           ...(overdueOnly ? overdueWhere(now) : OPEN),
+          // AFTER the spread, deliberately: `OPEN` already carries a `kind`
+          // clause, and a narrowing that spread first would be overwritten by
+          // it and silently return both directions.
+          ...(direction === undefined ? {} : { kind: { in: [...kindsFor(direction)] } }),
         },
         orderBy: [{ dueAt: "asc" }, { externalId: "asc" }],
         take: Math.min(limit, MONEY_PAGE_LIMIT),

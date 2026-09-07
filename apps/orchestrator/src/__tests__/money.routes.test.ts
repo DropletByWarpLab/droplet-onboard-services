@@ -113,7 +113,7 @@ describe("GET /api/money/documents", () => {
   });
 
   it("reads the direction words a person would type", async () => {
-    rows = [row(), row({ id: "doc-2", kind: "PAYABLE", externalId: "BILL-9" })];
+    rows = [row(), row({ id: "doc-2", kind: "BILL", externalId: "BILL-9" })];
 
     const owed = await request(app("owner")).get("/api/money/documents?kind=receivable");
     expect(owed.body.documents.map((d: { externalId: string }) => d.externalId)).toEqual([
@@ -125,13 +125,18 @@ describe("GET /api/money/documents", () => {
   });
 
   it("ignores a direction it does not understand rather than guessing one", async () => {
-    rows = [row(), row({ id: "doc-2", kind: "PAYABLE", externalId: "BILL-9" })];
+    rows = [row(), row({ id: "doc-2", kind: "BILL", externalId: "BILL-9" })];
     const res = await request(app("owner")).get("/api/money/documents?kind=sideways");
     expect(res.body.documents).toHaveLength(2);
     expect(erpDocument.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        // No `kind` narrowing at all — the open predicate is the only filter.
-        where: { OR: [{ balance: null }, { balance: { not: 0 } }] },
+        // No DIRECTION narrowing — the open predicate is the only filter, and
+        // its own `kind` clause is the money-kinds allow-list, not a direction.
+        // WARP-2739: a quote is not money owed and never reaches this surface.
+        where: {
+          kind: { in: ["INVOICE", "CREDIT_NOTE", "RECEIPT", "BILL"] },
+          OR: [{ balance: null }, { balance: { not: 0 } }],
+        },
       }),
     );
   });

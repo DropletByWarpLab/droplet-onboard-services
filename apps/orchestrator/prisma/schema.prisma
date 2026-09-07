@@ -209,7 +209,6 @@ model ContextPin {
   meta      Json?
   addedAt   DateTime       @default(now())
 
-  @@index([sessionId, addedAt])
   /// WARP-2582 — one pin per record per thread. The record-drawer "Ask AI
   /// about this customer" action makes a duplicate ONE CLICK, and a duplicate
   /// is not cosmetic: it spends the pin block's char budget twice on every
@@ -219,6 +218,7 @@ model ContextPin {
   /// silently inserts forever. `meta` is excluded for that reason as much as
   /// any other.
   @@unique([sessionId, kind, ref])
+  @@index([sessionId, addedAt])
 }
 
 /// WARP-460 — kinds of context the user can pin to a chat thread.
@@ -408,6 +408,324 @@ model BusinessProfile {
   reviewDismissedAt DateTime?
   updatedBy         String?
   updatedAt         DateTime                @updatedAt
+}
+
+/// WARP-2748 (ADR-051) — the DERIVED half of the company's self-knowledge.
+///
+/// `BusinessProfile` above is what a human TYPED about the business: 1,500
+/// characters, written once by an onboarding interview, never refreshed from
+/// the company's own data. `BrainDigest` is what the box WORKED OUT by reading
+/// that data, one bounded pass at a time, and it accumulates.
+///
+/// WHY A TABLE AND NOT A BIGGER PROMPT. The shipped window is 16,384 tokens
+/// (`config.ts` OLLAMA_CONTEXT_LENGTH); a turn spends ~2,950 on fixed blocks
+/// plus ~3,426 on tool schemas, every tool result is capped at 8,000 chars by
+/// a Zod `.max(8000)` an operator cannot raise, and the in-loop guard
+/// force-finalizes past 13,824 tokens. That is ~40-45 KB of readable text per
+/// turn against a corpus five orders of magnitude larger. A question therefore
+/// CANNOT scan the company; it reads rows a scheduled run wrote earlier. The
+/// scan is offline and incremental, the read is cheap and always in budget.
+///
+/// WORKSPACE-WIDE, NO `workspaceId`. `Workspace` is a singleton (`id = 1`, and
+/// its own docstring calls it "the company brain"), so these rows follow the
+/// `MemoryFact` precedent and carry no workspace column. Visibility is `scope`
+/// plus the reader's role, not a tenancy key.
+///
+/// PROVENANCE IS NOT OPTIONAL. `sources` is a non-empty JSON array enforced by
+/// a CHECK in the migration, not by application code. A digest nobody can
+/// trace back to a document is a hallucination that has been given a row id,
+/// which is strictly worse than having no row: it reads as fact, it survives
+/// restarts, and it gets prompt-injected. The constraint is the feature.
+model BrainDigest {
+  id String @id @default(uuid())
+
+  kind BrainDigestKind
+
+  /// Short human-readable claim. `body` is length-capped so N rows fit the
+  /// fixed prompt block without the assembler truncating mid-row — the
+  /// `MemoryFact` MEMORY_FACTS_CHAR_BUDGET posture, applied at write time
+  /// instead of at splice time.
+  title String @db.VarChar(200)
+  body  String @db.VarChar(1200)
+
+  /// A LOOSE pointer, deliberately without a foreign key — the posture
+  /// `EntityLink` takes toward `File`, for the same reason plus one more.
+  ///
+  /// (1) Not every subject has a local row. An obligation found in a lease, a
+  /// theme across twenty documents, a project that exists only as a folder
+  /// nobody turned into a `PmProject` — these are exactly the things this
+  /// table exists to surface, and an FK would reject all of them.
+  /// (2) Evidence outlives its subject. A deleted deal's digest is still a
+  /// true statement about what happened; cascading it away destroys the record
+  /// of why a finding was ever raised.
+  ///
+  /// So a subject pointer CAN dangle, and the UI shows that. No column
+  /// pretends to track liveness: a `subjectState` nothing maintains is a
+  /// column that always lies (the `EntityLink.fileState` ruling).
+  subjectType BrainSubjectType?
+  subjectId   String?
+
+  /// Non-empty JSON array of `{sourceKind, sourceId, quote}`. See the CHECK
+  /// `BrainDigest_sources_not_empty` in the migration — the emptiness rule is
+  /// a database constraint on purpose, so a detector with a bug cannot write
+  /// an unfalsifiable row.
+  sources Json
+
+  /// Integer 0-100, NOT a 0..1 float — matching `EntityLink.confidence` and
+  /// `CrmPipelineStage.probability`. Two confidence scales in one schema is
+  /// how a 0.85 gets rendered as "85%" beside an 85 rendered as "8500%".
+  confidence Int?
+
+  /// Which corpus scope this was derived FROM, and therefore the widest
+  /// audience it may be shown TO. A `company` digest must never surface to a
+  /// `family` or `guest` reader: the enforcement point is this column, because
+  /// the corpus that produced the row is the only thing that knows.
+  scope BrainScope @default(personal)
+
+  /// WHICH department, when `scope` is `department`. Required exactly then
+  /// (`BrainDigest_department_scope_needs_id`), because a department-scoped row
+  /// with no department is unenforceable: the reader check is "is this person a
+  /// member of THAT groupfolder", and there is nothing to ask about. An enum
+  /// value nothing can enforce is the same defect as a column nothing maintains.
+  ///
+  /// Cascade, unlike the loose subject pointer above. This one is an
+  /// ACCESS-CONTROL key, and an access key that dangles is a leak: a digest
+  /// naming a deleted department would fall through the membership test.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  /// Accumulation and decay. A re-run over unchanged input advances
+  /// `lastConfirmedAt` and writes nothing else; a superseding row points back
+  /// here rather than deleting, so the reason a claim changed stays readable.
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+  supersededById  String?
+
+  /// The detector or pass that produced this. Lets one noisy producer be
+  /// switched off without touching the others.
+  detectorKey String
+
+  /// The idempotency key, computed and stored by the service — NOT a compound
+  /// `@@unique` over the nullable subject columns.
+  ///
+  /// READ THIS BEFORE "SIMPLIFYING" IT AWAY. `subjectType` and `subjectId` are
+  /// null on every theme-shaped row, and Postgres never treats two rows as
+  /// duplicates when an indexed column is NULL — so `@@unique([kind,
+  /// subjectType, subjectId, detectorKey])` would reject nothing and P2002
+  /// would never fire. `EntityLink` hit exactly this and paid for it with five
+  /// partial unique indexes that `prisma.upsert` cannot address, forcing an
+  /// updateMany-then-create retry at every call site. A single NOT NULL
+  /// derived column makes the uniqueness real AND keeps `upsert` usable, which
+  /// is precisely what an idempotent nightly loop needs.
+  dedupeKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  @@index([kind, scope])
+  @@index([subjectType, subjectId])
+  @@index([scope, lastConfirmedAt(sort: Desc)])
+  @@index([departmentId, scope])
+  @@index([detectorKey])
+}
+
+/// WARP-2748 (ADR-051) — what the box thinks you should DO about what it read.
+///
+/// A digest is a claim; a finding is a claim with a consequence and a status a
+/// human moves. They are separate tables because their lifecycles differ: a
+/// digest is superseded silently as understanding improves, a finding is
+/// acknowledged, actioned or dismissed BY SOMEBODY and that decision must
+/// stick.
+///
+/// IDEMPOTENCY IS THE WHOLE DESIGN. `dedupeKey` (detector + subject) is what
+/// makes the same overdue invoice on Tuesday UPDATE Monday's row instead of
+/// creating a second one. Without it a nightly loop produces a growing pile of
+/// near-duplicates, the operator mutes the feature inside a week, and a muted
+/// feature is a deleted feature. This is the most likely way the brain fails in
+/// production, and it is a schema problem rather than a prompt problem.
+model BrainFinding {
+  id String @id @default(uuid())
+
+  kind BrainFindingKind
+
+  title     String @db.VarChar(200)
+  rationale String @db.VarChar(2000)
+
+  /// Minor units plus currency, the `CrmDeal.amountMinor` shape, and NULLABLE
+  /// on purpose. A finding without a number is still a finding ("this contract
+  /// auto-renews in 9 days and nobody has looked at it"); a finding carrying a
+  /// number the box invented is worse than one carrying none, so a detector
+  /// that cannot compute an impact must leave it null rather than guess. The
+  /// migration's `BrainFinding_impact_needs_currency` CHECK is the same
+  /// all-or-nothing pairing as `CrmDeal_amount_needs_currency`.
+  impactMinor BigInt?
+  currency    String?
+
+  /// Non-empty JSON `{digestIds, sources}`. Same rule and same reason as
+  /// `BrainDigest.sources`, enforced by CHECK: a finding whose evidence array
+  /// is empty must fail at the database, not merely look weak in review.
+  evidence Json
+
+  confidence Int?
+
+  /// EXPLICIT status column, never derived from a timestamp being null — the
+  /// no-guessing rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  status BrainFindingStatus @default(new)
+
+  /// Required when `status` is `dismissed` (`BrainFinding_dismissed_needs_reason`).
+  /// A dismissal with no reason is indistinguishable from a bug in the
+  /// detector, and the reason is the only thing that stops the same finding
+  /// being raised again next week.
+  dismissedReason String? @db.VarChar(500)
+
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for and `EntityLink.createdById` restates. SetNull:
+  /// removing a person must not delete the business's findings.
+  assignee   User?   @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  assigneeId String?
+
+  detectorKey String
+
+  /// See `BrainDigest.dedupeKey` — same reasoning, same NULL trap avoided.
+  dedupeKey String
+
+  scope BrainScope @default(personal)
+
+  /// See `BrainDigest.departmentId` — same rule, same CHECK, same Cascade.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+
+  /// WARP-2752 — when this finding was last TOLD to somebody.
+  ///
+  /// Without it an hourly pass re-notifies the same overdue invoice every hour
+  /// forever, which is precisely how a nightly feature earns a mute. Null means
+  /// "nobody has been told yet", and it is the queue the digest drains.
+  /// Deliberately NOT derived from `status`: a finding can be acknowledged in
+  /// the UI without ever having been pushed, and re-notifying it then would be
+  /// telling someone what they just read.
+  notifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  /// The notification queue: unnotified findings, newest first.
+  @@index([notifiedAt, status])
+  @@index([departmentId, status])
+  @@index([status, kind])
+  @@index([detectorKey, status])
+  @@index([status, impactMinor(sort: Desc)])
+  @@index([assigneeId, status])
+  @@index([scope, status])
+}
+
+/// What a digest is ABOUT, structurally. `metric` and `theme` rows normally
+/// carry no subject at all.
+enum BrainDigestKind {
+  entity
+  project
+  obligation
+  theme
+  metric
+  relationship
+}
+
+/// Mirrors `EntityLinkSubject` and extends it with the two things a digest can
+/// describe that a file-link cannot: a document and a bare file.
+enum BrainSubjectType {
+  COMPANY
+  CONTACT
+  DEAL
+  PROJECT
+  WORK_ITEM
+  DOCUMENT
+  FILE
+}
+
+/// The corpus a row was derived from, which bounds who may read it.
+/// `personal` = one user's own space; `department` = a groupfolder its members
+/// share; `company` = the household / whole-business corpus, owner+admin only.
+enum BrainScope {
+  personal
+  department
+  company
+}
+
+enum BrainFindingKind {
+  loss
+  risk
+  inefficiency
+  opportunity
+  inconsistency
+}
+
+enum BrainFindingStatus {
+  new
+  acknowledged
+  actioned
+  dismissed
+  stale
+}
+
+/// WARP-2749 (ADR-051) — the durable position of a brain pass.
+///
+/// ONE ROW PER PASS, and the row IS the cursor. A pass re-reads its own row on
+/// every tick, works from `cursor` forward, and writes the new position back in
+/// the SAME transaction as the rows it produced. That is what makes a crash
+/// mid-pass re-digest at most one unit instead of skipping one: there is no
+/// window in which the cursor has moved but the output has not landed.
+///
+/// NOT AN `AgentRun`, and not a second scheduler. `AgentRun` is a durable LLM
+/// conversation with a lease, a heartbeat and an iteration budget; this is a
+/// bookmark. The deterministic detector pass needs no model call at all (see
+/// `detectors/`), so giving it an AgentRun would buy a lease it does not need
+/// and an inference slot it must not hold. The corpus pass, which DOES call the
+/// model, still records its position here and runs under the one sanctioned
+/// clock (`cronRuntime.scheduleInterval` with an advisory lock), because the
+/// repo has exactly one scheduler and a guard test pins that.
+///
+/// COUNTERS ARE ON THE SURFACE ON PURPOSE. An operator who believes the brain
+/// read everything on night one stops trusting it the first time it misses
+/// something. `unitsSeen` / `unitsDigested` / `lastError` are what `/brief`
+/// renders as coverage, so "three weeks to first-pass a 5,000-document corpus"
+/// is a visible fact rather than a footnote in a brief nobody opened.
+model BrainPass {
+  /// Stable identifier for the pass, e.g. "detectors" or "corpus.documents".
+  /// Primary key: exactly one row per pass, upserted at boot, so a pass can
+  /// never accidentally run two positions in parallel.
+  passKey String @id
+
+  /// Opaque, pass-defined. The corpus pass stores an "updatedAt|id" watermark
+  /// (a bare timestamp loses rows that share a millisecond — the WARP-2743
+  /// pagination bug, avoided here rather than relearned). The detector pass
+  /// stores nothing: it is a set of deterministic queries over landed rows and
+  /// re-running it is the point, so it has no position to keep.
+  cursor String?
+
+  /// Explicit enable switch, never derived from absence. A pass that is off
+  /// must look different from a pass that has never run — the no-guessing
+  /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  enabled Boolean @default(true)
+
+  lastRunAt      DateTime?
+  lastSucceededAt DateTime?
+  /// Cleared on every success. A stale error string on a healthy pass is the
+  /// same lie as a status column nothing resets.
+  lastError      String?  @db.VarChar(1000)
+
+  /// Cumulative coverage counters, for the /brief coverage line.
+  unitsSeen     Int @default(0)
+  unitsDigested Int @default(0)
+  rowsWritten   Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
@@ -1124,8 +1442,98 @@ model FileIndexStatus {
   /// permanent. NULL = written before the column existed (treated as gen 1).
   extractorCapability String?
 
+  /// ADR-048 (WARP-2729) — the filing ledger. These five columns make this row
+  /// the queue: the durable row that already says "new content exists" carries
+  /// its own claim, exactly as WARP-2587 put `notifyStatus` on the activity
+  /// tables instead of adding an event table.
+  ///
+  /// 🔴 EVERY COLUMN HERE IS NULLABLE OR CARRIES A POSTGRES DEFAULT, and that is
+  /// load-bearing rather than incidental. `services/file-indexer/db.py`
+  /// `set_index_status` INSERTs this row naming its columns explicitly, so a
+  /// column it never writes is filled by Postgres — no Python change, and no
+  /// coupling between a Prisma migration and a file-indexer image release (an
+  /// unknown column there kills ALL indexing, not just filing). Prisma's
+  /// CLIENT-side defaults (`@default(uuid())`, `@updatedAt`) emit no DB default
+  /// at all, so a NOT NULL column of that shape would break the Python INSERT —
+  /// silently, because `watcher.py _set_status` swallows every DB exception at
+  /// `logger.debug`.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractReason    ExtractReason?
+
+  /// Terminal marker. A CHECK ties this to a terminal `extractStatus`, so a row
+  /// can never sit forever-pending with a terminal status or vice versa.
+  extractedAt DateTime?
+
+  /// 🔴 The watermark the last extraction CONSUMED — not when it ran.
+  ///
+  /// `updatedAt` above is bumped by `set_index_status` on EVERY upsert, so
+  /// `extractedFromUpdatedAt < updatedAt` is the re-index signal, computed
+  /// entirely orchestrator-side. It is a separate column from `extractedAt`
+  /// deliberately: writing `now()` there would overtake a bump that landed
+  /// WHILE the worker held the claim, and that file could then never re-arm.
+  /// The worker snapshots `updatedAt` at claim time and writes THAT value here.
+  extractedFromUpdatedAt DateTime?
+
+  /// Cheap content fingerprint (chunk count + hash of the first and last chunk
+  /// text), compared before any model call. `updatedAt` is bumped by a TOUCH,
+  /// not a change — `on_modified` fires on metadata-only events and the ON
+  /// CONFLICT arm has no `WHERE`/`IS DISTINCT FROM` — so a `chown -R`, a restic
+  /// restore, a desktop resync or an `occ files:scan` would otherwise re-extract
+  /// the whole corpus. Unchanged fingerprint ⇒ `done/unchanged`, no LLM call.
+  extractFingerprint String?
+
   @@id([userId, path])
   @@index([userId, status])
+  @@index([extractStatus, updatedAt])
+}
+
+/// ADR-048 — the filing claim state machine. Explicit enum, never derived from
+/// a NULL (CLAUDE.md), and `not_needed` is a real terminal so a row is never
+/// silently skipped into a forever-pending state — the `TeamChatMeetingReminder
+/// Status { pending | sent | not_needed }` shape WARP-2587 proved.
+enum ExtractStatus {
+  pending
+  running
+  done
+  skipped
+  failed
+  not_needed
+}
+
+/// Why a source reached a terminal state. An enum, never free text: a failure
+/// class must be groupable and renderable, and free text is where filenames
+/// (which are PHI, WARP-1983) leak into a column nobody screens.
+enum ExtractReason {
+  /// The classifier returned verdict RECORD. Terminal before any extraction.
+  phi_record
+  /// The path or filename tripped the deterministic denylist. The LLM was
+  /// never called at all.
+  phi_path
+  not_business
+  too_large
+  bad_json
+  model_unreachable
+  /// The active model resolved to a non-local provider. Unattended work over
+  /// stored documents is local, full stop — there is no owner opt-in.
+  cloud_model_refused
+  owner_unavailable
+  out_of_scope
+  ignored_by_you
+  stale_claim
+  /// Pre-dates the owner enabling filing. Set by the slice-1 backfill so first
+  /// boot does not extract a three-year history overnight. NOT sticky.
+  backlog
+  /// The content fingerprint was unchanged since the last extraction.
+  unchanged
+  /// WARP-2730 — indexed, but with no readable body: the extractor chain
+  /// produced nothing, or every chunk was header. Nothing to retry.
+  no_text
+  /// WARP-2730 — at least one chunk is WARP-233 `sensitive` and holds a `dcv1:`
+  /// blob rather than text. Extracting from ciphertext would produce confident
+  /// nonsense.
+  encrypted_content
 }
 
 enum FileIndexState {
@@ -1766,7 +2174,7 @@ model NotificationLog {
   channels    String
   deliveredAt DateTime?
   error       String?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
 }
@@ -2221,6 +2629,9 @@ model User {
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
+  // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
+  // owning side — removing a person must not delete the business's findings.
+  brainFindings    BrainFinding[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -3060,8 +3471,33 @@ model EmailMessage {
   /// mail retention stays governed by the mail surface alone.
   crmActivities CrmActivity[]
 
+  /// ADR-048 — filing proposals derived from this message. `onDelete: SetNull`
+  /// on the far side, and deliberately not covered by any CHECK there: this
+  /// model's own `accountId` is `onDelete: Cascade`, so a CHECK requiring the
+  /// pointer would make deleting an email account impossible once one proposal
+  /// existed.
+  ingestProposals IngestProposal[]
+
+  /// ADR-048 (WARP-2729) — the same filing ledger as `FileIndexStatus`.
+  ///
+  /// NO route change is needed: `prisma.emailMessage.create` on the 201 branch
+  /// of `POST /api/email/:accountId/messages-ingest` takes the default, and the
+  /// P2002 branch returns `duplicate: true` before any create, so a redelivery
+  /// never re-arms.
+  ///
+  /// There is deliberately no `extractedFromUpdatedAt` or fingerprint here:
+  /// this model has no `updatedAt` and is immutable after create, so there is
+  /// no email re-arm. An extractor-version bump is a bounded, explicit owner
+  /// action, not an automatic one.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractedAt      DateTime?
+  extractReason    ExtractReason?
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
+  @@index([extractStatus, receivedAt])
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3337,34 +3773,34 @@ enum ToolRunStatus {
 /// goalposts of a run already in flight. `maxIter` alone does not bound a run
 /// whose model calls are slow.
 model AgentRun {
-  id          String         @id @default(uuid())
+  id                 String                   @id @default(uuid())
   /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
   /// run cannot outlive a role change with stale reach.
-  userId      String
+  userId             String
   /// The chat conversation that started the run, when one did.
-  sessionId   String?
-  goal        String
-  model       String
-  status      AgentRunStatus @default(queued)
+  sessionId          String?
+  goal               String
+  model              String
+  status             AgentRunStatus           @default(queued)
   /// Not before. Delay and backoff without a second queue.
-  runAfter    DateTime       @default(now())
-  claimedBy   String?
-  claimedAt   DateTime?
-  heartbeatAt DateTime?
-  startedAt   DateTime?
-  endedAt     DateTime?
-  deadlineAt  DateTime?
-  attempts    Int            @default(0)
-  maxIter     Int
-  iteration   Int            @default(0)
-  messages    Json?
-  trace       Json?
+  runAfter           DateTime                 @default(now())
+  claimedBy          String?
+  claimedAt          DateTime?
+  heartbeatAt        DateTime?
+  startedAt          DateTime?
+  endedAt            DateTime?
+  deadlineAt         DateTime?
+  attempts           Int                      @default(0)
+  maxIter            Int
+  iteration          Int                      @default(0)
+  messages           Json?
+  trace              Json?
   /// The final assistant answer on `succeeded`.
-  result      String?
+  result             String?
   /// The loop's own `stop_reason` for the terminal segment.
-  stopReason  String?
-  error       String?
+  stopReason         String?
+  error              String?
   /// WARP-2179 — the parked Tier-2 call, while `status = awaiting_confirmation`.
   /// Explicit columns, not a blob: the call is bound the way the interceptor
   /// binds its token — tool name + `confirmationBindingHash(tool, args)` — so
@@ -3381,8 +3817,8 @@ model AgentRun {
   pendingDecision    AgentRunPendingDecision?
   pendingDecidedAt   DateTime?
   pendingDecidedBy   String?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
 
   // Claim scan: `status = queued AND runAfter <= now()`.
   @@index([status, runAfter])
@@ -4081,15 +4517,15 @@ model PmWorkspace {
 /// first commits and never observes/reuses the same number (WARP-885 —
 /// documents the existing enforcement; no schema change needed for this one).
 model PmProject {
-  id          String      @id @default(uuid())
-  workspaceId String
-  workspace   PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name        String
-  identifier  String
-  description String?
-  icon        String?
-  color       String?
-  leadId      String?
+  id           String      @id @default(uuid())
+  workspaceId  String
+  workspace    PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name         String
+  identifier   String
+  description  String?
+  icon         String?
+  color        String?
+  leadId       String?
   /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
   /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
   /// one must never delete work, and a project with no department reads as
@@ -4098,17 +4534,17 @@ model PmProject {
   /// household-shared and every role still reads every project.
   departmentId String?
   department   Department? @relation("PmProjectDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
-  seqCounter  Int         @default(0)
-  sortOrder   Int         @default(0)
+  seqCounter   Int         @default(0)
+  sortOrder    Int         @default(0)
   /// Canonical "is archived" signal (WARP-884) — explicit column, not
   /// derived from `archivedAt IS NOT NULL`. `archivedAt` remains the audit
   /// timestamp of when it was archived (null when un-archived, mirroring the
   /// prior derivation's semantics).
-  isArchived  Boolean     @default(false)
-  archivedAt  DateTime?
-  createdById String?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @default(now()) @updatedAt
+  isArchived   Boolean     @default(false)
+  archivedAt   DateTime?
+  createdById  String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   states     PmState[]
   labels     PmLabel[]
@@ -4137,7 +4573,7 @@ model PmProject {
   /// SetNull, not Cascade — deleting a customer must not delete the work
   /// delivered for them. The job happened.
   companyId String?
-  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  company   CrmCompany?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
   /// WARP-2585 — files related to this job. Cascade, unlike `crmDeals`: a link
   /// is a pointer with no independent meaning, where a deal is a commercial
   /// record that outlives the project.
@@ -5112,12 +5548,84 @@ model ErpEntityCache {
 /// Two kinds rather than two tables, because every column below is the same on
 /// both sides and only the counterparty's role differs — and because the
 /// question the owner asks ("what is overdue") crosses both.
+/// WARP-2739 (ADR-049 §4.1) — who wrote this document.
+///
+/// Mirrors `CrmRecordOrigin`, the pattern the CRM already proved, with one
+/// deliberate difference in vocabulary: the CRM's non-local value is `EXTERNAL`
+/// and carries "uneditable, archive-only, overwritten by the next landing
+/// tick". Here the value is `LANDED` and means exactly the same thing — the
+/// vendor owns the row — but the CRM's enum is not reused, because a shared
+/// enum across two tables with different lifecycles is how one table's widening
+/// becomes the other's migration.
+enum ErpDocumentOrigin {
+  /// A copy of what a vendor's server decided. `land-money.ts` owns it, the
+  /// vendor is the system of record, and the box may never edit it.
+  LANDED
+  /// The box's own document. Nothing outside this appliance has ever seen it,
+  /// and a person can correct it.
+  LOCAL
+}
+
+/// WARP-2739 (ADR-049 §4.1) — WHAT the document is.
+///
+/// 🔴 This enum used to be `RECEIVABLE | PAYABLE`, WHICH IS A DIRECTION, NOT A
+/// KIND. A quote and an invoice are both receivable; a credit note is
+/// receivable and negative; a receipt is receivable and already settled. The
+/// old pair could not tell any of those apart, so a native invoice had nowhere
+/// to live that a quote did not also occupy.
+///
+/// Direction is now DERIVED from kind (`money.service.ts`), which is the only
+/// place it was ever needed and the only place it stays correct as kinds are
+/// added.
 enum ErpDocumentKind {
-  /// An invoice. Money owed to the business.
-  RECEIVABLE
-  /// A bill. Money owed by the business — the half WARP-1991 records as
-  /// having had no data source anywhere in the product.
-  PAYABLE
+  /// An offer. Becomes an INVOICE by COPY, never by reference (§4.3).
+  QUOTE
+  ORDER
+  /// Money owed to the business.
+  INVOICE
+  /// Money owed by the business — the half WARP-1991 records as having had no
+  /// data source anywhere in the product.
+  BILL
+  /// Receivable and negative.
+  CREDIT_NOTE
+  RECEIPT
+}
+
+/// WARP-2739 (ADR-049 §4.2) — where a LOCAL document is in its life.
+///
+/// 🔴 ONE column with a per-kind allowed-transition map, not one enum per kind.
+/// Five enums are five things to keep in sync and a `switch` in every read
+/// path; the map lives in `document-status.ts` and is asserted cell by cell.
+///
+/// 🔴 NULL on every LANDED row, and the CHECK enforces it. A vendor's own
+/// status word is carried verbatim in `vendorStatus` and is NOT mapped onto
+/// these values: every vendor spells this differently, and folding five
+/// vocabularies into fourteen values would decide, silently, that "Voided" and
+/// "Paid" mean something this box chose for them.
+enum ErpDocumentStatus {
+  /// Every kind starts here.
+  DRAFT
+
+  // QUOTE: DRAFT -> SENT -> ACCEPTED | DECLINED | EXPIRED
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+
+  // ORDER: DRAFT -> CONFIRMED -> FULFILLED | CANCELLED
+  CONFIRMED
+  FULFILLED
+  CANCELLED
+
+  // INVOICE / BILL: DRAFT -> SENT -> PART_PAID -> PAID | VOID | WRITTEN_OFF
+  PART_PAID
+  PAID
+  VOID
+  WRITTEN_OFF
+
+  // CREDIT_NOTE: DRAFT -> ISSUED -> APPLIED
+  ISSUED
+  APPLIED
 }
 
 /// WARP-2581 — an invoice or bill, landed from a CLOUD ACCOUNTING connection.
@@ -5141,19 +5649,34 @@ enum ErpDocumentKind {
 model ErpDocument {
   id String @id @default(uuid())
 
-  /// The connection that landed it. RESTRICT for the same reason the CRM
-  /// tables use it — nothing deletes an `IntegrationConnection` today, and if
-  /// something starts, this fails loudly rather than silently dropping a
-  /// business's ledger.
-  connectionId String
-  connection   IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  /// WARP-2739 — LANDED or LOCAL, and the CHECK below makes the three
+  /// provenance columns follow from it.
+  ///
+  /// Defaults to LANDED because every row that existed when this column was
+  /// added was landed by definition, and a default of LOCAL would have made
+  /// the migration rewrite history.
+  origin ErpDocumentOrigin @default(LANDED)
+
+  /// The connection that landed it. NULL on a LOCAL row — nothing outside this
+  /// box has ever seen it.
+  ///
+  /// 🔴 A LOCAL ROW MAY NOT BORROW A CONNECTION, and the CHECK refuses it. A
+  /// document with a connection is vendor-owned, which on the CRM side means
+  /// uneditable, archive-only, and overwritten by the next landing tick. A
+  /// document a person has to be able to correct cannot be that.
+  ///
+  /// RESTRICT for the same reason the CRM tables use it — nothing deletes an
+  /// `IntegrationConnection` today, and if something starts, this fails loudly
+  /// rather than silently dropping a business's ledger.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
 
   /// Vendor key, denormalised so a row can be displayed without a join.
   /// Derived from `connection.provider` on write, never accepted from a caller.
-  externalSystem String
+  externalSystem String?
   /// The vendor's own id for this document. Scoped to the CONNECTION: two
   /// QuickBooks companies both number their invoices from 1.
-  externalId     String
+  externalId     String?
 
   kind ErpDocumentKind
 
@@ -5205,7 +5728,22 @@ model ErpDocument {
   /// The vendor's own status word, carried verbatim. Not an enum: every vendor
   /// spells this differently and mapping five vocabularies onto three values
   /// would decide, silently, that "Voided" and "Paid" are the same thing.
-  status String?
+  ///
+  /// WARP-2739 renamed this from `status` so the box's own lifecycle could take
+  /// that name. The two are mutually exclusive by origin, and the CHECK says
+  /// so: a LANDED row has a vendor word and no lifecycle, a LOCAL row has a
+  /// lifecycle and no vendor word. Keeping one column for both would mean a
+  /// query for "my unpaid invoices" silently matching the string "Paid".
+  vendorStatus String?
+
+  /// WARP-2739 — the box's own lifecycle, for LOCAL rows only.
+  ///
+  /// 🔴 Maintained ONLY by `moveDocumentStatus`, which writes the transition
+  /// and its timeline entry inside one `$transaction`. `moveDealStage`
+  /// established that rule and `updateDeal` routes stage changes through it
+  /// precisely so a PATCH cannot skip the timeline; a guard test asserts no
+  /// other writer sets this column.
+  status ErpDocumentStatus?
 
   /// When the VENDOR last changed it — never presented as "up to date".
   /// Xero's `UpdatedDateUTC` does not fire on a due-date edit, a
@@ -5218,10 +5756,16 @@ model ErpDocument {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// The reconcile key, for LANDED rows. Postgres treats NULLs as distinct, so
+  /// this constrains nothing on a LOCAL row — which is right: a LOCAL document
+  /// has no vendor id to be unique about.
   @@unique([connectionId, kind, externalId])
   @@index([connectionId, kind, dueAt])
   @@index([companyId])
   @@index([kind, dueAt])
+  /// "The quotes I have out", "the invoices I have not sent". A LOCAL-document
+  /// list is always filtered by all three.
+  @@index([origin, kind, status])
 }
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
@@ -5244,6 +5788,277 @@ enum WriteStatus {
 /// confirms (invariant 1, §11.2). `command` is a registered command NAME
 /// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
 /// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+// ============================================================================
+// ADR-048 - auto-filing (WARP-2727 / WARP-2729)
+//
+// Three tables: what the box PROPOSED, what the owner CORRECTED, and what the
+// owner CONSENTED to. The queue itself is not here - it is the claim columns on
+// `FileIndexStatus` and `EmailMessage`, because those rows already say "new
+// content exists" and a shadow queue would be a second source of truth.
+//
+// EVERY ACTOR COLUMN BELOW IS A PLAIN `String`, NOT AN FK, and that is a
+// decision rather than an omission. Two of them sit inside NOT-NULL CHECKs, and
+// an `onDelete: SetNull` FK under such a CHECK makes the row UN-DELETABLE: the
+// SetNull fires inside the same statement that the CHECK then rejects, so the
+// parent delete fails. That trap is live here twice over - `EmailMessage.
+// accountId` is `onDelete: Cascade`, so a `DELETE /api/email/accounts` would
+// cascade into every email proposal - and the house pattern already avoids it:
+// `ErpWriteRequest.requestedBy`, `ToolSpec.ownerId` and `PmComment.createdById`
+// are all bare strings. These columns are an AUDIT of who consented or decided,
+// and that fact stays true after the user row is gone. A dangling id is caught
+// by the worker's per-tick `resolveAttributedToolAccess`, which fails closed and
+// pauses filing with "the person who turned this on is no longer active" -
+// which is the designed behaviour, not a degradation.
+// ============================================================================
+
+enum IngestSourceKind {
+  FILE
+  EMAIL
+}
+
+enum IngestProposalKind {
+  /// Attach a file to a record that already exists. Reversible, additive.
+  LINK_FILE
+  /// Put an inbound email on an existing customer's timeline.
+  LOG_EMAIL_ACTIVITY
+  /// Set `PmProject.companyId` where it is currently NULL. Never overwrites.
+  SET_PROJECT_CUSTOMER
+  CREATE_CUSTOMER
+  CREATE_PROJECT
+  /// Never auto-applies, in any mode, on any vertical: a person is where PHI
+  /// lives on a practice box.
+  CREATE_CONTACT
+  /// Several candidates matched; a human picks. Never auto-applies.
+  MATCH_REVIEW
+  /// Held until the ADR-049 section 4 `ErpDocument` widening (WARP-2739). Money
+  /// is never auto-applied even after that.
+  CREATE_MONEY_DOC
+}
+
+enum IngestProposalStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  /// The owner said "not the same" - recorded as a FilingDecision too, so the
+  /// pair is never offered again.
+  NOT_SAME
+  EXPIRED
+  UNDONE
+}
+
+/// What the POLICY TABLE (`services/filing/policy.ts`) decided, evaluated in
+/// code and never by the model. `NEVER` is unappliable even by a human, and a
+/// CHECK enforces that rather than a branch.
+enum FilingPolicyClass {
+  AUTO
+  REVIEW
+  NEVER
+}
+
+enum PhiVerdict {
+  CLEAN
+  /// A vendor invoice that names patients - the document a dental practice
+  /// actually receives every week. Company and money survive; every person
+  /// entity and every verbatim quote is dropped, and confidence is capped
+  /// below every auto floor so it can never apply unattended.
+  MENTIONS
+  /// Terminal. No extraction pass, no proposal, no evidence stored.
+  RECORD
+}
+
+enum IngestMatchKind {
+  EMAIL
+  DOMAIN
+  NAME
+  NONE
+}
+
+model IngestProposal {
+  id String @id @default(uuid())
+
+  sourceKind IngestSourceKind
+
+  /// The durable source identity, `file:<ncFileId>` or `email:<uuid>`. TEXT and
+  /// NOT NULL on purpose: it is what the dedupe key is scoped by, and unlike the
+  /// two optional pointers below it survives the source row being deleted, so
+  /// no CHECK here can ever be broken by a cascade.
+  sourceRef String
+
+  /// Convenience pointers, deliberately NOT covered by any CHECK. See the block
+  /// comment above: `emailMessageId` is SetNull under a Cascade parent, so a
+  /// CHECK requiring it would make deleting an email account impossible.
+  ncFileId       Int?
+  emailMessageId String?
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+
+  kind         IngestProposalKind
+  status       IngestProposalStatus @default(PENDING)
+  policyClass  FilingPolicyClass
+  /// Rendered in words on the review card: "Not applied automatically because
+  /// the sender uses a personal email address."
+  policyReason String?
+
+  confidence Int
+  phiVerdict PhiVerdict
+  matchKind  IngestMatchKind
+
+  /// The proposed fields, validated by a zod `.strict()` per-kind allow-list
+  /// that has no `dob`/`chart`/`insurance`/`treatment` member anywhere - the
+  /// model has nowhere to put PHI, which is a structural control rather than a
+  /// prompt rule.
+  payload Json
+
+  /// Verbatim quotes proving each extracted field, each verified to be a real
+  /// substring of the text actually sent. NULLED in the same transaction as a
+  /// reject / not-same / PHI skip, and 30 days after an apply.
+  evidence Json?
+
+  extractorVersion String
+  dedupeKey        String
+
+  requestedById String
+  /// Who decided, and when. Required for every decided status INCLUDING
+  /// UNDONE — an undone proposal was applied by somebody first, and undoing
+  /// it does not unmake that.
+  decidedById   String?
+  decidedAt     DateTime?
+  appliedAt     DateTime?
+  autoApplied   Boolean   @default(false)
+  undoneById    String?
+  undoneAt      DateTime?
+  /// "delete" or "archive" - which branch the undo took, per the landed-purge
+  /// rule (a row that acquired a human note is archived, never deleted).
+  undoMode      String?
+
+  /// Back-pointers to what applying this actually created. The "Created by
+  /// Droplet" chip reads `origin === 'EXTRACTED'`, never `createdById IS NULL`
+  /// - state is never derived from a NULL.
+  createdCompanyId    String?
+  createdContactId    String?
+  createdProjectId    String?
+  createdEntityLinkId String?
+  createdActivityId   String?
+
+  /// A child proposal (e.g. LINK_FILE against a customer this run also
+  /// proposes creating) that cannot apply until its parent does.
+  dependsOnProposalId String?
+
+  /// What applying this actually produced. Named relations because the plain
+  /// `createdCompanyId` / `createdContactId` columns above are audit strings
+  /// with no FK — only the row's own `proposalId` back-pointer is referential,
+  /// so a reader can always ask a record "did Droplet file you?" without a
+  /// join through this table.
+  companiesFiled CrmCompany[] @relation("CompanyFiledByProposal")
+  contactsFiled  Contact[]    @relation("ContactFiledByProposal")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Re-extraction of the same source at the same extractor version must not
+  /// mint a second proposal for the same thing.
+  @@unique([sourceRef, kind, dedupeKey, extractorVersion])
+  @@index([status, createdAt])
+  @@index([sourceRef])
+  @@index([ncFileId])
+  @@index([emailMessageId])
+  @@index([dependsOnProposalId])
+}
+
+enum IngestKeyKind {
+  EMAIL_ADDRESS
+  EMAIL_DOMAIN
+  NAME
+  NC_FOLDER
+}
+
+enum FilingDecisionKind {
+  /// "Not this customer" - never offer this pair again.
+  NOT_SAME
+  /// "Mail from @northgatedental.com always files under Northgate Dental."
+  ALWAYS_HERE
+  /// "Ignore anything from this sender or folder."
+  IGNORE_SOURCE
+}
+
+/// The correction memory, and the reason auto mode survives week two: a
+/// correction made once is never made twice, and the owner can READ and REVOKE
+/// what they taught it. Consulted BEFORE the matcher searches.
+model FilingDecision {
+  id       String             @id @default(uuid())
+  keyKind  IngestKeyKind
+  /// Lowercased on write.
+  keyValue String
+  verdict  FilingDecisionKind
+
+  /// Required for NOT_SAME and ALWAYS_HERE, forbidden for IGNORE_SOURCE - a
+  /// CHECK, because a rule pointing at no customer is not a rule.
+  companyId String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  @@index([keyKind, keyValue])
+}
+
+enum AutoFilingMode {
+  off
+  /// Everything waits for a click.
+  propose
+  /// Owner-promoted classes apply unattended, within caps.
+  auto
+}
+
+enum AutoFilingLevel {
+  /// Default: attach files, log email on existing customers, set a project's
+  /// customer. Never creates.
+  links_only
+  also_create
+}
+
+enum AutoFilingVertical {
+  general
+  /// ASKED at enable time, never derived at read time. A LAN dental connector
+  /// only pre-fills the answer - a heuristic must not silently decide a PHI
+  /// posture.
+  healthcare
+}
+
+/// Consent as a ROW with constraints, not a settings blob: the record proving a
+/// human authorised unattended CRM writes must be one the database refuses to
+/// leave half-filled.
+model AutoFilingSetting {
+  id String @id @default("singleton")
+
+  mode     AutoFilingMode     @default(off)
+  level    AutoFilingLevel    @default(links_only)
+  vertical AutoFilingVertical @default(general)
+
+  /// Who turned it on, server-stamped. Plain String, no FK - see the block
+  /// comment at the top of this section.
+  enabledById String?
+  /// Bounds the ledger: a source older than this is retired `not_needed/
+  /// backlog` rather than claimed, so enabling filing never files three years
+  /// of history overnight.
+  enabledAt   DateTime?
+
+  folders      Json?
+  pathDenylist Json?
+  sources      Json?
+
+  hourlyApplyCap Int @default(50)
+  dailyCreateCap Int @default(10)
+  digestHour     Int @default(8)
+
+  /// `mode = 'auto'` is refused by a CHECK until an extraction-eval run has
+  /// recorded a pass on THIS box's model (WARP-2732). The canary is auto mode's
+  /// own merge condition, so it is a database invariant rather than a promise.
+  canaryPassedAt DateTime?
+  canaryModel    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model ErpWriteRequest {
   id           String      @id @default(cuid())
   connectionId String
@@ -5308,6 +6123,11 @@ model Department {
   /// two halves share a row and nothing else.
   pmProjects        PmProject[]            @relation("PmProjectDepartment")
   pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
+  // WARP-2748 (ADR-051): department-scoped brain rows. Cascade on the owning
+  // side — a digest naming a deleted department would fall through the
+  // membership test, so an access key must never dangle.
+  brainDigests      BrainDigest[]
+  brainFindings     BrainFinding[]
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which
@@ -6025,6 +6845,9 @@ enum ContactOrigin {
   /// Pulled from a source (CardDAV, Graph, a CRM connector). The source owns
   /// the synced fields.
   EXTERNAL
+  /// ADR-048 — derived by Droplet from a document or an email. Editable like
+  /// LOCAL; see `CrmRecordOrigin.EXTRACTED`.
+  EXTRACTED
 }
 
 model AddressBookSource {
@@ -6082,6 +6905,10 @@ model AddressBookSource {
 
 model Contact {
   id String @id @default(uuid())
+
+  /// ADR-048 - see `CrmCompany.proposalId`. Not in any CHECK.
+  proposalId String?
+  proposal   IngestProposal? @relation("ContactFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
 
   userId String
 
@@ -6175,7 +7002,7 @@ model Contact {
   /// question.
   partyLinks    PartyLink[]
   /// WARP-2585 — files related to this person (an ID scan, a signed form).
-  fileLinks       EntityLink[]
+  fileLinks     EntityLink[]
 
   /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
   /// upstream id), so a re-sync updates rather than duplicates.
@@ -6187,6 +7014,7 @@ model Contact {
   @@index([userId, origin])
   /// The default listing is "this person's contacts, unarchived, by name".
   @@index([userId, isArchived])
+  @@index([proposalId])
 }
 
 model ContactEmail {
@@ -6239,6 +7067,14 @@ model ContactPhone {
 enum CrmRecordOrigin {
   LOCAL
   EXTERNAL
+  /// ADR-048 — created by Droplet from a document or an email, then applied by
+  /// a human (or by an owner-promoted auto-apply class). Behaves like LOCAL:
+  /// the shipped `*_provenance_complete` CHECK's first arm carries NO origin
+  /// predicate, so an EXTRACTED row with all-NULL provenance already passes,
+  /// and the edit/delete guards key on `EXTERNAL` — so a person can correct an
+  /// EXTRACTED draft freely, which is the whole point of not landing it as
+  /// EXTERNAL under a fabricated connection.
+  EXTRACTED
 }
 
 /// What reaching a stage MEANS. An explicit outcome class, never inferred from
@@ -6275,6 +7111,13 @@ enum CrmActivityKind {
 
 model CrmCompany {
   id String @id @default(uuid())
+
+  /// ADR-048 - the proposal that created this row, when Droplet filed it.
+  /// Deliberately NOT referenced by any CHECK: it is `onDelete: SetNull`, and
+  /// a SetNull FK inside a NOT-NULL CHECK makes the row un-deletable and the
+  /// purge walker un-runnable.
+  proposalId String?
+  proposal   IngestProposal? @relation("CompanyFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
 
   name String
 
@@ -6342,16 +7185,16 @@ model CrmCompany {
 
   /// WARP-2581 — money owed by or to this customer, when a document matched.
   documents ErpDocument[]
-
-  @@unique([connectionId, externalId])
-  @@index([connectionId])
   /// WARP-2585 — files in /files that BELONG to this customer. Pointers, not
   /// copies; deleting the company deletes the links and none of the files.
   fileLinks EntityLink[]
 
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
   @@index([name])
   @@index([domain])
   @@index([ownerId, isArchived])
+  @@index([proposalId])
 }
 
 /// WARP-2562 (ADR-044) — how a link came to exist. An explicit column, never
@@ -6652,12 +7495,11 @@ model CrmDeal {
 
   contactLinks CrmDealContact[]
   activities   CrmActivity[]
+  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
+  fileLinks    EntityLink[]
 
   @@unique([connectionId, externalId])
   @@index([connectionId])
-  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
-  fileLinks EntityLink[]
-
   @@index([pipelineId, stageId])
   @@index([stageId])
   @@index([companyId])
@@ -6792,7 +7634,6 @@ model CrmActivity {
   @@index([emailMessageId])
   @@index([calendarEventId])
   @@index([workItemId])
-
   /// createdAt, NOT occurredAt — unlike every index above it. `occurredAt` is
   /// when the interaction HAPPENED and is caller-supplied: a connector
   /// backdates it and a MEETING can carry a future one, and a sweep gated on a

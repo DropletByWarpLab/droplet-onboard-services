@@ -48,6 +48,8 @@ export const CRM_ERRORS = {
   /// it. Mirrors CONTACT_IS_EXTERNAL_ARCHIVE_INSTEAD (WARP-2554); the route
   /// answers both with a 409 that names `archive` as the action that works.
   COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD: "company_is_external_archive_instead",
+  /** WARP-2739 — the customer still has money documents this box wrote. */
+  COMPANY_HAS_LOCAL_DOCUMENTS: "company_has_local_documents",
   DEAL_IS_EXTERNAL_ARCHIVE_INSTEAD: "deal_is_external_archive_instead",
   /// WARP-2577 — the five nullable FK columns this service used to write
   /// without checking. Each names the column the caller got wrong, which is
@@ -117,7 +119,7 @@ export interface ApiCrmCompany {
   country: string | null;
   note: string | null;
   ownerId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   /** Present on list and detail — the two numbers a customer row is read for. */
@@ -143,7 +145,7 @@ export interface ApiCrmDeal {
   closeReason: string | null;
   ownerId: string | null;
   projectId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   contactIds: string[];
@@ -629,10 +631,24 @@ export async function getCompany(prisma: PrismaClient, id: string): Promise<ApiC
   return companyToApi(prisma, row, counts.get(id) ?? 0);
 }
 
+/**
+ * ADR-048 (WARP-2730) — provenance for a row Droplet filed by itself.
+ *
+ * Passed ONLY by the filing apply path. Both halves move together on purpose:
+ * `origin: "EXTRACTED"` is what the "Created by Droplet" chip reads (never
+ * `createdById IS NULL` — state is not derived from a NULL), and `proposalId`
+ * is the back-pointer that makes the row answer "which document filed you?"
+ * without a join through `IngestProposal`.
+ */
+export interface FilingProvenance {
+  proposalId: string;
+}
+
 export async function createCompany(
   prisma: PrismaClient,
   input: CompanyInput & { name: string },
   actorId: string | null,
+  filing?: FilingProvenance,
 ): Promise<ApiCrmCompany> {
   const row = await prisma.crmCompany.create({
     data: {
@@ -649,14 +665,31 @@ export async function createCompany(
       country: input.country ?? null,
       note: input.note ?? null,
       ownerId: input.ownerId ?? null,
+      // Never null for a filed row: `createdById` is the OWNER who enabled
+      // filing, a real `User.id`, because "who is accountable for this row"
+      // must have an answer even when nobody typed it.
       createdById: actorId,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
+      proposalId: filing?.proposalId ?? null,
       activities: {
         create: {
           subjectType: "COMPANY",
           kind: "CREATED",
+          // 🔴 NO FILENAME HERE, EVER. Filenames are PHI (WARP-1983) and a
+          // CrmActivity summary is rendered on the customer timeline for every
+          // reader of the CRM. The document's identity lives on the
+          // `EntityLink` row, which is access-checked; this line is not.
           summary: `Customer created: ${input.name}`,
           actorId,
+          // 🔴 A BOX-WRITTEN ROW IS NOT A HUMAN NOTE. `CrmActivity.origin`
+          // defaults to LOCAL, and two things downstream read LOCAL as "a
+          // person typed this": `landed-purge.ts`'s survival test
+          // (`where: { origin: "LOCAL", [subject]: id }`) and ADR-048's undo
+          // predicate, which deletes a filed record that carries only its own
+          // CREATED row and ARCHIVES one a human has since annotated. Left at
+          // the default, every filed customer would look annotated from the
+          // moment it was created, and undo could never clean one up.
+          origin: filing ? "EXTRACTED" : "LOCAL",
         },
       },
     },
@@ -710,6 +743,26 @@ export async function deleteCompany(prisma: PrismaClient, id: string): Promise<v
   if (existing.origin === "EXTERNAL") {
     throw new Error(CRM_ERRORS.COMPANY_IS_EXTERNAL_ARCHIVE_INSTEAD);
   }
+  // 🔴 WARP-2739 — a LOCAL money document may not be orphaned, and this is
+  // where that is enforced rather than in a CHECK constraint.
+  //
+  // `ErpDocument_companyId_fkey` is `ON DELETE SET NULL`, so a CHECK requiring
+  // a non-null party on a local row would fire INSIDE the statement that nulls
+  // it: the delete would fail with a constraint error naming a table nobody
+  // was touching, and the company would be permanently un-deletable with no
+  // readable way out. (That trap is recorded twice in the schema already — see
+  // the ADR-048 actor-column note.) A named refusal here says the true thing
+  // instead, and the route turns it into a 409.
+  //
+  // LANDED documents are deliberately NOT counted: they keep the WARP-2581
+  // behaviour of surviving with `companyId = NULL`, because the vendor still
+  // holds the document and losing the account record must not lose the record
+  // of the money.
+  const localDocuments = await prisma.erpDocument.count({
+    where: { companyId: id, origin: "LOCAL" },
+  });
+  if (localDocuments > 0) throw new Error(CRM_ERRORS.COMPANY_HAS_LOCAL_DOCUMENTS);
+
   // Deals survive with `companyId = NULL` (SetNull in the schema): losing the
   // account record must not lose the record of the money.
   await prisma.crmCompany.delete({ where: { id } });
@@ -1390,6 +1443,20 @@ export async function logActivity(
   prisma: PrismaClient,
   input: ActivityInput,
   actorId: string | null,
+  /**
+   * ADR-048 (WARP-2731) — the box wrote this row, not a person.
+   *
+   * 🔴 `origin` is not decoration on this table. Two things read `LOCAL` as
+   * "a human typed this": `landed-purge.ts`'s survival test
+   * (`where: { origin: "LOCAL", [subject]: id }`, which decides whether a
+   * record is archived rather than deleted) and ADR-048's undo, which deletes
+   * a filed record carrying only machine rows and ARCHIVES one a person has
+   * since annotated. A box-written caption left at the default makes both lie.
+   *
+   * Passed only by the filing apply path. Every human caller omits it and
+   * keeps `LOCAL`.
+   */
+  filing?: FilingProvenance,
 ): Promise<ApiCrmActivity> {
   const subjectId =
     input.subjectType === "COMPANY"
@@ -1453,7 +1520,7 @@ export async function logActivity(
       emailMessageId: input.emailMessageId ?? null,
       calendarEventId: input.calendarEventId ?? null,
       workItemId: input.workItemId ?? null,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
     },
   });
   return activityToApi(row);

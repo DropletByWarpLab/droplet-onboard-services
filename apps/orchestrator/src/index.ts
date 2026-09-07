@@ -48,6 +48,17 @@ import {
   AGENT_RUN_SCHEDULE_LOCK_KEY,
   tickAgentRunSchedules,
 } from "./services/agent-run-schedule-ticker.service.js";
+// WARP-2749 (ADR-051) — the brain passes.
+import {
+  runDetectorPass,
+  seedBrainPasses,
+  BRAIN_PASS_LOCK_KEY,
+} from "./services/brain/brain-pass.service.js";
+import {
+  runCorpusPass,
+  BRAIN_CORPUS_LOCK_KEY,
+} from "./services/brain/brain-corpus.service.js";
+import { notifyFindings } from "./services/brain/brain-notify.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -115,6 +126,10 @@ import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { runFilingTick } from "./services/filing/worker.js";
+import { runFilingReconcile } from "./services/filing/reconcile.js";
+import { runFilingMaintenance } from "./services/filing/maintenance.js";
+import { runFilingDigest } from "./services/filing/digest.js";
 import {
   purgeNetworkThroughputSamples,
   purgeDnsBlockSamples,
@@ -631,6 +646,65 @@ async function main() {
     },
     { lockKey: AGENT_RUN_SCHEDULE_LOCK_KEY },
   );
+
+  // WARP-2749 (ADR-051) — the brain passes. Same clock, own lock keys, no
+  // second scheduler. Seeding happens HERE at boot rather than in
+  // `prisma/seed.ts`, which is invoked nowhere in scripts/ or docker/ on a
+  // shipped box — the reason the daily-report ToolSpec does not exist in
+  // production and its /reports button 404s.
+  if (config.brain.enabled) {
+    await seedBrainPasses(prisma);
+
+    // Deterministic pass: no model call, so it never contends for the box's
+    // single inference slot.
+    cronRuntime.scheduleInterval(
+      config.brain.detectorTickMs,
+      async () => {
+        const outcome = await runDetectorPass(prisma);
+        if (outcome.errors.length > 0) {
+          logger.warn({ outcome }, "brain.detector_pass.partial");
+        }
+        // Delivery runs INSIDE the same lock as the pass that produced the
+        // findings. Two instances notifying concurrently would double-announce
+        // the window between one stamping `notifiedAt` and the other reading it.
+        const notified = await notifyFindings(prisma);
+        if (notified.immediate > 0 || notified.digestSent) {
+          logger.info({ notified }, "brain.findings.notified");
+        }
+      },
+      { lockKey: BRAIN_PASS_LOCK_KEY },
+    );
+
+    // Corpus pass: DOES call the model, and therefore competes with
+    // interactive chat for the only inference slot. Bounded units per tick.
+    cronRuntime.scheduleInterval(
+      config.brain.corpusTickMs,
+      async () => {
+        // Same resolution the agent-run routes use. No model configured =
+        // nothing to call, so the pass is skipped rather than scheduled to
+        // fail hourly and fill `lastError` with noise.
+        const brainModel = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+        if (!brainModel) return;
+        const outcome = await runCorpusPass(
+          { prisma, chat: aiGateway.chat, model: brainModel },
+          { limit: config.brain.corpusUnitsPerRun },
+        );
+        if (outcome.errors.length > 0) {
+          logger.warn({ outcome }, "brain.corpus_pass.partial");
+        }
+      },
+      { lockKey: BRAIN_CORPUS_LOCK_KEY },
+    );
+
+    logger.info(
+      {
+        detectorTickMs: config.brain.detectorTickMs,
+        corpusTickMs: config.brain.corpusTickMs,
+        corpusUnitsPerRun: config.brain.corpusUnitsPerRun,
+      },
+      "brain.passes.scheduled",
+    );
+  }
   logger.info(
     {
       workerId: agentRunWorker.workerId,
@@ -1182,6 +1256,82 @@ async function main() {
       }
     },
     { lockKey: "droplet:activity-notify" },
+  );
+
+  // WARP-2730 (ADR-048) — auto-filing. Two registrations, split on purpose.
+  //
+  // 🔴 THE TICK CARRIES NO `lockKey`, AND THAT IS THE POINT. `lockKey` wraps
+  // its handler in `prisma.$transaction(…, { timeout: 60_000 })` holding
+  // `pg_try_advisory_xact_lock` for the handler's whole duration. Right for the
+  // 23 short DB sweeps that use it; wrong for this one, because a CPU-inference
+  // extraction can legitimately outlive 60 s (`completeOnce` allows 120 s per
+  // call for exactly that reason) and a handler that outlives its transaction
+  // has every write rolled back while the model keeps running.
+  //
+  // The exclusion is the durable CLAIM instead — `FOR UPDATE SKIP LOCKED` plus
+  // a guarded `updateMany` — which is strictly stronger here: it is atomic
+  // across replicas like the advisory lock, and unlike the advisory lock it
+  // SURVIVES A RESTART. A process killed mid-extraction leaves a `running` row
+  // that the reconcile below re-arms; a vanished advisory lock would leave that
+  // row stuck forever with nothing anywhere saying so. `safeRun` still
+  // supervises the handler, so the failure counter and canary are unchanged.
+  //
+  // 20 s: the DoD is "within ~90 s of the upload", and the file-indexer's own
+  // watcher debounce plus embedding already spends most of that budget.
+  cronRuntime.scheduleInterval(20_000, async () => {
+    const result = await runFilingTick(prisma);
+    if (result.status === "processed" || result.status === "blocked") {
+      logger.info(result, "filing tick");
+    }
+  });
+
+  // The stale-claim sweep. Pure DB work that finishes in milliseconds, so this
+  // one DOES carry a `lockKey` — the house pattern, and the direct analogue of
+  // the shipped `droplet:email-stale-sending-reconcile`.
+  cronRuntime.scheduleInterval(
+    5 * 60_000,
+    async () => {
+      const result = await runFilingReconcile(prisma);
+      if (result.reArmed > 0 || result.givenUp > 0 || result.retried > 0) {
+        logger.info(result, "filing stale-claim reconcile");
+      }
+    },
+    { lockKey: "droplet:filing-stale-claim-reconcile" },
+  );
+
+  // WARP-2731 — the daily forgetting arm. Expires proposals whose source file
+  // was deleted in Nextcloud (there is no FK to do it: `IngestProposal
+  // .ncFileId` is a plain Int by design), lapses ones nobody decided, and
+  // nulls the quotes on applied ones past their retention window.
+  //
+  // 🔴 Without this a proposal outlives its source forever, holding names,
+  // amounts and verbatim quotes for a document the owner deleted months ago.
+  // 03:40 rather than on the hour: nothing else on the box runs there, and a
+  // sweep that contends with the nightly backup is a sweep that gets blamed
+  // for it.
+  cronRuntime.scheduleCron(
+    "40 3 * * *",
+    async () => {
+      const result = await runFilingMaintenance(prisma);
+      if (result.orphaned > 0 || result.lapsed > 0 || result.evidenceForgotten > 0) {
+        logger.info(result, "filing maintenance");
+      }
+    },
+    { lockKey: "droplet:filing-maintenance" },
+  );
+
+  // The morning digest. Hourly rather than at a fixed time, because the hour
+  // is the OWNER's setting and a cron spec cannot read the database — the
+  // handler checks whether this is their hour and whether anything is waiting,
+  // and is idempotent within the day by reading NotificationLog rather than by
+  // holding state a restart would lose.
+  cronRuntime.scheduleCron(
+    "5 * * * *",
+    async () => {
+      const result = await runFilingDigest(prisma);
+      if (result.sent) logger.info(result, "filing digest");
+    },
+    { lockKey: "droplet:filing-digest" },
   );
 
   // WARP-475's nightly camera-retention purge used to fire here at 03:30.

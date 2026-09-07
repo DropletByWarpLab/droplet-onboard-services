@@ -28,14 +28,21 @@ function res(ok: boolean, status: number, body: unknown) {
 
 function wireDoc(over: Record<string, unknown> = {}) {
   return {
+    id: "doc-1",
     externalId: "INV-1001",
-    kind: "RECEIVABLE",
+    // WARP-2739 — `kind` is what it IS and `direction` is which way the money
+    // runs. The handler reads `direction`; deriving it from the kind in two
+    // places is how one of them ends up calling a credit note payable.
+    kind: "INVOICE",
+    direction: "RECEIVABLE",
+    origin: "LANDED",
     counterparty: { name: "Example Roofing", externalId: "cust-7" },
     dueAt: "2026-09-30T00:00:00.000Z",
     amount: "4210.55",
     balance: "1200.00",
     currency: null,
-    status: "Open",
+    vendorStatus: "Open",
+    status: null,
     isOverdue: false,
     externalSystem: "quickbooks-online",
     lastReadAt: "2026-09-01T11:00:00.000Z",
@@ -136,5 +143,55 @@ describe("failures", () => {
   it("lets a programming mistake bubble instead of flattening it into a tool failure", async () => {
     get.mockRejectedValue(new TypeError("undefined is not a function"));
     await expect(moneyListOpenDocuments.handler({}, ctx)).rejects.toThrow(TypeError);
+  });
+});
+
+/**
+ * WARP-2739 — a document this box wrote has no vendor number and no vendor.
+ *
+ * The model is asked follow-up questions about a specific row, so neither the
+ * name nor the source may come back blank: "" is not something anybody can
+ * refer to, and an empty source reads as a failed read rather than as a local
+ * document.
+ */
+describe("a document the box wrote itself", () => {
+  it("names it by its own id and sources it here, not at a vendor", async () => {
+    get.mockResolvedValue(
+      res(true, 200, {
+        documents: [
+          wireDoc({
+            id: "local-9",
+            externalId: null,
+            externalSystem: null,
+            origin: "LOCAL",
+            vendorStatus: null,
+            status: "SENT",
+          }),
+        ],
+      }),
+    );
+    const out = (await moneyListOpenDocuments.handler({}, ctx)) as {
+      data: { documents: { document: string; source: string; status: string }[] };
+    };
+    expect(out.data.documents[0].document).toBe("local-9");
+    expect(out.data.documents[0].source).toBe("this Droplet");
+    // The box's own lifecycle, not the vendor's empty word.
+    expect(out.data.documents[0].status).toBe("SENT");
+  });
+
+  it("reads the direction the server sent rather than re-deriving it", async () => {
+    // A credit note is RECEIVABLE and negative. A handler deriving direction
+    // from the kind would have to know that, and would be the copy nobody
+    // updates when a seventh kind arrives.
+    get.mockResolvedValue(
+      res(true, 200, {
+        documents: [wireDoc({ kind: "CREDIT_NOTE", direction: "RECEIVABLE" })],
+      }),
+    );
+    const out = (await moneyListOpenDocuments.handler({}, ctx)) as {
+      data: { documents: { direction: string; kind: string }[] };
+    };
+    expect(out.data.documents[0].direction).toBe("owed_to_us");
+    expect(out.data.documents[0].kind).toBe("CREDIT_NOTE");
   });
 });
