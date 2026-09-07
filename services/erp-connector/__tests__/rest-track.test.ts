@@ -760,6 +760,125 @@ describe("RestProfileConnector", () => {
     expect(calls[1]!.url).toContain("Offset=2");
   });
 
+  it("🔴 walks the PAGE-NUMBER arm on the vendor's has-more boolean, not on a short page", async () => {
+    // Untested until now, and it is not interchangeable with `limit-offset`:
+    // this arm stops on a BOOLEAN in the body. Zoho returns a full page with
+    // `more_records: false` on the last page and a short page with
+    // `more_records: true` when a filter removes rows, so "stop on a short
+    // page" is wrong in both directions here.
+    // Mutation: make the arm stop on `chunk.length < pageSize` -> red, because
+    // page 1 below is short AND has more.
+    const { impl, calls } = stubFetch([
+      { body: { data: [{ id: "a" }], info: { more_records: true } } },
+      { body: { data: [{ id: "b" }, { id: "c" }], info: { more_records: false } } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile({
+        datasets: [
+          {
+            dataset: "company",
+            path: "/v1/companies",
+            watermark: null,
+            pagination: { kind: "page-number", pageParam: "page", hasMorePath: "info.more_records", pageSize: 200 },
+            rowsPath: "data",
+            fieldMap: { company_id: "id" },
+          },
+        ],
+      }),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const rows = await c.runRead("get_company", {});
+    expect(rows).toHaveLength(3);
+    // The FIRST page carries page=1 explicitly rather than relying on a vendor
+    // default, and the second increments it.
+    expect(calls.map((call) => new URL(call.url).searchParams.get("page"))).toEqual(["1", "2"]);
+    // A missing `more_records` is NOT "keep going": anything but `true` stops.
+    expect(calls).toHaveLength(2);
+  });
+
+  it("🔴 follows the page-number → CURSOR switch past the row ceiling (Zoho's shape)", async () => {
+    // The reason this arm carries `switchesToCursorAfter` at all: Zoho pages by
+    // number up to 2,000 rows and then REFUSES `page`, requiring `page_token`.
+    // A connector that kept incrementing `page` would get an error at row
+    // 2,001 on exactly the accounts big enough to matter, and never on a
+    // developer's test org.
+    // Mutation: drop the switch branch -> the third call carries `page=3`
+    // instead of the token -> red.
+    const { impl, calls } = stubFetch([
+      { body: { data: [{ id: "a" }, { id: "b" }], info: { more_records: true } } },
+      { body: { data: [{ id: "c" }], info: { more_records: true, next_page_token: "TOK1" } } },
+      { body: { data: [{ id: "d" }], info: { more_records: true, next_page_token: "" } } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile({
+        datasets: [
+          {
+            dataset: "company",
+            path: "/v1/companies",
+            watermark: null,
+            pagination: {
+              kind: "page-number",
+              pageParam: "page",
+              hasMorePath: "info.more_records",
+              pageSize: 2,
+              switchesToCursorAfter: { rows: 3, nextCursorPath: "info.next_page_token", cursorParam: "page_token" },
+            },
+            rowsPath: "data",
+            fieldMap: { company_id: "id" },
+          },
+        ],
+      }),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const rows = await c.runRead("get_company", {});
+    expect(rows).toHaveLength(4);
+
+    const params = calls.map((call) => new URL(call.url).searchParams);
+    expect(params[0]!.get("page")).toBe("1");
+    expect(params[1]!.get("page")).toBe("2");
+    // Past the ceiling: `page` is REMOVED and the token takes over. Leaving
+    // `page` on alongside the token is the mistake this asserts against.
+    expect(params[2]!.get("page")).toBeNull();
+    expect(params[2]!.get("page_token")).toBe("TOK1");
+    // An empty token ends the walk even though `more_records` is still true —
+    // the cursor is authoritative once the switch has happened.
+    expect(calls).toHaveLength(3);
+  });
+
+  it("🔴 refuses the RELAY arm rather than serving a profile the track cannot page", async () => {
+    // Declared in the union for honesty about what ADR-046 §2 surveyed;
+    // GraphQL is OUT of v1 per §4. Reaching this arm means a profile shipped
+    // that this track cannot serve, and the honest answer is a contract error
+    // naming the ADR — not an empty first page reported as a complete read,
+    // which is what returning "" here would produce.
+    // Mutation: `return ""` in the relay arm -> the read "succeeds" with one
+    // page and this goes red.
+    const { impl, calls } = stubFetch([{ body: { data: [{ id: "a" }] } }]);
+    const c = new RestProfileConnector(
+      staticProfile({
+        datasets: [
+          {
+            dataset: "company",
+            path: "/v1/companies",
+            watermark: null,
+            pagination: { kind: "relay-pageinfo", pageInfoPath: "data.pageInfo" },
+            rowsPath: "data",
+            fieldMap: { company_id: "id" },
+          },
+        ],
+      }),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(RestPaginationContractError);
+    await expect(c.runRead("get_company", {})).rejects.toThrow(/ADR-046 §4/);
+    // The first page still went out — the arm is reached only after a response
+    // — so this is one call per attempt and never a walk.
+    expect(calls).toHaveLength(2);
+  });
+
   it("🔴 reports a non-terminating pagination rather than truncating silently", async () => {
     // A vendor whose cursor never clears would otherwise spin against the
     // customer's rate ceiling forever, or return a partial read that looks
@@ -1089,6 +1208,165 @@ describe("RestProfileConnector", () => {
       datasets: [{ ...base.datasets[0]!, dataset: "contact", fieldMap: { contact_id: "id" } }],
     }).introspect();
     expect(movedDataset.fingerprint).not.toBe(a.fingerprint);
+  });
+});
+
+// ── the follow-URL guard, END TO END ────────────────────────────────────────
+
+/**
+ * `assertSafeFollowUrl` had unit coverage and no end-to-end coverage: nothing
+ * proved the CONNECTOR calls it on a URL the vendor supplied. That gap is the
+ * one that matters, because the guard is only enforcement if it sits on the
+ * path a real page-walk takes.
+ *
+ * ⚠ These tests drive the `link-header` PAGINATION ARM through the connector.
+ * They do not touch `nextLinkFrom` or its unit tests — that parser and its
+ * suite are somebody else's ReDoS fix and are left exactly as they are. What
+ * is asserted here is what `RestProfileConnector` does with the URL the parser
+ * returns, which is a different question and was untested.
+ *
+ * The link-header arm is also the ONLY arm that can produce a cross-host URL:
+ * `cursor`, `limit-offset` and `page-number` all build on `new URL(currentUrl)`
+ * and can only ever set a parameter. So this is where the guard earns its keep.
+ */
+describe("assertSafeFollowUrl, through the connector rather than on its own", () => {
+  function linkHeaderProfile(): RestVendorProfile {
+    return staticProfile({
+      datasets: [
+        {
+          dataset: "company",
+          path: "/v1/companies",
+          watermark: null,
+          pagination: { kind: "link-header" },
+          rowsPath: "data",
+          fieldMap: { company_id: "id" },
+        },
+      ],
+    });
+  }
+
+  it("follows a same-host next link and stops when the header stops offering one", async () => {
+    // The positive half. Without it, a guard test could pass over a connector
+    // that refused EVERY follow URL and silently truncated every read to one
+    // page — which would look identical to a vendor with one page of data.
+    const { impl, calls } = stubFetch([
+      {
+        body: { data: [{ id: "a" }] },
+        headers: { link: '<https://api.example.com/v1/companies?page=2>; rel="next"' },
+      },
+      { body: { data: [{ id: "b" }] } },
+    ]);
+    const c = new RestProfileConnector(
+      linkHeaderProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const rows = await c.runRead("get_company", {});
+    expect(rows).toHaveLength(2);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.example.com/v1/companies",
+      "https://api.example.com/v1/companies?page=2",
+    ]);
+  });
+
+  it("🔴 refuses a CROSS-HOST next link, and never dials it", async () => {
+    // A `Link` header is vendor-controlled input arriving from whichever host
+    // the customer's account points at, and a cross-host next page is the
+    // obvious way to walk a credential off the registered destination — it
+    // looks like ordinary pagination in every log.
+    //
+    // THE assertion is the call count. Page 1 goes out; the follow URL is
+    // refused BEFORE the second request, so the count stays at 1 and the
+    // credential never reaches evil.example.net.
+    // Mutation: drop the `assertSafeFollowUrl` call from `request()` -> the
+    // second call goes out and the count is 2 -> red.
+    const { impl, calls } = stubFetch([
+      {
+        body: { data: [{ id: "a" }] },
+        headers: { link: '<https://evil.example.net/v1/companies?page=2>; rel="next"' },
+      },
+      { body: { data: [{ id: "leaked" }] } },
+    ]);
+    const c = new RestProfileConnector(
+      linkHeaderProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(UnsafeBaseUrlError);
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!.url).host).toBe("api.example.com");
+  });
+
+  it("🔴 refuses a next link that only LOOKS like the registered host", async () => {
+    // The suffix-confusion shapes, driven through the real walk rather than
+    // through the guard alone. `assertSafeFollowUrl` compares whole ORIGINS, so
+    // a host that merely ends with the registered one is a different host.
+    for (const host of [
+      "api.example.com.evil.net", // registered host as a prefix of a longer name
+      "evil.net", // nothing in common
+      "api.example.com:8443", // right host, wrong port
+      "sub.api.example.com", // a subdomain is not the host
+    ]) {
+      const { impl, calls } = stubFetch([
+        {
+          body: { data: [{ id: "a" }] },
+          headers: { link: `<https://${host}/v1/companies?page=2>; rel="next"` },
+        },
+        { body: { data: [{ id: "leaked" }] } },
+      ]);
+      const c = new RestProfileConnector(
+        linkHeaderProfile(),
+        { provider: "test-vendor" },
+        { fetchImpl: impl, resolveCredentials: creds },
+      );
+      await expect(c.runRead("get_company", {}), host).rejects.toThrow(UnsafeBaseUrlError);
+      expect(calls, host).toHaveLength(1);
+    }
+  });
+
+  it("🔴 refuses a next link that downgrades to http, and one carrying userinfo", async () => {
+    // Both are `assertCommonUrlSafety` checks, and both are reachable from a
+    // vendor-supplied URL: plaintext would put the credential on the wire, and
+    // userinfo leaks it into every log that records the URL.
+    for (const raw of ["http://api.example.com/v1/companies?page=2", "https://x:y@api.example.com/v1/x"]) {
+      const { impl, calls } = stubFetch([
+        { body: { data: [{ id: "a" }] }, headers: { link: `<${raw}>; rel="next"` } },
+        { body: { data: [{ id: "leaked" }] } },
+      ]);
+      const c = new RestProfileConnector(
+        linkHeaderProfile(),
+        { provider: "test-vendor" },
+        { fetchImpl: impl, resolveCredentials: creds },
+      );
+      await expect(c.runRead("get_company", {}), raw).rejects.toThrow(UnsafeBaseUrlError);
+      expect(calls, raw).toHaveLength(1);
+    }
+  });
+
+  it("🔴 re-guards the ORIGIN on every request, not only at construction", async () => {
+    // `request()` re-runs `assertSafeRestBaseUrl` per call against the SAME raw
+    // customer value the constructor saw, rather than re-deriving it from the
+    // guard's own output — which could only ever agree with itself. This drives
+    // the second page of a real walk through it.
+    // Mutation: hoist the origin resolution out of `request()` and into the
+    // constructor only -> this still passes, so the assertion below is on the
+    // per-request TARGET instead: every URL dialled is on the resolved origin.
+    const { impl, calls } = stubFetch([
+      {
+        body: { data: [{ id: "a" }] },
+        headers: { link: '<https://api.example.com/v1/companies?page=2&cursor=x>; rel="next"' },
+      },
+      { body: { data: [] } },
+    ]);
+    const c = new RestProfileConnector(
+      linkHeaderProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await c.runRead("get_company", {});
+    for (const call of calls) {
+      expect(new URL(call.url).origin, call.url).toBe("https://api.example.com");
+    }
   });
 });
 
