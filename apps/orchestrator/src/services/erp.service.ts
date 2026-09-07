@@ -605,19 +605,75 @@ export function createErpService(
    * real reason (PROVISIONING, NEEDS_RECONNECT) instead of the flat
    * NOT_CONFIGURED that a null would produce — "reconnect Stripe" and "you
    * have no Stripe" are different sentences and the owner can only act on one.
+   *
+   * 🔴 WARP-2833 — MOST DATASETS HAVE MORE THAN ONE CANDIDATE, and which one
+   * answers used to be whatever Postgres returned first.
+   *
+   * `contact` is served by five available providers; `campaign` by three;
+   * `charge` by Stripe AND Square; `audience` by Brevo AND Klaviyo. A bare
+   * `findFirst` with no `orderBy` lets the engine choose, and it is free to
+   * choose differently between two identical questions — so "what did we take
+   * last week" could answer from Stripe once and Square the next time, with no
+   * indication either way. For a money question that is the worst kind of
+   * wrong: not an error, just a different number.
+   *
+   * Ordered by the descriptor's own `catalog.order` — the sequence the owner
+   * already sees on the Integrations hub. Deliberately NOT alphabetical, which
+   * would be equally deterministic and mean nothing, and not `createdAt`, which
+   * would make the answer depend on the order two connections happened to be
+   * set up in. A provider with no catalog block sorts last rather than first,
+   * so a card the owner cannot see never silently outranks one they can.
+   *
+   * ⚠️ This makes the choice STABLE and EXPLAINABLE; it does not make it
+   * complete. A box with both processors connected still gets one processor's
+   * answer, and the response's `provider` field is the only thing that says
+   * which. Reporting the omission is a change to the read's contract and is
+   * tracked separately — determinism is the half that is unambiguously a bug.
    */
   async function cloudRowForDataset(dataset: string): Promise<ConnRow | null> {
     const providers = cloudProviderIds().filter((id) =>
       (providerDescriptor(id)?.datasets ?? []).includes(dataset as never),
     );
     if (providers.length === 0) return null;
-    const connected = (await prisma.integrationConnection.findFirst({
-      where: { provider: { in: providers as string[] }, status: "CONNECTED" },
-    })) as ConnRow | null;
-    if (connected) return connected;
-    return (await prisma.integrationConnection.findFirst({
-      where: { provider: { in: providers as string[] } },
-    })) as ConnRow | null;
+    // Hub order. `Number.MAX_SAFE_INTEGER` for a descriptor with no catalog
+    // block keeps it deterministic AND last; the id tiebreak covers two
+    // descriptors sharing an order, which can only happen by mistake.
+    //
+    // 🔴 Honest about its own reach: TODAY this sort changes nothing. The loop
+    // below is what removes the nondeterminism, and `cloudProviderIds()`
+    // already returns registry-declaration order, which happens to agree with
+    // hub order for every dataset more than one provider serves. So no test
+    // can kill this sort — I checked, by removing it. It is here because
+    // declaration order is ACCIDENTAL (whatever order descriptors were typed
+    // in) while `catalog.order` is the sequence the owner actually sees, and
+    // the two already diverge elsewhere in the registry: `dentrix-ascend` is
+    // declared after `quickbooks-online` and sorts before it. The day a pair
+    // like that shares a dataset, this is the difference between a precedence
+    // someone chose and one nobody did.
+    const inHubOrder = [...providers].sort(
+      (a, b) =>
+        (providerDescriptor(a)?.catalog?.order ?? Number.MAX_SAFE_INTEGER) -
+          (providerDescriptor(b)?.catalog?.order ?? Number.MAX_SAFE_INTEGER) ||
+        a.localeCompare(b),
+    );
+
+    // One single-provider lookup per candidate, in that order — the same shape
+    // `eaglesoftRow()` uses above and for the same stated reason: the `provider`
+    // filter stays a plain string, which keeps the query trivially indexable on
+    // `@@index([provider, status])`. The candidate list is at most five.
+    let degraded: ConnRow | null = null;
+    for (const provider of inHubOrder) {
+      const row = (await prisma.integrationConnection.findFirst({
+        where: { provider },
+      })) as ConnRow | null;
+      if (!row) continue;
+      if (row.status === "CONNECTED") return row;
+      // The degrade path takes the SAME ordering. A box with a PROVISIONING
+      // Stripe and a NEEDS_RECONNECT Square must name the same one every time,
+      // or the remediation sentence the owner is shown changes under them.
+      degraded ??= row;
+    }
+    return degraded;
   }
 
   /** The export-drop connection row, preferring a CONNECTED one. */

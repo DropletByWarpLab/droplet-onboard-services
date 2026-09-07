@@ -428,6 +428,79 @@ describe("WARP-2497 — 'what did we bill last week', end to end", () => {
     ]);
   });
 
+  it("🔴 WARP-2833 — with TWO providers serving one dataset, the same one answers every time", async () => {
+    // `charge` is served by Stripe AND Square; `audience` by Brevo AND Klaviyo;
+    // `contact` by five. The resolver used to be a bare `findFirst` over
+    // `provider: { in: [...] }` with no ordering, so Postgres chose — and is
+    // free to choose differently between two identical questions. For "what did
+    // we take last week" that is the worst kind of wrong: not an error, just a
+    // different number, with nothing to indicate the other processor exists.
+    //
+    // Resolved in the descriptor's `catalog.order` — the order the owner already
+    // sees on the hub. Stripe is 4, Square is 12, so Stripe answers `charge`.
+    // The point of the assertion is the STABILITY, not which one wins, so it
+    // runs the same question repeatedly against a store that returns rows in a
+    // different order each time — which is exactly what an unordered query is
+    // permitted to do and what a single call could never catch.
+    //
+    // Mutation: drop the `inHubOrder` sort in `cloudRowForDataset` → the
+    // provider follows the store's rotation and this goes red.
+    const rows: Record<string, unknown>[] = [
+      { id: "conn-square-2", provider: SQUARE_PROVIDER, status: "CONNECTED" },
+      { id: "conn-stripe-2", provider: STRIPE_PROVIDER, status: "CONNECTED" },
+    ].map((r) => ({
+      ...r,
+      host: null,
+      port: null,
+      databaseName: null,
+      secretRef: "secret://x/y",
+      writeEnabled: false,
+      providerConfig: null,
+      providerTokensEnc: null,
+    }));
+
+    let rotation = 0;
+    const prisma = {
+      integrationConnection: {
+        // A store that answers a single-provider lookup honestly, but hands
+        // back the CANDIDATE SET in a rotating order — the freedom an
+        // unordered `IN` query has and the resolver must not depend on.
+        // Honours BOTH `where.provider: "id"` and `where.provider: { in: [...] }`,
+        // deliberately: a double that only understood the shape the fixed code
+        // sends would "kill" the old implementation by returning null, which
+        // proves nothing about ordering. Answering the `in:` form the way
+        // Postgres may — first row of an unspecified order — is what makes the
+        // mutation below fail for the RIGHT reason: a flapping provider.
+        findFirst: vi.fn(async (args: { where?: { provider?: unknown } }) => {
+          const wanted = args?.where?.provider;
+          const ordered = rotation % 2 === 0 ? rows : [...rows].reverse();
+          if (wanted && typeof wanted === "object" && "in" in wanted) {
+            const set = (wanted as { in: string[] }).in;
+            return ordered.find((r) => set.includes(r.provider as string)) ?? null;
+          }
+          return ordered.find((r) => r.provider === wanted) ?? null;
+        }),
+      },
+      erpAuditLog: { create: vi.fn(async ({ data }: { data: unknown }) => data) },
+    };
+    const svc = createErpService(prisma as never, {
+      connectorFor: () =>
+        new StripeConnector(
+          { credentialsSecretRef: "secret://x/y" },
+          { fetchImpl: stubFetch().impl, resolveApiKey: async () => KEY },
+        ),
+    });
+
+    const answered: (string | null)[] = [];
+    for (rotation = 0; rotation < 6; rotation += 1) {
+      const res = await svc.queryDataset({ dataset: "charge", params: {} }, OWNER);
+      answered.push(res.provider);
+    }
+
+    expect(new Set(answered).size, `provider flapped across calls: ${answered.join(", ")}`).toBe(1);
+    expect(answered[0]).toBe(STRIPE_PROVIDER);
+  });
+
   it("refuses a non-admin caller before any connection is resolved", async () => {
     // Business records are admin-tier. Mutation: widen
     // CLOUD_DATASET_READ_ROLES to include "family" → red.
