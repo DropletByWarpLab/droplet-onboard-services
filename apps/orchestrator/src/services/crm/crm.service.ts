@@ -119,7 +119,7 @@ export interface ApiCrmCompany {
   country: string | null;
   note: string | null;
   ownerId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   /** Present on list and detail — the two numbers a customer row is read for. */
@@ -145,7 +145,7 @@ export interface ApiCrmDeal {
   closeReason: string | null;
   ownerId: string | null;
   projectId: string | null;
-  origin: "LOCAL" | "EXTERNAL";
+  origin: "LOCAL" | "EXTERNAL" | "EXTRACTED";
   externalSystem: string | null;
   archived: boolean;
   contactIds: string[];
@@ -186,6 +186,20 @@ export interface ApiCrmActivity {
  *                         `{ amountMinor: "0", currency: null }`.
  */
 export type CrmStageValuation = "priced" | "mixed_currencies" | "unpriced";
+
+/**
+ * WARP-2750 — a board, named just enough to ask for it.
+ *
+ * Deliberately not the full `ApiCrmPipeline`: this appears in `omitted`, whose
+ * whole job is to say "there is another board and this answer does not speak
+ * for it". Shipping its stages there would make the omission look like a
+ * second summary and re-create the confusion in a new shape.
+ */
+export interface CrmPipelineRef {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
 
 export interface ApiCrmStageSummary {
   stageId: string;
@@ -631,10 +645,42 @@ export async function getCompany(prisma: PrismaClient, id: string): Promise<ApiC
   return companyToApi(prisma, row, counts.get(id) ?? 0);
 }
 
+/**
+ * ADR-048 (WARP-2730) — provenance for a row Droplet filed by itself.
+ *
+ * Passed ONLY by the filing apply path. Both halves move together on purpose:
+ * `origin: "EXTRACTED"` is what the "Created by Droplet" chip reads (never
+ * `createdById IS NULL` — state is not derived from a NULL), and `proposalId`
+ * is the back-pointer that makes the row answer "which document filed you?"
+ * without a join through `IngestProposal`.
+ */
+export interface FilingProvenance {
+  proposalId: string;
+  /**
+   * WARP-2735 — the idempotency key for a box-written timeline row.
+   *
+   * `CrmActivity` is `@@unique([externalSystem, externalId])` and, unlike the
+   * other CRM tables, carries no `connectionId` — so that pair is the ONLY
+   * idempotency key available on it. The email arm sets it to the
+   * `EmailMessage.id`, so re-running the same message writes nothing new
+   * rather than a second identical caption.
+   *
+   * Optional because the file arm has nothing to key on: two documents can
+   * legitimately produce two identical captions, and inventing a key for them
+   * would suppress the second.
+   */
+  externalId?: string;
+}
+
+/** Written into `CrmActivity.externalSystem` on every filed row. A constant,
+ *  so the idempotency key cannot collide with a connector's namespace. */
+export const FILING_EXTERNAL_SYSTEM = "filing";
+
 export async function createCompany(
   prisma: PrismaClient,
   input: CompanyInput & { name: string },
   actorId: string | null,
+  filing?: FilingProvenance,
 ): Promise<ApiCrmCompany> {
   const row = await prisma.crmCompany.create({
     data: {
@@ -651,14 +697,31 @@ export async function createCompany(
       country: input.country ?? null,
       note: input.note ?? null,
       ownerId: input.ownerId ?? null,
+      // Never null for a filed row: `createdById` is the OWNER who enabled
+      // filing, a real `User.id`, because "who is accountable for this row"
+      // must have an answer even when nobody typed it.
       createdById: actorId,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
+      proposalId: filing?.proposalId ?? null,
       activities: {
         create: {
           subjectType: "COMPANY",
           kind: "CREATED",
+          // 🔴 NO FILENAME HERE, EVER. Filenames are PHI (WARP-1983) and a
+          // CrmActivity summary is rendered on the customer timeline for every
+          // reader of the CRM. The document's identity lives on the
+          // `EntityLink` row, which is access-checked; this line is not.
           summary: `Customer created: ${input.name}`,
           actorId,
+          // 🔴 A BOX-WRITTEN ROW IS NOT A HUMAN NOTE. `CrmActivity.origin`
+          // defaults to LOCAL, and two things downstream read LOCAL as "a
+          // person typed this": `landed-purge.ts`'s survival test
+          // (`where: { origin: "LOCAL", [subject]: id }`) and ADR-048's undo
+          // predicate, which deletes a filed record that carries only its own
+          // CREATED row and ARCHIVES one a human has since annotated. Left at
+          // the default, every filed customer would look annotated from the
+          // moment it was created, and undo could never clean one up.
+          origin: filing ? "EXTRACTED" : "LOCAL",
         },
       },
     },
@@ -1058,6 +1121,34 @@ export async function listDeals(
     // this arm to deals that actually HAVE a timeline; the empty case is arm
     // one's business and is judged on age, which is the whole point of the
     // split.
+    //
+    // ── WARP-2750: the backfill decision, and why it is "do nothing" ─────────
+    //
+    // Existing synced deals have no timeline, and the ticket asked for one of
+    // two remedies: write a synthetic "landed" activity at each deal's
+    // `createdAt`, or add a provenance carve-out so a connector deal with no
+    // activity reads as UNKNOWN rather than idle. Neither is here, on purpose.
+    //
+    // 🔴 THE BACKFILL IS ARITHMETICALLY A NO-OP. Insert one activity at
+    // `occurredAt = createdAt` and the deal simply moves from arm one to arm
+    // two: arm one stops matching (`none` is false), arm two starts matching
+    // iff `createdAt < cutoff` — the SAME column against the SAME cutoff. The
+    // result set does not change by a single row. It would buy nothing and
+    // cost one permanent machine-written entry on every synced customer's
+    // timeline, forever.
+    //
+    // The carve-out was rejected for a different reason: this endpoint returns
+    // a flat list, so "unknown" has nowhere to live on the wire and collapses
+    // to "excluded" at every consumer. A vendor-abandoned HubSpot deal is the
+    // coldest thing in the book, and it would silently never appear in a chase
+    // list again. On a chase list a false positive costs a glance; a false
+    // negative costs the deal.
+    //
+    // What actually fixes it is the forward writer in `erp-sync/land.ts`:
+    // deals get real timeline rows from now on, and existing ones age in on
+    // `createdAt`, which for a landed row IS the moment it landed. Provenance
+    // is now visible on every deal a tool returns (`synced_from`), so "why is
+    // this one idle" has an answer the model can read.
     where.OR = [
       { activities: { none: {} }, createdAt: { lt: cutoff } },
       { activities: { some: {}, every: { occurredAt: { lt: cutoff } } } },
@@ -1412,6 +1503,20 @@ export async function logActivity(
   prisma: PrismaClient,
   input: ActivityInput,
   actorId: string | null,
+  /**
+   * ADR-048 (WARP-2731) — the box wrote this row, not a person.
+   *
+   * 🔴 `origin` is not decoration on this table. Two things read `LOCAL` as
+   * "a human typed this": `landed-purge.ts`'s survival test
+   * (`where: { origin: "LOCAL", [subject]: id }`, which decides whether a
+   * record is archived rather than deleted) and ADR-048's undo, which deletes
+   * a filed record carrying only machine rows and ARCHIVES one a person has
+   * since annotated. A box-written caption left at the default makes both lie.
+   *
+   * Passed only by the filing apply path. Every human caller omits it and
+   * keeps `LOCAL`.
+   */
+  filing?: FilingProvenance,
 ): Promise<ApiCrmActivity> {
   const subjectId =
     input.subjectType === "COMPANY"
@@ -1475,7 +1580,26 @@ export async function logActivity(
       emailMessageId: input.emailMessageId ?? null,
       calendarEventId: input.calendarEventId ?? null,
       workItemId: input.workItemId ?? null,
-      origin: "LOCAL",
+      origin: filing ? "EXTRACTED" : "LOCAL",
+      // WARP-2735 — the idempotency key, when the caller has one. See
+      // `FilingProvenance.externalId`: this pair is the only unique key
+      // `CrmActivity` offers, and re-running one email must not append a
+      // second identical caption to a customer's timeline.
+      ...(filing?.externalId
+        ? { externalSystem: FILING_EXTERNAL_SYSTEM, externalId: filing.externalId }
+        : {}),
+      // 🔴 WARP-2735 — a filed row never enters the notification queue.
+      //
+      // `activity-notify.service.ts` takes `notifyStatus: "pending"` FIFO,
+      // 500 rows per 60 s, with NO kind filter, and marks everything that is
+      // not a WON/LOST stage change `not_needed` on arrival. Every row here
+      // would take the schema default `pending` and be swept for nothing — so
+      // a morning's mail would sit ahead of a real deal notification in a
+      // shared budget and delay it.
+      //
+      // Saying `not_needed` up front costs nothing and is simply true: nobody
+      // is notified because Droplet filed an email.
+      ...(filing ? { notifyStatus: "not_needed" as const } : {}),
     },
   });
   return activityToApi(row);
@@ -1521,10 +1645,41 @@ export async function listActivities(
 export async function getPipelineSummary(
   prisma: PrismaClient,
   pipelineId?: string,
-): Promise<{ pipelineId: string; stages: ApiCrmStageSummary[] }> {
+): Promise<{
+  pipelineId: string;
+  stages: ApiCrmStageSummary[];
+  covered: CrmPipelineRef[];
+  omitted: CrmPipelineRef[];
+}> {
   const pipeline = pipelineId
     ? await getPipeline(prisma, pipelineId)
     : await ensureDefaultPipeline(prisma);
+
+  // WARP-2750 — WHICH BOARDS THIS ANSWER ACTUALLY COVERS.
+  //
+  // 🔴 The bug was never that this could not name a pipeline; it can, and
+  // `business_find(entity:"pipeline", id:…)` has always passed one through as
+  // `?pipeline=<id>`. The bug was SILENCE. With no id this resolves the single
+  // `isDefault: true` board, and every connector pipeline is created
+  // `isDefault: false` (erp-sync/land.ts — "a deal a human creates must not
+  // land on a board whose stages a vendor renames"). So a business whose
+  // pipeline lives entirely in HubSpot got a summary of an empty local board
+  // and nothing, anywhere in the response, saying a word about the other one.
+  // "How is the quarter looking" answered from hand-typed deals only.
+  //
+  // Naming coverage rather than SUMMING ACROSS BOARDS is deliberate, and it is
+  // this function's own existing argument one level up: it already refuses to
+  // add 500 EUR to 500 USD because the total "looks authoritative and means
+  // nothing". Two vendors' stage vocabularies are the same problem —
+  // HubSpot's `appointmentscheduled` and a local `Qualified` are not one
+  // bucket, and a merged funnel would invent a shape neither board has. The
+  // model can already ask for the other board by id; what it could not do was
+  // find out the other board existed.
+  const boards = await prisma.crmPipeline.findMany({
+    where: { isArchived: false },
+    select: { id: true, name: true, isDefault: true },
+    orderBy: [{ isDefault: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
+  });
 
   const deals = await prisma.crmDeal.findMany({
     where: { pipelineId: pipeline.id, isArchived: false },
@@ -1567,6 +1722,23 @@ export async function getPipelineSummary(
 
   return {
     pipelineId: pipeline.id,
+    // 🔴 THE RESOLVED BOARD ITSELF, never `boards.filter(…)`.
+    //
+    // `boards` is active-only, and NEITHER resolver above filters on
+    // `isArchived`: `ensureDefaultPipeline` reads `{ isDefault: true }`, and
+    // `getPipeline` is a bare `findUnique`. Archiving the default board is a
+    // reachable operator action — `updatePipeline` does not stop it — and the
+    // board then keeps being resolved while being absent from this list. A
+    // filter over the list therefore came back EMPTY for the one pipeline this
+    // answer is entirely about, while `omitted` named every other board, and
+    // the pair reported the exact opposite of what happened. Deriving
+    // `covered` from the resolved pipeline makes the two impossible to invert.
+    covered: [{ id: pipeline.id, name: pipeline.name, isDefault: pipeline.isDefault }],
+    // Everything this answer does NOT speak for. Empty on a box with one
+    // board, which is the ordinary case and reads correctly as "nothing was
+    // left out" rather than as a missing field. Active boards only: an
+    // archived one is not something to be told to "ask again" for.
+    omitted: boards.filter((b) => b.id !== pipeline.id),
     stages: pipeline.stages.map((stage) => {
       const bucket = byStage.get(stage.id)!;
       // WARP-2556 — THREE states, named. This used to be two, and the missing

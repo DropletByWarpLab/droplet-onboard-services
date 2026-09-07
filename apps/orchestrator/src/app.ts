@@ -54,6 +54,7 @@ import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
+import { createCrmFilingRouter } from "./routes/crm-filing.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
@@ -117,7 +118,7 @@ import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
-import { initPushDispatch } from "./services/push-dispatch.service.js";
+import { initPushDispatch, ensurePushDispatch } from "./services/push-dispatch.service.js";
 import { outboundEmailGate } from "./services/off-lan-gate.service.js";
 import {
   seedWorkspaceSettings,
@@ -433,6 +434,15 @@ export function createApp(
   // path parameter in the first segment after `/crm`, so neither can shadow
   // the other (the mount-order hazard this file documents elsewhere).
   app.use("/api", createCrmEntityLinksRouter(prisma));
+  // WARP-2730 (ADR-048) — the filing review surface. Same `/api/crm` prefix
+  // and therefore the same `crm` module gate, for the same reason the entity
+  // links router above shares it: `/crm/filing/...` is disjoint from every
+  // path routes/crm.ts serves, so mount order cannot shadow either.
+  //
+  // Its roles are NARROWER than the rest of the CRM (owner/admin only, on
+  // reads too) — a proposal card carries verbatim quotes from a stored
+  // document. See the header of routes/crm-filing.ts.
+  app.use("/api", createCrmFilingRouter(prisma));
   // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
   app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
@@ -638,9 +648,19 @@ export function createApp(
   // alone rather than blanking it.
   startScreenQRPoller(prisma);
 
-  // Web Push — initialise VAPID + log keys at startup. Idempotent;
-  // safe to call before any subscribe/push attempt.
-  initPushDispatch();
+  // Web Push — initialise VAPID at startup.
+  //
+  // WARP-2752: this MUST be the persisting variant. The synchronous
+  // `initPushDispatch()` sets the module-level `configured = true` with an
+  // ephemeral keypair, and `ensurePushDispatch()` opens with
+  // `if (configured) return` — so calling the sync one here made the whole
+  // SystemFlag-backed persistence path unreachable, and every restart kept
+  // rotating the keypair exactly as before. Fire-and-forget with a catch: a
+  // DB hiccup must not block app construction, and `ensurePushDispatch`
+  // already falls back to the ephemeral path internally.
+  void ensurePushDispatch(prisma).catch(() => {
+    initPushDispatch();
+  });
 
   // WARP-457: workspace settings first-boot seeder. Idempotent
   // (insert-or-skip via createMany({skipDuplicates: true})); operator-

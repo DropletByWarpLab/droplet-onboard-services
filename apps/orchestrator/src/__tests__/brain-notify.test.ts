@@ -39,15 +39,34 @@ function finding(over: Record<string, unknown> = {}) {
     impactMinor: 4_000_000n,
     currency: "USD",
     firstSeenAt: NOW,
+    // Every row has one; `company` is what the three shipped detectors write.
+    scope: "company",
     ...over,
   };
 }
 
 function db(pending: unknown[], over: Record<string, unknown> = {}) {
   return {
-    user: { findFirst: vi.fn(async () => ({ id: "u-owner" })) },
+    // DISTINCT id and username, as production rows are (WARP-2813). The fake
+    // used to return `{ id }` alone, which meant it agreed with the bug: the
+    // service selected `id`, handed a UUID to a subsystem keyed on username,
+    // and every assertion here still passed. A revert to `id` now yields
+    // `undefined` and fails, instead of silently notifying nobody.
+    user: { findFirst: vi.fn(async () => ({ id: "u-owner", username: "owner" })) },
     brainFinding: {
-      findMany: vi.fn(async () => pending),
+      // HONOURS `where` (WARP-2811). A mock that returns its fixture whatever
+      // it is asked cannot fail when a filter is wrong — which is how the money
+      // detectors shipped a query naming a retired enum and stayed green
+      // (WARP-2754). Only the predicates this service actually uses.
+      findMany: vi.fn(async ({ where }: { where?: Record<string, unknown> } = {}) =>
+        pending.filter((row) => {
+          const f = row as Record<string, unknown>;
+          if (!where) return true;
+          if ("scope" in where && f.scope !== where.scope) return false;
+          if ("status" in where && f.status !== undefined && f.status !== where.status) return false;
+          return true;
+        }),
+      ),
       update: vi.fn(async () => ({})),
       updateMany: vi.fn(async () => ({ count: pending.length })),
     },
@@ -199,5 +218,68 @@ describe("notifyFindings — no owner (WARP-2752)", () => {
       (prisma as unknown as { brainFinding: { update: ReturnType<typeof vi.fn> } })
         .brainFinding.update,
     ).not.toHaveBeenCalled();
+  });
+});
+
+describe("notifyFindings — who it is addressed to (WARP-2813)", () => {
+  it("addresses the owner by USERNAME, not by id", async () => {
+    // The notifications subsystem is keyed on `User.username` end to end:
+    // `sendNotification` publishes `droplet/notifications/${userId}`, ws-bridge
+    // subscribes `droplet/notifications/${user.username}`, and both readers of
+    // the persisted NotificationLog filter by username. A UUID here is dropped
+    // by the broker AND invisible to every reader — the notification exists and
+    // reaches nobody. The fake returns distinct values so this cannot pass by
+    // coincidence.
+    await notifyFindings(db([finding()]), { now: NOW });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    const [, input] = sendNotification.mock.calls[0]!;
+    expect((input as unknown as { userId: string }).userId).toBe("owner");
+    expect((input as unknown as { userId: string }).userId).not.toBe("u-owner");
+  });
+
+  it("addresses the digest to the username too", async () => {
+    await notifyFindings(db([finding({ impactMinor: 1n })]), { now: NOW });
+    expect(sendNotification).toHaveBeenCalledOnce();
+    const [, input] = sendNotification.mock.calls[0]!;
+    expect((input as unknown as { userId: string }).userId).toBe("owner");
+  });
+});
+
+describe("notifyFindings — scope (WARP-2811)", () => {
+  it("never sends someone else's personal finding to the owner", async () => {
+    // `personal` scope means the finding is ABOUT a particular person and is
+    // owner-scoped by a CHECK constraint. Sending it here would hand the box
+    // owner another person's business — the title plus 300 characters of
+    // rationale — over a channel with no scope check at all. It waits on
+    // /brief instead.
+    const mine = finding({ id: "f-personal", scope: "personal", ownerId: "u-someone-else" });
+    const out = await notifyFindings(db([mine]), { now: NOW });
+    expect(out).toEqual({ immediate: 0, digested: 0, digestSent: false });
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("never sends a department finding to the owner", async () => {
+    const dept = finding({ id: "f-dept", scope: "department", departmentId: "d1" });
+    const out = await notifyFindings(db([dept]), { now: NOW });
+    expect(out).toEqual({ immediate: 0, digested: 0, digestSent: false });
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("leaves an un-notifiable finding UNSTAMPED, so a later policy can deliver it", async () => {
+    // Stamping `notifiedAt` on a row nobody was told about would swallow it
+    // permanently: per-recipient delivery, when it is built, would find the
+    // queue already marked sent.
+    const prisma = db([finding({ scope: "personal", ownerId: "u-someone-else" })]);
+    await notifyFindings(prisma, { now: NOW });
+    const bf = (prisma as unknown as {
+      brainFinding: { update: ReturnType<typeof vi.fn>; updateMany: ReturnType<typeof vi.fn> };
+    }).brainFinding;
+    expect(bf.update).not.toHaveBeenCalled();
+    expect(bf.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("still notifies a company finding — the scope the detectors write", async () => {
+    const out = await notifyFindings(db([finding()]), { now: NOW });
+    expect(out.immediate).toBe(1);
   });
 });

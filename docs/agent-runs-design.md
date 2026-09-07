@@ -121,9 +121,23 @@ racers still cannot both win a row (`agent-run-claim.pg.test.ts`, real
 Postgres).
 
 **Fencing.** Every executor write is conditioned on `claimedBy = workerId AND
-status = running`. A run reclaimed by another worker while this process was
-paused is one this process can no longer touch: its next checkpoint returns
-`count: 0`, it aborts, and the successor continues from the row.
+claimedAt = <the claimedAt this process stamped> AND status = running`. A lease
+is the `(workerId, claimedAt)` pair, not the worker id alone: a row reclaimed
+and claimed again — by a same-named process, or by this one after a stall —
+carries a later `claimedAt`, so the old execution's next write returns
+`count: 0`, it aborts, and the successor continues from the row. The claim
+query also excludes every id this process still has in flight, so a worker
+never re-claims a run it is itself executing (WARP-2744 item 1).
+
+**Yielding to chat (WARP-2749).** A run's inference requests carry
+`X-Request-Priority: 10`, the gateway's background level; interactive turns
+are served first, and while five or more requests are pending the gateway
+refuses a background request with 429. The worker treats that as "chat has
+the box", not as the run failing: the row goes back to `queued` at the same
+checkpoint with `runAfter` a minute out and no attempt charged. `deadlineAt`
+still stands, so a run that keeps yielding ends on its wall clock with that
+reason. A run's iteration cap is `AGENT_RUN_MAX_ITER` (30), its own, carried
+into the loop as `AgentDeps.maxIterCap`; the chat cap is untouched.
 
 **Heartbeat and reclaim.** The heartbeat is timer-driven (`AGENT_RUN_HEARTBEAT_MS`,
 15 s) and independent of iteration length, so a run parked in a slow model
@@ -147,9 +161,20 @@ ticker's skip-and-audit posture, rather than running at DENY_ALL reach and
 burning GPU on a turn that can call nothing. The scope passed to the loop is
 always the resolved one, never `null` standing in for "unknown".
 
-**Pool.** Tier-1 only until WARP-2179: the chat pool minus every
-`requiresConfirmation` tool, narrowed per principal across both axes
-(`narrowToolNamesForPrincipal`). One deliberate re-admission:
+**Pool.** The chat pool, narrowed per principal across both axes
+(`narrowToolNamesForPrincipal`). Confirming tools are in and park (§7);
+**non-confirming write tools are out** (Romain, 2026-09-04): the interceptor
+challenges only what the catalog declares `requiresConfirmation`, so a Tier-1
+write in a run would simply happen with nobody watching — in chat it at least
+happens in front of the person who asked. Held until WARP-2002 and WARP-2008
+make confirmation a mechanism end to end and the eighteen Tier-1 writes have
+been judged for unattended use. **Route-owned confirmations are out** (WARP-2744
+item 2): the ten tools declaring `confirmationOwner: "route"` are ones the
+interceptor stands down for so the orchestrator route can ask, with a token
+only the dashboard may redeem (`tool-confirmation-contract.md` §13). A run
+never parks on them and could never complete them, so `runToolPool()` drops
+`confirmationOwnerOf(t) === "route"` structurally until a run can park on a
+route token. One deliberate re-admission:
 `send_notification` is excluded from chat as a window-budget/UX call, not a
 safety tier; a run has no reader, so a notification is its completion channel,
 and it is Tier-1 in the catalog. A model that reaches for a Tier-2 tool hits
@@ -187,6 +212,7 @@ resume needs both.
 | `AGENT_RUN_TICK_MS` | 5000 | claim/reclaim scan |
 | `AGENT_RUN_HEARTBEAT_MS` | 15000 | lease heartbeat |
 | `AGENT_RUN_RECLAIM_AFTER_MS` | 60000 | stale-lease threshold (≥ 2 × heartbeat, clamped) |
+| `AGENT_RUN_MAX_ITER` | 30 | a run's iteration cap, separate from the chat cap |
 | `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
 | `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
 
@@ -300,8 +326,19 @@ consumed:
 
 Either way the pending columns clear, the trace entry carries
 `confirmation: "confirmed" | "denied"`, and a `tool_call` row with
-`refs.agentRunId` records the outcome. A run resumed after a box restart
-loses nothing: the park is the checkpoint plus the pending columns.
+`refs.agentRunId` records the outcome. Two rules from review: the decision is
+**consumed and the call's trace entry written before the first dispatch**
+(the replay guard's discipline), so a crash mid-handshake leaves an entry with
+no result that the resume re-dispatches without a token — the interceptor
+challenges again and the run re-parks, a second prompt rather than a silent
+duplicate — and both legs are wrapped so a thrown dispatch is a tool error,
+not the death of the run. The audit label follows what happened: an approval
+whose redeem leg did not run the tool records `approved but did not run`.
+Every terminal write clears the parked-call columns, and both readers
+(`serializeRun`, `list_agent_runs`) gate on `status = awaiting_confirmation`,
+so a finished run can never be reported as still needing approval. A run
+resumed after a box restart loses nothing: the park is the checkpoint plus the
+pending columns.
 
 **Tier-3.** A tool outside the run's pool hits the loop's unknown-tool guard;
 a tool the interceptor's deny tier refuses comes back as a `TOOL_DENIED`
@@ -322,7 +359,7 @@ and Romain's sign-off, as ADR-014 §③ required for desktop tools).
 ## 8. API, Activity view, scheduling, LLM tools (WARP-2180)
 
 **API** — `apps/orchestrator/src/routes/agent-runs.ts`: `POST /api/agent-runs`,
-`GET /api/agent-runs` (status filter, cursor = the tail row's `createdAt`),
+`GET /api/agent-runs` (status filter, cursor = the tail row's `(createdAt, id)` tuple),
 `GET /api/agent-runs/:id` (with the trace and the parked call's PHI-free
 summary), `POST /api/agent-runs/:id/cancel`, `POST /api/agent-runs/:id/confirm`
 (`{ decision: "approved" | "denied" }` → `decideAgentRun`), and
@@ -342,7 +379,10 @@ another's is a 404, a wrong role a 403.
 with lock key `droplet:agent-run-schedule-ticker`. A due row **enqueues** a
 run (never executes one); the worker claims it and re-resolves the creator's
 reach. `runAfter` on the enqueued run is the fire time. An unparseable RRULE
-disables the schedule with a `system` row. No second clock.
+disables the schedule with a `system` row. No second clock. A due schedule whose owner row is gone
+is disabled inside the fire transaction with a `system` activity row
+(`reason: user_missing`) instead of enqueuing a run that could only fail —
+`AgentRunSchedule.userId` carries no FK (WARP-2744 item 4).
 
 **Completion** — a terminal status notifies the owner over the same
 `droplet/notifications/<username>` topic the park uses, with the result

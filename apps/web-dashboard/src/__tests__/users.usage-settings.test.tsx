@@ -119,12 +119,41 @@ beforeEach(() => {
 });
 
 async function openEditDialog() {
-  render(<UsersPage />);
+  const view = render(<UsersPage />);
   await waitFor(() =>
     expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
   );
   fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
-  return screen.getByRole("dialog");
+  return Object.assign(screen.getByRole("dialog"), { __view: view });
+}
+
+/**
+ * 🔴 WARP-2775 — wait for the usage section to have LOADED, not for the fetch
+ * to have been CALLED.
+ *
+ * `users/page.tsx` renders
+ *
+ *     {editUsageLoading ? "Loading usage…" : `${formatUsedBytes(…)} used`}
+ *
+ * and every test below used to wait on
+ * `expect(fetchUserUsageMock).toHaveBeenCalled()`. That is satisfied the
+ * moment the effect fires — before the promise settles, and before React
+ * flushes the state update that clears `editUsageLoading`. The assertion after
+ * it is synchronous, so on a loaded CI runner it reads the loading frame and
+ * the test fails with the product code working perfectly.
+ *
+ * It failed exactly that way in the `node / web-dashboard` leg while the same
+ * spec passed in isolation on a developer machine — the signature of a race,
+ * not a defect. And because that leg is affected-legs-gated and does not run
+ * on a `stage` push (WARP-2761), the flake only ever surfaced on somebody
+ * else's PR, attributed to their change.
+ *
+ * Waiting on the rendered outcome removes the timing question entirely: the
+ * dialog either says "Loading usage…" or it does not, and no test proceeds
+ * until it does not.
+ */
+async function awaitUsageLoaded(dialog: HTMLElement) {
+  await waitFor(() => expect(dialog.textContent).not.toMatch(/Loading usage…/));
 }
 
 describe("Users page — roster used/limit column (WARP-1271)", () => {
@@ -161,6 +190,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     });
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalledWith("u1"));
+    await awaitUsageLoaded(dialog);
 
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     await waitFor(() => expect(storageInput.value).toBe("2"));
@@ -171,7 +201,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("empty storage value means No limit (placeholder), never a fabricated 0", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     expect(storageInput.value).toBe("");
     expect(storageInput.placeholder).toMatch(/no limit/i);
@@ -179,7 +209,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("saving a storage value + unit sends the correct byte string", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -225,13 +255,13 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
   it("shows an em dash when used bytes is unknown (never fabricates 0)", async () => {
     fetchUserUsageMock.mockResolvedValueOnce({ policy: null, usedBytes: null });
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     expect(dialog.textContent).toMatch(/— used/);
   });
 
   it("shows the sync-state transition (Applying to storage… -> Applied) after save", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -246,9 +276,41 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     });
   });
 
-  it("rejects a non-positive upload cap without saving", async () => {
+  /**
+   * WARP-2696 — the post-save "Applied" beat is a 700 ms `await` in the middle
+   * of `handleEditSave`, and `closeEdit()` + `reload()` sit after it. A page
+   * that unmounts inside that window used to resume the continuation into a
+   * dead tree; in jsdom that lands after environment teardown, where `window`
+   * is gone, so it failed the whole run as an unhandled `ReferenceError` with
+   * every test file green and nothing to point at.
+   *
+   * `reload()` calls `fetchUsers`, so "did the continuation run after
+   * unmount?" is observable as "did the roster get refetched?".
+   */
+  it("a save still holding its Applied beat at unmount touches nothing afterwards", async () => {
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
+      target: { value: "5" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    // The write has landed, so the handler is now parked in the beat.
+    await waitFor(() => expect(updateUserUsageMock).toHaveBeenCalledTimes(1));
+    const reloadsBeforeUnmount = fetchUsersMock.mock.calls.length;
+
+    (dialog as unknown as { __view: { unmount: () => void } }).__view.unmount();
+
+    // Well past the beat: if the guard were gone, the continuation would have
+    // resumed by now and called reload().
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fetchUsersMock.mock.calls.length).toBe(reloadsBeforeUnmount);
+  });
+
+  it("rejects a non-positive upload cap without saving", async () => {
+    const dialog = await openEditDialog();
+    await awaitUsageLoaded(dialog);
     fireEvent.change(within(dialog).getByLabelText(/upload cap in megabytes/i), {
       target: { value: "0" },
     });

@@ -12,7 +12,7 @@
  * gated sources and each degrades on its own.
  */
 import { describe, it, expect } from "vitest";
-import { formatImpact } from "@/app/brief/api";
+import { brainIsOff, formatImpact, type Coverage } from "@/app/brief/api";
 import { NAV_GROUPS, MOBILE_PRIMARY_HREFS, moduleForPath } from "@/components/nav-config";
 
 function briefItem() {
@@ -44,12 +44,17 @@ describe("formatImpact (WARP-2752)", () => {
     expect(out).toContain("XYZ");
   });
 
-  it("falls back rather than throwing on a MALFORMED currency code", () => {
-    // This is what actually reaches the catch: a vendor field that is not a
-    // 3-letter code at all. A thrown formatter must not take the finding with
-    // it.
+  it("delegates a malformed currency to formatMinor rather than throwing", () => {
+    // formatImpact now DELEGATES to formatMinor instead of carrying a second
+    // implementation, so its fallback is formatMinor's — one formatter, one
+    // behaviour to keep true, and no float64 coercion on the way.
     const out = formatImpact("150000", "not-a-code");
-    expect(out).toBe("1500 not-a-code");
+    expect(out).toBe("1500.00 not-a-code");
+  });
+
+  it("returns null for a non-integer minor amount", () => {
+    // The one guard kept locally: this value arrives from JSON unvalidated.
+    expect(formatImpact("12.5", "USD")).toBeNull();
   });
 
   it("returns null for a non-numeric amount rather than NaN", () => {
@@ -81,5 +86,52 @@ describe("/brief nav entry (WARP-2752)", () => {
     // WARP-290 measured four tabs at 360px and that stands; Business routes
     // through the More drawer.
     expect(MOBILE_PRIMARY_HREFS).not.toContain("/brief");
+  });
+});
+
+/**
+ * WARP-2812 — the difference between "quiet" and "never switched on".
+ *
+ * This decides which of two sentences an owner reads on a box with no
+ * findings. Getting it wrong means a feature that has never looked at the
+ * business reports an all-clear, which is the one failure the page's own
+ * docstring says would destroy trust in it.
+ */
+function coverage(over: Partial<Coverage> = {}): Coverage {
+  return {
+    passes: [],
+    corpus: { documentsReady: 4000, documentsDigested: 0 },
+    ...over,
+  };
+}
+
+describe("brainIsOff (WARP-2812)", () => {
+  it("is OFF when the box says the brain is disabled", () => {
+    // The case that used to be unreachable: /coverage answers 200 with a
+    // well-formed body on a box where BRAIN_ENABLED is false, so a truthiness
+    // check read this as a healthy brain that had simply read nothing yet.
+    expect(brainIsOff(coverage({ enabled: false }))).toBe(true);
+  });
+
+  it("is ON when the box says the brain is enabled", () => {
+    expect(brainIsOff(coverage({ enabled: true }))).toBe(false);
+  });
+
+  it("is OFF when the box did not answer at all", () => {
+    expect(brainIsOff(null)).toBe(true);
+  });
+
+  it("assumes ON when the field is absent — an older orchestrator", () => {
+    // A dashboard newer than its orchestrator receives no `enabled`. Reading
+    // that as OFF would tell an owner with a working brain to switch it on.
+    expect(brainIsOff(coverage())).toBe(false);
+  });
+
+  it("does not confuse 'nothing digested yet' with 'switched off'", () => {
+    // Zero coverage on an enabled brain is a brain that has started and not
+    // got far — a real and common state on a fresh box.
+    expect(
+      brainIsOff(coverage({ enabled: true, corpus: { documentsReady: 4000, documentsDigested: 0 } })),
+    ).toBe(false);
   });
 });

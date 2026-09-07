@@ -225,6 +225,13 @@ const envSchema = z.object({
   // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
   // The epic sizes agentic work at 5–40 minutes.
   AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2749 — a run's iteration cap, SEPARATE from the chat cap.
+  // AGENT_MAX_ITER_CAP bounds an interactive turn, where a person is waiting
+  // and ten model calls is a latency budget. A run has a wall clock instead
+  // (AGENT_RUN_MAX_WALL_MS) and nobody waiting, so it gets its own cap. The
+  // loop honours it through `AgentDeps.maxIterCap`, which only in-process
+  // callers can set — /api/llm/chat never does, so chat is byte-identical.
+  AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
   // WARP-2178 — characters of ONE tool result the model is fed per call
   // (tool-result-bounding.ts). 8000 is the value the loop has always used and
   // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
@@ -254,7 +261,16 @@ const envSchema = z.object({
   // Master switch. OFF by default: the corpus pass reads the user's documents
   // and writes derived rows, which is a capability an operator opts into (see
   // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
-  BRAIN_ENABLED: z.coerce.boolean().default(false),
+  // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
+  // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
+  // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
+  // corpus pass reading their documents would have switched it ON. This file
+  // already documents that trap two hundred lines up; the first draft of this
+  // line walked into it anyway.
+  BRAIN_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
@@ -808,6 +824,19 @@ const envSchema = z.object({
   // rejects it at startup rather than silently treating it as disable.
   DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2751 — how long `MoneySnapshot` keeps DAILY rows before the tail is
+  // downsampled to one row per month. NOT a delete-older-than: beyond this
+  // window the month's closing value survives, so "how has our overdue balance
+  // moved over two years" still answers while the row count stops growing
+  // daily forever.
+  //
+  // 90 days matches the drift window above and is the shortest horizon that
+  // leaves a quarter-over-quarter ageing question answerable at daily grain.
+  // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
+  // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
+  // negative window is nonsensical input, so the schema rejects it at startup.
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
@@ -957,6 +986,20 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- Email indexer (WARP-2734 mailbox provisioning) ---
+  //
+  // The hop that lets an owner connect a mailbox at all. `services/email-indexer`
+  // owns the Fernet key at /data/secrets/email.key and the IMAP client, so it
+  // is the only process that can verify a mailbox and produce a `passwordEnc`;
+  // this orchestrator owns the `EmailAccount` row. Mounting the key here
+  // instead would put a new secret and a hand-rolled Fernet encoder into the
+  // process that already holds every other credential, to save one mesh hop.
+  //
+  // Defaulted like FILE_INDEXER_URL rather than left empty: the service is
+  // compose-internal, and a box that has the `email` profile has it at this
+  // name. A box that does not simply never reaches the route.
+  EMAIL_INDEXER_URL: z.string().default("http://email-indexer:8086"),
+
   // --- ERP direct-SQL bridge (WARP-1106) ---
   // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
   // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there
@@ -972,6 +1015,22 @@ const envSchema = z.object({
   // for a network problem that isn't there. The REST track (`eaglesoft-api`)
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
+
+  // WARP-2590 — the bridge's service bearer, minted per box by
+  // scripts/lib/secrets.sh and wired to BOTH ends via ${SERVICE_TOKEN_ERP_BRIDGE}.
+  //
+  // Read the `.env` name directly and do NOT re-declare it in compose as a
+  // `${VAR}` substitution: that resolves against docker/.env — a different,
+  // untracked file — and because `environment:` outranks `env_file:` the empty
+  // result SHADOWS the real value. That exact mistake blanked
+  // SERVICE_TOKEN_RAG_EVAL and 401'd 15 consecutive nightly eval runs.
+  //
+  // Empty is a legitimate state on a box with no ERP deployed (the bridge is
+  // profile-gated to "erp"), and it degrades the same honest way an empty
+  // ERP_SQL_BRIDGE_URL does: the connector keeps its blocked I/O boundary.
+  // Against a bridge that IS running, an empty token means 401 on every call —
+  // loudly, rather than looking like the practice's server is down.
+  SERVICE_TOKEN_ERP_BRIDGE: z.string().default(""),
 
   // --- ERP export-drop track (WARP-1964) ---
   // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports
@@ -1404,13 +1463,16 @@ export const config = {
     corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
   },
   // WARP-2177 — see resolveAgentRunLimits.
-  agentRuns: resolveAgentRunLimits({
-    concurrency: parsed.AGENT_RUN_CONCURRENCY,
-    tickMs: parsed.AGENT_RUN_TICK_MS,
-    heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
-    reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
-    maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
-    maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
-  }),
+  agentRuns: {
+    ...resolveAgentRunLimits({
+      concurrency: parsed.AGENT_RUN_CONCURRENCY,
+      tickMs: parsed.AGENT_RUN_TICK_MS,
+      heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
+      reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
+      maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
+      maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
+    }),
+    maxIter: parsed.AGENT_RUN_MAX_ITER,
+  },
 };
 export type Config = typeof config;

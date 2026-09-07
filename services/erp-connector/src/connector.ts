@@ -210,6 +210,10 @@ export interface EaglesoftConnectorDeps {
   bridge?: SqlBridgeClient;
   /** Where the `erp-sql-bridge` sidecar lives. Absent ⇒ no database I/O. */
   bridgeUrl?: string;
+  /** WARP-2590 — the bridge's service bearer. Absent against a provisioned
+   *  bridge ⇒ every call 401s, which is the point: an unauthenticated
+   *  orchestrator must fail loudly rather than look like an outage. */
+  bridgeAuthToken?: string;
   /** Override the catalog family outright — a suite introspecting a
    *  non-SQL-Anywhere database to prove the pipeline end to end. */
   catalog?: CatalogQuerySet;
@@ -271,6 +275,7 @@ export class EaglesoftConnector implements Connector {
       (deps.bridgeUrl
         ? new SqlBridgeClient({
             baseUrl: deps.bridgeUrl,
+            authToken: deps.bridgeAuthToken,
             target: {
               host: config.host,
               port: config.port,

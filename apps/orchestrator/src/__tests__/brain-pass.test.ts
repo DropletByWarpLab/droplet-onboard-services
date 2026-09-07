@@ -305,22 +305,38 @@ describe("parseDigests (WARP-2749)", () => {
   });
 });
 
-describe("decimalToMinor (WARP-2754)", () => {
-  it("converts without a float round-trip", () => {
-    expect(decimalToMinor("1234.565")).toBe(123457n); // half-up, not 123456
-    expect(decimalToMinor("10")).toBe(1000n);
-    expect(decimalToMinor("0.005")).toBe(1n);
-    expect(decimalToMinor("0.004")).toBe(0n);
+describe("decimalToMinor — CURRENCY-AWARE (WARP-2754)", () => {
+  it("converts major units without a float round-trip", () => {
+    expect(decimalToMinor("1234.56", "USD")).toBe(123456n);
+    expect(decimalToMinor("10", "USD")).toBe(1000n);
+  });
+
+  it("uses the currency's OWN exponent, not a hardcoded 2", () => {
+    // The bug this replaced: hundredths for everything, which is 100x wrong
+    // for a 0-decimal currency and 10x wrong for a 3-decimal one — a
+    // confident, fabricated impact figure read straight to the model.
+    expect(decimalToMinor("1000", "JPY")).toBe(1000n); // 0 decimals
+    expect(decimalToMinor("1000", "KRW")).toBe(1000n);
+    expect(decimalToMinor("1.5", "KWD")).toBe(1500n); // 3 decimals
   });
 
   it("handles negatives symmetrically", () => {
-    expect(decimalToMinor("-10.50")).toBe(-1050n);
+    expect(decimalToMinor("-10.50", "USD")).toBe(-1050n);
+  });
+
+  it("defaults a well-formed but unlisted code to 2, and refuses a malformed one", () => {
+    // `minorUnitExponent`'s own contract: null means "that is not an alpha-3
+    // code at all", NOT "I have not heard of it". A well-formed unknown gets
+    // the default rather than being dropped.
+    expect(decimalToMinor("10", "ZZZ")).toBe(1000n);
+    expect(decimalToMinor("10", "not-a-code")).toBeNull();
   });
 
   it("returns null for absent or non-numeric input", () => {
-    expect(decimalToMinor(null)).toBeNull();
-    expect(decimalToMinor(undefined)).toBeNull();
-    expect(decimalToMinor("abc")).toBeNull();
+    expect(decimalToMinor(null, "USD")).toBeNull();
+    expect(decimalToMinor(undefined, "USD")).toBeNull();
+    expect(decimalToMinor("abc", "USD")).toBeNull();
+    expect(decimalToMinor("10", null)).toBeNull();
   });
 });
 
@@ -328,8 +344,27 @@ describe("money detectors (WARP-2754)", () => {
   const now = new Date("2026-09-05T00:00:00.000Z");
   const due = new Date("2026-06-01T00:00:00.000Z"); // ~96 days earlier
 
+  /**
+   * 🔴 The helper now HANDS BACK its spy, so a test can assert on the query.
+   *
+   * `vi.fn` always recorded the call — that was never the gap. The gap was
+   * that `erpPrisma` returned the prisma stub alone, so nothing in this file
+   * could reach `mock.calls`, and not one test ever looked at the `where`.
+   * Every assertion was on rows the mock had been told to return.
+   *
+   * WARP-2773 is what that costs. `findMany` answers the same way whatever it
+   * is asked, so a query naming `kind: "RECEIVABLE"` — an enum value the
+   * WARP-2739 migration had already renamed away — still returned an overdue
+   * invoice and every test here stayed green, while on a real box the detector
+   * matched nothing at all. Only `tsc` disagreed, and the `node / orchestrator`
+   * leg does not run on a `stage` push (WARP-2761).
+   *
+   * A test that only ever asserts on what the mock was told to return is not
+   * coverage of the query; it is coverage of the fixture.
+   */
   function erpPrisma(rows: unknown[]) {
-    return { erpDocument: { findMany: vi.fn(async () => rows) } } as never;
+    const findMany = vi.fn(async (_a: { where: Record<string, unknown> }) => rows);
+    return { prisma: { erpDocument: { findMany } } as never, findMany };
   }
 
   const base = {
@@ -337,13 +372,81 @@ describe("money detectors (WARP-2754)", () => {
     balance: "500.00",
     currency: "USD",
     dueAt: due,
-    status: "open",
+    // The vendor's own prose word. Post-WARP-2739 it lives in `vendorStatus`;
+    // `status` is the box's own lifecycle enum and is null on a landed row.
+    vendorStatus: "open",
+    status: null,
     counterpartyName: "Acme Ltd",
     externalSystem: "quickbooks",
   };
 
+  it("🔴 MUTATION: asks for the enum the table actually has, and only vendor rows", async () => {
+    // The two halves of WARP-2773, asserted on the QUERY rather than on the
+    // answer, because the answer comes from a mock.
+    //
+    //   `kind`   the widening renamed RECEIVABLE -> INVOICE and PAYABLE ->
+    //            BILL. A query naming the old value now matches no row at all,
+    //            so every overdue invoice on a real box goes unreported —
+    //            silently, which is the worst way for a detector to fail.
+    //   `origin` WARP-2737 lets a person write a LOCAL invoice on this box. It
+    //            is born DRAFT with no vendor. Sweeping it here would tell an
+    //            owner their own unsent draft was "96 days past due, and
+    //            nothing in the box has chased it".
+    const r = erpPrisma([]);
+    await overdueReceivables.run(r.prisma, now);
+    expect(r.findMany.mock.calls[0]![0].where).toMatchObject({
+      kind: "INVOICE",
+      origin: "LANDED",
+    });
+
+    const p = erpPrisma([]);
+    await overduePayables.run(p.prisma, now);
+    expect(p.findMany.mock.calls[0]![0].where).toMatchObject({
+      kind: "BILL",
+      origin: "LANDED",
+    });
+  });
+
+  it("skips a document the BOX has settled, not just one the vendor has", async () => {
+    // `status` is the box's own enum. It is null on a landed row today, so
+    // this is the path that must already work on the day a local document
+    // first reaches this sweep — the vendor-prose set would never match
+    // "PAID", and an owner would be chased over an invoice they had marked
+    // paid themselves.
+    for (const status of ["PAID", "VOID", "WRITTEN_OFF"]) {
+      const out = await overdueReceivables.run(
+        erpPrisma([{ ...base, vendorStatus: null, status }]).prisma,
+        now,
+      );
+      expect(out, status).toHaveLength(0);
+    }
+    // And a NON-terminal box status is still open — DRAFT and SENT must not be
+    // read as settled just because the field is populated.
+    for (const status of ["SENT", "PART_PAID"]) {
+      const out = await overdueReceivables.run(
+        erpPrisma([{ ...base, vendorStatus: null, status }]).prisma,
+        now,
+      );
+      expect(out, status).toHaveLength(1);
+    }
+  });
+
+  it("never prints the word null into a sentence an owner reads", async () => {
+    // Unreachable while the sweep is LANDED-only — the provenance CHECK makes
+    // `externalSystem` non-null there. Asserted anyway, because the failure it
+    // guards against is a rationale reading "An invoice from null fell due 96
+    // days ago", and a `!` assertion is what would produce it.
+    const out = await overdueReceivables.run(
+      erpPrisma([{ ...base, externalSystem: null }]).prisma,
+      now,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.rationale).not.toContain("null");
+    expect(out[0]!.evidence.sources[0]!.quote).not.toContain("null");
+  });
+
   it("reports an overdue receivable as a loss, with impact", async () => {
-    const out = await overdueReceivables.run(erpPrisma([base]), now);
+    const out = await overdueReceivables.run(erpPrisma([base]).prisma, now);
     expect(out).toHaveLength(1);
     expect(out[0]!.kind).toBe("loss");
     expect(out[0]!.impactMinor).toBe(50000n);
@@ -355,7 +458,7 @@ describe("money detectors (WARP-2754)", () => {
   it("reports an overdue PAYABLE as a risk, not a loss", async () => {
     // Money the business owes is not money it lost. Filing it as `loss` would
     // inflate the /brief total with the business's own obligations.
-    const out = await overduePayables.run(erpPrisma([base]), now);
+    const out = await overduePayables.run(erpPrisma([base]).prisma, now);
     expect(out[0]!.kind).toBe("risk");
   });
 
@@ -363,26 +466,26 @@ describe("money detectors (WARP-2754)", () => {
     // money.service.ts records that a paid document is never reaped, so a
     // stale row can keep a balance forever.
     for (const status of ["paid", "PAID", " Void ", "refunded"]) {
-      const out = await overdueReceivables.run(erpPrisma([{ ...base, status }]), now);
+      const out = await overdueReceivables.run(erpPrisma([{ ...base, vendorStatus: status }]).prisma, now);
       expect(out).toHaveLength(0);
     }
   });
 
   it("skips a zero or negative balance", async () => {
-    expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "0" }]), now)).toHaveLength(0);
-    expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "-5" }]), now)).toHaveLength(0);
+    expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "0" }]).prisma, now)).toHaveLength(0);
+    expect(await overdueReceivables.run(erpPrisma([{ ...base, balance: "-5" }]).prisma, now)).toHaveLength(0);
   });
 
   it("skips sub-threshold noise", async () => {
     expect(
-      await overdueReceivables.run(erpPrisma([{ ...base, balance: "0.50" }]), now),
+      await overdueReceivables.run(erpPrisma([{ ...base, balance: "0.50" }]).prisma, now),
     ).toHaveLength(0);
   });
 
   it("reports WITHOUT a number when the vendor sent no currency", async () => {
     // impact and currency are all-or-nothing; a guessed currency is worse than
     // no amount.
-    const out = await overdueReceivables.run(erpPrisma([{ ...base, currency: null }]), now);
+    const out = await overdueReceivables.run(erpPrisma([{ ...base, currency: null }]).prisma, now);
     expect(out).toHaveLength(1);
     expect(out[0]!.impactMinor).toBeNull();
     expect(out[0]!.currency).toBeNull();
@@ -390,7 +493,7 @@ describe("money detectors (WARP-2754)", () => {
 
   it("caps confidence at 95 however old the debt is", async () => {
     const ancient = new Date("2020-01-01T00:00:00.000Z");
-    const out = await overdueReceivables.run(erpPrisma([{ ...base, dueAt: ancient }]), now);
+    const out = await overdueReceivables.run(erpPrisma([{ ...base, dueAt: ancient }]).prisma, now);
     expect(out[0]!.confidence).toBeLessThanOrEqual(95);
   });
 });

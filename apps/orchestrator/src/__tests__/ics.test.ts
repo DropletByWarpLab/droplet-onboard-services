@@ -272,3 +272,453 @@ describe("serializeIcs", () => {
     expect(parsed[0].endsAt.toISOString()).toBe("2026-04-23T15:30:00.000Z");
   });
 });
+
+// ── WARP-2763: nested components must not leak into the parent VEVENT ──
+//
+// 🔴 Every fixture here puts the nested component AFTER the event's own
+// properties, which is where real exporters put it. A fixture with the alarm
+// FIRST passes against the broken parser too (last write wins), so it would be
+// coverage in name only.
+describe("parseIcs — nested components (WARP-2763)", () => {
+  /** The same event, with and without a nested block appended before END:VEVENT. */
+  function withAndWithout(nested: string): { plain: string; nestedIn: string } {
+    const body = `UID:6h1abcdefg@google.com
+SUMMARY:Coffee with Bob
+DESCRIPTION:Bring the Q3 numbers and the signed lease. Parking code 4417.
+LOCATION:Blue Bottle
+DTSTART:20260423T140000Z
+DTEND:20260423T150000Z`;
+    const wrap = (inner: string) =>
+      `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\nBEGIN:VEVENT\n${inner}\nEND:VEVENT\nEND:VCALENDAR\n`;
+    return { plain: wrap(body), nestedIn: wrap(`${body}\n${nested}`) };
+  }
+
+  it("a VALARM leaves the parent event byte-identical to having no VALARM", () => {
+    const { plain, nestedIn } = withAndWithout(
+      `BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:This is an event reminder
+TRIGGER:-P0DT0H30M0S
+END:VALARM`,
+    );
+    const [a] = parseIcs(plain);
+    const [b] = parseIcs(nestedIn);
+    expect(b.uid).toBe(a.uid);
+    expect(b.summary).toBe(a.summary);
+    expect(b.description).toBe(a.description);
+    expect(b.location).toBe(a.location);
+    // The regression this ticket exists for: Google's default popup reminder.
+    expect(b.description).toBe("Bring the Q3 numbers and the signed lease. Parking code 4417.");
+  });
+
+  it("an ACTION:EMAIL alarm does not overwrite the event's SUMMARY", () => {
+    // RFC 5545 makes SUMMARY *required* on an EMAIL alarm, so this one steals
+    // the title as well as the body.
+    const { nestedIn } = withAndWithout(
+      `BEGIN:VALARM
+ACTION:EMAIL
+SUMMARY:Alarm notification
+DESCRIPTION:This is an automated reminder
+TRIGGER:-PT1H
+END:VALARM`,
+    );
+    const [ev] = parseIcs(nestedIn);
+    expect(ev.summary).toBe("Coffee with Bob");
+    expect(ev.description).toBe("Bring the Q3 numbers and the signed lease. Parking code 4417.");
+  });
+
+  it("an alarm carrying its own UID does not re-key the event", () => {
+    // The nastiest of the three: the upsert key is (sourceId, externalUid), so
+    // a stolen UID writes the row under the alarm's identity and the duplicate
+    // survives any later fix.
+    const { nestedIn } = withAndWithout(
+      `BEGIN:VALARM
+ACTION:DISPLAY
+UID:6E2A5F1C-ALARM
+DESCRIPTION:Event reminder
+TRIGGER:-PT15M
+END:VALARM`,
+    );
+    const [ev] = parseIcs(nestedIn);
+    expect(ev.uid).toBe("6h1abcdefg@google.com");
+  });
+
+  it("skips an unknown nested component without naming it", () => {
+    // Depth-based, not a VALARM allow-list: a vendor extension nobody has
+    // heard of must be inert by construction.
+    const { nestedIn } = withAndWithout(
+      `BEGIN:X-VENDOR-THING
+UID:vendor-uid
+SUMMARY:Vendor summary
+DESCRIPTION:Vendor description
+END:X-VENDOR-THING`,
+    );
+    const [ev] = parseIcs(nestedIn);
+    expect(ev.uid).toBe("6h1abcdefg@google.com");
+    expect(ev.summary).toBe("Coffee with Bob");
+    expect(ev.description).toBe("Bring the Q3 numbers and the signed lease. Parking code 4417.");
+  });
+
+  it("tracks depth, so a nested-nested END does not end the skip early", () => {
+    const { nestedIn } = withAndWithout(
+      `BEGIN:VALARM
+ACTION:DISPLAY
+BEGIN:X-INNER
+SUMMARY:Inner summary
+END:X-INNER
+DESCRIPTION:Alarm body that must not leak
+END:VALARM`,
+    );
+    const [ev] = parseIcs(nestedIn);
+    expect(ev.summary).toBe("Coffee with Bob");
+    expect(ev.description).toBe("Bring the Q3 numbers and the signed lease. Parking code 4417.");
+  });
+
+  it("a VTIMEZONE with STANDARD/DAYLIGHT subcomponents yields no phantom events", () => {
+    // VTIMEZONE sits at VCALENDAR level, and its subcomponents carry their own
+    // DTSTART and RRULE. Nothing here may be mistaken for an event.
+    const ics = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VTIMEZONE
+TZID:America/Los_Angeles
+BEGIN:DAYLIGHT
+TZOFFSETFROM:-0800
+TZOFFSETTO:-0700
+DTSTART:19700308T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
+END:DAYLIGHT
+BEGIN:STANDARD
+TZOFFSETFROM:-0700
+TZOFFSETTO:-0800
+DTSTART:19701101T020000
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:real@example.com
+SUMMARY:The only real event
+DTSTART:20260423T140000Z
+DTEND:20260423T150000Z
+END:VEVENT
+END:VCALENDAR
+`;
+    const events = parseIcs(ics);
+    expect(events).toHaveLength(1);
+    expect(events[0].uid).toBe("real@example.com");
+  });
+});
+
+// ── WARP-2764: DTSTART/DTEND honour their TZID parameter ──
+describe("parseIcs — TZID (WARP-2764)", () => {
+  function eventWith(dtstart: string, dtend: string): string {
+    return `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:tz@example.com
+SUMMARY:9am local
+${dtstart}
+${dtend}
+END:VEVENT
+END:VCALENDAR
+`;
+  }
+
+  it("resolves a zoned wall clock west of UTC (PDT, -7)", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Los_Angeles:20260423T090000",
+        "DTEND;TZID=America/Los_Angeles:20260423T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T16:00:00.000Z");
+  });
+
+  it("uses the offset in force on that date, not a fixed one (PST, -8)", () => {
+    // Same wall clock, same zone, other side of the DST boundary. A hardcoded
+    // -7 passes the test above and fails this one.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Los_Angeles:20261203T090000",
+        "DTEND;TZID=America/Los_Angeles:20261203T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-12-03T17:00:00.000Z");
+  });
+
+  it("resolves a zone east of UTC (CEST, +2)", () => {
+    // A sign error passes both tests above and fails this one.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=Europe/Berlin:20260423T090000",
+        "DTEND;TZID=Europe/Berlin:20260423T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T07:00:00.000Z");
+  });
+
+  it("converts DTEND on the same path, so the duration survives", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Los_Angeles:20260423T090000",
+        "DTEND;TZID=America/Los_Angeles:20260423T100000",
+      ),
+    );
+    expect(ev.endsAt.getTime() - ev.startsAt.getTime()).toBe(60 * 60 * 1000);
+    expect(ev.endsAt.toISOString()).toBe("2026-04-23T17:00:00.000Z");
+  });
+
+  it("drops an event whose TZID the runtime cannot resolve — never assumes UTC", () => {
+    // Exchange still emits Windows zone names. Storing 09:00Z here would be
+    // the exact defect this ticket fixed, so the event is dropped instead.
+    const events = parseIcs(
+      eventWith(
+        "DTSTART;TZID=W. Europe Standard Time:20260423T090000",
+        "DTEND;TZID=W. Europe Standard Time:20260423T100000",
+      ),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("an explicit Z still wins, and a TZID alongside it is not double-applied", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Los_Angeles:20260423T140000Z",
+        "DTEND;TZID=America/Los_Angeles:20260423T150000Z",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
+  });
+
+  it("a floating DATE-TIME with no TZID is unchanged (still treated as UTC)", () => {
+    const [ev] = parseIcs(
+      eventWith("DTSTART:20260423T140000", "DTEND:20260423T150000"),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
+  });
+
+  // ── RFC 5545 §3.3.5, the two cases the naive two-pass version got wrong ──
+
+  it("a repeated (fall-back) local time takes the FIRST occurrence, west of UTC", () => {
+    // The RFC's own worked example, verbatim: "TZID=America/New_York:
+    // 20071104T013000 indicates November 4, 2007 at 1:30 A.M. EDT (UTC-04:00)".
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/New_York:20071104T013000",
+        "DTEND;TZID=America/New_York:20071104T023000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2007-11-04T05:30:00.000Z");
+  });
+
+  it("a repeated local time takes the FIRST occurrence EAST of UTC too", () => {
+    // 02:30 occurs twice in Berlin on 2026-10-25 (00:30Z and 01:30Z). The
+    // earlier is correct. The previous implementation returned the later one
+    // here — and in all 73 DST zones east of UTC — while passing the test above,
+    // because the west-of-UTC case happens to come out right by accident.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=Europe/Berlin:20261025T023000",
+        "DTEND;TZID=Europe/Berlin:20261025T033000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-10-25T00:30:00.000Z");
+  });
+
+  it("a nonexistent (spring-forward) local time shifts FORWARD past the gap", () => {
+    // §3.3.5: a local time that does not occur is "interpreted using the UTC
+    // offset before the gap". Berlin jumps 02:00→03:00 on 2026-03-29, so 02:30
+    // never happens; the pre-gap offset (+01:00) puts it at 01:30Z.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=Europe/Berlin:20260329T023000",
+        "DTEND;TZID=Europe/Berlin:20260329T033000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-03-29T01:30:00.000Z");
+  });
+
+  it("a midnight gap does not move the event to the previous calendar day", () => {
+    // Santiago transitions AT midnight, so 00:00 on 2026-09-06 does not exist.
+    // Resolving it backward lands on 2026-09-05 — a whole day out on a date
+    // nobody would think to check. Only a midnight-transition zone catches this.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Santiago:20260906T000000",
+        "DTEND;TZID=America/Santiago:20260906T010000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-09-06T04:00:00.000Z");
+    // The day is the point of this test, not just the instant.
+    expect(ev.startsAt.toISOString().slice(0, 10)).toBe("2026-09-06");
+  });
+
+  it("drops an event the gap would invert, rather than persisting end-before-start", () => {
+    // New York jumps 02:00 EST → 03:00 EDT on 2026-03-08, so [02:00, 03:00) is
+    // a gap. A DTSTART inside it resolves forward to 03:30 EDT (07:30Z) while a
+    // DTEND of 03:00 already exists at 07:00Z — the start overtakes the end.
+    //
+    // 🔴 The obvious trigger does NOT reproduce this: DTSTART 01:45 / DTEND
+    // 02:15 (end in the gap, start before it) resolves to a clean +30 min,
+    // because shifting the END forward only widens the event. The start must be
+    // the one inside the gap. A test built on the wrong half of that pair passes
+    // with the guard deleted and pins nothing.
+    const events = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/New_York:20260308T023000",
+        "DTEND;TZID=America/New_York:20260308T030000",
+      ),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("keeps a zero-length event — only strictly inverted rows are dropped", () => {
+    // `>=` not `>`: some exporters emit zero-length markers and they are
+    // harmless to an overlap query. Guards the guard against over-reach.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=America/Los_Angeles:20260423T090000",
+        "DTEND;TZID=America/Los_Angeles:20260423T090000",
+      ),
+    );
+    expect(ev.endsAt.getTime()).toBe(ev.startsAt.getTime());
+  });
+
+  // ── TZID parameter spellings (RFC 5545 §3.2 and §3.2.19) ──
+
+  it("resolves a DQUOTEd TZID — the quotes are delimiters, not part of the name", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        'DTSTART;TZID="America/Los_Angeles":20260423T090000',
+        'DTEND;TZID="America/Los_Angeles":20260423T100000',
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T16:00:00.000Z");
+  });
+
+  it("resolves a solidus-prefixed globally-unique TZID (§3.2.19)", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=/America/Los_Angeles:20260423T090000",
+        "DTEND;TZID=/America/Los_Angeles:20260423T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T16:00:00.000Z");
+  });
+
+  it("resolves Thunderbird's vendor-prefixed TZID by longest resolvable suffix", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=/mozilla.org/20050126_1/America/New_York:20260423T090000",
+        "DTEND;TZID=/mozilla.org/20050126_1/America/New_York:20260423T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T13:00:00.000Z");
+  });
+
+  it("keeps three-component zones intact when stripping a vendor prefix", () => {
+    // 🔴 A fixed "last two segments" rule mangles the 19 three-component zones
+    // (America/Indiana/*, America/Argentina/*, …) into non-zones that then drop.
+    // Longest-resolvable-suffix is what makes this pass.
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;TZID=/mozilla.org/20070129_1/America/Indiana/Knox:20260423T090000",
+        "DTEND;TZID=/mozilla.org/20070129_1/America/Indiana/Knox:20260423T100000",
+      ),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
+  });
+
+  it("still drops a quoted Windows zone name — unquoting did not weaken the guard", () => {
+    const events = parseIcs(
+      eventWith(
+        'DTSTART;TZID="W. Europe Standard Time":20260423T090000',
+        'DTEND;TZID="W. Europe Standard Time":20260423T100000',
+      ),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  // ── TZID present but empty: legal, and NOT the floating case ──
+  //
+  // RFC 5545 §3.2 defines `param-value = paramtext / quoted-string` and
+  // `paramtext = *SAFE-CHAR` — zero characters is a legal paramtext, so
+  // `TZID=` parses to a TZID parameter whose value is the empty string. That
+  // is "a zone the emitter failed to name", not "no zone": the value is still
+  // a local wall clock. Guarding the zone branch on the parameter's TRUTHINESS
+  // rather than its PRESENCE routes it to the floating path, which stamps a Z
+  // on 09:00 local — the exact WARP-2764 defect, reintroduced for one input
+  // shape. An unnameable zone is an unresolvable zone, so it belongs in the
+  // module header's one documented drop class.
+
+  it("drops an event whose TZID is present but empty — never stores the wall clock as UTC", () => {
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=:20260423T090000", "DTEND;TZID=:20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops a DQUOTEd empty TZID too — unquoting `\"\"` must not read as absent", () => {
+    const events = parseIcs(
+      eventWith('DTSTART;TZID="":20260423T090000', 'DTEND;TZID="":20260423T100000'),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops a whitespace-only TZID — trimming to empty resolves no zone", () => {
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=   :20260423T090000", "DTEND;TZID=   :20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("drops the event when only DTEND carries the empty TZID", () => {
+    // Half a mis-stored event is still a mis-stored event: DTEND runs the same
+    // path as DTSTART, so an empty TZID on either end drops the whole row
+    // rather than silently stretching one boundary.
+    //
+    // The zone is deliberately EAST of UTC. West of UTC the mis-stored DTEND
+    // lands BEFORE the DTSTART and the §3.6.1 inversion check at END:VEVENT
+    // drops the event anyway — the test would pass without the presence check
+    // and prove nothing. Berlin 09:00 CEST is 07:00Z, so a DTEND wrongly read
+    // as 10:00Z still sorts after it and survives that check, silently
+    // tripling a one-hour event.
+    const events = parseIcs(
+      eventWith("DTSTART;TZID=Europe/Berlin:20260423T090000", "DTEND;TZID=:20260423T100000"),
+    );
+    expect(events).toHaveLength(0);
+  });
+
+  it("an explicit Z still wins over an empty TZID — §3.3.5 order is unchanged", () => {
+    // The presence check must not promote a UTC value into the zone branch:
+    // §3.3.5 forbids TZID on a Z-suffixed value, so Z keeps winning.
+    const [ev] = parseIcs(
+      eventWith("DTSTART;TZID=:20260423T140000Z", "DTEND;TZID=:20260423T150000Z"),
+    );
+    expect(ev.startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
+    expect(ev.endsAt.toISOString()).toBe("2026-04-23T15:00:00.000Z");
+  });
+
+  it("an all-day DATE with an empty TZID is still an all-day DATE", () => {
+    // The DATE form returns before the zone branch — TZID does not apply to a
+    // value with no time of day, empty or not.
+    const [ev] = parseIcs(
+      eventWith("DTSTART;VALUE=DATE;TZID=:20260501", "DTEND;VALUE=DATE;TZID=:20260508"),
+    );
+    expect(ev.allDay).toBe(true);
+    expect(ev.startsAt.toISOString()).toBe("2026-05-01T00:00:00.000Z");
+    expect(ev.endsAt.toISOString()).toBe("2026-05-08T00:00:00.000Z");
+  });
+
+  it("an all-day DATE is unaffected by a TZID parameter", () => {
+    const [ev] = parseIcs(
+      eventWith(
+        "DTSTART;VALUE=DATE;TZID=America/Los_Angeles:20260501",
+        "DTEND;VALUE=DATE;TZID=America/Los_Angeles:20260508",
+      ),
+    );
+    expect(ev.allDay).toBe(true);
+    expect(ev.startsAt.toISOString()).toBe("2026-05-01T00:00:00.000Z");
+  });
+});

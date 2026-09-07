@@ -1718,6 +1718,12 @@ services:
       # to call the orchestrator"); the orchestrator stores it as
       # SERVICE_TOKEN_EMAIL (TS convention SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_EMAIL:-}
+      # WARP-2734 — the SAME secret, the OTHER direction. The line above is the
+      # token this service PRESENTS when it calls the orchestrator; this one is
+      # the token it REQUIRES on `/accounts/provision`, the endpoint that takes
+      # a mailbox password. Without it the middleware fails closed with a 503
+      # rather than serving that route unauthenticated.
+      - SERVICE_TOKEN_EMAIL=${SERVICE_TOKEN_EMAIL:-}
       # WARP-235: mTLS broker — identity is the client cert CN
       # ("email-indexer"); the username/password pair is retired.
       - MQTT_HOST=${MQTT_HOST:-broker}
@@ -1760,7 +1766,16 @@ services:
       - orchestrator
     restart: always
     <<: *default-logging
-    profiles: ["full"]
+    # WARP-2734 — `email` joins `full`, and `scripts/lib/secrets.sh` appends
+    # that token to COMPOSE_PROFILES exactly when it provisions
+    # SERVICE_TOKEN_EMAIL. That is the same predicate the module registry
+    # already uses (`id: "email"`, `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`),
+    # so a box gets the container precisely when it can authenticate it.
+    #
+    # Better than both alternatives: an idle container on every box that will
+    # never have a mailbox, or a profile nobody remembers to set — which is
+    # what shipped, and why the IMAP subsystem has never run anywhere.
+    profiles: ["full", "email"]
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -2118,6 +2133,13 @@ services:
       - ERP_DB_RW_USER=${ERP_DB_RW_USER:-droplet_rw}
       - ERP_ODBC_DRIVER=${ERP_ODBC_DRIVER:-SQL Anywhere 17}
       - ERP_DB_ENCRYPTION=${ERP_DB_ENCRYPTION:-NONE}
+      # WARP-2590: the service bearer. NOT declared here as a `${VAR}`
+      # substitution on purpose — `env_file: ../.env` above already delivers
+      # SERVICE_TOKEN_ERP_BRIDGE, and re-declaring it would resolve against
+      # docker/.env (a different, untracked file) and, because `environment:`
+      # outranks `env_file:`, SHADOW the real value with "". That is exactly
+      # how SERVICE_TOKEN_RAG_EVAL got blanked and 401'd 15 nightly runs.
+      # The bridge fails CLOSED without it (503 BRIDGE_NOT_PROVISIONED).
     healthcheck:
       # /health returns 200 with ok:false when the practice's DB is
       # unreachable — that is the honest answer, and it is deliberately NOT a

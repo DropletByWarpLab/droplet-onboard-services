@@ -36,6 +36,7 @@
  */
 
 import { TOOLS } from "./registry.js";
+import type { ConfirmationOwner } from "./types.js";
 
 /** A tool's home surface. Ordered to match the dashboard IA so the
  *  filter chips read top-to-bottom the way the sidebar does. */
@@ -86,6 +87,13 @@ export interface ToolCatalogEntry {
   domain: ToolDomain;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2472 / WARP-2744 — which layer asks for a confirming tool, carried
+   * from the registry ONLY when declared. Read it through
+   * `confirmationOwnerOf()` (`./interceptor.ts`), never off the field: absent
+   * means the interceptor, and that default lives in one place.
+   */
+  confirmationOwner?: ConfirmationOwner;
 }
 
 /**
@@ -441,7 +449,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Business (business-knowledge profile, and the business graph)
   business_profile_get: "Look up what Droplet knows about your business",
   business_find:
-    "Look up a customer, a contact, a deal, a project, a job, or your sales pipeline",
+    "Look up a customer, a contact, a deal, a project, a job, your sales pipeline, or what the box worked out on its own — findings that need attention and standing facts read out of your documents",
   business_timeline: "See what has happened recently on a customer, deal or job",
   // ADR-045 slice D. Home copy, not the agent-facing description (ADR-002):
   // it names what the OWNER gets, and says the quiet part — these three ask
@@ -514,6 +522,10 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = Array.from(TOOLS.values()).map(
       domain,
       requiresWrite: tool.requiresWrite,
       requiresConfirmation: tool.requiresConfirmation,
+      // WARP-2744 — carried through only when declared, so an entry without
+      // it still resolves to the interceptor default via confirmationOwnerOf()
+      // and no consumer can read a second, disagreeing default off the field.
+      ...(tool.confirmationOwner ? { confirmationOwner: tool.confirmationOwner } : {}),
     };
   },
 );

@@ -1,0 +1,820 @@
+/**
+ * `/api/crm/filing/*` — ADR-048's review surface (WARP-2730).
+ *
+ * ── Why this prefix ────────────────────────────────────────────────────────
+ *
+ * Mounted on `/api/crm`, so it inherits the `crm` module gate through
+ * `mountModuleGates` and its `routePrefixes: ["/api/crm"]` entry. No registry
+ * edit, no second gate vocabulary, and the same reasoning `crm-entity-links.ts`
+ * records: nothing in `routes/crm.ts` takes a path parameter in the first
+ * segment after `/crm`, so `/crm/filing/...` cannot be shadowed.
+ *
+ * ── Why the roles are narrower than the rest of the CRM ────────────────────
+ *
+ * 🔴 `owner` and `admin` only, on READS as well as writes, and never
+ * `requireRoleOrMcpService`.
+ *
+ * The rest of the CRM admits `family` for writes because a household member
+ * adding a customer is ordinary. This surface is different in two ways. First,
+ * a proposal card carries VERBATIM QUOTES from a stored document, which is a
+ * document-content read wearing a CRM read's clothes — the `family` role is not
+ * granted document access on this box. Second, applying is the act that turns
+ * a machine's reading into a record other people will rely on, and the
+ * consent for that was given by the owner who enabled filing.
+ *
+ * The MCP service principal is refused outright. There is no confirmation-gated
+ * tool behind this and there is not going to be one: a model deciding which of
+ * its own extractions to apply is the loop this whole design exists to keep a
+ * human inside of.
+ */
+import { Router, type Request, type Response } from "express";
+import { z } from "zod";
+import type { PrismaClient } from "@prisma/client";
+
+import { requireRole } from "../middleware/auth.js";
+import { assertSafeNcPath } from "../services/clips.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import { ncGetFileId } from "../services/nextcloud.client.js";
+import {
+  applyProposal,
+  FILING_ERRORS,
+  markNotSame,
+  rejectProposal,
+} from "../services/filing/apply.service.js";
+import { parsePayload } from "../services/filing/payloads.js";
+import {
+  permittedOwnerIds,
+  readFilingSettings,
+  SETTING_ID,
+} from "../services/filing/settings.js";
+import { undoProposal } from "../services/filing/undo.service.js";
+import {
+  listRules,
+  revokeRule,
+  RULE_ERRORS,
+  teachNotSame,
+} from "../services/filing/rules.service.js";
+import { listSkipped } from "../services/filing/skipped.service.js";
+import { readFilingHealth } from "../services/filing/digest.js";
+import { createLogger } from "../lib/logger.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import { filingPauseState } from "../services/filing/worker.js";
+import { preflight } from "../services/filing/auto-apply.js";
+import {
+  buildReadback,
+  promotionSentence,
+  shouldOfferPromotion,
+} from "../services/filing/readback.js";
+import { AUDIT_PHRASES, recordFilingAuditBestEffort } from "../services/filing/audit.js";
+
+const REVIEWER = ["owner", "admin"] as const;
+
+/** How many cards one page carries. The needs-a-look list is meant to be
+ *  finished, not scrolled. */
+const PAGE_SIZE = 50;
+
+const listQuery = z.object({
+  status: z.enum(["pending", "decided"]).default("pending"),
+  cursor: z.string().uuid().optional(),
+});
+
+const applyBody = z
+  .object({ chooseCompanyId: z.string().uuid().optional() })
+  .strict();
+
+const notSameBody = z.object({ companyId: z.string().uuid() }).strict();
+
+const skippedQuery = z.object({ before: z.string().datetime().optional() });
+
+/** "Stop filing @domain here", from a record's own chip. */
+const teachBody = z
+  .object({
+    keyKind: z.enum(["EMAIL_ADDRESS", "EMAIL_DOMAIN", "NAME", "NC_FOLDER"]),
+    keyValue: z.string().trim().min(1).max(320),
+    companyId: z.string().uuid(),
+  })
+  .strict();
+
+/**
+ * Turning filing on.
+ *
+ * `mode: "auto"` is accepted here and REFUSED BY THE DATABASE until an
+ * extraction-eval canary has passed on this box's own model (WARP-2732's
+ * `AutoFilingSetting_auto_requires_canary` CHECK). That is deliberate: the
+ * refusal is an invariant, not a branch in a route that a later route could
+ * forget to copy. The 422 below is the readable half of the same rule.
+ *
+ * `enabledById` and `enabledAt` are SERVER-STAMPED. A consent record whose
+ * "who" and "when" came from the request body is not a consent record.
+ */
+const settingsBody = z
+  .object({
+    mode: z.enum(["off", "propose", "auto"]).optional(),
+    level: z.enum(["links_only", "also_create"]).optional(),
+    vertical: z.enum(["general", "healthcare"]).optional(),
+    /** Path prefixes in scope. `[]` means "everywhere I can see". */
+    folders: z.array(z.string().trim().min(1).max(4096)).max(50).optional(),
+    /** Owner-editable, and an empty list restores the defaults rather than
+     *  disabling the layer — see `readFilingSettings`. */
+    pathDenylist: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+  })
+  .strict();
+
+/**
+ * The canary body names a RUN and nothing else.
+ *
+ * `.strict()` for the same reason `settingsBody` is: a body that carried
+ * `passed` or `model` would let a caller assert the verdict the route exists to
+ * go and read for itself.
+ */
+const canaryBody = z.object({ runId: z.string().trim().min(1).max(200) }).strict();
+
+/** The deciding owner's real `User.id`. Null is not attribution-less here, it
+ *  is a refusal: every filing decision has a person behind it. */
+function actorOf(req: Request): string | null {
+  const id = req.user?.id;
+  if (!id || id.startsWith("_service:")) return null;
+  return id;
+}
+
+function mapError(err: unknown, res: Response): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  switch (msg) {
+    case FILING_ERRORS.PROPOSAL_NOT_FOUND:
+    case RULE_ERRORS.NOT_FOUND:
+      res.status(404).json({ error: msg });
+      return true;
+    case FILING_ERRORS.NOT_APPLIED:
+      // 409 for the same reason NOT_PENDING is: the row exists and the
+      // caller's view of it is stale, usually a second tab.
+      res.status(409).json({ error: msg });
+      return true;
+    case FILING_ERRORS.NOT_PENDING:
+      // 409, not 404: the row is there and the caller's view of it is stale —
+      // usually a second tab. The dashboard refreshes the list on a 409.
+      res.status(409).json({ error: msg });
+      return true;
+    case FILING_ERRORS.NEVER_APPLIABLE:
+    case FILING_ERRORS.PAYLOAD_UNREADABLE:
+    case FILING_ERRORS.SOURCE_CHANGED:
+    case FILING_ERRORS.CHOICE_REQUIRED:
+    case FILING_ERRORS.CHOICE_NOT_OFFERED:
+      // Well-formed request, refused on its merits. 422 rather than 400 so it
+      // does not read as a malformed body the client could fix by retrying.
+      res.status(422).json({ error: msg });
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * The card the dashboard renders.
+ *
+ * 🔴 `payload` is re-parsed through its kind's allow-list before it leaves the
+ * box. A row that no longer validates is returned as `readable: false` with no
+ * payload at all rather than being omitted — an owner who cannot see a card
+ * cannot reject it, and a queue with an invisible permanent member is a queue
+ * that stops being finishable.
+ */
+function toCard(row: {
+  id: string;
+  kind: Parameters<typeof parsePayload>[0];
+  status: string;
+  policyClass: string;
+  policyReason: string | null;
+  confidence: number;
+  phiVerdict: string;
+  matchKind: string;
+  payload: unknown;
+  evidence: unknown;
+  sourceKind: string;
+  ncFileId: number | null;
+  autoApplied: boolean;
+  createdAt: Date;
+  decidedAt: Date | null;
+}) {
+  const payload = parsePayload(row.kind, row.payload);
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    policyClass: row.policyClass,
+    policyReason: row.policyReason,
+    confidence: row.confidence,
+    phiVerdict: row.phiVerdict,
+    matchKind: row.matchKind,
+    sourceKind: row.sourceKind,
+    ncFileId: row.ncFileId,
+    // WARP-2733 — whether the BOX did this one, so the card can say so. An
+    // unattended write that looked hand-made would leave an owner unable to
+    // tell what they approved from what was approved on their behalf, which is
+    // the one distinction the whole consent argument rests on.
+    autoApplied: row.autoApplied,
+    createdAt: row.createdAt.toISOString(),
+    decidedAt: row.decidedAt?.toISOString() ?? null,
+    readable: payload !== null,
+    payload,
+    // Quotes only reach a reviewer. They are nulled on reject/not-same, and on
+    // a MENTIONS document they are already locator-only by the time they were
+    // stored.
+    evidence: row.status === "PENDING" ? (row.evidence ?? []) : [],
+  };
+}
+
+/** Postgres surfaces a CHECK violation by NAME (unlike a unique violation,
+ *  which names the FIELDS) — so matching on the constraint name is sound here
+ *  in a way `P2002` matching never is. */
+const logger = createLogger("crm-filing-routes");
+
+/**
+ * 🔴 WARP-2733 — arming the auto-mode gate, which nothing could do.
+ *
+ * `AutoFilingSetting` carries
+ *
+ *     CHECK ("mode" <> 'auto' OR ("canaryPassedAt" IS NOT NULL AND "canaryModel" IS NOT NULL))
+ *
+ * and NOTHING IN THE TREE WROTE EITHER COLUMN. `PATCH /crm/filing/settings`
+ * has a `.strict()` body that rejects them by design, so the only way to reach
+ * auto mode on a real box was a hand-written SQL UPDATE — outside every
+ * actor-stamping and audit convention ADR-048 enforces. The extraction eval's
+ * own README says so, and names the owner of the gap:
+ *
+ *   "Wiring the write-back through the orchestrator, so a pass is attributed
+ *    and audited like every other consent write, is WARP-2733."
+ *
+ * This is that write-back. Two properties matter more than the mechanism:
+ *
+ *   1. THE VERDICT IS FETCHED, NEVER SUPPLIED. The body names a run; it does
+ *      not assert a result. A route that armed on `{ passed: true }` would be
+ *      a database constraint an HTTP client can satisfy by asking nicely,
+ *      which is the exact "faked away" failure the CHECK exists to prevent.
+ *   2. THE MODEL COMES FROM THE REPORT. `canaryModel` records what the box
+ *      actually served during the run, so a pass cannot be transplanted onto
+ *      a model nobody measured.
+ */
+const CANARY_TIMEOUT_MS = 10_000;
+
+function ragEvalBaseUrl(): string | null {
+  const url = process.env.RAG_EVAL_URL;
+  if (!url || url.trim().length === 0) return null;
+  // WARP-236: https:// + client cert when internal mTLS is on, identity when off.
+  return internalBaseUrl(url.replace(/\/+$/, ""));
+}
+
+interface CanaryRun {
+  readonly kind?: string;
+  readonly status?: string;
+  readonly finishedAt?: string | null;
+  readonly extraction?: {
+    readonly passed?: boolean | null;
+    readonly model?: string | null;
+    readonly failures?: readonly string[];
+    readonly nFixtures?: number | null;
+  };
+}
+
+function isCheckViolation(err: unknown, needle: string): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes(needle);
+}
+
+export function createCrmFilingRouter(prisma: PrismaClient): Router {
+  const router = Router();
+
+  /** The banner on `/customers`: how many things are waiting. */
+  router.get("/crm/filing/summary", requireRole(...REVIEWER), async (_req, res, next) => {
+    try {
+      const [settings, pending] = await Promise.all([
+        readFilingSettings(prisma),
+        prisma.ingestProposal.count({ where: { status: "PENDING" } }),
+      ]);
+      // WARP-2731 — the Health block. Two numbers that make two different
+      // SILENCES visible: a corpus the indexer can no longer embed
+      // (`hoursSinceLastIndex`), and a worker registered but never firing
+      // (`lastTickAt`). Neither is a count of successes — a feature whose
+      // health page reports only what it did looks healthiest once it stops.
+      const health = await readFilingHealth(prisma, filingPauseState());
+
+      // WARP-2733 — the consent record, DERIVED from the policy table rather
+      // than written as prose. A hand-written sentence and a changed table
+      // means the box does something the owner was never told about while the
+      // screen still shows the old promise.
+      const owner = settings.enabledById
+        ? await prisma.user.findUnique({
+            where: { id: settings.enabledById },
+            select: { displayName: true },
+          })
+        : null;
+      const readback = buildReadback({
+        mode: settings.mode,
+        level: settings.level,
+        vertical: settings.vertical,
+        ownerName: owner?.displayName ?? null,
+        enabledAt: settings.enabledAt,
+      });
+
+      // Decision D1 — offer the promotion on EVIDENCE, from this owner's own
+      // corpus on this box's own model, rather than on a timer.
+      const [applied, corrections] = await Promise.all([
+        prisma.ingestProposal.count({ where: { status: "APPLIED" } }),
+        prisma.ingestProposal.count({ where: { status: { in: ["NOT_SAME", "UNDONE"] } } }),
+      ]);
+      const offerPromotion = shouldOfferPromotion({
+        applied,
+        corrections,
+        mode: settings.mode,
+      });
+
+      // Why auto mode is not running, when it is switched on but held back.
+      const pre = settings.mode === "auto" ? await preflight(prisma, settings) : null;
+
+      res.json({
+        mode: settings.mode,
+        level: settings.level,
+        vertical: settings.vertical,
+        enabled: settings.mode !== "off",
+        pending,
+        health: {
+          ...health,
+          ...(pre && !pre.ok && pre.message
+            ? { paused: true, pausedReason: pre.reason, pausedMessage: pre.message }
+            : {}),
+        },
+        readback,
+        promotion: offerPromotion
+          ? { offer: true, sentence: promotionSentence({ applied, corrections }) }
+          : { offer: false },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/crm/filing/settings", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    const parsed = settingsBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    const body = parsed.data;
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        // 🔴 Both flags below are decided against the STORED mode, not the
+        // requested one, which is why this reads the row first and why the
+        // read and the write share a transaction.
+        //
+        // `AutoFilingSetting_enabled_has_actor` is a BICONDITIONAL:
+        //
+        //     ("mode" <> 'off') = ("enabledById" IS NOT NULL AND "enabledAt" IS NOT NULL)
+        //
+        // so the actor pair is not merely optional when filing is off — it is
+        // REQUIRED TO BE ABSENT. Writing mode='off' while leaving it populated
+        // is `false = true`, a 23514 the catch below does not recognise, a 500,
+        // and — because the statement rolls back — a row still saying 'propose'.
+        // The off switch did not turn filing off.
+        const current = await tx.autoFilingSetting.findUnique({ where: { id: SETTING_ID } });
+        const wasOff = current === null || current.mode === "off";
+        const goingOff = body.mode === "off";
+        // 🔴 The OFF -> ON EDGE, not "the request names a non-off mode".
+        //
+        // `enabledAt` is the BACKLOG BOUNDARY as well as the consent stamp: the
+        // worker will not claim a source whose `updatedAt` predates it. Stamping
+        // it whenever the body named a non-off mode meant that accepting the
+        // promotion — propose -> auto, the one click this feature is built
+        // around — moved the boundary to now and silently retired every
+        // document still waiting in the queue. Those rows never reach a
+        // terminal status, so they appear in no tab and in no count: they are
+        // simply gone, as a direct result of saying yes.
+        const turningOn = body.mode !== undefined && !goingOff && wasOff;
+
+        await tx.autoFilingSetting.upsert({
+          where: { id: SETTING_ID },
+          create: {
+            id: SETTING_ID,
+            mode: body.mode ?? "off",
+            level: body.level ?? "links_only",
+            vertical: body.vertical ?? "general",
+            folders: body.folders ?? undefined,
+            pathDenylist: body.pathDenylist ?? undefined,
+            // Stamped on the way in, from the session — never from the body.
+            enabledById: body.mode !== undefined && !goingOff ? actorId : null,
+            enabledAt: body.mode !== undefined && !goingOff ? new Date() : null,
+          },
+          update: {
+            ...(body.mode !== undefined ? { mode: body.mode } : {}),
+            ...(body.level !== undefined ? { level: body.level } : {}),
+            ...(body.vertical !== undefined ? { vertical: body.vertical } : {}),
+            ...(body.folders !== undefined ? { folders: body.folders } : {}),
+            ...(body.pathDenylist !== undefined ? { pathDenylist: body.pathDenylist } : {}),
+            ...(turningOn ? { enabledById: actorId, enabledAt: new Date() } : {}),
+            // Cleared together with the mode, in the same statement, because
+            // the CHECK is evaluated per row and will not accept one without
+            // the other.
+            ...(goingOff ? { enabledById: null, enabledAt: null } : {}),
+          },
+        });
+      });
+      res.json(await readFilingSettings(prisma));
+    } catch (err) {
+      // The canary CHECK. A 422 rather than a 500: the request is well-formed
+      // and the answer is "not until this box has been measured".
+      if (isCheckViolation(err, "AutoFilingSetting_auto_requires_canary")) {
+        res.status(422).json({ error: "auto_needs_canary" });
+        return;
+      }
+      // The consent CHECK should now be unreachable — the branches above are
+      // the only writers and they keep mode and the actor pair in step. It is
+      // named here anyway so that if it ever fires again the log says which
+      // invariant broke, rather than leaving a bare 23514 to be traced back to
+      // a route by hand.
+      if (isCheckViolation(err, "AutoFilingSetting_enabled_has_actor")) {
+        logger.error({ err }, "filing settings: consent invariant violated");
+      }
+      next(err);
+    }
+  });
+
+  /**
+   * Arm the auto-mode gate from a canary run that PASSED on this box.
+   *
+   * Every refusal below is a 422 with a named code rather than a 500: the
+   * request is well formed and the answer is a fact about this box. An owner
+   * who is told "the canary has not passed" can act; one who is told
+   * "something went wrong" switches the feature off.
+   */
+  router.post("/crm/filing/canary", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      // A service principal must not be able to arm unattended CRM writes.
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    const parsed = canaryBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const base = ragEvalBaseUrl();
+    if (base === null) {
+      res.status(503).json({ error: "rag_eval_unavailable" });
+      return;
+    }
+
+    let run: CanaryRun;
+    try {
+      const upstream = await internalFetch(
+        `${base}/runs/${encodeURIComponent(parsed.data.runId)}`,
+        { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(CANARY_TIMEOUT_MS) },
+      );
+      if (!upstream.ok) {
+        res.status(503).json({ error: "rag_eval_unavailable" });
+        return;
+      }
+      run = (await upstream.json()) as CanaryRun;
+    } catch (err) {
+      // Profile inactive, DNS failure, timeout. Not the owner's fault and not
+      // a verdict — say so rather than reporting a canary failure.
+      logger.warn({ err: (err as Error)?.message }, "canary: rag-eval unreachable");
+      res.status(503).json({ error: "rag_eval_unavailable" });
+      return;
+    }
+
+    // The run must be the extraction canary, and it must have finished.
+    if (run.kind !== "extraction") {
+      res.status(422).json({ error: "canary_wrong_suite" });
+      return;
+    }
+    if (run.status !== "succeeded" && run.status !== "failed") {
+      res.status(422).json({ error: "canary_not_finished" });
+      return;
+    }
+
+    // 🔴 `status: "succeeded"` means THE HARNESS COMPLETED, not that the box
+    // passed — `_extraction_blocking` finishes a measured FAIL as SUCCEEDED on
+    // purpose, because a harness that ran correctly and found the model wanting
+    // has not failed. The verdict is the separate field, and its absence is
+    // UNKNOWN rather than a default.
+    const verdict = run.extraction;
+    if (!verdict || typeof verdict.passed !== "boolean") {
+      res.status(422).json({ error: "canary_no_verdict" });
+      return;
+    }
+    if (verdict.passed !== true) {
+      res.status(422).json({ error: "canary_failed" });
+      return;
+    }
+    const model = typeof verdict.model === "string" ? verdict.model.trim() : "";
+    if (model.length === 0) {
+      // The CHECK needs both columns, and a pass whose model is unknown cannot
+      // be attributed to anything — arming on it would record a measurement of
+      // nothing in particular.
+      res.status(422).json({ error: "canary_no_model" });
+      return;
+    }
+
+    try {
+      // 🔴 The pass is stamped at the time the RUN finished, not now. The
+      // column answers "when was this box measured", and a later arming click
+      // must not make an old measurement look fresh to anything that ages it.
+      const passedAt = run.finishedAt ? new Date(run.finishedAt) : new Date();
+      await prisma.autoFilingSetting.upsert({
+        where: { id: SETTING_ID },
+        create: {
+          id: SETTING_ID,
+          // Arming the gate is not switching filing on: the row stays off, with
+          // no actor, which is exactly what the consent CHECK requires. It
+          // records that the box has been measured, nothing more.
+          mode: "off",
+          canaryPassedAt: passedAt,
+          canaryModel: model,
+        },
+        update: { canaryPassedAt: passedAt, canaryModel: model },
+      });
+
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield",
+        what: "Auto-filing canary armed",
+        sub: model,
+        // WARP-181 — a consent write names the person who made it.
+        actor: actorFromRequest(req),
+        refs: {
+          actor: req.user?.username ?? null,
+          runId: parsed.data.runId,
+          model,
+          nFixtures: verdict.nFixtures ?? null,
+          passedAt: passedAt.toISOString(),
+        },
+      });
+
+      res.json({ armed: true, model, passedAt: passedAt.toISOString() });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/crm/filing/proposals", requireRole(...REVIEWER), async (req, res, next) => {
+    const parsed = listQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const where =
+        parsed.data.status === "pending"
+          ? { status: "PENDING" as const }
+          : { status: { not: "PENDING" as const } };
+      const rows = await prisma.ingestProposal.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: PAGE_SIZE + 1,
+        ...(parsed.data.cursor ? { cursor: { id: parsed.data.cursor }, skip: 1 } : {}),
+      });
+      const page = rows.slice(0, PAGE_SIZE);
+      res.json({
+        proposals: page.map(toCard),
+        nextCursor: rows.length > PAGE_SIZE ? page[page.length - 1].id : null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/crm/filing/proposals/:id/apply",
+    requireRole(...REVIEWER),
+    async (req, res, next) => {
+      const actorId = actorOf(req);
+      if (!actorId) {
+        res.status(403).json({ error: "human_reviewer_required" });
+        return;
+      }
+      const parsed = applyBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+        return;
+      }
+
+      // The caller's OWN Nextcloud token, so the re-check is an authorization
+      // check and not a lookup — the same split `crm-entity-links.ts` makes.
+      // Fail closed: acting as admin by default would be a privilege
+      // escalation dressed as a convenience.
+      const token = await resolveNcToken(req);
+      const ncUser = req.user?.username;
+      if (!token || !ncUser) {
+        res.status(401).json({ error: "nextcloud_session_required" });
+        return;
+      }
+
+      try {
+        const result = await applyProposal(
+          prisma,
+          req.params.id,
+          {
+            actorId,
+            resolveFileId: async (filePath) => {
+              // The stored path came from the file-indexer rather than from a
+              // caller, but it is still a string being turned into a URL.
+              // `webdavUrl()` percent-encodes each segment and does NOT reject
+              // `..`, so the traversal defence every other Nextcloud path
+              // caller applies is applied here too.
+              let safe: string;
+              try {
+                safe = assertSafeNcPath(filePath).replace(/\/+/g, "/");
+              } catch {
+                return null;
+              }
+              return ncGetFileId(token, ncUser, safe);
+            },
+          },
+          parsed.data,
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        if (mapError(err, res)) return;
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/crm/filing/proposals/:id/reject",
+    requireRole(...REVIEWER),
+    async (req, res, next) => {
+      const actorId = actorOf(req);
+      if (!actorId) {
+        res.status(403).json({ error: "human_reviewer_required" });
+        return;
+      }
+      try {
+        await rejectProposal(prisma, req.params.id, actorId);
+        res.status(204).end();
+      } catch (err) {
+        if (mapError(err, res)) return;
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/crm/filing/proposals/:id/not-same",
+    requireRole(...REVIEWER),
+    async (req, res, next) => {
+      const actorId = actorOf(req);
+      if (!actorId) {
+        res.status(403).json({ error: "human_reviewer_required" });
+        return;
+      }
+      const parsed = notSameBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+        return;
+      }
+      try {
+        await markNotSame(prisma, req.params.id, parsed.data.companyId, actorId);
+        res.status(204).end();
+      } catch (err) {
+        if (mapError(err, res)) return;
+        next(err);
+      }
+    },
+  );
+
+  /**
+   * Undo an applied filing.
+   *
+   * The promise the whole review surface rests on. `POST`, not `DELETE`: it
+   * creates a decision (`UNDONE`, with an actor and a time) rather than
+   * removing one, and the proposal row survives so the audit trail can still
+   * say what happened.
+   */
+  router.post(
+    "/crm/filing/proposals/:id/undo",
+    requireRole(...REVIEWER),
+    async (req, res, next) => {
+      const actorId = actorOf(req);
+      if (!actorId) {
+        res.status(403).json({ error: "human_reviewer_required" });
+        return;
+      }
+      try {
+        const result = await undoProposal(prisma, req.params.id, actorId);
+        await recordFilingAuditBestEffort({
+          ownerId: actorId,
+          what: AUDIT_PHRASES.undone,
+          refs: {
+            sourceRef: `proposal:${result.proposalId}`,
+            sourceKind: "FILE",
+            extractStatus: "done",
+            extractReason: result.mode,
+          },
+        });
+        res.json(result);
+      } catch (err) {
+        if (mapError(err, res)) return;
+        next(err);
+      }
+    },
+  );
+
+  /** What Droplet has been taught, in sentences. */
+  router.get("/crm/filing/rules", requireRole(...REVIEWER), async (_req, res, next) => {
+    try {
+      res.json({ rules: await listRules(prisma) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/crm/filing/rules/:id", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    try {
+      await revokeRule(prisma, req.params.id);
+      // The rule is gone; the fact it existed survives here. Without this the
+      // Rules page could be emptied with nothing anywhere recording it.
+      await recordFilingAuditBestEffort({
+        ownerId: actorId,
+        what: AUDIT_PHRASES.ruleRevoked,
+        refs: {
+          sourceRef: `rule:${req.params.id}`,
+          sourceKind: "FILE",
+          extractStatus: "done",
+        },
+      });
+      res.status(204).end();
+    } catch (err) {
+      if (mapError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.post("/crm/filing/rules", requireRole(...REVIEWER), async (req, res, next) => {
+    const actorId = actorOf(req);
+    if (!actorId) {
+      res.status(403).json({ error: "human_reviewer_required" });
+      return;
+    }
+    const parsed = teachBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const rule = await teachNotSame(prisma, parsed.data, actorId);
+      await recordFilingAuditBestEffort({
+        ownerId: actorId,
+        what: AUDIT_PHRASES.ruleWritten,
+        refs: {
+          sourceRef: `rule:${rule.id}`,
+          sourceKind: "FILE",
+          extractStatus: "done",
+        },
+      });
+      res.status(201).json({ rule });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * What Droplet decided NOT to file.
+   *
+   * The surface that stops this feature having a silent mode: without it, a
+   * folder whose name happens to contain "treatment" swallows a month of
+   * invoices and there is nowhere to find out why.
+   */
+  router.get("/crm/filing/skipped", requireRole(...REVIEWER), async (req, res, next) => {
+    const parsed = skippedQuery.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const settings = await readFilingSettings(prisma);
+      const owners = await permittedOwnerIds(prisma, settings);
+      const page = await listSkipped(prisma, owners, settings.enabledById, {
+        ...(parsed.data.before ? { before: new Date(parsed.data.before) } : {}),
+      });
+      res.json(page);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return router;
+}

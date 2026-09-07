@@ -702,7 +702,9 @@ export async function ncDeleteUser(
 
 export async function ncListUsers(
   adminToken: string
-): Promise<Array<{ id: string; displayName: string; email: string | null }>> {
+): Promise<
+  Array<{ id: string; displayName: string; email: string | null; enabled: boolean }>
+> {
   const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/users/details"), {
     headers: ocsHeaders(adminToken),
   });
@@ -717,6 +719,11 @@ export async function ncListUsers(
     id,
     displayName: u.displayname || id,
     email: u.email || null,
+    // `/cloud/users/details` returns this and we used to drop it, which is
+    // why the roster could disable a person and then never offer to undo it.
+    // Absent → treat as enabled: an NC build that omits the field must not
+    // paint the whole directory as deactivated.
+    enabled: u.enabled !== false,
   }));
 }
 

@@ -412,3 +412,80 @@ describe("POST /api/activity/export", () => {
     );
   });
 });
+
+describe("POST /api/activity/export — the export is itself audited", () => {
+  /**
+   * Taking the entire signed chain off the box used to leave no trace in
+   * it. An audit log whose own export is unlogged cannot answer "who took
+   * a copy of this, and when".
+   */
+  function capturingRecorder() {
+    const recorded: Array<Record<string, unknown>> = [];
+    const signer = createHmacSigner(KEY);
+    _setActivityRecorderForTests(
+      {
+        async record(params: Record<string, unknown>) {
+          recorded.push(params);
+          return null;
+        },
+      } as never,
+      signer,
+    );
+    return recorded;
+  }
+
+  it("records who exported, how many rows, and the filter they used", async () => {
+    const recorded = capturingRecorder();
+    const app = makeApp([
+      makeRow({ kind: "auth" }, 1),
+      makeRow({ kind: "auth" }, 2),
+      makeRow({}, 3),
+    ]);
+
+    const res = await request(app)
+      .post("/api/activity/export")
+      .send({ kind: "auth" });
+    expect(res.status).toBe(200);
+
+    // The row is appended after res.end(), so let the detached promise run.
+    await new Promise((r) => setImmediate(r));
+
+    expect(recorded).toHaveLength(1);
+    const row = recorded[0] as {
+      kind: string;
+      severity: string;
+      what: string;
+      sub: string;
+      refs: { rowCount: number; filter: { kind?: string } };
+    };
+    expect(row.kind).toBe("system");
+    expect(row.severity).toBe("warn");
+    expect(row.what).toBe("Audit bundle exported");
+    expect(row.sub).toContain("auth");
+    expect(row.refs.rowCount).toBeGreaterThan(0);
+    expect(row.refs.filter.kind).toBe("auth");
+  });
+
+  it("counts the rows that actually left the box", async () => {
+    const recorded = capturingRecorder();
+    const app = makeApp([makeRow({}, 1), makeRow({}, 2)]);
+
+    await request(app).post("/api/activity/export").send({});
+    await new Promise((r) => setImmediate(r));
+
+    expect((recorded[0] as { refs: { rowCount: number } }).refs.rowCount).toBe(2);
+  });
+
+  it("does not fail the export when the recorder is unavailable", async () => {
+    // recordActivity returns null pre-init and swallows recorder errors —
+    // a download that already streamed must not turn into a 500.
+    const signer = createHmacSigner(KEY);
+    _setActivityRecorderForTests(null, signer);
+    const app = makeApp([makeRow({}, 1)]);
+
+    const res = await request(app).post("/api/activity/export").send({});
+
+    expect(res.status).toBe(200);
+    expect(res.text.trim().split("\n")).toHaveLength(2);
+  });
+});
