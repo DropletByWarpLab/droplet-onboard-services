@@ -58,7 +58,10 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { minorUnitExponent, toMinorUnits } from "@droplet/shared-types";
-import { SUBJECT_ERP_DOCUMENT } from "../../erp-sync/money-snapshot.service.js";
+import {
+  SUBJECT_ERP_DOCUMENT,
+  toUtcDateString,
+} from "../../erp-sync/money-snapshot.service.js";
 import type { Detector, DetectedFinding } from "./types";
 
 /**
@@ -204,7 +207,15 @@ export const receivablesAgeing: Detector = {
   description: "Overdue money owed to the business that is growing rather than being collected",
 
   async run(prisma: PrismaClient, now: Date): Promise<DetectedFinding[]> {
-    const windowStart = new Date(now.getTime() - WINDOW_DAYS * 86_400_000);
+    // Both bounds are handed to Postgres as DAY STRINGS, through the very
+    // function that wrote `capturedOn` in the first place. Passing a JS `Date`
+    // and casting it with `::date` in SQL resolves against the SESSION's
+    // TimeZone, so on a box or a CI runner that is not UTC the reader would
+    // round to a different day than the writer did — and at the TOP bound that
+    // silently excludes today's own snapshot. Same function, same day, no
+    // dependence on a setting neither end controls.
+    const windowStartDay = toUtcDateString(new Date(now.getTime() - WINDOW_DAYS * 86_400_000));
+    const nowDay = toUtcDateString(now);
 
     // ONE query, in Postgres. The detector contract's reason is explicit: the
     // box runs a single inference at a time, and arithmetic over rows it
@@ -216,13 +227,24 @@ export const receivablesAgeing: Detector = {
     // newest day present. Both come from the data rather than from arithmetic
     // on `now`, so a box whose sync was down for a week compares the days it
     // actually has instead of silently reading zero for a day it never wrote.
+    //
+    // 🔴 THE WINDOW HAS A TOP AS WELL AS A BOTTOM. `latest` is the newest day
+    // AS OF `now`, never simply the newest row in the table. A `capturedOn` in
+    // the future is not a theoretical row — `MoneySnapshot` is keyed on a DATE
+    // the writer computes from the box's own clock, and a box that boots with a
+    // bad RTC (no network time yet, a dead coin cell) stamps tomorrow. Without
+    // the cap that single row becomes the "now" endpoint forever: the real
+    // present-day rows are then never compared, and the detector reports on a
+    // day that has not happened. `now` is already a parameter for exactly this
+    // kind of reason, so the fix costs one predicate.
     const rows = await prisma.$queryRaw<TrendRow[]>`
       WITH bounds AS (
         SELECT
-          MIN("capturedOn") FILTER (WHERE "capturedOn" >= ${windowStart}::date) AS anchor,
+          MIN("capturedOn") FILTER (WHERE "capturedOn" >= ${windowStartDay}::date) AS anchor,
           MAX("capturedOn") AS latest
         FROM "MoneySnapshot"
         WHERE "subjectType" = ${SUBJECT_ERP_DOCUMENT}
+          AND "capturedOn" <= ${nowDay}::date
       ),
       overdue AS (
         SELECT

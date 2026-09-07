@@ -50,10 +50,23 @@
  * distinct from money-snapshot.pg.test.ts's 2030-2031 — and cleanup is scoped
  * to that range. Never an unscoped deleteMany, never a TRUNCATE.
  *
- * 🔴 The detector's `bounds` CTE takes MIN/MAX over EVERY `erp_document`
- * snapshot, because in production that is the whole point. So a stray row from
- * another suite outside this era would move `latest` and these assertions would
- * FAIL rather than pass wrongly — loud, which is the right failure.
+ * 🔴 AND THE SCOPES DO NOT MATCH, WHICH IS THE INTERESTING PART. The detector's
+ * `bounds` CTE takes MIN/MAX over EVERY `erp_document` snapshot, because in
+ * production that is the whole point, while `cleanup()` can only reach the era.
+ * An earlier version of this note said a stray row would therefore make these
+ * assertions "FAIL rather than pass wrongly". That is true of the cases that
+ * assert a finding — and exactly backwards for the ten that assert silence. A
+ * stray row moves an endpoint off our two days, the `overdue` CTE then selects
+ * on a day our fixtures were never written to, the detector correctly returns
+ * nothing, and every silence assertion passes while proving nothing at all.
+ *
+ * Two things close that, and both are load-bearing:
+ *
+ *   `assertEraIsExclusive()` runs before every case and names the leak if the
+ *     table holds an `erp_document` snapshot outside 2033–34.
+ *   `expectSilent(anchor, latest)` replaces the bare `toEqual([])`. It states
+ *     which two endpoints the detector must have RESOLVED before it stayed
+ *     quiet, so silence for the wrong reason is a failure rather than a pass.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
@@ -140,8 +153,50 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     await prisma.integrationConnection.deleteMany({ where: { secretRef: OURS } });
   }
 
+  /**
+   * 🔴 `bounds` IS NOT ERA-SCOPED AND CANNOT BE — so the era has to be.
+   *
+   * `cleanup()` deletes only 2033–34 rows, because this DB is shared and a
+   * broader delete would take another suite's fixtures with it. The detector's
+   * `bounds` CTE, by contrast, takes MIN/MAX over EVERY `erp_document` snapshot
+   * in the table, because in production that is exactly the point.
+   *
+   * Those two scopes not matching is what made six `toEqual([])` assertions
+   * meaningless. A stray row outside the era moves `anchor` or `latest` off our
+   * two days; the `overdue` CTE then selects on days our fixtures were never
+   * written to; the detector returns nothing — and every negative case passes,
+   * proving only that the detector was looking somewhere else. The file header
+   * claimed the opposite ("would FAIL rather than pass wrongly"). That is true
+   * of the POSITIVE cases and precisely backwards for the negative ones.
+   *
+   * So: assert the era is exclusive before every case. If another suite leaked,
+   * this says so by name rather than letting seven assertions quietly stop
+   * meaning anything.
+   */
+  async function assertEraIsExclusive() {
+    const strays = await prisma.moneySnapshot.findMany({
+      where: {
+        subjectType: SUBJECT_ERP_DOCUMENT,
+        OR: [{ capturedOn: { lt: ERA_START } }, { capturedOn: { gte: ERA_END } }],
+      },
+      select: { capturedOn: true, subjectId: true },
+      take: 5,
+    });
+    if (strays.length > 0) {
+      const days = strays.map((s) => s.capturedOn.toISOString().slice(0, 10)).join(", ");
+      throw new Error(
+        `receivables-ageing pg fixtures require the ${SUBJECT_ERP_DOCUMENT} snapshot table to ` +
+          `hold nothing outside ${ERA_START.toISOString().slice(0, 10)}..` +
+          `${ERA_END.toISOString().slice(0, 10)}, because the detector's bounds CTE is ` +
+          `deliberately unscoped. Found: ${days}. Another suite leaked rows; ` +
+          `every silence assertion here would otherwise pass for the wrong reason.`,
+      );
+    }
+  }
+
   beforeEach(async () => {
     await cleanup();
+    await assertEraIsExclusive();
     connectionId = (
       await prisma.integrationConnection.create({
         data: {
@@ -251,6 +306,48 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
   const run = () => receivablesAgeing.run(prisma, NOW);
 
+  /** `@db.Date` compared as the day it is, not as a timestamp. */
+  const day = (d: Date | null) => (d === null ? null : d.toISOString().slice(0, 10));
+
+  /**
+   * The detector's own `bounds` CTE, re-issued from the test.
+   *
+   * Deliberately the SAME shape and the SAME derived `windowStart` the detector
+   * computes — `now - WINDOW_DAYS`, never a literal date, so it keeps tracking
+   * the constant if anyone moves it.
+   */
+  async function boundsAsDetectorSeesThem(): Promise<{ anchor: string | null; latest: string | null }> {
+    const windowStartDay = day(new Date(NOW.getTime() - WINDOW_DAYS * 86_400_000))!;
+    const nowDay = day(NOW)!;
+    const [b] = await prisma.$queryRaw<{ anchor: Date | null; latest: Date | null }[]>`
+      SELECT
+        MIN("capturedOn") FILTER (WHERE "capturedOn" >= ${windowStartDay}::date) AS anchor,
+        MAX("capturedOn") AS latest
+      FROM "MoneySnapshot"
+      WHERE "subjectType" = ${SUBJECT_ERP_DOCUMENT}
+        AND "capturedOn" <= ${nowDay}::date
+    `;
+    return { anchor: day(b?.anchor ?? null), latest: day(b?.latest ?? null) };
+  }
+
+  /**
+   * 🔴 "IT RETURNED NOTHING" IS ONLY A CLAIM ABOUT THE DETECTOR IF IT LOOKED AT
+   * OUR DAYS.
+   *
+   * Every silence assertion in this file used to be a bare `toEqual([])`, which
+   * an unscoped `bounds` can satisfy for a reason that has nothing to do with
+   * the rule under test — see `assertEraIsExclusive`. So each one now states
+   * which two endpoints the detector must have resolved BEFORE it stayed
+   * silent. Wrong endpoints fail here, loudly, instead of reading as a pass.
+   */
+  async function expectSilent(anchor: Date | null, latest: Date | null) {
+    expect(await boundsAsDetectorSeesThem()).toEqual({
+      anchor: day(anchor),
+      latest: day(latest),
+    });
+    await expect(run()).resolves.toEqual([]);
+  }
+
   it("reports a growing overdue book, with the INCREASE as its impact", async () => {
     // Overdue on both days (due before THEN), and the balance grew.
     const a = await invoice(DUE_BEFORE_ANCHOR);
@@ -299,7 +396,9 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     await snap(a.id, NOW, "90000.00");
 
     expect(MIN_SERIES_DAYS).toBeGreaterThan(3);
-    await expect(run()).resolves.toEqual([]);
+    // The endpoints ARE three days apart — the detector resolved them and then
+    // refused. That is the guard firing, not the fixture missing.
+    await expectSilent(near, NOW);
   });
 
   it("reads the SNAPSHOT's status, not the document's today", async () => {
@@ -348,7 +447,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
     // Receivables were flat. Only the payable moved, and it is not this
     // detector's subject.
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   it("ignores LOCAL documents, like its sibling does", async () => {
@@ -360,14 +459,14 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     await snap(l.id, THEN, "1000.00");
     await snap(l.id, NOW, "80000.00");
 
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   it("stays silent when the book SHRANK", async () => {
     const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "40000.00");
     await snap(a.id, NOW, "10000.00");
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   it("stays silent on a rise below the ratio gate", async () => {
@@ -375,7 +474,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "100000.00");
     await snap(a.id, NOW, "110000.00");
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   it("stays silent on a big ratio whose absolute increase is trivial", async () => {
@@ -383,7 +482,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "2.00");
     await snap(a.id, NOW, "8.00");
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   // ── the NULL-currency path, which is the ORDINARY one ─────────────────────
@@ -402,7 +501,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     const a = await invoice(DUE_BEFORE_ANCHOR, null);
     await snap(a.id, THEN, "2.00", { currency: null });
     await snap(a.id, NOW, "8.00", { currency: null });
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
   });
 
   it("reports a material rise when the ledger named NO currency, without an amount", async () => {
@@ -479,7 +578,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     const small = await invoice(DUE_BEFORE_ANCHOR);
     await snap(small.id, THEN, "2.00");
     await snap(small.id, NOW, "8.00");
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
 
     // Material rise on the SAME series: reported, and with an exact amount.
     await prisma.moneySnapshot.deleteMany({ where: { subjectId: small.id } });
@@ -497,11 +596,36 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "0.00");
     await snap(a.id, NOW, "0.00");
-    await expect(run()).resolves.toEqual([]);
+    await expectSilent(THEN, NOW);
+  });
+
+  it("will not let a FUTURE-dated row become the `latest` endpoint", async () => {
+    // 🔴 `bounds` reads MAX("capturedOn") over the whole table, so without the
+    // `<= now` cap one row stamped tomorrow becomes the "now" endpoint forever
+    // and the real present-day rows are never compared again. That row is not
+    // theoretical: `capturedOn` is a DATE the writer takes from the box's own
+    // clock, and a box booting with a dead RTC and no network time stamps a day
+    // that has not happened.
+    const a = await invoice(DUE_BEFORE_ANCHOR);
+    await snap(a.id, THEN, "10000.00");
+    await snap(a.id, NOW, "30000.00");
+
+    const tomorrow = new Date(NOW.getTime() + 86_400_000);
+    const skewed = await invoice(DUE_BEFORE_ANCHOR);
+    await snap(skewed.id, tomorrow, "990000.00");
+
+    // The endpoints are still OUR two days, and the finding is still the real
+    // +20,000.00 rather than the clock-skewed row's 990,000.
+    expect(await boundsAsDetectorSeesThem()).toEqual({ anchor: day(THEN), latest: day(NOW) });
+    const found = await run();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.impactMinor).toBe(2_000_000n);
   });
 
   it("returns nothing at all when there is no series", async () => {
-    // A box that has never synced. Not an error, not a zero — nothing.
-    await expect(run()).resolves.toEqual([]);
+    // A box that has never synced. Not an error, not a zero — nothing. Both
+    // endpoints are NULL, which is what makes this "no series" rather than
+    // "somebody else's series".
+    await expectSilent(null, null);
   });
 });
