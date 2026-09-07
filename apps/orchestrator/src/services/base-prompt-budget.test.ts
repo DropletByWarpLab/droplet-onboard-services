@@ -48,9 +48,14 @@ import {
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 import { ALL_REMOTE_TOOLS } from "./__fixtures__/remote-tool-catalog.js";
 
-/** buildMemoryFactsBlock's MEMORY_FACTS_CHAR_BUDGET (routes/llm.ts). Kept as
- *  a literal here (the const is route-local, not exported) so the invariant
- *  is complete; a change to the route budget should update this in lockstep. */
+/** `buildMemoryFactsBlock`'s MEMORY_FACTS_CHAR_BUDGET, restated here as a
+ *  literal so this file's fixed-block invariant is complete and readable in
+ *  one place. WARP-2823 moved the block out of `routes/llm.ts` into
+ *  `services/system-prompt.service.ts`, and the const itself is exported from
+ *  `services/tool-budget.service.ts` — that is the one definition, and a
+ *  change there must update this literal in lockstep. The comment this
+ *  replaced said the const was "route-local, not exported", which stopped
+ *  being true with the move. */
 const MEMORY_FACTS_CHAR_BUDGET = 2000;
 
 /** Serialize the DEFAULT CHAT advertisement to the wire tools[] shape the

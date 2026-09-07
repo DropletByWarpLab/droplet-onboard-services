@@ -46,11 +46,16 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("tool-budget");
 
 /**
- * `buildMemoryFactsBlock`'s MEMORY_FACTS_CHAR_BUDGET (routes/llm.ts). The
- * const is route-local and unexported, so it is mirrored here to keep the
- * fixed-block sum complete. A change to the route budget must update this in
- * lockstep — `base-prompt-budget.test.ts` pins the total, so a drift shows up
- * as a red canary rather than as a quietly wrong ceiling.
+ * `buildMemoryFactsBlock`'s memory-block budget, and the ONE definition of it.
+ *
+ * It lives here rather than beside the block it bounds because the fixed-block
+ * sum below is composed here, and a budget that is not in the sum is a ceiling
+ * that is quietly wrong. `system-prompt.service.ts` imports it.
+ *
+ * 🔴 WARP-2823 corrected this comment. It used to say the const was
+ * "route-local and unexported, so it is mirrored here" — true until
+ * `buildMemoryFactsBlock` moved out of `routes/llm.ts`, and a lie afterwards.
+ * There is no mirror now; there is one export and one importer.
  */
 export const MEMORY_FACTS_CHAR_BUDGET = 2000;
 
