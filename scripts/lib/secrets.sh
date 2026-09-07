@@ -339,7 +339,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -449,6 +449,13 @@ generate_env() {
   # container's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_RAG_EVAL}.
   # Without it every scheduled + ad-hoc RAGAS run 401s at the first query.
   service_token_rag_eval=$(openssl rand -hex 32)
+  # WARP-2590: bearer the orchestrator presents to services/erp-sql-bridge on
+  # /read, /write and /introspect. The bridge holds the practice's droplet_ro /
+  # droplet_rw ODBC credentials and reaches their system of record, so unlike
+  # inference-manager it fails CLOSED: with no token every route answers 503
+  # BRIDGE_NOT_PROVISIONED. Both ends read SERVICE_TOKEN_ERP_BRIDGE straight
+  # from .env via env_file — never re-declare it as a compose ${...}.
+  service_token_erp_bridge=$(openssl rand -hex 32)
   # WARP-2211: bearer the orchestrator presents on POST /render to the
   # services/doc-render container (the .pdf/.docx/.xlsx renderer behind
   # POST /api/files/render). doc-render fails CLOSED — 503 on every
@@ -774,6 +781,14 @@ DROPLET_MATTER_SERVICE_TOKEN=$droplet_matter_service_token
 # WARP-465. Bearer the email-indexer presents on ingest POSTs.
 # Compose wires email-indexer's ORCHESTRATOR_SERVICE_TOKEN to this value.
 SERVICE_TOKEN_EMAIL=$service_token_email
+
+# --- ERP SQL bridge service bearer (orchestrator -> erp-sql-bridge REST) ---
+# WARP-2590. The bridge executes registry-built SQL against a practice's
+# system of record as droplet_ro / droplet_rw. This bearer is what decides
+# WHO may ask; allowlist.py decides WHICH statement, and the database grant
+# decides what it may touch. Missing => the bridge refuses every route with
+# 503 (fail closed, by design). Both ends read it from .env via env_file.
+SERVICE_TOKEN_ERP_BRIDGE=$service_token_erp_bridge
 
 # --- RAG eval service bearer (rag-eval → orchestrator REST) ---
 # Bearer ragas_runner.py presents on /api/admin/retrieval-eval/search
@@ -1217,6 +1232,11 @@ migrate_env() {
   _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
+  # WARP-2590: a box provisioned before the bridge gate exists has no
+  # SERVICE_TOKEN_ERP_BRIDGE, and the bridge fails CLOSED — so without this
+  # backfill an upgraded ERP box loses its PMS sync at 503 rather than
+  # silently running unauthenticated. Mint it on upgrade too.
+  _migrate_ensure_key SERVICE_TOKEN_ERP_BRIDGE "$(openssl rand -hex 32)"
   _migrate_ensure_key JWT_SECRET "$(openssl rand -hex 64)"
   # RAG-eval auth backfill: existing installs predate the rag-eval service
   # token; without this key ragas_runner.py's /api/admin/retrieval-eval/search

@@ -49,6 +49,10 @@ export interface CrmDealOut {
   currency: string | null;
   expected_close: string | null;
   closed_at: string | null;
+  /** Which upstream owns this record, when one does. The same field
+   *  `CrmCompanyOut` and the contact projection already carry — the deal was
+   *  the only one of the three that dropped it (WARP-2750). */
+  synced_from: string | null;
 }
 
 export interface CrmActivityOut {
@@ -78,6 +82,11 @@ interface ApiDeal {
   currency: string | null;
   expectedCloseOn: string | null;
   closedAt: string | null;
+  // WARP-2750 — the orchestrator has always emitted both of these
+  // (`dealToApi` in crm.service.ts); this interface simply never declared
+  // them, so `toDeal` could not have read them if it wanted to.
+  origin: string;
+  externalSystem: string | null;
 }
 
 interface ApiActivity {
@@ -112,6 +121,14 @@ export function toDeal(row: ApiDeal): CrmDealOut {
     currency: row.currency,
     expected_close: row.expectedCloseOn,
     closed_at: row.closedAt,
+    // Reported from `origin`, not from `externalSystem != null` — the two can
+    // disagree only if something is wrong, and `origin` is the explicit column.
+    // The same rule `toCompany` follows above.
+    //
+    // WARP-2750 — the deal was the ONLY one of the three graph projections
+    // that dropped provenance, which is why "why is this HubSpot deal showing
+    // as idle" had no answer visible anywhere in a tool result.
+    synced_from: row.origin === "EXTERNAL" ? row.externalSystem : null,
   };
 }
 
