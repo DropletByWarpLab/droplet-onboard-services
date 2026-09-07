@@ -17,6 +17,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Activity as ActivityIcon,
+  Bot,
   HardDrive,
   ScrollText,
   ServerCog,
@@ -55,6 +56,12 @@ const AREAS = [
     icon: <HardDrive size={15} />,
     title: "Company files",
     sub: "Storage used by each person and library on this box.",
+  },
+  {
+    href: "/admin/prompt",
+    icon: <Bot size={15} />,
+    title: "Assistant",
+    sub: "The prompt and the tools each person's assistant actually gets, and what is holding the rest back.",
   },
   {
     href: "/settings",

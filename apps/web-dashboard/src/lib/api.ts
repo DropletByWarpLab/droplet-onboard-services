@@ -6,6 +6,8 @@ import {
 // docstring there) so `@/lib/api` stays the name every consumer imports from.
 import type { SaasConnectionState } from "@droplet/shared-types";
 import type {
+  ToolInspectResponse,
+  PromptInspectResponse,
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
@@ -6011,6 +6013,60 @@ export async function updateUserUsage(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to update usage: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-2823 — what one person's assistant is actually handed.
+ *
+ * Two fetchers rather than one roll-up, called independently by the page, so
+ * an unreachable prompt does not blank the tool table and vice versa. The
+ * query models a turn: the message the relevance gate is sized against, plus
+ * the three turn shapes (off-LAN, interview, voice) that change what is
+ * withheld.
+ */
+function inspectQuery(opts: InspectTurnOptions): string {
+  const q = new URLSearchParams();
+  if (opts.message) q.set("message", opts.message);
+  if (opts.offLan) q.set("offLan", "1");
+  if (opts.interview) q.set("interview", "1");
+  if (opts.voice) q.set("voice", "1");
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export interface InspectTurnOptions {
+  message?: string;
+  offLan?: boolean;
+  interview?: boolean;
+  voice?: boolean;
+}
+
+export async function fetchToolInspect(
+  userId: string,
+  opts: InspectTurnOptions = {},
+): Promise<ToolInspectResponse> {
+  const res = await authFetch(
+    `${BASE}/api/admin/tool-inspect/${encodeURIComponent(userId)}${inspectQuery(opts)}`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to inspect tools: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchPromptInspect(
+  userId: string,
+  opts: InspectTurnOptions = {},
+): Promise<PromptInspectResponse> {
+  const res = await authFetch(
+    `${BASE}/api/admin/prompt-inspect/${encodeURIComponent(userId)}${inspectQuery(opts)}`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to inspect prompt: ${res.status}`);
   }
   return res.json();
 }
