@@ -52,7 +52,6 @@ import { restProfileFor } from "../src/rest/profiles.js";
 import {
   SQUARE_API_ORIGIN,
   SQUARE_API_VERSION,
-  SQUARE_PAGE_SIZE,
   SQUARE_PROFILE,
   SQUARE_PROVIDER,
 } from "../src/rest/vendors/square.js";
@@ -294,10 +293,18 @@ describe("Square — auth and the version header, read off the wire", () => {
     // buy nothing on these three endpoints — and `GET /v2/catalog/list`, which a
     // future dataset would use, accepts no `limit` at all, so making it a habit
     // sends a parameter that endpoint does not document.
+    //
+    // Asserted from the OUTGOING REQUEST only. This test used to close with
+    // `expect(SQUARE_PAGE_SIZE).toBe(100)` — a module constant compared to its
+    // own definition, which no change to this connector or this profile can
+    // make fail, over a constant the profile never read. It is gone; the fact
+    // lives in the comment on the paging rules in `vendors/square.ts`.
+    // Mutation: add `limit` to any dataset's `query` -> red.
     const { connector, calls } = connectorWith([{ body: { payments: [] } }]);
     await connector.runRead("get_recent_charges", { since: SINCE });
-    expect(new URL(calls[0]!.url).searchParams.has("limit")).toBe(false);
-    expect(SQUARE_PAGE_SIZE).toBe(100);
+    for (const call of calls) {
+      expect(new URL(call.url).searchParams.has("limit"), call.url).toBe(false);
+    }
   });
 });
 

@@ -49,7 +49,7 @@
  * `UnsafeBaseUrlError`. Ten of the thirty-four vendors need it, which is why it
  * is a shared guard here rather than a per-connector one.
  */
-import type { DatasetName } from "../export-drop/profiles.js";
+import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
 
 /**
  * How the credential is presented on every request.
@@ -507,5 +507,40 @@ export function assertValidRestProfile(profile: RestVendorProfile): void {
     if (seen.has(spec.dataset)) fail(`dataset "${spec.dataset}" is declared twice`);
     seen.add(spec.dataset);
     if (!spec.path.startsWith("/")) fail(`dataset "${spec.dataset}" path must start with "/"`);
+
+    // 🔴 Every `fieldMap` key must be a canonical column of THIS dataset.
+    //
+    // `RestDatasetSpec.fieldMap` has always DOCUMENTED this ("Keys are exactly
+    // the columns in `CANONICAL_COLUMNS[dataset]`") and nothing enforced it,
+    // which made the claim worse than useless. `projectCanonicalRow` iterates
+    // `CANONICAL_COLUMNS[dataset]` and looks each column UP in the map — it
+    // never iterates the map — so a key that is not a canonical column is
+    // simply never read.
+    //
+    // The failure that produces is the silent one this whole layer is built to
+    // refuse: mistype `chrage_id`, or carry a column name across from a
+    // neighbouring dataset, and the canonical column stays `undefined` on
+    // every row of every sync. Nothing throws, nothing logs, the read
+    // succeeds, the connection card stays green, and a money column is empty
+    // forever. It is one character, and it is invisible in review because the
+    // profile READS correctly.
+    //
+    // Decidable from the profile alone, which is the bar this function sets
+    // for itself — the vocabulary is a compile-time constant. (Whether the
+    // dotted PATH is the one the vendor serves is not decidable here, and
+    // stays the vendor tests' job.)
+    const columns = CANONICAL_COLUMNS[spec.dataset] as readonly string[] | undefined;
+    if (!columns) {
+      fail(`dataset "${spec.dataset}" is not one of the canonical datasets`);
+    } else {
+      for (const column of Object.keys(spec.fieldMap)) {
+        if (!columns.includes(column)) {
+          fail(
+            `dataset "${spec.dataset}" maps "${column}", which is not one of its canonical ` +
+              `columns (${columns.join(", ")}) — it would never be read`,
+          );
+        }
+      }
+    }
   }
 }

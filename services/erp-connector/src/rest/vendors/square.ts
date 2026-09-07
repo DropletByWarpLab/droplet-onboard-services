@@ -83,16 +83,21 @@ export const SQUARE_API_ORIGIN = "https://connect.squareup.com";
 export const SQUARE_API_VERSION = "2026-08-19";
 
 /**
- * Square's own cursor rules, quoted because they decide the paging loop:
- * `limit` default and max are 100 on these endpoints and values above 100 are
+ * Square's own cursor rules, recorded because they decide the paging loop:
+ * `limit` default and max are both 100 on these endpoints, values above 100 are
  * IGNORED rather than rejected, and a cursor lives 5 minutes.
  *
- * Not sent as a constant query parameter: the endpoints default to 100 anyway,
- * and `GET /v2/catalog/list` — which a future dataset here would use — accepts
- * no `limit` at all, so making it a habit would send a parameter that endpoint
- * does not document.
+ * 🔴 Deliberately NOT a constant. It was `export const SQUARE_PAGE_SIZE = 100`,
+ * referenced by nothing but its own test (`expect(SQUARE_PAGE_SIZE).toBe(100)`)
+ * — a constant compared to its own definition, which cannot fail for any reason
+ * a reader would care about and made the profile look as though it configured a
+ * page size it does not send.
+ *
+ * Nothing sends `limit`: these endpoints default to 100 anyway, and
+ * `GET /v2/catalog/list` — which a future dataset here would use — accepts no
+ * `limit` at all, so making it a habit would send a parameter that endpoint does
+ * not document. That absence is what the test asserts now.
  */
-export const SQUARE_PAGE_SIZE = 100;
 
 export const SQUARE_PROFILE: RestVendorProfile = {
   provider: SQUARE_PROVIDER,

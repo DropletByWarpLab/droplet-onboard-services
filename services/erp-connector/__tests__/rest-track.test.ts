@@ -180,6 +180,77 @@ describe("profile validation — a malformed profile fails to BUILD, not on firs
     }
   });
 
+  it("🔴 refuses a fieldMap key that is not a canonical column of that dataset", () => {
+    // `projectCanonicalRow` iterates CANONICAL_COLUMNS and looks each column UP
+    // in the map — it never iterates the map. So a key that is not a canonical
+    // column is NEVER READ, and the failure is completely silent: nothing
+    // throws, nothing logs, the read succeeds, the connection card stays green,
+    // and the column is `undefined` on every row of every sync forever.
+    //
+    // One character does it. `chrage_id` for `charge_id`, or a column carried
+    // across from a neighbouring dataset because the profiles sit side by side.
+    // In review the profile READS correctly, which is why a type cannot be
+    // relied on here and a check is.
+    // Mutation: delete the fieldMap loop in `assertValidRestProfile` -> red.
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [
+            {
+              dataset: "company",
+              path: "/v1/companies",
+              watermark: null,
+              pagination: { kind: "cursor", nextCursorPath: "meta.next", cursorParam: "cursor" },
+              rowsPath: "data",
+              fieldMap: { compnay_id: "id" },
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/"compnay_id", which is not one of its canonical columns/);
+
+    // A column that is real but belongs to a DIFFERENT dataset is refused for
+    // the same reason and is the likelier mistake of the two.
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [
+            {
+              dataset: "company",
+              path: "/v1/companies",
+              watermark: null,
+              pagination: { kind: "cursor", nextCursorPath: "meta.next", cursorParam: "cursor" },
+              rowsPath: "data",
+              fieldMap: { company_id: "id", appt_time: "created" },
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/appt_time/);
+
+    // And the reference profile — and both shipped ones — still build.
+    expect(() => assertValidRestProfile(staticProfile())).not.toThrow();
+    for (const profile of REST_VENDOR_PROFILES) {
+      expect(() => assertValidRestProfile(profile), profile.provider).not.toThrow();
+    }
+  });
+
+  it("🔴 every shipped profile maps ONLY canonical columns — checked against the vocabulary directly", () => {
+    // The check above proves the guard rejects; this proves the shipped
+    // profiles pass it for the right reason, by reading CANONICAL_COLUMNS
+    // rather than by trusting `assertValidRestProfile` not to have been
+    // weakened. Two independent paths to the same claim, which is the point.
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        const columns = CANONICAL_COLUMNS[spec.dataset];
+        expect(columns, `${profile.provider}.${spec.dataset}`).toBeDefined();
+        for (const column of Object.keys(spec.fieldMap)) {
+          expect(columns, `${profile.provider}.${spec.dataset}.${column}`).toContain(column);
+        }
+      }
+    }
+  });
+
   it("refuses a profile serving no datasets, and one declaring a dataset twice", () => {
     expect(() => assertValidRestProfile(staticProfile({ datasets: [] }))).toThrow(/no datasets/);
     const one = staticProfile().datasets[0]!;

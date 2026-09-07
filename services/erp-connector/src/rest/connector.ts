@@ -389,7 +389,12 @@ export class RestProfileConnector implements Connector {
    * One request. THE choke point — every call this connector makes goes through
    * here, which is why every guard lives here rather than on the callers.
    *
-   * Order is load-bearing and `rest-connector.guards.test.ts` asserts on it:
+   * Order is load-bearing, and it is asserted in `__tests__/rest-track.test.ts`
+   * — the "refuses …  — ZERO fetch calls" tests and the `redirects` block. (It
+   * used to cite `rest-connector.guards.test.ts`, which has never existed in
+   * this repo: a citation to a file nobody can open is a claim of coverage
+   * that cannot be checked, and reads as stronger than the coverage that is
+   * really there.)
    *
    *   1. the host guard ({@link assertSafeRestBaseUrl}) — re-run per request,
    *      not only at construction, because a tampered connection row is exactly
