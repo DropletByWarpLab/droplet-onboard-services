@@ -204,6 +204,24 @@ const TURNS: Turn[] = [
     message: "what's still open on the kitchen remodel project?",
     requires: "business_find",
   },
+  // ── WARP-2719 — the department question, in the words the ticket used ──
+  //
+  // The sentence the department filter was built to answer, kept as a
+  // regression case because it is ALSO the sentence the vocabulary above does
+  // not match: no project, no ticket, no work item, and a proper noun no rule
+  // can enumerate. Shipping the filter without a rule for it would have made a
+  // tool that is registered, budgeted, advertised on zero relevant turns —
+  // WARP-2058 / WARP-2454 / WARP-2546, a fourth time.
+  {
+    label: "business graph / who is doing what, by department",
+    message: "what is Front Desk working on?",
+    requires: "business_find",
+  },
+  {
+    label: "business graph / the same question asked backwards",
+    message: "what is assigned to the Clinical team right now?",
+    requires: "business_find",
+  },
   {
     label: "business graph / history, in the words a person uses",
     message: "what's been happening with that roofing customer lately?",

@@ -268,7 +268,27 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `pm` still needs its own rule (pm_create_project, and the remote Atlassian
   // catalog that registers into this domain, WARP-2316), and two rules
   // carrying the same words is two places to keep in step.
-  { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm", "business"] },
+  { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work|departments?|teams?)\b/i, domains: ["pm", "business"] },
+  // WARP-2719 — the question the department filter exists to answer, and the
+  // one the vocabulary above does NOT match.
+  //
+  // "What is Front Desk working on?" contains no project, no ticket, no work
+  // item and no department — `working` is not `work items?`, and the name of
+  // the department is a proper noun no rule can enumerate. With no match,
+  // `selectAdvertisedTools` falls back to core-only and `business_find` is
+  // never advertised, so shipping the filter without this line would be a
+  // filter reachable only by a model that had already used the domain for some
+  // other reason. Fourth instance of the WARP-2058 / WARP-2454 / WARP-2546
+  // class, and the one the ticket's own acceptance sentence sits on.
+  //
+  // Deliberately narrow, and its false positives are named rather than
+  // discovered: "what am I working on", "who is working on the kitchen" and
+  // "what is Sam working on" all advertise the project tools, which is what a
+  // person asking any of them wants. `assigned to` is the same question asked
+  // the other way round. What it must NOT catch is the household sense — "the
+  // dishwasher is not working" has no `on` after it — and the negatives in
+  // tool-selection.service.test.ts pin that.
+  { pattern: /\b(work(ing|ed) on|workloads?|assigned to)\b/i, domains: ["pm", "business"] },
   // WARP-2454 — `repl(y|ies|ied|ying)`, never `replied?`. The original was
   // "replie" plus an OPTIONAL "d": it matched `replied` and the non-word
   // `replie`, and missed `reply` and `replies` entirely — so "did the

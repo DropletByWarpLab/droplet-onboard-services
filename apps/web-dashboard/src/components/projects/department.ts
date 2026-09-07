@@ -37,7 +37,9 @@
 // matches only that team. There is no second "include teams" toggle: one
 // control, one rule. The server's `?department=` filter applies exactly the
 // same rule (`pm-department.ts` `expandDepartmentScope`), so this board and the
-// LLM's `pm_list_work_items` never disagree about what a department contains.
+// assistant never disagree about what a department contains. (The tool is
+// `business_find` with a `department` argument — WARP-2719. It used to be
+// `pm_list_work_items`, which ADR-045 slice C deleted.)
 //
 // HOUSEHOLD is never offered. It is the seeded system unit everyone is already
 // in, so "route it to Household" is indistinguishable from routing nothing. The

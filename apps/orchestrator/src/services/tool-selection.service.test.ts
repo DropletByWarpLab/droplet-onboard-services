@@ -90,6 +90,8 @@ describe("selectAdvertisedTools (spec §3)", () => {
         r.matchedDomains,
         `"${sentence}" advertised only [${r.advertised.join(", ")}]`,
       ).toContain("pm");
+      // (see the WARP-2719 block below for the department half of this
+      // vocabulary, which no sentence here reaches)
       // ADR-045 slice D — the tracker WRITE is `business_create`, and the
       // pm rule reaches it because it claims the `business` domain too.
       // Asserting the DOMAIN alone would pass on an empty advertisement,
@@ -694,6 +696,57 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "turn the living room lights off",
     ])("%s does NOT advertise the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).not.toContain("cloud_query_dataset");
+    });
+  });
+
+  // ── WARP-2719 — `working on`, and what it must not swallow ──────────────
+  //
+  // The rule exists because "what is Front Desk working on?" matched NOTHING:
+  // `working` is not `work items?`, and a department's name is a proper noun
+  // no pattern can enumerate. Without it the department filter is reachable
+  // only by a model that had already used the domain for some other reason.
+  //
+  // It is the most ordinary English in this file, so its false positives are
+  // written down rather than discovered. The three positives below are all
+  // sentences where advertising the project tools is the RIGHT answer even
+  // though the asker never said "project". The negatives are the household
+  // sense of the same word.
+  describe("`working on` reaches the tracker (WARP-2719)", () => {
+    // Its own pool: the enclosing `advertisedFor` defaults to CLOUD_POOL, and
+    // a tool absent from the pool can never be advertised however well the
+    // rule matches — a default-pool assertion here would fail for a reason
+    // that has nothing to do with the rule under test.
+    const GRAPH_POOL = ["business_find", "business_create", "search_content"];
+    const graph = (message: string) => advertisedFor(message, GRAPH_POOL);
+
+    it.each([
+      "what is Front Desk working on?",
+      "what am I working on this week",
+      "who is working on the kitchen",
+      "what is assigned to Sam",
+      "how is the team's workload looking",
+    ])("%s advertises the business graph", (message) => {
+      expect(graph(message)).toContain("business_find");
+    });
+
+    it.each([
+      // The household sense: something is broken. No `on` follows, and the
+      // rule requires it.
+      "the dishwasher is not working",
+      "the wifi stopped working last night",
+      "is the printer working yet",
+      // `work` bare is not enough either — the rule takes `working`/`worked`.
+      "what time do you finish work",
+    ])("%s does NOT", (message) => {
+      expect(graph(message)).not.toContain("business_find");
+    });
+
+    it("MUTATION: take `work` bare and the household sentences all claim the tracker", () => {
+      // Written down because it is the obvious widening: `work` instead of
+      // `work(ing|ed) on` looks like it catches more of the same question and
+      // actually catches every appliance complaint on the box.
+      expect(graph("the dishwasher is not working")).not.toContain("business_find");
+      expect(graph("my back has been playing up at work")).not.toContain("business_find");
     });
   });
 
