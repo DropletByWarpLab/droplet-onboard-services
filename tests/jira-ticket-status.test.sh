@@ -243,6 +243,43 @@ else
   fail "🔴 a rejected transition stays green — rc=$RC out=$OUT_TXT"
 fi
 
+# ── the three 401/403s that are NOT a dead token ────────────────────────────
+#
+# Each of these is reached only AFTER the issue read returned 200, so the
+# credential is demonstrably alive and Jira's 403 means "this account lacks
+# that permission on this project". Counting any of them as an auth failure
+# turns a MERGED PR red and prints "Rotate JIRA_EMAIL / JIRA_API_TOKEN" about
+# a healthy token — #1614's defect, relocated into the predicate. All three
+# fail if `read_is_auth_failure` is applied anywhere but the read.
+
+issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"
+TRANSITION_CODE=403 run done "feat: no Transition Issues permission (WARP-21)"
+unset TRANSITION_CODE
+if [ $RC -eq 0 ] && ! echo "$OUT_TXT" | grep -q "credential looks dead"; then
+  pass "🔴 403 on the TRANSITION is a permission, not a dead token — merged PR stays green"
+else
+  fail "🔴 403 on the transition stays green — rc=$RC out=$OUT_TXT"
+fi
+
+issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"
+COMMENT_CODE=403 run done "feat: no Add Comments permission (WARP-22)"
+unset COMMENT_CODE
+if [ $RC -eq 0 ] && ! echo "$OUT_TXT" | grep -q "credential looks dead"; then
+  pass "🔴 403 on the COMMENT is a permission, not a dead token"
+else
+  fail "🔴 403 on the comment stays green — rc=$RC out=$OUT_TXT"
+fi
+
+issue "To Do" "To Do" "Story"; transitions "$TRANSITIONS_DEFAULT"
+TRANSITIONS_CODE=403 run done "feat: cannot list transitions (WARP-23)"
+unset TRANSITIONS_CODE
+if [ $RC -eq 0 ] && ! echo "$OUT_TXT" | grep -q "credential looks dead"; then
+  pass "🔴 403 listing transitions is a permission, not a dead token"
+else
+  fail "🔴 403 listing transitions stays green — rc=$RC out=$OUT_TXT"
+fi
+
+# The read is still the canary, and still fires.
 ISSUE_CODE=401 run done "feat: dead token (WARP-15)"
 unset ISSUE_CODE
 if [ $RC -eq 1 ] && echo "$OUT_TXT" | grep -q "credential looks dead"; then

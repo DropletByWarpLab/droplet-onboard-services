@@ -51,9 +51,19 @@
 #
 # A Jira hiccup is a ::warning. The merge already happened and a red X on a
 # merged PR is pure noise. The ONE thing that turns this red is a credential
-# that no longer works — 401/403 on every key — because a silently dead token
-# is how this automation would rot back into hand sweeps without anyone
-# noticing. A REJECTED transition (400/409) is not that, and is counted apart.
+# that no longer works — 401/403 on the READ of every key — because a silently
+# dead token is how this automation would rot back into hand sweeps without
+# anyone noticing. A REJECTED transition (400/409) is not that, and is counted
+# apart.
+#
+# "on the READ" is load-bearing, not a hedge. Jira Cloud documents 403 on
+# POST /rest/api/3/issue/{key}/transitions as "the user does not have the
+# necessary permission" — a per-project permission, not a dead token. Every
+# POST below is reached only AFTER a 200 from GET /issue/{key}, so by then the
+# credential is demonstrably alive and a 401/403 is evidence about permissions
+# alone. Counting those as auth failures is what turned a MERGED PR red and
+# told the reader to rotate a healthy token: #1614's defect, relocated out of
+# the transition-code branch and into the predicate.
 #
 # Usage:  jira-ticket-status.sh --mode in-review|done
 # Env:    PR_TITLE PR_NUMBER PR_URL PR_BASE_REF JIRA_EMAIL JIRA_API_TOKEN
@@ -152,12 +162,20 @@ jira_post() { # $1 = path, $2 = json → HTTP code on stdout
 # Auth-class failures are the only ones that can turn this job red. Kept as a
 # predicate rather than inline so the "dead token" definition lives in one
 # place and the tests can name it.
-is_auth_failure() { case "$1" in 401|403) return 0 ;; *) return 1 ;; esac; }
+#
+# The `read_` in the name is the contract: the READ is the ONLY place this may
+# be applied. A 401/403 on GET /issue/<key> is the only response in this script
+# that is evidence about the token, because everything after it runs only
+# because that GET returned 200. Named this way so `read_is_auth_failure "$T"`
+# on a transition POST reads wrong where it is written — which is exactly how
+# it drifted onto the POSTs and turned a merged PR red for a permission
+# problem. Every non-2xx after the read is an OTHER failure, by construction.
+read_is_auth_failure() { case "$1" in 401|403) return 0 ;; *) return 1 ;; esac; }
 
 MOVED=0      # transitions that happened
 SKIPPED=0    # deliberately left alone — a guard fired
 REJECTED=0   # Jira said no to the transition itself
-AUTH_FAIL=0  # the credential is the problem
+AUTH_FAIL=0  # a READ answered 401/403 — the only credential evidence there is
 OTHER_FAIL=0 # everything else
 
 for KEY in $KEYS; do
@@ -166,7 +184,7 @@ for KEY in $KEYS; do
   rm -f /tmp/jira-body.$$
 
   if [ "$CODE" != "200" ]; then
-    if is_auth_failure "$CODE"; then
+    if read_is_auth_failure "$CODE"; then
       warn "$KEY could not be read — HTTP $CODE (credential)"
       AUTH_FAIL=$((AUTH_FAIL + 1))
     else
@@ -226,7 +244,9 @@ for KEY in $KEYS; do
     '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')
   C=$(jira_post "/rest/api/3/issue/$KEY/comment" "$COMMENT")
   if [ "$C" != "201" ]; then
-    if is_auth_failure "$C"; then AUTH_FAIL=$((AUTH_FAIL + 1)); else OTHER_FAIL=$((OTHER_FAIL + 1)); fi
+    # Not an auth failure whatever the code: the read above returned 200, so a
+    # 403 here is "no Add Comments permission on this project", not a token.
+    OTHER_FAIL=$((OTHER_FAIL + 1))
     warn "$KEY comment failed — HTTP $C"
     continue
   fi
@@ -246,7 +266,9 @@ for KEY in $KEYS; do
   TBODY=$(cat /tmp/jira-body.$$ 2>/dev/null || echo '{}')
   rm -f /tmp/jira-body.$$
   if [ "$CODE" != "200" ]; then
-    if is_auth_failure "$CODE"; then AUTH_FAIL=$((AUTH_FAIL + 1)); else OTHER_FAIL=$((OTHER_FAIL + 1)); fi
+    # A GET, but not THE read: it is reached only because the issue read
+    # already returned 200, so it says nothing about the credential either.
+    OTHER_FAIL=$((OTHER_FAIL + 1))
     warn "$KEY transitions could not be listed — HTTP $CODE"
     continue
   fi
@@ -272,7 +294,12 @@ for KEY in $KEYS; do
       warn "$KEY transition to $TARGET_STATUS was rejected — HTTP $T"
       REJECTED=$((REJECTED + 1)) ;;
     *)
-      if is_auth_failure "$T"; then AUTH_FAIL=$((AUTH_FAIL + 1)); else OTHER_FAIL=$((OTHER_FAIL + 1)); fi
+      # Including 403. Jira documents it here as "the user does not have the
+      # necessary permission" — a per-project grant the minting account is
+      # missing, on a credential the read at the top of this loop just proved
+      # alive. Rotating the token would fix nothing and the ticket would still
+      # not move, so this must never be the thing that turns a merged PR red.
+      OTHER_FAIL=$((OTHER_FAIL + 1))
       warn "$KEY transition failed — HTTP $T" ;;
   esac
 done
