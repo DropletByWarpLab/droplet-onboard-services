@@ -1,11 +1,11 @@
 # ADR-051: The company brain is a table the box writes offline, not a prompt it reads at question time
 
-- **Status:** Accepted for §1–§11 (built, on `stage`). §9.9's consent posture is **partially built** — the switch exists, the operator-facing half is WARP-2753. §12 is the operational contract as shipped.
+- **Status:** Accepted for §1–§11. Every section describes code on `stage` **except** the fourth row of §6's detector slate, which is in review as [#2092](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/2092) and is marked as such in place. §9.9's consent posture is **partially built** — the switch exists, the operator-facing half is WARP-2753. §11 is the operational contract as shipped.
 - **Epic:** [WARP-2745](https://warp-lab.atlassian.net/browse/WARP-2745) · slices [WARP-2748](https://warp-lab.atlassian.net/browse/WARP-2748) (tables), [WARP-2749](https://warp-lab.atlassian.net/browse/WARP-2749) (passes), [WARP-2751](https://warp-lab.atlassian.net/browse/WARP-2751) (money time axis), [WARP-2752](https://warp-lab.atlassian.net/browse/WARP-2752) (`/brief` + delivery), [WARP-2754](https://warp-lab.atlassian.net/browse/WARP-2754) (detectors), [WARP-2825](https://warp-lab.atlassian.net/browse/WARP-2825) (the first history detector)
 - **Builds on:** [`ADR-044`](ADR-044-business-ecosystem-customer-spine.md) (the customer spine findings hang off), [`ADR-049`](ADR-049-revenue-cycle-documents.md) (`ErpDocument`, the ledger the money detectors read), WARP-1264 (department corpora), WARP-2177 (the one sanctioned cron runtime)
 - **Number:** claimed here, in `docs/`. The design brief that preceded this work called itself "provisional ADR-049" and that number was taken by [`ADR-049`](ADR-049-revenue-cycle-documents.md) before the brief was filed. A provisional number in a brief reserves nothing.
 
-> **Why this document is late.** Forty files across the orchestrator, the dashboard, the migrations and the test suites cite `ADR-051`, five of them by section number, and until now no such file existed. This ADR is written **against those citations**: every section below is the decision the code already assumes was made. Where two areas of the codebase assumed *different* things — and four places did — this document picks one and says which code is now wrong.
+> **Why this document is late.** **Forty-one** files across the orchestrator, the dashboard, the migrations and the test suites cite `ADR-051`, five of them by section number, and until now no such file existed. This ADR is written **against those citations**: every section below is the decision the code already assumes was made. Where two areas of the codebase assumed *different* things, this document picks one and says which code is now wrong — see the Consequences, which cash **one** such correction and record a second candidate that turned out to be this document's own error rather than the code's.
 
 ## Context
 
@@ -19,7 +19,7 @@ The numbers that decide this design are properties of the shipped box, not estim
 | per-tool-result cap | **8,000 chars**, `.max(8000)` — an operator **cannot raise it** | `config.ts:243` |
 | agent iterations, per turn | 10 | `config.ts` (`AGENT_MAX_ITER_DEFAULT` / `_CAP`) |
 
-Ten tool results at 8,000 characters is roughly **40–45 KB of readable text per turn**, before the system prompt, the tool schemas and the conversation. A small company's document corpus is five orders of magnitude larger than that.
+Ten tool results at 8,000 characters is **80,000 characters — roughly 78 KB** — and that is the ceiling *before* anything else competes for the window. What actually survives is smaller: `brain-corpus.service.ts:5-10` measures **40–45 KB** of readable text per turn, net of ~2,950 characters of system blocks and ~3,426 of tool schemas against a 13,824-token force-finalize. A small company's document corpus is five orders of magnitude larger than either figure.
 
 So "the assistant reads the company and answers" is not a feature that needs tuning. It is **arithmetically impossible**, and no amount of prompt engineering, retrieval tuning or model upgrade changes the shape of it.
 
@@ -110,14 +110,16 @@ Detectors are **stateless**. Each returns everything currently true; the runner 
 
 **The admission bar is high, and the reason is the failure mode.** It is not "no findings". It is *three hundred findings, mostly from one detector*, after which the operator mutes `/brief` and the whole feature is dead. A detector earns its place by being right about something a human would have wanted to know.
 
-The current slate:
+The current slate — ⏳ marks a detector that is **in review, not yet on `stage`**:
 
 | key | kind | reads |
 |---|---|---|
 | `money.overdue-receivable` | `loss` | `ErpDocument` at rest |
 | `money.overdue-payable` | `risk` | `ErpDocument` at rest |
 | `crm.deal-slipping` | `risk` | `CrmDeal` expected close dates |
-| `money.receivables-ageing` | `risk` | **`MoneySnapshot` — the first to read history** (WARP-2825) |
+| `money.receivables-ageing` ⏳ | `risk` | **`MoneySnapshot` — the first to read history** (WARP-2825) |
+
+`DETECTORS` on `stage` registers the first three. The fourth lands with [#2092](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/2092); until it merges, a `git grep money.receivables-ageing` finds this table and no implementation, which is why the row is marked rather than simply listed.
 
 All money detectors sweep `origin: "LANDED"` only. A `LOCAL` document is one somebody on this box wrote, is born `DRAFT`, and must never be reported to its own author as an unchased debt.
 
@@ -169,12 +171,12 @@ A `personal` row **must** name its owner (`ownerId`, the local `User.id` UUID �
 
 **9.3 — Two gates, doing two different jobs.** These are not redundancy, and conflating them is what made one comment in the codebase wrong.
 
-- **(a) The CAPABILITY gate.** The brain's own HTTP surface (`/api/brain/*`, including the `PATCH`) and the `/brief` nav entry are **owner/admin**. `family` and `guest` are refused with a **403** and the nav does not advertise the door. Refusing a capability leaks nothing, because the capability's *existence* is not the secret.
+- **(a) The CAPABILITY gate.** The brain's own HTTP surface (`/api/brain/*`, including the `PATCH`) and the `/brief` nav entry are **owner/admin**. A `family` or `guest` arriving **as themselves over HTTP** is refused with a **403** and the nav does not advertise the door. Refusing a capability leaks nothing, because the capability's *existence* is not the secret. 🔴 **This gate does not fire on the tool path.** `requireRoleOrMcpService` (`middleware/auth.ts:864-870`) short-circuits `next()` for `_service:mcp` **before any role check**, so a `family` or `guest` reaching these routes through `business_find` is *admitted*, and (b) is the only thing that withholds company rows from them.
 - **(b) The ROW rule.** Wherever a non-owner/admin can legitimately reach brain rows, visibility is a **filter composed into the query** — `visibleScopeFilter`, resolving readable departments through the existing `readableDepartmentIdsFor`, admitting `company` only for owner/admin, and qualifying the `personal` arm by the caller's **own** id. Rows are **omitted, never refused**, and any reported total is the **post-filter** count: a total that counted hidden rows would leak exactly the existence the filter exists to hide.
 
 The `_service:mcp` principal may reach these routes on behalf of a chat user. **The middleware admits the principal; it does not turn it into a person** — the route resolves `X-Nextcloud-User` to a `User` row and scopes on *that* human's id and role, failing closed with a 403 when no human can be established (WARP-2810). Before that resolution existed, the filter received the literal string `_service:mcp`, whose role is not privileged and whose id matches no row, so every brain read through `business_find` returned an empty list on every box — a silence indistinguishable from good news.
 
-**9.4 — Today, tier (b) does real work in exactly one place:** the brain block spliced into `/llm/chat`, whose caller set includes `family`, `guest` and service principals. Scoping the block is therefore load-bearing, not defence in depth. The first draft OR'd in a bare `{ scope: "personal" }` when neither table had an owner column, which meant *every personal row on the box* for every reader — a guest received other people's document digests in their system prompt every turn. That is why `ownerId` exists and why the filter reads it back.
+**9.4 — Tier (b) does real work in two places,** and both have the same caller set — `family`, `guest` and service principals: the brain block spliced into `/llm/chat`, and `/api/brain/*` reached via the `_service:mcp` principal, which §9.3(a) admits without a role check. Scoping the block is therefore load-bearing, not defence in depth. The first draft OR'd in a bare `{ scope: "personal" }` when neither table had an owner column, which meant *every personal row on the box* for every reader — a guest received other people's document digests in their system prompt every turn. That is why `ownerId` exists and why the filter reads it back.
 
 **9.5 — The filter lives in the service, next to the data**, never in route middleware. A future route can forget middleware; it cannot forget a filter that is part of the query. Role resolution is **fail-restrictive**: `family`, `guest` and any unrecognised role never receive the company arm, and an empty department set emits **no department arm at all** rather than `in: []`, which invites a later refactor to read "no departments" as "all departments".
 
@@ -210,7 +212,7 @@ Its design in four rules:
 
 ### 11. Operational contract
 
-- **Env surface:** `BRAIN_ENABLED` (off), `BRAIN_DETECTOR_TICK_MS` (1 h), `BRAIN_CORPUS_TICK_MS` (1 h), `BRAIN_CORPUS_UNITS_PER_RUN` (10), `DROPLET_MONEY_SNAPSHOT_DAILY_DAYS` (90). All documented in `.env.example`, because a flag an owner is told to turn on and cannot discover the name of is not a switch.
+- **Env surface:** `BRAIN_ENABLED` (off), `BRAIN_DETECTOR_TICK_MS` (1 h), `BRAIN_CORPUS_TICK_MS` (1 h), `BRAIN_CORPUS_UNITS_PER_RUN` (10), `DROPLET_MONEY_SNAPSHOT_DAILY_DAYS` (90). The first four are documented in `.env.example`; **`DROPLET_MONEY_SNAPSHOT_DAILY_DAYS` is not** — it exists only at `config.ts:838`, and adding it is outstanding. The principle stands and indicts the gap: a flag an owner is told to turn on and cannot discover the name of is not a switch.
 - **`BrainPass.enabled`** is a second, per-pass axis under the master switch — the "one noisy producer off without touching the others" control the detector contract promises.
 - **No dedicated brain model.** `DEFAULT_MODEL` then `LLM_MODEL`, through `ai-gateway`; with neither set the corpus pass is **skipped**, rather than scheduled to fail hourly and fill `lastError` with noise.
 - **Migration hygiene:** a pushed migration is immutable; DDL is copied verbatim from `prisma migrate diff`.
@@ -258,7 +260,12 @@ Its design in four rules:
 
 **Costly.** Findings are only as good as the detector slate, which is deliberately short. The corpus pass digests ~10 documents an hour by design, so a 5,000-document business is weeks from first-pass coverage — which is exactly why `/brief` leads with the coverage line.
 
-🔴 **Two corrections this ADR forces on existing code:**
+🔴 **One correction this ADR forces on existing code:**
 
-1. `packages/tools-core/src/handlers/business/find.ts` states that a company-scope row "never reaches a family or guest caller even though the model asked on their behalf", attributing that to `visibleScopeFilter`. Per §9.3, the *filter* is not what protects that path — the **capability gate** is, and since WARP-2810 the MCP path resolves the acting human and then filters. The comment describes the right outcome by the wrong mechanism and should be corrected.
-2. Several docstrings call the detector pass **"nightly"**. Per §5 it is **hourly** and operator-tunable. The word should go, because it makes the delivery policy in §8 look like over-engineering when it is the thing that makes an hourly pass survivable.
+1. Several docstrings call the detector pass **"nightly"**. Per §5 it is **hourly** and operator-tunable. The word should go, because it makes the delivery policy in §8 look like over-engineering when it is the thing that makes an hourly pass survivable.
+
+⚠️ **A second correction was drafted here and is withdrawn, because the code was right and this document was wrong.** An earlier revision instructed that `packages/tools-core/src/handlers/business/find.ts` be corrected: it says a company-scope row "never reaches a family or guest caller even though the model asked on their behalf" and attributes that to `visibleScopeFilter`, and the draft claimed the **capability gate** was the real protection.
+
+It is not. `requireRoleOrMcpService` short-circuits for `_service:mcp` before any role check, `resolveCaller` then resolves the acting human from `X-Nextcloud-User`, and `listFindings` **filters** on that human's id and role. The only 403 on that path is `noActor`, when no human resolves at all. So on the tool path `visibleScopeFilter` is precisely and solely what withholds those rows, and `find.ts` is accurate as written — as is `brain-block.service.ts`, which says the same thing. Applying the withdrawn correction would have put two files into disagreement and taught the next reader to trust a gate that does not fire.
+
+This is recorded rather than deleted because §9.5's argument — *"a future route can forget middleware; it cannot forget a filter"* — is exactly what the mistake ran against, and the near-miss is the best evidence for it.
