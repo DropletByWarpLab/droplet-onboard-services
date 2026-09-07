@@ -384,7 +384,17 @@ async function performApply(
       //
       // Refusing beats silently preferring one. Preferring the derived value
       // would file a plausible row built from a reading we know was confused.
-      if (money.directionOf(p.kind) !== p.direction) {
+      //
+      // 🔴 ONLY WHERE THERE IS A DERIVED DIRECTION TO DISAGREE WITH.
+      // `directionOf` returns null for QUOTE by design (money.service.ts —
+      // `KINDS_BY_DIRECTION` is an allow-list, and an unaccepted quote is money
+      // nobody owes in either direction). `p.direction` is a required
+      // `RECEIVABLE | PAYABLE`, so a bare `!==` is true for every quote ever
+      // extracted: the guard fired unconditionally and made a whole kind
+      // permanently unappliable, telling the owner their perfectly good
+      // proposal was unreadable and that discarding it was safe.
+      const derived = money.directionOf(p.kind);
+      if (derived !== null && derived !== p.direction) {
         throw new Error(FILING_ERRORS.PAYLOAD_UNREADABLE);
       }
 

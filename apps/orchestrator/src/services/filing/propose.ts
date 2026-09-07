@@ -213,6 +213,14 @@ export async function buildDrafts(args: {
       documentRole: auto.documentRole ?? null,
       counterparty: auto.counterparty ?? null,
       capReached: auto.capReached?.(kind) ?? false,
+      // The money kind, so the review card names the document instead of
+      // calling a bill an invoice. Read off the payload AFTER `parsePayload`
+      // accepted it above, so this is the validated value and not a guess; for
+      // every other kind it is absent and the table never looks at it.
+      moneyKind:
+        kind === "CREATE_MONEY_DOC" && typeof payload.kind === "string"
+          ? payload.kind
+          : null,
       ...extra,
     });
     drafts.push({

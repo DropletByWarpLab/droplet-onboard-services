@@ -116,6 +116,48 @@ describe("🔴 money is never filed automatically, in any cell", () => {
     expect(reason).toMatch(/never filed automatically/i);
     expect(reason).not.toMatch(/proposal|policy|classif|entity|extraction/i);
   });
+
+  it("🔴 names the document it read, and never calls a bill an invoice", () => {
+    // The card is the owner's whole basis for deciding. A BILL is money owed
+    // BY the business and a CREDIT_NOTE reduces what is owed — telling
+    // somebody Droplet "read an invoice" when it read either is a false
+    // statement about a figure they are about to act on, and the surface's own
+    // card title (`FilingSurface.tsx`) already gets this right.
+    const reasonFor = (moneyKind: string | null) =>
+      classify({
+        kind: "CREATE_MONEY_DOC",
+        mode: "propose",
+        level: "links_only",
+        vertical: "general",
+        phiVerdict: "CLEAN",
+        confidence: 95,
+        matchKind: "DOMAIN",
+        documentRole: "INVOICE",
+        counterparty: "BUSINESS",
+        nearestCandidateScore: 0,
+        capReached: false,
+        moneyKind,
+      }).policyReason;
+
+    expect(reasonFor("INVOICE")).toContain("an invoice");
+    expect(reasonFor("QUOTE")).toContain("a quote");
+    expect(reasonFor("BILL")).toContain("a bill");
+    expect(reasonFor("RECEIPT")).toContain("a receipt");
+    expect(reasonFor("CREDIT_NOTE")).toContain("a credit note");
+
+    // 🔴 And none of the four non-invoice kinds may say "invoice" ANYWHERE in
+    // the sentence — a `toContain` alone would pass a string that named both.
+    for (const kind of ["QUOTE", "BILL", "RECEIPT", "CREDIT_NOTE"]) {
+      expect(reasonFor(kind), kind).not.toMatch(/invoice/i);
+    }
+
+    // Absent — an older row, or a sixth kind nobody has written a word for —
+    // reads as vague rather than as wrong. The enum member itself must never
+    // reach the owner.
+    expect(reasonFor(null)).toContain("a money document");
+    expect(reasonFor("SOMETHING_NEW")).toContain("a money document");
+    expect(reasonFor("SOMETHING_NEW")).not.toMatch(/SOMETHING_NEW/);
+  });
 });
 
 // ── the payload contract ────────────────────────────────────────────────────
@@ -274,6 +316,15 @@ describe("🔴 a document whose kind and direction disagree is not filed", () =>
     expect(directionOf("CREDIT_NOTE")).toBe("RECEIVABLE");
   });
 
+  it("🔴 returns NULL for the kinds that are not money owed either way", () => {
+    // This is the fact the apply-time guard has to be written around.
+    // `KINDS_BY_DIRECTION` is an allow-list precisely so an unaccepted quote
+    // never joins "what you are owed"; the cost is that `directionOf` has a
+    // third answer, and a comparison that forgets it refuses a whole kind.
+    expect(directionOf("QUOTE")).toBeNull();
+    expect(directionOf("ORDER")).toBeNull();
+  });
+
   it("names the refusal the apply path uses for an incoherent reading", () => {
     // Asserted here so the constant cannot be quietly renamed out from under
     // the branch that throws it.
@@ -395,6 +446,46 @@ describe("🔴 the CREATE_MONEY_DOC refusals, as they actually fire", () => {
     expect(h.erpCreate).not.toHaveBeenCalled();
     // The claim is written before the branch runs, so the ONLY thing that
     // un-writes it is the transaction rolling back — nothing downstream ran.
+    expect(h.resultWrite).not.toHaveBeenCalled();
+  });
+
+  it("🔴 REGRESSION: a QUOTE is not refused for having no derived direction", async () => {
+    // The bug this pins: `directionOf("QUOTE")` is null and `p.direction` is a
+    // required RECEIVABLE|PAYABLE, so a bare `!==` was true for EVERY quote
+    // ever extracted. Every quote card was permanently unappliable, and the
+    // owner was told their perfectly good proposal was unreadable and that
+    // clearing it was safe. Reaching the create is the whole assertion.
+    const h = harness({
+      moneyEnabled: true,
+      payload: { ...BASE_PAYLOAD, kind: "QUOTE", direction: "RECEIVABLE" },
+    });
+    await expect(run(h)).rejects.toThrow("REACHED_CREATE");
+    expect(h.erpCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("🔴 REGRESSION: nor for the other direction, because it has neither", async () => {
+    // Both values, not one. A fix that special-cased QUOTE by pinning it to
+    // RECEIVABLE would pass the test above and fail this one — there is no
+    // direction a quote agrees with, which is exactly why the comparison must
+    // not run rather than run against a chosen answer.
+    const h = harness({
+      moneyEnabled: true,
+      payload: { ...BASE_PAYLOAD, kind: "QUOTE", direction: "PAYABLE" },
+    });
+    await expect(run(h)).rejects.toThrow("REACHED_CREATE");
+    expect(h.erpCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("MUTATION: a kind that DOES derive a direction is still refused when they disagree", async () => {
+    // The guard must be narrowed, not deleted. A CREDIT_NOTE is receivable;
+    // reading one as PAYABLE is the incoherent extraction the guard exists for,
+    // and a fix that dropped the comparison entirely would let it through.
+    const h = harness({
+      moneyEnabled: true,
+      payload: { ...BASE_PAYLOAD, kind: "CREDIT_NOTE", direction: "PAYABLE" },
+    });
+    await expect(run(h)).rejects.toThrow(FILING_ERRORS.PAYLOAD_UNREADABLE);
+    expect(h.erpCreate).not.toHaveBeenCalled();
     expect(h.resultWrite).not.toHaveBeenCalled();
   });
 

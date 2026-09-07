@@ -104,6 +104,16 @@ export interface PolicyInput {
   sameNameProjectExists?: boolean;
   /** The record this would write to was landed by a connector. */
   targetIsExternal?: boolean;
+  /**
+   * For `CREATE_MONEY_DOC`: which of the five kinds was read.
+   *
+   * 🔴 Present only so the review card names the document it is describing. A
+   * bill is money owed BY the business and a credit note reduces what is owed;
+   * calling either "an invoice" on the card is a false statement about a figure
+   * somebody is about to act on. It is deliberately NOT consulted by any branch
+   * that decides a class — every money kind gets the same REVIEW.
+   */
+  moneyKind?: string | null;
 }
 
 export interface PolicyVerdict {
@@ -119,6 +129,22 @@ const LINK_KINDS: ReadonlySet<IngestProposalKind> = new Set([
   "LOG_EMAIL_ACTIVITY",
   "SET_PROJECT_CUSTOMER",
 ]);
+
+/**
+ * What to call each money kind on the review card.
+ *
+ * Spelled out rather than lower-cased from the enum, because "credit note" is
+ * two words and "CREDIT_NOTE" is not English. An unknown kind falls back to the
+ * generic below rather than showing the owner an enum member — a sixth kind
+ * added later reads as vague, never as wrong.
+ */
+const MONEY_NOUN: Readonly<Record<string, string>> = {
+  INVOICE: "an invoice",
+  QUOTE: "a quote",
+  BILL: "a bill",
+  RECEIPT: "a receipt",
+  CREDIT_NOTE: "a credit note",
+};
 
 /** Kinds that mint a new record. */
 const CREATE_KINDS: ReadonlySet<IngestProposalKind> = new Set([
@@ -174,10 +200,11 @@ export function classify(input: PolicyInput): PolicyVerdict {
   // the confidence floors are consulted — the same shape as the refusals above
   // it, and for the same reason: a cell somebody widens later cannot reach it.
   if (input.kind === "CREATE_MONEY_DOC") {
+    const noun = MONEY_NOUN[input.moneyKind ?? ""] ?? "a money document";
     return {
       policyClass: "REVIEW",
       policyReason:
-        "Droplet read an invoice here. Money is never filed automatically — " +
+        `Droplet read ${noun} here. Money is never filed automatically — ` +
         "check the figures and file it yourself.",
     };
   }
