@@ -88,6 +88,18 @@ export interface AutoContext {
   projectNameExists?: (name: string) => boolean;
 }
 
+/**
+ * A pointer from a draft to the draft it cannot be applied without.
+ *
+ * Named by (kind, dedupeKey) rather than by id, because at build time no draft
+ * HAS an id — `buildDrafts` is pure and writes nothing. `persistDrafts` turns
+ * the pair into the parent row's real id.
+ */
+export interface DraftDependency {
+  kind: IngestProposalKind;
+  dedupeKey: string;
+}
+
 export interface ProposalDraft {
   kind: IngestProposalKind;
   dedupeKey: string;
@@ -97,6 +109,21 @@ export interface ProposalDraft {
   evidence: { quote: string; chunkIdx?: number }[];
   policyClass: "AUTO" | "REVIEW" | "NEVER";
   policyReason: string | null;
+  /**
+   * WARP-2737 — the draft this one cannot apply before.
+   *
+   * Set for a money document whose counterparty this run is also proposing to
+   * CREATE: the invoice has no customer to land on until that card is applied,
+   * and the payload cannot carry an id for a row that does not exist yet.
+   *
+   * The header of this file argues that a `CREATE_CUSTOMER` must not be split
+   * into a parent/child pair, and that still holds — a customer created without
+   * the paper that created them is a record nobody can check, which is why the
+   * file travels ON the customer draft. This is the other case the schema
+   * column was written for: two proposals that were always going to be two
+   * cards, one of which is meaningless until the other is said yes to.
+   */
+  dependsOn?: DraftDependency;
 }
 
 export interface BuildDraftsResult {
@@ -128,6 +155,20 @@ export function matchedKey(
   if (kind === "DOMAIN") return { matchedKeyKind: "EMAIL_DOMAIN", matchedKeyValue: value };
   if (kind === "NAME") return { matchedKeyKind: "NAME", matchedKeyValue: value };
   return {};
+}
+
+/**
+ * The key both halves of the money chain are looked up under (WARP-2737).
+ *
+ * 🔴 The `|| lowercase` fallback is load-bearing, and it is the same one the
+ * dedupe keys already carry. `normalizeCompanyName` collapses some inputs — a
+ * bare "LLC" — to the empty string, and without the fallback two different
+ * unmatched businesses on one document would share the key `""`. A money
+ * document would then chain to whichever of them happened to be written last,
+ * which is the wrong customer rather than no customer.
+ */
+export function chainKey(name: string): string {
+  return normalizeCompanyName(name) || name.toLowerCase();
 }
 
 /** The folder a file sits in, for `NC_FOLDER` decisions. Path only, never the
@@ -184,7 +225,9 @@ export async function buildDrafts(args: {
       targetIsExternal?: boolean;
       sameNameProjectExists?: boolean;
     } = {},
-  ) => {
+    /** The draft this one cannot be applied before. See `ProposalDraft`. */
+    dependsOn?: DraftDependency,
+  ): boolean => {
     // Parse on the way in. A draft that does not satisfy its own kind's
     // allow-list is a bug in THIS file, and the right time to find out is
     // before the row exists rather than at apply time thirty days later.
@@ -199,7 +242,10 @@ export async function buildDrafts(args: {
         { kind, reason: payloadRejectionReason(kind, payload) },
         "filing: dropped a draft that failed its own payload allow-list",
       );
-      return;
+      // Reported, so a caller that is about to point ANOTHER draft at this one
+      // finds out it was never made. A pointer at a draft that was dropped is a
+      // chain that can never resolve.
+      return false;
     }
     const c = cap(confidence);
     const verdict = classifyPolicy({
@@ -232,11 +278,23 @@ export async function buildDrafts(args: {
       evidence,
       policyClass: verdict.policyClass,
       policyReason: verdict.policyReason,
+      ...(dependsOn ? { dependsOn } : {}),
     });
+    return true;
   };
 
   /** Company name → the record it resolved to, for `companyRef` on projects. */
   const resolved = new Map<string, { companyId: string; companyName: string }>();
+  /**
+   * WARP-2737 — company name → the dedupe key of the `CREATE_CUSTOMER` draft
+   * this run is proposing for it.
+   *
+   * The other half of `resolved`: that one holds the customers that already
+   * exist, this one holds the ones that would. A money document naming a
+   * business in here is chained to that draft rather than left with no customer
+   * at all, which is what made every first invoice permanently unappliable.
+   */
+  const proposedCustomers = new Map<string, string>();
   let anyIgnored = false;
 
   for (const company of entities.companies) {
@@ -333,9 +391,10 @@ export async function buildDrafts(args: {
     // 🔴 `outcome.nearestScore` travels with it. "No match" and "nothing like
     // it exists" are different facts, and only the second one makes an
     // unattended create safe.
-    add(
+    const customerKey = chainKey(company.name);
+    const madeCustomerDraft = add(
       "CREATE_CUSTOMER",
-      normalizeCompanyName(company.name) || company.name.toLowerCase(),
+      customerKey,
       company.confidence,
       "NONE",
       {
@@ -348,6 +407,14 @@ export async function buildDrafts(args: {
       company.evidence,
       { nearestCandidateScore: outcome.nearestScore },
     );
+    // Recorded only once the draft actually EXISTS. `add` drops a draft that
+    // fails its own payload allow-list, and a money document chained to a card
+    // nobody can see would be waiting on something that is never coming.
+    //
+    // The VALUE is the dedupe key rather than the lookup key: they are the same
+    // string today, and storing it means the chain keeps following the dedupe
+    // key if the two ever diverge.
+    if (madeCustomerDraft) proposedCustomers.set(customerKey, customerKey);
   }
 
   for (const project of entities.projects) {
@@ -397,6 +464,15 @@ export async function buildDrafts(args: {
     const link = money.counterpartyName
       ? resolved.get(normalizeCompanyName(money.counterpartyName))
       : undefined;
+    // 🔴 Only when the counterparty did NOT resolve to an existing customer. A
+    // payload that names one carries the resolution the matcher already made,
+    // and a pointer beside it would be a second answer to a settled question.
+    // Keyed on the counterparty's own name, so an invoice from one business on
+    // a document that also names another cannot inherit the other's customer.
+    const parent =
+      !link && money.counterpartyName
+        ? proposedCustomers.get(chainKey(money.counterpartyName))
+        : undefined;
     add(
       "CREATE_MONEY_DOC",
       `${money.kind}:${money.number ?? ""}:${money.currency}:${money.total}`,
@@ -416,6 +492,8 @@ export async function buildDrafts(args: {
         ...(fileRef(source) ? { file: fileRef(source) } : {}),
       },
       money.evidence,
+      {},
+      parent ? { kind: "CREATE_CUSTOMER", dedupeKey: parent } : undefined,
     );
   }
 
@@ -459,8 +537,19 @@ export async function persistDrafts(
   let created = 0;
   let duplicate = 0;
   const proposalIds: string[] = [];
+  /** `kind` + `dedupeKey` → the row id this run just wrote for it. */
+  const idsThisRun = new Map<string, string>();
 
   for (const d of drafts) {
+    // WARP-2737 — resolved BEFORE the create, so the pointer lands in the same
+    // INSERT as the row rather than in a follow-up UPDATE that a crash could
+    // skip. `buildDrafts` emits companies before money, so the parent is
+    // already in `idsThisRun` on the ordinary path; `parentIdFor` covers the
+    // re-extraction path, where the parent exists from an earlier read and its
+    // create above raised the unique violation instead of returning an id.
+    const dependsOnProposalId = d.dependsOn
+      ? await parentIdFor(prisma, source, d.dependsOn, idsThisRun)
+      : null;
     const data = {
       sourceKind: source.sourceKind as IngestSourceKind,
       sourceRef: source.sourceRef,
@@ -477,11 +566,13 @@ export async function persistDrafts(
       extractorVersion: EXTRACTOR_VERSION,
       dedupeKey: d.dedupeKey,
       requestedById: ctx.requestedById,
+      dependsOnProposalId,
     };
     try {
       const row = await prisma.ingestProposal.create({ data, select: { id: true } });
       created += 1;
       proposalIds.push(row.id);
+      idsThisRun.set(draftKey(d.kind, d.dedupeKey), row.id);
     } catch (err) {
       if (isUniqueViolation(err)) {
         duplicate += 1;
@@ -492,6 +583,47 @@ export async function persistDrafts(
   }
 
   return { created, duplicate, proposalIds };
+}
+
+/** The map key. `IngestProposalKind` is an enum of A-Z and underscores and
+ *  can never contain the separator, so the pair cannot be spelled two ways. */
+function draftKey(kind: IngestProposalKind, dedupeKey: string): string {
+  return `${kind}|${dedupeKey}`;
+}
+
+/**
+ * The parent row's id, from this run or from the last one.
+ *
+ * 🔴 The second lookup is not belt-and-braces. Re-extracting a touched file
+ * re-proposes the same customer, whose `create` raises `P2002` and returns no
+ * id — so on every read after the first, a chain resolved only from this run's
+ * map would be silently null and the money card would be stuck in exactly the
+ * way this slice exists to fix. The composite key below is the same one that
+ * collision was against.
+ *
+ * Null when there is no parent at all. That is not an error: the money card
+ * refuses honestly and says what the owner needs to do.
+ */
+async function parentIdFor(
+  prisma: PrismaClient,
+  source: SourceRef,
+  dep: DraftDependency,
+  idsThisRun: ReadonlyMap<string, string>,
+): Promise<string | null> {
+  const fresh = idsThisRun.get(draftKey(dep.kind, dep.dedupeKey));
+  if (fresh) return fresh;
+  const existing = await prisma.ingestProposal.findUnique({
+    where: {
+      sourceRef_kind_dedupeKey_extractorVersion: {
+        sourceRef: source.sourceRef,
+        kind: dep.kind,
+        dedupeKey: dep.dedupeKey,
+        extractorVersion: EXTRACTOR_VERSION,
+      },
+    },
+    select: { id: true },
+  });
+  return existing?.id ?? null;
 }
 
 function isUniqueViolation(err: unknown): boolean {

@@ -43,6 +43,7 @@ import * as documents from "../money/document-status.js";
 import * as money from "../money/money.service.js";
 
 import { normalizeCompanyName } from "./match.js";
+import { resolveChainedCustomer } from "./money-customer.js";
 import { parsePayload, type AnyPayload, type PayloadFor } from "./payloads.js";
 
 export const FILING_ERRORS = {
@@ -60,6 +61,17 @@ export const FILING_ERRORS = {
   NOT_APPLIED: "proposal_not_applied",
   /** `MATCH_REVIEW` applied without saying which candidate. */
   CHOICE_REQUIRED: "proposal_choice_required",
+  /**
+   * WARP-2737 — a money document with no customer to file it under, and none
+   * reachable through the `CREATE_CUSTOMER` card it depends on.
+   *
+   * 🔴 NOT `CHOICE_REQUIRED`, which it used to borrow. "Pick which customer
+   * this belongs to first" is what that code means and what the dashboard says
+   * for it, and on this path there is nothing to pick: the customer does not
+   * exist yet. Telling somebody to choose from an empty set is worse than
+   * telling them nothing.
+   */
+  CUSTOMER_REQUIRED: "proposal_customer_required",
   /** The chosen id is not one of the candidates the proposal offered. */
   CHOICE_NOT_OFFERED: "proposal_choice_not_offered",
   /** WARP-2737 — the Money module is switched off, so a filed invoice would
@@ -373,7 +385,25 @@ async function performApply(
       // NEEDS_PARTY too, but by then we are inside the transaction and the
       // owner would get a 500 for a card the surface should never have offered
       // an Apply button on.
-      if (!p.companyId) throw new Error(FILING_ERRORS.CHOICE_REQUIRED);
+      //
+      // 🔴 THE PAYLOAD IS NOT THE ONLY PLACE A CUSTOMER CAN COME FROM, and
+      // reading it as though it were is what made the ordinary first-invoice
+      // case permanently unappliable. `propose.ts` writes `companyId` only when
+      // the counterparty resolved to a customer that ALREADY existed; for a
+      // business the box has never seen it is simply absent, and every one of
+      // those cards 422'd on every click, forever, with reject as the only way
+      // out.
+      //
+      // So the fallback is the `CREATE_CUSTOMER` card this proposal depends on
+      // — the pairing `dependsOnProposalId` was added for and which nothing had
+      // ever written. `resolveChainedCustomer` runs INSIDE this transaction so
+      // the customer it finds is the customer the write lands against, and it
+      // refuses a parent that was undone, deleted or archived. See
+      // `money-customer.ts` for why none of that is cached onto the payload.
+      const companyId =
+        p.companyId ??
+        (await resolveChainedCustomer(prisma, proposal.dependsOnProposalId))?.companyId;
+      if (!companyId) throw new Error(FILING_ERRORS.CUSTOMER_REQUIRED);
 
       // 🔴 The extractor reports a DIRECTION and WARP-2739 deleted the column
       // that used to hold one — direction is now derived from the kind. That
@@ -400,7 +430,7 @@ async function performApply(
 
       const doc = await documents.createLocalDocument(prisma, {
         kind: p.kind,
-        companyId: p.companyId,
+        companyId,
         documentNumber: p.number ?? null,
         currency: p.currency,
         // Strings, straight through. Prisma accepts a string for a Decimal
@@ -426,7 +456,10 @@ async function performApply(
             filePath: p.file.filePath,
             fileSpace: p.file.fileSpace,
             subjectType: "COMPANY",
-            subjectId: p.companyId,
+            // The RESOLVED customer, not the payload's. Attaching the source
+            // PDF to a different record from the one the figures landed on
+            // would split one filing across two customers.
+            subjectId: companyId,
             role: ROLE_FOR_MONEY_KIND[p.kind],
             linkedBy: "EXTRACTED",
             confidence: proposal.confidence,

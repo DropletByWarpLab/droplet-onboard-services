@@ -544,6 +544,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Pick which customer this belongs to first.",
     proposal_choice_not_offered:
       "That customer wasn't one of the choices. Refresh and try again.",
+    // WARP-2737 — deliberately NOT "pick a customer". On this path there is no
+    // customer to pick: the business is not in your list yet, and the card that
+    // would add them is the one sitting beside this one. The sentence names the
+    // step rather than the obstacle.
+    proposal_customer_required:
+      "Add this customer to your customer list first, then file this document.",
     human_reviewer_required:
       "Only a person signed in to this Droplet can file these.",
     // WARP-2737 — names the switch, because the switch is the whole fix.
