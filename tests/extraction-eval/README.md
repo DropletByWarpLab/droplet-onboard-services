@@ -15,16 +15,31 @@ checkbox: it is gated by a database constraint that no application code can
 satisfy by accident. `PATCH /crm/filing/settings` has a `.strict()` body and
 refuses those two columns outright.
 
-> 🔴 **This slice measures; it does not yet arm the gate.** Nothing in this
-> repo writes `canaryPassedAt` / `canaryModel` — `extraction_runner.py` reads
-> the database, scores, and writes a report file. Arming the gate today means a
-> manual SQL `UPDATE`, outside the actor-stamping and audit conventions the rest
-> of ADR-048 enforces, which is why it is deliberately NOT done from this
-> container. Wiring the write-back through the orchestrator, so a pass is
-> attributed and audited like every other consent write, is **WARP-2733**.
+> 🔴 **This slice measures; it does not arm the gate — and it must not.**
+> Nothing in THIS container writes `canaryPassedAt` / `canaryModel`.
+> `extraction_runner.py` reads the database, scores, and writes a report file.
+> That is all it does, deliberately: arming from here would be a service with
+> no auth of its own writing a consent column, outside every actor-stamping and
+> audit convention the rest of ADR-048 enforces.
 >
-> Until then: run the canary, read the verdict, and treat a pass as the
-> *precondition* for arming auto mode rather than the act of arming it.
+> **WARP-2733 closed the loop from the other end.** `POST /api/crm/filing/canary`
+> on the orchestrator takes a `runId`, fetches this service's verdict for
+> itself, and stamps the two columns only if it reads `passed: true` — with the
+> model taken from the report and the pass attributed to the signed-in owner.
+>
+> Two things that route will not do, and the reasons are the point:
+>
+> * **It will not take the verdict from its caller.** A body carrying
+>   `passed: true` is refused by a `.strict()` schema. A database constraint an
+>   HTTP client can satisfy by asserting the answer is not a constraint.
+> * **It will not read `status: "succeeded"` as a pass.** A measured FAIL
+>   finishes as `succeeded` on purpose — run status answers "did the harness
+>   complete", and a harness that ran correctly and found the model wanting has
+>   not failed. `GET /runs/{id}` carries an `extraction.passed` boolean for
+>   exactly this reason, and a missing one is UNKNOWN rather than a default.
+>
+> So: run the canary, read the verdict, and if it passed, arm the gate through
+> the orchestrator so the box records who did it and against which model.
 
 ## Why it is split in two
 

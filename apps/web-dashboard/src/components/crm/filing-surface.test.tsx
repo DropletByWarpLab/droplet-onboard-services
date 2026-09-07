@@ -29,7 +29,13 @@ vi.mock("next/link", () => ({
   },
 }));
 
-import { FilingCard, headlineFor } from "./FilingSurface";
+const summaryMock = vi.fn();
+vi.mock("./useFiling", async () => {
+  const actual = await vi.importActual<typeof import("./useFiling")>("./useFiling");
+  return { ...actual, useFilingSummary: () => summaryMock() };
+});
+
+import { FilingBanner, FilingCard, headlineFor } from "./FilingSurface";
 import type { FilingProposal } from "./useFiling";
 
 const base: FilingProposal = {
@@ -164,5 +170,71 @@ describe("MATCH_REVIEW cannot be filed until a customer is picked", () => {
       (screen.getByRole("button", { name: "Yes, file it" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(screen.getByText("Northgate Dental Lab")).toBeTruthy();
+  });
+});
+
+/**
+ * 🔴 The entry point, which did not exist.
+ *
+ * `/customers/filing` has no nav entry — `CrmTabs` argues that case and is
+ * right: a link to a different section is a nav entry, not a tab. But this
+ * banner was the ONLY link to that route anywhere in the dashboard, and it
+ * rendered `null` unless filing was already on. The switch that turns filing
+ * on lives inside the route, and a fresh box defaults to off. The circle was
+ * closed: the whole of ADR-048 was dark on a shipped box unless the owner
+ * guessed the URL.
+ */
+describe("FilingBanner — the way in", () => {
+  const SUMMARY = {
+    mode: "off" as const,
+    level: "links_only" as const,
+    vertical: "general" as const,
+    enabled: false,
+    pending: 0,
+  };
+
+  function show(over: Record<string, unknown> = {}) {
+    summaryMock.mockReturnValue({ summary: { ...SUMMARY, ...over }, error: null, mutate: vi.fn() });
+    render(<FilingBanner />);
+  }
+
+  it("🔴 MUTATION: render nothing while filing is off — the feature becomes unreachable", () => {
+    show();
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/customers/filing");
+  });
+
+  it("the off state is an OFFER, and never a count", () => {
+    // The pending banner is an alarm; this one says what Droplet could do. A
+    // number here would be a demand for attention on a box where nothing has
+    // happened yet, and there is nothing waiting to attend to.
+    show();
+    const text = screen.getByRole("link").textContent ?? "";
+    expect(text).toMatch(/Droplet can read new files/i);
+    expect(text).not.toMatch(/\d/);
+    // ADR-002 voice: the machine's vocabulary never reaches the page.
+    expect(text).not.toMatch(/proposal|extraction|entity|confidence/i);
+  });
+
+  it("goes away the moment filing is on with nothing waiting", () => {
+    // The answer to "a banner that is always there stops being read": the
+    // offer disappears as soon as it has been used.
+    show({ enabled: true, mode: "propose", pending: 0 });
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("switches to the pending alarm once there is something to look at", () => {
+    show({ enabled: true, mode: "propose", pending: 3 });
+    const text = screen.getByRole("link").textContent ?? "";
+    expect(text).toMatch(/read 3 things/i);
+    expect(text).not.toMatch(/Droplet can read new files/i);
+  });
+
+  it("renders nothing at all when the summary never arrived", () => {
+    // A `family` member's 403 is the ordinary answer here, not a fault, and an
+    // undefined summary must not be read as "filing is off".
+    summaryMock.mockReturnValue({ summary: undefined, error: null, mutate: vi.fn() });
+    render(<FilingBanner />);
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

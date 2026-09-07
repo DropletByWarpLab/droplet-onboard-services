@@ -13,16 +13,22 @@ measurement is a database invariant rather than a promise: `AutoFilingSetting`
 carries a CHECK that refuses `mode = 'auto'` until `canaryPassedAt` and
 `canaryModel` are both set.
 
-🔴 THIS SLICE MEASURES; IT DOES NOT YET ARM THE GATE.
+🔴 THIS SLICE MEASURES; IT DOES NOT ARM THE GATE — AND IT MUST NOT.
 
 Nothing here writes `canaryPassedAt` / `canaryModel`. `extraction_runner.run()`
 reads Postgres, scores, and writes a JSON/markdown report to disk — that is all
-it does. `PATCH /crm/filing/settings` cannot write those columns either: its
-body is `.strict()` and it deliberately rejects them, so the only way to arm the
-gate today is a manual SQL UPDATE, outside every actor-stamping and audit
-convention the rest of ADR-048 enforces. Wiring the write-back — through the
-orchestrator, so the pass is attributed and audited like every other consent
-write — is WARP-2733's job.
+it does, and that is the correct boundary: this container has no auth of its
+own, so a write from here would be a consent column set by an unauthenticated
+peer. `PATCH /crm/filing/settings` cannot write those columns either; its body
+is `.strict()` and rejects them by design.
+
+WARP-2733 closed the loop from the orchestrator end instead:
+`POST /api/crm/filing/canary` takes a run id, FETCHES this module's verdict
+through `GET /runs/{id}`, and stamps the two columns only on `passed: true`,
+with the model read out of the report and the act attributed to the signed-in
+owner and written to the activity log. The verdict is never supplied by the
+caller — a route that armed on a client's say-so would be a database
+constraint satisfiable by asking nicely.
 
 So read the CHECK as: a genuine measurement is NECESSARY for auto mode and
 cannot be faked away, but the loop from "canary passed" to "gate armed" is not
