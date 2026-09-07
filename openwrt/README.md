@@ -32,12 +32,25 @@ The single-box image COPYs three things from this directory at build time:
 
 | Source | Why |
 |---|---|
-| `files/usr/share/rpcd/acl.d/droplet-ai.json` | Canonical ubus ACL — without it even root sessions are denied `file`/`umdns` reads (the network tab + DDNS step 500). Shared source of truth. |
+| `files/usr/share/rpcd/acl.d/droplet-ai.json` | Canonical ubus ACL — without it even root sessions are denied `file`/`umdns` reads (the network tab + DDNS step 500). Shared source of truth with `droplet-edge-router` (`files/usr/share/rpcd/acl.d/droplet-ai.json`) — change one, change both (ADR-033). |
 | `singlebox-image/uci-defaults/60-droplet-uhttpd-limits` | Raises uhttpd `max_requests` so the orchestrator's network-summary fan-out doesn't get connections reset. |
 | `singlebox-image/uci-defaults/61-droplet-upnp-default` | Seeds a disabled-by-default `upnpd` config so the dashboard UPnP / NAT-PMP card reads `available:true` / `enabled:false` (miniupnpd ships in the image; the SDK degrades a missing config to "not available"). |
 
 It does **not** consume `files/etc/config/*` or `files/etc/uci-defaults/99-droplet-setup`
 — the in-container wireless config is created at runtime.
+
+### What actually guards the ACL
+
+Be precise about the lockstep, because it is easy to over-trust. Two tests pin
+this repo's **own** two copies against each other — the committed JSON above and
+`services/routing/main.py`'s `_AI_ACL_FALLBACK`
+(`services/routing/tests/test_ai_access.py`), plus the grant-shape guards in
+`tests/openwrt-rpcd-acl-provisioning.test.sh`. **Nothing compares this file with
+`droplet-edge-router`'s copy**, so the cross-repo half of "change one, change
+both" is a human step. It has already been missed twice: the `wireguard` write
+wildcard survived here for a month after the edge router dropped it (WARP-2239),
+and the two files still differ on `ddns` today. Diff them by hand when you touch
+either.
 
 ## Integration with the platform
 

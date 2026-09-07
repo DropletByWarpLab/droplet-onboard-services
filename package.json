@@ -39,7 +39,7 @@
     "node": "20.x"
   },
   "devDependencies": {
-    "turbo": "^2.10.11"
+    "turbo": "^2.10.12"
   },
   "overrides": {
     "next": {

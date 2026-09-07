@@ -2280,6 +2280,13 @@ _AI_ACL_FALLBACK = {
                     "getDHCPLeases", "getHostHints",
                 ],
                 "umdns": ["browse", "update"],
+                # WARP-2239: READ-only `status`. rpcd-mod-wireguard registers
+                # four methods on this object — status, genkey, genpsk and
+                # pubkey — so the write-side ["*"] this replaces also handed
+                # the account the key-generation primitives. The SDK calls
+                # exactly `status` (live_peers/peer_handshakes) and nothing
+                # else. Lockstep with droplet-edge-router (ADR-033).
+                "wireguard": ["status"],
             },
             # The `ubus` grant above only opens the `file` OBJECT. rpcd applies
             # a SECOND, path-level check for file.read/list/stat, so without
@@ -2304,7 +2311,6 @@ _AI_ACL_FALLBACK = {
                 "service": ["set", "delete", "signal", "event"],
                 "session": ["login", "destroy"],
                 "hostapd.*": ["del_client"],
-                "wireguard": ["*"],
                 "file": ["exec"],
             },
             # WARP-987: exec is PINNED to the dnsmasq restart command line —

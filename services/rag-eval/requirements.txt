@@ -51,3 +51,12 @@ uvicorn[standard]>=0.52.4
 # deps at their minimum resolvable version; these state the real minimums.
 scipy>=1.10.0
 filelock>=3.20.3
+
+# WARP-2732 — ADR-048's extraction canary. `tests/extraction-eval/
+# extraction_runner.py` is COPYd into this image by the Dockerfile and reads the
+# box's Postgres directly to score what the filing worker actually wrote. It
+# imports psycopg in a try/except and returns EXIT_CANNOT_RUN when it is
+# missing, so without this line `run-once --suite extraction` and
+# POST /run-extraction fail before they ever reach the database — on the very
+# image built to run them. `[binary]` so no libpq build toolchain is needed.
+psycopg[binary]>=3.2

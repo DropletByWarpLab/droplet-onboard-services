@@ -57,7 +57,34 @@
  *   • `tierReachableDomains(tier)` — family and guest lose `team_chat` as a
  *     TOOL domain entirely (both its tools are `requiresWrite`), so no
  *     family/guest template carries that tool grant even though all of them
- *     grant the team_chat FEATURE.
+ *     grant the team_chat FEATURE. It drops an EMPTY domain by the same
+ *     arithmetic, which is why NO template here — at ANY tier — grants `crm`
+ *     or `pm` (WARP-2760/2761): ADR-045 moved every CRM and PM tool into
+ *     `business`, and catalog.ts keeps those two declared but toolless as
+ *     landing slots for a remote catalog.
+ *
+ * WHY `business` REPLACED THE DEAD GRANT ON ONE TEMPLATE AND NOT THREE.
+ * `business` is where those reads went, so substituting it looks like the
+ * obvious repair — but it is NOT a rename. `business` is UNCLAIMED (see the
+ * unclaimed-domain note below), so `domainsForFeatures` passes it for ANY
+ * feature set, and the route layer does not make up the difference: only
+ * eight modules are in `FEATURE_GATED_MODULES` (module-mounts.ts) and
+ * `projects` is not one of them, so `/api/pm/projects` carries the box-wide
+ * toggle and no per-person check, while `/api/pm/work-items` is not a
+ * registered `routePrefix` at all. A `business` grant therefore reaches
+ * `business_find({entity:"work_item"})` with nothing narrowing it per person.
+ *
+ *   • `read-only-auditor` holds `projects: view` AND `crm: view`, so
+ *     `business` is exactly the reach it already advertised — substituted.
+ *   • `front-desk` and `marketing-outreach` hold `crm` but NOT `projects`.
+ *     Giving them `business` would hand the assistant project and work-item
+ *     reads their feature set does not authorise, so their dead grant is
+ *     simply dropped. Nothing is lost today — an empty domain reaches nothing
+ *     at any tier — and their CRM FEATURE grant, which is per-person gated
+ *     (`crm` IS in FEATURE_GATED_MODULES), is untouched. Widening them is a
+ *     policy decision for its own ticket, not a rider on a red-stage fix.
+ *   • `office-manager` and `bookkeeper` already granted `business` beside the
+ *     dead rows, so dropping those changed nothing at all.
  *   • `mayOperateLocks` is ANDed away unless a `smart_home` feature grant
  *     rides in the same payload.
  *
@@ -174,7 +201,6 @@ export const ROLE_TEMPLATES = [
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "email", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "memory", level: "view" },
     ],
     connectorGrants: [],
@@ -240,8 +266,6 @@ export const ROLE_TEMPLATES = [
       { domain: "calendar", level: "use" },
       { domain: "reminders", level: "use" },
       { domain: "notifications", level: "use" },
-      { domain: "crm", level: "use" },
-      { domain: "pm", level: "use" },
       { domain: "memory", level: "use" },
       { domain: "money", level: "use" },
       { domain: "team_chat", level: "use" },
@@ -273,7 +297,6 @@ export const ROLE_TEMPLATES = [
     toolGrants: [
       { domain: "money", level: "use" },
       { domain: "files", level: "view" },
-      { domain: "crm", level: "view" },
       { domain: "business", level: "view" },
       { domain: "data", level: "view" },
     ],
@@ -332,7 +355,6 @@ export const ROLE_TEMPLATES = [
       { moduleId: "team_chat", level: "act" },
     ],
     toolGrants: [
-      { domain: "crm", level: "view" },
       { domain: "email", level: "view" },
       { domain: "files", level: "view" },
       { domain: "calendar", level: "view" },
@@ -365,12 +387,11 @@ export const ROLE_TEMPLATES = [
     ],
     toolGrants: [
       { domain: "files", level: "view" },
-      { domain: "crm", level: "view" },
+      { domain: "business", level: "view" },
       { domain: "calendar", level: "view" },
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },
       { domain: "memory", level: "view" },
-      { domain: "pm", level: "view" },
     ],
     connectorGrants: [],
     cloudModelsAllowed: false,

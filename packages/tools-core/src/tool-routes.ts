@@ -427,6 +427,14 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
       admit("get", "/api/pm/projects/:id/work-items"),
       admit("get", "/api/pm/work-items"),
       admit("get", "/api/pm/work-items/:id"),
+      // WARP-2752 (ADR-051) — the brain branches. Declared here for the same
+      // reason every other branch is: the cross-check is bidirectional, and an
+      // undeclared hop is how a tool ships with a route the `_service:mcp`
+      // principal cannot reach. Both are `requireRoleOrMcpService("owner",
+      // "admin")` on routes/brain.ts, and both re-apply the caller's scope
+      // filter server-side.
+      admit("get", "/api/brain/findings"),
+      admit("get", "/api/brain/digests"),
     ],
   },
   {

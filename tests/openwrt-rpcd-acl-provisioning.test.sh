@@ -21,6 +21,8 @@
 #      capabilities the routing service needs;
 #   5. the uhttpd concurrency bump ships in the image's uci-defaults AND the
 #      attach-time enforcement for pre-bake containers.
+#   6. the wireguard grant stays read-only `status` and no scope carries a
+#      blanket `["*"]` method list (WARP-2239).
 # =============================================================================
 set -euo pipefail
 
@@ -100,6 +102,43 @@ if grep -Eq '"/etc/init.d/dnsmasq( \*)?": \["exec"\]|"/(usr/)?(s)?bin[^"]*": \["
   bad "droplet-ai.json exec grant loosened beyond the pinned dnsmasq cmdline"
 else
   ok "droplet-ai.json exec grants stay pinned (no bare-path/wildcard exec)"
+fi
+
+# 4c. WARP-2239: the `wireguard` ubus grant is READ-only, and only `status`.
+#     rpcd-mod-wireguard registers FOUR methods on that object — status,
+#     genkey, genpsk, pubkey — and rpcd matches the function list with
+#     fnmatch (session.c rpc_session_acl_allowed), so the `["*"]` this
+#     replaced granted all four, handing the account the key-generation
+#     primitives. The only caller is droplet_openwrt_sdk's live_peers() /
+#     peer_handshakes(), which invoke exactly `status`.
+#
+#     Guard both directions: the grant disappearing (live_peers() silently
+#     degrades to None and a revoked peer looks revoked when it is not —
+#     WARP-2686) and the grant widening again.
+#
+#     Every capture defaults to 0: under this file's `set -euo pipefail` an
+#     empty line number would make the -lt comparison a fatal error, aborting
+#     the suite before the guards below it ever run — one drift would mask
+#     the next instead of reporting both.
+WG_GRANTS="$(grep -c '"wireguard":' "$ACL" || true)"
+WG_READ_AT="$(grep -n '"wireguard": \["status"\]' "$ACL" | head -1 | cut -d: -f1 || true)"
+WRITE_AT="$(grep -n '^    "write": {' "$ACL" | head -1 | cut -d: -f1 || true)"
+if [ "${WG_GRANTS:-0}" = "1" ] && [ "${WG_READ_AT:-0}" -gt 0 ] \
+   && [ "${WRITE_AT:-0}" -gt 0 ] \
+   && [ "${WG_READ_AT:-0}" -lt "${WRITE_AT:-0}" ]; then
+  ok "droplet-ai.json grants wireguard read-only status (WARP-2239)"
+else
+  bad "droplet-ai.json wireguard grant is not a single read-side [\"status\"] (WARP-2239)"
+fi
+
+# 4d. WARP-2239, the general form: no scope may hand out a blanket `["*"]`
+#     method list. Object-side wildcards (`hostapd.*`, `network.interface.*`)
+#     stay legal — they still pin the methods; this matches only the VALUE
+#     side, which is what fnmatch expands to "every method on the object".
+if grep -Eq ': \["\*"\]' "$ACL"; then
+  bad "droplet-ai.json grants a blanket [\"*\"] method list on some ubus object"
+else
+  ok "droplet-ai.json pins every grant to explicit methods (no [\"*\"])"
 fi
 
 # 5a. uhttpd concurrency bump ships in the image (uci-defaults)…

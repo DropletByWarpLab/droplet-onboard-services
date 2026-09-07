@@ -35,10 +35,13 @@ import { vi } from "vitest";
 /** A row as a test writes it: money as decimal strings, dates as `Date`. */
 export interface FakeDocumentInput {
   id?: string;
-  kind?: "RECEIVABLE" | "PAYABLE";
-  externalId?: string;
-  externalSystem?: string;
-  connectionId?: string;
+  /** WARP-2739 — the six-value kind. `INVOICE` and `BILL` are what the old
+   *  `RECEIVABLE` and `PAYABLE` became. */
+  kind?: "QUOTE" | "ORDER" | "INVOICE" | "BILL" | "CREDIT_NOTE" | "RECEIPT";
+  origin?: "LANDED" | "LOCAL";
+  externalId?: string | null;
+  externalSystem?: string | null;
+  connectionId?: string | null;
   issuedAt?: Date | null;
   dueAt?: Date | null;
   counterpartyExternalId?: string | null;
@@ -48,7 +51,19 @@ export interface FakeDocumentInput {
   amount?: string | null;
   balance?: string | null;
   currency?: string | null;
-  status?: string | null;
+  /** The vendor's own word, on a LANDED row. */
+  vendorStatus?: string | null;
+  /** The box's own lifecycle, on a LOCAL row. */
+  status?:
+    | "DRAFT"
+    | "SENT"
+    | "PART_PAID"
+    | "PAID"
+    | "VOID"
+    | "WRITTEN_OFF"
+    | "ISSUED"
+    | "APPLIED"
+    | null;
   vendorUpdatedAt?: Date | null;
   lastReadAt?: Date;
 }
@@ -56,7 +71,7 @@ export interface FakeDocumentInput {
 type StoredRow = Record<string, unknown> & {
   kind: string;
   dueAt: Date | null;
-  externalId: string;
+  externalId: string | null;
   balance: Decimal | null;
   lastReadAt: Date;
 };
@@ -65,7 +80,8 @@ type StoredRow = Record<string, unknown> & {
 export function fakeDocument(over: FakeDocumentInput = {}): FakeDocumentInput {
   return {
     id: "doc-1",
-    kind: "RECEIVABLE",
+    kind: "INVOICE",
+    origin: "LANDED",
     externalId: "INV-1001",
     externalSystem: "quickbooks-online",
     connectionId: "conn-1",
@@ -77,7 +93,11 @@ export function fakeDocument(over: FakeDocumentInput = {}): FakeDocumentInput {
     amount: "4210.55",
     balance: "1200.00",
     currency: null,
-    status: "Open",
+    // 🔴 The VENDOR's word. `status` stays null on a landed row — the provenance
+    // CHECK refuses it otherwise, and a default that filled both columns would
+    // let a test pass against a row Postgres would reject.
+    vendorStatus: "Open",
+    status: null,
     vendorUpdatedAt: null,
     lastReadAt: new Date("2026-09-01T11:00:00Z"),
     ...over,
@@ -110,6 +130,16 @@ function matches(row: StoredRow, where: Record<string, unknown> | undefined): bo
     }
 
     if (key === "kind") {
+      // WARP-2739 — a direction is a SET of kinds, so `{ in: [...] }` is the
+      // ordinary shape here and a bare equality is no longer produced by the
+      // service at all. Both are supported: a fake that accepted only the
+      // shape in use would turn the next narrowing into `unsupported filter`
+      // rather than a real answer.
+      const inList = (cond as { in?: unknown }).in;
+      if (Array.isArray(inList)) {
+        if (!inList.includes(row.kind)) return false;
+        continue;
+      }
       if (row.kind !== cond) return false;
       continue;
     }
@@ -151,7 +181,15 @@ function sortRows(rows: StoredRow[], orderBy: unknown): StoredRow[] {
     if (b.dueAt === null && a.dueAt !== null) return -1;
     const byDue =
       a.dueAt === null || b.dueAt === null ? 0 : a.dueAt.getTime() - b.dueAt.getTime();
-    return byDue !== 0 ? byDue : a.externalId.localeCompare(b.externalId);
+    if (byDue !== 0) return byDue;
+    // WARP-2739 — a LOCAL row has no `externalId`. Postgres sorts NULLs LAST on
+    // an ASC ordering, and `""` sorts FIRST, so coalescing to the empty string
+    // would put local documents at the top of a page the database puts them at
+    // the bottom of. Only reached as the tie-break, after the due date.
+    if (a.externalId === null && b.externalId !== null) return 1;
+    if (b.externalId === null && a.externalId !== null) return -1;
+    if (a.externalId === null || b.externalId === null) return 0;
+    return a.externalId.localeCompare(b.externalId);
   });
 }
 

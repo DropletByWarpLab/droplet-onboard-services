@@ -54,9 +54,12 @@ import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
+import { createCrmFilingRouter } from "./routes/crm-filing.js";
 import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
+// WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
+import { createBrainRouter } from "./routes/brain.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -431,6 +434,15 @@ export function createApp(
   // path parameter in the first segment after `/crm`, so neither can shadow
   // the other (the mount-order hazard this file documents elsewhere).
   app.use("/api", createCrmEntityLinksRouter(prisma));
+  // WARP-2730 (ADR-048) — the filing review surface. Same `/api/crm` prefix
+  // and therefore the same `crm` module gate, for the same reason the entity
+  // links router above shares it: `/crm/filing/...` is disjoint from every
+  // path routes/crm.ts serves, so mount order cannot shadow either.
+  //
+  // Its roles are NARROWER than the rest of the CRM (owner/admin only, on
+  // reads too) — a proposal card carries verbatim quotes from a stored
+  // document. See the header of routes/crm-filing.ts.
+  app.use("/api", createCrmFilingRouter(prisma));
   // WARP-2018/WARP-2032 — the one address book. Owner-scoped, unlike PM/CRM.
   app.use("/api", createContactsRouter(prisma));
   // ADR-026 — read-only mobile wrappers over the native PM service
@@ -444,6 +456,7 @@ export function createApp(
   // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
   // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
   app.use("/api", createAgentRunsRouter(prisma));
+  app.use("/api", createBrainRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.
