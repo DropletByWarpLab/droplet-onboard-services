@@ -12,6 +12,18 @@ import { landCanonicalRows, landsInCrm, NEVER_LANDED_ENTITIES } from "./land.js"
 const CONNECTION = { id: "conn-1", provider: "hubspot" };
 const NOW = new Date("2026-09-01T04:00:00.000Z");
 
+/**
+ * The stage id the double hands back for a vendor stage key.
+ *
+ * 🔴 DERIVED FROM THE KEY, never a constant. A double that returned one id for
+ * every key made `after.stageId` equal `before.stageId` in every deal fixture,
+ * so the STAGE_CHANGE branch of `timelineEntryFor` could not fire — and the
+ * tests that read as though they covered a stage move were passing through the
+ * field-diff branch instead. Distinct ids are what make those assertions mean
+ * what they say.
+ */
+const stageIdFor = (externalKey: string) => `stage-${externalKey}`;
+
 /** A Prisma double whose every method is a spy, so a test can assert absence. */
 function db(overrides: Record<string, Record<string, unknown>> = {}) {
   const table = (extra: Record<string, unknown> = {}) => ({
@@ -35,7 +47,9 @@ function db(overrides: Record<string, Record<string, unknown>> = {}) {
       create: vi.fn(async () => ({ id: "pipeline-1" })),
     }),
     crmPipelineStage: table({
-      create: vi.fn(async () => ({ id: "stage-1" })),
+      create: vi.fn(async (args: { data?: { externalKey?: string } }) => ({
+        id: stageIdFor(args?.data?.externalKey ?? "unstaged"),
+      })),
     }),
     // WARP-2750 — the timeline table. Part of `LandingDb` now, so it is part of
     // the double: a landing that could not reach it is what made every synced
@@ -399,7 +413,7 @@ describe("deal", () => {
   const stored = (over: Record<string, unknown> = {}) => ({
     id: "deal-1",
     title: "Retainer",
-    stageId: "stage-1",
+    stageId: stageIdFor("appointmentscheduled"),
     amountMinor: 123450n,
     currency: "USD",
     closedAt: null,
@@ -449,7 +463,7 @@ describe("deal", () => {
         kind: "STAGE_CHANGE",
         summary: "HubSpot moved this to appointmentscheduled",
         fromStageId: "stage-old",
-        toStageId: "stage-1",
+        toStageId: stageIdFor("appointmentscheduled"),
       }),
     });
   });
@@ -468,18 +482,80 @@ describe("deal", () => {
   });
 
   it("notices a close date moving on its own", async () => {
+    // ON ITS OWN means the deal is ALREADY in the stage the vendor is sending,
+    // so the only thing that moved is the date. Held at the same stage id
+    // deliberately: with a different one this would be a stage move, and the
+    // close-date arm of the diff would never be reached.
     const client = db({
       crmDeal: {
         findFirst: vi.fn(async () =>
-          stored({ stageId: "stage-1", closedAt: new Date("2020-01-01T00:00:00.000Z") }),
+          stored({
+            stageId: stageIdFor("closedwon"),
+            closedAt: new Date("2020-01-01T00:00:00.000Z"),
+          }),
         ),
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
     });
     await land(client, "deal", [{ ...DEAL, stage: "closedwon", closed_at: "2026-01-01" }]);
-    // A closed stage is a different stage row, so this lands as STAGE_CHANGE;
-    // the point is that it is NOT silently dropped.
-    expect(client.crmActivity.create).toHaveBeenCalled();
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ kind: "SYNCED", summary: "HubSpot changed close date" }),
+    });
+  });
+
+  it("🔴 records the amount too when the vendor moves the stage in the SAME push", async () => {
+    // The failure this ticket exists to fix, recurring inside the fix for it.
+    // A vendor payload that re-prices a deal AND advances it writes BOTH
+    // columns, and an early return on the stage move left the money change
+    // recorded nowhere — the sync audit log is counts-only, so "why is this
+    // 9,999 now" had no answer anywhere on the box. A timeline whose whole
+    // thesis is admitting what it omits must not omit this.
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () =>
+          stored({ stageId: "stage-old", amountMinor: 999n, title: "Retainer" }),
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+
+    // ONE row, not two: the stage move stays the headline (it is what
+    // `activity-notify.service.ts` reads, and it is what carries the stage
+    // ids), and the other changed fields are named in the same summary.
+    expect(client.crmActivity.create).toHaveBeenCalledTimes(1);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "STAGE_CHANGE",
+        summary: "HubSpot moved this to appointmentscheduled and changed amount",
+        fromStageId: "stage-old",
+        toStageId: stageIdFor("appointmentscheduled"),
+      }),
+    });
+  });
+
+  it("names every field that moved alongside the stage, in diff order", async () => {
+    const client = db({
+      crmDeal: {
+        findFirst: vi.fn(async () =>
+          stored({
+            stageId: "stage-old",
+            title: "Old name",
+            amountMinor: 999n,
+            closedAt: new Date("2020-01-01T00:00:00.000Z"),
+          }),
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+    });
+    await land(client, "deal", [DEAL]);
+    expect(client.crmActivity.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "STAGE_CHANGE",
+        summary:
+          "HubSpot moved this to appointmentscheduled and changed name, amount, close date",
+      }),
+    });
   });
 
   it("🔴 stamps EXTERNAL provenance, never the LOCAL default", async () => {

@@ -584,19 +584,16 @@ function timelineEntryFor(
     return { kind: "CREATED", summary: `Landed from ${vendor}`, ...provenance };
   }
 
-  if (before.stageId !== after.stageId) {
-    // The VENDOR'S OWN WORD for the stage, not our stage row's name: the two
-    // agree today only because `syncedStage` seeds `name` from `externalKey`,
-    // and a rename on our side must not rewrite what the vendor said happened.
-    return {
-      kind: "STAGE_CHANGE",
-      summary: `${vendor} moved this to ${vendorStageWord}`,
-      fromStageId: before.stageId,
-      toStageId: after.stageId,
-      ...provenance,
-    };
-  }
-
+  // 🔴 THE FIELD DIFF IS COMPUTED BEFORE THE STAGE BRANCH, NOT AFTER IT.
+  //
+  // Returning on the stage move first looked harmless because the two seemed
+  // like alternatives. They are not: one vendor push writes every column at
+  // once, so a deal that is advanced AND re-priced in the same sync moved two
+  // things and the timeline recorded one. The other change went into no row
+  // anywhere — a `LandOutcome` carries counts (`landed`, `skipped`), never
+  // which fields moved — so "why is this 9,999 now" had no answer on the box
+  // at all. That is this ticket's own failure mode, a record that does not
+  // admit what it leaves out, recurring inside the fix for it.
   const changed: string[] = [];
   if (before.title !== after.title) changed.push("name");
   if (before.amountMinor !== after.amountMinor || before.currency !== after.currency) {
@@ -605,6 +602,29 @@ function timelineEntryFor(
   if ((before.closedAt?.getTime() ?? null) !== (after.closedAt?.getTime() ?? null)) {
     changed.push("close date");
   }
+
+  if (before.stageId !== after.stageId) {
+    // ONE row, not a STAGE_CHANGE plus a SYNCED. Two rows would be written
+    // with the same defaulted `occurredAt`, leaving the order the timeline
+    // renders them in to a tie-break — and `activity-notify.service.ts`
+    // notifies on the STAGE_CHANGE arm, so the pair would also have to agree
+    // about which of them is the notifiable one. The move stays the headline
+    // (it is what carries `fromStageId`/`toStageId`), and everything else the
+    // same push changed is named in the same sentence.
+    //
+    // The VENDOR'S OWN WORD for the stage, not our stage row's name: the two
+    // agree today only because `syncedStage` seeds `name` from `externalKey`,
+    // and a rename on our side must not rewrite what the vendor said happened.
+    const moved = `${vendor} moved this to ${vendorStageWord}`;
+    return {
+      kind: "STAGE_CHANGE",
+      summary: changed.length === 0 ? moved : `${moved} and changed ${changed.join(", ")}`,
+      fromStageId: before.stageId,
+      toStageId: after.stageId,
+      ...provenance,
+    };
+  }
+
   if (changed.length === 0) return null;
 
   return { kind: "SYNCED", summary: `${vendor} changed ${changed.join(", ")}`, ...provenance };
