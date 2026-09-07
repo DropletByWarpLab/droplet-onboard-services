@@ -138,6 +138,27 @@ const REST_TRACK_REMEDIATION =
   "check the key you pasted is still valid in the vendor's console, then reconnect this integration from the Integrations page";
 
 /**
+ * The remediation for a request that never got an ANSWER.
+ *
+ * 🔴 Separate from {@link REST_TRACK_REMEDIATION} because the two are not the
+ * same problem and `integrations.service.ts` renders this string verbatim to
+ * the owner (`not connected: ${err.remediation}`). DNS failure, connection
+ * refused, TLS failure and the abort this connector raises on its own timeout
+ * all arrive in the same `catch`, and every one of them was being reported as
+ * "check the key you pasted is still valid" — sending an owner to a vendor
+ * console to rotate a credential that is fine, during an outage, while the
+ * actual answer is to wait.
+ *
+ * That is WARP-1964's defect exactly: an export-drop test failure told
+ * installers to license a SAP SQL Anywhere driver, on the one track that needs
+ * no driver. `ConnectorBlockedError`'s `remediation` parameter exists BECAUSE
+ * of that ticket, and a track that passes one constant for every cause has
+ * re-created the bug it was added to prevent.
+ */
+const REST_TRACK_UNREACHABLE_REMEDIATION =
+  "the vendor could not be reached — this is a network or vendor-availability problem, not a credential problem. Nothing needs re-pasting; the sync retries on its own";
+
+/**
  * Read a dotted path out of a parsed body. `""` means the body itself.
  *
  * Array elements use bracket syntax — `hosts[0].id`, `payment_requests[0].due_date`
@@ -481,7 +502,23 @@ export class RestProfileConnector implements Connector {
         redirect: "error",
       });
     } catch (error) {
-      throw this.blocked(op, error instanceof Error ? error.message : String(error));
+      // No answer came back. That is an OUTAGE — see
+      // REST_TRACK_UNREACHABLE_REMEDIATION for why it does not share the
+      // credential remediation.
+      //
+      // The timeout is named rather than surfaced as a bare "AbortError",
+      // which is what an abort signal produces and which tells an owner
+      // nothing: the connector aborted its OWN request after `timeoutMs`, and
+      // "the vendor did not answer within 30s" is the fact.
+      const aborted =
+        controller.signal.aborted ||
+        (error instanceof Error && error.name === "AbortError");
+      const detail = aborted
+        ? `the vendor did not answer within ${this.timeoutMs}ms`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      throw new ConnectorBlockedError(`${op} (${detail})`, REST_TRACK_UNREACHABLE_REMEDIATION);
     } finally {
       clearTimeout(timer);
     }

@@ -784,6 +784,69 @@ describe("RestProfileConnector", () => {
     await expect(c.runRead("get_company", {})).rejects.toThrow(/no array at "data"/);
   });
 
+  it("🔴 an OUTAGE is not reported as a bad credential — the remediation differs", async () => {
+    // `integrations.service.ts` renders `err.remediation` verbatim to the owner
+    // as `not connected: …`. Every transport failure — DNS, connection refused,
+    // TLS, and this connector's own timeout — arrives in ONE catch, and they
+    // were all carrying "check the key you pasted is still valid", which sends
+    // an owner to rotate a working credential in the middle of an outage.
+    //
+    // WARP-1964 is the same bug: an export-drop failure told installers to
+    // license a SAP driver. `ConnectorBlockedError`'s `remediation` parameter
+    // exists because of that ticket.
+    // Mutation: pass REST_TRACK_REMEDIATION in the transport catch -> red.
+    const refused = (async () => {
+      throw new Error("connect ECONNREFUSED 203.0.113.7:443");
+    }) as never;
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: refused, resolveCredentials: creds },
+    );
+    const err = await c.runRead("get_company", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    const blocked = err as ConnectorBlockedError;
+    expect(blocked.remediation).toMatch(/not a credential problem/);
+    expect(blocked.remediation).not.toMatch(/key you pasted/);
+
+    // …while a credential the VENDOR rejected still says to re-paste it. Both
+    // halves, because a fix that made everything an outage would be the same
+    // defect pointing the other way.
+    const { impl } = stubFetch([{ body: {}, status: 401 }]);
+    const c2 = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const err2 = (await c2.runRead("get_company", {}).catch((e: unknown) => e)) as ConnectorBlockedError;
+    expect(err2.remediation).toMatch(/key you pasted/);
+  });
+
+  it("🔴 names its own timeout instead of surfacing a bare AbortError", async () => {
+    // The abort comes from THIS connector's `AbortController` after
+    // `timeoutMs`. Reporting "AbortError" tells an owner nothing and reads like
+    // a client bug; "the vendor did not answer within 50ms" is the fact.
+    // Mutation: drop the `aborted` branch -> the message is "This operation was
+    // aborted" (or whatever the runtime calls it) -> red.
+    const never = ((_url: string, init: RequestInit = {}) =>
+      new Promise((_resolve, reject) => {
+        (init.signal as AbortSignal | undefined)?.addEventListener("abort", () => {
+          const e = new Error("This operation was aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      })) as never;
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: never, resolveCredentials: creds, timeoutMs: 50 },
+    );
+    const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as ConnectorBlockedError;
+    expect(err).toBeInstanceOf(ConnectorBlockedError);
+    expect(err.message).toMatch(/did not answer within 50ms/);
+    expect(err.remediation).toMatch(/not a credential problem/);
+  });
+
   it("distinguishes a rejected credential from an outage", async () => {
     // This is what lets the hub say "paste a new key" instead of "can't connect".
     const { impl } = stubFetch([{ body: {}, status: 401 }]);
