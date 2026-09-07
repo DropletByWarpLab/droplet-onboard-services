@@ -47,7 +47,12 @@ import { describe, expect, it } from "vitest";
 
 import { providerDescriptor } from "@droplet/shared-types";
 
-import { RestProfileConnector, RestPaginationContractError } from "../src/rest/connector.js";
+import {
+  RestPaginationContractError,
+  RestProfileConnector,
+  UnsafeBaseUrlError,
+} from "../src/rest/connector.js";
+import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
 import { authPlaceholders } from "../src/rest/profile.js";
 import { restProfileFor } from "../src/rest/profiles.js";
 import {
@@ -506,5 +511,120 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
     await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
       RestPaginationContractError,
     );
+  });
+});
+
+// ── refusals ────────────────────────────────────────────────────────────────
+
+/**
+ * 🔴 The refusal tests this file's header calls non-negotiable, and which it
+ * shipped without.
+ *
+ * ADR-046 §3 and `rest-track.test.ts`'s own header state the rule: **a refusal
+ * asserts `fetch` was called ZERO times**, never merely that an error was
+ * thrown. A test that inspected only the returned error would still pass if the
+ * request had already gone out carrying the owner's API key.
+ *
+ * Cal.com's hosted profile is STATIC, so its host cannot be steered by a
+ * connection row today. The self-hosted product is a SECOND profile with a
+ * customer-supplied origin — the shape ten of the surveyed vendors have — and
+ * these refusals are what that profile will inherit. Writing them now is what
+ * makes adding it a profile change rather than a security review.
+ */
+describe("Cal.com — the refusals, each costing ZERO fetch calls", () => {
+  /** The real profile with a resolver that yields exactly what is passed. */
+  function connectorWithCredentials(creds: Record<string, string>) {
+    const { impl, calls } = stubFetch([
+      { body: { data: [], pagination: { nextCursor: null, hasMore: false } } },
+    ]);
+    const connector = new RestProfileConnector(
+      CALCOM_PROFILE,
+      { provider: CALCOM_PROVIDER },
+      { fetchImpl: impl, resolveCredentials: async () => creds },
+    );
+    return { connector, calls };
+  }
+
+  it("🔴 refuses a read when the stored credential has no apiKey — ZERO fetch calls", async () => {
+    // The shape a real connection reaches this in: the descriptor's field was
+    // renamed, or the owner's secret was purged on disconnect and the row
+    // survived. Sending the literal `{{apiKey}}` would land in Cal.com's logs
+    // as a failed auth nobody can explain.
+    // Mutation: fall back to "" instead of refusing an empty placeholder -> the
+    // request goes out and the call count goes to 1.
+    const { connector, calls } = connectorWithCredentials({});
+    await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
+      /has no "apiKey"/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a blank apiKey as firmly as a missing one — ZERO fetch calls", async () => {
+    // Whitespace is what a paste box produces. An empty Authorization header is
+    // a request that cannot succeed, and Cal.com paces at 500 ms, so spending a
+    // call to learn that costs the owner's budget as well as the round trip.
+    const { connector, calls } = connectorWithCredentials({ apiKey: "\t \n" });
+    await expect(connector.connect()).rejects.toThrow(/has no "apiKey"/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a dataset Cal.com does not serve — ZERO fetch calls, and NOT an empty array", async () => {
+    // This profile serves `appointment` and nothing else. Asked for money or
+    // for a patient record, the connection refuses by NAME.
+    // `[]` would be a confident false statement no caller can tell from a
+    // genuinely empty result — and on `get_ar_summary` that statement is about
+    // a practice's money.
+    // Mutation: make `runRead` fall through to an empty array -> red.
+    for (const name of ["get_ar_summary", "get_open_invoices", "get_recent_charges"]) {
+      const { connector, calls } = connectorWithCredentials({ apiKey: API_KEY });
+      await expect(connector.runRead(name, { since: SINCE }), name).rejects.toThrow(
+        DatasetNotServedError,
+      );
+      expect(calls, name).toHaveLength(0);
+    }
+  });
+
+  it("🔴 refuses every write, and spends no call finding out — the track is read-only", async () => {
+    // ADR-046 §4. Cal.com HAS a booking-write API and `reschedule_appointment`
+    // is a real command in the registry — which is exactly why this matters:
+    // the refusal is the track's, not the vendor's, and it costs no request.
+    const { connector, calls } = connectorWithCredentials({ apiKey: API_KEY });
+    await expect(connector.applyWrite("reschedule_appointment", {})).rejects.toThrow(
+      ConnectorBlockedError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses to build against a provider id that is not Cal.com's — ZERO fetch calls", async () => {
+    // The self-hosted build will be its own provider id with its own profile.
+    // A row naming one and dispatched to the other must fail at CONSTRUCTION,
+    // before a credential is resolved — not silently read a self-hoster's
+    // calendar through the hosted contract.
+    const { impl, calls } = stubFetch([{ body: { data: [] } }]);
+    expect(
+      () =>
+        new RestProfileConnector(
+          CALCOM_PROFILE,
+          { provider: "calcom-selfhosted" },
+          { fetchImpl: impl, resolveCredentials: async () => ({ apiKey: API_KEY }) },
+        ),
+    ).toThrow(ConnectorBlockedError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a 302 rather than following it off api.cal.com", async () => {
+    // `fetch` defaults to following redirects, so without `redirect: "error"`
+    // the guard would be checking a URL while the answer chose the destination
+    // — with the owner's key attached, and with a booking response body that
+    // carries attendee names, emails and phone numbers.
+    // EXACTLY ONE call: the redirect was not followed.
+    const { connector, calls } = connectorWith([
+      { body: {}, status: 302, headers: { location: "https://evil.example.net/v2/bookings" } },
+    ]);
+    await expect(connector.runRead("get_schedule_today", { since: SINCE })).rejects.toThrow(
+      UnsafeBaseUrlError,
+    );
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!.url).host).toBe("api.cal.com");
   });
 });

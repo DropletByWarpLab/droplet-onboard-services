@@ -45,7 +45,8 @@ import { describe, expect, it } from "vitest";
 
 import { providerDescriptor } from "@droplet/shared-types";
 
-import { RestProfileConnector } from "../src/rest/connector.js";
+import { RestProfileConnector, UnsafeBaseUrlError } from "../src/rest/connector.js";
+import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
 import { authPlaceholders } from "../src/rest/profile.js";
 import { restProfileFor } from "../src/rest/profiles.js";
 import {
@@ -591,5 +592,125 @@ describe("Square — an empty result omits the array entirely", () => {
     for (const spec of SQUARE_PROFILE.datasets) {
       expect(spec.absentRowsMeansEmpty, `${spec.dataset} must tolerate Square's omitted array`).toBe(true);
     }
+  });
+});
+
+// ── refusals ────────────────────────────────────────────────────────────────
+
+/**
+ * 🔴 The refusal tests this file's header calls non-negotiable, and which it
+ * shipped without.
+ *
+ * ADR-046 §3 and `rest-track.test.ts`'s own header state the rule: **a refusal
+ * asserts `fetch` was called ZERO times**, never merely that an error was
+ * thrown. A test that inspected only the returned error would still pass if the
+ * request had already gone out carrying the seller's access token — and on this
+ * track that token is a live payments credential.
+ *
+ * Square's profile is STATIC, so its host cannot be steered by a connection
+ * row. That is exactly why these belong here anyway: the refusals below are
+ * about the CREDENTIAL and the VOCABULARY, which no `kind: egress` entry and no
+ * host guard covers, and they are the ones that will still be true when the
+ * self-hosted / regional vendors arrive on this track behind a dynamic host.
+ */
+describe("Square — the refusals, each costing ZERO fetch calls", () => {
+  /** The real profile with a resolver that yields nothing at all. */
+  function connectorWithCredentials(creds: Record<string, string>) {
+    const { impl, calls } = stubFetch([{ body: { payments: [] } }]);
+    const connector = new RestProfileConnector(
+      SQUARE_PROFILE,
+      { provider: SQUARE_PROVIDER },
+      { fetchImpl: impl, resolveCredentials: async () => creds },
+    );
+    return { connector, calls };
+  }
+
+  it("🔴 refuses a read when the stored credential has no accessToken — ZERO fetch calls", async () => {
+    // The shape a real connection reaches this in: the descriptor's field was
+    // renamed, or the seller's secret was purged on disconnect and the row
+    // survived. Sending the literal `{{accessToken}}` would land in Square's
+    // logs as a failed auth nobody can explain, and would burn the seller's
+    // rate budget doing it.
+    // Mutation: fall back to "" instead of refusing an empty placeholder -> the
+    // request goes out and the call count goes to 1.
+    const { connector, calls } = connectorWithCredentials({});
+    await expect(connector.runRead("get_recent_charges", { since: SINCE })).rejects.toThrow(
+      /has no "accessToken"/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a blank accessToken as firmly as a missing one — ZERO fetch calls", async () => {
+    // Whitespace is the shape a paste box produces, and an empty Authorization
+    // header is a request that cannot succeed. Refusing costs nothing; sending
+    // it spends a call and teaches Square that this seller has a broken client.
+    const { connector, calls } = connectorWithCredentials({ accessToken: "   " });
+    await expect(connector.connect()).rejects.toThrow(/has no "accessToken"/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a dataset Square does not serve — ZERO fetch calls, and NOT an empty array", async () => {
+    // `invoice`, `order`, `product` and `customer` are omitted from this profile
+    // for reasons recorded in `vendors/square.ts`, and the omissions are pinned
+    // above. THIS is what makes the omission safe: asked for one anyway, the
+    // connection refuses by name.
+    // Returning `[]` instead would be a confident false statement about a
+    // seller's money that no caller could tell from a genuinely empty result —
+    // and it would be indistinguishable in every downstream report.
+    // Mutation: make `runRead` fall through to an empty array -> red.
+    // Real registry names, each depending on a dataset Square omits:
+    // get_open_invoices -> invoice, get_recent_orders -> order,
+    // get_schedule_today -> appointment. A name the registry does not know at
+    // all raises UnknownReadQueryError instead and would prove nothing here.
+    for (const name of ["get_open_invoices", "get_recent_orders", "get_schedule_today"]) {
+      const { connector, calls } = connectorWithCredentials({ accessToken: ACCESS_TOKEN });
+      await expect(connector.runRead(name, { since: SINCE }), name).rejects.toThrow(
+        DatasetNotServedError,
+      );
+      expect(calls, name).toHaveLength(0);
+    }
+  });
+
+  it("🔴 refuses every write, and spends no call finding out — the track is read-only", async () => {
+    // ADR-046 §4. Square HAS a write API; this connection does not reach it,
+    // and there is no profile field that could turn it on. The call count is the
+    // assertion that matters: a write attempted and rejected BY SQUARE would
+    // have been a real request against a real seller's account.
+    const { connector, calls } = connectorWithCredentials({ accessToken: ACCESS_TOKEN });
+    await expect(connector.applyWrite("reschedule_appointment", {})).rejects.toThrow(
+      ConnectorBlockedError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses to build against a provider id that is not Square's — ZERO fetch calls", async () => {
+    // A connection row whose `provider` disagrees with the profile it was
+    // dispatched to is a row written by a different build. Refused at
+    // CONSTRUCTION, before any credential is resolved.
+    const { impl, calls } = stubFetch([{ body: { payments: [] } }]);
+    expect(
+      () =>
+        new RestProfileConnector(
+          SQUARE_PROFILE,
+          { provider: "square-sandbox" },
+          { fetchImpl: impl, resolveCredentials: async () => ({ accessToken: ACCESS_TOKEN }) },
+        ),
+    ).toThrow(ConnectorBlockedError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("🔴 refuses a 302 rather than following it off connect.squareup.com", async () => {
+    // The static origin is guarded, but `fetch` defaults to following
+    // redirects — so without `redirect: "error"` the guard would be checking a
+    // URL while Square's answer chose the destination, with the seller's
+    // payments token attached. EXACTLY ONE call: the redirect was not followed.
+    const { connector, calls } = connectorWith([
+      { body: {}, status: 302, headers: { location: "https://evil.example.net/v2/payments" } },
+    ]);
+    await expect(connector.runRead("get_recent_charges", { since: SINCE })).rejects.toThrow(
+      UnsafeBaseUrlError,
+    );
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!.url).host).toBe("connect.squareup.com");
   });
 });
