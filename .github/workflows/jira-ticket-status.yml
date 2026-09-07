@@ -124,11 +124,13 @@ jobs:
     name: move opened tickets to In Review
     # Not on a draft: a draft is not in review, and opening one should not
     # announce otherwise on the board. `ready_for_review` is what promotes it.
+    #
+    # `startsWith(..., 'stage')` and not `!= 'stage'` — see the `done` job.
     if: >
       contains(fromJSON('["opened","reopened","ready_for_review"]'), github.event.action) &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.head.ref != 'stage' &&
+      !startsWith(github.event.pull_request.head.ref, 'stage') &&
       github.event.pull_request.head.ref != 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -151,14 +153,25 @@ jobs:
 
   done:
     name: move merged tickets to Done
-    # A promotion PR (head=stage) and a sync (head=main) are skipped: their
+    # A promotion PR (head=stage*) and a sync (head=main) are skipped: their
     # titles describe a merge, not a ticket, and stage→main would double-fire
     # every key that already closed when the feature landed on stage.
+    #
+    # The stage side is a PREFIX, not equality, because promotions here have
+    # not all been called `stage`: `stage-catchup-2026-08-14` and
+    # `stage-sync-main-20260816` are both still on the remote, and a
+    # `stage-conflict-fix` shape recurs whenever a promote has to be redone.
+    # Exact equality exempted none of them — and pr-title-ticket-lint.yml
+    # exempts only the literal `stage|main` too, so a PR from any of those is
+    # REQUIRED to carry WARP keys in its title, which this job would then walk
+    # and close a second time. `main` stays exact on purpose: a prefix there
+    # would swallow `maintenance/...` and any other main-prefixed feature
+    # branch, and the cost of a wrong exemption is a ticket that never moves.
     if: >
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.head.ref != 'stage' &&
+      !startsWith(github.event.pull_request.head.ref, 'stage') &&
       github.event.pull_request.head.ref != 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5

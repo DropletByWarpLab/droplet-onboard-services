@@ -377,6 +377,30 @@ else
   fail "🔴 a crafted PR title executed something"
 fi
 
+# --- Phase 6: the workflow's own promotion-branch exemption -------------------
+echo ""
+echo "--- Phase 6: which branches the Jira jobs refuse to run for ---"
+
+# Structural, and says so: a job-level `if:` is a GitHub expression and cannot
+# be executed here. What it pins is the shape that matters — the stage side is
+# a PREFIX, so the whole promotion family is exempt and not just a branch
+# literally named `stage`. This repo has promoted through
+# `stage-catchup-2026-08-14` and `stage-sync-main-20260816`, both still on the
+# remote; exact equality exempted neither, and pr-title-ticket-lint.yml
+# requires such a PR to carry WARP keys in its title — which the `done` job
+# would then walk and close a second time, on keys that closed when the
+# feature landed on stage. `main` is deliberately still exact: a prefix there
+# would swallow `maintenance/...`.
+WF="$REPO_ROOT/.github/workflows/jira-ticket-status.yml"
+STAGE_PREFIX=$(grep -c "startsWith(github.event.pull_request.head.ref, 'stage')" "$WF")
+STAGE_EXACT=$(grep -c "head.ref != 'stage'" "$WF")
+MAIN_EXACT=$(grep -c "head.ref != 'main'" "$WF")
+if [ "$STAGE_PREFIX" = "2" ] && [ "$STAGE_EXACT" = "0" ] && [ "$MAIN_EXACT" = "2" ]; then
+  pass "🔴 both Jira jobs exempt the whole stage-* family, and main by exact name"
+else
+  fail "🔴 the stage exemption is a prefix — prefix=$STAGE_PREFIX exact=$STAGE_EXACT main=$MAIN_EXACT"
+fi
+
 echo ""
 echo "  ------------------------------------------------"
 if [ "$FAILURES" -eq 0 ]; then
