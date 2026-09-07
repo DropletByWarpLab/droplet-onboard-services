@@ -88,6 +88,13 @@ import {
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 import { getEffectiveUsage } from "../services/effective-usage.service.js";
+// WARP-2821 — the ONE corpus-visibility rule, shared with the mcp-server.
+import {
+  HOUSEHOLD_INDEX_USER as SHARED_HOUSEHOLD_INDEX_USER,
+  deptSentinel as sharedDeptSentinel,
+  visibleDepartmentsFor,
+  maxAclVersion,
+} from "@droplet/tools-core";
 
 const logger = pino({ name: "files-route" });
 
@@ -613,7 +620,7 @@ function unionContentAndNameHits(
  * the same path each member sees in their own WebDAV home. Must match the
  * file-indexer's `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
  */
-const HOUSEHOLD_INDEX_USER = "__household__";
+const HOUSEHOLD_INDEX_USER = SHARED_HOUSEHOLD_INDEX_USER;
 
 /**
  * WARP-1264 — department chunk-corpus sentinel. The file-indexer emits
@@ -621,9 +628,7 @@ const HOUSEHOLD_INDEX_USER = "__household__";
  * sentinel userId (services/file-indexer/watcher.py
  * `_lookup_department_for_groupfolder`).
  */
-function deptSentinel(departmentId: string): string {
-  return `__dept_${departmentId}__`;
-}
+const deptSentinel = sharedDeptSentinel;
 
 /** Corpus resolution result: the FileContentChunk `userId` list this caller
  * may search, plus the max `aclVersion` across their visible departments
@@ -713,26 +718,14 @@ async function visibleDeptsForCaller(
     const caller = await resolveSearchCaller(req, prisma);
     if (!caller) return { depts: [], aclVersion: 0, resolved: false };
 
-    const isOwnerOrAdmin = caller.role === "owner" || caller.role === "admin";
-    let depts: VisibleDept[];
-    if (isOwnerOrAdmin) {
-      depts = await prisma.department.findMany({
-        where: { state: "active" },
-        select: { id: true, kind: true, aclVersion: true },
-      });
-    } else {
-      const memberships = await prisma.departmentMembership.findMany({
-        where: { userId: caller.id, department: { state: "active" } },
-        select: { department: { select: { id: true, kind: true, aclVersion: true } } },
-      });
-      depts = memberships.map((m) => m.department);
-    }
-
-    let aclVersion = 0;
-    for (const dept of depts) {
-      if (dept.aclVersion > aclVersion) aclVersion = dept.aclVersion;
-    }
-    return { depts, aclVersion, resolved: true };
+    // WARP-2821 — the rule itself lives in `@droplet/tools-core`, because the
+    // mcp-server asks the same question behind `search_content` and
+    // `read_document_text` and its own copy once disagreed with this one:
+    // it emitted no sentinel at all, so every shared and department document
+    // was listed by this page and invisible to the assistant. One
+    // implementation, two callers.
+    const depts = await visibleDepartmentsFor(prisma, caller);
+    return { depts, aclVersion: maxAclVersion(depts), resolved: true };
   } catch (err) {
     logger.debug(
       { err },

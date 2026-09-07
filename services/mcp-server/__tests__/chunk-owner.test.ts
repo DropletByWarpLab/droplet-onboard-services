@@ -104,10 +104,12 @@ describe("resolveChunkOwnerIds — department corpora (WARP-2821)", () => {
     await resolveChunkOwnerIds(prisma, "alice");
     // Never a bare department scan for a member: that is the difference
     // between "the departments I am in" and "every department on the box".
+    // The BRANCH is what matters here; the query's exact shape belongs to
+    // `visibleDepartmentsFor` and is pinned by its own suite in tools-core.
     expect(deptFindMany).not.toHaveBeenCalled();
-    expect(memberFindMany).toHaveBeenCalledWith({
+    expect(memberFindMany).toHaveBeenCalledOnce();
+    expect(memberFindMany.mock.calls[0]![0]).toMatchObject({
       where: { userId: UUID, department: { state: "active" } },
-      select: { department: { select: { id: true, kind: true } } },
     });
   });
 
@@ -118,10 +120,8 @@ describe("resolveChunkOwnerIds — department corpora (WARP-2821)", () => {
     const ids = await resolveChunkOwnerIds(prisma, "stefan");
     expect(ids).toContain(`__dept_${DEPT_A}__`);
     expect(memberFindMany).not.toHaveBeenCalled();
-    expect(deptFindMany).toHaveBeenCalledWith({
-      where: { state: "active" },
-      select: { id: true, kind: true },
-    });
+    expect(deptFindMany).toHaveBeenCalledOnce();
+    expect(deptFindMany.mock.calls[0]![0]).toMatchObject({ where: { state: "active" } });
   });
 
   it("admins are privileged too", async () => {
