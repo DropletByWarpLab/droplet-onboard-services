@@ -977,6 +977,10 @@ export default function UsersPage() {
     const label = u.displayName || u.id;
     const roleLabel = roleLabelFor(u);
     const isOwnerRow = u.role === "owner";
+    // Strict `=== false` on purpose: an orchestrator that predates the
+    // roster's `enabled` field sends nothing, and an undefined value has to
+    // read as active. Only an explicit false deactivates a row.
+    const isDeactivated = u.enabled === false;
     return (
     <div key={u.id} className="lrow">
       <span className="ri brand">
@@ -998,6 +1002,17 @@ export default function UsersPage() {
         <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
           <KeyRound size={11} aria-hidden="true" />
           {roleLabel}
+        </span>
+      )}
+      {/* State, not just the affordance: without this the roster looked
+          identical whether a person could sign in or not. */}
+      {isDeactivated && (
+        <span
+          className="chip"
+          style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12, color: "var(--text-faint)" }}
+        >
+          <Shield size={11} aria-hidden="true" />
+          Deactivated
         </span>
       )}
       {/* WARP-1271 (T19a): "used / limit" — mono, matches the
@@ -1049,15 +1064,32 @@ export default function UsersPage() {
         </button>
         {!isSelf(u) && (
           <>
-            <button
-              onClick={() => handleSetEnabled(u, false)}
-              aria-label={`Disable user ${label}`}
-              disabled={isOwnerRow}
-              title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Disable"}
-              className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
-            >
-              <Shield size={14} />
-            </button>
+            {/* The row offers the action that is actually available. A
+                deactivated person used to render the same Disable control as
+                everyone else, so an admin could cut someone off and had no
+                way to undo it from any screen — `performEnable` existed and
+                nothing ever called it with `true`. */}
+            {isDeactivated ? (
+              <button
+                onClick={() => handleSetEnabled(u, true)}
+                aria-label={`Enable user ${label}`}
+                disabled={isOwnerRow}
+                title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Enable"}
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-system-green hover:bg-system-green/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <ShieldCheck size={14} />
+              </button>
+            ) : (
+              <button
+                onClick={() => handleSetEnabled(u, false)}
+                aria-label={`Disable user ${label}`}
+                disabled={isOwnerRow}
+                title={isOwnerRow ? ACCESS_COPY.ownerTooltip : "Disable"}
+                className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <Shield size={14} />
+              </button>
+            )}
             <button
               onClick={() => handleDelete(u)}
               aria-label={`Delete user ${label}`}
