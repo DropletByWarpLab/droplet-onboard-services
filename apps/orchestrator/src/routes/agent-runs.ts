@@ -70,8 +70,8 @@ const listQuerySchema = z.object({
     .enum(["queued", "running", "awaiting_confirmation", "succeeded", "failed", "cancelled"])
     .optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
-  /** Opaque: the previous page's tail `createdAt`, ISO. */
-  cursor: z.string().datetime().optional(),
+  /** Opaque: `<createdAt ISO>|<id>` of the previous page's tail row. */
+  cursor: z.string().min(1).max(300).optional(),
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
 });
 
@@ -121,6 +121,24 @@ async function resolveActor(
     return row;
   }
   return { id: user.id, username: user.username, role: user.role };
+}
+
+/**
+ * The list cursor is the tail row's `(createdAt, id)` tuple, matching the
+ * `orderBy`. A `createdAt`-only cursor skipped rows created in the same
+ * millisecond (the ticker enqueues up to fifty in one loop) when they
+ * straddled a page boundary (Stefan, #2014 review).
+ */
+function parseCursor(raw: string): { createdAt: Date; id: string } | null {
+  const sep = raw.lastIndexOf("|");
+  if (sep <= 0 || sep === raw.length - 1) return null;
+  const createdAt = new Date(raw.slice(0, sep));
+  if (Number.isNaN(createdAt.getTime())) return null;
+  return { createdAt, id: raw.slice(sep + 1) };
+}
+
+function encodeCursor(row: { createdAt: Date; id: string }): string {
+  return `${row.createdAt.toISOString()}|${row.id}`;
 }
 
 function defaultModel(): string | null {
@@ -181,8 +199,11 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     error: r.error,
     // WARP-2179 — the parked call with its provenance, for the confirm
     // surface: tool, a PHI-free argument summary, the raw args (the caller
-    // is the run's owner), and when it parked.
-    pending: r.pendingTool
+    // is the run's owner), and when it parked. Meaningful ONLY while the run
+    // is parked: the worker clears the columns at every terminal write, and
+    // this gate is the reader-side belt to that brace, so a consumer can
+    // never be told a finished run still needs approval.
+    pending: r.status === "awaiting_confirmation" && r.pendingTool
       ? {
           tool: r.pendingTool,
           args: pendingArgs,
@@ -297,11 +318,23 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
       const { status, limit, cursor } = parsed.data;
+      const after = cursor ? parseCursor(cursor) : null;
+      if (cursor && !after) {
+        res.status(400).json({ error: "Invalid cursor" });
+        return;
+      }
       const rows = (await prisma.agentRun.findMany({
         where: {
           userId: actor.id,
           ...(status ? { status } : {}),
-          ...(cursor ? { createdAt: { lt: new Date(cursor) } } : {}),
+          ...(after
+            ? {
+                OR: [
+                  { createdAt: { lt: after.createdAt } },
+                  { createdAt: after.createdAt, id: { lt: after.id } },
+                ],
+              }
+            : {}),
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: limit,
@@ -309,7 +342,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       })) as unknown as RunRow[];
       res.json({
         items: rows.map((r) => serializeRun(r, false)),
-        nextCursor: rows.length === limit ? rows[rows.length - 1]!.createdAt.toISOString() : null,
+        nextCursor: rows.length === limit ? encodeCursor(rows[rows.length - 1]!) : null,
       });
     } catch (err) {
       next(err);
@@ -389,7 +422,9 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "Unsupported RRULE" });
         return;
       }
-      const cap = config.agentMaxIter.capIter;
+      // WARP-2749 — a schedule's runs get the RUN cap, not the chat cap; the
+      // ticker enqueues with this maxIter verbatim.
+      const cap = config.agentRuns.maxIter;
       const created = (await prisma.agentRunSchedule.create({
         data: {
           userId: actor.id,

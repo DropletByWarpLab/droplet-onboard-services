@@ -225,6 +225,13 @@ const envSchema = z.object({
   // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
   // The epic sizes agentic work at 5–40 minutes.
   AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2749 — a run's iteration cap, SEPARATE from the chat cap.
+  // AGENT_MAX_ITER_CAP bounds an interactive turn, where a person is waiting
+  // and ten model calls is a latency budget. A run has a wall clock instead
+  // (AGENT_RUN_MAX_WALL_MS) and nobody waiting, so it gets its own cap. The
+  // loop honours it through `AgentDeps.maxIterCap`, which only in-process
+  // callers can set — /api/llm/chat never does, so chat is byte-identical.
+  AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
   // WARP-2178 — characters of ONE tool result the model is fed per call
   // (tool-result-bounding.ts). 8000 is the value the loop has always used and
   // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
@@ -254,7 +261,16 @@ const envSchema = z.object({
   // Master switch. OFF by default: the corpus pass reads the user's documents
   // and writes derived rows, which is a capability an operator opts into (see
   // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
-  BRAIN_ENABLED: z.coerce.boolean().default(false),
+  // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
+  // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
+  // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
+  // corpus pass reading their documents would have switched it ON. This file
+  // already documents that trap two hundred lines up; the first draft of this
+  // line walked into it anyway.
+  BRAIN_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
@@ -1404,13 +1420,16 @@ export const config = {
     corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
   },
   // WARP-2177 — see resolveAgentRunLimits.
-  agentRuns: resolveAgentRunLimits({
-    concurrency: parsed.AGENT_RUN_CONCURRENCY,
-    tickMs: parsed.AGENT_RUN_TICK_MS,
-    heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
-    reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
-    maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
-    maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
-  }),
+  agentRuns: {
+    ...resolveAgentRunLimits({
+      concurrency: parsed.AGENT_RUN_CONCURRENCY,
+      tickMs: parsed.AGENT_RUN_TICK_MS,
+      heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
+      reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
+      maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
+      maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
+    }),
+    maxIter: parsed.AGENT_RUN_MAX_ITER,
+  },
 };
 export type Config = typeof config;

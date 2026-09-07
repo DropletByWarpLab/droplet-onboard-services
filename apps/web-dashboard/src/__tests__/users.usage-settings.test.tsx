@@ -119,12 +119,12 @@ beforeEach(() => {
 });
 
 async function openEditDialog() {
-  render(<UsersPage />);
+  const view = render(<UsersPage />);
   await waitFor(() =>
     expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
   );
   fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
-  return screen.getByRole("dialog");
+  return Object.assign(screen.getByRole("dialog"), { __view: view });
 }
 
 /**
@@ -274,6 +274,38 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     await waitFor(() => {
       expect(within(dialog).getByText("Applied")).toBeInTheDocument();
     });
+  });
+
+  /**
+   * WARP-2696 — the post-save "Applied" beat is a 700 ms `await` in the middle
+   * of `handleEditSave`, and `closeEdit()` + `reload()` sit after it. A page
+   * that unmounts inside that window used to resume the continuation into a
+   * dead tree; in jsdom that lands after environment teardown, where `window`
+   * is gone, so it failed the whole run as an unhandled `ReferenceError` with
+   * every test file green and nothing to point at.
+   *
+   * `reload()` calls `fetchUsers`, so "did the continuation run after
+   * unmount?" is observable as "did the roster get refetched?".
+   */
+  it("a save still holding its Applied beat at unmount touches nothing afterwards", async () => {
+    const dialog = await openEditDialog();
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
+      target: { value: "5" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    // The write has landed, so the handler is now parked in the beat.
+    await waitFor(() => expect(updateUserUsageMock).toHaveBeenCalledTimes(1));
+    const reloadsBeforeUnmount = fetchUsersMock.mock.calls.length;
+
+    (dialog as unknown as { __view: { unmount: () => void } }).__view.unmount();
+
+    // Well past the beat: if the guard were gone, the continuation would have
+    // resumed by now and called reload().
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fetchUsersMock.mock.calls.length).toBe(reloadsBeforeUnmount);
   });
 
   it("rejects a non-positive upload cap without saving", async () => {

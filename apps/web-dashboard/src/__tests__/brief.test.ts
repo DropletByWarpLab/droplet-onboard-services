@@ -44,12 +44,17 @@ describe("formatImpact (WARP-2752)", () => {
     expect(out).toContain("XYZ");
   });
 
-  it("falls back rather than throwing on a MALFORMED currency code", () => {
-    // This is what actually reaches the catch: a vendor field that is not a
-    // 3-letter code at all. A thrown formatter must not take the finding with
-    // it.
+  it("delegates a malformed currency to formatMinor rather than throwing", () => {
+    // formatImpact now DELEGATES to formatMinor instead of carrying a second
+    // implementation, so its fallback is formatMinor's — one formatter, one
+    // behaviour to keep true, and no float64 coercion on the way.
     const out = formatImpact("150000", "not-a-code");
-    expect(out).toBe("1500 not-a-code");
+    expect(out).toBe("1500.00 not-a-code");
+  });
+
+  it("returns null for a non-integer minor amount", () => {
+    // The one guard kept locally: this value arrives from JSON unvalidated.
+    expect(formatImpact("12.5", "USD")).toBeNull();
   });
 
   it("returns null for a non-numeric amount rather than NaN", () => {

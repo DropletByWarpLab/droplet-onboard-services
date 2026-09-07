@@ -51,6 +51,7 @@ const SOURCES = [{ sourceKind: "file", sourceId: `${P}file-1`, quote: "net 30 fr
 describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () => {
   let prisma: PrismaClient;
   let deptId: string;
+  let ownerId: string;
 
   beforeAll(async () => {
     // `setup.ts` mocks `@prisma/client` GLOBALLY for the DB-less lane, so a
@@ -69,6 +70,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
     await prisma.brainFinding.deleteMany({ where: { detectorKey: { startsWith: P } } });
     await prisma.brainDigest.deleteMany({ where: { detectorKey: { startsWith: P } } });
     await prisma.department.deleteMany({ where: { name: { startsWith: P } } });
+    await prisma.user.deleteMany({ where: { username: { startsWith: P } } });
     await prisma.$disconnect();
   });
 
@@ -76,6 +78,17 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
     await prisma.brainFinding.deleteMany({ where: { detectorKey: { startsWith: P } } });
     await prisma.brainDigest.deleteMany({ where: { detectorKey: { startsWith: P } } });
     await prisma.department.deleteMany({ where: { name: { startsWith: P } } });
+    await prisma.user.deleteMany({ where: { username: { startsWith: P } } });
+    const user = await prisma.user.create({
+      data: {
+        username: `${P}owner`,
+        displayName: `${P}owner`,
+        role: "owner",
+      },
+      select: { id: true },
+    });
+    ownerId = user.id;
+
     const dept = await prisma.department.create({
       // `slug` and `createdBy` are required; `state: active` is what
       // `readableDepartmentIdsFor` filters on for the owner/admin see-all arm.
@@ -103,6 +116,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
           title: "t",
           body: "b",
           sources: [],
+          ownerId,
           detectorKey: `${P}d`,
           dedupeKey: `${P}d:theme:-:-`,
         },
@@ -119,6 +133,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
           title: "t",
           body: "b",
           sources: { sourceKind: "file" },
+          ownerId,
           detectorKey: `${P}d`,
           dedupeKey: `${P}d:theme:-:-2`,
         },
@@ -134,6 +149,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
           title: "t",
           rationale: "r",
           evidence: { digestIds: ["x"], sources: [] },
+          ownerId,
           detectorKey: `${P}f`,
           dedupeKey: `${P}f:loss:-:-`,
         },
@@ -147,6 +163,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
       title: "Acme is net 30",
       body: "The 2026 MSA sets payment terms at net 30 from delivery.",
       sources: SOURCES,
+      ownerId,
       detectorKey: `${P}obligations`,
     });
     expect(id).toBeTruthy();
@@ -164,6 +181,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
       subjectType: "COMPANY" as const,
       subjectId: `${P}co-1`,
       sources: SOURCES,
+      ownerId,
       detectorKey: `${P}entities`,
     };
 
@@ -193,6 +211,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
       title: "Cash collection is slipping",
       body: "Three customers moved past 60 days this quarter.",
       sources: SOURCES,
+      ownerId,
       detectorKey: `${P}themes`,
     };
     await upsertDigest(prisma, base);
@@ -209,6 +228,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
       title: "Invoice 41 is 90 days overdue",
       rationale: "Balance unchanged since June.",
       evidence: { sources: SOURCES },
+      ownerId,
       detectorKey: `${P}ageing`,
       subjectKey: `${P}inv-41`,
     };
@@ -279,6 +299,56 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
 
   // ── ranges ───────────────────────────────────────────────────────────────
 
+  it("REFUSES a personal-scope row with no owner — the leak this closes", async () => {
+    // Without this CHECK, `personal` was a label nothing enforced: neither
+    // table had an owner column, so every reader saw every other reader's
+    // rows through the brain block on /llm/chat.
+    await expect(
+      prisma.brainDigest.create({
+        data: {
+          kind: "theme",
+          title: "t",
+          body: "b",
+          sources: SOURCES,
+          scope: "personal",
+          detectorKey: `${P}d`,
+          dedupeKey: `${P}d:theme:-:noowner`,
+        },
+      }),
+    ).rejects.toThrow(/BrainDigest_personal_scope_needs_owner/);
+  });
+
+  it("REFUSES a company-scope row that carries an owner", async () => {
+    await expect(
+      prisma.brainDigest.create({
+        data: {
+          kind: "theme",
+          title: "t",
+          body: "b",
+          sources: SOURCES,
+          scope: "company",
+          ownerId,
+          detectorKey: `${P}d`,
+          dedupeKey: `${P}d:theme:-:strayowner`,
+        },
+      }),
+    ).rejects.toThrow(/BrainDigest_personal_scope_needs_owner/);
+  });
+
+  it("deleting the owner CASCADES their personal rows", async () => {
+    await upsertDigest(prisma, {
+      kind: "theme",
+      title: "Mine",
+      body: "b",
+      sources: SOURCES,
+      ownerId,
+      detectorKey: `${P}owned`,
+    });
+    expect(await prisma.brainDigest.count({ where: { detectorKey: `${P}owned` } })).toBe(1);
+    await prisma.user.delete({ where: { id: ownerId } });
+    expect(await prisma.brainDigest.count({ where: { detectorKey: `${P}owned` } })).toBe(0);
+  });
+
   it("REFUSES a confidence above 100", async () => {
     await expect(
       prisma.brainDigest.create({
@@ -288,6 +358,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
           body: "b",
           sources: SOURCES,
           confidence: 3000,
+          ownerId,
           detectorKey: `${P}d`,
           dedupeKey: `${P}d:theme:-:conf`,
         },
@@ -304,6 +375,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
           rationale: "r",
           evidence: { sources: SOURCES },
           impactMinor: 4000n,
+          ownerId,
           detectorKey: `${P}f`,
           dedupeKey: `${P}f:loss:-:cur`,
         },
@@ -317,6 +389,7 @@ describe.skipIf(!RUN)("Brain digest/finding — real Postgres (WARP-2748)", () =
       title: "t",
       rationale: "r",
       evidence: { sources: SOURCES },
+      ownerId,
       detectorKey: `${P}dismiss`,
     });
     await expect(

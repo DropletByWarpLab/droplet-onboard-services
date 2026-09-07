@@ -6,6 +6,12 @@
  *      and Approve posts the decision to the confirm route.
  *   2. A finished run shows its result and trace, and no approve buttons.
  *   3. Deny posts `denied`; Cancel posts to the cancel route.
+ *   4. A detail response that arrives after the person selected another run
+ *      is dropped — a stale run's approval prompt never overwrites the
+ *      selected run's panel.
+ *   5. Recurring runs: the panel lists schedules with a human rule and next
+ *      fire, adds one from a preset (POST with the preset's RRULE and the
+ *      typed time zone), and deletes one.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -18,7 +24,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { AgentRunsPanel } from "@/components/audit/AgentRunsPanel";
-import type { AgentRunSummary } from "@/components/audit/agent-runs/api";
+import type { AgentRunSummary, AgentRunSchedule } from "@/components/audit/agent-runs/api";
 
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
@@ -60,8 +66,13 @@ const finished: AgentRunSummary = {
   pending: null,
 };
 
-function wire(runs: AgentRunSummary[], traces: Record<string, unknown[]> = {}) {
+function wire(runs: AgentRunSummary[], traces: Record<string, unknown[]> = {}, schedules: AgentRunSchedule[] = []) {
   authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/agent-runs/schedules")) {
+      if (init?.method === "POST") return { ok: true, status: 201, json: async () => ({ id: "sched-new", nextFireAt: "2026-09-06T13:00:00.000Z" }) };
+      if (init?.method === "DELETE") return { ok: true, status: 204, json: async () => ({}) };
+      return okJson({ schedules });
+    }
     if (init?.method === "POST") return okJson({ ok: true });
     const m = /^\/api\/agent-runs\/([^/?]+)$/.exec(url);
     if (m) {
@@ -122,24 +133,15 @@ describe("Background runs panel (WARP-2180)", () => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/agent-runs/run-1/confirm");
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ decision: "denied" });
     });
-    // 🔴 WAIT FOR THE BUTTON, NOT FOR THE POST.
-    //
-    // The waitFor above resolves the moment the deny fetch is RECORDED, which
-    // is not the moment the handler finishes. `act()` sets `busy` true, awaits
-    // the POST, then awaits `loadDetail` + `loadList`, and only then clears it
-    // — and "Cancel run" is `disabled={busy}`. Clicking here on the strength of
-    // the POST alone lands on a disabled button, React drops the event, no
-    // cancel request is ever issued, and the next waitFor fails with
-    // `expected false to be true` after burning its full budget.
-    //
-    // Locally the two reloads settle in ~1 ms and the race is invisible; on a
-    // saturated CI runner it is not. This is the wrong-signal class, so a
-    // longer timeout cannot fix it — the wait has to point at the thing that
-    // actually has to become true.
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled();
-    });
-    fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
+    // WARP-2696 — every action button on this panel is `disabled={busy}`, and
+    // `busy` stays true until the deny POST *settles*, not until it is issued.
+    // The waitFor above only proves it was issued, so clicking straight after
+    // it raced the reset: under CI load the click landed on a disabled button,
+    // did nothing, and the assertion below then timed out at 5000 ms. Waiting
+    // for the button to be enabled asserts the real precondition.
+    const cancelRun = await screen.findByRole("button", { name: /cancel run/i });
+    await waitFor(() => expect(cancelRun).not.toBeDisabled());
+    fireEvent.click(cancelRun);
     await waitFor(() => {
       expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/agent-runs/run-1/cancel")).toBe(true);
     });
@@ -153,5 +155,83 @@ describe("Background runs panel (WARP-2180)", () => {
     expect(list.textContent).toContain("Finished");
     fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
     await screen.findByText("Reviewed 12 clips; nothing unusual.");
+  });
+
+  it("drops a late detail response for a run that is no longer selected", async () => {
+    const pending: Record<string, (v: unknown) => void> = {};
+    authFetchMock.mockImplementation(async (url: string) => {
+      const m = /^\/api\/agent-runs\/([^/?]+)$/.exec(url);
+      if (m) {
+        const id = decodeURIComponent(m[1]!);
+        const run = [parked, finished].find((r) => r.id === id)!;
+        // Each detail fetch resolves only when the test says so.
+        await new Promise((resolve) => {
+          pending[id] = resolve;
+        });
+        return okJson({ ...run, trace: [] });
+      }
+      if (url.startsWith("/api/agent-runs")) return okJson({ items: [parked, finished], nextCursor: null });
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<AgentRunsPanel />);
+    await screen.findByRole("list", { name: "Background runs" });
+    // Select the parked run (slow), then the finished one (fast).
+    fireEvent.click(screen.getByRole("button", { name: /tidy up the old files/i }));
+    await waitFor(() => expect(pending["run-1"]).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
+    await waitFor(() => expect(pending["run-2"]).toBeTruthy());
+    pending["run-2"]!(undefined);
+    await screen.findByText("Reviewed 12 clips; nothing unusual.");
+    // The slow response lands last — and must not take over the panel.
+    pending["run-1"]!(undefined);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText("Reviewed 12 clips; nothing unusual.")).toBeTruthy();
+    expect(screen.queryByText("This run is waiting for your approval")).toBeNull();
+  });
+
+  it("lists recurring runs, adds one from a preset with the typed time zone, and deletes one", async () => {
+    const schedule: AgentRunSchedule = {
+      id: "sched-1",
+      goal: "sweep last night's clips every morning",
+      model: "m",
+      maxIter: 30,
+      rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0",
+      timezone: "America/Los_Angeles",
+      nextFireAt: "2026-09-06T13:00:00.000Z",
+      enabled: true,
+      lastFiredAt: null,
+      createdAt: "2026-09-04T03:00:00.000Z",
+    };
+    wire([], {}, [schedule]);
+    render(<AgentRunsPanel />);
+    const list = await screen.findByRole("list", { name: "Recurring runs" });
+    await waitFor(() => expect(list.textContent).toContain("sweep last night's clips every morning"));
+    expect(list.textContent).toContain("Every day at 06:00");
+    expect(list.textContent).toContain("America/Los_Angeles");
+
+    fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "check the front door camera" } });
+    fireEvent.change(screen.getByLabelText("When"), { target: { value: "weekdays-9" } });
+    fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "Europe/Paris" } });
+    fireEvent.click(screen.getByRole("button", { name: /add recurring run/i }));
+    await waitFor(() => {
+      const post = authFetchMock.mock.calls.find(
+        (c) => c[0] === "/api/agent-runs/schedules" && (c[1] as RequestInit)?.method === "POST",
+      );
+      expect(post).toBeTruthy();
+      expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({
+        goal: "check the front door camera",
+        rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0",
+        timezone: "Europe/Paris",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /delete recurring run: sweep last night's clips/i }));
+    await waitFor(() => {
+      expect(
+        authFetchMock.mock.calls.some(
+          (c) => c[0] === "/api/agent-runs/schedules/sched-1" && (c[1] as RequestInit)?.method === "DELETE",
+        ),
+      ).toBe(true);
+    });
   });
 });
