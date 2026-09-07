@@ -55,6 +55,7 @@ import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.j
 import { UnknownWriteCommandError } from "../src/write-commands.js";
 import { CANONICAL_COLUMNS } from "../src/export-drop/profiles.js";
 import { getReadQuery } from "../src/read-queries.js";
+import { REST_VENDOR_PROFILES } from "../src/rest/profiles.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -350,6 +351,41 @@ describe("RestProfileConnector", () => {
     expect(readPath({ a: { b: [1] } }, "a.b")).toEqual([1]);
     expect(readPath([1, 2], "")).toEqual([1, 2]);
     expect(readPath({ a: 1 }, "a.b.c")).toBeUndefined();
+  });
+
+  it("🔴 indexes arrays with BRACKETS, not a bare numeric segment", () => {
+    // Two reasons, and the second is a real CI failure rather than taste:
+    // `hosts.0.id` is a HOSTNAME to check-egress-allowlist.py, because `.id`
+    // is a real ICANN TLD — the bare-host pass extracts it out of the field
+    // map's string literal and fails the egress gate.
+    // Mutation: drop the bracket branch -> Cal.com's provider_id goes undefined.
+    const body = { hosts: [{ id: 7 }, { id: 9 }], a: { b: [{ c: "x" }] } };
+    expect(readPath(body, "hosts[0].id")).toBe(7);
+    expect(readPath(body, "hosts[1].id")).toBe(9);
+    expect(readPath(body, "a.b[0].c")).toBe("x");
+    // Out of range is undefined, never a throw and never element 0.
+    expect(readPath(body, "hosts[5].id")).toBeUndefined();
+    // A bare numeric segment still works — JS arrays are objects — so existing
+    // paths are unaffected; brackets are the spelling profiles must USE.
+    expect(readPath(body, "hosts.0.id")).toBe(7);
+  });
+
+  it("🔴 no shipped profile writes a path the egress scanner reads as a host", () => {
+    // The gate only sees git-TRACKED files, so a green local run on a branch
+    // with new untracked files is a false green. This asserts the property
+    // directly instead of relying on that run.
+    // Mutation: change any fieldMap path back to `a.0.b` -> red here.
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        for (const [column, source] of Object.entries(spec.fieldMap)) {
+          const path = typeof source === "string" ? source : source.path;
+          expect(
+            /\.\d+(\.|$)/.test(path),
+            `${profile.provider}.${spec.dataset}.${column} = "${path}" — use brackets: a[0].b`,
+          ).toBe(false);
+        }
+      }
+    }
   });
 
   it("formats a watermark per the endpoint's declared format", () => {

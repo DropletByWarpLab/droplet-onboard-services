@@ -83,10 +83,16 @@ function assertCommonUrlSafety(provider: string, raw: string): URL {
   if (url.protocol !== "https:") {
     throw new UnsafeBaseUrlError(provider, `"${url.protocol}//" is not https`);
   }
-  // `https://api.vendor.com@evil.com/` parses with hostname `evil.com`. The
-  // hostname check below would catch that one, but userinfo also leaks a
-  // credential into a URL and into every log that records it, so it is refused
-  // in its own right rather than left to a downstream check.
+  // A URL of the form `https://<a-trusted-looking-name>@<attacker-host>/`
+  // parses with the ATTACKER's hostname — the part before the `@` is userinfo,
+  // not a host. The hostname check below would catch that one, but userinfo
+  // also leaks a credential into a URL and into every log that records it, so
+  // it is refused in its own right rather than left to a downstream check.
+  //
+  // (Written without a literal example on purpose: `check-egress-allowlist.py`
+  // reads string and comment content looking for bare hostnames, and a sample
+  // host in a comment is indistinguishable to it from a destination this box
+  // dials. The same reason `ref-pipedrive-host-suffix` exists.)
   if (url.username !== "" || url.password !== "") {
     throw new UnsafeBaseUrlError(provider, "the URL carries userinfo");
   }

@@ -157,7 +157,7 @@ export const CALCOM_PROFILE: RestVendorProfile = {
         // MULTIPLE hosts and this column holds one. The first host is the
         // organiser in Cal.com's own ordering, which is the closest thing to
         // "the provider" the canonical column means.
-        provider_id: "hosts.0.id",
+        provider_id: "hosts[0].id",
         status: "status",
         // patient_id and operatory_id are ABSENT ON PURPOSE — see the module
         // docstring. `calcom-profile.test.ts` pins them undefined.

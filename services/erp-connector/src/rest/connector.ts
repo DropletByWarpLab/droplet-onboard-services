@@ -137,13 +137,41 @@ export class RestVendorError extends Error {
 const REST_TRACK_REMEDIATION =
   "check the key you pasted is still valid in the vendor's console, then reconnect this integration from the Integrations page";
 
-/** Read a dotted path out of a parsed body. `""` means the body itself. */
+/**
+ * Read a dotted path out of a parsed body. `""` means the body itself.
+ *
+ * Array elements use bracket syntax — `hosts[0].id`, `payment_requests[0].due_date`
+ * — rather than a bare numeric segment. Two reasons, and the second is not a
+ * style preference:
+ *
+ *  1. It says what it means. `hosts.0.id` reads as an object key that happens
+ *     to be "0"; an index into a list should look like one.
+ *  2. 🔴 `hosts.0.id` is a HOSTNAME to `scripts/check-egress-allowlist.py`.
+ *     `.id` is a real ICANN TLD (Indonesia), so the bare-host pass extracts it
+ *     from the string literal and fails the gate over a field map. Bracket
+ *     syntax is not host-shaped, so it cannot be mistaken for a destination.
+ *
+ * 🔴 An index into a list is LOSSY by construction and every use of one should
+ * say what it drops — Cal.com's `hosts[0]` is one of several hosts on a
+ * round-robin event, Square's `payment_requests[0]` is one of up to thirteen
+ * instalments. The path syntax cannot express "all of them", and a canonical
+ * column holds one value, so the profile has to be honest in its comment about
+ * which one it kept.
+ */
 export function readPath(body: unknown, path: string): unknown {
   if (path === "") return body;
   let cursor: unknown = body;
-  for (const segment of path.split(".")) {
-    if (cursor === null || typeof cursor !== "object") return undefined;
-    cursor = (cursor as Record<string, unknown>)[segment];
+  // Split on dots, then peel any trailing `[n]` groups off each segment, so
+  // `a.b[0].c` walks a → b → 0 → c.
+  for (const raw of path.split(".")) {
+    const match = raw.match(/^([^[\]]*)((?:\[\d+\])*)$/);
+    if (!match) return undefined;
+    const [, key, indices] = match;
+    for (const step of [key, ...[...(indices ?? "").matchAll(/\[(\d+)\]/g)].map((m) => m[1]!)]) {
+      if (step === "") continue;
+      if (cursor === null || typeof cursor !== "object") return undefined;
+      cursor = (cursor as Record<string, unknown>)[step];
+    }
   }
   return cursor;
 }
