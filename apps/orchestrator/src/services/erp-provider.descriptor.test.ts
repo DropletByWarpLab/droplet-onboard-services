@@ -32,6 +32,8 @@ import {
   HUBSPOT_PROVIDER,
   MAILCHIMP_PROVIDER,
   ConnectorBlockedError,
+  RestProfileConnector,
+  restProfileFor,
   type DatasetName as ConnectorDatasetName,
 } from "@droplet/erp-connector";
 import {
@@ -139,9 +141,15 @@ const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
  * `services/erp-connector/src/rest/vendors/`, and `connectorFactoryFor`
  * resolves them through `restProfileFor(provider)` before consulting the static
  * factory map — exactly as it resolves the export-drop family through
- * `vendorFromExportProvider`. So the "every buildable descriptor can actually
- * be built" assertion below is a REAL check for these two, not a formality: it
- * is the only thing proving the profile-dispatch branch is wired at all.
+ * `vendorFromExportProvider`.
+ *
+ * ⚠ That dispatch branch is proved by the POSITIVE test below ("dispatches
+ * every REST provider to a RestProfileConnector"), NOT by the older "every
+ * buildable descriptor can actually be built" loop. That loop asserts
+ * `.not.toThrow(/unknown ERP provider/)`, which passes on any other error:
+ * break `restProfileFactory` so it throws something else and the loop stays
+ * green over a track that cannot construct a single connection. Verified by
+ * running exactly that mutation.
  *
  * They appear in `cloudProviderIds()` as well, and that is deliberate rather
  * than sloppy — a REST row takes its identity from `providerConfig` and its
@@ -237,6 +245,47 @@ describe("the descriptor set covers exactly the providers that shipped before", 
           },
         }),
       ).not.toThrow(/unknown ERP provider/);
+    }
+  });
+
+  it("🔴 dispatches every REST provider to a RestProfileConnector — asserted POSITIVELY", () => {
+    // The loop above is a NEGATIVE: `.not.toThrow(/unknown ERP provider/)`
+    // passes on any OTHER error, so it would stay green if `connectorFactoryFor`
+    // never consulted `restProfileFor` at all and the construction failed for
+    // some entirely different reason. `REST_PROVIDERS_WARP_2707`'s docstring
+    // calls that loop "the only thing proving the profile-dispatch branch is
+    // wired at all", and until this test it was not proving it.
+    //
+    // Asserted three ways, because each catches a different way the branch can
+    // be wrong:
+    //   - a profile is REGISTERED for the id (`restProfileFor` is the registry
+    //     `connectorFactoryFor` consults, so an unregistered id would fall
+    //     through to the static factory map and throw "unknown ERP provider");
+    //   - dispatch returns a `RestProfileConnector` and not some other
+    //     connector — an id that also had a hand-written factory would silently
+    //     take whichever branch ran first;
+    //   - the connector it returns carries THAT provider's identity and serves
+    //     THAT profile's datasets, so one profile cannot be handed to every id.
+    //
+    // Mutation: delete the `if (restProfileFor(provider)) return
+    // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
+    // the negative loop above stays green.
+    for (const id of REST_PROVIDERS_WARP_2707) {
+      const profile = restProfileFor(id);
+      expect(profile, `${id} must have a registered REST profile`).toBeDefined();
+
+      const connector = connectorForProvider({
+        provider: id,
+        host: "10.0.0.5",
+        connectionId: "conn-1",
+        providerConfig: { provider: id },
+      });
+
+      expect(connector, `${id} must dispatch to the REST track`).toBeInstanceOf(
+        RestProfileConnector,
+      );
+      expect(connector.provider).toBe(id);
+      expect([...connector.servesDatasets].sort()).toEqual([...profile!.datasets.map((d) => d.dataset)].sort());
     }
   });
 
