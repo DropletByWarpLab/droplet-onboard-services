@@ -67,6 +67,110 @@ function escapeRegExpLiteral(literal: string): string {
 }
 
 /**
+ * IPv4 ranges this connector will not dial, whatever a profile or a customer
+ * says.
+ *
+ * A vendor SaaS lives on the public internet. An address in one of these ranges
+ * is not a vendor — it is this box, this LAN, or the cloud metadata service —
+ * and a REST connection pointed at one is either a mistake or an attempt to
+ * turn the connector into a proxy for the customer's own network. The
+ * per-account host is CUSTOMER-SUPPLIED and the `Link`/cursor follow URL is
+ * VENDOR-supplied, so both are exactly the inputs that reach for these.
+ *
+ * `169.254.0.0/16` is the one that matters most: `169.254.169.254` is the
+ * instance-metadata endpoint on every major cloud, and it answers unauthenticated
+ * HTTP with role credentials. It is not a hypothetical — it is the canonical
+ * SSRF payoff, and it is inside link-local, so blocking the /16 blocks it.
+ *
+ * Two ranges beyond the ones a reviewer would list first, and why each is here:
+ *   `0.0.0.0/8`     — `https://0/` PARSES as `0.0.0.0`, which Linux routes to
+ *                     loopback. Blocking `127/8` alone leaves that open.
+ *   `100.64.0.0/10` — RFC 6598 shared address space. It is a real LAN range on
+ *                     a carrier-fed install, not a curiosity.
+ */
+const BLOCKED_V4_RANGES: readonly { readonly cidr: string; readonly why: string; readonly test: (o: number[]) => boolean }[] = [
+  { cidr: "0.0.0.0/8", why: "this host", test: (o) => o[0] === 0 },
+  { cidr: "10.0.0.0/8", why: "a private network", test: (o) => o[0] === 10 },
+  { cidr: "127.0.0.0/8", why: "loopback", test: (o) => o[0] === 127 },
+  { cidr: "100.64.0.0/10", why: "carrier-grade NAT space", test: (o) => o[0] === 100 && o[1]! >= 64 && o[1]! <= 127 },
+  { cidr: "169.254.0.0/16", why: "link-local, which is where cloud instance metadata answers", test: (o) => o[0] === 169 && o[1] === 254 },
+  { cidr: "172.16.0.0/12", why: "a private network", test: (o) => o[0] === 172 && o[1]! >= 16 && o[1]! <= 31 },
+  { cidr: "192.168.0.0/16", why: "a private network", test: (o) => o[0] === 192 && o[1] === 168 },
+];
+
+/** The four octets of a dotted-quad, or `null` if this is not one. */
+function ipv4Octets(host: string): number[] | null {
+  const parts = host.split(".");
+  if (parts.length !== 4) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const n = Number(part);
+    if (n > 255) return null;
+    octets.push(n);
+  }
+  return octets;
+}
+
+/**
+ * Why this host must not be dialled, or `null` if it is not a blocked literal.
+ *
+ * Reads the host AFTER `new URL()` has normalised it, which is what makes the
+ * ranges above sufficient rather than a game of spellings. The WHATWG parser
+ * folds every IPv4 form to a dotted-quad — `0x7f.0.0.1`, `2130706433`,
+ * `010.0.0.1` and `0` all come out as addresses these tests catch — and folds
+ * IPv6 to its compressed form. Matching on the raw string instead would have
+ * to enumerate those spellings, and would miss the next one.
+ *
+ * A NAME is not checked here: `internal.corp.example` is a host this cannot
+ * resolve, and the allow-set check is what constrains names. See the TOCTOU
+ * note on {@link assertSafeRestBaseUrl}.
+ */
+function blockedLiteralReason(hostname: string): string | null {
+  // `URL.hostname` keeps the brackets on an IPv6 literal; the address is inside.
+  const bare = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+
+  const octets = ipv4Octets(bare);
+  if (octets) {
+    const hit = BLOCKED_V4_RANGES.find((range) => range.test(octets));
+    return hit ? `${hit.cidr} is ${hit.why}` : null;
+  }
+
+  if (!bare.includes(":")) return null; // a name, not an address literal
+
+  const v6 = bare.toLowerCase();
+  if (v6 === "::1") return "::1 is loopback";
+  if (v6 === "::") return ":: is the unspecified address";
+
+  // An IPv4-mapped address is an IPv4 address wearing an IPv6 spelling, and the
+  // parser normalises the trailing dotted-quad into two hex groups — so
+  // `::ffff:127.0.0.1` arrives as `::ffff:7f00:1`. Decode it and apply the IPv4
+  // ranges, or `::ffff:169.254.169.254` walks straight past them.
+  const mapped = v6.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    const high = parseInt(mapped[1]!, 16);
+    const low = parseInt(mapped[2]!, 16);
+    const reason = blockedLiteralReason(
+      `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`,
+    );
+    if (reason) return `${reason} (reached as an IPv4-mapped IPv6 address)`;
+    return null;
+  }
+
+  const firstGroup = v6.split(":")[0] ?? "";
+  if (/^[0-9a-f]{1,4}$/.test(firstGroup)) {
+    const value = parseInt(firstGroup, 16);
+    // fc00::/7 — unique local. Both fc.. and fd.. are inside it.
+    if (value >= 0xfc00 && value <= 0xfdff) return "fc00::/7 is a unique-local network";
+    // fe80::/10 — link-local, the IPv6 half of the metadata problem.
+    if (value >= 0xfe80 && value <= 0xfebf) return "fe80::/10 is link-local";
+  }
+  return null;
+}
+
+/**
  * The checks every dialled URL passes, whatever the track.
  *
  * Returns the normalised origin (`https://host`) — callers build paths onto
@@ -102,6 +206,13 @@ function assertCommonUrlSafety(provider: string, raw: string): URL {
     throw new UnsafeBaseUrlError(
       provider,
       `port ${url.port} — the egress registry allows this host on 443 only`,
+    );
+  }
+  const blocked = blockedLiteralReason(url.hostname.toLowerCase());
+  if (blocked !== null) {
+    throw new UnsafeBaseUrlError(
+      provider,
+      `"${url.hostname}" is not a vendor — ${blocked}`,
     );
   }
   return url;
@@ -162,6 +273,29 @@ export function assertHostConfigValue(provider: string, value: string): string {
  * Dynamic profiles: the customer's value is substituted, and the RESULT is
  * checked against the profile's allow-set. Building and then validating is
  * deliberate; validating only the input would leave the composition unchecked.
+ *
+ * ## 🔴 What this guard does NOT close — stated rather than implied
+ *
+ * This is a check on the URL, not on the connection. Three residual gaps, and
+ * naming them is the point: a guard that is believed to do more than it does is
+ * worse than one whose limit is written down.
+ *
+ *  1. **DNS rebinding / check-then-connect (TOCTOU).** The blocklist above
+ *     reads an address LITERAL. A registered NAME under an allowed suffix is
+ *     admitted here and resolved later by the runtime, and nothing stops that
+ *     name from resolving to `127.0.0.1`, to `169.254.169.254`, or to a
+ *     different address on the second lookup than on the first. Closing it
+ *     needs resolution inside the guard AND a socket pinned to the address that
+ *     was checked — a custom `undici` dispatcher with a `connect` hook, not a
+ *     line here. Until that exists, the allow-set is what constrains a name:
+ *     only a host the profile registered can be dialled at all, so the attacker
+ *     has to already control a vendor subdomain.
+ *  2. **The vendor's own hosts.** An allowed host that is compromised, or a
+ *     vendor that proxies, is inside the allow-set by definition. Nothing here
+ *     sees that.
+ *  3. **The redirect a runtime might follow.** Closed on this track by
+ *     `redirect: "error"` in `connector.ts`, not by this file — and that is why
+ *     it is set there rather than left to the guard.
  */
 export function assertSafeRestBaseUrl(
   provider: string,

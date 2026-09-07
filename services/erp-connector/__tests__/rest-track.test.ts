@@ -264,6 +264,155 @@ describe("host guard — the ONLY enforcement for a dynamic destination", () => 
   });
 });
 
+// ── the private-range blocklist ─────────────────────────────────────────────
+
+describe("host guard — a vendor SaaS is never on this box, this LAN, or the metadata service", () => {
+  /** A profile that would admit ANY host, so only the blocklist can refuse. */
+  const permissive = {
+    kind: "dynamic" as const,
+    configField: "host",
+    allowedSuffixes: [],
+    // The literal is registered as an allowed host on purpose: it takes the
+    // allow-set out of the question, so a green test here is the BLOCKLIST
+    // passing and nothing else. Without this the test would pass for the wrong
+    // reason — "not in the allow-set" — and would keep passing with the
+    // blocklist deleted.
+    allowedHosts: [] as string[],
+  };
+  const admitting = (host: string) => ({ ...permissive, allowedHosts: [host] });
+
+  it("🔴 refuses loopback, the private ranges, and link-local — in EVERY IPv4 spelling", () => {
+    // Mutation: delete any row of `BLOCKED_V4_RANGES` -> its cases go green.
+    const cases: [string, string][] = [
+      ["127.0.0.1", "127.0.0.0/8"],
+      ["127.1.2.3", "127.0.0.0/8"],
+      ["10.0.0.5", "10.0.0.0/8"],
+      ["172.16.0.1", "172.16.0.0/12"],
+      ["172.31.255.254", "172.16.0.0/12"],
+      ["192.168.1.250", "192.168.0.0/16"],
+      ["169.254.1.1", "169.254.0.0/16"],
+      // 🔴 THE one. Unauthenticated HTTP, and it answers with role credentials.
+      ["169.254.169.254", "169.254.0.0/16"],
+      ["100.64.0.1", "100.64.0.0/10"],
+      ["0.0.0.0", "0.0.0.0/8"],
+    ];
+    for (const [host, cidr] of cases) {
+      expect(() => assertSafeRestBaseUrl("v", admitting(host), host), host).toThrow(UnsafeBaseUrlError);
+      expect(() => assertSafeRestBaseUrl("v", admitting(host), host), host).toThrow(cidr);
+    }
+  });
+
+  it("🔴 the alternate IPv4 spellings do not get past it", () => {
+    // The WHATWG parser folds hex, decimal, octal and short forms to a
+    // dotted-quad BEFORE the ranges are applied, which is why the blocklist can
+    // be a list of ranges rather than a list of spellings. This test is what
+    // says so — matching on the raw string instead would pass every case above
+    // and fail every case here.
+    //
+    // Driven through a STATIC origin on purpose. The obvious spelling of this
+    // test — `assertSafeFollowUrl("v", "https://0x7f.0.0.1", …)` — is green
+    // WITHOUT the blocklist, because the raw origin string and the parser's
+    // normalised `127.0.0.1` differ and the origin-equality check refuses it
+    // first. It would have passed for the wrong reason. (Found by running the
+    // mutation; it is the only reason this comment exists.) A static origin
+    // consults no allow-set and no origin comparison, so the blocklist is the
+    // only thing that can refuse.
+    // Mutation: read `raw` instead of `url.hostname` in the guard -> red.
+    const spellings: [string, string][] = [
+      ["0x7f.0.0.1", "127.0.0.1"], // hex first octet
+      ["2130706433", "127.0.0.1"], // one 32-bit decimal
+      ["0177.0.0.1", "127.0.0.1"], // octal first octet
+      ["0xc0a80101", "192.168.1.1"], // one 32-bit hex
+      ["0300.0250.1.1", "192.168.1.1"], // octal, two octets
+      ["192.168.001.001", "192.168.1.1"], // leading zeros
+    ];
+    for (const [spelling, folded] of spellings) {
+      expect(
+        () => assertSafeRestBaseUrl("v", { kind: "static", origin: `https://${spelling}` }),
+        `${spelling} folds to ${folded}`,
+      ).toThrow(UnsafeBaseUrlError);
+    }
+    // ⚠ Not every odd spelling is a blocked address, and assuming so is how this
+    // test lies: `010.0.0.1` is OCTAL 10, so it folds to the PUBLIC `8.0.0.1`
+    // and is admitted. Pinned so nobody "fixes" it into the list above.
+    expect(assertSafeRestBaseUrl("v", { kind: "static", origin: "https://010.0.0.1" })).toBe(
+      "https://8.0.0.1",
+    );
+  });
+
+  it("🔴 refuses the IPv6 ranges, including an IPv4-mapped metadata address", () => {
+    // `::ffff:169.254.169.254` is the metadata endpoint wearing an IPv6
+    // spelling, and the parser hands it over as `::ffff:a9fe:a9fe` — two hex
+    // groups, matching NO IPv4 rule until the mapping is decoded.
+    // Mutation: drop the `::ffff:` branch -> the two mapped cases go green
+    // while every other case here stays red.
+    // Static origins again, for the reason the test above records.
+    const cases = ["[::1]", "[::]", "[fe80::1]", "[fc00::1]", "[fd12:3456::1]", "[::ffff:127.0.0.1]", "[::ffff:169.254.169.254]"];
+    for (const host of cases) {
+      expect(
+        () => assertSafeRestBaseUrl("v", { kind: "static", origin: `https://${host}` }),
+        host,
+      ).toThrow(UnsafeBaseUrlError);
+    }
+    // And a PUBLIC IPv6 literal is still admitted — the rule is the ranges, not
+    // "no IPv6".
+    expect(assertSafeRestBaseUrl("v", { kind: "static", origin: "https://[2606:2800:220:1::1]" })).toBe(
+      "https://[2606:2800:220:1::1]",
+    );
+  });
+
+  it("still admits an ordinary public vendor host, and a public IP literal", () => {
+    // The blocklist must not become a "no IP literals" rule by accident: a
+    // vendor that publishes a bare address is unusual but not forbidden, and a
+    // guard that over-refuses is a paying customer who cannot connect.
+    expect(assertSafeRestBaseUrl("v", admitting("api.example.com"), "api.example.com")).toBe(
+      "https://api.example.com",
+    );
+    expect(assertSafeRestBaseUrl("v", admitting("93.184.216.34"), "93.184.216.34")).toBe(
+      "https://93.184.216.34",
+    );
+    expect(assertSafeRestBaseUrl("v", admitting("172.32.0.1"), "172.32.0.1")).toBe("https://172.32.0.1");
+    expect(assertSafeRestBaseUrl("v", admitting("100.63.255.255"), "100.63.255.255")).toBe(
+      "https://100.63.255.255",
+    );
+  });
+
+  it("🔴 applies to a STATIC profile origin and to a follow URL, not only to a customer's value", () => {
+    // One `assertCommonUrlSafety` serves all three entry points, and this is
+    // what pins that. A blocklist wired into the dynamic branch alone would
+    // leave a mistyped static profile and a vendor's cursor URL unguarded.
+    expect(() =>
+      assertSafeRestBaseUrl("v", { kind: "static", origin: "https://192.168.1.250" }),
+    ).toThrow(/192\.168\.0\.0\/16/);
+    expect(() =>
+      assertSafeFollowUrl("v", "https://api.example.com", "https://169.254.169.254/latest/meta-data/"),
+    ).toThrow(/169\.254\.0\.0\/16/);
+  });
+
+  it("🔴 a REQUEST to a blocked host costs ZERO fetch calls", async () => {
+    // The file's rule. A refusal that arrived after the request went out would
+    // have shipped the credential to the metadata service, which is the entire
+    // point of pointing a connection there.
+    const { impl, calls } = stubFetch([{ body: { data: [] } }]);
+    expect(
+      () =>
+        new RestProfileConnector(
+          dynamicProfile({
+            baseUrl: {
+              kind: "dynamic",
+              configField: "host",
+              allowedSuffixes: [],
+              allowedHosts: ["169.254.169.254"],
+            },
+          }),
+          { provider: "dyn-vendor", hostConfigValue: "169.254.169.254" },
+          { fetchImpl: impl, resolveCredentials: creds },
+        ),
+    ).toThrow(UnsafeBaseUrlError);
+    expect(calls).toHaveLength(0);
+  });
+});
+
 // ── read semantics ──────────────────────────────────────────────────────────
 
 describe("read semantics — the named queries as data over canonical rows", () => {
