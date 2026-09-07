@@ -305,6 +305,43 @@ describe("resolveDepartmentFilter turns a word into an id, or refuses", () => {
     expect(calls.findUnique).toBe(0);
   });
 
+  it("🔴 the `none` sentinel is case-insensitive, like every match around it", async () => {
+    // WARP-2719 review, finding 3. This was the one case-SENSITIVE comparison
+    // in a function whose whole premise is that nobody types the stored case:
+    // `"none"` meant "owned by nobody", `"None"` fell through to the id/slug/
+    // name lookups, matched nothing, and threw `department_not_found` → 404.
+    //
+    // A model capitalising the first letter of a value it was told to send is
+    // doing the ordinary thing, and the answer it got back — "no such
+    // department" — named the wrong problem. `none` is a RESERVED WORD in this
+    // parameter, so it is reserved in every casing.
+    //
+    // MUTATION: restore `needle === DEPARTMENT_FILTER_NONE` and the first two
+    // of these throw instead of returning null.
+    const { db, calls } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "None")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "NONE")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "  none  ")).toBeNull();
+    // Non-vacuity: still a short-circuit, not a lookup that happens to miss.
+    expect(calls.findUnique).toBe(0);
+    expect(calls.findFirst).toBe(0);
+  });
+
+  it("a department whose NAME is the sentinel is unreachable, and that is the trade", async () => {
+    // Written down rather than discovered. Reserving the word in every casing
+    // costs exactly one thing: a real department called "None" can no longer
+    // be filtered to by name. It is still reachable by id and by slug, which
+    // is why the trade is worth making — and `?parent=none` on the same route
+    // reserves the word the same way.
+    const { db } = makeResolverDb([
+      ...ROWS,
+      { id: "dept-none", slug: "none-dept", name: "None" },
+    ]);
+    expect(await resolveDepartmentFilter(db, "None")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "dept-none")).toBe("dept-none");
+    expect(await resolveDepartmentFilter(db, "none-dept")).toBe("dept-none");
+  });
+
   it("🔴 THROWS on an unknown name rather than letting it become an empty board", async () => {
     // `expandDepartmentScope` deliberately returns `[id]` for an unknown id so
     // the filter matches nothing instead of degrading to no filter. Right for

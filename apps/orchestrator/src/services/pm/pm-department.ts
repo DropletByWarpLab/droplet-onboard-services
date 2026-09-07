@@ -232,6 +232,10 @@ export async function expandDepartmentScope(
  * The sentinel a caller passes to mean "owned by nobody", rather than
  * "no filter". Spelled out because the three-way encoding — absent / a target /
  * unowned — is the whole reason a plain `string | undefined` is not enough.
+ *
+ * Stored lower-case and compared lower-case — see
+ * {@link resolveDepartmentFilter}. It is a RESERVED WORD in this parameter,
+ * not a lookup, so `None` and `NONE` mean it too.
  */
 export const DEPARTMENT_FILTER_NONE = "none";
 
@@ -254,11 +258,22 @@ export const DEPARTMENT_FILTER_NONE = "none";
  * pass an id; if the name is not resolved here, the feature does not exist for
  * the caller it was built for.
  *
- * Order is id, then slug, then name, and the last two are case-insensitive
- * because nobody types "Front desk" the way it was created. `Department.name`
- * and `.slug` are both `@unique` but case-SENSITIVELY, so two rows differing
- * only in case can in principle both match — first row wins, which is the same
- * answer a person would give and better than refusing.
+ * Order is sentinel, then id, then slug, then name, and every one of those
+ * comparisons is case-insensitive because nobody types "Front desk" the way it
+ * was created. `Department.name` and `.slug` are both `@unique` but
+ * case-SENSITIVELY, so two rows differing only in case can in principle both
+ * match — first row wins, which is the same answer a person would give and
+ * better than refusing.
+ *
+ * WARP-2719 review, finding 3 — the sentinel comparison used to be the ONE
+ * case-sensitive test in the function. `"none"` resolved to "owned by nobody";
+ * `"None"` fell through to the lookups, matched no row, and threw
+ * `department_not_found` → 404. The schema advertises the word (`… or "none"
+ * for unassigned`), a model that capitalises the start of a value is doing the
+ * ordinary thing, and the failure it got back said the department did not
+ * exist — which is not what went wrong. Making it match its neighbours costs
+ * only a department literally named "None", which is reserved here in the same
+ * way `?parent=none` reserves it.
  *
  * Returns `null` for the "unowned" sentinel and `undefined` for "no filter",
  * so a caller can pass the result straight through without re-deriving which
@@ -270,7 +285,8 @@ export async function resolveDepartmentFilter(
 ): Promise<string | null | undefined> {
   if (raw === undefined || raw === null || raw.trim().length === 0) return undefined;
   const needle = raw.trim();
-  if (needle === DEPARTMENT_FILTER_NONE) return null;
+  // Case-insensitive, like every other comparison below it. See the header.
+  if (needle.toLowerCase() === DEPARTMENT_FILTER_NONE) return null;
 
   const byId = await db.department.findUnique({
     where: { id: needle },
