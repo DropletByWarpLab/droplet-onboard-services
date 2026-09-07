@@ -1,4 +1,10 @@
 import { z } from "zod";
+// WARP-2825 — the daily-retention horizon lives next to the downsample that
+// enforces it, and every reader that must sit inside it imports the same
+// constant. `money-snapshot.service.ts` has exactly one import of its own and
+// it is a `import type`, so this adds NOTHING to config.ts's runtime module
+// graph — the concern the `resolveAgentIterLimits` note below is about.
+import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -835,7 +841,12 @@ const envSchema = z.object({
   // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
   // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
   // negative window is nonsensical input, so the schema rejects it at startup.
-  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce.number().int().min(0).finite().default(90),
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .finite()
+    .default(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT),
 
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
