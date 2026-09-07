@@ -10,11 +10,17 @@
 import type { Detector } from "./types";
 import { overdueReceivables, overduePayables } from "./money-overdue";
 import { dealsSlipping } from "./deals-slipping";
+import { receivablesAgeing } from "./receivables-ageing";
 
 export const DETECTORS: readonly Detector[] = [
   overdueReceivables,
   overduePayables,
   dealsSlipping,
+  // WARP-2825 — the first detector that reads HISTORY. It reports direction,
+  // which the three above cannot: they see only the present tense. It earns
+  // its place by refusing to speak on a short series rather than by finding
+  // more things.
+  receivablesAgeing,
 ] as const;
 
 export type { Detector, DetectedFinding } from "./types";
