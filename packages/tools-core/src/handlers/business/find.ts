@@ -558,13 +558,38 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
 
       case "pipeline": {
+        type Board = { id: string; name: string; isDefault: boolean };
         const data = await callOrch<{
           pipelineId: string;
           stages?: Parameters<typeof toStageRollup>[0][];
+          covered?: Board[];
+          omitted?: Board[];
         }>(ctx, "get", `/api/crm/summary${id ? `?pipeline=${id}` : ""}`);
+        const omitted = data.omitted ?? [];
         return {
           ok: true,
-          data: { entity, stages: (data.stages ?? []).map(toStageRollup) },
+          data: {
+            entity,
+            // WARP-2750 — the id was declared here and then dropped on the
+            // floor, so an answer never said which board it described.
+            pipeline_id: data.pipelineId,
+            stages: (data.stages ?? []).map(toStageRollup),
+            ...(omitted.length > 0
+              ? {
+                  // 🔴 THE SILENCE WAS THE BUG. Every connector pipeline is
+                  // created `isDefault: false`, and a no-id summary resolves
+                  // only the default board — so a business whose deals live in
+                  // HubSpot was handed an empty local funnel with nothing
+                  // saying another board existed. The model can already ask
+                  // for one by id; it could not find out there was one.
+                  covers_only: data.pipelineId,
+                  other_pipelines: omitted.map((b) => ({ id: b.id, name: b.name })),
+                  note: `this roll-up covers one pipeline; ${omitted.length} other${
+                    omitted.length === 1 ? "" : "s"
+                  } exist and are NOT included — ask again with that pipeline's id`,
+                }
+              : {}),
+          },
         };
       }
     }
