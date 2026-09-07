@@ -74,7 +74,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   // WARP-979 — the reworked AddressStep imports these (this walk skips the step).
   checkBoxName: vi.fn(async () => ({
     available: true,
@@ -93,7 +92,6 @@ vi.mock("@/lib/api", () => ({
   // WARP-817 — WifiStep reads the host topology on mount to decide its
   // default disclosure state; null (best-effort) leaves the collapsed default.
   getNetworkTopology: vi.fn(async () => null),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they
   // expect.
@@ -157,7 +155,7 @@ async function advanceToDiscovery() {
   // Onboarding-Flow redesign — the single Internet step is now two (Wi-Fi then
   // Address) between account and discovery. Skip both so the polling-bounds
   // tests land on the discovery surface they exercise. Wi-Fi has no async mount
-  // load; the Address step's fetchDuckDnsStatus effect resolves before its skip.
+  // load; the Address step's fetchBoxName effect resolves before its skip.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
