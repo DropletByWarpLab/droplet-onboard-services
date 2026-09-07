@@ -15,8 +15,22 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
+/** The activity row this route writes, as much of it as the assertions read. */
+interface ActivityRow {
+  kind: string;
+  severity: string;
+  sub: string;
+  refs: Record<string, unknown>;
+}
+
 const mocks = vi.hoisted(() => ({
-  recordActivity: vi.fn(async () => undefined),
+  // 🔴 The parameter is declared, and it is load-bearing for `tsc`, not for
+  // the runtime. vitest 3 infers a zero-length tuple for an untyped `vi.fn`,
+  // so `mock.calls[0][0]` is "Tuple type '[]' has no element at index '0'" —
+  // an error the suite never sees, because vitest strips types without
+  // checking them (WARP-2606). It fails the `typecheck` lane instead, which is
+  // the lane that runs after you have already believed the green run.
+  recordActivity: vi.fn(async (_row: unknown) => undefined),
   inspectTools: vi.fn(),
   inspectPrompt: vi.fn(),
 }));
@@ -179,11 +193,7 @@ describe("🔴 looking leaves a trace, and the trace carries no content", () => 
   it("records one row per inspect", async () => {
     await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
     expect(mocks.recordActivity).toHaveBeenCalledTimes(1);
-    const row = mocks.recordActivity.mock.calls[0]![0] as {
-      kind: string;
-      severity: string;
-      refs: Record<string, unknown>;
-    };
+    const row = mocks.recordActivity.mock.calls[0]![0] as ActivityRow;
     expect(row.kind).toBe("system");
     expect(row.severity).toBe("info");
     expect(row.refs.target).toBe("u1");
@@ -222,10 +232,7 @@ describe("🔴 looking leaves a trace, and the trace carries no content", () => 
   it("names the failed-composer count in the row, without naming the composer's error", async () => {
     mocks.inspectPrompt.mockResolvedValue({ ...PROMPT_RESULT, erroredBlocks: ["persona"] });
     await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
-    const row = mocks.recordActivity.mock.calls[0]![0] as {
-      sub: string;
-      refs: { erroredBlocks: number };
-    };
+    const row = mocks.recordActivity.mock.calls[0]![0] as ActivityRow;
     expect(row.refs.erroredBlocks).toBe(1);
     expect(row.sub).toContain("failed to compose");
   });
