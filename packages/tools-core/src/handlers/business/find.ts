@@ -124,6 +124,16 @@ const inputSchema = {
       maximum: 3650,
       description: "Deals only: untouched this long — finds who needs chasing.",
     },
+    department: {
+      // 🔴 A PLAIN STRING, and it must stay one. The ai-gateway's DMR
+      // sanitizer strips `pattern`/`format`/`min*`/`max*` but copies `enum`
+      // through untouched to llama.cpp's GBNF compiler, so a department enum
+      // would be a per-box grammar built from live rows — the shape WARP-1839
+      // took the box down with. The name is resolved server-side instead.
+      type: "string",
+      description:
+        'Projects and work items: the department that owns it, by name — or "none" for unassigned.',
+    },
     limit: { type: "number", minimum: 1, maximum: 50 },
   },
   required: ["entity"],
@@ -137,6 +147,7 @@ interface Args {
   status?: string;
   parent_id?: string;
   idle_days?: number;
+  department?: string;
   limit?: number;
 }
 
@@ -201,6 +212,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const id = a.id?.trim() ? encodeURIComponent(a.id.trim()) : null;
   const parent = a.parent_id?.trim() ? encodeURIComponent(a.parent_id.trim()) : null;
   const q = a.query?.trim();
+  // Sent verbatim, resolved by the orchestrator. It is a NAME here — the
+  // assistant cannot look one up, because `GET /api/departments` scopes its
+  // listing to the caller's own memberships and the service principal holds
+  // none, so it receives an empty list however the request is shaped.
+  const department = a.department?.trim() ? a.department.trim() : null;
 
   try {
     switch (entity) {
@@ -426,10 +442,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         }
         // No workspace argument on purpose: `/api/pm/projects` takes an
         // OPTIONAL workspace, which is what let `pm_list_workspaces` go.
+        const projectParams = new URLSearchParams({ per_page: String(limit) });
+        if (department) projectParams.set("department", department);
         const data = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
           ctx,
           "get",
-          `/api/pm/projects?per_page=${limit}`,
+          `/api/pm/projects?${projectParams.toString()}`,
         );
         const all = (data.projects ?? []).map(toPlaneProject);
         // The route has no `q`; filtering here keeps ONE search vocabulary
@@ -457,6 +475,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         if (parent) {
           const params = new URLSearchParams();
           if (q) params.set("q", q);
+          if (department) params.set("department", department);
           params.set("per_page", String(limit));
           const data = await callOrch<{ work_items?: Parameters<typeof toGraphWorkItem>[0][] }>(
             ctx,
@@ -472,6 +491,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           };
         }
         const params = new URLSearchParams({ q: q ?? "" });
+        // The department alone is a complete query here: "what is Front Desk
+        // working on?" carries no search term, and the route's empty-`q`
+        // short-circuit was relaxed for exactly this call.
+        if (department) params.set("department", department);
         params.set("per_page", String(limit));
         const data = await callOrch<{ work_items?: Parameters<typeof toGraphWorkItem>[0][] }>(
           ctx,

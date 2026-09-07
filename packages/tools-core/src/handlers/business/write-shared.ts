@@ -182,27 +182,39 @@ export const LINK_EDGES: readonly LinkEdge[] = [
   { from: "deal", to: "project", kind: "delivers", status: "live" },
   { from: "deal", to: "customer", kind: "belongs_to", status: "live" },
 
-  // ── real edges with no table behind them yet ──
+  // ── real edges whose SUBSTRATE now exists, and whose write tool does not ──
+  //
+  // 🔴 All three of these said "not built yet" and had stopped being true.
+  // `PmWorkItemRelation` landed with WARP-2586 (schema.prisma, plus
+  // pm-relations.service.ts and routes/pm/relations.ts), and `PmWorkItem`
+  // gained `departmentId` with WARP-2717. A table that reads "blocked on a
+  // table that already exists" is worse than no note: it tells the next reader
+  // the expensive half is missing when what is actually missing is the cheap
+  // half, and that is the wrong estimate to act on.
+  //
+  // They stay `not_built` because `business_link` genuinely cannot write them
+  // yet — the reason is now the WRITE, not the substrate, and the text says so.
   {
     from: "task",
     to: "task",
     kind: "blocks",
     status: "not_built",
-    blockedBy: "the work-item relation table is not built yet",
+    blockedBy: "PmWorkItemRelation exists (WARP-2586); business_link has no writer for it yet",
   },
   {
     from: "task",
     to: "task",
     kind: "relates_to",
     status: "not_built",
-    blockedBy: "the work-item relation table is not built yet",
+    blockedBy: "PmWorkItemRelation exists (WARP-2586); business_link has no writer for it yet",
   },
   {
     from: "task",
     to: "department",
     kind: "owned_by",
     status: "not_built",
-    blockedBy: "work items carry no department column yet",
+    blockedBy:
+      "the column exists (WARP-2717) and business_find can FILTER on it (WARP-2719); assigning one still needs a writer",
   },
 
   // ── real edges whose column or table EXISTS, and whose write route admits

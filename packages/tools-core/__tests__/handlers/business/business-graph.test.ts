@@ -273,6 +273,122 @@ describe("business_find — searches", () => {
     expect(url).not.toContain("workspace=");
   });
 
+  // ── WARP-2719: the department filter ──────────────────────────────────
+
+  it("sends the department through to the workspace-wide search, by name", async () => {
+    // The name, not an id: the assistant CANNOT resolve one. `/api/departments`
+    // scopes its listing to the caller's own memberships and the service
+    // principal holds none, so it always receives an empty list. If the name
+    // is not resolved server-side, the filter does not exist for this caller.
+    get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
+    await businessFind.handler({ entity: "work_item", department: "Front Desk" }, ctx);
+    const url = get.mock.calls[0][0] as string;
+    expect(url).toContain("/api/pm/work-items?");
+    expect(url).toContain("department=Front+Desk");
+  });
+
+  it("sends it on the project-scoped work-item read too", async () => {
+    get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
+    await businessFind.handler(
+      { entity: "work_item", parent_id: "p1", department: "Clinical" },
+      ctx,
+    );
+    const url = get.mock.calls[0][0] as string;
+    expect(url).toContain("/api/pm/projects/p1/work-items?");
+    expect(url).toContain("department=Clinical");
+  });
+
+  it("sends it on the project list", async () => {
+    get.mockResolvedValue(res(true, 200, { projects: [apiProject] }));
+    await businessFind.handler({ entity: "project", department: "Clinical" }, ctx);
+    const url = get.mock.calls[0][0] as string;
+    expect(url).toContain("/api/pm/projects?");
+    expect(url).toContain("department=Clinical");
+  });
+
+  it("🔴 a department alone is a complete query — no search term needed", async () => {
+    // "What is Front Desk working on?" carries no search term at all. The
+    // route's empty-`q` short-circuit was relaxed for exactly this call, and
+    // the tool must not invent a query to fill the gap.
+    get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
+    await businessFind.handler({ entity: "work_item", department: "Front Desk" }, ctx);
+    const url = get.mock.calls[0][0] as string;
+    expect(url).toContain("q=&");
+    expect(url).toContain("department=Front+Desk");
+  });
+
+  it("🔴 refuses department on an entity that has none, instead of ignoring it", async () => {
+    // No CRM model carries a departmentId. Accepting it on a customer or a
+    // deal would be a filter that silently matched everything, and the model
+    // would report "these are Front Desk's customers" having never asked.
+    // MUTATION: drop "department" from SEARCH_ARGS -> rejectMisusedArgs stops
+    // iterating it and both of these silently succeed unfiltered.
+    for (const entity of ["customer", "deal", "contact"]) {
+      const out = await businessFind.handler({ entity, department: "Front Desk" }, ctx);
+      expect(out.ok, entity).toBe(false);
+      expect((out as { error: { message: string } }).error.message).toContain("department");
+      expect((out as { error: { code: string } }).error.code).toBe("BUSINESS_INVALID_REQUEST");
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("refuses it alongside an id, like every other search filter", async () => {
+    // An id branch reads the record and honours no filter (#2005 finding 6).
+    const out = await businessFind.handler(
+      { entity: "work_item", id: "w1", department: "Front Desk" },
+      ctx,
+    );
+    expect(out.ok).toBe(false);
+    expect((out as { error: { message: string } }).error.message).toContain("department");
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("🔴 an unknown department is a refusal in words, never an empty list", async () => {
+    // The whole point of resolving names server-side. An empty board is
+    // indistinguishable from "that department has no work", and a model that
+    // gets the bare token `department_not_found` back will retry the same word.
+    get.mockResolvedValue(res(false, 404, { error: "department_not_found" }));
+    const out = await businessFind.handler(
+      { entity: "work_item", department: "Frnot Desk" },
+      ctx,
+    );
+    expect(out.ok).toBe(false);
+    const err = (out as { error: { code: string; message: string } }).error;
+    expect(err.code).toBe("BUSINESS_NOT_FOUND");
+    expect(err.message).toContain("No department by that name");
+    // The bare token must not reach the model.
+    expect(err.message).not.toContain("department_not_found");
+  });
+
+  it("carries the department NAME onto a compact work-item row", async () => {
+    // A model that filtered by department and got rows carrying no department
+    // back cannot tell a correct answer from a dropped filter. Name only —
+    // kind, parentId and source are org structure this question does not ask.
+    get.mockResolvedValue(
+      res(true, 200, {
+        work_items: [
+          { ...apiWorkItem, department: { id: "d-1", name: "Front Desk", kind: "TEAM", parentId: null } },
+        ],
+      }),
+    );
+    const out = await businessFind.handler({ entity: "work_item", department: "Front Desk" }, ctx);
+    const row = (expectOk(out).data as { work_items: Array<Record<string, unknown>> })
+      .work_items[0];
+    expect(row.department).toBe("Front Desk");
+    expect(row).not.toHaveProperty("description_html");
+  });
+
+  it("says nothing rather than null when an item has no department", async () => {
+    // An absent key reads as "this says nothing about a department"; a null
+    // reads as an assertion that it has none, which the row cannot make —
+    // the value it carries is already the RESOLVED one, project included.
+    get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
+    const out = await businessFind.handler({ entity: "work_item" }, ctx);
+    const row = (expectOk(out).data as { work_items: Array<Record<string, unknown>> })
+      .work_items[0];
+    expect(row).not.toHaveProperty("department");
+  });
+
   it("omits description_html from a work-item LIST and keeps it on a single read", async () => {
     // Twenty descriptions is the whole context window.
     get.mockResolvedValue(res(true, 200, { work_items: [apiWorkItem] }));
