@@ -16,12 +16,16 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 
 ### `Stage Protection` — ruleset id 20877684, `refs/heads/stage`
 
-> **STALE as of 2026-08-26 (WARP-2187).** `stage` was deleted deliberately and
-> `branch-flow-guard` retired with it, but this ruleset is **still active** and
-> still targets `refs/heads/stage`. It now guards a ref that cannot exist, so it
-> gates nothing. Deleting a ruleset is a repo-admin action rather than a file
-> change, so it is tracked on WARP-2187 rather than done here. The contexts below
-> are recorded as they stand, not as a recommendation.
+> **LIVE and load-bearing.** Verified against the API on 2026-09-07: the ruleset
+> is `active` on `refs/heads/stage`, the ref exists, and the rules are
+> `deletion`, `non_fast_forward`, `pull_request` (1 approving review) and the
+> three required contexts below — with **`bypass_actors: []`**, so `--admin`
+> does not bypass it and no org admin can delete the branch.
+>
+> An earlier revision of this file recorded it as stale on the assumption that
+> WARP-2187 had deleted `stage`. That did not happen. On 2026-09-07 this ruleset
+> held four PRs (#2038, #2047, #2052, #2088) unmergeable until each carried an
+> approving review. See **WARP-2824** for the decision record.
 
 | required context | emitted by | reports on every PR? |
 | --- | --- | --- |
@@ -36,17 +40,22 @@ Verified 2026-08-24 against the live rulesets and against real PR heads
 | `ci-summary` | `ci.yml` | yes |
 | `egress-gate` | `egress-gate.yml` | yes |
 
-Until 2026-08-26 `main` only ever received promotion PRs whose head was
-`stage`, and the title lint exempts those by design (`head.ref in (stage,
-main)`) — so requiring it here would have added a context that always passed
-trivially, and it was deliberately not listed.
+`main` receives promotion PRs whose head is `stage`, and the title lint exempts
+those by design (`head.ref in (stage, main)`) — so requiring it here would add a
+context that always passes trivially, which is why it is deliberately not
+listed.
 
-**That reasoning expired with the branch (WARP-2187).** `main` now receives
-feature PRs directly, and those are exactly the PRs the title lint is meant to
-catch — so `title carries a WARP key` is currently a gate that RUNS on every
-feature PR into `main` and is REQUIRED on none of them. The job qualifies under
-the rule below (unfiltered `pull_request:`, no checkout), so adding it to `Main
-Protection` is safe whenever someone with admin decides to. Open on WARP-2187.
+That reasoning **still holds** under WARP-2824, which reverses WARP-2187's
+retirement of the two-branch flow: feature PRs target `stage` (where
+`title carries a WARP key` **is** required), and `main` is reached only by a
+promotion PR. A revision of this file written during the retirement claimed the
+reasoning had expired because `main` "now receives feature PRs directly" — it
+does not, and a feature PR opened against `main` is the mistake the flow exists
+to prevent.
+
+If `main` is ever opened to feature PRs, this becomes a real gap: the job
+qualifies under the rule below (unfiltered `pull_request:`, no checkout), so
+adding it to `Main Protection` would be safe. Not needed today.
 
 ## The rule for adding a required context
 
