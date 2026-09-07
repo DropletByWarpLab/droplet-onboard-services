@@ -8,7 +8,7 @@ sse-starlette>=3.4.10
 redis>=8.1.0
 grpcio>=1.83.1
 grpcio-tools>=1.83.1
-sentence-transformers>=5.7.0
+sentence-transformers>=6.0.1
 # NOTE (WARP-1948): keep this torch line EXACTLY as-is. Appending a version
 # spec ("torch>=X --index-url …") makes osv-scanner treat the whole remainder
 # as the version string and match every torch advisory ever published. The
