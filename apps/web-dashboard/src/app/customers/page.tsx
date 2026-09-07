@@ -25,12 +25,14 @@ import { canWrite } from "@/components/projects/types";
 import { CrmTabs, type CrmTab } from "@/components/crm/CrmTabs";
 import { CrmSurface } from "@/components/crm/CrmSurface";
 import { CrmDisabled } from "@/components/crm/CrmDisabled";
+import { FilingBanner } from "@/components/crm/FilingSurface";
 import { stagePromptHandoff } from "@/lib/pin-handoff";
 // The CRM renders inside the PM design scope (`pm-scope` / `pm-page` and the
 // pill tablist). The stylesheet is imported here rather than duplicated —
 // splitting it would let the two surfaces drift apart visually, which is the
 // same reason CrmTabs is built on the ViewSwitcher tablist.
 import "../projects/projects.css";
+import "./filing/filing.css";
 
 export default function CustomersPage(): JSX.Element {
   // The flag fails CLOSED (useAppCapabilities DEFAULTS), so an unresolved
@@ -82,6 +84,11 @@ function CustomersWorkspace(): JSX.Element {
     >
       <div className="pm-scope">
         <div className="pm-page">
+          {/* WARP-2730 — renders nothing at all when there is nothing waiting,
+              when filing is off, or when the reader is not an owner or admin
+              (the summary 403s for `family`, which is the ordinary answer and
+              not a fault). A banner that is always there stops being read. */}
+          <FilingBanner />
           <div style={{ marginBottom: 14 }}>
             <CrmTabs tab={tab} onTab={setTab} />
           </div>

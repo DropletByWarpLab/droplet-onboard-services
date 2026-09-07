@@ -49,6 +49,20 @@ COPY tests/retrieval-eval/ragas/goldens.yaml \
 COPY tests/retrieval-eval/ragas/ragas_runner.py \
      /opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py
 
+# WARP-2732 (ADR-048) — the extraction canary: scorer, box-side runner, the
+# 12-fixture corpus and its answer key.
+#
+# 🔴 WITHOUT THESE FOUR COPY LINES THE CANARY IS INVISIBLE TO THE BOX. The
+# appliance runs images, not a repo checkout ("image-first, no repo on
+# appliance"), so a `tests/extraction-eval/` directory that exists only in git
+# is a canary nobody can run — and `auto` mode is gated on running it. A
+# goldens edit that does not rebuild this image measures the OLD corpus while
+# reporting today's date.
+COPY tests/extraction-eval/score.py /opt/rag-eval/tests/extraction-eval/score.py
+COPY tests/extraction-eval/extraction_runner.py /opt/rag-eval/tests/extraction-eval/extraction_runner.py
+COPY tests/extraction-eval/goldens.yaml /opt/rag-eval/tests/extraction-eval/goldens.yaml
+COPY tests/extraction-eval/fixtures /opt/rag-eval/tests/extraction-eval/fixtures
+
 # Service-local Python: scheduler wiring + main + subprocess runner.
 COPY services/rag-eval/*.py /opt/rag-eval/
 
