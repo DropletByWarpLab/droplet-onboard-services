@@ -310,7 +310,13 @@ async function performApply(
         ctx.actorId,
         // Box-written, so it must not read as a human note — see the
         // `filing` parameter on `logActivity`.
-        { proposalId: proposal.id },
+        //
+        // 🔴 WARP-2735 — `externalId` is the EmailMessage id, and it is the
+        // idempotency key. `CrmActivity` is `@@unique([externalSystem,
+        // externalId])` and carries no `connectionId`, so that pair is the
+        // only one available; re-running the same message writes nothing new
+        // rather than a second identical caption on the customer's timeline.
+        { proposalId: proposal.id, externalId: p.emailMessageId },
       );
       return { createdActivityId: activity.id };
     }

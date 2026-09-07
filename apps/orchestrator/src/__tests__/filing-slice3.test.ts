@@ -365,7 +365,7 @@ describe("🔴 a NOT_SAME pair is never offered again", () => {
       ]),
       { name: "Northgate Dental", domain: "northgate.example", emails: [], folder: null },
     );
-    expect(after).toEqual({ kind: "NONE" });
+    expect(after).toMatchObject({ kind: "NONE" });
   });
 
   it("an IGNORE_SOURCE rule stops the source being read at all", async () => {

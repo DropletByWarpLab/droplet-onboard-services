@@ -163,6 +163,15 @@
   border-color: var(--border-strong);
 }
 
+/* The OFF state: an offer, not an alarm. Quieter than the pending banner —
+   no accent wash — because it is the one that can sit on the page for a long
+   time without being acted on, and the pending banner must stay the louder of
+   the two when both states exist on the same box over its life. */
+.filing-banner-offer {
+  background: var(--bg-subtle, var(--bg-canvas));
+  color: var(--text-secondary, var(--text));
+}
+
 .filing-banner-go {
   margin-left: auto;
   color: var(--accent);
@@ -337,3 +346,125 @@
 }
 
 .pm-scope .filing-stop-row .pm-input { flex: 1; min-width: 180px; }
+
+/* ── WARP-2733: what Droplet does by itself ────────────────────────────────
+ *
+ * The settings card carries the consent record, so it is laid out to be READ
+ * rather than skimmed: the choices first, then "What this means" as a list of
+ * short sentences at body size. Deliberately NOT small print — the whole point
+ * of the readback is that it is the thing the owner agreed to, and setting it
+ * two sizes down would say the opposite.
+ */
+.pm-scope .filing-settings {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pm-scope .filing-settings h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pm-scope .filing-modes,
+.pm-scope .filing-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pm-scope .filing-modes label,
+.pm-scope .filing-levels label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pm-scope .filing-modes label.is-active,
+.pm-scope .filing-levels label.is-active {
+  border-color: var(--accent);
+  background: var(--bg-tint);
+}
+
+.pm-scope .filing-modes input,
+.pm-scope .filing-levels input {
+  grid-row: 1;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.pm-scope .filing-mode-label { font-weight: 600; }
+
+.pm-scope .filing-mode-hint {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+
+.pm-scope .filing-readback {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.pm-scope .filing-readback h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.pm-scope .filing-readback ul {
+  margin: 0;
+  padding: 0 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pm-scope .filing-readback li {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+/* The offer. One line, above the tabs, and gone the moment it is answered. */
+.pm-scope .filing-promotion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-tint);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pm-scope .filing-promotion > span:first-child { flex: 1; min-width: 220px; }
+
+/* "Droplet did this one" — on the row, in the Recently filed strip. Quiet,
+   because it is a fact about provenance and not a warning. */
+.pm-scope .filing-auto-chip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  white-space: nowrap;
+}

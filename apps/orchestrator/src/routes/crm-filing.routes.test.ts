@@ -44,6 +44,18 @@ const ncGetFileIdMock = vi.hoisted(() => vi.fn());
 vi.mock("../services/nextcloud.client.js", () => ({ ncGetFileId: ncGetFileIdMock }));
 
 const resolveNcTokenMock = vi.hoisted(() => vi.fn());
+/** The canary route fetches the verdict for itself; this is the peer it asks. */
+const internalFetchMock = vi.fn();
+vi.mock("../lib/internal-tls.js", () => ({
+  internalFetch: (...a: unknown[]) => internalFetchMock(...a),
+  internalBaseUrl: (u: string) => u,
+}));
+
+const recordActivityMock = vi.fn(async (_p: Record<string, unknown>) => null);
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: (p: Record<string, unknown>) => recordActivityMock(p),
+}));
+
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: resolveNcTokenMock,
 }));
@@ -76,6 +88,10 @@ const prisma = {
     deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   crmCompany: { findMany: vi.fn().mockResolvedValue([]) },
+  // The settings PATCH reads the STORED mode and writes in one transaction, so
+  // the callback gets the same stub back — this mock is not modelling isolation,
+  // only the shape.
+  $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
 } as never;
 
 function appAs(user: Principal) {
@@ -87,6 +103,32 @@ function appAs(user: Principal) {
   });
   app.use("/api", createCrmFilingRouter(prisma));
   return app;
+}
+
+/** The argument the handler passed to `autoFilingSetting.upsert`. */
+function upsertArg(): { create: Record<string, unknown>; update: Record<string, unknown> } {
+  const m = (prisma as unknown as {
+    autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
+  }).autoFilingSetting.upsert.mock;
+  return m.calls[0][0] as { create: Record<string, unknown>; update: Record<string, unknown> };
+}
+
+/** How many times the handler wrote the settings row. */
+function upsertCalls(): number {
+  return (prisma as unknown as {
+    autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
+  }).autoFilingSetting.upsert.mock.calls.length;
+}
+
+/** Put a stored row behind the read the handler now does first. */
+function storedMode(mode: string | null): void {
+  (prisma as unknown as {
+    autoFilingSetting: { findUnique: ReturnType<typeof vi.fn> };
+  }).autoFilingSetting.findUnique.mockResolvedValue(
+    mode === null
+      ? null
+      : { id: "singleton", mode, enabledById: "u-owner", enabledAt: new Date("2026-09-01") },
+  );
 }
 
 const OWNER = { id: "u-owner", username: "owner", displayName: "Owner", role: "owner" as Role };
@@ -299,15 +341,11 @@ describe("undo is a human's decision", () => {
 
 describe("turning filing on", () => {
   it("stamps the enabling owner from the SESSION, never the body", async () => {
+    storedMode(null); // no row yet — this IS the off -> on edge
     await request(appAs(OWNER))
       .patch("/api/crm/filing/settings")
       .send({ mode: "propose" });
-    const call = (prisma as unknown as {
-      autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
-    }).autoFilingSetting.upsert.mock.calls[0][0] as {
-      create: { enabledById: string | null };
-      update: { enabledById?: string };
-    };
+    const call = upsertArg();
     expect(call.create.enabledById).toBe("u-owner");
     expect(call.update.enabledById).toBe("u-owner");
   });
@@ -316,12 +354,11 @@ describe("turning filing on", () => {
     // `enabledAt` is the BACKLOG BOUNDARY as well as the consent stamp: the
     // worker will not claim a source older than it. An unrelated settings edit
     // must not move it.
+    storedMode("propose");
     await request(appAs(OWNER))
       .patch("/api/crm/filing/settings")
       .send({ level: "also_create" });
-    const call = (prisma as unknown as {
-      autoFilingSetting: { upsert: { mock: { calls: unknown[][] } } };
-    }).autoFilingSetting.upsert.mock.calls[0][0] as { update: Record<string, unknown> };
+    const call = upsertArg();
     expect(call.update).not.toHaveProperty("enabledAt");
     expect(call.update).toMatchObject({ level: "also_create" });
   });
@@ -331,6 +368,65 @@ describe("turning filing on", () => {
       .patch("/api/crm/filing/settings")
       .send({ mode: "propose", canaryPassedAt: "2026-01-01T00:00:00.000Z" });
     expect(res.status).toBe(400);
+  });
+
+  it("🔴 MUTATION: turning filing OFF clears the actor pair — or the CHECK 500s and filing stays ON", async () => {
+    // `AutoFilingSetting_enabled_has_actor` is a BICONDITIONAL:
+    //
+    //     ("mode" <> 'off') = ("enabledById" IS NOT NULL AND "enabledAt" IS NOT NULL)
+    //
+    // so when filing goes off the actor pair is REQUIRED TO BE ABSENT, not
+    // merely allowed to be. Leaving it populated is `false = true` — a 23514
+    // the route's catch does not recognise, so a 500, and because the statement
+    // rolls back the row still says 'propose'. The off switch did not turn
+    // filing off, and the worker kept reading the owner's files.
+    //
+    // Asserted on the WRITE rather than the response, because a mocked prisma
+    // has no CHECK to violate: the invariant this test defends lives in
+    // Postgres, and the pg-lane companion in filing-schema.pg.test.ts exercises
+    // it for real.
+    storedMode("propose");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "off" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "off", enabledById: null, enabledAt: null });
+  });
+
+  it("🔴 MUTATION: re-stamp enabledAt on propose -> auto — accepting the promotion retires the queue", async () => {
+    // The one click this feature is built around. `enabledAt` is the backlog
+    // BOUNDARY as well as the consent stamp, so moving it to now excludes every
+    // document still waiting from ever being claimed. Those rows never reach a
+    // terminal status, so they show up in no tab and in no count: saying yes to
+    // Droplet would silently discard the queue it had just offered to file.
+    //
+    // The pre-existing no-refresh test could not catch this: it sends a
+    // `level`-only body, where the old `turningOn` was already false because no
+    // mode was named at all. The mode CHANGE is the case that mattered.
+    storedMode("propose");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "auto" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "auto" });
+    expect(call.update).not.toHaveProperty("enabledAt");
+    expect(call.update).not.toHaveProperty("enabledById");
+  });
+
+  it("switching back on from OFF does stamp again — consent is re-taken", async () => {
+    // The complement of the two above: off -> propose is a genuine new grant,
+    // so it takes a fresh actor and a fresh boundary. Without this, a fix for
+    // the two cases above could simply never stamp and both would still pass.
+    storedMode("off");
+    await request(appAs(OWNER))
+      .patch("/api/crm/filing/settings")
+      .send({ mode: "propose" });
+
+    const call = upsertArg();
+    expect(call.update).toMatchObject({ mode: "propose", enabledById: "u-owner" });
+    expect(call.update.enabledAt).toBeInstanceOf(Date);
   });
 
   it("the canary CHECK surfaces as 422, not 500", async () => {
@@ -347,5 +443,160 @@ describe("turning filing on", () => {
       .send({ mode: "auto" });
     expect(res.status).toBe(422);
     expect(res.body).toEqual({ error: "auto_needs_canary" });
+  });
+});
+
+/**
+ * 🔴 WARP-2733 — arming the gate, which until now nothing could do.
+ *
+ * `AutoFilingSetting` refuses `mode = 'auto'` unless `canaryPassedAt` and
+ * `canaryModel` are both set, and no code in the tree wrote either: `auto` mode
+ * was unreachable on every box except by hand-written SQL. These tests are
+ * about the two properties that make the write-back trustworthy — the verdict
+ * is FETCHED rather than supplied, and the model comes from the REPORT.
+ */
+describe("arming the auto-mode canary", () => {
+  const RUN = "20260906-120000";
+
+  function upstream(body: unknown, ok = true) {
+    internalFetchMock.mockResolvedValueOnce({
+      ok,
+      status: ok ? 200 : 503,
+      json: async () => body,
+    });
+  }
+
+  const PASSED = {
+    kind: "extraction",
+    status: "succeeded",
+    finishedAt: "2026-09-06T12:05:00.000Z",
+    extraction: { passed: true, model: "gpt-oss:20b", failures: [], nFixtures: 12 },
+  };
+
+  beforeEach(() => {
+    process.env.RAG_EVAL_URL = "http://rag-eval:8000";
+  });
+
+  it("arms from a pass, stamping the run's OWN time and the report's model", async () => {
+    upstream(PASSED);
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ armed: true, model: "gpt-oss:20b" });
+
+    const call = upsertArg();
+    expect(call.update).toEqual({
+      canaryPassedAt: new Date("2026-09-06T12:05:00.000Z"),
+      canaryModel: "gpt-oss:20b",
+    });
+    // 🔴 Stamped at the time the RUN finished, not at the click. The column
+    // answers "when was this box measured"; arming later must not make an old
+    // measurement look fresh.
+    expect(call.update.canaryPassedAt).toEqual(new Date(PASSED.finishedAt));
+  });
+
+  it("🔴 arming is not switching filing on — the row stays off, with no actor", async () => {
+    upstream(PASSED);
+    await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    const call = upsertArg();
+    // The consent CHECK is a biconditional: a row that is not 'off' MUST carry
+    // an actor. Recording a measurement is not consent to unattended writes,
+    // and creating the row as 'propose' here would both violate the CHECK and
+    // switch filing on behind the owner.
+    expect(call.create).toMatchObject({ mode: "off" });
+    expect(call.create).not.toHaveProperty("enabledById");
+    expect(call.create).not.toHaveProperty("enabledAt");
+  });
+
+  it("🔴 MUTATION: arm on `status: succeeded` — a measured FAIL would arm the gate", async () => {
+    // The trap this route exists to avoid. `_extraction_blocking` finishes a
+    // measured FAIL as SUCCEEDED on purpose: run status answers "did the
+    // harness complete", and a harness that ran correctly and found the model
+    // wanting has not failed. Reading it as "the box passed" would arm auto
+    // mode on the exact measurement that says not to.
+    upstream({ ...PASSED, extraction: { ...PASSED.extraction, passed: false } });
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "canary_failed" });
+    expect(upsertCalls()).toBe(0);
+  });
+
+  it("🔴 a missing verdict is UNKNOWN, never a default", async () => {
+    // An older run, or a report that could not be read. Absence must not fall
+    // through to "fine".
+    upstream({ kind: "extraction", status: "succeeded", finishedAt: PASSED.finishedAt });
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "canary_no_verdict" });
+    expect(upsertCalls()).toBe(0);
+  });
+
+  it("refuses a run that is not the extraction canary", async () => {
+    upstream({ kind: "run", status: "succeeded", extraction: PASSED.extraction });
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "canary_wrong_suite" });
+  });
+
+  it("refuses a run still in flight", async () => {
+    upstream({ kind: "extraction", status: "running" });
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "canary_not_finished" });
+  });
+
+  it("refuses a pass whose model is unknown", async () => {
+    upstream({ ...PASSED, extraction: { ...PASSED.extraction, model: "  " } });
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "canary_no_model" });
+    expect(upsertCalls()).toBe(0);
+  });
+
+  it("🔴 MUTATION: let the body assert the verdict", async () => {
+    // The body names a RUN and nothing else. A route that accepted
+    // `{ passed: true }` would be a database constraint an HTTP client can
+    // satisfy by asking nicely — which is what the CHECK exists to prevent.
+    const res = await request(appAs(OWNER))
+      .post("/api/crm/filing/canary")
+      .send({ runId: RUN, passed: true, model: "something-else" });
+    expect(res.status).toBe(400);
+    expect(internalFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("says the service is unavailable rather than reporting a failure", async () => {
+    // A box without the `eval` profile has not failed its canary; it has not
+    // run one. Telling an owner their model failed would be a lie that makes
+    // them change the model.
+    delete process.env.RAG_EVAL_URL;
+    const res = await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: "rag_eval_unavailable" });
+  });
+
+  it("MUTATION: let the service principal arm the gate", async () => {
+    upstream(PASSED);
+    const res = await request(appAs(MCP)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(403);
+    expect(upsertCalls()).toBe(0);
+  });
+
+  it("family cannot arm it either", async () => {
+    const res = await request(appAs(FAMILY)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(res.status).toBe(403);
+  });
+
+  it("the arming is recorded, with the person and the model on the row", async () => {
+    upstream(PASSED);
+    await request(appAs(OWNER)).post("/api/crm/filing/canary").send({ runId: RUN });
+    expect(recordActivityMock).toHaveBeenCalledOnce();
+    const params = recordActivityMock.mock.calls[0]![0] as unknown as {
+      what: string;
+      actor: unknown;
+      refs: Record<string, unknown>;
+    };
+    expect(params.what).toBe("Auto-filing canary armed");
+    expect(params.actor).toBeTruthy();
+    expect(params.refs).toMatchObject({ runId: RUN, model: "gpt-oss:20b" });
   });
 });
