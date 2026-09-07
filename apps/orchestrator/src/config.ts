@@ -824,6 +824,19 @@ const envSchema = z.object({
   // rejects it at startup rather than silently treating it as disable.
   DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2751 — how long `MoneySnapshot` keeps DAILY rows before the tail is
+  // downsampled to one row per month. NOT a delete-older-than: beyond this
+  // window the month's closing value survives, so "how has our overdue balance
+  // moved over two years" still answers while the row count stops growing
+  // daily forever.
+  //
+  // 90 days matches the drift window above and is the shortest horizon that
+  // leaves a quarter-over-quarter ageing question answerable at daily grain.
+  // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
+  // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
+  // negative window is nonsensical input, so the schema rejects it at startup.
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
