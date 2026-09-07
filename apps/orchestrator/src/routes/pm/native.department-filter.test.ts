@@ -130,6 +130,45 @@ describe("GET /api/pm/projects?department=", () => {
     expect(fake.captured.projectWhere).toBeUndefined();
   });
 
+  it("🔴 the refusal discloses EXISTENCE and nothing else (WARP-2719 review, finding 4)", async () => {
+    // A 404 that depends on whether a name exists IS an existence oracle, and
+    // it stays: `/api/pm/*` reads are household-shared, an unfiltered
+    // `GET /pm/projects` already publishes every owning department's id and
+    // name, and resolving only within the caller's memberships would kill the
+    // feature for the assistant, whose principal holds none. The full argument
+    // is in `pm-department.ts`, above `resolveDepartmentFilter`.
+    //
+    // What must NOT drift is the size of the disclosure. The body carries the
+    // bare code — no id, no kind, no parent, and no echo of what the caller
+    // guessed. An error message "improved" to `department "Front Desk" not
+    // found` would confirm a guess in words instead of in a status code, and
+    // an echo of the needle is a reflection sink besides. This is the
+    // assertion that goes red for both.
+    const res = await request(makeApp(fake.prisma)).get(
+      "/api/pm/projects?department=Frnot%20Desk",
+    );
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "department_not_found" });
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain("Frnot");
+    expect(body).not.toContain(DEPT.id);
+    expect(body).not.toContain(DEPT.name);
+    expect(body).not.toContain(TEAM.id);
+  });
+
+  it("a department that exists but owns nothing is an empty list, not a 404", async () => {
+    // The other half of the same decision, and the reason the oracle cannot be
+    // closed by collapsing the two answers: "there is no such department" and
+    // "that department has no work" are different answers, and the second one
+    // has to be reachable or the filter is back to the silent empty board.
+    const res = await request(makeApp(fake.prisma)).get(
+      "/api/pm/projects?department=Front%20Desk",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.projects).toEqual([]);
+    expect(fake.captured.projectWhere?.departmentId).toEqual({ in: [DEPT.id, TEAM.id] });
+  });
+
   it("`none` and absent are different answers", async () => {
     await request(makeApp(fake.prisma)).get("/api/pm/projects?department=none");
     expect(fake.captured.projectWhere?.departmentId).toBeNull();

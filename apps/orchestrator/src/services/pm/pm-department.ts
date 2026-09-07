@@ -275,6 +275,43 @@ export const DEPARTMENT_FILTER_NONE = "none";
  * only a department literally named "None", which is reserved here in the same
  * way `?parent=none` reserves it.
  *
+ * ── what the 404 discloses, and why it stays (WARP-2719 review, finding 4) ──
+ *
+ * A refusal that depends on whether a NAME exists is an existence oracle: any
+ * authenticated caller can put a guess on `?department=` and read the answer
+ * off the status code. Recorded here as a considered trade rather than left
+ * for the next reader to find, because the reasons it is small and the reason
+ * it cannot be closed are both non-obvious.
+ *
+ *  1. IT WIDENS NO ROWS. `/api/pm/*` reads are household-shared by design
+ *     (routes/pm/native.ts header, ADR-026): every authenticated role already
+ *     sees every project and work item whatever department owns them. There is
+ *     no membership scoping on this surface for the refusal to be inconsistent
+ *     with, and therefore no "not a member" shape to make "unknown" match.
+ *  2. THE NAMES ARE ALREADY PUBLISHED ON THE SAME ROUTE. `PROJECT_INCLUDE` has
+ *     carried `department: { select: DEPARTMENT_SELECT }` since WARP-2717, so
+ *     an unfiltered `GET /api/pm/projects` hands every caller the id AND name
+ *     of every department that owns a project. This resolver adds existence
+ *     for the departments that own NOTHING — and `GET /api/departments/:id`
+ *     already answers 404-vs-403 by id, so an existence oracle for departments
+ *     is pre-existing on the shipping surface and deliberate there.
+ *  3. THE OBVIOUS FIX MOVES THE ORACLE, IT DOES NOT CLOSE IT. Resolving only
+ *     within the caller's memberships is the standard remedy and cannot be
+ *     used: the assistant's principal (`_service:mcp`) holds none, so every
+ *     name would 404 and the feature would be dead for the caller it was built
+ *     for. Exempting the service principal puts the oracle behind chat, which
+ *     any authenticated user can drive — one extra hop, same disclosure, plus
+ *     a role axis on a household-shared read route this ticket never intended
+ *     to add.
+ *  4. THE DISTINCTION IS THE FEATURE. "No such department" and "that
+ *     department has no work" are different answers, and collapsing them is
+ *     the silent-empty-board defect this function exists to prevent.
+ *
+ * What IS pinned is the boundary: the refusal must disclose EXISTENCE and
+ * nothing else — no id, no kind, no parent, no echo of the caller's needle.
+ * `native.department-filter.test.ts` asserts the 404 body carries the bare
+ * code, so an error message "improved" to name the department goes red.
+ *
  * Returns `null` for the "unowned" sentinel and `undefined` for "no filter",
  * so a caller can pass the result straight through without re-deriving which
  * of the three cases it is in.
