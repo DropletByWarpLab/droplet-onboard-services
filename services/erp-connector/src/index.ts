@@ -662,6 +662,10 @@ export {
   InvalidPipedriveCredentialError,
   PipedriveReauthorizationRequiredError,
   PipedriveCapabilityMissingError,
+  // WARP-2841 — was the ONLY capability error this package kept to itself, so
+  // the orchestrator could not `instanceof` it and every Pipedrive connection's
+  // `product` cursor parked FAILED forever on day one.
+  PipedriveColumnNotAvailableError,
   assertSafePipedriveBaseUrl,
   PIPEDRIVE_PROVIDER,
   PIPEDRIVE_API_HOST_SUFFIX,

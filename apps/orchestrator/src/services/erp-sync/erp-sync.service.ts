@@ -56,6 +56,15 @@ import {
   ConnectorBlockedError,
   HubSpotCapabilityUnavailableError,
   MailchimpCapabilityMissingError,
+  // WARP-2841 — the rest of the capability family. Imported as VALUES, not
+  // types: `isCapabilityBlocked` is an `instanceof` check, so a renamed class
+  // breaks the build rather than silently stopping to match.
+  BrevoCapabilityMissingError,
+  DatasetNotServedError,
+  KlaviyoCapabilityMissingError,
+  PipedriveCapabilityMissingError,
+  PipedriveColumnNotAvailableError,
+  ShopifyScopeMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
   // WARP-2383 — the Xero track's three named states.
@@ -270,11 +279,54 @@ function defaultBudgetFor(conn: SyncConnectionRow): SyncCallBudget {
  * same maintenance contract the three named branches already carry, and the
  * cost of forgetting is stated in `asSyncFailure`.
  */
+export const CAPABILITY_BLOCKED_ERRORS = [
+  HubSpotCapabilityUnavailableError,
+  MailchimpCapabilityMissingError,
+  // ── WARP-2841 — the seven this list had been missing ───────────────────────
+  //
+  // The contract above ("a third connector growing a capability error must be
+  // added HERE") was kept for zero of the seven connectors that grew one. The
+  // consequence is the one `asSyncFailure` spells out below: FATAL, cursor
+  // parked FAILED with `nextAttemptAt: null`, unclaimable, never revived, and
+  // `foldSyncState` ranking it highest so the WHOLE connection reads failed —
+  // including after the owner buys the plan that would have fixed it.
+  //
+  // 🔴 `PipedriveColumnNotAvailableError` was live on EVERY Pipedrive customer
+  // from day one, not on a plan edge: the descriptor declares `product`, so a
+  // cursor is registered, and `get_low_stock_products` is refused
+  // unconditionally before any I/O because Pipedrive has no source column for
+  // `inventory_quantity`. contact/company/deal landed perfectly while the
+  // connection reported itself broken.
+  //
+  // `DatasetNotServedError` is the generic form of the same fact and belongs
+  // here for the same reason: "this connection does not serve that" is a
+  // capability statement, not a fault.
+  BrevoCapabilityMissingError,
+  KlaviyoCapabilityMissingError,
+  PipedriveCapabilityMissingError,
+  PipedriveColumnNotAvailableError,
+  ShopifyScopeMissingError,
+  DatasetNotServedError,
+] as const;
+
+/**
+ * 🔴 `XeroScopeMissingError` is deliberately NOT here, and the omission is a
+ * decision rather than the same oversight repeated.
+ *
+ * It already has its own branch in `asSyncFailure` returning 403 → AUTH, with
+ * a written rationale ("the credential is fine and the connection is intact —
+ * a scope the owner has to tick is a re-consent"). That branch runs BEFORE the
+ * capability check, so listing it here would not change the classification at
+ * all. What it WOULD change is `retryAfterOf`, the predicate's other consumer,
+ * which answers `MAX_BACKOFF_MS` for anything capability-blocked — silently
+ * lengthening the retry interval on a state Xero's own branch is tuned for.
+ *
+ * Widening a list to include something already handled correctly is how a
+ * cleanup becomes a regression.
+ */
+
 function isCapabilityBlocked(err: unknown): boolean {
-  return (
-    err instanceof HubSpotCapabilityUnavailableError ||
-    err instanceof MailchimpCapabilityMissingError
-  );
+  return CAPABILITY_BLOCKED_ERRORS.some((cls) => err instanceof cls);
 }
 
 /** Pull a `Retry-After` off whatever shape the vendor error arrived in. */

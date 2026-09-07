@@ -24,7 +24,11 @@ import {
 
 import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
 import { CLAIMABLE_ERP_SYNC_STATES } from "./cursor.service.js";
-import { createErpSyncRunner, type SyncConnectionRow } from "./erp-sync.service.js";
+import {
+  createErpSyncRunner,
+  CAPABILITY_BLOCKED_ERRORS,
+  type SyncConnectionRow,
+} from "./erp-sync.service.js";
 
 const NOW = new Date("2026-08-27T12:00:00Z");
 const LATER = new Date("2026-08-27T13:00:00Z");
@@ -1282,5 +1286,57 @@ describe("WARP-2623 — a refused dataset must not park the connection at FAILED
     expect(h.prisma.__cursor("cur-1")!.state).toBe("IDLE");
     expect(h.prisma.__cursor("cur-1")!.consecutiveFailures).toBe(0);
     expect(h.prisma.__cursor("cur-1")!.lastError).toBeNull();
+  });
+});
+
+/**
+ * WARP-2841 — the list that had been forgotten seven times.
+ *
+ * `isCapabilityBlocked` is a hand-maintained `instanceof` list, and its own
+ * docstring states the contract: "A third connector growing a capability error
+ * must be added HERE." Seven connectors grew one and none was added. The cost
+ * is spelled out in `asSyncFailure` directly beneath it: FATAL parks the cursor
+ * FAILED with `nextAttemptAt: null`, FAILED is unclaimable, `upsertErpCursor`'s
+ * `update: {}` never revives it, and `foldSyncState` ranks it highest — so one
+ * refused dataset renders the WHOLE connection failed forever, including after
+ * the owner buys the plan that would have fixed it.
+ *
+ * Extending the list by seven only resets the clock. This derives the
+ * expectation from the CONNECTOR PACKAGE'S OWN EXPORTS, so the tenth one fails
+ * the build instead of a customer's connection.
+ */
+describe("WARP-2841 — every capability error the connectors export is classified", () => {
+  /**
+   * Errors that are capability facts — "this connection does not serve that" —
+   * as opposed to faults. Matched on the exported NAME so the set is derived
+   * from `@droplet/erp-connector` rather than retyped here; a second hand-list
+   * would be the same defect wearing a test's clothes.
+   */
+  const CAPABILITY_NAME = /(CapabilityMissing|CapabilityUnavailable|ColumnNotAvailable|ScopeMissing|DatasetNotServed)Error$/;
+
+  it("🔴 leaves no exported capability error unclassified", async () => {
+    const pkg = (await import("@droplet/erp-connector")) as Record<string, unknown>;
+    const exported = Object.keys(pkg)
+      .filter((k) => CAPABILITY_NAME.test(k))
+      .sort();
+
+    // The regex must actually be finding things — an expression that matches
+    // nothing would make this whole file a no-op that passes forever.
+    expect(exported.length).toBeGreaterThanOrEqual(8);
+
+    const unclassified = exported.filter((name) => {
+      const Cls = pkg[name] as new (...a: never[]) => Error;
+      // Construct without arguments: these are all Error subclasses, and the
+      // check under test is `instanceof`, which does not read any field.
+      const instance = Object.create(Cls.prototype) as Error;
+      return !CAPABILITY_BLOCKED_ERRORS.some((c) => instance instanceof c);
+    });
+
+    expect(
+      unclassified,
+      "these are capability facts that would classify FATAL and park a cursor " +
+        "FAILED forever — add them to CAPABILITY_BLOCKED_ERRORS, or give them " +
+        "their own branch in asSyncFailure the way XeroScopeMissingError has",
+    ).toEqual(["XeroScopeMissingError"]);
   });
 });
