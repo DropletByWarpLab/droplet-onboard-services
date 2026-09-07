@@ -90,6 +90,8 @@ describe("selectAdvertisedTools (spec §3)", () => {
         r.matchedDomains,
         `"${sentence}" advertised only [${r.advertised.join(", ")}]`,
       ).toContain("pm");
+      // (see the WARP-2719 block below for the department half of this
+      // vocabulary, which no sentence here reaches)
       // ADR-045 slice D — the tracker WRITE is `business_create`, and the
       // pm rule reaches it because it claims the `business` domain too.
       // Asserting the DOMAIN alone would pass on an empty advertisement,
@@ -694,6 +696,164 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "turn the living room lights off",
     ])("%s does NOT advertise the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).not.toContain("cloud_query_dataset");
+    });
+  });
+
+  // ── WARP-2719 — `working on`, and what it must not swallow ──────────────
+  //
+  // The rule exists because "what is Front Desk working on?" matched NOTHING:
+  // `working` is not `work items?`, and a department's name is a proper noun
+  // no pattern can enumerate. Without it the department filter is reachable
+  // only by a model that had already used the domain for some other reason.
+  //
+  // It is the most ordinary English in this file, so its false positives are
+  // written down rather than discovered. The three positives below are all
+  // sentences where advertising the project tools is the RIGHT answer even
+  // though the asker never said "project". The negatives are the household
+  // sense of the same word.
+  describe("`working on` reaches the tracker (WARP-2719)", () => {
+    // Its own pool: the enclosing `advertisedFor` defaults to CLOUD_POOL, and
+    // a tool absent from the pool can never be advertised however well the
+    // rule matches — a default-pool assertion here would fail for a reason
+    // that has nothing to do with the rule under test.
+    const GRAPH_POOL = ["business_find", "business_create", "search_content"];
+    const graph = (message: string) => advertisedFor(message, GRAPH_POOL);
+
+    it.each([
+      "what is Front Desk working on?",
+      "what am I working on this week",
+      "who is working on the kitchen",
+      "what is assigned to Sam",
+      "how is the team's workload looking",
+    ])("%s advertises the business graph", (message) => {
+      expect(graph(message)).toContain("business_find");
+    });
+
+    it.each([
+      // The household sense: something is broken. No `on` follows, and the
+      // rule requires it.
+      "the dishwasher is not working",
+      "the wifi stopped working last night",
+      "is the printer working yet",
+      // `work` bare is not enough either — the rule takes `working`/`worked`.
+      "what time do you finish work",
+    ])("%s does NOT", (message) => {
+      expect(graph(message)).not.toContain("business_find");
+    });
+
+    it("MUTATION: take `work` bare and the household sentences all claim the tracker", () => {
+      // Written down because it is the obvious widening: `work` instead of
+      // `work(ing|ed) on` looks like it catches more of the same question and
+      // actually catches every appliance complaint on the box.
+      expect(graph("the dishwasher is not working")).not.toContain("business_find");
+      expect(graph("my back has been playing up at work")).not.toContain("business_find");
+    });
+  });
+
+  // ── WARP-2719 — the DEPARTMENT vocabulary, and the `team` it must not take ──
+  //
+  // The first cut of this ticket put `departments?|teams?` straight into the
+  // pm noun list. `departments?` is fine there; a bare `teams?` was not. It
+  // matched this repo's own team_chat continuity fixture — "and post that
+  // where the team will see it" — and opened `pm` and `business` on a turn
+  // that must reach Slack and nothing else, plus every household sentence
+  // with the word in it. Nothing went red, because that fixture only ever
+  // asserted `slack_send_message` was PRESENT, and an over-matching rule
+  // ADDS domains: no present-tool assertion anywhere in this repo can see
+  // one. Both halves are therefore pinned here, explicitly.
+  describe("department / team vocabulary is bounded (WARP-2719)", () => {
+    const GRAPH_POOL = ["business_find", "business_create", "search_content"];
+    const domainsFor = (message: string) =>
+      selectAdvertisedTools({
+        mode: "domains",
+        userMessage: message,
+        pool: GRAPH_POOL,
+        conversationToolNames: [],
+      }).matchedDomains;
+
+    // ── positives: each of these is carried by THIS rule and nothing else ──
+    //
+    // MUTATION for this group: delete the `departments? … teams?` rule
+    // from tool-selection.service.ts and every one goes red. Verified by
+    // deleting it — none of them survives on another rule, which is what
+    // makes them a pin rather than a restatement of the ruleset.
+    it.each([
+      // `departments?`, bare — the word the tool's own schema uses.
+      "which department does Sam sit in",
+      "move the new hire into the billing department",
+      // `on|in the <name> team` — membership in a NAMED team. One name word
+      // and two both have to work; "front desk" is the ticket's own example.
+      "who is on the clinical team",
+      "who is on the front desk team",
+      // `which|whose team` — the question is about the team itself.
+      "which team should this go to",
+      // `team('s) <work noun>` — the team as an owner of work.
+      "how does the clinical team's roster look",
+      "show me the team's capacity",
+    ])("%s reaches the business graph", (message) => {
+      expect(
+        domainsFor(message),
+        `"${message}" matched only [${domainsFor(message).join(", ")}]`,
+      ).toContain("business");
+    });
+
+    // ── the negative that the first cut of this rule failed ────────────────
+    it("the team_chat continuity fixture stays a Slack-only turn", () => {
+      // THE regression. `advertisedFor(..., [prior call])` elsewhere in this
+      // file proves the continuity path still delivers Slack; what was never
+      // asserted is that the fixture's own WORDS reach no domain rule — and
+      // `tool-selection.regression.test.ts` depends on exactly that to keep
+      // the keyword path and the continuity path separable. A bare `teams?`
+      // in the pm rule breaks it, and this is the assertion that says so.
+      expect(
+        domainsFor("and post that where the team will see it"),
+        "the continuity fixture's own wording must match NO domain rule",
+      ).toEqual([]);
+    });
+
+    it.each([
+      // The household senses of the same noun. Two whole domains of tool
+      // schema on any of these is pure waste on the turn that pays for it.
+      "the team is coming over for dinner",
+      "my football team lost again",
+      "the away team scored in the last minute",
+      // `in the team meeting` has no team NAME between determiner and noun,
+      // so the membership frame does not fire. (It reaches `calendar`, which
+      // is the right domain for it — `business` is what must stay out.)
+      "we are in the team meeting until four",
+      // The one household use of `department`, and the reason that half of
+      // the rule carries a lookahead rather than standing bare.
+      "I need to go to the department store",
+    ])("%s does NOT", (message) => {
+      expect(domainsFor(message)).not.toContain("business");
+      expect(domainsFor(message)).not.toContain("pm");
+    });
+
+    it("MUTATION: put `teams?` back in the pm noun list and four of these flip", () => {
+      // Written down because it is exactly the widening that shipped, and
+      // the one a later reader will be tempted to redo: `teams?` alongside
+      // `projects?|tickets?|…` reads harmless and takes the Slack fixture,
+      // the dinner, the football and the meeting with it.
+      for (const message of [
+        "and post that where the team will see it",
+        "the team is coming over for dinner",
+        "my football team lost again",
+        "we are in the team meeting until four",
+      ]) {
+        expect(domainsFor(message), message).not.toContain("business");
+      }
+    });
+
+    it("the ticket's own two sentences do not depend on this rule at all", () => {
+      // The narrowing costs the ticket nothing, stated as a test rather than
+      // as prose: both acceptance sentences are carried by the
+      // `work(ing|ed) on` / `assigned to` rule, so someone tightening the
+      // department rule further can see immediately what is and is not
+      // resting on it.
+      expect(domainsFor("what is Front Desk working on?")).toContain("business");
+      expect(domainsFor("what is assigned to the Clinical team right now?")).toContain(
+        "business",
+      );
     });
   });
 

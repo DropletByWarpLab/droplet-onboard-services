@@ -20,6 +20,7 @@ import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
 import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
+import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
 
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
@@ -222,9 +223,23 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
         perPage,
+        // WARP-2719 — `?department=` takes an id, a slug or a NAME, and
+        // `none` for "owned by nobody". Resolved here rather than left to the
+        // caller because the assistant cannot look a name up: the department
+        // listing scopes itself to the caller's own memberships, and the
+        // service principal holds none.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          req.query.department === undefined ? undefined : String(req.query.department),
+        ),
       });
       res.json({ projects });
     } catch (err) {
+      // WARP-2719 — was a bare `next(err)`. An unknown department throws
+      // `department_not_found` here, and without this it reaches the model as
+      // a 500 (`BUSINESS_API_ERROR`) instead of the 404 that says which half
+      // of the request was wrong.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });
@@ -405,16 +420,19 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
               : undefined)
           : undefined,
         parentId: parentRaw === undefined ? undefined : parentRaw === "none" ? null : String(parentRaw),
-        // ADR-045 §5.3 — `?department=<id>` matches that department AND its
-        // teams; `?department=none` matches work no department owns. The
-        // `none` sentinel mirrors `?parent=none` directly above so the API has
-        // ONE way to say "explicitly nothing".
-        departmentId:
-          q.department === undefined
-            ? undefined
-            : q.department === "none"
-              ? null
-              : String(q.department),
+        // WARP-2717 — `?department=` matches that department AND its teams;
+        // `?department=none` matches work no department owns. The `none`
+        // sentinel mirrors `?parent=none` directly above so the API has ONE
+        // way to say "explicitly nothing".
+        //
+        // WARP-2719 widened it from an id to an id-or-slug-or-name and moved
+        // the three-way decoding into `resolveDepartmentFilter`, so all three
+        // readers answer the same word the same way — and an unknown one is a
+        // 404 rather than an empty board.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          q.department === undefined ? undefined : String(q.department),
+        ),
         q: q.q ? String(q.q) : undefined,
         perPage: pageParsed.data.per_page,
         page: pageParsed.data.page,
@@ -462,9 +480,20 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         q: req.query.q ? String(req.query.q) : "",
         perPage: req.query.per_page ? Number(req.query.per_page) : undefined,
+        // WARP-2719 — this reader is the one that answers "what is Front Desk
+        // working on?", a question carrying no search term, so an empty `q`
+        // alongside a department is now a real query rather than an empty list.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          req.query.department === undefined
+            ? undefined
+            : String(req.query.department),
+        ),
       });
       res.json({ work_items });
     } catch (err) {
+      // WARP-2719 — see GET /pm/projects. Was a bare `next(err)`.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });

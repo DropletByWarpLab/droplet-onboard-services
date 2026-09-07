@@ -229,6 +229,126 @@ export async function expandDepartmentScope(
 }
 
 /**
+ * The sentinel a caller passes to mean "owned by nobody", rather than
+ * "no filter". Spelled out because the three-way encoding — absent / a target /
+ * unowned — is the whole reason a plain `string | undefined` is not enough.
+ *
+ * Stored lower-case and compared lower-case — see
+ * {@link resolveDepartmentFilter}. It is a RESERVED WORD in this parameter,
+ * not a lookup, so `None` and `NONE` mean it too.
+ */
+export const DEPARTMENT_FILTER_NONE = "none";
+
+/**
+ * Turn whatever a caller typed into a department id, or refuse.
+ *
+ * WARP-2719. `expandDepartmentScope` matches on `id` ONLY, and deliberately
+ * returns `[departmentId]` for an unknown one so the filter matches nothing
+ * rather than degrading into "no filter". That is right for an id and wrong for
+ * a NAME: a person — or a model — asking about "Front Desk" and getting an
+ * empty board back has been told, silently, that the department has no work.
+ * The distinction between "nothing matched your filter" and "there is no such
+ * department" is the entire value of the answer, so a name that resolves to
+ * nothing throws `department_not_found` here, BEFORE the scope expansion.
+ *
+ * 🔴 THE RESOLUTION LIVES SERVER-SIDE, AND IT HAS TO. `GET /api/departments`
+ * scopes its listing to the caller's own memberships for anyone below
+ * owner/admin, and the assistant's principal (`_service:mcp`) holds none — it
+ * receives `{departments: []}`. So an LLM tool cannot look a name up first and
+ * pass an id; if the name is not resolved here, the feature does not exist for
+ * the caller it was built for.
+ *
+ * Order is sentinel, then id, then slug, then name, and every one of those
+ * comparisons is case-insensitive because nobody types "Front desk" the way it
+ * was created. `Department.name` and `.slug` are both `@unique` but
+ * case-SENSITIVELY, so two rows differing only in case can in principle both
+ * match — first row wins, which is the same answer a person would give and
+ * better than refusing.
+ *
+ * WARP-2719 review, finding 3 — the sentinel comparison used to be the ONE
+ * case-sensitive test in the function. `"none"` resolved to "owned by nobody";
+ * `"None"` fell through to the lookups, matched no row, and threw
+ * `department_not_found` → 404. The schema advertises the word (`… or "none"
+ * for unassigned`), a model that capitalises the start of a value is doing the
+ * ordinary thing, and the failure it got back said the department did not
+ * exist — which is not what went wrong. Making it match its neighbours costs
+ * only a department literally named "None", which is reserved here in the same
+ * way `?parent=none` reserves it.
+ *
+ * ── what the 404 discloses, and why it stays (WARP-2719 review, finding 4) ──
+ *
+ * A refusal that depends on whether a NAME exists is an existence oracle: any
+ * authenticated caller can put a guess on `?department=` and read the answer
+ * off the status code. Recorded here as a considered trade rather than left
+ * for the next reader to find, because the reasons it is small and the reason
+ * it cannot be closed are both non-obvious.
+ *
+ *  1. IT WIDENS NO ROWS. `/api/pm/*` reads are household-shared by design
+ *     (routes/pm/native.ts header, ADR-026): every authenticated role already
+ *     sees every project and work item whatever department owns them. There is
+ *     no membership scoping on this surface for the refusal to be inconsistent
+ *     with, and therefore no "not a member" shape to make "unknown" match.
+ *  2. THE NAMES ARE ALREADY PUBLISHED ON THE SAME ROUTE. `PROJECT_INCLUDE` has
+ *     carried `department: { select: DEPARTMENT_SELECT }` since WARP-2717, so
+ *     an unfiltered `GET /api/pm/projects` hands every caller the id AND name
+ *     of every department that owns a project. This resolver adds existence
+ *     for the departments that own NOTHING — and `GET /api/departments/:id`
+ *     already answers 404-vs-403 by id, so an existence oracle for departments
+ *     is pre-existing on the shipping surface and deliberate there.
+ *  3. THE OBVIOUS FIX MOVES THE ORACLE, IT DOES NOT CLOSE IT. Resolving only
+ *     within the caller's memberships is the standard remedy and cannot be
+ *     used: the assistant's principal (`_service:mcp`) holds none, so every
+ *     name would 404 and the feature would be dead for the caller it was built
+ *     for. Exempting the service principal puts the oracle behind chat, which
+ *     any authenticated user can drive — one extra hop, same disclosure, plus
+ *     a role axis on a household-shared read route this ticket never intended
+ *     to add.
+ *  4. THE DISTINCTION IS THE FEATURE. "No such department" and "that
+ *     department has no work" are different answers, and collapsing them is
+ *     the silent-empty-board defect this function exists to prevent.
+ *
+ * What IS pinned is the boundary: the refusal must disclose EXISTENCE and
+ * nothing else — no id, no kind, no parent, no echo of the caller's needle.
+ * `native.department-filter.test.ts` asserts the 404 body carries the bare
+ * code, so an error message "improved" to name the department goes red.
+ *
+ * Returns `null` for the "unowned" sentinel and `undefined` for "no filter",
+ * so a caller can pass the result straight through without re-deriving which
+ * of the three cases it is in.
+ */
+export async function resolveDepartmentFilter(
+  db: Db,
+  raw: string | null | undefined,
+): Promise<string | null | undefined> {
+  if (raw === undefined || raw === null || raw.trim().length === 0) return undefined;
+  const needle = raw.trim();
+  // Case-insensitive, like every other comparison below it. See the header.
+  if (needle.toLowerCase() === DEPARTMENT_FILTER_NONE) return null;
+
+  const byId = await db.department.findUnique({
+    where: { id: needle },
+    select: { id: true },
+  });
+  if (byId) return byId.id;
+
+  // `mode: "insensitive"` on both, in ONE query, so a box with a "Front Desk"
+  // slug and a "front desk" name cannot answer differently depending on which
+  // lookup ran first.
+  const byWord = await db.department.findFirst({
+    where: {
+      OR: [
+        { slug: { equals: needle, mode: "insensitive" } },
+        { name: { equals: needle, mode: "insensitive" } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (byWord) return byWord.id;
+
+  throw new Error(PM_DEPARTMENT_ERRORS.DEPARTMENT_NOT_FOUND);
+}
+
+/**
  * The work-item predicate for a department filter, honouring the override rule
  * on the DB side so `?department=` and the board agree.
  *
