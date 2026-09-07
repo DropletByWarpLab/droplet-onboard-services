@@ -61,6 +61,10 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
   const { documentsReady, documentsDigested } = coverage.corpus;
   const detectors = coverage.passes.find((p) => p.passKey === "detectors");
   const corpus = coverage.passes.find((p) => p.passKey === "corpus.documents");
+  // Reached but not read. Clamped at zero: the two counters are incremented in
+  // separate statements over the pass's life, and a negative here would render
+  // as a nonsense sentence rather than as the accounting slip it would be.
+  const passedOver = Math.max(0, (corpus?.unitsSeen ?? 0) - (corpus?.unitsDigested ?? 0));
 
   return (
     <div className="brief-coverage">
@@ -75,6 +79,25 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
             : " — the rest is not queued to be read."
           : "."}
       </p>
+      {/* WARP-2834 — units the pass REACHED but could not read. `unitsSeen`
+          advances for every document the loop touched; `unitsDigested` only
+          for the ones the model actually read. The gap is documents with no
+          extractable text, or whose owner could not be resolved — the
+          `__household__` / `__dept_<uuid>__` sentinel owners the file-indexer
+          writes for the shared drive.
+
+          Worth its own sentence rather than folding into the count: those
+          documents are NOT queued and will not be read on a later tick, so
+          leaving them inside "still working through the rest" would be the
+          same overstatement in a new place. */}
+      {passedOver > 0 ? (
+        <p className="brief-coverage-detail">
+          <strong>{passedOver.toLocaleString()}</strong>{" "}
+          {passedOver === 1 ? "document was" : "documents were"} passed over —
+          no readable text, or the box could not tell whose {passedOver === 1 ? "it" : "they"} were.
+          {" "}They are not queued for a later pass.
+        </p>
+      ) : null}
       <p className="brief-coverage-detail">
         {detectors?.lastSucceededAt
           ? `Business records last checked ${new Date(detectors.lastSucceededAt).toLocaleString()}.`
