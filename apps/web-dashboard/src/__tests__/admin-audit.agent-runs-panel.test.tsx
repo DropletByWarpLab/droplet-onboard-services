@@ -122,6 +122,23 @@ describe("Background runs panel (WARP-2180)", () => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/agent-runs/run-1/confirm");
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ decision: "denied" });
     });
+    // 🔴 WAIT FOR THE BUTTON, NOT FOR THE POST.
+    //
+    // The waitFor above resolves the moment the deny fetch is RECORDED, which
+    // is not the moment the handler finishes. `act()` sets `busy` true, awaits
+    // the POST, then awaits `loadDetail` + `loadList`, and only then clears it
+    // — and "Cancel run" is `disabled={busy}`. Clicking here on the strength of
+    // the POST alone lands on a disabled button, React drops the event, no
+    // cancel request is ever issued, and the next waitFor fails with
+    // `expected false to be true` after burning its full budget.
+    //
+    // Locally the two reloads settle in ~1 ms and the race is invisible; on a
+    // saturated CI runner it is not. This is the wrong-signal class, so a
+    // longer timeout cannot fix it — the wait has to point at the thing that
+    // actually has to become true.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
     await waitFor(() => {
       expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/agent-runs/run-1/cancel")).toBe(true);
