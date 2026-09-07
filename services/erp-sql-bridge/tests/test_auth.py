@@ -231,3 +231,103 @@ class TestUnprovisionedBridgeFailsClosed:
         """Otherwise the container healthcheck would fail the box into a
         restart loop over a missing secret."""
         assert unprovisioned_client.get("/health").status_code == 200
+
+
+class TestHealthIsTheOnlyExemption:
+    """`EXEMPT_PATHS` is the whole exemption list — nothing is exempt beside it.
+
+    The gate shipped with an extra `or request.url.path == "/"` clause riding
+    alongside the set, so root was open too. Nothing routed there (the app
+    declares no `/` handler) and the compose healthcheck probes `/health`, so
+    the clause bought nothing — but it made the module docstring, main.py's
+    comment and the README wrong in the same breath, and an exemption that
+    contradicts its own documentation is how the NEXT route gets added to it.
+    An unauthenticated caller must not be able to tell an exempt path from a
+    404 either; both are information about the surface behind the gate.
+    """
+
+    def test_the_exemption_set_is_exactly_health(self):
+        import auth
+
+        assert auth.EXEMPT_PATHS == {"/health"}
+
+    @pytest.mark.parametrize("path", ["/", "//", "/docs", "/openapi.json"])
+    def test_no_path_beside_health_answers_without_a_bearer(
+        self, unauthenticated_client, path
+    ):
+        """Root included. A 404 here would mean the gate let the request reach
+        the router, which is the bug — the caller learns the route does not
+        exist without ever authenticating."""
+        r = unauthenticated_client.get(path)
+        assert r.status_code == 401, f"{path} was served without a bearer"
+        assert r.json()["code"] == "UNAUTHORIZED"
+
+    def test_root_is_gated_before_the_pool(self, unauthenticated_client, pool_sentinel):
+        r = unauthenticated_client.post("/", json={})
+        assert r.status_code == 401
+        assert pool_sentinel == []
+
+
+class TestANonAsciiBearerIsRefusedNotCrashed:
+    """A header byte >= 0x80 must 401, never 500.
+
+    `hmac.compare_digest` accepts two `str` only when both are ASCII; anything
+    else is a TypeError. Starlette decodes raw header bytes as latin-1, which
+    NEVER fails and happily produces a non-ASCII `str` — so a single 0x80 byte
+    in `Authorization` turned a clean rejection into an unhandled exception.
+
+    That is a denial-of-service shape (unauthenticated, one byte, no session)
+    and it also breaks the error contract the connector reads: a 500 from the
+    ASGI server carries no `{code, message}` body, so
+    `sql-bridge-client.ts` reports BRIDGE_ERROR and cannot tell a rejected
+    caller from a broken bridge.
+    """
+
+    #: latin-1-decodable, not ASCII: the exact class starlette hands over.
+    NON_ASCII_HEADERS = [
+        b"Bearer \xff",
+        b"Bearer \x80",
+        "Bearer café".encode("latin-1"),
+        b"\xc3\xa9",
+    ]
+
+    @pytest.mark.parametrize("header", NON_ASCII_HEADERS)
+    def test_a_non_ascii_bearer_gets_the_uniform_401(
+        self, unauthenticated_client, pool_sentinel, header
+    ):
+        r = unauthenticated_client.post(
+            "/read/get_patient",
+            json={"sql": GET_PATIENT_SQL, "params": [1003], "target": TARGET},
+            headers={"Authorization": header},
+        )
+        assert r.status_code == 401
+        assert r.json() == {
+            "code": "UNAUTHORIZED",
+            "message": "missing or invalid service bearer",
+        }
+        assert pool_sentinel == []
+
+    def test_a_non_ascii_bearer_cannot_reach_health_shaped_special_cases(
+        self, unauthenticated_client
+    ):
+        """/health stays exempt regardless of what the caller sends."""
+        r = unauthenticated_client.get("/health", headers={"Authorization": b"\xff"})
+        assert r.status_code == 200
+
+    def test_the_token_itself_may_be_non_ascii_without_crashing(
+        self, unauthenticated_client, monkeypatch, pool_sentinel
+    ):
+        """The mirror case: an operator who pastes a non-ASCII token must get a
+        refusal, not a 500. Such a token can never match a latin-1-decoded
+        header, so the only correct answer is 401."""
+        import auth
+
+        monkeypatch.setattr(auth, "SERVICE_TOKEN", "café-token")
+        r = unauthenticated_client.post(
+            "/read/get_patient",
+            json={"sql": GET_PATIENT_SQL, "params": [1003], "target": TARGET},
+            headers={"Authorization": "Bearer plain-ascii"},
+        )
+        assert r.status_code == 401
+        assert r.json()["code"] == "UNAUTHORIZED"
+        assert pool_sentinel == []

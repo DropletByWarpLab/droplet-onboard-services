@@ -30,6 +30,8 @@ the hole this closes.
 
 /health is exempt so the compose healthcheck (which cannot hold a secret)
 keeps working. It reports reachability only — never a credential, never a row.
+It is the ONLY exemption: `EXEMPT_PATHS` is the whole list, and nothing —
+including `/` — is waved through beside it.
 """
 from __future__ import annotations
 
@@ -81,7 +83,7 @@ class ServiceBearerMiddleware(BaseHTTPMiddleware):
     """Require `Authorization: Bearer <SERVICE_TOKEN_ERP_BRIDGE>`."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path.rstrip("/") in EXEMPT_PATHS or request.url.path == "/":
+        if request.url.path.rstrip("/") in EXEMPT_PATHS:
             return await call_next(request)
 
         if not SERVICE_TOKEN:
@@ -103,11 +105,42 @@ class ServiceBearerMiddleware(BaseHTTPMiddleware):
             )
 
         header = request.headers.get("authorization", "")
+        expected = f"Bearer {SERVICE_TOKEN}"
+
+        # `hmac.compare_digest` accepts two `str` only when BOTH are ASCII;
+        # anything else raises TypeError rather than returning False. Starlette
+        # decodes raw header bytes as latin-1 — a decode that cannot fail — so a
+        # single 0x80 byte in `Authorization` arrives here as an ordinary
+        # non-ASCII `str` and used to blow the middleware up into an unhandled
+        # 500. That is a denial-of-service shape (unauthenticated, one byte, no
+        # session) and it also breaks the error contract: a 500 off the ASGI
+        # server carries no `{code, message}`, so sql-bridge-client.ts reads
+        # BRIDGE_ERROR and cannot tell a refused caller from a broken bridge.
+        #
+        # A non-ASCII header can never equal the token anyway — secrets.sh mints
+        # it from hex — so refusing is the correct answer. It just has to be the
+        # SAME refusal as every other bad bearer, which is what the guard buys.
+        if not expected.isascii():
+            # The mirror case: a hand-pasted non-ASCII token. Still a 401 (it
+            # cannot match a latin-1-decoded header), but say so in the log —
+            # otherwise this looks like a caller problem for the rest of time.
+            logger.error(
+                "%s contains non-ASCII characters and can never match a bearer "
+                "header; every gated route will answer 401 until it is reminted.",
+                TOKEN_ENV,
+            )
+
         # Constant-time over the WHOLE header. A plain `!=` short-circuits on
         # the first differing byte, which leaks the token a byte at a time to a
         # caller that can time responses — and every caller here can, since the
-        # bridge answers on the compose network with no proxy in between.
-        if not hmac.compare_digest(header, f"Bearer {SERVICE_TOKEN}"):
+        # bridge answers on the compose network with no proxy in between. The
+        # two `isascii()` guards short-circuit BEFORE the compare, so the
+        # constant-time path is unchanged for every header that could match.
+        if (
+            not header.isascii()
+            or not expected.isascii()
+            or not hmac.compare_digest(header, expected)
+        ):
             logger.warning(
                 "rejected unauthenticated %s %s", request.method, request.url.path
             )
