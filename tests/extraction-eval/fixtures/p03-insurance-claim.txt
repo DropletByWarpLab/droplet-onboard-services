@@ -1,0 +1,20 @@
+DENTAL BENEFIT CLAIM
+
+Subscriber:     Peter Vance
+Member ID:      XZ-99312
+Group #:        44182
+Patient:        Ella Vance
+Patient DOB:    03/09/2012
+Relationship:   Child
+
+Provider:       Northgate Dental Practice
+Date of service: 2026-02-19
+
+  Procedure   Tooth   Surface   Description                    Fee
+  D1206         --      --      Fluoride varnish             38.00
+  D2391        #14      O       Resin composite, one surface 165.00
+  D0274         --      --      Bitewings, four films        72.00
+
+  Total charged                                             275.00
+
+I certify that the procedures listed above were performed on the date shown.

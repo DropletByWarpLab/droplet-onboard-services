@@ -14,6 +14,11 @@ on:
     paths:
       - "tests/retrieval-eval/ragas/ragas_runner.py"
       - "tests/retrieval-eval/ragas/test_aggregate.py"
+      # WARP-2732 — ADR-048's extraction canary. Without this entry a change to
+      # the scorer, the goldens or the corpus does not run the suite that
+      # checks them, and the gate on auto mode goes unverified in the one lane
+      # that CAN verify it.
+      - "tests/extraction-eval/**"
       - "services/rag-eval/**"
       - ".github/workflows/rag-eval-tests.yml"
   push:
@@ -21,6 +26,11 @@ on:
     paths:
       - "tests/retrieval-eval/ragas/ragas_runner.py"
       - "tests/retrieval-eval/ragas/test_aggregate.py"
+      # WARP-2732 — ADR-048's extraction canary. Without this entry a change to
+      # the scorer, the goldens or the corpus does not run the suite that
+      # checks them, and the gate on auto mode goes unverified in the one lane
+      # that CAN verify it.
+      - "tests/extraction-eval/**"
       - "services/rag-eval/**"
       - ".github/workflows/rag-eval-tests.yml"
   workflow_dispatch:
@@ -66,3 +76,17 @@ jobs:
 
       - name: Run pytest (rag-eval service unit tests)
         run: pytest services/rag-eval/tests -v
+
+      # WARP-2732 (ADR-048) — the extraction canary's SCORER, which is the half
+      # that can be gated pre-merge.
+      #
+      # 🔴 No model runs here, and none can: `rag-tests.yml` is
+      # workflow_dispatch-only and its own e2e test records that the inference
+      # host "is unreachable on a CI runner". So this lane proves the ARITHMETIC
+      # and the corpus/answer-key agreement; only a box with a model can prove
+      # the extractor. Pretending otherwise — a mocked canary green in Actions —
+      # would look like the gate on `auto` mode had been satisfied.
+      #
+      # Needs nothing beyond pyyaml and pytest, both already installed above.
+      - name: Run pytest (ADR-048 extraction scorer)
+        run: pytest tests/extraction-eval/test_score.py -v

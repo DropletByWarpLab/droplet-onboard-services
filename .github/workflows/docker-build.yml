@@ -58,6 +58,12 @@ on:
       # WARP-1021: the gateway image bakes docker/nginx/** (Dockerfile,
       # nginx.conf, cipher profiles, entrypoint hook) — edits must rebuild it.
       - "docker/nginx/**"
+      # WARP-2732 (ADR-048): the rag-eval image BAKES the extraction canary's
+      # scorer, runner, goldens and 12-fixture corpus. The appliance runs
+      # images, not a repo checkout, so a goldens or fixture edit that does not
+      # rebuild this image leaves the box measuring the OLD corpus while
+      # reporting today's date — and `auto` mode is gated on that measurement.
+      - "tests/extraction-eval/**"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
@@ -85,6 +91,12 @@ on:
       - "docker/fips/**"
       - "docker/openssl-fips.cnf"
       - "docker/nginx/**"
+      # WARP-2732 (ADR-048): the rag-eval image BAKES the extraction canary's
+      # scorer, runner, goldens and 12-fixture corpus. The appliance runs
+      # images, not a repo checkout, so a goldens or fixture edit that does not
+      # rebuild this image leaves the box measuring the OLD corpus while
+      # reporting today's date — and `auto` mode is gated on that measurement.
+      - "tests/extraction-eval/**"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
@@ -278,6 +290,8 @@ jobs:
               - "services/switch/**"
             rag-eval:
               - "services/rag-eval/**"
+              # ADR-048's canary corpus is COPYd into this image (WARP-2732).
+              - "tests/extraction-eval/**"
               - "tests/retrieval-eval/**"
 
       - name: Decide which images to build
