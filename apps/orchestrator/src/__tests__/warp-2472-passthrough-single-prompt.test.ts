@@ -325,11 +325,27 @@ describe("WARP-2472 — class (a): the route 202s, and it is the ONLY gate", () 
     expect(challenges).toEqual(["orchestrator-route"]);
     expect(challenges).toHaveLength(1);
 
-    // It is the ROUTE's challenge, with the route's own token, and the
-    // interceptor contributed nothing — not even a token nobody asked for.
+    // It is the ROUTE's challenge, and the interceptor contributed nothing —
+    // not even a token nobody asked for.
     expect(detailsOf(first).operation).toBe("block_device");
     expect(detailsOf(first).tier).toBe(2);
-    expect(typeof detailsOf(first).confirmationToken).toBe("string");
+
+    // 🔴 WARP-2776 — this line USED TO READ
+    // `expect(typeof detailsOf(first).confirmationToken).toBe("string")`,
+    // and it was pinning the defect rather than the behaviour.
+    //
+    // `details` is serialised into the MODEL's context. The route's 202
+    // carries a live single-use token for a Tier-2 write, so asserting the
+    // token is present here asserted that the agent is handed the approval
+    // for the write it just asked to make — "an agent re-presenting the token
+    // it was just handed is the agent approving its own write", which is the
+    // shape WARP-2472's own comment says the design refuses.
+    //
+    // The token is redacted from the model's view only. The dashboard confirm
+    // endpoint still receives it on its own path, so the Tier-2 gate is
+    // unchanged — what moved is who can read it. Asserting its ABSENCE keeps
+    // the redaction from being quietly undone.
+    expect(detailsOf(first).confirmationToken).toBeUndefined();
     expect(detailsOf(first).interceptor).toBeUndefined();
     expect(interceptorToken(first)).toBe("");
 

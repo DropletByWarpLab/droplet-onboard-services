@@ -1174,6 +1174,13 @@ export interface RosterUser extends AuthUser {
   /** WARP-1532 — assigned custom role id (null = plain built-in tier).
    *  Optional for the same parallel-build reason as `role`. */
   accessRoleId?: string | null;
+  /** Directory account state, mirrored from Nextcloud's
+   *  `/cloud/users/details`. The roster used to drop this, so a deactivated
+   *  person looked identical to an active one and the only affordance on the
+   *  row was Disable — there was no way back. Optional: a box running an
+   *  orchestrator older than this field sends nothing, and `undefined` must
+   *  read as enabled rather than painting the whole roster deactivated. */
+  enabled?: boolean;
 }
 
 // ── WARP-217 invite types ──

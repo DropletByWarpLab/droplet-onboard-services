@@ -38,7 +38,31 @@ import type {
  * clear either floor.
  */
 export const AUTO_FLOOR_LINK = 85;
-export const AUTO_FLOOR_CREATE = 92;
+export const AUTO_FLOOR_CREATE = 90;
+
+/**
+ * How close a rejected candidate may be before a CREATE is refused.
+ *
+ * Above this, the matcher saw something similar and declined to trust it —
+ * which is a reason to ask a person, not a licence to make a second record.
+ */
+export const NEAREST_CANDIDATE_CEILING = 0.6;
+
+/** Document roles that may mint a customer unattended. Paper that IS a
+ *  transaction; not a letter that mentions a company. */
+export const CREATE_ROLES: ReadonlySet<string> = new Set(["INVOICE", "QUOTE", "CONTRACT"]);
+
+/**
+ * The substring every cap-deferred reason contains.
+ *
+ * 🔴 Defined HERE, beside the sentences, and imported by `caps.ts` — not the
+ * other way round. `policyReason` is already the durable record of why a
+ * proposal is in review; adding a second column to say "and it was the cap"
+ * would give two answers to one question, and they would disagree the first
+ * time somebody edited a sentence. A test asserts every cap reason contains
+ * this, so an edit that breaks the sweep breaks a test first.
+ */
+export const BOUNDED_MARKER = "so this one waits";
 
 /** The cap applied to a MENTIONS document's confidence, wherever it came
  *  from. Exported so the test can assert it is below both floors rather than
@@ -53,6 +77,33 @@ export interface PolicyInput {
   phiVerdict: PhiVerdict;
   confidence: number;
   matchKind: IngestMatchKind;
+
+  // ── WARP-2733 — the conditions a CREATE must additionally satisfy ────────
+
+  /** The classifier's `role`. Only paper that IS a transaction may mint a
+   *  customer unattended: an invoice, a quote or a contract. A letter that
+   *  mentions a company is not a business relationship. */
+  documentRole?: string | null;
+  /** `BUSINESS` | `INDIVIDUAL` | `UNKNOWN`. A private individual becoming a
+   *  customer row without anyone looking is how a personal document ends up
+   *  in the CRM. */
+  counterparty?: string | null;
+  /**
+   * How close the NEAREST rejected candidate was, 0–1.
+   *
+   * 🔴 A create is only safe when nothing else came close. `matchKind: NONE`
+   * says the matcher found no key it trusts — it does NOT say the record is
+   * absent. A near miss at 0.6 is precisely the case where creating produces
+   * the duplicate the whole matcher exists to prevent, and the owner finds it
+   * weeks later.
+   */
+  nearestCandidateScore?: number | null;
+  /** True when the hourly/daily cap for this class is already spent. */
+  capReached?: boolean;
+  /** WARP-2733: a project whose name already exists must not be minted again. */
+  sameNameProjectExists?: boolean;
+  /** The record this would write to was landed by a connector. */
+  targetIsExternal?: boolean;
 }
 
 export interface PolicyVerdict {
@@ -85,6 +136,20 @@ const CREATE_KINDS: ReadonlySet<IngestProposalKind> = new Set([
  */
 export function classify(input: PolicyInput): PolicyVerdict {
   // ── NEVER ────────────────────────────────────────────────────────────────
+  //
+  // 🔴 A row a CONNECTOR landed is not ours to touch, in any mode, by anyone.
+  // `origin = EXTERNAL` means a vendor is the system of record: whatever we
+  // wrote would be reverted by the next sync tick, so the write is not merely
+  // risky but pointless — and it would look, for the hours in between, as
+  // though Droplet had made a change the owner then saw disappear.
+  if (input.targetIsExternal) {
+    return {
+      policyClass: "NEVER",
+      policyReason:
+        "This customer comes from a connected account, so Droplet leaves it to that service.",
+    };
+  }
+
   //
   // Money documents wait for the `ErpDocument` widening (WARP-2739). Until
   // that lands there is no column to put a proposed invoice in that would not
@@ -154,6 +219,12 @@ export function classify(input: PolicyInput): PolicyVerdict {
         policyReason: "Droplet is not sure enough about this one.",
       };
     }
+    if (input.capReached) {
+      return {
+        policyClass: "REVIEW",
+        policyReason: `Droplet has filed a lot in the last hour, ${BOUNDED_MARKER} for you.`,
+      };
+    }
     return { policyClass: "AUTO", policyReason: null };
   }
 
@@ -180,6 +251,54 @@ export function classify(input: PolicyInput): PolicyVerdict {
         policyReason: "Droplet is not sure enough to add something new on its own.",
       };
     }
+
+    // 🔴 Only paper that IS a transaction may mint a customer unattended. A
+    // letter that mentions a company is not a business relationship, and a
+    // scan whose role the classifier could not tell is not either.
+    if (input.kind === "CREATE_CUSTOMER") {
+      if (!CREATE_ROLES.has(String(input.documentRole ?? ""))) {
+        return {
+          policyClass: "REVIEW",
+          policyReason:
+            "Droplet only adds customers by itself from an invoice, a quote or a contract.",
+        };
+      }
+      if (input.counterparty !== "BUSINESS") {
+        return {
+          policyClass: "REVIEW",
+          policyReason: "This looks like a private individual rather than a business.",
+        };
+      }
+    }
+
+    // 🔴 Nothing else may have come close. `matchKind: NONE` says the matcher
+    // found no key it TRUSTS — not that the record is absent. A near miss is
+    // exactly where creating produces the duplicate the matcher exists to
+    // prevent, and the owner finds it weeks later.
+    if ((input.nearestCandidateScore ?? 0) >= NEAREST_CANDIDATE_CEILING) {
+      return {
+        policyClass: "REVIEW",
+        policyReason: "This looks a lot like a customer you already have.",
+      };
+    }
+
+    if (input.kind === "CREATE_PROJECT" && input.sameNameProjectExists) {
+      return {
+        policyClass: "REVIEW",
+        policyReason: "There is already a project with this name.",
+      };
+    }
+
+    // 🔴 Over the cap is REVIEW, never DROPPED. The proposal stays visible and
+    // is reconsidered when the window rolls: a bound that silently discarded
+    // work would make a busy morning indistinguishable from a broken worker.
+    if (input.capReached) {
+      return {
+        policyClass: "REVIEW",
+        policyReason: `Droplet has already added several customers today, ${BOUNDED_MARKER}.`,
+      };
+    }
+
     return { policyClass: "AUTO", policyReason: null };
   }
 

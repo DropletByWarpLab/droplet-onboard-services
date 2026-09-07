@@ -66,6 +66,28 @@ export interface FilingSettings {
   vertical: AutoFilingVertical;
 }
 
+/**
+ * What the policy table needs to know about the DOCUMENT and the BOX, beyond
+ * the entity itself (WARP-2733).
+ *
+ * 🔴 Threaded explicitly rather than defaulted, because every one of these is
+ * fail-CLOSED when absent: an undefined `documentRole` is not in `CREATE_ROLES`
+ * and refuses the create. That is the right direction — a caller who forgets to
+ * pass it gets review cards, not unattended writes — but it also means a
+ * forgetful caller would silently disable auto-create with no error, so the
+ * worker passes them and a test asserts an auto-create actually happens.
+ */
+export interface AutoContext {
+  /** The classifier's `role` for this document. */
+  documentRole?: string | null;
+  /** `BUSINESS` | `INDIVIDUAL` | `UNKNOWN`. */
+  counterparty?: string | null;
+  /** True when the hourly or the relevant daily budget is already spent. */
+  capReached?: (kind: IngestProposalKind) => boolean;
+  /** Does a project of this name already exist? */
+  projectNameExists?: (name: string) => boolean;
+}
+
 export interface ProposalDraft {
   kind: IngestProposalKind;
   dedupeKey: string;
@@ -138,8 +160,10 @@ export async function buildDrafts(args: {
   phiVerdict: PhiVerdict;
   settings: FilingSettings;
   resolveMatch: MatchResolver;
+  auto?: AutoContext;
 }): Promise<BuildDraftsResult> {
   const { source, entities, phiVerdict, settings } = args;
+  const auto = args.auto ?? {};
   const folder = folderOf(source);
   const drafts: ProposalDraft[] = [];
 
@@ -153,6 +177,13 @@ export async function buildDrafts(args: {
     matchKind: IngestMatchKind,
     payload: Record<string, unknown>,
     evidence: { quote: string; chunkIdx?: number }[],
+    /** Per-draft facts the table needs — the near-miss score, the target's
+     *  origin — that only the loop producing this draft knows. */
+    extra: {
+      nearestCandidateScore?: number;
+      targetIsExternal?: boolean;
+      sameNameProjectExists?: boolean;
+    } = {},
   ) => {
     // Parse on the way in. A draft that does not satisfy its own kind's
     // allow-list is a bug in THIS file, and the right time to find out is
@@ -179,6 +210,10 @@ export async function buildDrafts(args: {
       phiVerdict,
       confidence: c,
       matchKind,
+      documentRole: auto.documentRole ?? null,
+      counterparty: auto.counterparty ?? null,
+      capReached: auto.capReached?.(kind) ?? false,
+      ...extra,
     });
     drafts.push({
       kind,
@@ -233,6 +268,10 @@ export async function buildDrafts(args: {
             ...matched,
           },
           company.evidence,
+          // 🔴 A connector owns this row; anything we wrote would be reverted
+          // by the next sync tick. NEVER, not review — there is no confidence
+          // at which writing to somebody else's system of record is right.
+          { targetIsExternal: outcome.targetIsExternal },
         );
       } else if (source.sourceKind === "EMAIL") {
         add(
@@ -249,6 +288,7 @@ export async function buildDrafts(args: {
             ...matched,
           },
           company.evidence,
+          { targetIsExternal: outcome.targetIsExternal },
         );
       }
       continue;
@@ -281,6 +321,10 @@ export async function buildDrafts(args: {
     }
 
     // NONE — propose the customer, with the document that named them.
+    //
+    // 🔴 `outcome.nearestScore` travels with it. "No match" and "nothing like
+    // it exists" are different facts, and only the second one makes an
+    // unattended create safe.
     add(
       "CREATE_CUSTOMER",
       normalizeCompanyName(company.name) || company.name.toLowerCase(),
@@ -294,6 +338,7 @@ export async function buildDrafts(args: {
         ...(fileRef(source) ? { file: fileRef(source) } : {}),
       },
       company.evidence,
+      { nearestCandidateScore: outcome.nearestScore },
     );
   }
 
@@ -312,6 +357,7 @@ export async function buildDrafts(args: {
         ...(link ? { companyId: link.companyId, companyName: link.companyName } : {}),
       },
       project.evidence,
+      { sameNameProjectExists: auto.projectNameExists?.(project.name) ?? false },
     );
   }
 

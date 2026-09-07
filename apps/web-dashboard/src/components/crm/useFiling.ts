@@ -68,6 +68,10 @@ export interface FilingProposal {
   ncFileId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  /** WARP-2733 — the box applied this one without being asked. Drives the
+   *  "Droplet did this one by itself" chip; never inferred from anything else,
+   *  because a person's Apply and the worker's are otherwise identical rows. */
+  autoApplied: boolean;
   readable: boolean;
   payload: FilingPayload | null;
   evidence: { quote: string; chunkIdx?: number }[];
@@ -97,7 +101,17 @@ export interface FilingSummary {
   vertical: "general" | "healthcare";
   enabled: boolean;
   pending: number;
-  health?: FilingHealth;
+  health?: FilingHealth & { pausedMessage?: string };
+  /**
+   * WARP-2733 — the consent record, built SERVER-SIDE from the policy table.
+   *
+   * 🔴 Never assembled here. The whole argument for unattended writes is that
+   * the owner was told what class of action they were promoting; a client that
+   * wrote its own sentences would describe a table it does not have, and would
+   * keep describing the old one after a deploy.
+   */
+  readback?: string[];
+  promotion?: { offer: boolean; sentence?: string };
 }
 
 export interface FilingRule {
@@ -194,6 +208,7 @@ export interface FilingActions {
   notSame: (id: string, companyId: string) => Promise<void>;
   undo: (id: string) => Promise<void>;
   revokeRule: (id: string) => Promise<void>;
+  setLevel: (level: FilingSummary["level"]) => Promise<void>;
   setMode: (mode: FilingSummary["mode"], extra?: Partial<FilingSummary>) => Promise<void>;
 }
 
@@ -276,5 +291,9 @@ export function useFilingActions(): FilingActions {
     [],
   );
 
-  return { apply, reject, notSame, undo, revokeRule: revokeRuleAction, setMode };
+  const setLevel = useCallback(async (level: FilingSummary["level"]) => {
+    await send("/api/crm/filing/settings", "PATCH", { level });
+  }, []);
+
+  return { apply, reject, notSame, undo, revokeRule: revokeRuleAction, setMode, setLevel };
 }

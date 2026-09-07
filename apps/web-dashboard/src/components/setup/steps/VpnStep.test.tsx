@@ -40,7 +40,7 @@ beforeEach(() => {
   fetchVpnStatus.mockResolvedValue({
     configured: true,
     endpointConfigured: true,
-    endpointHost: "yourstudio.duckdns.org",
+    endpointHost: "studio.droplet-us.com",
     homeEndpointHost: "192.168.1.87",
     peerCount: 0,
   });
@@ -427,7 +427,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "studio.droplet-us.com",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({
@@ -474,7 +474,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "x.duckdns.org",
+      endpointHost: "other.droplet-us.com",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({

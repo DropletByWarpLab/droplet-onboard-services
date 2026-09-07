@@ -19,6 +19,7 @@ import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
+import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
@@ -439,6 +440,10 @@ export default function SettingsPage() {
 
         {/* Outbound email (BUG-11) — SMTP relay for invite delivery. Sits with
             the people/account config since its primary consumer is invites. */}
+        {/* WARP-2734 — the mailbox Droplet READS, above the relay it SENDS
+            through. Two halves of mail that people confuse constantly, so they
+            sit together and each says which it is. */}
+        <EmailAccountCard />
         <EmailChannelSection />
 
         {/* Device Info */}
