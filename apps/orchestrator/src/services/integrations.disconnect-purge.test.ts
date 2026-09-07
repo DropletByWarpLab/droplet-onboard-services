@@ -1241,7 +1241,58 @@ describe.each(KNOWN_ERP_PROVIDERS)(
   },
 );
 
-describe.each(KNOWN_ERP_PROVIDERS)(
+/**
+ * WARP-2833 — the write flag is only meaningful on a track that CAN write.
+ *
+ * This split is the finding, not a fixture tidy-up. `describe.each` used to run
+ * over every buildable provider, so `square` and `calcom` were asserting that a
+ * connector whose `applyWrite` throws unconditionally (ADR-046 §4, read-only by
+ * CONSTRUCTION) accepts the write opt-in and audits it as a security event.
+ * The tests were green and were pinning the defect.
+ */
+const WRITE_CAPABLE_PROVIDERS = KNOWN_ERP_PROVIDERS.filter(
+  (p) => providerDescriptor(p)?.track !== "rest",
+);
+const READ_ONLY_TRACK_PROVIDERS = KNOWN_ERP_PROVIDERS.filter(
+  (p) => providerDescriptor(p)?.track === "rest",
+);
+
+describe.each(READ_ONLY_TRACK_PROVIDERS)(
+  "setWriteEnabled(ctx, %s, …) — a track that cannot write refuses the opt-in",
+  (provider) => {
+    it("refuses to ENABLE writes, and writes neither the flag nor an audit row", async () => {
+      // Refused, not silently coerced to false: a caller that asked for writes
+      // and got a 200 would reasonably believe it had them. And the assertion
+      // that matters is the absence — a future edit that throws AFTER the
+      // update would pass a rejects-check and fail these two.
+      //
+      // Mutation: drop the `track === "rest"` guard in setWriteEnabled → red.
+      const prisma = stubPrisma(
+        everyProviderConnected().map((r) => ({ ...r, writeEnabled: false })),
+      );
+      await expect(
+        serviceFor(prisma).setWriteEnabled({ actor: "romain" }, provider, true),
+      ).rejects.toThrow(/read-only by construction/);
+
+      expect(rowFor(prisma, provider).writeEnabled).toBe(false);
+      expect(prisma.erpAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it("still allows DISABLING, so a row that somehow holds true can be cleared", async () => {
+      // The asymmetry is deliberate. `enabled === false` is always a
+      // legitimate request, and refusing it would make a stale `true` — from
+      // before this guard, or from a direct DB edit — impossible to clear
+      // through the product.
+      // Mutation: guard on `track === "rest"` alone, ignoring `enabled` → red.
+      const prisma = stubPrisma(everyProviderConnected()); // all writeEnabled: true
+      await serviceFor(prisma).setWriteEnabled({ actor: "romain" }, provider, false);
+
+      expect(rowFor(prisma, provider).writeEnabled).toBe(false);
+    });
+  },
+);
+
+describe.each(WRITE_CAPABLE_PROVIDERS)(
   "setWriteEnabled(ctx, %s, …) on a box where every provider is connected",
   (provider) => {
     /**

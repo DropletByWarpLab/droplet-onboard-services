@@ -990,6 +990,40 @@ export function createIntegrationsService(
       const row = await findRow(scoped);
       if (!row) throw ErpError.notConfigured(scoped);
 
+      /**
+       * WARP-2833 — a track that CANNOT write must not accept the opt-in.
+       *
+       * ADR-046 §4 makes the REST track read-only by construction:
+       * `RestProfileConnector.applyWrite` always throws, and there is no
+       * profile field that could turn it on. Flipping `writeEnabled` for one
+       * therefore set a flag that no code path can honour, and it was not
+       * inert in three separate ways:
+       *
+       *  • `effective-access.service.ts`'s `connectionLevels()` keys
+       *    `read` / `read_write` off this column PER PROVIDER (WARP-2465), so
+       *    a role could hold a `read_write` grant on a connector with no write
+       *    path — a permission describing a capability that does not exist.
+       *  • The audit row below would record a `write-enable` against Square as
+       *    a security-relevant event that never happened.
+       *  • `docs/integrations/square.md` tells the customer, in as many words,
+       *    that "writes are off" is not a setting anyone could turn back on.
+       *    That was false while this accepted the flip, and a setup guide the
+       *    code contradicts is worse than one that says nothing.
+       *
+       * Refused rather than silently coerced to `false`: a caller that asked
+       * for writes and got a 200 would reasonably believe it had them.
+       * DISABLING stays allowed for any track — `enabled === false` is always
+       * a legitimate request, and refusing it would make a row that somehow
+       * holds `true` impossible to clear.
+       */
+      const track = providerDescriptor(scoped)?.track;
+      if (enabled && track === "rest") {
+        throw ErpError.validation(
+          `the "${scoped}" connector is read-only by construction (ADR-046 §4) — ` +
+            "it has no write path to enable",
+        );
+      }
+
       const updated = await prisma.integrationConnection.update({
         where: { id: row.id },
         data: { writeEnabled: enabled },
