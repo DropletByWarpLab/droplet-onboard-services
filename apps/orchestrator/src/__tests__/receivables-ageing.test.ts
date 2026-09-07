@@ -22,6 +22,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { toMinorUnits } from "@droplet/shared-types";
+import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "../services/erp-sync/money-snapshot.service";
 import {
   receivablesAgeing,
   daysBetween,
@@ -86,11 +87,26 @@ describe("receivables-ageing — arithmetic (WARP-2825)", () => {
     expect(daysBetween(THEN, THEN)).toBe(0);
   });
 
-  it("keeps the comparison window inside the daily-retention window", () => {
-    // Beyond DROPLET_MONEY_SNAPSHOT_DAILY_DAYS (90) the tail is downsampled to
-    // one row per month, and an exact day would usually miss.
-    expect(WINDOW_DAYS).toBeLessThan(90);
+  it("keeps the comparison window inside the daily-retention horizon it depends on", () => {
+    // 🔴 This assertion used to read `toBeLessThan(90)` — one literal
+    // against another, with no way to fail. The retention default is
+    // configurable and lives in `money-snapshot.service.ts`; the config schema
+    // takes its zod default from the same constant. Shortening it below
+    // WINDOW_DAYS now turns this red instead of quietly leaving the detector
+    // comparing against a tail that has been downsampled to monthly rows.
+    expect(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT).toBeGreaterThan(0);
+    expect(WINDOW_DAYS).toBeLessThan(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT);
     expect(MIN_SERIES_DAYS).toBeLessThan(WINDOW_DAYS);
+  });
+
+  it("and the CONFIG default is that same constant, not a second copy of it", async () => {
+    // A structural coupling only holds while it holds: config.ts could be
+    // edited back to a bare `90` and everything above would still pass. With
+    // the env var unset, the parsed default IS the constant — so this is what
+    // notices if the two are ever separated again.
+    expect(process.env.DROPLET_MONEY_SNAPSHOT_DAILY_DAYS ?? "").toBe("");
+    const { config } = await import("../config.js");
+    expect(config.DROPLET_MONEY_SNAPSHOT_DAILY_DAYS).toBe(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT);
   });
 });
 

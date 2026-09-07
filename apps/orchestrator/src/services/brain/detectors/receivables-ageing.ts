@@ -65,9 +65,27 @@ import {
 import type { Detector, DetectedFinding } from "./types";
 
 /**
- * How far back to compare. Well inside `DROPLET_MONEY_SNAPSHOT_DAILY_DAYS`
- * (90), which is the window that still holds DAILY rows — beyond it the tail is
- * downsampled to one row per month and an exact day would usually miss.
+ * How far back to compare. Deliberately inside `MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT`
+ * — the horizon that still holds DAILY rows. Beyond it `trimMoneySnapshots`
+ * keeps only each month's closing value, so a comparison reaching past it is
+ * reading a series that has silently stopped being daily.
+ *
+ * 🔴 THE RELATIONSHIP IS THE POINT, AND IT IS TESTED AGAINST THE SAME SOURCE
+ * THE CONFIG USES. The guard that used to sit on this read
+ * `expect(WINDOW_DAYS).toBeLessThan(90)` — one literal against another, a test
+ * with no way to fail. Both numbers now come from
+ * `MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT`, so shortening the retention default
+ * below this window turns the assertion red instead of quietly widening the
+ * window past the daily grain.
+ *
+ * WHAT THIS STILL CANNOT SEE: an operator's `DROPLET_MONEY_SNAPSHOT_DAILY_DAYS`
+ * override. `Detector.run(prisma, now)` takes no config, and threading one
+ * through the registry for this would be a larger change than the risk merits —
+ * the failure mode is benign in the direction that matters. With a SHORTER
+ * retention `bounds.anchor` is the oldest day at or after the window start,
+ * which is simply the oldest row that survived; the comparison narrows rather
+ * than fabricating a day, and MIN_SERIES_DAYS still refuses anything too short
+ * to be a trend.
  */
 export const WINDOW_DAYS = 30;
 
