@@ -584,9 +584,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
                   // for one by id; it could not find out there was one.
                   covers_only: data.pipelineId,
                   other_pipelines: omitted.map((b) => ({ id: b.id, name: b.name })),
-                  note: `this roll-up covers one pipeline; ${omitted.length} other${
-                    omitted.length === 1 ? "" : "s"
-                  } exist and are NOT included — ask again with that pipeline's id`,
+                  // The count and the VERB both agree with `omitted.length`.
+                  // Pluralising only the noun produced "1 other exist and are
+                  // NOT included" — ungrammatical in the commonest shape there
+                  // is, a local board plus one connector's, in the one
+                  // sentence whose entire job is to be relayed to the owner.
+                  note: `this roll-up covers one pipeline; ${omitted.length} ${
+                    omitted.length === 1 ? "other exists and is" : "others exist and are"
+                  } NOT included — ask again with that pipeline's id`,
                 }
               : {}),
           },

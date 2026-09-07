@@ -626,6 +626,27 @@ describe("business_find — the pipeline entity", () => {
     expect(String(data.note)).toContain("2 others exist");
   });
 
+  it("keeps the verb agreeing with the count when exactly ONE board is left out", async () => {
+    // The plural assertion above is satisfied by a note that reads "1 other
+    // exist and are NOT included": the count was pluralised and the verb was
+    // not. The one sentence whose whole job is to be relayed verbatim to the
+    // owner was ungrammatical in the commonest case — a box with the local
+    // board plus a single connector's.
+    get.mockResolvedValue(
+      res(true, 200, {
+        pipelineId: "pl1",
+        stages: [],
+        omitted: [{ id: "pl2", name: "HubSpot", isDefault: false }],
+      }),
+    );
+    const data = expectOk(await businessFind.handler({ entity: "pipeline" }, ctx)).data as Record<
+      string,
+      unknown
+    >;
+    expect(String(data.note)).toContain("1 other exists and is NOT included");
+    expect(String(data.note)).not.toContain("exist and are");
+  });
+
   it("survives an orchestrator that has not shipped the coverage fields yet", async () => {
     // Version skew between the tool package and the box is a real state on a
     // partially-updated appliance; an undefined `omitted` must read as "no
