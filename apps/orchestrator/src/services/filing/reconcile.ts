@@ -14,6 +14,8 @@
  */
 import type { PrismaClient } from "@prisma/client";
 
+import { readCaps, reconsiderBounded } from "./caps.js";
+import { readFilingSettings } from "./settings.js";
 import { MAX_ATTEMPTS } from "./worker.js";
 
 /**
@@ -40,6 +42,9 @@ export interface ReconcileResult {
   givenUp: number;
   /** Failed rows whose backoff expired. */
   retried: number;
+  /** WARP-2733 — cap-deferred proposals returned to AUTO because the window
+   *  rolled. See the comment on the sweep below. */
+  freed: number;
 }
 
 export async function runFilingReconcile(prisma: PrismaClient): Promise<ReconcileResult> {
@@ -94,5 +99,34 @@ export async function runFilingReconcile(prisma: PrismaClient): Promise<Reconcil
     },
   });
 
-  return { reArmed: reArmed.count, givenUp: givenUp.count, retried: retried.count };
+  // WARP-2733 — the cap sweep runs HERE as well as inside `runAutoApply`, and
+  // the duplication is deliberate.
+  //
+  // 🔴 `runFilingTick` returns early — before auto-apply — when the model is
+  // unreachable or the canary has it paused. That is right for EXTRACTION,
+  // which needs the model. It is wrong for a proposal that was already read,
+  // already classified, and only deferred because an hour's budget was spent:
+  // freeing it is pure DB work and needs no model at all. Without this line a
+  // box with a model outage leaves every cap-deferred card wearing a reason
+  // that stopped applying hours ago — which is exactly the "manual forever,
+  // then silently EXPIRED" outcome the cap design exists to avoid, arrived at
+  // through an unrelated fault.
+  //
+  // Running twice is safe: the update is guarded on `status: PENDING` and
+  // `policyClass: REVIEW`, so the second sweep to reach a row finds nothing to
+  // do. Nothing is APPLIED from here — this only moves rows back into the
+  // queue the tick reads, so a cap sweep can never become a second, unbounded,
+  // apply path.
+  let freed = 0;
+  const settings = await readFilingSettings(prisma);
+  if (settings.mode === "auto") {
+    freed = await reconsiderBounded(prisma, await readCaps(prisma, settings));
+  }
+
+  return {
+    reArmed: reArmed.count,
+    givenUp: givenUp.count,
+    retried: retried.count,
+    freed,
+  };
 }

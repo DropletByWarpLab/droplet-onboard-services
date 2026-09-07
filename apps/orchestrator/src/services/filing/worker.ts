@@ -55,6 +55,9 @@ import { buildDrafts, persistDrafts, prismaMatcher } from "./propose.js";
 import { isInScope, permittedOwnerIds, readFilingSettings } from "./settings.js";
 import { noteTickCompleted } from "./digest.js";
 import { AUDIT_PHRASES, recordFilingAuditBestEffort, type FilingAuditRefs } from "./audit.js";
+import { indexBackedFileCheck, runAutoApply } from "./auto-apply.js";
+import { runEmailArm } from "./email-arm.js";
+import { capReachedFor, readCaps } from "./caps.js";
 
 const logger = createLogger("filing-worker");
 
@@ -202,6 +205,25 @@ async function runOneTick(prisma: PrismaClient): Promise<TickOutcome> {
     return { status: "idle", reason: "no_owner" };
   }
 
+  // WARP-2735 — the email arm, ahead of the model pre-flight.
+  //
+  // 🔴 The order is load-bearing. This arm is a JOIN: sender -> contact ->
+  // company, with no model anywhere on the path. A box whose local model is
+  // unreachable has nothing wrong with its MAIL, and returning `blocked`
+  // before running it would stop a customer's email reaching their timeline
+  // for a reason that has nothing to do with either.
+  //
+  // It is also cheap enough to sit in front of the expensive arm: a handful of
+  // indexed queries per message, bounded at EMAIL_CLAIM_BATCH per tick.
+  try {
+    await runEmailArm(prisma, settings);
+  } catch (err) {
+    // Absorbed rather than propagated: an email-arm fault must not take the
+    // file arm down with it, and `safeRun`'s failure counter feeds the canary
+    // that pauses EXTRACTION — which this arm does not do.
+    logger.error({ err }, "filing: email arm failed");
+  }
+
   // Resolved BEFORE anything is claimed. A box pointed at a cloud model has
   // nothing wrong with its FILES, so no file is marked `failed` for it — the
   // tick reports the block and the row stays pending, ready for the moment the
@@ -225,6 +247,16 @@ async function runOneTick(prisma: PrismaClient): Promise<TickOutcome> {
 
   inFlight = true;
   try {
+    // WARP-2733 — apply what the owner promoted, BEFORE claiming new work.
+    //
+    // The order matters on a busy box: a backlog of unapplied AUTO proposals
+    // is work the owner has already authorised, and reading a new document
+    // ahead of it would let the queue grow while the thing it was promoted for
+    // never happens. It also means a tick that finds nothing new still drains.
+    await runAutoApply(prisma, settings, {
+      resolveFileId: indexBackedFileCheck(prisma, owners),
+    });
+
     const claim = await claimOne(prisma, owners, settings.enabledAt);
     if (!claim) return { status: "idle", reason: "nothing_pending" };
 
@@ -409,6 +441,23 @@ async function processClaim(
     return finish(status, outcome.reason, read.content.fingerprint);
   }
 
+  // 🔴 The auto context is passed EXPLICITLY, and everything in it fails
+  // closed when absent: an undefined `documentRole` is not in `CREATE_ROLES`
+  // and refuses the create. That is the right direction, but it also means a
+  // caller who forgot to pass it would silently disable auto-create with no
+  // error — so `filing-auto-mode.test.ts` asserts an auto-create actually
+  // happens rather than only that the wrong ones do not.
+  const caps = settings.mode === "auto" ? await readCaps(prisma, settings) : null;
+  const projectNames = new Set(
+    (
+      await prisma.pmProject.findMany({
+        where: { isArchived: false },
+        select: { name: true },
+        take: 500,
+      })
+    ).map((p) => p.name.trim().toLowerCase()),
+  );
+
   const { drafts, ignored } = await buildDrafts({
     source: {
       sourceKind: "FILE",
@@ -421,6 +470,12 @@ async function processClaim(
     phiVerdict: outcome.result.phiVerdict,
     settings,
     resolveMatch: prismaMatcher(prisma),
+    auto: {
+      documentRole: outcome.result.role,
+      counterparty: outcome.result.counterparty,
+      capReached: caps ? (kind) => capReachedFor(kind, caps) : undefined,
+      projectNameExists: (name) => projectNames.has(name.trim().toLowerCase()),
+    },
   });
 
   if (ignored) return finish("not_needed", "ignored_by_you", read.content.fingerprint);

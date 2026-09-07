@@ -34,7 +34,7 @@ vi.mock("./useFiling", () => ({
   useFilingActions: () => ({ revokeRule: vi.fn(), undo: vi.fn() }),
 }));
 
-import { FilingTabList, HealthRow, RulesTab, SkippedTab } from "./FilingTabs";
+import { FilingTabList, HealthRow, RecentlyFiled, RulesTab, SkippedTab } from "./FilingTabs";
 
 const HEALTHY = {
   pending: 2,
@@ -90,11 +90,15 @@ describe("🔴 the Health row reports silences, not successes", () => {
 });
 
 describe("the tab strip", () => {
-  it("names the three questions an owner actually asks", () => {
+  it("names the questions an owner actually asks", () => {
     render(<FilingTabList tab="review" onTab={() => {}} pending={2} />);
     expect(screen.getByRole("tab", { name: /Needs a look/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /What you've taught it/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /Left alone/ })).toBeTruthy();
+    // WARP-2733 — named for what it answers, not for what it is. "Settings"
+    // would be a place you configure a machine; this is where an owner reads
+    // what the box is allowed to do without them.
+    expect(screen.getByRole("tab", { name: /What Droplet does/ })).toBeTruthy();
   });
 
   it("shows a count only when there is one", () => {
@@ -185,5 +189,52 @@ describe("🔴 the Skipped tab explains without quoting", () => {
   it("says what the list is FOR when it is empty", () => {
     render(<SkippedTab />);
     expect(screen.getByText(/has not left anything alone/i)).toBeTruthy();
+  });
+});
+
+/**
+ * WARP-2733 — the provenance chip.
+ *
+ * 🔴 An owner has to be able to tell, without clicking anything, which of these
+ * they did and which the box did for them. That distinction is the consent
+ * record made visible: everything else in the design says "you agreed to a
+ * class of action", and this row is the only place they can check what the
+ * class actually did.
+ */
+describe("🔴 Recently filed says which ones the box did by itself", () => {
+  const filed = (id: string, autoApplied: boolean) => ({
+    id,
+    kind: "LINK_FILE" as const,
+    status: "APPLIED",
+    policyClass: "AUTO" as const,
+    policyReason: null,
+    confidence: 96,
+    phiVerdict: "CLEAN" as const,
+    matchKind: "DOMAIN" as const,
+    sourceKind: "FILE" as const,
+    ncFileId: 1,
+    createdAt: "2026-09-05T09:00:00.000Z",
+    decidedAt: "2026-09-05T09:01:00.000Z",
+    autoApplied,
+    readable: true,
+    payload: { companyName: "Northgate Dental" },
+    evidence: [],
+  });
+
+  it("MUTATION: drop the chip — a hand-filed row and an unattended one look identical", () => {
+    useFilingDecidedMock.mockReturnValue({
+      proposals: [filed("auto-1", true), filed("hand-1", false)],
+      mutate: vi.fn(),
+    });
+    const { container } = render(<RecentlyFiled onUndo={() => {}} busyId={null} />);
+
+    const chips = container.querySelectorAll(".filing-auto-chip");
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe("Droplet did this one");
+
+    // Both rows are still undoable. The chip explains provenance; it does not
+    // gate the reversal — the one an owner most wants to take back is exactly
+    // the one nobody chose.
+    expect(screen.getAllByRole("button", { name: "Undo" })).toHaveLength(2);
   });
 });

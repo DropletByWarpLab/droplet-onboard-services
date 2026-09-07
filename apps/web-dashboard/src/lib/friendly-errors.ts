@@ -53,6 +53,10 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "projects"
+  // WARP-2734 — connecting a mailbox. Its own domain because every code here
+  // is about somebody ELSE's mail server, and the remedy is always a field on
+  // the form rather than something to do on this Droplet.
+  | "email"
   | "device"
   | "storage"
   | "pairing"
@@ -75,6 +79,10 @@ export type ErrorDomain =
 /** Domain-fallback copy. NEVER `err.message`. */
 const FALLBACK: Record<ErrorDomain, string> = {
   auth: "We couldn't sign you in. Check your username and password, then try again.",
+  // WARP-2734. Says which end failed without guessing which: an unknown code
+  // here could be this Droplet or the mail server, and claiming either would
+  // be wrong half the time.
+  email: "We couldn't connect that mailbox. Check the details and try again.",
   files: "We couldn't load those files right now. Try again in a moment.",
   share:
     "We couldn't create that share link right now. Try again in a moment.",
@@ -565,6 +573,34 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
   // settings writes). Status-keyed: `updateDriveLabel` / `updatePoolLabel`
   // attach `err.status`, so a role-blocked or not-found rename gets
   // actionable copy instead of the fallback.
+  email: {
+    // 🔴 Names the field to fix, never the server's own words. An IMAP
+    // rejection string is attacker-influenced and routinely echoes the
+    // credential back ("LOGIN failed for user@example.com").
+    email_mailbox_refused:
+      "That mailbox didn't accept those details. Check the username and password, and that the server address and port are right.",
+    // The SSRF refusal, in the owner's terms. It does not say "private
+    // address" or "SSRF" — it says the box will not go there, which is the
+    // part that concerns them.
+    email_host_not_allowed:
+      "Droplet won't connect to that address — it points somewhere inside this Droplet's own network rather than out to a mail server.",
+    email_address_already_connected:
+      "That mailbox is already connected. Disconnect it first if you want to reconnect it with new details.",
+    // Not the owner's fault and not fixable on this form.
+    email_indexer_unavailable:
+      "Droplet's mail service isn't running on this Droplet, so it can't check the mailbox. An owner can turn Email on in Settings.",
+    human_required:
+      "Only a person signed in to this Droplet can connect a mailbox.",
+    account_not_found:
+      "That mailbox isn't connected anymore. Refresh and try again.",
+    invalid_request:
+      "Some of those details weren't valid. Check the form and try again.",
+    "403":
+      "You don't have permission to connect a mailbox. An owner or admin can do this.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
   storage: {
     "400":
       "That name can't be saved. Use 1–64 characters and try again.",

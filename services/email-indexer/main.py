@@ -47,13 +47,19 @@ def _run_fips_boot_self_test() -> None:
 _run_fips_boot_self_test()
 
 
-from fastapi import FastAPI
+import hmac
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import creds
 import db
 import mqtt_bridge
 import orchestrator_client
+import provision as provisioning
 from idle import IdleDeps, start_account_idle_loop
 from outbound import StatusCallback, send_one_draft
 from outbound_gate import OutboundGate
@@ -160,9 +166,98 @@ async def lifespan(_: FastAPI):
     await db.close_pool()
 
 
+SERVICE_TOKEN_EMAIL = os.environ.get("SERVICE_TOKEN_EMAIL", "").strip()
+EMAIL_ALLOW_NO_AUTH = os.environ.get("EMAIL_ALLOW_NO_AUTH", "").strip() == "1"
+
+#: `/health` is the only unauthenticated path, matching every other service on
+#: the box. It reports liveness and nothing about any account.
+_AUTH_EXEMPT_PATHS = {"/health"}
+
+
+class ServiceAuthMiddleware(BaseHTTPMiddleware):
+    """Reject every non-health request without a valid SERVICE_TOKEN_EMAIL.
+
+    🔴 FAILS CLOSED, and that is the whole reason it is written as
+    `if TOKEN: ... elif not ALLOW_NO_AUTH: refuse` rather than the `if TOKEN:`
+    that reads the same and is not the same. A blank token in production is a
+    failed secret injection, not permission to serve `/accounts/provision` —
+    which takes a mailbox password — to anything that can reach the port. The
+    dev escape hatch is explicit and named, per `service-auth-fail-closed`.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _AUTH_EXEMPT_PATHS:
+            return await call_next(request)
+        if SERVICE_TOKEN_EMAIL:
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip()
+            # Both operands encoded: a non-ASCII Authorization header makes
+            # hmac.compare_digest on two str args raise TypeError -> 500, where
+            # a clean 401 is the answer.
+            if not hmac.compare_digest(
+                token.encode("utf-8", "ignore"),
+                SERVICE_TOKEN_EMAIL.encode("utf-8"),
+            ):
+                return JSONResponse(status_code=401, content={"error": "unauthorized"})
+        elif not EMAIL_ALLOW_NO_AUTH:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "service token not configured"},
+            )
+        return await call_next(request)
+
+
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(ServiceAuthMiddleware)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+class ProvisionRequest(BaseModel):
+    """What the orchestrator sends to connect one mailbox.
+
+    🔴 `password` is the only field on this box that arrives as a third-party
+    plaintext secret. It exists in this process for the duration of one probe
+    and is never logged, never echoed, and never stored — `model_config`
+    forbids extra keys so a caller cannot smuggle one past the allow-list.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    useTls: bool = True
+    username: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/accounts/provision")
+async def provision_account(body: ProvisionRequest) -> JSONResponse:
+    """Verify a mailbox, and return its ciphertext only if it answered.
+
+    The orchestrator writes the row; this service never touches EmailAccount on
+    this path. That split is deliberate — see `provision.py`'s header.
+
+    🔴 The response carries a CIPHERTEXT and a closed-set reason, never the
+    plaintext and never the IMAP server's own words. A server's rejection
+    string is attacker-influenced and routinely echoes the credential back.
+    """
+    result, ciphertext = await provisioning.provision(
+        host=body.host,
+        port=body.port,
+        use_tls=body.useTls,
+        username=body.username,
+        password=body.password,
+    )
+    if not result.ok:
+        # 422, not 401: the REQUEST was well-formed and authenticated; the
+        # mailbox refused it. A 401 here would read as the orchestrator's own
+        # service token being wrong.
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "reason": result.reason},
+        )
+    return JSONResponse(status_code=200, content={"ok": True, "passwordEnc": ciphertext})

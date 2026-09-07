@@ -28,6 +28,16 @@ vi.mock("../config.js", () => ({
   config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
+// The signed-chain dual-write. Spread the real module so anything else in the
+// graph still gets the genuine signer accessors.
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn(async (_params: Record<string, unknown>) => null),
+}));
+vi.mock("./activity.singleton.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  recordActivity: recordActivityMock,
+}));
+
 import {
   validateConfirmToken,
   requestFactoryReset,
@@ -477,5 +487,106 @@ describe("getResetStatus", () => {
     const status = await getResetStatus(prisma as never);
     expect(status?.status).toBe("dispatched");
     expect(status?.targetName).toBe("droplet-home");
+  });
+});
+
+describe("requestFactoryReset — the signed activity chain", () => {
+  /**
+   * The transaction writes a CommandAuditLog row, and CommandAuditLog has no
+   * rendered surface anywhere in the dashboard. So the single most
+   * destructive action the product offers was missing from /admin/audit —
+   * the page sold as "the signed activity log, for humans".
+   *
+   * A completed reset destroys the chain and the signing key together, by
+   * design; these rows exist for the attempts that DON'T complete, where the
+   * box survives to be looked at.
+   */
+  beforeEach(() => {
+    recordActivityMock.mockClear();
+  });
+
+  it("appends a row for the request, after the transaction commits", async () => {
+    const { prisma } = makeFakePrisma();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "droplet-home",
+      targetName: "droplet-home",
+    });
+
+    const rows = recordActivityMock.mock.calls.map((c) => c[0] as any);
+    const requested = rows.find((r) => r.what === "Factory reset requested");
+    expect(requested).toBeDefined();
+    expect(requested.kind).toBe("system");
+    expect(requested.severity).toBe("warn");
+    expect(requested.actor).toEqual({ type: "user", id: "owner-1" });
+    expect(requested.refs.service).toBe("factory_reset");
+  });
+
+  it("never claims a reset that the transaction rolled back", async () => {
+    // The chain is append-only: a row written before the commit could not be
+    // corrected if the double-fire guard threw.
+    const { prisma, jobs } = makeFakePrisma();
+    jobs.push({
+      id: "job-existing",
+      status: "requested",
+      requestedBy: "owner-1",
+      targetName: "droplet-home",
+      failureReason: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toThrow(ResetError);
+
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("records an err row when the bridge refuses — the box is still here to look at", async () => {
+    const { prisma } = makeFakePrisma();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "busy" }), { status: 503 }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toThrow(ResetError);
+
+    const rows = recordActivityMock.mock.calls.map((c) => c[0] as any);
+    const failed = rows.find((r) => r.what === "Factory reset failed");
+    expect(failed).toBeDefined();
+    expect(failed.severity).toBe("err");
+    expect(failed.refs.outcome).toBe("failed");
+  });
+
+  it("records an err row when the bridge is unreachable", async () => {
+    const { prisma } = makeFakePrisma();
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toThrow(ResetError);
+
+    const rows = recordActivityMock.mock.calls.map((c) => c[0] as any);
+    expect(rows.some((r) => r.what === "Factory reset failed" && r.severity === "err")).toBe(true);
   });
 });

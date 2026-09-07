@@ -326,6 +326,10 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/crm/filing/summary", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/crm/filing/proposals", allowed: ["owner", "admin"] },
   { method: "patch", path: "/api/crm/filing/settings", allowed: ["owner", "admin"] },
+  // WARP-2733 — arming the auto-mode gate. Owner/admin AND a human: the route
+  // refuses a service principal separately, because this is the consent act
+  // that lets the box write to the CRM unattended.
+  { method: "post", path: "/api/crm/filing/canary", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/crm/filing/proposals/abc/apply", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/crm/filing/proposals/abc/reject", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/crm/filing/proposals/abc/not-same", allowed: ["owner", "admin"] },

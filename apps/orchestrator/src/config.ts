@@ -824,6 +824,19 @@ const envSchema = z.object({
   // rejects it at startup rather than silently treating it as disable.
   DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2751 — how long `MoneySnapshot` keeps DAILY rows before the tail is
+  // downsampled to one row per month. NOT a delete-older-than: beyond this
+  // window the month's closing value survives, so "how has our overdue balance
+  // moved over two years" still answers while the row count stops growing
+  // daily forever.
+  //
+  // 90 days matches the drift window above and is the shortest horizon that
+  // leaves a quarter-over-quarter ageing question answerable at daily grain.
+  // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
+  // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
+  // negative window is nonsensical input, so the schema rejects it at startup.
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
@@ -973,6 +986,20 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- Email indexer (WARP-2734 mailbox provisioning) ---
+  //
+  // The hop that lets an owner connect a mailbox at all. `services/email-indexer`
+  // owns the Fernet key at /data/secrets/email.key and the IMAP client, so it
+  // is the only process that can verify a mailbox and produce a `passwordEnc`;
+  // this orchestrator owns the `EmailAccount` row. Mounting the key here
+  // instead would put a new secret and a hand-rolled Fernet encoder into the
+  // process that already holds every other credential, to save one mesh hop.
+  //
+  // Defaulted like FILE_INDEXER_URL rather than left empty: the service is
+  // compose-internal, and a box that has the `email` profile has it at this
+  // name. A box that does not simply never reaches the route.
+  EMAIL_INDEXER_URL: z.string().default("http://email-indexer:8086"),
+
   // --- ERP direct-SQL bridge (WARP-1106) ---
   // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
   // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there
@@ -988,6 +1015,22 @@ const envSchema = z.object({
   // for a network problem that isn't there. The REST track (`eaglesoft-api`)
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
+
+  // WARP-2590 — the bridge's service bearer, minted per box by
+  // scripts/lib/secrets.sh and wired to BOTH ends via ${SERVICE_TOKEN_ERP_BRIDGE}.
+  //
+  // Read the `.env` name directly and do NOT re-declare it in compose as a
+  // `${VAR}` substitution: that resolves against docker/.env — a different,
+  // untracked file — and because `environment:` outranks `env_file:` the empty
+  // result SHADOWS the real value. That exact mistake blanked
+  // SERVICE_TOKEN_RAG_EVAL and 401'd 15 consecutive nightly eval runs.
+  //
+  // Empty is a legitimate state on a box with no ERP deployed (the bridge is
+  // profile-gated to "erp"), and it degrades the same honest way an empty
+  // ERP_SQL_BRIDGE_URL does: the connector keeps its blocked I/O boundary.
+  // Against a bridge that IS running, an empty token means 401 on every call —
+  // loudly, rather than looking like the practice's server is down.
+  SERVICE_TOKEN_ERP_BRIDGE: z.string().default(""),
 
   // --- ERP export-drop track (WARP-1964) ---
   // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports

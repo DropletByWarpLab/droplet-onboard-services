@@ -3,13 +3,25 @@
  * passed while the deal is still open.
  *
  * WHY THIS ONE AND NOT "GONE QUIET". The obvious deal detector is idleness, and
- * it is BLOCKED: `LandingDb` (erp-sync/land.ts:62) omits `crmActivity`, so every
- * vendor-synced deal has zero activity rows forever, and the shipped idle query
- * (`crm.service.ts:878` — `{ activities: { none: {} }, createdAt: { lt: cutoff } }`)
- * therefore reports the entire synced pipeline as neglected. Building on it
- * today would produce a wall of false positives on night one, which is the
- * fastest way to lose an operator's trust. WARP-2750 fixes that; this detector
- * deliberately does not depend on it.
+ * it WAS blocked: `LandingDb` omitted `crmActivity`, so every vendor-synced deal
+ * had zero activity rows forever and the idle query judged them all neglected.
+ * WARP-2750 has since widened that seam and the landing now writes a timeline
+ * row whenever the vendor's own values move — so the block is gone.
+ *
+ * TWO CORRECTIONS to what this comment used to say, both worth keeping because
+ * the second one changes the argument:
+ *
+ *   - it cited `crm.service.ts:878`, which is `jobTitle` in `crmContactToApi`.
+ *     The idle predicate is in `listDeals` (search for `opts.idleDays`).
+ *     Ticket line numbers in this repo rot; grep for the symbol.
+ *   - "reports the ENTIRE synced pipeline as neglected" overstated it. The
+ *     no-activity arm still tests `createdAt < cutoff`, so a freshly landed
+ *     deal is not idle — the arm is a grace window exactly `idle_days` long.
+ *     The bug was real for any connection older than that window, which is
+ *     every connection in practice, but it was never unconditional.
+ *
+ * This detector still does not depend on idleness, and the selection rule below
+ * is why.
  *
  * `expectedCloseOn` is different: it is set by a human or by the vendor, it is
  * indexed (`@@index([expectedCloseOn])`), and a date in the past on an open

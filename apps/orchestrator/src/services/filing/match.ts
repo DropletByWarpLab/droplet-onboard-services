@@ -141,6 +141,8 @@ export function longestSignificantWord(normalized: string): string | null {
 export interface MatchCandidate {
   companyId: string;
   name: string;
+  /** `origin === "EXTERNAL"` — a connector owns this row. */
+  isExternal?: boolean;
   /** Which key found it. */
   via: IngestMatchKind;
   /**
@@ -171,11 +173,30 @@ export type MatchOutcome =
       companyId: string;
       companyName: string;
       taught: boolean;
+      /**
+       * WARP-2733 — the matched row was landed by a connector.
+       *
+       * A vendor is the system of record for it, so anything Droplet wrote
+       * would be reverted by the next sync tick. The policy table refuses the
+       * whole class as NEVER; the matcher's job is only to say so.
+       */
+      targetIsExternal: boolean;
     }
   /** More than one plausible record. A person picks; never auto-applied. */
   | { kind: "AMBIGUOUS"; candidates: MatchCandidate[] }
-  /** Nothing matched. This is how a new customer gets proposed. */
-  | { kind: "NONE" };
+  /**
+   * Nothing matched. This is how a new customer gets proposed.
+   *
+   * `nearestScore` is how close the CLOSEST rejected candidate was, 0–1.
+   *
+   * 🔴 "No match" and "nothing like it exists" are different facts, and auto
+   * mode needs the second. The matcher only ever returns a key it TRUSTS, so
+   * `NONE` is routinely returned for a company that is plainly already there
+   * under a slightly different name — and creating in that situation produces
+   * the duplicate the matcher exists to prevent. The score is what lets the
+   * policy table refuse an unattended create on a near miss.
+   */
+  | { kind: "NONE"; nearestScore: number };
 
 export interface MatchInput {
   name?: string;
@@ -227,7 +248,7 @@ export async function matchCompany(
   if (taught?.companyId) {
     const company = await prisma.crmCompany.findUnique({
       where: { id: taught.companyId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, origin: true },
     });
     if (company) {
       return {
@@ -242,6 +263,7 @@ export async function matchCompany(
         companyId: company.id,
         companyName: company.name,
         taught: true,
+        targetIsExternal: company.origin === "EXTERNAL",
       };
     }
     // The taught company was deleted. Fall through to the search rather than
@@ -271,7 +293,11 @@ export async function matchCompany(
         addressLower: true,
         contact: {
           select: {
-            companyLinks: { select: { company: { select: { id: true, name: true, isArchived: true } } } },
+            companyLinks: {
+              select: {
+                company: { select: { id: true, name: true, isArchived: true, origin: true } },
+              },
+            },
           },
         },
       },
@@ -285,6 +311,7 @@ export async function matchCompany(
           name: link.company.name,
           via: "EMAIL",
           viaValue: row.addressLower,
+          isExternal: link.company.origin === "EXTERNAL",
         });
       }
     }
@@ -295,13 +322,19 @@ export async function matchCompany(
   if (domains.length > 0) {
     const byDomain = await prisma.crmCompany.findMany({
       where: { domain: { in: domains }, isArchived: false },
-      select: { id: true, name: true, domain: true },
+      select: { id: true, name: true, domain: true, origin: true },
       take: 25,
     });
     for (const c of byDomain) {
       // The company's own stored domain, already normalised on write, so the
       // taught key and the lookup key are the same string.
-      push({ companyId: c.id, name: c.name, via: "DOMAIN", viaValue: c.domain ?? "" });
+      push({
+        companyId: c.id,
+        name: c.name,
+        via: "DOMAIN",
+        viaValue: c.domain ?? "",
+        isExternal: c.origin === "EXTERNAL",
+      });
     }
   }
   if (found.length === 1) return single(found[0]);
@@ -326,19 +359,67 @@ export async function matchCompany(
     const needle = longestSignificantWord(nameKey) ?? nameKey;
     const byName = await prisma.crmCompany.findMany({
       where: { name: { contains: needle, mode: "insensitive" }, isArchived: false },
-      select: { id: true, name: true },
+      select: { id: true, name: true, origin: true },
       take: NAME_CANDIDATE_CAP,
     });
     for (const c of byName) {
       if (normalizeCompanyName(c.name) === nameKey) {
-        push({ companyId: c.id, name: c.name, via: "NAME", viaValue: nameKey });
+        push({
+          companyId: c.id,
+          name: c.name,
+          via: "NAME",
+          viaValue: nameKey,
+          isExternal: c.origin === "EXTERNAL",
+        });
       }
     }
   }
 
   if (found.length === 1) return single(found[0]);
   if (found.length > 1) return { kind: "AMBIGUOUS", candidates: found.slice(0, 5) };
-  return { kind: "NONE" };
+
+  // Nothing was trusted. Before saying so, ask HOW CLOSE the nearest thing was
+  // — the answer is what stops auto mode minting a near-duplicate.
+  return { kind: "NONE", nearestScore: nameKey ? await nearestScoreFor(prisma, nameKey) : 0 };
+}
+
+/**
+ * How similar the closest existing company name is, 0–1.
+ *
+ * Token overlap on the suffix-stripped names, not an edit distance: business
+ * names differ by whole WORDS ("Northgate Dental" vs "Northgate Dental Lab"),
+ * and a character metric scores that pair as nearly identical while calling
+ * "ACME Ltd" and "ACNE Ltd" — two unrelated companies — nearly identical too.
+ * Overlap answers the question actually being asked: does this name share most
+ * of its distinctive words with one we already have?
+ *
+ * Deliberately NOT used to MATCH. It only ever makes the policy table more
+ * cautious; a high score refuses an unattended create, it never causes a link.
+ */
+export async function nearestScoreFor(prisma: PrismaClient, nameKey: string): Promise<number> {
+  const needle = longestSignificantWord(nameKey);
+  if (!needle) return 0;
+  const rows = await prisma.crmCompany.findMany({
+    where: { name: { contains: needle, mode: "insensitive" }, isArchived: false },
+    select: { name: true },
+    take: NAME_CANDIDATE_CAP,
+  });
+
+  const want = new Set(nameKey.split(/\s+/).filter((w) => w.length >= 3));
+  if (want.size === 0) return 0;
+
+  let best = 0;
+  for (const row of rows) {
+    const got = new Set(normalizeCompanyName(row.name).split(/\s+/).filter((w) => w.length >= 3));
+    if (got.size === 0) continue;
+    let shared = 0;
+    for (const w of want) if (got.has(w)) shared += 1;
+    // Jaccard: shared over the union, so a long name sharing one word with a
+    // short one does not score highly in either direction.
+    const union = new Set([...want, ...got]).size;
+    best = Math.max(best, shared / union);
+  }
+  return best;
 }
 
 function single(c: MatchCandidate): MatchOutcome {
@@ -349,5 +430,6 @@ function single(c: MatchCandidate): MatchOutcome {
     companyId: c.companyId,
     companyName: c.name,
     taught: false,
+    targetIsExternal: c.isExternal === true,
   };
 }
