@@ -2133,6 +2133,13 @@ services:
       - ERP_DB_RW_USER=${ERP_DB_RW_USER:-droplet_rw}
       - ERP_ODBC_DRIVER=${ERP_ODBC_DRIVER:-SQL Anywhere 17}
       - ERP_DB_ENCRYPTION=${ERP_DB_ENCRYPTION:-NONE}
+      # WARP-2590: the service bearer. NOT declared here as a `${VAR}`
+      # substitution on purpose — `env_file: ../.env` above already delivers
+      # SERVICE_TOKEN_ERP_BRIDGE, and re-declaring it would resolve against
+      # docker/.env (a different, untracked file) and, because `environment:`
+      # outranks `env_file:`, SHADOW the real value with "". That is exactly
+      # how SERVICE_TOKEN_RAG_EVAL got blanked and 401'd 15 nightly runs.
+      # The bridge fails CLOSED without it (503 BRIDGE_NOT_PROVISIONED).
     healthcheck:
       # /health returns 200 with ok:false when the practice's DB is
       # unreachable — that is the honest answer, and it is deliberately NOT a

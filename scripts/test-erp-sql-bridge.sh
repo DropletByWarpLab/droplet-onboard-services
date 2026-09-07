@@ -140,6 +140,14 @@ echo "--- pytest (services/erp-sql-bridge, live database) ---"
 BRIDGE_PORT="${ERP_BRIDGE_PORT:-9391}"
 BRIDGE_LOG="$RUN_DIR/bridge.log"
 
+# WARP-2590 — the bridge refuses every route except /health without this, so
+# the lane must provision one exactly as scripts/lib/secrets.sh does on a box.
+# Exported (not passed inline) so BOTH halves see the same value: the uvicorn
+# process below reads it from the environment, and the vitest client presents
+# it. That makes this lane cover the REAL authenticated path — a lane that ran
+# with the gate disabled would prove nothing about what ships.
+export SERVICE_TOKEN_ERP_BRIDGE="${SERVICE_TOKEN_ERP_BRIDGE:-$(openssl rand -hex 32)}"
+
 echo "--- starting the bridge on :${BRIDGE_PORT} ---"
 (cd "$BRIDGE_DIR" && python -m uvicorn main:app --host 127.0.0.1 --port "$BRIDGE_PORT" --log-level warning >"$BRIDGE_LOG" 2>&1) &
 BRIDGE_PID=$!
