@@ -46,7 +46,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import { receivablesAgeing, MIN_SERIES_DAYS } from "../services/brain/detectors/receivables-ageing";
+import {
+  receivablesAgeing,
+  MIN_SERIES_DAYS,
+  WINDOW_DAYS,
+} from "../services/brain/detectors/receivables-ageing";
 import { SUBJECT_ERP_DOCUMENT } from "../services/erp-sync/money-snapshot.service";
 
 vi.unmock("@prisma/client");
@@ -62,10 +66,38 @@ const OURS = { startsWith: P } as const;
 const ERA_START = new Date("2033-01-01T00:00:00.000Z");
 const ERA_END = new Date("2034-01-01T00:00:00.000Z");
 
-/** The two endpoints. 40 days apart, comfortably over MIN_SERIES_DAYS and
- *  inside the 90-day daily-retention window. */
-const THEN = new Date("2033-05-01T00:00:00.000Z");
 const NOW = new Date("2033-06-10T00:00:00.000Z");
+
+/**
+ * The anchor endpoint, DERIVED from the detector's own window rather than
+ * written as a literal.
+ *
+ * 🔴 The first version of this file hard-coded 2033-05-01 — forty days back,
+ * which is OUTSIDE the detector's thirty-day comparison window. `bounds.anchor`
+ * is the oldest day AT OR AFTER `now - WINDOW_DAYS`, so that row was filtered
+ * out, anchor collapsed onto latest, the span was zero and the short-series
+ * guard correctly refused. Four cases then asserted a finding against a
+ * detector that was behaving exactly as designed.
+ *
+ * That is a fixture bug and not a detector bug, and it is the reason this value
+ * is now computed: a literal date cannot notice that WINDOW_DAYS changed.
+ */
+const SPAN_DAYS = Math.floor((WINDOW_DAYS + MIN_SERIES_DAYS) / 2); // 22
+const THEN = new Date(NOW.getTime() - SPAN_DAYS * 86_400_000);
+
+/** The fixture is only meaningful between the two bounds, so pin that here
+ *  rather than discovering it as four mystery failures in the pg lane. */
+if (SPAN_DAYS >= WINDOW_DAYS || SPAN_DAYS < MIN_SERIES_DAYS) {
+  throw new Error(
+    `receivables-ageing fixture span ${SPAN_DAYS}d must sit within ` +
+      `[${MIN_SERIES_DAYS}, ${WINDOW_DAYS}) — the detector cannot report otherwise`,
+  );
+}
+
+/** Due before the anchor: overdue at BOTH endpoints. */
+const DUE_BEFORE_ANCHOR = new Date(THEN.getTime() - 20 * 86_400_000);
+/** Due between the anchor and now: overdue at the LATEST endpoint only. */
+const DUE_BETWEEN = new Date(THEN.getTime() + 5 * 86_400_000);
 
 describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => {
   let prisma: PrismaClient;
@@ -200,7 +232,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
   it("reports a growing overdue book, with the INCREASE as its impact", async () => {
     // Overdue on both days (due before THEN), and the balance grew.
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "10000.00");
     await snap(a.id, NOW, "30000.00");
 
@@ -215,19 +247,19 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     expect(f.title).toContain("200%");
     // Both endpoints are cited, so a reviewer can re-query the series.
     expect(f.evidence.sources).toHaveLength(2);
-    expect(f.evidence.sources[0]!.sourceId).toContain("2033-05-01");
-    expect(f.evidence.sources[1]!.sourceId).toContain("2033-06-10");
+    expect(f.evidence.sources[0]!.sourceId).toContain(THEN.toISOString().slice(0, 10));
+    expect(f.evidence.sources[1]!.sourceId).toContain(NOW.toISOString().slice(0, 10));
   });
 
   it("does NOT count a document that was not yet overdue at the anchor", async () => {
     // Due AFTER the anchor day: it belongs to the NOW total only. Without the
     // as-of-day rule this would be counted at both ends and the book would look
     // flat; with it, the rise is real and attributable.
-    const old = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const old = await invoice(DUE_BEFORE_ANCHOR);
     await snap(old.id, THEN, "10000.00");
     await snap(old.id, NOW, "10000.00");
 
-    const fresh = await invoice(new Date("2033-06-01T00:00:00.000Z"));
+    const fresh = await invoice(DUE_BETWEEN);
     await snap(fresh.id, THEN, "40000.00"); // present in the series, NOT yet due
     await snap(fresh.id, NOW, "40000.00");
 
@@ -241,7 +273,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     // The honesty guard. Both endpoints exist and the book tripled, but three
     // days is not a trend and must not be described as one.
     const near = new Date(NOW.getTime() - 3 * 86_400_000);
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, near, "10000.00");
     await snap(a.id, NOW, "90000.00");
 
@@ -252,11 +284,11 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
   it("reads the SNAPSHOT's status, not the document's today", async () => {
     // Settled on the anchor day, open now: it contributed nothing then and
     // everything now. Reading today's word at both ends would erase the past.
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "10000.00", { status: "Paid" });
     await snap(a.id, NOW, "10000.00", { status: "Open" });
 
-    const b = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const b = await invoice(DUE_BEFORE_ANCHOR);
     await snap(b.id, THEN, "8000.00");
     await snap(b.id, NOW, "8000.00");
 
@@ -267,11 +299,11 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
   });
 
   it("keeps currencies apart — never one summed total", async () => {
-    const usd = await invoice(new Date("2033-04-01T00:00:00.000Z"), "USD");
+    const usd = await invoice(DUE_BEFORE_ANCHOR, "USD");
     await snap(usd.id, THEN, "10000.00", { currency: "USD" });
     await snap(usd.id, NOW, "30000.00", { currency: "USD" });
 
-    const eur = await invoice(new Date("2033-04-01T00:00:00.000Z"), "EUR");
+    const eur = await invoice(DUE_BEFORE_ANCHOR, "EUR");
     await snap(eur.id, THEN, "5000.00", { currency: "EUR" });
     await snap(eur.id, NOW, "20000.00", { currency: "EUR" });
 
@@ -285,11 +317,11 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
   });
 
   it("ignores BILLs — those are money owed BY the business", async () => {
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "10000.00");
     await snap(a.id, NOW, "10000.00");
 
-    const b = await bill(new Date("2033-04-01T00:00:00.000Z"));
+    const b = await bill(DUE_BEFORE_ANCHOR);
     await snap(b.id, THEN, "1000.00");
     await snap(b.id, NOW, "90000.00");
 
@@ -299,11 +331,11 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
   });
 
   it("ignores LOCAL documents, like its sibling does", async () => {
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "10000.00");
     await snap(a.id, NOW, "10000.00");
 
-    const l = await localInvoice(new Date("2033-04-01T00:00:00.000Z"));
+    const l = await localInvoice(DUE_BEFORE_ANCHOR);
     await snap(l.id, THEN, "1000.00");
     await snap(l.id, NOW, "80000.00");
 
@@ -311,7 +343,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
   });
 
   it("stays silent when the book SHRANK", async () => {
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "40000.00");
     await snap(a.id, NOW, "10000.00");
     await expect(run()).resolves.toEqual([]);
@@ -319,7 +351,7 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
   it("stays silent on a rise below the ratio gate", async () => {
     // +10%: a book breathing, not a book ageing.
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "100000.00");
     await snap(a.id, NOW, "110000.00");
     await expect(run()).resolves.toEqual([]);
@@ -327,14 +359,14 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
 
   it("stays silent on a big ratio whose absolute increase is trivial", async () => {
     // Up 300% — and by four dollars. Both gates must clear, and this is why.
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "2.00");
     await snap(a.id, NOW, "8.00");
     await expect(run()).resolves.toEqual([]);
   });
 
   it("skips a zero-balance snapshot row", async () => {
-    const a = await invoice(new Date("2033-04-01T00:00:00.000Z"));
+    const a = await invoice(DUE_BEFORE_ANCHOR);
     await snap(a.id, THEN, "0.00");
     await snap(a.id, NOW, "0.00");
     await expect(run()).resolves.toEqual([]);
