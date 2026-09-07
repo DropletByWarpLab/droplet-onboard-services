@@ -550,6 +550,44 @@ export async function fetchUsers(): Promise<{ users: RosterUser[] }> {
   return res.json();
 }
 
+/** One live session as /admin/sessions shows it. No sid — see the route. */
+export interface LiveSession {
+  role: string;
+  /** Epoch SECONDS (not ms) — the session store's own unit. */
+  createdAt: number;
+  lastSeenAt: number;
+  idleDeadline: number;
+  absoluteDeadline: number;
+}
+
+export interface SessionsForUser {
+  username: string;
+  displayName: string | null;
+  role: string;
+  /** `null` means the box could not read this person's sessions. It is NOT
+   *  "signed out" — rendering it as an empty list would tell an operator that
+   *  a departing employee had been cut off when nobody had checked. */
+  sessions: LiveSession[] | null;
+}
+
+export async function fetchSessions(): Promise<{ users: SessionsForUser[] }> {
+  const res = await authFetch(`${BASE}/api/auth/sessions`);
+  if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`);
+  return res.json();
+}
+
+/** Ends every live session for one person. Already-issued access tokens die at
+ *  the next middleware check; see WARP-116/WARP-247 on the route. */
+export async function revokeUserSessions(
+  username: string,
+): Promise<{ status: string; revoked: number }> {
+  const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}/revoke-sessions`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to revoke sessions: ${res.status}`);
+  return res.json();
+}
+
 export async function createUser(
   email: string,
   password: string,
