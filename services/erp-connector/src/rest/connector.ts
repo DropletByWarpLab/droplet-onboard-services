@@ -399,6 +399,14 @@ export class RestProfileConnector implements Connector {
    *
    * both BEFORE the credential resolves — so a refused destination costs zero
    * fetch calls and never touches the key. Then the credential, then the pace.
+   * And then, on the request itself and on the answer:
+   *
+   *   3. `redirect: "error"`, plus an explicit refusal of any 3xx that reaches
+   *      us anyway. Guards 1 and 2 settle a URL; a followed redirect changes
+   *      the destination AFTER they have passed and WITH the credential
+   *      attached, which makes them advisory rather than enforcement. Thirteen
+   *      sibling connectors already set the option; this track is the choke
+   *      point for all twenty-eight ADR-046 §2 vendors at once.
    *
    * 🔴 The tests for every refusal assert `fetch` was called ZERO times, never
    * merely that an error was thrown. A test that inspects the outcome still
@@ -446,11 +454,54 @@ export class RestProfileConnector implements Connector {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
     try {
-      response = await doFetch(target, { method: "GET", headers, signal: controller.signal });
+      response = await doFetch(target, {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+        // 🔴 (3) `redirect: "error"` — WITHOUT this the host guard above is
+        // ADVISORY, not enforcement. `fetch` defaults to `redirect: "follow"`,
+        // so a vendor (or anything that can answer as the customer's
+        // per-account host) replies 302 and the runtime re-issues the request
+        // wherever the `Location` header points — AFTER both guards have
+        // passed, and with the credential header attached. The guard checked a
+        // URL; the redirect changed the destination behind it.
+        //
+        // The house pattern, not an invention here: thirteen sibling
+        // connectors already set it, `mcp-bridge` documents this exact bypass,
+        // and `profile.ts`'s `link-header` arm names it. It matters more on
+        // this track than on any of them — those are one vendor each, this one
+        // is the choke point for the twenty-eight ADR-046 §2 surveyed, ten of
+        // which assemble their host per account and so have no static egress
+        // pattern in CI at all.
+        redirect: "error",
+      });
     } catch (error) {
       throw this.blocked(op, error instanceof Error ? error.message : String(error));
     } finally {
       clearTimeout(timer);
+    }
+
+    // 🔴 The second half of the redirect guard, and it is not redundant.
+    //
+    // `redirect: "error"` above is what a CONFORMING fetch honours, and under
+    // it a 3xx never reaches this line. This does reach it in the two cases
+    // that matter: an injected `fetchImpl` (every test on this track, and any
+    // caller that supplies its own) that does not implement the option, and a
+    // future runtime swap. Refusing the status explicitly is what makes "the
+    // redirect was NOT followed" an assertable property rather than a promise
+    // about undici's internals — and `response.redirected` catches a fetch that
+    // followed one before handing the answer back.
+    //
+    // Typed `UnsafeBaseUrlError`, deliberately: a redirect off the registered
+    // origin is a DESTINATION refusal, the same family as the host guard's. It
+    // is not a vendor outage and it is not a bad key, and the hub renders those
+    // three differently.
+    if ((response.status >= 300 && response.status < 400) || response.redirected === true) {
+      throw new UnsafeBaseUrlError(
+        this.provider,
+        `the vendor answered ${response.status} with a redirect; this track never follows one, ` +
+          `because the destination it points at has not passed the host guard and the request carries the credential`,
+      );
     }
 
     if (response.status === 401 || response.status === 403) {

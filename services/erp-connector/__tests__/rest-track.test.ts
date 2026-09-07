@@ -678,6 +678,98 @@ describe("RestProfileConnector", () => {
   });
 });
 
+// ── redirects ───────────────────────────────────────────────────────────────
+
+describe("redirects — the host guard is enforcement only because none are followed", () => {
+  it("🔴 asks fetch for redirect: 'error' on EVERY request", async () => {
+    // Without this option `fetch` defaults to `redirect: "follow"`, and the
+    // runtime re-issues the request at the `Location` header — after both host
+    // guards have passed, and with the credential attached. The guard would be
+    // checking a URL while something else chose the destination.
+    // Mutation: delete `redirect: "error"` from the init object -> red.
+    const { impl, calls } = stubFetch([
+      { body: { data: [{ id: "a" }], meta: { next: "t" } } },
+      { body: { data: [] } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await c.connect();
+    await c.runRead("get_company", {});
+
+    // connect() probes, introspect() is local, then the read walks two pages.
+    expect(calls.length).toBeGreaterThan(1);
+    for (const call of calls) expect(call.init.redirect).toBe("error");
+  });
+
+  it("🔴 refuses a 302 and does NOT follow it — fetch is called EXACTLY ONCE", async () => {
+    // THE assertion is the call count. An implementation that followed the
+    // redirect would also end in an error here (the second hop returns the same
+    // 302 forever), so a test that inspected only the thrown error would pass
+    // over a connector that had already shipped the customer's credential to
+    // whatever host the `Location` header named.
+    // Mutation: drop the 3xx branch in `request()` -> the stub's `ok: false`
+    // sends this down the RestVendorError path instead -> red on the type.
+    const { impl, calls } = stubFetch([
+      { body: {}, status: 302, headers: { location: "https://evil.example.net/v1/companies" } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+
+    await expect(c.runRead("get_company", {})).rejects.toThrow(UnsafeBaseUrlError);
+    expect(calls).toHaveLength(1);
+    // And the ONE call that went out went to the registered origin, not to the
+    // host the redirect named.
+    expect(new URL(calls[0]!.url).host).toBe("api.example.com");
+  });
+
+  it("🔴 refuses a 3xx on connect() too, before a schedule ever runs", async () => {
+    // `connect()` is where an owner is watching. A redirect met here must be
+    // refused as a DESTINATION problem — not reported as a bad key, which would
+    // send them to their vendor console to rotate a credential that is fine.
+    const { impl, calls } = stubFetch([{ body: {}, status: 307 }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.connect()).rejects.toThrow(UnsafeBaseUrlError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("🔴 refuses an answer a non-conforming fetch already followed", async () => {
+    // `response.redirected` is the only evidence left when an injected or
+    // future fetch ignores the option and hands back the FINAL response. 200,
+    // a body that parses, and the credential already gone — the status check
+    // alone cannot see it.
+    // Mutation: drop `|| response.redirected === true` -> red.
+    const calls: { url: string; init: RequestInit }[] = [];
+    const impl = (async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        redirected: true,
+        headers: { get: () => null } as unknown as Headers,
+        json: async () => ({ data: [] }),
+        text: async () => "{}",
+      } as unknown as Response;
+    }) as never;
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(UnsafeBaseUrlError);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 
 // ── Link header pagination ──────────────────────────────────────────────────
 
