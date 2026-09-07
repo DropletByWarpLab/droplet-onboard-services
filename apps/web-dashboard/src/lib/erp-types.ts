@@ -56,7 +56,18 @@ export type ConnectorId =
   // checking.
   | "brevo"
   | "klaviyo"
-  | "pipedrive";
+  | "pipedrive"
+  // WARP-2707 / ADR-046 — the first two vendors on the DECLARATIVE REST track.
+  // Widened by hand like every literal above, and for a reason the new track
+  // makes sharper rather than weaker: `hubCardFor` routes `rest` through the
+  // SAME arm as `cloud` on purpose (a "declarative" connector is not a thing a
+  // practice owner can see), so a rest card reaches `descriptor.catalog.id as
+  // ConnectorId` by exactly the path a cloud card does, and nothing but this
+  // union stands between it and a tile `useIntegrations` cannot key status
+  // onto. Deriving the union from `catalogDescriptors()` would satisfy the
+  // cast by deleting the check.
+  | "square"
+  | "calcom";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

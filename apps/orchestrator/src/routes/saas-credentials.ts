@@ -88,7 +88,13 @@ const patchSchema = z
  *  connect surface an MCP track has — it puts no card on the hub — so leaving
  *  it out is what kept #1964's third gate unsatisfiable. */
 function configurableDescriptors() {
-  return providerDescriptors().filter((d) => d.track === "cloud" || d.track === "mcp");
+  // WARP-2707 — `rest` is exactly what this route exists for: a vendor whose
+  // credential the CUSTOMER mints and pastes. Omit it and the credential form
+  // never renders and its PATCH 404s, so the owner has no way to enter the key
+  // for any of the twenty-eight vendors the track was built to carry.
+  return providerDescriptors().filter(
+    (d) => d.track === "cloud" || d.track === "rest" || d.track === "mcp",
+  );
 }
 
 type IntegrationPrisma = Pick<PrismaClient, "integrationConnection">;

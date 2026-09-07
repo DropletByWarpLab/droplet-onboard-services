@@ -1,6 +1,6 @@
 # ADR-046 — The declarative REST connector track
 
-**Status:** Proposed
+**Status:** Accepted — the track landed on WARP-2707, 2026-09-07. See *Implementation record* below.
 **Date:** 2026-09-03
 **Ticket:** WARP-2707
 **Supersedes nothing. Extends:** [ADR-041](ADR-041-cloud-connector-class.md) (cloud connector class), [ADR-042](ADR-042-customer-supplied-credentials.md) (customer-supplied credentials), WARP-2217 (provider descriptors)
@@ -113,3 +113,82 @@ Unchanged from the cloud track, and restated because volume is the risk: `script
 * **Vendor waves**, each its own ticket, guide, egress entry and ADR-042 row. Suggested order by cleanliness (static host, one auth header, documented per-dataset watermark, datasets that already exist in the vocabulary): **Brevo → Klaviyo → Pipedrive → Zoho CRM → Square → GitHub → GitLab**.
 * **Dataset vocabulary widening** is required before the HR, scheduling, storage and task-tracker vendors can declare what they serve honestly. `DATASET_NAMES` is a closed union of 23 mirrored in two packages, with three *total* `Record`s keyed off it and `@ts-expect-error` fixtures in `vocabulary-contract.ts` that fail in both directions. That is a deliberate, gated change and its own ticket — not an append.
 * **Vendors excluded by the survey, recorded so they are not re-researched:** Notion (**refuted to NOT_FREE** — the free internal-integration path no longer holds), Wave (API moved behind Wave Pro, 2025-05-26), NexHealth (one org-wide key spans every practice — the application-wide credential ADR-042 model 2 prohibits), Slack (ADR-042 §7 — the sole operator-registered case; **Romain owns that call, WARP-2373**, and nothing here pre-empts it).
+
+---
+
+## Implementation record — 2026-09-07 (WARP-2707)
+
+The track shipped as specified. `RestVendorProfile` + `RestProfileConnector` +
+`restProfileFor()` live in `services/erp-connector/src/rest/`, dispatched from
+`connectorFactoryFor` ahead of the static factory map, exactly as export-drop is.
+`ProviderTrack` gained `"rest"`, sharing the `cloud` arm of `ProviderDescriptor` so
+that `CloudProviderCatalogMeta`'s required `setupGuideHref` keeps applying — a
+separate arm would have dropped §5's guide rule silently.
+
+**Two profile fields were added beyond §2's list**, each admitted under §2's own
+criterion (a field must name a real, verified failure):
+
+* `FieldTransform: "minor-units"` — Square returns money as integer minor units and
+  a dotted path cannot divide. The divisor is not always 100 (JPY is ISO-4217
+  exponent 0), so the transform reads the row's own currency. Without it every
+  Square amount lands 100× too large, silently.
+* `absentRowsMeansEmpty` — Square OMITS the rows array on an empty result (`{}`, not
+  `{"payments": []}`), so a healthy account with no rows read as a broken connection.
+* `probePath` — not a §2 field but a contract one: `integrations.service.ts` treats a
+  successful `health()` as the evidence a pasted key works, so the track must make a
+  real authenticated round trip. Resolving the credential locally would let a revoked
+  key be written CONNECTED and fail hours later, unattended.
+
+### The vendor programme, re-scoped against the evidence
+
+Four vendors were taken to build-spec depth and each spec adversarially refuted
+against the vendor's own documentation. The §2 suggested order did not survive
+contact with the sources:
+
+* 🔴 **Open Dental — DO NOT BUILD on this track.** Its REST API fails ADR-042 on two
+  independent grounds, either fatal. The `DeveloperKey` is issued to Warp Lab only
+  after an emailed application (company name, billing address, requested permission
+  list) reviewed in one to three business days — a fleet-wide application credential
+  of exactly the shape ADR-042 §1 model 2 declares not permitted, and the shape that
+  already disqualified NexHealth. The `CustomerKey` is then generated *by the
+  developer* in the portal, so Warp Lab would mint and hold the practice's credential
+  before the practice ever saw it; Warp Lab is also the party on file for per-location
+  billing. A BAA per practice is required on top. The practice's only control is
+  enable/disable. **The existing `opendental` catalog placeholder should stay
+  `track: "catalog"`, and its LAN direct-database path (whose ADR-042 §7 row is
+  already clear) is the one worth building.**
+* **Zoho CRM — deferred, not rejected.** Custody is clean (Self Client, minted by the
+  owner) but it needs two structural things this track does not have: TWO independent
+  per-account hosts (an accounts host for the token exchange and the `api_domain`
+  returned in that response — `RestBaseUrl` models one), and an OAuth refresh-token
+  exchange, which is control flow the declarative track deliberately lacks. Also
+  refuted: `api_domain` is not always a `www.zohoapis.*` host, so a zohoapis-only
+  allow-set is not sufficient.
+* **Square — shipped, at three datasets of eight.** `charge`, `refund` and `payout`
+  only. `order` needs a POST search body; `invoice` requires a `location_id` fan-out
+  and has no total-money field at all; `product` needs a second endpoint for inventory
+  and a client-side join; `customer` has no watermark of any kind. `appointment` is a
+  vocabulary question, not a mapping one (below). Each omission is written out in
+  `rest/vendors/square.ts` rather than left to be discovered.
+* **Cal.com — shipped, hosted only.** `api.cal.com` is a static host (the earlier note
+  calling it dynamic was wrong). Self-hosted `cal.diy` runs a *different* API contract
+  (`take`/`skip`, a different `cal-api-version`, a feature-reduced build) and is a
+  second profile, not a variable host on this one.
+
+### 🔴 The finding that should shape the next ticket
+
+**The declarative track is not the bottleneck any more; the dataset vocabulary is.**
+Within the closed 23 names, nearly every slot a FREE_NOW vendor could fill is already
+taken by a hand-written connector — which is why this wave found only three clean
+datasets across four researched vendors. Two independent vendors hit the *same* wall
+from opposite directions: Cal.com and Square Appointments both map onto `appointment`,
+whose canonical columns (`patient_id`, `operatory_id`) are the dental
+practice-management vocabulary from WARP-1964. Neither vendor has an honest source for
+either column. Cal.com ships with both pinned `undefined` and a test that keeps them
+that way; Square's `appointment` is not shipped at all pending that call.
+
+So the follow-up below — *"dataset vocabulary widening is required before the HR,
+scheduling, storage and task-tracker vendors can declare what they serve honestly"* —
+is not a later nicety. It is the gate on the remaining ~127 vendors, and it should be
+the next ticket rather than a fifth vendor.
+

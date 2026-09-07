@@ -183,6 +183,31 @@ export type ProviderTrack =
    *  `providerConfig` and its credentials from `providerTokensEnc`, so the LAN
    *  columns are unused. */
   | "cloud"
+  /**
+   * WARP-2707 / ADR-046 — reaches a vendor SaaS through the DECLARATIVE REST
+   * track: one `RestProfileConnector` serving N vendors, each a
+   * `RestVendorProfile` of pure data.
+   *
+   * Identical to `cloud` in every respect this union discriminates on — it
+   * takes its identity from `providerConfig`, its credential from
+   * `providerTokensEnc`, it declares datasets, it is scheduled, budgeted and
+   * swept by the machinery that already exists, and it must carry a setup
+   * guide. It shares the `cloud` arm below FOR THAT REASON: a separate arm
+   * with a plain `ProviderCatalogMeta` would silently drop the
+   * required-`setupGuideHref` gate for exactly the twenty-eight vendors
+   * ADR-046 §5 says are most at risk of shipping without one.
+   *
+   * The one thing that makes it a distinct TRACK rather than a flag on
+   * `cloud`: dispatch. `connectorFactoryFor` consults `restProfileFor(provider)`
+   * before the static factory map, exactly as it consults
+   * `vendorFromExportProvider`. A `cloud` provider has a hand-written
+   * `Connector`; a `rest` provider has none and must not be looked up in a map
+   * that will not have it.
+   *
+   * 🔴 READ-ONLY BY CONSTRUCTION (ADR-046 §4). `applyWrite` throws on this
+   * track and there is no descriptor field that could turn it on.
+   */
+  | "rest"
   /** A hub catalog card with NO shipped track. Never buildable, never a valid
    *  `IntegrationConnection.provider`. Explicit rather than inferred from an
    *  absent factory — absence is never a silent anything. */
@@ -584,8 +609,15 @@ export type ProviderDescriptor =
       readonly track: "lan" | "catalog";
       readonly catalog?: ProviderCatalogMeta;
     })
+  // `rest` (WARP-2707) shares this arm rather than getting its own, and that is
+  // the load-bearing choice: `CloudProviderCatalogMeta` is what makes
+  // `setupGuideHref` REQUIRED at `availability: "available"`, and ADR-046 §5
+  // makes a guide non-negotiable for exactly this track — *"a profile without a
+  // guide is a connector the owner cannot use, and at 28 vendors the temptation
+  // to batch the profiles and defer the guides is precisely what this clause
+  // forbids."* A separate arm would have dropped that gate silently.
   | (ProviderDescriptorBase & {
-      readonly track: "cloud";
+      readonly track: "cloud" | "rest";
       readonly catalog?: CloudProviderCatalogMeta;
     })
   | McpProviderDescriptor;

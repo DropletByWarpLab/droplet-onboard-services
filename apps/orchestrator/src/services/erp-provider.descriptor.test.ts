@@ -126,6 +126,31 @@ const SAAS_PROVIDERS_WARP_2214 = [
  */
 const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
 
+/**
+ * WARP-2707 / ADR-046 — the first two vendors on the DECLARATIVE REST track.
+ *
+ * Its own const for the reason every const above is its own: each records what
+ * shipped on one ticket, and folding these into an older list would turn a
+ * regression anchor into a running total.
+ *
+ * What makes this list different in kind from the ones above: these two
+ * providers register NO connector factory. `track: "rest"` means their
+ * behaviour is a `RestVendorProfile` in
+ * `services/erp-connector/src/rest/vendors/`, and `connectorFactoryFor`
+ * resolves them through `restProfileFor(provider)` before consulting the static
+ * factory map — exactly as it resolves the export-drop family through
+ * `vendorFromExportProvider`. So the "every buildable descriptor can actually
+ * be built" assertion below is a REAL check for these two, not a formality: it
+ * is the only thing proving the profile-dispatch branch is wired at all.
+ *
+ * They appear in `cloudProviderIds()` as well, and that is deliberate rather
+ * than sloppy — a REST row takes its identity from `providerConfig` and its
+ * credential from `providerTokensEnc`, which is byte for byte the cloud shape.
+ * Omitting them there is the silent failure that leaves every REST connection
+ * reporting ERP_NOT_CONNECTED with a green build.
+ */
+const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+
 afterEach(() => {
   __resetRegisteredProvidersForTest();
   __resetCallBudgetsForTest();
@@ -144,6 +169,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...KNOWN_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
+        ...REST_PROVIDERS_WARP_2707,
       ]),
     );
   });
@@ -160,6 +186,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...CLOUD_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
+        ...REST_PROVIDERS_WARP_2707,
       ]),
     );
   });
@@ -174,6 +201,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
+      ...REST_PROVIDERS_WARP_2707,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -181,6 +209,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
+      ...REST_PROVIDERS_WARP_2707,
     ]);
   });
 
@@ -915,6 +944,13 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "pipedrive",
       // WARP-2383 — Xero, at `catalog.order: 11`, after the wave-1 cards that shipped first.
       "xero",
+      // WARP-2707 — the first two ADR-046 declarative REST cards. They render
+      // through the SAME `catalog` block as a cloud card on purpose: to an
+      // owner reading the hub there is no such thing as a "declarative"
+      // connector, and a track that looked different would be leaking an
+      // implementation detail into the product.
+      "square",
+      "calcom",
     ]);
   });
 
