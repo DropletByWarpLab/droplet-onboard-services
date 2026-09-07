@@ -8,6 +8,7 @@
  * against real SQL in `crm-contacts.schema.test.ts` and enforced by the DB.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { PrismaClient } from "@prisma/client";
 
 import {
   CRM_ERRORS,
@@ -71,7 +72,12 @@ describe("getPipelineSummary", () => {
       { stageId: "s1", amountMinor: 7n, currency: "USD" },
     ];
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: { findMany: async () => deals },
     } as never;
 
@@ -85,7 +91,12 @@ describe("getPipelineSummary", () => {
     // 500 EUR + 500 USD = 1000 of nothing. Reporting null is the honest answer;
     // reporting 1000 is a number a human would act on.
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: {
         findMany: async () => [
           { stageId: "s1", amountMinor: 50000n, currency: "USD" },
@@ -112,7 +123,12 @@ describe("getPipelineSummary", () => {
     // Mutation: collapse `valuation` back to `mixed ? null : (…?? null)` → the
     // two expectations below become identical and this goes red.
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: {
         findMany: async () => [
           // Three real deals nobody has put a number on. Not an empty stage.
@@ -133,7 +149,12 @@ describe("getPipelineSummary", () => {
 
   it("reports a single-currency stage as priced, with the real total", async () => {
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: {
         findMany: async () => [
           { stageId: "s1", amountMinor: 50000n, currency: "USD" },
@@ -168,7 +189,12 @@ describe("getPipelineSummary", () => {
     // takes the 50000 the currency set never accounts for, and the invariant
     // asserted here breaks.
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: {
         findMany: async () => [
           { stageId: "s1", amountMinor: 50000n, currency: "" },
@@ -193,7 +219,12 @@ describe("getPipelineSummary", () => {
     // unpriced deal, and it must not split `USD` into two currency values and
     // read as `mixed_currencies`.
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: {
         findMany: async () => [
           { stageId: "s1", amountMinor: 50000n, currency: "USD" },
@@ -211,7 +242,12 @@ describe("getPipelineSummary", () => {
   it("reports every stage, including the ones holding nothing", async () => {
     // A kanban with a missing column is a worse bug than an empty one.
     const prisma = {
-      crmPipeline: { findUnique: async () => pipelineWithStages },
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        // WARP-2750 — the summary now also enumerates the box's boards so it
+        // can say which ones this answer does NOT cover.
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
       crmDeal: { findMany: async () => [] },
     } as never;
 
@@ -221,6 +257,78 @@ describe("getPipelineSummary", () => {
     // An empty stage is `unpriced`, not `mixed_currencies` (WARP-2556).
     expect(summary.stages.every((s) => s.valuation === "unpriced")).toBe(true);
     expect(summary.stages[1].kind).toBe("WON");
+  });
+
+  // ── WARP-2750: what this roll-up does NOT cover ──────────────────────────
+
+  it("names the pipelines this answer LEAVES OUT", async () => {
+    // A no-id summary resolves the single `isDefault: true` board, and every
+    // connector pipeline is created `isDefault: false` (erp-sync/land.ts). So a
+    // business whose deals live in HubSpot was handed an empty local funnel
+    // with nothing anywhere saying another board existed.
+    const prisma = {
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        findMany: async () => [
+          { id: "p1", name: "Sales", isDefault: true },
+          { id: "p2", name: "HubSpot", isDefault: false },
+        ],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma, "p1");
+    expect(out.covered).toEqual([{ id: "p1", name: "Sales", isDefault: true }]);
+    expect(out.omitted).toEqual([{ id: "p2", name: "HubSpot", isDefault: false }]);
+  });
+
+  it("leaves `omitted` EMPTY on a one-board box, rather than implying a second", async () => {
+    const prisma = {
+      crmPipeline: {
+        findUnique: async () => pipelineWithStages,
+        findMany: async () => [{ id: "p1", name: "Sales", isDefault: true }],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma, "p1");
+    expect(out.omitted).toEqual([]);
+    expect(out.covered).toHaveLength(1);
+  });
+
+  it("🔴 an ARCHIVED default board is still what this answer COVERS", async () => {
+    // The reachable operator action: archive the default board. `updatePipeline`
+    // does not stop it, `ensureDefaultPipeline` resolves `{ isDefault: true }`
+    // with no `isArchived` filter and so keeps returning it — but the board
+    // list is active-only, so a `covered` computed by filtering that list found
+    // nothing. The summary then reported the OPPOSITE of what happened: the one
+    // board it actually summed was absent from `covered`, and `omitted` read as
+    // though every other board had been left out of an answer about nothing.
+    const prisma = {
+      crmPipeline: {
+        findFirst: async () => ({ ...pipelineWithStages, isArchived: true }),
+        findMany: async () => [{ id: "p2", name: "HubSpot", isDefault: false }],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma);
+    expect(out.pipelineId).toBe("p1");
+    expect(out.covered).toEqual([{ id: "p1", name: "Sales", isDefault: true }]);
+    expect(out.omitted.map((b) => b.id)).toEqual(["p2"]);
+  });
+
+  it("covers an archived board asked for BY ID too, not only the default", async () => {
+    // `getPipeline` is a bare `findUnique` with no `isArchived` filter either,
+    // so `business_find(entity:"pipeline", id:…)` reaches the same state by the
+    // other door.
+    const prisma = {
+      crmPipeline: {
+        findUnique: async () => ({ ...pipelineWithStages, isDefault: false, isArchived: true }),
+        findMany: async () => [{ id: "p2", name: "HubSpot", isDefault: true }],
+      },
+      crmDeal: { findMany: async () => [] },
+    } as unknown as PrismaClient;
+    const out = await getPipelineSummary(prisma, "p1");
+    expect(out.covered).toEqual([{ id: "p1", name: "Sales", isDefault: false }]);
+    expect(out.omitted.map((b) => b.id)).toEqual(["p2"]);
   });
 });
 
