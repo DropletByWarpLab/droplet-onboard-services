@@ -28,7 +28,18 @@
  *                        was still outstanding a month ago.
  *   per currency       — USD and EUR are separate findings and are never
  *                        summed. A cross-currency total is wrong invisibly.
- *   both gates         — ratio AND absolute increase must clear.
+ *   both gates         — ratio AND absolute increase must clear, WITH or
+ *                        WITHOUT a currency. NULL is the ordinary value of
+ *                        `ErpDocument.currency` on a shipped box, so the
+ *                        null-currency cases are the mainstream ones here.
+ *   NULL correlation   — 🔴 `IS NOT DISTINCT FROM` and not `=`. The header of
+ *                        this file listed that operator as something the lane
+ *                        proved while no fixture used a NULL currency at all,
+ *                        so `=` would have passed every case. It now has one:
+ *                        "matches a NULL currency to itself". Under `=` the
+ *                        NULL group correlates to nothing, both totals read
+ *                        NULL, and the whole unnamed-currency book disappears
+ *                        from /brief without an error anywhere.
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL like every other `*.pg.test.ts`.
  * Local: scripts/test-orchestrator-pg.sh. CI: the `pg-integration` job.
@@ -407,6 +418,38 @@ describe.skipIf(!RUN)("receivables ageing — real Postgres (WARP-2825)", () => 
     expect(found[0]!.impactMinor).toBeNull();
     expect(found[0]!.currency).toBeNull();
     expect(found[0]!.rationale).toContain("no readable currency");
+  });
+
+  it("matches a NULL currency to itself — `IS NOT DISTINCT FROM`, not `=`", async () => {
+    // 🔴 THE FIXTURE THE FILE HEADER PROMISED AND DID NOT HAVE. The outer
+    // SELECT correlates each DISTINCT currency back to its two endpoint totals.
+    // With a plain `=` the NULL group correlates to NOTHING — `NULL = NULL` is
+    // NULL, never true — so both its totals come back NULL, the row reads as
+    // 0 -> 0, and the whole null-currency book vanishes from /brief in silence.
+    // Every other case in this file names a currency, so `=` would have passed
+    // all of them. This one is the only thing standing between the operator and
+    // that silence.
+    const usd = await invoice(DUE_BEFORE_ANCHOR, "USD");
+    await snap(usd.id, THEN, "10000.00", { currency: "USD" });
+    await snap(usd.id, NOW, "30000.00", { currency: "USD" });
+
+    const home = await invoice(DUE_BEFORE_ANCHOR, null);
+    await snap(home.id, THEN, "4000.00", { currency: null });
+    await snap(home.id, NOW, "16000.00", { currency: null });
+
+    const found = await run();
+    // The NULL group is a group, not a hole.
+    expect(found).toHaveLength(2);
+    const byKey = Object.fromEntries(found.map((f) => [f.subjectKey, f]));
+    expect(Object.keys(byKey).sort()).toEqual(["USD", "unknown-currency"]);
+
+    // ...and the two groups did not bleed into each other. USD's +20,000.00 is
+    // exact and excludes the 12,000 that moved in the unnamed ledger; the
+    // unnamed one reports its 300% rise with no amount at all.
+    expect(byKey.USD!.impactMinor).toBe(2_000_000n);
+    expect(byKey.USD!.title).toContain("200%");
+    expect(byKey["unknown-currency"]!.impactMinor).toBeNull();
+    expect(byKey["unknown-currency"]!.title).toContain("300%");
   });
 
   it("keeps USD, and blames precision, on totals `Decimal(20,6)` can hold and USD cannot", async () => {
