@@ -13,7 +13,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "undici": "^6"
+    "undici": "^7.29.1"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
