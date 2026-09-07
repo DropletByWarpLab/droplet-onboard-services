@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Build context is the monorepo root (see docker-compose.yml service block).
 # All COPY paths below are relative to the repo root.
@@ -77,7 +77,7 @@ EXPOSE 8090
 # job absorbs short outages); in-flight HTTP-triggered runs are forgotten on
 # restart (the filesystem is the source of truth for completed runs).
 # GWV-015: probe the real HTTP surface (:8090/health) so a wedged uvicorn or a
-# dead HTTP half is not reported healthy. python:3.11-slim has no curl.
+# dead HTTP half is not reported healthy. python:3.12-slim has no curl.
 # WARP-1061: the shared cert-presenting client replaces the inline plain-HTTP
 # urlopen — a plaintext probe against the DROPLET_INTERNAL_TLS=1 listener
 # would flap this container unhealthy forever; it stays plain HTTP when off.

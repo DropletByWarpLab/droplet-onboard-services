@@ -41,8 +41,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          # 3.11 matches services/rag-eval/Dockerfile's base image.
-          python-version: "3.11"
+          # 3.12 matches services/rag-eval/Dockerfile's base image.
+          python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
