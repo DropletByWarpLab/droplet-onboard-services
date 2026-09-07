@@ -263,15 +263,33 @@ export function formatWatermark(iso: string, format: WatermarkFormat): string {
   }
 }
 
-/** Parse `Link: <url>; rel="next"` and return the next URL, if any. */
+/** Anchored: each `\s*` is followed by a distinct literal, so no backtracking. */
+const REL_NEXT = /^\s*;\s*rel\s*=\s*"?next"?/i;
+
+/**
+ * Parse `Link: <url>; rel="next"` and return the next URL, if any.
+ *
+ * 🔴 Scanned with `indexOf`, NOT with `/<([^>]+)>\s*;\s*rel.../`. That regex was
+ * a polynomial ReDoS (CodeQL `js/polynomial-redos`, high): the engine retries
+ * `<([^>]+)>` from every `<` in the part, and `[^>]+` rescans to the end of the
+ * input each time, so a header of many `<=` with no `>` costs O(n^2). The
+ * `Link` header is VENDOR-controlled — it arrives on a paginated response from
+ * whichever host the customer's account points at — so that input is exactly
+ * the uncontrolled kind. The `rel` test below is anchored with `^` so it cannot
+ * restart at successive offsets either.
+ */
 export function nextLinkFrom(header: string | null): string | null {
   if (!header) return null;
   for (const part of header.split(",")) {
-    const match = part.match(/<([^>]+)>\s*;\s*rel\s*=\s*"?next"?/i);
-    if (match) return match[1]!;
+    const open = part.indexOf("<");
+    if (open === -1) continue;
+    const close = part.indexOf(">", open + 1);
+    if (close === -1) continue;
+    if (REL_NEXT.test(part.slice(close + 1))) return part.slice(open + 1, close);
   }
   return null;
 }
+
 
 export class RestProfileConnector implements Connector {
   readonly provider: string;

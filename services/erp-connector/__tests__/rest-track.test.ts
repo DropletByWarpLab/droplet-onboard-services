@@ -677,3 +677,68 @@ describe("RestProfileConnector", () => {
     expect(movedDataset.fingerprint).not.toBe(a.fingerprint);
   });
 });
+
+
+// ── Link header pagination ──────────────────────────────────────────────────
+
+describe("nextLinkFrom", () => {
+  it("reads the next URL out of a well-formed Link header", () => {
+    // 🔴 Turns red if the indexOf scan returns the wrong slice bounds — an
+    // off-by-one on `open`/`close` yields "<https://..." or drops the last char.
+    expect(
+      nextLinkFrom('<https://api.example.test/v1/companies?page=2>; rel="next"'),
+    ).toBe("https://api.example.test/v1/companies?page=2");
+  });
+
+  it("picks the next link out of a multi-part header, not merely the first part", () => {
+    // 🔴 Turns red if the loop returns on the first part that has angle
+    // brackets instead of the first whose rel is actually `next`.
+    const header =
+      '<https://api.example.test/v1/x?page=1>; rel="prev", ' +
+      '<https://api.example.test/v1/x?page=3>; rel="next", ' +
+      '<https://api.example.test/v1/x?page=9>; rel="last"';
+    expect(nextLinkFrom(header)).toBe("https://api.example.test/v1/x?page=3");
+  });
+
+  it("accepts the unquoted and loosely spaced spellings vendors actually send", () => {
+    // 🔴 Turns red if REL_NEXT loses a `\s*` or the `"?` optional quote.
+    expect(nextLinkFrom("<https://a.test/2>;rel=next")).toBe("https://a.test/2");
+    expect(nextLinkFrom('<https://a.test/2>  ;  REL = "NEXT"')).toBe("https://a.test/2");
+  });
+
+  it("returns null when no part carries rel=next", () => {
+    // 🔴 Turns red if REL_NEXT loses its `^` anchor: unanchored, `rel="next"`
+    // appearing anywhere later in the part — including inside a URL's own query
+    // string — would match and hand back a link the vendor marked `prev`.
+    expect(nextLinkFrom('<https://a.test/1>; rel="prev"')).toBeNull();
+    expect(nextLinkFrom('<https://a.test/1?rel="next">; rel="prev"')).toBeNull();
+    expect(nextLinkFrom(null)).toBeNull();
+    expect(nextLinkFrom("")).toBeNull();
+  });
+
+  it("ignores parts with an unterminated angle bracket instead of scanning past it", () => {
+    // 🔴 Turns red if the `close === -1` guard is dropped — slice(open+1, -1)
+    // silently returns the whole rest of the part as if it were a URL.
+    expect(nextLinkFrom('<https://a.test/1; rel="next"')).toBeNull();
+  });
+
+  it("returns promptly on the pathological header CodeQL flagged (js/polynomial-redos)", () => {
+    // 🔴 This is the regression test for the high-severity CodeQL finding on
+    // this PR. The old body was
+    //   part.match(/<([^>]+)>\s*;\s*rel\s*=\s*"?next"?/i)
+    // which retries `<([^>]+)>` from EVERY `<` and rescans to end of input each
+    // time — O(n^2) on a run of `<=` that never closes. The `Link` header is
+    // vendor-controlled: it arrives on a paginated response from whichever host
+    // the customer's account points at, so this input is reachable in
+    // production, not merely theoretical.
+    //
+    // Turns red if the regex scan is reinstated: at 100k this took multiple
+    // seconds under the old implementation and is sub-millisecond under
+    // indexOf. The bound is deliberately loose (1s) so it fails on a
+    // reintroduced quadratic scan, not on a slow CI runner.
+    const evil = "<" + "<=".repeat(100_000);
+    const started = Date.now();
+    expect(nextLinkFrom(evil)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
