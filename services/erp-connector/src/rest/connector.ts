@@ -312,6 +312,55 @@ export function nextLinkFrom(header: string | null): string | null {
 }
 
 
+/**
+ * Keys a vendor puts its machine-readable error code under, and nothing else.
+ *
+ * An allowlist of KEY NAMES rather than a scan of the body, because the point
+ * is to take one token and leave everything else behind — a "find the shortest
+ * string" heuristic would happily pick up a customer's first name.
+ *
+ * `errors[0]` is Square's documented envelope (`{errors:[{category, code,
+ * detail}]}`); `error`/`code`/`type` cover the rest of the surveyed set.
+ * `detail` and `message` are deliberately ABSENT: those are the free-text
+ * fields, and free text is where the credential and the PII live.
+ */
+const VENDOR_ERROR_CODE_KEYS = ["code", "type", "error", "category"] as const;
+
+/** A code is short, and made of code characters. Anything else is prose. */
+const CODE_SHAPED = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * The vendor's error code, or a bare "" — never the body.
+ *
+ * Returns "" rather than a truncated body when nothing code-shaped is found.
+ * A status code with no detail is a smaller lie than a body that might carry a
+ * key: `RestVendorError`'s message already names the provider and the status,
+ * which is what a support search starts from.
+ */
+export function vendorErrorCode(body: string): string {
+  // Bounded before parsing: an unbounded vendor body is not something to hand
+  // to JSON.parse on a box that also runs the customer's other services.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.slice(0, 4096));
+  } catch {
+    return "";
+  }
+  const candidates: unknown[] = [parsed];
+  if (parsed !== null && typeof parsed === "object") {
+    const errors = (parsed as Record<string, unknown>).errors;
+    if (Array.isArray(errors) && errors.length > 0) candidates.push(errors[0]);
+  }
+  for (const candidate of candidates) {
+    if (candidate === null || typeof candidate !== "object") continue;
+    for (const key of VENDOR_ERROR_CODE_KEYS) {
+      const value = (candidate as Record<string, unknown>)[key];
+      if (typeof value === "string" && CODE_SHAPED.test(value)) return value;
+    }
+  }
+  return "";
+}
+
 export class RestProfileConnector implements Connector {
   readonly provider: string;
   readonly servesDatasets: readonly DatasetName[];
@@ -549,11 +598,45 @@ export class RestProfileConnector implements Connector {
     if (response.status === 401 || response.status === 403) {
       // A rejected credential is not an outage. Distinguishing it is what lets
       // the hub say "paste a new key" instead of "can't connect".
+      //
+      // 🔴 EVICT THE CACHE FIRST. `authHeaderValue` resolves once and holds the
+      // values for the connector's whole life, so without this line every
+      // later call on this instance re-sends the credential the vendor has
+      // already refused — including the `introspect()` that `connect()` runs
+      // straight afterwards, and every page of a walk that reaches a key
+      // revoked mid-read. Re-sending a refused credential is how an account
+      // gets locked for repeated failed auth, and it makes the owner's
+      // reconnect look like it did nothing until the process restarts.
+      //
+      // Evicting only asks the resolver again; the resolver reads the sealed
+      // store, so if the owner HAS re-pasted, the next attempt uses the new
+      // value. If they have not, the same one goes out once more and the same
+      // 401 comes back — which is the honest outcome, not a loop.
+      this.credentials = null;
       throw this.blocked(op, `the vendor rejected the credential (${response.status})`);
     }
     if (!response.ok) {
+      // 🔴 The vendor's BODY does not go in the message.
+      //
+      // This error's message reaches `ErpSyncCursor.lastError` through
+      // `redactSyncErrorText`, which is persisted and rendered to an operator.
+      // That redactor is an ALLOWLIST — Stripe/HubSpot/Slack/Google prefixes
+      // and cursor parameters — and it has never met `EAAA…` (Square) or
+      // `cal_live_…` (Cal.com), let alone the twenty-six other vendors this
+      // track is built to carry. Vendors echo the credential that failed.
+      //
+      // PII is the half an allowlist cannot fix at all: a Cal.com 4xx on
+      // `/v2/bookings` carries attendee names, e-mail addresses and phone
+      // numbers, and a Square error can carry a buyer's details. Storing 500
+      // bytes of that in a column an operator reads is a data-protection
+      // problem, not a formatting one — and none of it helps anyone debug.
+      //
+      // What DOES help is the vendor's own error CODE: `redactSyncErrorText`'s
+      // docstring says so ("keeps the vendor's error code, which is the part
+      // that makes a support search possible"). So the body is parsed for a
+      // code-shaped token and everything else is dropped unread.
       const detail = await response.text().catch(() => "");
-      throw new RestVendorError(this.provider, response.status, detail.slice(0, 500));
+      throw new RestVendorError(this.provider, response.status, vendorErrorCode(detail));
     }
 
     let body: unknown;

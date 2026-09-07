@@ -50,6 +50,7 @@ import {
   RestProfileConnector,
   RestVendorError,
   REST_MAX_PAGES,
+  vendorErrorCode,
 } from "../src/rest/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
 import { UnknownWriteCommandError } from "../src/write-commands.js";
@@ -864,6 +865,136 @@ describe("RestProfileConnector", () => {
       { fetchImpl: other.impl, resolveCredentials: creds },
     );
     await expect(c2.runRead("get_company", {})).rejects.toThrow(RestVendorError);
+  });
+
+  it("🔴 evicts the cached credential the vendor REJECTED, so the next attempt re-resolves", async () => {
+    // `authHeaderValue` resolves once and holds the values for the connector's
+    // whole life. Without eviction, every later call on this instance re-sends
+    // a credential the vendor has already refused — including the
+    // `introspect()` that `connect()` runs straight afterwards, and every page
+    // of a walk that meets a key revoked mid-read. Repeated failed auth is how
+    // an account gets locked, and an owner's reconnect looks like it did
+    // nothing until the process restarts.
+    // Mutation: delete `this.credentials = null` from the 401/403 branch and
+    // `resolves` stays at 1 -> red.
+    let resolves = 0;
+    const { impl, calls } = stubFetch([{ body: {}, status: 401 }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      {
+        fetchImpl: impl,
+        resolveCredentials: async () => {
+          resolves += 1;
+          return { token: `key-${resolves}` };
+        },
+      },
+    );
+
+    await expect(c.runRead("get_company", {})).rejects.toThrow(ConnectorBlockedError);
+    expect(resolves).toBe(1);
+
+    await expect(c.runRead("get_company", {})).rejects.toThrow(ConnectorBlockedError);
+    // THE assertion: the store was asked again rather than the refused value
+    // being replayed…
+    expect(resolves).toBe(2);
+    // …and the second request really carried the newly-resolved value.
+    expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe("Bearer key-2");
+  });
+
+  it("does NOT evict on a plain vendor error — a 503 says nothing about the key", async () => {
+    // Eviction is scoped to the vendor REFUSING the credential. Re-resolving on
+    // every 5xx would hammer the sealed store during an outage and would blur
+    // the one distinction the 401 branch exists to draw.
+    let resolves = 0;
+    const { impl } = stubFetch([{ body: { code: "SERVICE_UNAVAILABLE" }, status: 503 }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      {
+        fetchImpl: impl,
+        resolveCredentials: async () => {
+          resolves += 1;
+          return { token: "k" };
+        },
+      },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
+    await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
+    expect(resolves).toBe(1);
+  });
+
+  it("🔴 keeps the vendor's BODY out of the error that gets persisted", async () => {
+    // `RestVendorError.message` reaches `ErpSyncCursor.lastError` through
+    // `redactSyncErrorText` — persisted, and rendered to an operator. That
+    // redactor is an ALLOWLIST of credential prefixes (Stripe, HubSpot, Slack,
+    // Google) and it has never met Square's `EAAA…` or Cal.com's `cal_live_…`,
+    // let alone the other twenty-six vendors this track is built to carry.
+    // Vendors echo the credential that failed.
+    //
+    // And PII is the half no allowlist can fix: a Cal.com 4xx on /v2/bookings
+    // carries attendee names, e-mail addresses and phone numbers.
+    // Mutation: restore `detail.slice(0, 500)` -> red on every assertion below.
+    const leaky = JSON.stringify({
+      code: "RATE_LIMITED",
+      message: "token EAAAl9Xexample0000 was rejected for casey@example.com (+33123456789)",
+      attendees: [{ name: "Casey Jordan", email: "casey@example.com" }],
+    });
+    const { impl } = stubFetch([{ body: JSON.parse(leaky), status: 429 }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as RestVendorError;
+    expect(err).toBeInstanceOf(RestVendorError);
+
+    // The status and the provider survive — that is what a support search
+    // starts from — and so does the vendor's CODE.
+    expect(err.status).toBe(429);
+    expect(err.message).toContain("429");
+    expect(err.message).toContain("RATE_LIMITED");
+
+    // Nothing else does.
+    expect(err.message).not.toContain("EAAAl9Xexample0000");
+    expect(err.message).not.toContain("casey@example.com");
+    expect(err.message).not.toContain("+33123456789");
+    expect(err.message).not.toContain("Casey Jordan");
+  });
+
+  it("vendorErrorCode takes a CODE and nothing else", () => {
+    // Square's documented envelope — `code` is preferred over `category`,
+    // because it is the specific half and the one a support search wants.
+    expect(
+      vendorErrorCode(
+        JSON.stringify({
+          errors: [
+            { category: "RATE_LIMIT_ERROR", code: "RATE_LIMITED", detail: "slow down, casey@example.com" },
+          ],
+        }),
+      ),
+    ).toBe("RATE_LIMITED");
+    // `category` is the fallback when a vendor sends only that.
+    expect(vendorErrorCode(JSON.stringify({ errors: [{ category: "AUTHENTICATION_ERROR" }] }))).toBe(
+      "AUTHENTICATION_ERROR",
+    );
+    // The flat shapes the rest of the surveyed set uses.
+    expect(vendorErrorCode(JSON.stringify({ code: "not_found" }))).toBe("not_found");
+    expect(vendorErrorCode(JSON.stringify({ type: "invalid_request_error" }))).toBe("invalid_request_error");
+    expect(vendorErrorCode(JSON.stringify({ error: "insufficient_scope" }))).toBe("insufficient_scope");
+
+    // 🔴 Prose is not a code, however it is spelled or wherever it sits. These
+    // are the cases that would leak if the rule were "take the shortest string"
+    // or "take `message` when `code` is missing".
+    expect(vendorErrorCode(JSON.stringify({ code: "casey@example.com" }))).toBe("");
+    expect(vendorErrorCode(JSON.stringify({ message: "token EAAAsecret rejected" }))).toBe("");
+    expect(vendorErrorCode(JSON.stringify({ error: { message: "nested prose" } }))).toBe("");
+    expect(vendorErrorCode(JSON.stringify({ code: "x".repeat(65) }))).toBe("");
+
+    // A non-JSON body (an HTML error page from a proxy, the common real case)
+    // yields nothing rather than a truncated page.
+    expect(vendorErrorCode("<html><body>502 Bad Gateway casey@example.com</body></html>")).toBe("");
+    expect(vendorErrorCode("")).toBe("");
   });
 
   it("🔴 refuses a read whose dataset this profile does not serve", async () => {
