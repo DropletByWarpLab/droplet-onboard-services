@@ -380,9 +380,17 @@ describe("Cal.com appointment — GET /v2/bookings", () => {
   });
 
   it("declares the watermark COMPLETE, the cursor paths, and the rows path", () => {
-    // `complete: true` matters here because a booking's `status` MOVES after
-    // creation (accepted -> cancelled), and a creation-time filter would freeze
-    // every cancellation out of view while the sync kept reporting success.
+    // `afterUpdatedAt` filters on the booking's own modification time, so a
+    // status change (accepted -> cancelled) comes back on the next pass. That
+    // is the vendor fact `complete: true` records.
+    //
+    // ⚠ It is a RECORDED FACT, not a control: nothing reads `complete` today.
+    // The reconciliation sweep's cadence is uniform, and `appointment` is not
+    // in `ERP_SYNC_ENTITIES`, so a Cal.com connection registers no cursor and
+    // is neither ticked nor swept — its rows are reached on demand through
+    // `runRead` and nowhere else. See `RestWatermark.complete`, and the
+    // orchestrator test that pins the empty intersection.
+    // Mutation: flip it to false -> red here, and nowhere else.
     const appointment = CALCOM_PROFILE.datasets.find((d) => d.dataset === "appointment")!;
     expect(appointment.path).toBe("/v2/bookings");
     expect(appointment.watermark).toEqual({

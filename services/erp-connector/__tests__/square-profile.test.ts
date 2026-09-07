@@ -345,11 +345,17 @@ describe("Square charge — GET /v2/payments", () => {
   });
 
   it("🔴 declares the watermark COMPLETE — updated_at_begin_time is a real last-modified filter", () => {
-    // `complete: true` is what tells the sweeper an incremental pass is
-    // sufficient here. It is true because Square filters on the row's own
-    // `updated_at`, not on creation.
-    // Mutation: flip it to false and the box does needless full sweeps; flip the
-    // PAYOUT one to true (below) and it stops doing a necessary one.
+    // True because Square filters on the row's own `updated_at`, not on
+    // creation: an edit after the window opened still comes back.
+    //
+    // ⚠ `complete` is a RECORDED FACT, not a control. Nothing reads it — the
+    // reconciliation sweep's cadence is uniform, and neither vendor is swept
+    // at all today because `charge`/`refund`/`payout` are not in
+    // `ERP_SYNC_ENTITIES`. See `RestWatermark.complete`, which says so, and the
+    // orchestrator test that pins it.
+    // Mutation: flip it to false -> red HERE, and nowhere else. That is the
+    // whole of its current effect, and saying otherwise (as this comment used
+    // to) invents a sweeper decision that does not happen.
     const charge = SQUARE_PROFILE.datasets.find((d) => d.dataset === "charge")!;
     expect(charge.watermark).toEqual({
       name: "updated_at_begin_time",
@@ -498,11 +504,16 @@ describe("Square payout — GET /v2/payouts", () => {
   it("🔴 declares the watermark INCOMPLETE, which is what keeps the full sweep MANDATORY", () => {
     // `updated_at` IS on the Payout object — it is simply not filterable. So a
     // payout that moves SENT -> PAID after its creation window closes is NEVER
-    // re-read by an incremental pass. `complete: false` is the declaration that
-    // makes the periodic sweep a requirement rather than a safety net.
-    // Mutation: flip this to true -> the sweep is dropped as redundant and every
-    // payout freezes at the status it had when it was created. Nothing goes red,
-    // no request fails, and the box quietly reports stale money.
+    // re-read by an incremental pass. That is the vendor fact, and it is why
+    // this endpoint needs a periodic full re-read where the other two do not.
+    //
+    // ⚠ The note that used to sit here — "flip this to true -> the sweep is
+    // dropped as redundant and every payout freezes" — was FALSE, and false in
+    // the direction that matters: it described a consequence, so a reader would
+    // stop looking for one. Nothing reads `complete`. The sweep's cadence is
+    // uniform, and `payout` is not in `ERP_SYNC_ENTITIES` at all, so no sweep
+    // and no incremental tick runs for a Square connection in the first place.
+    // Mutation: flip this to true -> red here, and nowhere else.
     const payout = SQUARE_PROFILE.datasets.find((d) => d.dataset === "payout")!;
     expect(payout.watermark).toEqual({
       name: "begin_time",

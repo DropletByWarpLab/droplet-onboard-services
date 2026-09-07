@@ -145,9 +145,37 @@ export interface RestWatermark {
    * `false` when it is documented to miss edits — Postmark's `fromdate` is a
    * SEND-time filter, not a last-modified one, so an incremental pass keyed on
    * it never sees a later change. This mirrors the `complete` reasoning
-   * `CANONICAL_COLUMNS` already carries for Xero's `UpdatedDateUTC` and is
-   * load-bearing in exactly the same way: an incomplete watermark makes the
-   * periodic full sweep MANDATORY rather than a safety net.
+   * `CANONICAL_COLUMNS` already carries for Xero's `UpdatedDateUTC`.
+   *
+   * ## 🔴 NOTHING READS THIS YET. Recorded so it is not re-derived, not
+   * because a sweeper consults it.
+   *
+   * Written plainly because the alternative — a field that reads as a control
+   * and is a comment — is the confidently-wrong shape this whole layer exists
+   * to avoid. Two separate facts, and the second is the bigger one:
+   *
+   *  1. The reconciliation sweep DOES exist (`runReconciliationSweep`,
+   *     WARP-2218/2463): it re-enumerates each entity with NO watermark on
+   *     `connSweepIntervalMs` and records the drift. But its cadence is
+   *     uniform. It does not read this flag, so a `complete: true` dataset is
+   *     swept exactly as often as a `complete: false` one. This field's job —
+   *     making the sweep mandatory here and a safety net there — is the
+   *     cadence policy that has not been written.
+   *  2. More to the point, **neither shipped vendor is swept or synced at
+   *     all**. `registerCursors` walks `ERP_SYNC_ENTITIES`, and none of
+   *     `charge`, `refund`, `payout` or `appointment` is in it, so a Square or
+   *     Cal.com connection gets ZERO cursors: no incremental tick, no sweep,
+   *     no landing. Their rows are reached on demand through `runRead` and
+   *     nowhere else. Pinned by a test in
+   *     `apps/orchestrator/src/services/erp-provider.descriptor.test.ts`, so
+   *     that adding one of those entities is a deliberate act that fails a
+   *     test until this flag is given a reader.
+   *
+   * Kept rather than deleted because the fact is real, per-endpoint, and comes
+   * from a vendor documentation page — Square's `begin_time` on `/v2/payouts`
+   * filters on CREATION, which is not decidable from anything else in this
+   * profile. Re-deriving it for twenty-eight vendors later is the cost of
+   * deleting it now.
    */
   readonly complete: boolean;
 }

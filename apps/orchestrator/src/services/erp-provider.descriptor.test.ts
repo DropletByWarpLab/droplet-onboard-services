@@ -56,6 +56,7 @@ import {
   type ProviderDescriptor,
   type CredentialVariant,
 } from "@droplet/shared-types";
+import { ERP_SYNC_ENTITIES } from "./erp-sync/entities.js";
 import {
   connectorForProvider,
   registerConnectorFactory,
@@ -286,6 +287,40 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       );
       expect(connector.provider).toBe(id);
       expect([...connector.servesDatasets].sort()).toEqual([...profile!.datasets.map((d) => d.dataset)].sort());
+    }
+  });
+
+  it("🔴 registers NO sync cursor for either REST vendor — a declared state, not an accident", () => {
+    // `registerCursors` walks `ERP_SYNC_ENTITIES` and keeps `spec.entity` when
+    // the descriptor declares it. Square declares charge/refund/payout and
+    // Cal.com declares appointment; none of the four is in that table. So both
+    // vendors register ZERO cursors: no incremental tick, no reconciliation
+    // sweep, no landing. Their rows are reached on demand through `runRead` and
+    // nowhere else.
+    //
+    // Asserted rather than left implicit, because the absence is silent in
+    // every direction: nothing fails, nothing logs, and an owner's Square card
+    // reads CONNECTED while nothing is ever stored. Absence is declared, never
+    // inferred — the same rule `SQUARE_PROFILE`'s "serves ONLY the money story"
+    // test applies one level down.
+    //
+    // 🔴 This is also the tripwire for `RestWatermark.complete`, which is
+    // recorded by every profile and read by NOTHING. Adding any of these four
+    // to `ERP_SYNC_ENTITIES` turns this test red and is the moment that flag
+    // needs a reader — the sweep's cadence is uniform today, so a
+    // `complete: false` dataset (Square's `payout`, whose `begin_time` filters
+    // on CREATION) would otherwise be swept exactly as often as a complete one
+    // and could freeze at the status it had when its window closed.
+    const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
+    for (const id of REST_PROVIDERS_WARP_2707) {
+      const declared = providerDescriptor(id)!.datasets as readonly string[];
+      const overlap = declared.filter((d) => syncedEntities.has(d));
+      expect(
+        overlap,
+        `${id} now declares a scheduled entity (${overlap.join(", ")}) — give ` +
+          "RestWatermark.complete a reader before this ships, or the sweep " +
+          "cadence is uniform over a watermark that is documented to miss edits",
+      ).toEqual([]);
     }
   });
 
