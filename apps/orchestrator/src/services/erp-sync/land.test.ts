@@ -489,7 +489,7 @@ describe("deal", () => {
     // yes, and every synced deal on every box silently becomes archive-only.
     const client = db();
     await land(client, "deal", [DEAL]);
-    const data = client.crmActivity.create.mock.calls[0]![0].data;
+    const data = client.crmActivity.create.mock.calls[0]![0].data as Record<string, unknown>;
     expect(data.origin).toBe("EXTERNAL");
     expect(data.externalSystem).toBe("hubspot");
   });
@@ -500,7 +500,8 @@ describe("deal", () => {
     // stays free for a real vendor activity id if one is ever landed.
     const client = db();
     await land(client, "deal", [DEAL]);
-    expect(client.crmActivity.create.mock.calls[0]![0].data.externalId).toBeUndefined();
+    const data = client.crmActivity.create.mock.calls[0]![0].data as Record<string, unknown>;
+    expect(data.externalId).toBeUndefined();
   });
 });
 

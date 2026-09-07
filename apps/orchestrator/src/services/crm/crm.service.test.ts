@@ -8,6 +8,7 @@
  * against real SQL in `crm-contacts.schema.test.ts` and enforced by the DB.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { PrismaClient } from "@prisma/client";
 
 import {
   CRM_ERRORS,
