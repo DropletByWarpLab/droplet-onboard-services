@@ -25,6 +25,7 @@ import { AlertTriangle, CheckCircle2, Clock, Sparkles, TrendingDown } from "luci
 import { ShellPage } from "@/components/shell/ShellPage";
 import "./brief.css";
 import {
+  brainIsOff,
   fetchCoverage,
   fetchFindings,
   formatImpact,
@@ -42,7 +43,12 @@ const KIND_ICON = {
 } as const;
 
 function CoverageLine({ coverage }: { coverage: Coverage | null }) {
-  if (!coverage) {
+  // WARP-2812 — TWO different offs. `coverage === null` is "the box did not
+  // answer"; `enabled === false` is "the box answered, and said nothing is
+  // running". The second used to be unreachable here, because /coverage
+  // succeeds whichever way BRAIN_ENABLED is set, so a disabled brain rendered
+  // as a working one that had simply not got very far yet.
+  if (brainIsOff(coverage)) {
     return (
       <p className="brief-coverage">
         The brain is off. Nothing has been read, and no findings are being produced.
@@ -58,7 +64,13 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
       <p>
         Read <strong>{documentsDigested.toLocaleString()}</strong> of{" "}
         <strong>{documentsReady.toLocaleString()}</strong> indexed documents
-        {documentsReady > documentsDigested ? " — still working through the rest." : "."}
+        {/* Only a scheduled pass is "still working". With no BrainPass rows the
+            remainder is not queued, it is untouched. */}
+        {documentsReady > documentsDigested
+          ? coverage.passes.length > 0
+            ? " — still working through the rest."
+            : " — the rest is not queued to be read."
+          : "."}
       </p>
       <p className="brief-coverage-detail">
         {detectors?.lastSucceededAt
@@ -197,8 +209,12 @@ export default function BriefPage() {
       ) : findings.length === 0 ? (
         // Two different nothings, said differently. "No findings" on a running
         // brain is good news; on a brain that has never run it is a setup step.
+        // The discriminator is `coverage.enabled`, NOT whether the fetch
+        // succeeded (WARP-2812): /coverage answers 200 on a box where the brain
+        // has never been switched on, so keying on truthiness told every such
+        // owner they were all clear.
         <p className="brief-empty">
-          {coverage
+          {!brainIsOff(coverage)
             ? "Nothing needs your attention right now."
             : "Turn the brain on to start reading your business."}
         </p>

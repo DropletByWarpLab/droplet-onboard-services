@@ -19,10 +19,18 @@
  *   NEVER      a finding with no impact and no severity is not worth a phone
  *              buzz; it waits on /brief for someone to come looking.
  *
- * WHO IS TOLD. The owner. `company`-scope findings are owner/admin material by
- * ADR-051 §9, and there is exactly one owner (the role is a singleton, immutable
- * and unassignable). Broadcasting to every admin would turn one finding into N
- * notifications and re-create the noise problem from the other direction.
+ * WHO IS TOLD. The owner, by username. `company`-scope findings are owner/admin
+ * material by ADR-051 §9, and there is exactly one owner (the role is a
+ * singleton, immutable and unassignable). Broadcasting to every admin would turn
+ * one finding into N notifications and re-create the noise problem from the
+ * other direction.
+ *
+ * WHAT IS NOT TOLD, and why. Only `company` scope is notified — enforced in the
+ * query since WARP-2811, having been policy-by-comment before it. A `personal`
+ * or `department` finding belongs to somebody who is not necessarily the owner,
+ * and sending it here would hand them another person's business over a channel
+ * with no scope check. They wait on /brief until per-recipient delivery is
+ * designed; see WARP-2811.
  */
 import type { PrismaClient } from "@prisma/client";
 import { sendNotification } from "../notifications.service.js";
@@ -41,10 +49,30 @@ export type NotifyOutcome = {
   digestSent: boolean;
 };
 
-/** The single owner. Findings go to them; see the module docstring. */
-async function ownerId(prisma: PrismaClient): Promise<string | null> {
-  const owner = await prisma.user.findFirst({ where: { role: "owner" }, select: { id: true } });
-  return owner?.id ?? null;
+/**
+ * The single owner, BY USERNAME. Findings go to them; see the module docstring.
+ *
+ * WARP-2813 — this used to select `id`. The notifications subsystem is keyed on
+ * `User.username` end to end: `sendNotification` publishes to
+ * `droplet/notifications/${userId}`, the only subscriber is ws-bridge's
+ * `droplet/notifications/${user.username}`, and both readers of the persisted
+ * `NotificationLog` — routes/notifications.ts and the `list_notifications`
+ * tool — filter by username too. A UUID here meant the broker dropped the toast
+ * AND no reader could see the stored row, so every notification this file has
+ * ever produced reached nobody.
+ *
+ * This is the exact defect WARP-2783 fixed in audit-verify.service.ts one day
+ * after this file landed. That fix's comment called itself "the one UUID-keyed
+ * caller in the codebase"; it was not, and the claim of uniqueness is why the
+ * sweep stopped there. The return type is named for the vocabulary now, so the
+ * next reader cannot mistake which one it is.
+ */
+async function ownerUsername(prisma: PrismaClient): Promise<string | null> {
+  const owner = await prisma.user.findFirst({
+    where: { role: "owner" },
+    select: { username: true },
+  });
+  return owner?.username ?? null;
 }
 
 export async function notifyFindings(
@@ -59,13 +87,27 @@ export async function notifyFindings(
   const minImpact = opts.minImpactMinor ?? DEFAULT_MIN_IMPACT_MINOR;
   const digestIntervalMs = opts.digestIntervalMs ?? DEFAULT_DIGEST_INTERVAL_MS;
 
-  const to = await ownerId(prisma);
+  const to = await ownerUsername(prisma);
   // No owner = a box mid-setup. Nothing to do, and nothing to record: leaving
   // `notifiedAt` null keeps these findings in the queue for when there is one.
   if (!to) return { immediate: 0, digested: 0, digestSent: false };
 
+  // WARP-2811 — SCOPED. The module docstring states the policy ("WHO IS TOLD.
+  // The owner. `company`-scope findings are owner/admin material by ADR-051
+  // §9") and nothing enforced it: the query took every scope and sent all of
+  // them to one recipient, so the first `personal`- or `department`-scoped
+  // finding anyone wrote would arrive on the owner's phone carrying its title
+  // and 300 characters of rationale. That is the cross-user leak WARP-2752
+  // added `ownerId` and a CHECK to close on the READ path; the notify path
+  // never got the same treatment.
+  //
+  // Personal and department findings deliberately wait on /brief rather than
+  // being fanned out here. Per-recipient delivery is a real design — one that
+  // has to answer the noise question this file exists to answer — and it is
+  // UNBUILT, not forgotten. Until it exists, not notifying is the correct
+  // behaviour, and it is the same choice the NEVER tier already makes.
   const pending = await prisma.brainFinding.findMany({
-    where: { notifiedAt: null, status: "new" },
+    where: { notifiedAt: null, status: "new", scope: "company" },
     orderBy: [{ impactMinor: { sort: "desc", nulls: "last" } }, { firstSeenAt: "asc" }],
     take: 200,
   });
