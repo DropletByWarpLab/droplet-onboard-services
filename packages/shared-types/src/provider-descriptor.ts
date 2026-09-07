@@ -46,7 +46,8 @@
  * splitting the vocabulary in two.
  *
  * Widened six → twenty alongside WARP-2280, then twenty → twenty-three by
- * WARP-2466's reconciliation, with that drift test as the guard throughout.
+ * WARP-2466's reconciliation, and twenty-three → twenty-six by WARP-2832,
+ * with that drift test as the guard throughout.
  */
 export const DATASET_NAMES = [
   // practice-management (WARP-1964)
@@ -78,10 +79,25 @@ export const DATASET_NAMES = [
   "audience",
   "audience_member",
   "ecommerce_order",
+  // ── WARP-2832 — scheduling, people, projects.
+  // Appended at the SAME INDEXES as the connector package's `DATASETS`: the
+  // drift test in `erp-provider.descriptor.test.ts` is an ORDERED `toEqual`,
+  // so a name added to both lists at different positions is still red — which
+  // is the property that makes this a mirror rather than two lists that happen
+  // to agree.
+  //
+  // `booking` is added BESIDE `appointment`, never instead of it. `appointment`
+  // is WARP-1964's dental shape (`patient_id`, `operatory_id`) and it is also a
+  // WIRE FORMAT — operators author export-drop profile JSON on their own sites
+  // naming datasets as bare strings, and Warp Lab does not hold those files, so
+  // renaming it would be an un-migratable field change.
+  "booking",
+  "employee",
+  "task",
 ] as const;
 
 /**
- * The closed union of twenty-three. A descriptor's `datasets` is typed with THIS, never
+ * The closed union of twenty-six. A descriptor's `datasets` is typed with THIS, never
  * `string[]`: the exhaustive `Record`s keyed by it (`DATASET_CATEGORY`,
  * `CANONICAL_COLUMNS`) only buy exhaustiveness while the union stays closed,
  * and a widened `string[]` throws that away silently.
@@ -183,6 +199,31 @@ export type ProviderTrack =
    *  `providerConfig` and its credentials from `providerTokensEnc`, so the LAN
    *  columns are unused. */
   | "cloud"
+  /**
+   * WARP-2707 / ADR-046 — reaches a vendor SaaS through the DECLARATIVE REST
+   * track: one `RestProfileConnector` serving N vendors, each a
+   * `RestVendorProfile` of pure data.
+   *
+   * Identical to `cloud` in every respect this union discriminates on — it
+   * takes its identity from `providerConfig`, its credential from
+   * `providerTokensEnc`, it declares datasets, it is scheduled, budgeted and
+   * swept by the machinery that already exists, and it must carry a setup
+   * guide. It shares the `cloud` arm below FOR THAT REASON: a separate arm
+   * with a plain `ProviderCatalogMeta` would silently drop the
+   * required-`setupGuideHref` gate for exactly the twenty-eight vendors
+   * ADR-046 §5 says are most at risk of shipping without one.
+   *
+   * The one thing that makes it a distinct TRACK rather than a flag on
+   * `cloud`: dispatch. `connectorFactoryFor` consults `restProfileFor(provider)`
+   * before the static factory map, exactly as it consults
+   * `vendorFromExportProvider`. A `cloud` provider has a hand-written
+   * `Connector`; a `rest` provider has none and must not be looked up in a map
+   * that will not have it.
+   *
+   * 🔴 READ-ONLY BY CONSTRUCTION (ADR-046 §4). `applyWrite` throws on this
+   * track and there is no descriptor field that could turn it on.
+   */
+  | "rest"
   /** A hub catalog card with NO shipped track. Never buildable, never a valid
    *  `IntegrationConnection.provider`. Explicit rather than inferred from an
    *  absent factory — absence is never a silent anything. */
@@ -584,8 +625,15 @@ export type ProviderDescriptor =
       readonly track: "lan" | "catalog";
       readonly catalog?: ProviderCatalogMeta;
     })
+  // `rest` (WARP-2707) shares this arm rather than getting its own, and that is
+  // the load-bearing choice: `CloudProviderCatalogMeta` is what makes
+  // `setupGuideHref` REQUIRED at `availability: "available"`, and ADR-046 §5
+  // makes a guide non-negotiable for exactly this track — *"a profile without a
+  // guide is a connector the owner cannot use, and at 28 vendors the temptation
+  // to batch the profiles and defer the guides is precisely what this clause
+  // forbids."* A separate arm would have dropped that gate silently.
   | (ProviderDescriptorBase & {
-      readonly track: "cloud";
+      readonly track: "cloud" | "rest";
       readonly catalog?: CloudProviderCatalogMeta;
     })
   | McpProviderDescriptor;

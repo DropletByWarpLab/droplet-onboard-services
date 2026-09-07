@@ -673,3 +673,64 @@ export {
   type PipedriveConnectorConfig,
   type PipedriveConnectorDeps,
 } from "./pipedrive/connector.js";
+
+// ---------------------------------------------------------------------------
+// WARP-2707 / ADR-046 — the declarative REST track.
+//
+// One `RestProfileConnector` serving N vendors, each a `RestVendorProfile` of
+// pure data. Dispatch mirrors export-drop exactly: `restProfileFor(provider)`
+// returns a profile or `null`, and `connectorFactoryFor` consults it before the
+// static factory map.
+// ---------------------------------------------------------------------------
+export {
+  RestProfileConnector,
+  RestPaginationContractError,
+  RestVendorError,
+  REST_MAX_PAGES,
+  REST_REQUEST_TIMEOUT_MS,
+  blockedRestCredentialResolver,
+  formatWatermark,
+  fromMinorUnits,
+  nextLinkFrom,
+  readField,
+  readPath,
+  type RestConnectorConfig,
+  type RestConnectorDeps,
+  type RestCredentialResolver,
+} from "./rest/connector.js";
+export {
+  assertValidRestProfile,
+  authPlaceholders,
+  InvalidRestProfileError,
+  type FieldSource,
+  type FieldTransform,
+  type RestAuthHeader,
+  type RestBaseUrl,
+  type RestDatasetSpec,
+  type RestPagination,
+  type RestVendorProfile,
+  type RestWatermark,
+  type WatermarkFormat,
+  type WatermarkLocation,
+} from "./rest/profile.js";
+export {
+  assertHostConfigValue,
+  assertSafeFollowUrl,
+  assertSafeRestBaseUrl,
+  UnsafeBaseUrlError as UnsafeRestBaseUrlError,
+} from "./rest/host-guard.js";
+export {
+  REST_READ_SEMANTICS,
+  applyRestReadFilter,
+  applyRestReadOrder,
+  restReadSemantics,
+  type RestReadFilter,
+  type RestReadSemantics,
+} from "./rest/read-semantics.js";
+export {
+  CALCOM_PROVIDER,
+  REST_VENDOR_PROFILES,
+  restProfileFor,
+  restProviderIds,
+  SQUARE_PROVIDER,
+} from "./rest/profiles.js";

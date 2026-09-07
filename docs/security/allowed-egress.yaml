@@ -1238,6 +1238,125 @@ entries:
     review_by: 2027-09-03
     code_refs: [services/erp-connector/src/pipedrive/connector.ts]
 
+  # ── ADR-046 declarative REST track (WARP-2707) ───────────────────────────
+  #
+  # Neither vendor below ships a connector module of its own: its behaviour is
+  # a RestVendorProfile that the shared RestProfileConnector executes. So the
+  # code_refs cite the PROFILE — that is the file carrying the origin as a
+  # whole-string literal, and the file the shared exact-host guard anchors on.
+  # Citing rest/connector.ts instead would register a destination against a
+  # module that names no host at all, which is exactly the decorative entry
+  # WARP-2452 added the backing pass to catch.
+  - id: square-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [connect.squareup.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Square API v2 — the payments cloud connector (WARP-2676), on ADR-046's
+      declarative REST track. Read-only, GET only, and ONLY the money story:
+      payments, refunds and payouts, three endpoints and no more. NOT the whole
+      Square account — orders, invoices, the product catalogue and the seller's
+      customer book are deliberately not read, each for a reason written out in
+      the profile, so this destination is never asked for them. Carries the
+      seller's own transaction records, fetched on request under a PRODUCTION
+      access token the account owner created in their own Square developer
+      console and pasted into the box; never ambient, never a background crawl,
+      and off until the owner connects. ONE FIXED HOST, like Brevo and unlike
+      Shopify or Pipedrive — no region code, no seller subdomain, no
+      self-hosted option, and no host handed back in a token response — so this
+      is a plain registered destination and the profile's origin is a
+      whole-string literal the scanner reads directly. Every request also
+      carries a dated `Square-Version` header, which the profile always sends
+      because omitting it does not fail — it silently serves whatever API
+      version the seller's own application defaults to. That is a shape pin,
+      not a destination, and does not affect this registration.
+    ticket: WARP-2676
+    added: 2026-09-07
+    review_by: 2027-09-07
+    code_refs: [services/erp-connector/src/rest/vendors/square.ts]
+
+  # WARP-2676 — the twin of `ref-shopify-dev-dashboard`, for the same reason and
+  # from the same class of literal.
+  - id: ref-square-developer-console
+    kind: reference
+    service: erp-connector
+    destination:
+      # NOT an egress destination. This is where the SELLER'S OWN BROWSER goes
+      # to create their Square application and copy its production access token
+      # — a page a person visits, never a host the box opens a connection to.
+      # It is registered because the credential-field help text names it, and
+      # the WARP-2467 bare-host pass reads string-literal CONTENTS, so an
+      # unregistered mention of it fails the gate.
+      hosts: [developer.squareup.com]
+    purpose: the developer console the seller uses to create their own Square application and mint its access token, cited in the connect form's help text and in the setup guide — not a connection the box makes
+    ticket: WARP-2676
+    added: 2026-09-07
+    review_by: 2027-09-07
+    code_refs: [packages/shared-types/src/provider-registry.ts]
+
+  # 🔴 WARP-2828 — registered because the VENDOR'S BRAND NAME IS A HOSTNAME.
+  #
+  # Not a destination in any sense, and not even a URL in the source: every hit
+  # is display copy — `displayName: "Cal.com"`, the credential label, the help
+  # text, the catalog card's name and description. The WARP-2467 bare-host pass
+  # reads string-literal contents and the WARP-2487 PSL check accepts anything
+  # under a real ICANN suffix, so the brand parses as a host and the gate fails.
+  #
+  # The alternative was renaming the vendor in its own descriptor, which is
+  # worse: the hub would stop calling Cal.com by its name to satisfy a scanner.
+  # Registering it as `kind: reference` states the true fact — this name appears
+  # in copy, and the box never dials it. Same mechanism as
+  # `ref-brand-and-fleet-domains` and `ref-pipedrive-host-suffix`.
+  #
+  # The host the box DOES dial is `api.cal.com`, registered as `calcom-api` above.
+  - id: ref-cal-com-brand
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [cal.com]
+    purpose: the Cal.com brand name as it appears in the hub card, the credential label and the setup help text — a vendor's name that happens to be a hostname, never a connection the box makes
+    ticket: WARP-2828
+    added: 2026-09-07
+    review_by: 2027-09-07
+    code_refs: [packages/shared-types/src/provider-registry.ts]
+
+  - id: calcom-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.cal.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Cal.com API v2 — the scheduling cloud connector (WARP-2707), on ADR-046's
+      declarative REST track. Read-only, GET only, one dataset: bookings with
+      their times, their host and their status. Carries the customer's own
+      appointment book, fetched on request under an API key the account owner
+      minted in their own Cal.com settings (My Settings → Developer → API
+      keys), on any plan including the free one; never ambient, off until the
+      owner connects. Paced against Cal.com's published 120-requests-per-minute
+      API-key ceiling rather than a guessed constant. ONE FIXED HOST, so a
+      plain registered destination whose origin is a whole-string literal the
+      scanner reads directly — and this registration is for the HOSTED product
+      ONLY. Self-hosted Cal.com is a customer-supplied origin running a
+      different API contract (different pagination, different API version), so
+      it is a second profile needing its own kind: dynamic entry and its own
+      exact-host guard, never a variable host on this one. Every request also
+      carries a dated `cal-api-version` header, which Cal.com marks required on
+      the bookings endpoint and which decides which endpoint version answers;
+      it is an API-version pin, not a destination.
+    ticket: WARP-2707
+    added: 2026-09-07
+    review_by: 2027-09-07
+    code_refs: [services/erp-connector/src/rest/vendors/calcom.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

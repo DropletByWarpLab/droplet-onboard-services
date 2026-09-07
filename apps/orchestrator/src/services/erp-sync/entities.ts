@@ -305,6 +305,54 @@ export const ERP_SYNC_ENTITIES: readonly ErpSyncEntity[] = [
     updatedAtField: "updated_at",
     openToUndeclaredTracks: false,
   },
+
+  // ── WARP-2832 — scheduling, people, projects ──────────────────────────────
+  //
+  // 🔴 A row here is what makes a connected vendor POLLED. Cal.com shipped on
+  // WARP-2707 serving `appointment`, which has no row in this table and no
+  // entry in `CLOUD_DATASET_READS` — so `registerCursors` skipped it, no
+  // cursor was ever created, and a healthy connection synced nothing. Nothing
+  // went red, because neither list is typed `DatasetName`.
+  //
+  // `openToUndeclaredTracks: false` on all three: each is served only by
+  // tracks that DECLARE their datasets (cloud and rest), so an export-drop
+  // profile that happens to name one should not be handed a cursor for it.
+  {
+    entity: "booking",
+    readQuery: "get_bookings",
+    sourceKeyField: "booking_id",
+    // The position the enumeration orders by. `starts_at` rather than
+    // `created_at` because that is what `get_bookings` windows and sorts on —
+    // a marker that is not the query's own ordering key cannot advance.
+    markerField: "starts_at",
+    // Cal.com's `afterUpdatedAt` is a COMPLETE last-modified filter, so this is
+    // the position the watermark should actually prefer. It is also the value
+    // that had nowhere to land while this data served `appointment`.
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
+  {
+    entity: "employee",
+    readQuery: "find_employee",
+    sourceKeyField: "employee_id",
+    // `find_employee` with no term enumerates the whole directory ordered by
+    // name, which is the only stable position it has — a payroll has no
+    // creation-time ordering a poller can rely on.
+    markerField: "last_name",
+    // BambooHR's changed-employees feed is complete: it fires on any field
+    // change, including the employment-status, job-info and compensation
+    // tables.
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
+  {
+    entity: "task",
+    readQuery: "get_tasks_by_status",
+    sourceKeyField: "task_id",
+    markerField: "created_at",
+    updatedAtField: "updated_at",
+    openToUndeclaredTracks: false,
+  },
 ];
 
 const BY_ENTITY = new Map(ERP_SYNC_ENTITIES.map((e) => [e.entity, e]));

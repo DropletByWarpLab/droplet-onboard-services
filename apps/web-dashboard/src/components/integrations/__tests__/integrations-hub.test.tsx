@@ -595,6 +595,13 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      // WARP-2707 / ADR-046 — the first two DECLARATIVE REST vendors. Same
+      // story a fourth time, and it is the strongest version of it: these two
+      // register no connector factory at all, only a profile, and they still
+      // reach the grid with no hub code change. They sit after Xero because
+      // their `catalog.order` is 12 and 13.
+      "Square",
+      "Cal.com",
       // WARP-2659 — the MCP-track card, appended after the catalog cards. It
       // has NO `catalog` block and no `ConnectorId` literal: it is derived
       // from the descriptor's track by `hubCardFor`, which is why it lands
@@ -640,6 +647,13 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      // WARP-2707 / ADR-046 — the first two DECLARATIVE REST vendors. Same
+      // story a fourth time, and it is the strongest version of it: these two
+      // register no connector factory at all, only a profile, and they still
+      // reach the grid with no hub code change. They sit after Xero because
+      // their `catalog.order` is 12 and 13.
+      "Square",
+      "Cal.com",
       // WARP-2659 — the MCP-track card, appended after the catalog cards. It
       // has NO `catalog` block and no `ConnectorId` literal: it is derived
       // from the descriptor's track by `hubCardFor`, which is why it lands
@@ -670,12 +684,12 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Twelve catalog tiles (four original, the five WARP-2214 vendors — Xero
-    // included — and the three wave-1 vendors) absorb four of the rows; the two
-    // the catalog knows nothing about each get their own. WARP-2659 adds the
-    // MCP-track tile, which this fixture reports no row for — it renders from
-    // the registry regardless, which is the point.
-    expect(tiles(container)).toHaveLength(15);
+    // Fourteen catalog tiles (four original, the five WARP-2214 vendors — Xero
+    // included — the three wave-1 vendors, and the two WARP-2707 REST vendors)
+    // absorb four of the rows; the two the catalog knows nothing about each get
+    // their own. WARP-2659 adds the MCP-track tile, which this fixture reports
+    // no row for — it renders from the registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(17);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -689,6 +703,13 @@ describe("entries are the union of the catalog and the response", () => {
       "Klaviyo",
       "Pipedrive",
       "Xero",
+      // WARP-2707 / ADR-046 — the first two DECLARATIVE REST vendors. Same
+      // story a fourth time, and it is the strongest version of it: these two
+      // register no connector factory at all, only a profile, and they still
+      // reach the grid with no hub code change. They sit after Xero because
+      // their `catalog.order` is 12 and 13.
+      "Square",
+      "Cal.com",
       "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",

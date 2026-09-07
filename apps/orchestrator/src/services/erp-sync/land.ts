@@ -112,7 +112,28 @@ export const LANDED_ENTITIES = ["company", "contact", "deal"] as const;
  * meets rather than an absence they have to notice. PHI on this box is
  * read-through, per connector, behind the ERP gate.
  */
-export const NEVER_LANDED_ENTITIES = ["patient", "appointment", "account"] as const;
+export const NEVER_LANDED_ENTITIES = [
+  "patient",
+  "appointment",
+  "account",
+  // ── WARP-2832 ──
+  // Read-through, not landed, and each is a decision rather than an absence.
+  //
+  // `booking` — a schedule is the same class of fact as `appointment` above:
+  // it is read when someone asks and it goes stale the moment the vendor
+  // changes it. Landing it would put a second, always-slightly-wrong copy of
+  // the customer's calendar on the box.
+  //
+  // `employee` — HR records are the most sensitive non-clinical data a vendor
+  // holds. `CANONICAL_COLUMNS.employee` deliberately carries no compensation
+  // column, and landing what remains would still make the box a copy of the
+  // payroll directory. Read-through keeps the copy in the vendor's system.
+  //
+  // `task` — a work item's whole value is that it is current.
+  "booking",
+  "employee",
+  "task",
+] as const;
 
 export function landsInCrm(entity: string): boolean {
   return (LANDED_ENTITIES as readonly string[]).includes(entity);

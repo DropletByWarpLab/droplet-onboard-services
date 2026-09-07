@@ -52,6 +52,14 @@ export function hubCardFor(descriptor: ProviderDescriptor): ConnectorMeta | unde
   switch (descriptor.track) {
     case "lan":
     case "cloud":
+    // WARP-2707 / ADR-046 — a `rest` vendor's card comes from the SAME
+    // vendor-level `catalog` block as a cloud one. Deliberately classified
+    // here rather than given its own arm: to an owner reading the hub there is
+    // no such thing as a "declarative" connector, and a track that rendered a
+    // visibly different tile would be leaking an implementation detail into
+    // the product. The declarativeness is entirely a fact about our source
+    // tree.
+    case "rest":
     case "catalog":
       // The historical home: a vendor-level `catalog` block. The `ConnectorId`
       // cast is the one place the two vocabularies are asserted to line up. It

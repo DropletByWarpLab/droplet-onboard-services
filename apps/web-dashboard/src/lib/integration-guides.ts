@@ -48,6 +48,7 @@
 import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
 import atlassian from "../../../../docs/integrations/atlassian.md?raw";
 import brevo from "../../../../docs/integrations/brevo.md?raw";
+import calcom from "../../../../docs/integrations/calcom.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
@@ -58,6 +59,7 @@ import pipedrive from "../../../../docs/integrations/pipedrive.md?raw";
 import readme from "../../../../docs/integrations/README.md?raw";
 import setup from "../../../../docs/integrations/SETUP.md?raw";
 import shopify from "../../../../docs/integrations/shopify.md?raw";
+import square from "../../../../docs/integrations/square.md?raw";
 import stripe from "../../../../docs/integrations/stripe.md?raw";
 import vendorSetupTemplate from "../../../../docs/integrations/vendor-setup-template.md?raw";
 import xero from "../../../../docs/integrations/xero.md?raw";
@@ -78,6 +80,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "add-a-provider": addAProvider,
   atlassian,
   brevo,
+  calcom,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,
@@ -88,6 +91,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   readme,
   setup,
   shopify,
+  square,
   stripe,
   "vendor-setup-template": vendorSetupTemplate,
   xero,

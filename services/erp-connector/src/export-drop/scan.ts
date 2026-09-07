@@ -381,6 +381,22 @@ export const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   // keying on it would collapse two distinct consent events into one.
   audience_member: ["audience_member_id"],
   ecommerce_order: ["ecommerce_order_id"],
+  // ── WARP-2832 ──
+  // 🔴 This is the FOURTH total Record keyed on `DatasetName`, and ADR-046's
+  // follow-up misses it when it says "three". It is also the one with no
+  // totality fixture in `vocabulary-contract.ts`, so the mutation "make this
+  // `Partial<>`" is caught by nothing and would silently key dedup on
+  // `undefined` for every dataset at once.
+  //
+  // All three are single vendor-issued ids rather than composites: each comes
+  // from a SaaS whose id is authoritative and stable, unlike the ledger shapes
+  // above whose reference numbers a human types.
+  booking: ["booking_id"],
+  employee: ["employee_id"],
+  // Composite: a task id is unique WITHIN its project on several trackers
+  // (GitLab numbers issues per project, Jira per project key), so a bare
+  // `task_id` would collide across projects on one connection.
+  task: ["project_id", "task_id"],
 };
 
 /**
