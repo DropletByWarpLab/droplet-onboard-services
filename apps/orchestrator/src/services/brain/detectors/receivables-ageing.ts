@@ -299,6 +299,28 @@ export const receivablesAgeing: Detector = {
           s."currency"   AS currency,
           SUM(s."balance") AS total
         FROM "MoneySnapshot" s
+        -- 🔴 AN INNER JOIN, AGAINST A TABLE THAT IS DELIBERATELY FK-FREE.
+        --
+        -- MoneySnapshot."subjectId" is NOT a foreign key, and the schema says
+        -- why: a snapshot must survive the document it describes, or the series
+        -- ends the moment a vendor deletes an invoice, which is exactly the
+        -- history worth keeping. This join drops precisely those orphans, so
+        -- this reader does not use that property.
+        --
+        -- Kept anyway, because the alternative is worse. "dueAt", "kind" and
+        -- "origin" exist only on the document; a snapshot alone cannot say
+        -- whether its row was a receivable, whether it was past due on the day,
+        -- or whether the business wrote it. An orphan is therefore not a row
+        -- with missing detail, it is a row that CANNOT be classified, and the
+        -- honest treatment of an unclassifiable amount in a total is to leave
+        -- it out rather than to assume it in.
+        --
+        -- What makes that safe here is that the join applies IDENTICALLY at
+        -- both endpoints: a deleted document leaves the anchor and the latest
+        -- total together, so it cannot manufacture a trend. It can only make
+        -- the pair smaller than the ledger once was, which understates. Storing
+        -- "dueAt"/"kind"/"origin" on the snapshot would fix it properly and is
+        -- a schema change, not this PR.
         JOIN "ErpDocument" d ON d."id" = s."subjectId"
         CROSS JOIN bounds b
         WHERE s."subjectType" = ${SUBJECT_ERP_DOCUMENT}
@@ -306,6 +328,23 @@ export const receivablesAgeing: Detector = {
           -- Money owed TO the business, from a vendor sync. A LOCAL document
           -- is one somebody on this box wrote and is born DRAFT; the sibling
           -- detector's note applies unchanged.
+          --
+          -- 🔴 READ FROM TODAY'S DOCUMENT, NOT FROM THE SNAPSHOT. Forced,
+          -- and not the same trade-off for all three. MoneySnapshot carries
+          -- only amount / balance / currency / status, so these three have no
+          -- historical copy to read.
+          --
+          -- "kind" and "origin" are effectively immutable: a landing does not
+          -- turn an invoice into a bill, or a vendor's document into one this
+          -- box wrote. Today's value is yesterday's.
+          --
+          -- "dueAt" genuinely can change. A vendor extending terms rewrites it,
+          -- and the anchor total is then recomputed under the NEW date, so a
+          -- past endpoint can move after the fact. The alternative is worse
+          -- again: with no historical "dueAt" the only other option is today's
+          -- overdue SET at both ends, which reports a rise every time an
+          -- invoice crosses its due date. This way the endpoints stay
+          -- consistent with each other, which is what a trend needs.
           AND d."kind" = 'INVOICE'
           AND d."origin" = 'LANDED'
           -- Overdue AS OF THAT DAY. A NULL dueAt is never past due, and NULL
