@@ -55,6 +55,35 @@
  * NULL "when the ledger's own home currency is the only answer", and the
  * snapshot copies it. A gate that only fires when a currency happens to be
  * named is a gate that mostly does not fire. See `MIN_INCREASE_MAJOR`.
+ *
+ * ── 🔴 HOW THIS DETECTOR FAILS, WHICH IS QUIETLY ─────────────────────────────
+ *
+ * `runDetectorPass` wraps every `run()` in a try/catch and collects the message
+ * into `BrainPass.lastError`. That isolation is deliberate and right — one bad
+ * detector must not stop the other three from reporting — but it has a cost
+ * worth naming HERE, at the module that would suffer it:
+ *
+ *   A DETECTOR WHOSE SQL NO LONGER PARSES LOOKS EXACTLY LIKE A DETECTOR WITH
+ *   NOTHING TO REPORT. Both produce no findings. "The book is not ageing" is
+ *   the reassuring answer, and it is the one an operator gets from a query that
+ *   has been throwing every night for a month.
+ *
+ * This is not a hypothetical for this family: `money-overdue.ts` shipped a
+ * query naming a retired enum value and caught nothing for as long as it took
+ * someone to notice (WARP-2773/2754). This module is ONE raw SQL statement, so
+ * it has the same exposure and more of it.
+ *
+ * Three things make it visible, in descending order of reliability:
+ *
+ *   `receivables-ageing.pg.test.ts` — the real proof. A mocked `$queryRaw`
+ *     cannot fail on unparseable SQL, so CI's `pg-integration` job is the only
+ *     place a broken query is a red build rather than a quiet night.
+ *   `logger.error(... "brain.detector_pass.detector_failed")` at the tick in
+ *     `index.ts` — raised from `warn` in WARP-2825, because a detector that
+ *     throws is a hard failure that will not fix itself, not a partial run.
+ *   `BrainPass.lastError`, rendered on /brief's coverage banner ("Last records
+ *     pass errored: …"). Real, and last: it reaches a human only if one opens
+ *     the page and reads the line above the findings.
  */
 import type { PrismaClient } from "@prisma/client";
 import { minorUnitExponent, toMinorUnits } from "@droplet/shared-types";

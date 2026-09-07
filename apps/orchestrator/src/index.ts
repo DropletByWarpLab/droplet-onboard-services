@@ -663,7 +663,14 @@ async function main() {
       async () => {
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
-          logger.warn({ outcome }, "brain.detector_pass.partial");
+          // 🔴 ERROR, not warn (WARP-2825). `runDetectorPass` catches per
+          // detector so one broken query cannot stop the others — which is
+          // right, and which also means a detector whose SQL no longer parses
+          // produces exactly what a healthy quiet detector produces: no
+          // findings. It is not a transient partial; nothing will fix itself,
+          // and the only other trace is `BrainPass.lastError`, which reaches a
+          // human solely if somebody opens /brief and reads the banner.
+          logger.error({ outcome }, "brain.detector_pass.detector_failed");
         }
         // Delivery runs INSIDE the same lock as the pass that produced the
         // findings. Two instances notifying concurrently would double-announce
