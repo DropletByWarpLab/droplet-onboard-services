@@ -202,4 +202,31 @@ describe.skipIf(!RUN)("brain pass claim — real Postgres (WARP-2837)", () => {
       reason: "missing",
     });
   });
+
+  it("BOOT SEQUENCE: the claim never creates the row, so only seeding bootstraps a pass", async () => {
+    // The fresh-install deadlock, in the database that has to answer it.
+    // Before the lease, the corpus row was created by `runCorpusPass`'s own
+    // upsert on tick 1. Now the tick claims FIRST, and a conditional
+    // `updateMany` against a row that does not exist matches nothing — so the
+    // run that would have created it never happens, on every tick, forever.
+    const key = `${P}boot`;
+    await expect(claimPass(prisma, key, NOW, "worker-a")).resolves.toEqual({
+      won: false,
+      reason: "missing",
+    });
+    expect(await prisma.brainPass.findUnique({ where: { passKey: key } })).toBeNull();
+
+    // Seeding is the only bootstrap there is. This is the upsert
+    // `seedBrainPasses` now performs for EVERY key in `BRAIN_PASS_KEYS`, the
+    // corpus pass included; the DB-less suite pins that list.
+    await prisma.brainPass.upsert({
+      where: { passKey: key },
+      create: { passKey: key },
+      update: {},
+    });
+    await expect(claimPass(prisma, key, NOW, "worker-a")).resolves.toEqual({
+      won: true,
+      workerId: "worker-a",
+    });
+  });
 });

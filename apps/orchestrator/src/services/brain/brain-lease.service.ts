@@ -32,6 +32,9 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
+import { createLogger } from "../../lib/logger.js";
+
+const logger = createLogger("brain-lease");
 
 /**
  * How long a claim survives without a heartbeat before another process may
@@ -151,6 +154,43 @@ export async function releasePass(
  *  than leaving the next boot to wait out a 15-minute lease. */
 const inFlight = new Map<string, Promise<void>>();
 
+/**
+ * Claims that have been ASKED FOR and not yet answered.
+ *
+ * 🔴 `inFlight` alone left a shutdown race, and this set is what closes it.
+ * `cronRuntime.stop()` clears intervals; it knows nothing about a tick already
+ * dispatched as `void safeRun(...)`. A pass was registered in `inFlight` only
+ * AFTER `claimPass` resolved — a real DB round trip — so a SIGTERM landing
+ * inside that window found `inFlight` empty, `releaseAllPasses()` returned
+ * having waited for nothing, and the claim then won and started ten model
+ * calls on a process that was already tearing down. Exactly what awaiting an
+ * in-flight pass at shutdown exists to prevent.
+ *
+ * Added SYNCHRONOUSLY, before the first `await`, so there is no window in
+ * which a `runWithLease` already under way is invisible to shutdown.
+ */
+const pending = new Set<Promise<void>>();
+
+/**
+ * Latched by `releaseAllPasses`, never cleared: a process shuts down once.
+ *
+ * A claim that WINS after the latch is handed straight back rather than run.
+ * Waiting for it would make shutdown as long as a corpus pass, and running it
+ * is the thing shutdown is trying to stop.
+ */
+let shuttingDown = false;
+
+/**
+ * Consecutive failures per pass, reset by the first clean run.
+ *
+ * cron-runtime's `safeRun` keeps this for every tick, and this pass lost it the
+ * moment the tick stopped awaiting it. Carried here instead, on the log line
+ * for the failure: "this pass has failed eleven times running" and "this pass
+ * failed once" are different operator problems and the message is otherwise
+ * identical.
+ */
+const failureStreak = new Map<string, number>();
+
 export function inFlightPasses(): ReadonlySet<string> {
   return new Set(inFlight.keys());
 }
@@ -173,41 +213,93 @@ export async function runWithLease(
   opts: { now?: Date; workerId?: string; heartbeatMs?: number } = {},
 ): Promise<{ started: boolean; reason?: string; done?: Promise<void> }> {
   const workerId = opts.workerId ?? WORKER_ID;
-  const claim = await claimPass(prisma, passKey, opts.now ?? new Date(), workerId);
-  if (!claim.won) return { started: false, reason: claim.reason };
 
-  // TIMER-driven, not iteration-driven. A pass sitting inside one slow model
-  // call is still alive and must keep its lease; a heartbeat that only fired
-  // between units would drop the claim on exactly the box this fix is for.
-  const beat = setInterval(() => {
-    void beatPass(prisma, passKey, new Date(), workerId);
-  }, opts.heartbeatMs ?? BRAIN_HEARTBEAT_MS);
-  beat.unref?.();
+  // Registered BEFORE the first await — see `pending`. From here to the
+  // return, shutdown can see this attempt and will wait for it.
+  let settleAttempt!: () => void;
+  const attempt = new Promise<void>((resolve) => (settleAttempt = resolve));
+  pending.add(attempt);
 
-  const done = (async () => {
-    try {
-      await run();
-    } finally {
-      clearInterval(beat);
-      await releasePass(prisma, passKey, workerId).catch(() => {
-        // Best effort. A release that fails leaves the lease to expire, which
-        // is the failure this design already tolerates by construction —
-        // strictly better than throwing out of a `finally` and masking
-        // whatever the pass itself was reporting.
-      });
-      inFlight.delete(passKey);
+  try {
+    if (shuttingDown) return { started: false, reason: "shutting_down" };
+
+    const claim = await claimPass(prisma, passKey, opts.now ?? new Date(), workerId);
+    if (!claim.won) return { started: false, reason: claim.reason };
+
+    // Won the row, but the process is on its way out. Hand it back NOW rather
+    // than start: the box that comes up next finds an `idle` row instead of
+    // waiting out a 15-minute lease, and no inference begins on a process that
+    // is already tearing down.
+    if (shuttingDown) {
+      await releasePass(prisma, passKey, workerId).catch(() => {});
+      return { started: false, reason: "shutting_down" };
     }
-  })();
 
-  inFlight.set(passKey, done);
-  return { started: true, done };
+    // TIMER-driven, not iteration-driven. A pass sitting inside one slow model
+    // call is still alive and must keep its lease; a heartbeat that only fired
+    // between units would drop the claim on exactly the box this fix is for.
+    const beat = setInterval(() => {
+      void beatPass(prisma, passKey, new Date(), workerId);
+    }, opts.heartbeatMs ?? BRAIN_HEARTBEAT_MS);
+    beat.unref?.();
+
+    const done = (async () => {
+      try {
+        await run();
+        failureStreak.set(passKey, 0);
+      } catch (err) {
+        // 🔴 CAUGHT HERE, DELIBERATELY, AND NOT RE-THROWN. Nothing awaits
+        // `done`: the tick must not (that is the whole fix), and neither does
+        // a boot run or an operator's "check now". A rejection with no
+        // subscriber became an untagged `unhandledRejection` — the process
+        // survives, because index.ts installs a handler for those, but the
+        // failure arrived without its `passKey`, without the worker that hit
+        // it, and without the consecutive-failure count cron-runtime's
+        // `safeRun` used to keep. Reporting it in the ONE place every caller
+        // goes through beats asking every caller to remember a `.catch`.
+        const streak = (failureStreak.get(passKey) ?? 0) + 1;
+        failureStreak.set(passKey, streak);
+        logger.error({ err, passKey, workerId, consecutiveFailures: streak }, "brain.pass.failed");
+      } finally {
+        clearInterval(beat);
+        await releasePass(prisma, passKey, workerId).catch(() => {
+          // Best effort. A release that fails leaves the lease to expire, which
+          // is the failure this design already tolerates by construction —
+          // strictly better than throwing out of a `finally` and masking
+          // whatever the pass itself was reporting.
+        });
+        inFlight.delete(passKey);
+      }
+    })();
+
+    inFlight.set(passKey, done);
+    return { started: true, done };
+  } finally {
+    pending.delete(attempt);
+    settleAttempt();
+  }
 }
 
 /**
- * Graceful shutdown: wait for what is in flight and let each release its own
- * claim. Without this a redeploy leaves the pass `running` until the lease
- * expires, and the box that just restarted skips its first tick for no reason.
+ * Graceful shutdown: latch, then wait for what is in flight and let each
+ * release its own claim. Without this a redeploy leaves the pass `running`
+ * until the lease expires, and the box that just restarted skips its first
+ * tick for no reason.
+ *
+ * DRAIN, DO NOT SNAPSHOT. `Promise.allSettled` collects its arguments once. A
+ * claim that was mid-round-trip when the latch was set registers its run
+ * AFTERWARDS, so a single pass over the two collections would return with that
+ * run still going — the race `pending` and this loop exist to close. The
+ * loop terminates because the latch stops a new attempt from ever reaching
+ * `inFlight`, and a latched attempt settles without doing any work.
+ *
+ * Call this once. The latch is never cleared: a process shuts down once, and a
+ * pass started after shutdown began is a bug in the caller, not a state to
+ * recover from.
  */
 export async function releaseAllPasses(): Promise<void> {
-  await Promise.allSettled([...inFlight.values()]);
+  shuttingDown = true;
+  while (pending.size > 0 || inFlight.size > 0) {
+    await Promise.allSettled([...pending, ...inFlight.values()]);
+  }
 }

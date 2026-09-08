@@ -1754,18 +1754,25 @@ async function main() {
   // Docker's restart policy brings a fresh instance back.
   const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
+    // WARP-2837 — wait for an in-flight brain pass so it releases its own
+    // lease. Without this a redeploy leaves the row `running` until the
+    // 15-minute lease expires, and the box that just restarted skips its
+    // first tick for no reason. Bounded: a corpus tick is ten units.
+    //
+    // IMMEDIATELY after `cronRuntime.stop()`, and before anything else that
+    // awaits. `stop()` only clears intervals — a tick already dispatched as
+    // `void safeRun(...)` is still going, and this call is what latches the
+    // "no new passes" flag. Every `await` placed ahead of it is another window
+    // in which a claim can win and start ten model calls on a process that is
+    // already shutting down.
+    await releaseAllPasses().catch((err) => {
+      logger.warn("brain pass release failed: %s", (err as Error).message);
+    });
     // WARP-2177 — hand in-flight runs back to `queued` (not charged as an
     // attempt) so the restarted process resumes them from their checkpoint
     // on its first tick instead of after the reclaim threshold.
     await agentRunWorker.releaseAll().catch((err) => {
       logger.warn("agent run release failed: %s", (err as Error).message);
-    });
-    // WARP-2837 — wait for an in-flight brain pass so it releases its own
-    // lease. Without this a redeploy leaves the row `running` until the
-    // 15-minute lease expires, and the box that just restarted skips its
-    // first tick for no reason. Bounded: a corpus tick is ten units.
-    await releaseAllPasses().catch((err) => {
-      logger.warn("brain pass release failed: %s", (err as Error).message);
     });
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
