@@ -12,7 +12,7 @@ pydantic>=2.13.4
 pyserial>=3.5
 # qrcode is used by device-bridge.py to render the Wi-Fi QR matrix the
 # PyPortal paints on the "QR" screen.
-qrcode>=7.4
+qrcode>=8.2
 # WARP-1023 — FIPS boot self-test. services/_shared/fips_selftest.py is
 # COPY'd into this image and its is_fips_enabled() probe reads
 # cryptography's backend `_fips_enabled` flag. Nothing above pulls
