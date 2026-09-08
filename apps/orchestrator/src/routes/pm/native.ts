@@ -85,7 +85,11 @@ const projectCreateSchema = z.object({
   icon: z.string().max(64).optional(),
   color: z.string().max(32).optional(),
   // ADR-045 §5.3 — the department that owns this project's work.
-  department_id: z.string().max(64).optional(),
+  // WARP-2724 — `.min(1)`: an empty string is a 400 here rather than a
+    // falsy value the service has to notice. The comment in `pm.service.ts`
+    // claiming "the zod schemas reject '' at the boundary" was true of
+    // `company_id` and not of this one.
+    department_id: z.string().min(1).max(64).optional(),
   // ADR-048 (WARP-2729) — the customer this project is FOR. The column has
   // existed since WARP-2562 with no writer on any path; this is the first.
   // `.min(1)`: an empty string is not a customer id. Without it, "" skipped the
@@ -100,7 +104,9 @@ const projectPatchSchema = z.object({
   color: z.string().max(32).nullable().optional(),
   leadId: z.string().max(64).nullable().optional(),
   // ADR-045 §5.3 — `null` clears the department; omitting it leaves it alone.
-  department_id: z.string().max(64).nullable().optional(),
+  // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
+    // assignment. "" was neither: it skipped the guard and disconnected.
+    department_id: z.string().min(1).max(64).nullable().optional(),
   // ADR-048 — `null` clears the customer; omitting it leaves it alone.
   // `null` clears; "" is a malformed id, not a clear — see the create schema.
   company_id: z.string().min(1).max(64).nullable().optional(),
@@ -140,7 +146,11 @@ const workItemCreateSchema = z.object({
   label_ids: z.array(z.string().max(64)).max(50).optional(),
   parent_id: z.string().max(64).optional(),
   // ADR-045 §5.3 — overrides the project's department for this item.
-  department_id: z.string().max(64).optional(),
+  // WARP-2724 — `.min(1)`: an empty string is a 400 here rather than a
+    // falsy value the service has to notice. The comment in `pm.service.ts`
+    // claiming "the zod schemas reject '' at the boundary" was true of
+    // `company_id` and not of this one.
+    department_id: z.string().min(1).max(64).optional(),
   start_date: z.string().datetime().optional(),
   due_date: z.string().datetime().optional(),
 });
@@ -155,7 +165,9 @@ const workItemPatchSchema = z.object({
   parent_id: z.string().max(64).nullable().optional(),
   // ADR-045 §5.3 — `null` clears the OVERRIDE, so the item inherits its
   // project's department again (which may itself be none).
-  department_id: z.string().max(64).nullable().optional(),
+  // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
+    // assignment. "" was neither: it skipped the guard and disconnected.
+    department_id: z.string().min(1).max(64).nullable().optional(),
   start_date: z.string().datetime().nullable().optional(),
   due_date: z.string().datetime().nullable().optional(),
   // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
