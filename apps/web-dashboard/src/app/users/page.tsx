@@ -408,14 +408,33 @@ export default function UsersPage() {
     reload();
   }, [reload]);
 
+  // WARP-2696 — every best-effort chain below is fire-and-forget, so its LAST
+  // handler is the end of the line: a throw there has nothing to catch it and
+  // escapes as an unhandled rejection. That is what killed a whole dashboard
+  // run with all 555 files green — the page unmounts, the read resolves after
+  // vitest has torn the jsdom environment down, the handler writes state,
+  // `window` is gone, and the ReferenceError is attributed to whichever file
+  // happened to be last. Real operators hit the same path by navigating away
+  // mid-load; they just do not have a runner to fail.
+  //
+  // So each handler checks `mountedRef` before it writes. Note this guards the
+  // WRITE, never the control flow — in `handleEditSave` the awaits in between
+  // are server writes the operator already asked for, and bailing out of those
+  // would silently apply half a save.
   // WARP-1270 (T18) — department list for the invite modal's "Add to a
   // department" section. Best-effort (the invite modal's core email/role
   // flow must not break if this fails — the section just doesn't render).
   useEffect(() => {
     if (isAdmin !== true) return;
     listDepartments()
-      .then((data) => setDepartments(data.departments || []))
-      .catch(() => setDepartments([]));
+      .then((data) => {
+        if (!mountedRef.current) return;
+        setDepartments(data.departments || []);
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setDepartments([]);
+      });
   }, [isAdmin]);
 
   // WARP-1532 (T8) — custom roles for the roster chip / person editor and
@@ -425,6 +444,7 @@ export default function UsersPage() {
   const reloadAccessRoles = useCallback(() => {
     listAccessRoles()
       .then((data) => {
+        if (!mountedRef.current) return;
         const next = (data.roles || []).filter((r) => r.state !== "archived");
         setAccessRoles(next);
         setAccessRolesFailed(false);
@@ -442,6 +462,7 @@ export default function UsersPage() {
         );
       })
       .catch(() => {
+        if (!mountedRef.current) return;
         setAccessRoles([]);
         // WARP-1533: "failed to load" ≠ "no custom roles" — the invite
         // modal's picker degrades to built-in tiers with an honest caption
@@ -461,15 +482,19 @@ export default function UsersPage() {
     if (isAdmin !== true) return;
     reloadAccessRoles();
     fetchIntegrations()
-      .then((connections) =>
+      .then((connections) => {
+        if (!mountedRef.current) return;
         setConnectors(
           (connections || []).map((c) => ({
             provider: c.provider,
             label: c.provider.charAt(0).toUpperCase() + c.provider.slice(1),
           })),
-        ),
-      )
-      .catch(() => setConnectors([]));
+        );
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setConnectors([]);
+      });
   }, [isAdmin, reloadAccessRoles]);
 
   /** Anything carrying an assigned tier + optional custom role: a roster
@@ -823,6 +848,7 @@ export default function UsersPage() {
       setEditUsageLoading(true);
       fetchUserUsage(u.userId)
         .then((usage) => {
+          if (!mountedRef.current) return;
           const { value, unit } = bytesToStorageInput(usage.policy?.storageQuotaBytes ?? null);
           setEditStorageValue(value);
           setEditStorageUnit(unit);
@@ -834,7 +860,10 @@ export default function UsersPage() {
         .catch(() => {
           // Best-effort — the rest of the Edit dialog still works.
         })
-        .finally(() => setEditUsageLoading(false));
+        .finally(() => {
+          if (!mountedRef.current) return;
+          setEditUsageLoading(false);
+        });
     }
   };
 
@@ -917,9 +946,9 @@ export default function UsersPage() {
         // WARP-1270 QA fix: surface the sync-state transition under the
         // Usage fields instead of closing the dialog silently — the box
         // still has to push the quota to storage after this call resolves.
-        setEditUsageSyncText("Applying to storage…");
+        if (mountedRef.current) setEditUsageSyncText("Applying to storage…");
         await updateUserUsage(editing.userId, usagePatch);
-        setEditUsageSyncText("Applied");
+        if (mountedRef.current) setEditUsageSyncText("Applied");
         // Let "Applied" stay visible for a beat before the dialog closes.
         await beat();
         if (!mountedRef.current) return;
@@ -928,7 +957,7 @@ export default function UsersPage() {
         // §8/§12 — the change revokes the target's sessions (WARP-116), so
         // the sync line states the consequence while the box applies it.
         const firstName = (editing.displayName || editing.id).split(" ")[0] ?? editing.id;
-        setEditAccessSyncText(ACCESS_COPY.sessionRevoke(firstName));
+        if (mountedRef.current) setEditAccessSyncText(ACCESS_COPY.sessionRevoke(firstName));
         const body = editAccessValue.startsWith("role:")
           ? { accessRoleId: editAccessValue.slice(5) }
           : {
@@ -936,7 +965,7 @@ export default function UsersPage() {
               tier: editAccessValue.slice(5) as AccessStartingPoint,
             };
         await setPersonAccess(editing.userId, body);
-        setEditAccessSyncText(ACCESS_COPY.applied);
+        if (mountedRef.current) setEditAccessSyncText(ACCESS_COPY.applied);
         await beat();
         if (!mountedRef.current) return;
       }
