@@ -11,10 +11,11 @@
  * The record is the source of truth for three controls the stateless design
  * could not express:
  *
- *   • sliding idle timeout   — role-dependent (admin 15 min / user 60 min),
- *     enforced by the auth middleware on every request via checkSession();
- *   • absolute timeout       — 8 h from login, never extended (refresh calls
- *     checkSession with touch:false so a token-refresh loop can't slide it);
+ *   • sliding idle timeout   — role-dependent, enforced by the auth
+ *     middleware on every request via checkSession();
+ *   • absolute timeout       — role-dependent, fixed at login, never extended
+ *     (refresh calls checkSession with touch:false so a token-refresh loop
+ *     can't slide the idle clock either);
  *   • immediate revocation   — deleting the record kills the ACCESS token at
  *     the next middleware check (not just refresh, unlike WARP-116's
  *     refresh-token denylist), and /auth/refresh refuses rotation without a
@@ -49,16 +50,19 @@ export const SESSION_INDEX_PREFIX = "sess:user:";
 
 /** Write-throttle for the sliding lastSeenAt update: at most one Redis write
  *  per session per this many seconds. Bounds write amplification on chatty
- *  dashboards while keeping idle-window resolution far below the 15-min
- *  admin limit. */
+ *  dashboards while keeping idle-window resolution far below any idle
+ *  limit an operator would configure. */
 export const SESSION_TOUCH_INTERVAL_SECONDS = 30;
 
 /** GC grace past the absolute cap — see module docstring. */
 const RECORD_GC_GRACE_SECONDS = 24 * 60 * 60;
 
-export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 15 * 60;
-export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 60 * 60;
-export const DEFAULT_ABSOLUTE_TIMEOUT_SECONDS = 8 * 60 * 60;
+// WARP-2854 — shipped lifetimes: owner/admin log in again every 24 h,
+// family/guest every 7 days. Idle equals the cap by default (see config.ts).
+export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 24 * 60 * 60;
+export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS = 24 * 60 * 60;
+export const DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS = 7 * 24 * 60 * 60;
 export const DEFAULT_MAX_CONCURRENT_SESSIONS = 5;
 
 export interface SessionRecord {
@@ -100,10 +104,17 @@ export function idleLimitSecondsForRole(role: Role): number {
   );
 }
 
-export function absoluteLimitSeconds(): number {
+/** Same role split as the idle window (WARP-2854). */
+export function absoluteLimitSecondsForRole(role: Role): number {
+  if (role === "owner" || role === "admin") {
+    return cfgNum(
+      config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS,
+      DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS,
+    );
+  }
   return cfgNum(
-    config.SESSION_ABSOLUTE_TIMEOUT_SECONDS,
-    DEFAULT_ABSOLUTE_TIMEOUT_SECONDS,
+    config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS,
+    DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS,
   );
 }
 
@@ -153,7 +164,7 @@ export async function createSession(user: {
     lastSeenAt: now,
   };
   const idxKey = SESSION_INDEX_PREFIX + user.id;
-  const gcTtl = absoluteLimitSeconds() + RECORD_GC_GRACE_SECONDS;
+  const gcTtl = absoluteLimitSecondsForRole(user.role) + RECORD_GC_GRACE_SECONDS;
   const evictedSids: string[] = [];
 
   try {
@@ -237,19 +248,20 @@ export async function checkSession(
 
   const now = nowSeconds();
 
-  if (now - record.createdAt >= absoluteLimitSeconds()) {
+  const absoluteLimit = absoluteLimitSecondsForRole(record.role);
+  if (now - record.createdAt >= absoluteLimit) {
     await destroyRecord(record.userId, sid);
     await recordActivity({
       kind: "auth",
       severity: "info",
       sourceIcon: "log-out",
       what: "Session expired (absolute limit)",
-      sub: `${absoluteLimitSeconds()}s cap`,
+      sub: `${absoluteLimit}s cap (${record.role})`,
       refs: {
         outcome: "session_absolute_timeout",
         userId: record.userId,
         sid,
-        limitSeconds: absoluteLimitSeconds(),
+        limitSeconds: absoluteLimit,
       },
       // Policy-driven termination — the box did it, not the user.
       actor: { type: "system", id: null },

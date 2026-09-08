@@ -13,9 +13,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../config.js", () => ({
   config: {
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    // Idle deliberately shorter than the caps here so the idle mechanism is
+    // observable; the shipped defaults (idle == cap) are pinned separately.
     SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: 900,
     SESSION_IDLE_TIMEOUT_USER_SECONDS: 3600,
-    SESSION_ABSOLUTE_TIMEOUT_SECONDS: 28800,
+    SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS: 28800,
+    SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS: 7 * 24 * 3600,
     SESSION_MAX_CONCURRENT_PER_USER: 3,
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -45,6 +48,11 @@ import {
   countLiveSessions,
   revokeAllSessions,
   idleLimitSecondsForRole,
+  absoluteLimitSecondsForRole,
+  DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS,
+  DEFAULT_IDLE_TIMEOUT_USER_SECONDS,
+  DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS,
+  DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS,
   SESSION_KEY_PREFIX,
   SESSION_INDEX_PREFIX,
   SESSION_TOUCH_INTERVAL_SECONDS,
@@ -143,6 +151,25 @@ describe("idleLimitSecondsForRole", () => {
     expect(idleLimitSecondsForRole("admin")).toBe(900);
     expect(idleLimitSecondsForRole("family")).toBe(3600);
     expect(idleLimitSecondsForRole("guest")).toBe(3600);
+  });
+});
+
+describe("absoluteLimitSecondsForRole (WARP-2854)", () => {
+  it("reads the admin cap for owner/admin and the user cap for everyone else", () => {
+    expect(absoluteLimitSecondsForRole("owner")).toBe(28800);
+    expect(absoluteLimitSecondsForRole("admin")).toBe(28800);
+    expect(absoluteLimitSecondsForRole("family")).toBe(7 * 24 * 3600);
+    expect(absoluteLimitSecondsForRole("guest")).toBe(7 * 24 * 3600);
+  });
+
+  it("ships owner/admin at 24 h and family/guest at 7 d, idle equal to the cap", () => {
+    // The product decision behind WARP-2854. config.ts carries the same
+    // numbers as zod defaults (pinned in config.session-lifetimes.test.ts);
+    // these are the fallbacks session.service uses when config lacks a value.
+    expect(DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(24 * 3600);
+    expect(DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(7 * 24 * 3600);
+    expect(DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS);
+    expect(DEFAULT_IDLE_TIMEOUT_USER_SECONDS).toBe(DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS);
   });
 });
 
@@ -256,12 +283,12 @@ describe("checkSession — idle + absolute enforcement", () => {
     expect(result.kind).toBe("ok");
   });
 
-  it("enforces the 8h absolute cap even when activity is continuous", async () => {
-    const { sid } = await createSession(alice);
-    // Stay "active": touch every 30 min for 8 hours.
-    for (let i = 0; i < 16; i++) {
-      advanceSeconds(30 * 60);
-      if (i < 15) {
+  it("enforces the admin-class 8h absolute cap on an owner even when activity is continuous", async () => {
+    const { sid } = await createSession(owner);
+    // Stay "active": touch every 10 min (under the 15-min admin idle) for 8 hours.
+    for (let i = 0; i < 48; i++) {
+      advanceSeconds(10 * 60);
+      if (i < 47) {
         const mid = await checkSession(sid);
         expect(mid.kind).toBe("ok");
       }
@@ -271,9 +298,64 @@ describe("checkSession — idle + absolute enforcement", () => {
     expect(fake.kv.has(SESSION_KEY_PREFIX + sid)).toBe(false);
     expect(recordActivity).toHaveBeenCalledWith(
       expect.objectContaining({
-        refs: expect.objectContaining({ outcome: "session_absolute_timeout", sid }),
+        refs: expect.objectContaining({
+          outcome: "session_absolute_timeout",
+          sid,
+          limitSeconds: 28800,
+        }),
         actor: { type: "system", id: null },
       }),
+    );
+  });
+
+  /** Rewrite the stored record's clocks so a boundary can be hit exactly
+   *  without replaying hours of touches. */
+  function setClocks(sid: string, ageSeconds: number) {
+    const key = SESSION_KEY_PREFIX + sid;
+    const entry = fake.kv.get(key)!;
+    const rec = JSON.parse(entry.value);
+    const now = Math.floor(Date.now() / 1000);
+    rec.createdAt = now - ageSeconds;
+    rec.lastSeenAt = now;
+    fake.kv.set(key, { ...entry, value: JSON.stringify(rec) });
+  }
+
+  it("owner: alive one second before the admin cap, dead at it (WARP-2854)", async () => {
+    const { sid } = await createSession(owner);
+    setClocks(sid, 28800 - 1);
+    expect((await checkSession(sid)).kind).toBe("ok");
+    setClocks(sid, 28800);
+    expect(await checkSession(sid)).toEqual({ kind: "expired", reason: "absolute_timeout" });
+  });
+
+  it("family: outlives the admin cap and dies at the user cap (WARP-2854)", async () => {
+    const { sid } = await createSession(alice);
+    // Past the admin cap by a full day — a family session must not read it.
+    setClocks(sid, 28800 + 24 * 3600);
+    expect((await checkSession(sid)).kind).toBe("ok");
+    setClocks(sid, 7 * 24 * 3600 - 1);
+    expect((await checkSession(sid)).kind).toBe("ok");
+    setClocks(sid, 7 * 24 * 3600);
+    expect(await checkSession(sid)).toEqual({ kind: "expired", reason: "absolute_timeout" });
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        refs: expect.objectContaining({
+          outcome: "session_absolute_timeout",
+          sid,
+          limitSeconds: 7 * 24 * 3600,
+        }),
+      }),
+    );
+  });
+
+  it("sizes the record's GC TTL from the caller's role cap (WARP-2854)", async () => {
+    const t0 = Date.now();
+    const { sid: ownerSid } = await createSession(owner);
+    const { sid: familySid } = await createSession(alice);
+    const grace = 24 * 3600;
+    expect(fake.kv.get(SESSION_KEY_PREFIX + ownerSid)!.expiresAt).toBe(t0 + (28800 + grace) * 1000);
+    expect(fake.kv.get(SESSION_KEY_PREFIX + familySid)!.expiresAt).toBe(
+      t0 + (7 * 24 * 3600 + grace) * 1000,
     );
   });
 

@@ -480,9 +480,18 @@ const envSchema = z.object({
   // or token refresh. The cap evicts the OLDEST session at login (audited).
   // Enforced via Redis session records (services/session.service.ts) keyed
   // by the JWT `sid` claim.
-  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(15 * 60),
-  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(60 * 60),
-  SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce.number().default(8 * 60 * 60),
+  //
+  // WARP-2854 — the shipped defaults are a product decision, not the NIST
+  // posture WARP-247 first shipped (900 / 3600 idle, 28800 absolute): an
+  // owner/admin logs in again once every 24 h, a family/guest once every
+  // 7 days, nothing shorter. So the absolute cap is per role class, like the
+  // idle window, and each idle default EQUALS its role's cap — idle never
+  // fires first unless an operator lowers it. Anything above 7 days is
+  // bounded by the refresh token's own lifetime (REFRESH_TOKEN_TTL_SECONDS).
+  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(24 * 60 * 60),
+  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(7 * 24 * 60 * 60),
+  SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(24 * 60 * 60),
+  SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS: z.coerce.number().default(7 * 24 * 60 * 60),
   SESSION_MAX_CONCURRENT_PER_USER: z.coerce.number().default(5),
 
   // --- OAuth2 ---
