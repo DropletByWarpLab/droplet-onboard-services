@@ -24,6 +24,10 @@ import {
 
 import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
 import { CLAIMABLE_ERP_SYNC_STATES } from "./cursor.service.js";
+// The READ path's own capability classification, imported rather than retyped
+// — its docstring says so in as many words ("the agreement is asserted against
+// THIS set rather than a second hand-written copy of it").
+import { CAPABILITY_LIMITED_CODES } from "../erp.service.js";
 import {
   createErpSyncRunner,
   CAPABILITY_BLOCKED_ERRORS,
@@ -1338,5 +1342,75 @@ describe("WARP-2841 — every capability error the connectors export is classifi
         "FAILED forever — add them to CAPABILITY_BLOCKED_ERRORS, or give them " +
         "their own branch in asSyncFailure the way XeroScopeMissingError has",
     ).toEqual(["XeroScopeMissingError"]);
+  });
+
+  /**
+   * 🔴 The SECOND derivation, and the reason there are two.
+   *
+   * The assertion above finds capability errors by NAME. That closes the hole
+   * it was written for — a matching class added and never listed — but it can
+   * only ever see classes somebody happened to name with one of five suffixes.
+   * `ShopifyProtectedDataDeniedError` is named with none of them, and it is a
+   * capability fact by every other definition in this codebase: its
+   * `PROTECTED_CUSTOMER_DATA_DENIED` code is in `CAPABILITY_LIMITED_CODES` on
+   * the READ path and maps to the `CAPABILITY_LIMITED` STATUS in
+   * `cloud-connection-state.ts`. Only the sync path called it a fault.
+   *
+   * So this derives the same expectation from the CODE — the classification
+   * two other tables already made — rather than from the spelling. The two
+   * derivations are independent and complementary: a class the read path has
+   * already classified is caught here whatever it is called, and a class whose
+   * constructor needs arguments (so its code cannot be read) is caught above by
+   * its name. The final assertion is that nothing escapes BOTH.
+   */
+  it("🔴 leaves no error the READ path already calls capability-class unclassified", async () => {
+    const pkg = (await import("@droplet/erp-connector")) as Record<string, unknown>;
+    const errorNames = Object.keys(pkg).filter((k) => k.endsWith("Error"));
+    // Guard against a vacuous pass, the same way the name derivation does.
+    expect(errorNames.length).toBeGreaterThanOrEqual(50);
+
+    const unreadable: string[] = [];
+    const capabilityByCode: string[] = [];
+    for (const name of errorNames) {
+      const Cls = pkg[name] as new () => Error & { code?: unknown };
+      let code: unknown;
+      try {
+        // `code` is a class FIELD initializer on every one of these, so it is
+        // set before the constructor body runs — but a constructor that reads
+        // its arguments still throws with none. Those fall to `unreadable`
+        // rather than being silently skipped.
+        code = new Cls().code;
+      } catch {
+        unreadable.push(name);
+        continue;
+      }
+      if (typeof code === "string" && CAPABILITY_LIMITED_CODES.has(code)) {
+        capabilityByCode.push(name);
+      }
+    }
+
+    // Nothing escapes both derivations. An error whose code cannot be read AND
+    // whose name matches nothing would be invisible to this whole suite, which
+    // is the failure mode the two derivations exist to make impossible.
+    expect(
+      unreadable.filter((n) => !CAPABILITY_NAME.test(n)).sort(),
+      "these classes are invisible to both derivations — give the class a " +
+        "no-argument-safe constructor, or a name the convention above matches",
+    ).toEqual([]);
+
+    const unclassified = capabilityByCode
+      .filter((name) => {
+        const Cls = pkg[name] as new (...a: never[]) => Error;
+        const instance = Object.create(Cls.prototype) as Error;
+        return !CAPABILITY_BLOCKED_ERRORS.some((c) => instance instanceof c);
+      })
+      .sort();
+
+    expect(
+      unclassified,
+      "the read path and the hub already call these capability-class; the sync " +
+        "path calling them FATAL parks the cursor FAILED forever and renders " +
+        "the whole connection broken — add them to CAPABILITY_BLOCKED_ERRORS",
+    ).toEqual([]);
   });
 });

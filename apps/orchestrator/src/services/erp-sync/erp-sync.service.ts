@@ -64,6 +64,7 @@ import {
   KlaviyoCapabilityMissingError,
   PipedriveCapabilityMissingError,
   PipedriveColumnNotAvailableError,
+  ShopifyProtectedDataDeniedError,
   ShopifyScopeMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
@@ -307,6 +308,28 @@ export const CAPABILITY_BLOCKED_ERRORS = [
   PipedriveColumnNotAvailableError,
   ShopifyScopeMissingError,
   DatasetNotServedError,
+  /**
+   * 🔴 The EIGHTH, found by classification rather than by spelling — and the
+   * reason the completeness test now derives its expectation two ways.
+   *
+   * `ShopifyProtectedDataDeniedError` is a capability fact by every definition
+   * this codebase already holds: its `PROTECTED_CUSTOMER_DATA_DENIED` code is
+   * in `CAPABILITY_LIMITED_CODES` on the read path and maps to the
+   * `CAPABILITY_LIMITED` STATUS in `cloud-connection-state.ts`. Only the sync
+   * path called it a fault — and it was invisible to a name-matched sweep of
+   * this list, because it is the one capability class named for WHAT WAS
+   * DENIED rather than for the capability that is missing.
+   *
+   * It is not a plan edge case either. Shopify withholds protected customer
+   * data until the app is approved, so an unapproved store throws it
+   * UNCONDITIONALLY for `customer` — before any I/O in `runRead`, and again in
+   * `listEntityIds` — while `order` and `product` land perfectly. A store that
+   * downgrades mid-life reaches the same state through
+   * `detectProtectedDataRedaction`. Either way the `customer` cursor parked
+   * FAILED forever and `foldSyncState` rendered the whole Shopify connection
+   * broken.
+   */
+  ShopifyProtectedDataDeniedError,
 ] as const;
 
 /**
