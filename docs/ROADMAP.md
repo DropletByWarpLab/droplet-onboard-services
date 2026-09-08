@@ -43,7 +43,7 @@ GA readiness is tracked by five risk-based epics, WARP-956 through WARP-960. The
 
 ### M1.3 JWT authentication
 - **GTM scope:** Login endpoint, token issuance/refresh, Bearer auth on all endpoints, basic owner/guest roles.
-- **This repo's slice:** JWT access tokens (15 min) + refresh tokens (7 days) issued on login. Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Refresh endpoint reissues access tokens. Logout denylists refresh tokens in Redis.
+- **This repo's slice:** JWT access tokens (15 min) + refresh tokens (30 days, WARP-2856) issued on login. Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Refresh endpoint reissues access tokens. Logout denylists refresh tokens in Redis.
 - **Files involved:** `apps/orchestrator/src/services/jwt.service.ts`, `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/src/config.ts`, `scripts/lib/secrets.sh`
 - **Status:** `[x]` Done
 - **What was done:** Added `jsonwebtoken` dependency; created `jwt.service.ts` (sign/verify/refresh/denylist); updated auth middleware with JWT-first + Nextcloud fallback; login issues JWT pair; refresh endpoint verifies and reissues; `JWT_SECRET` generated per-device by `setup.sh`; role claim (owner/admin/family/guest) derived from Nextcloud groups.

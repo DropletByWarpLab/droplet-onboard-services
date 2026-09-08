@@ -70,7 +70,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ## 🟡 Partial / stubbed
 
-- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): JWT access tokens (15 min) + refresh tokens (7 days). Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Role claim (owner/admin/family/guest) included in JWT. GTM M1.3 is `[x]` Done. RBAC per-route guards (M2.2) are also `[x]` Done — see "Security & access control" above.
+- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): JWT access tokens (15 min) + refresh tokens (30 days, WARP-2856). Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Role claim (owner/admin/family/guest) included in JWT. GTM M1.3 is `[x]` Done. RBAC per-route guards (M2.2) are also `[x]` Done — see "Security & access control" above.
 - **NVR integration** (`docker/frigate/config.yml`, `services/camera-discovery/`, `apps/orchestrator/src/routes/cameras.ts`): Frigate is wired into Compose; ONVIF scanner + Frigate client exist; event subscriptions and clip-export delegation need auditing. GTM M2.1 is `[~]`.
 - **Prompt-injection hardening** (`services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`): Sliding-window rate limiter implemented (Redis + in-memory fallback) on chat endpoints. Input validation: `max_tokens` capped at 4096, messages capped at 100, content at 32k chars. CORS restricted to explicit origins. Remaining: output schema validation for tool-call responses. GTM M2.7 is `[~]`.
 - **Photo indexing** (`services/file-indexer/embedder.py`, `services/file-indexer/extractors/`): text indexing plumbing is present; image/CLIP embedding is not. GTM M3.3 is `[~]`.
