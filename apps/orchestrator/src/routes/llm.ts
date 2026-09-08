@@ -1781,6 +1781,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // on an unreachable gateway, and `undefined` resolves to the local
       // window — the value every turn used before this change.
       //
+      // AWAITED HERE, ahead of the four Prisma reads that follow, and that is
+      // not a serialized gateway round-trip in front of the DB work: THIS
+      // request already called `getModelProvider` twice — unconditionally, at
+      // `decideCloudTurn` and `resolveOffLanProvider` above — and
+      // `findModelInfo` caches the whole model LIST, not one model's entry. So
+      // `_modelsCache` is warm by the time we get here and this call does no
+      // I/O, including for a local-only turn that will resolve to
+      // `local_default` anyway, and including when vision auto-routing made
+      // `agentModel` a different id than the one the provider lookups used.
+      // Pinned by `ai-gateway.client.capabilities-cache.test.ts` (WARP-2851
+      // block) so a future per-model cache cannot make this a real fetch
+      // silently. Moving the await down to the use site would buy nothing:
+      // the only paths where it is a fetch are the ones where the gateway is
+      // already unreachable or listed degraded, and there the cost is a
+      // timeout, not the few ms of DB work it could overlap with.
+      //
       // try/catch, NOT `.catch()` — the same reason spelled out at the
       // WARP-1921 continuity lookup below. `.catch()` only handles a REJECTED
       // promise; if `getModelContextWindow` is missing from the module object
