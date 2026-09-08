@@ -360,6 +360,60 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     expect(escaped).toEqual([]);
   });
 
+  /**
+   * Review follow-up on the same PR: `reload()` is the wider version of the
+   * same fault and the most reachable one in the file. It runs three awaits
+   * over six setters, and the mount effect calls it WITHOUT awaiting, so a
+   * throw inside it after teardown has nothing to catch it — on every single
+   * page mount, not just an Edit-dialog one.
+   *
+   * `handleEditSave`'s `if (!mountedRef.current) return;` before calling
+   * `reload()` does not cover this: it checks the mount state at the CALL
+   * SITE, not during `reload`'s own in-flight awaits.
+   *
+   * HOW THIS ONE DETECTS, because it is not obvious and the assertion below
+   * looks redundant: reverting the guard does NOT trip `expect(escaped)`. The
+   * un-awaited `reload()` surfaces through vitest's own unhandled-error
+   * channel rather than `unhandledRejection`, so the run ends
+   * `Tests 12 passed` + an Unhandled Errors section + exit 1 — which is the
+   * ORIGINAL failure signature, verbatim. Verified by mutation. Keep the
+   * assertion (it is the one that fires for the sibling usage case) and do
+   * not "simplify" this test on the grounds that it always passes.
+   *
+   * A `process.on("uncaughtException")` listener would make the assertion
+   * fire directly, but it also swallows unrelated async errors raised while
+   * `window` is missing and made both tests here fail spuriously. Not worth it.
+   */
+  it("a roster reload landing after unmount + teardown escapes nothing", async () => {
+    let resolveUsers!: (value: unknown) => void;
+    fetchUsersMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsers = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() => expect(fetchUsersMock).toHaveBeenCalled());
+
+    // The page goes away while the very first roster read is still in flight.
+    view.unmount();
+
+    const escaped: string[] = [];
+    const onRejection = (err: unknown) =>
+      escaped.push(String((err as { message?: string })?.message ?? err));
+    process.on("unhandledRejection", onRejection);
+
+    const realWindow = (globalThis as { window?: unknown }).window;
+    try {
+      delete (globalThis as { window?: unknown }).window;
+      resolveUsers({ users: [] });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    } finally {
+      (globalThis as { window?: unknown }).window = realWindow;
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(escaped).toEqual([]);
+  });
+
   it("rejects a non-positive upload cap without saving", async () => {
     const dialog = await openEditDialog();
     await awaitUsageLoaded(dialog);

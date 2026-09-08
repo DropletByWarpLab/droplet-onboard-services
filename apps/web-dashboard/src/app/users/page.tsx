@@ -372,35 +372,39 @@ export default function UsersPage() {
     setError(null);
     try {
       const data = await fetchUsers();
+      if (!mountedRef.current) return;
       setUsers(data.users || []);
       setIsAdmin(true);
       try {
         const inviteData = await listInvites();
-        setInvites(inviteData.invites || []);
+        if (mountedRef.current) setInvites(inviteData.invites || []);
       } catch {
         // Pending invites are nice-to-have; if the orchestrator hasn't
         // migrated yet, don't block the user list.
-        setInvites([]);
+        if (mountedRef.current) setInvites([]);
       }
       // WARP-1271 (T19a): the roster's "used / limit" column is best-effort
       // — a failed fetch (e.g. Nextcloud unreachable) leaves the column
       // blank rather than failing the whole page.
       try {
         const usage = await fetchAdminFilesUsage();
+        if (!mountedRef.current) return;
         const byUserId: Record<string, AdminUsageUserRow> = {};
         for (const row of usage.users) byUserId[row.userId] = row;
         setUsageRoster(byUserId);
       } catch {
-        setUsageRoster({});
+        if (mountedRef.current) setUsageRoster({});
       }
     } catch (err: any) {
+      if (!mountedRef.current) return;
       if (String(err?.message ?? "").includes("403")) {
         setIsAdmin(false);
       } else {
         setError(err?.message || "Failed to load users");
       }
     } finally {
-      setLoading(false);
+      // `return` above still runs this, so it is guarded too.
+      if (mountedRef.current) setLoading(false);
     }
   }, []);
 
@@ -417,10 +421,23 @@ export default function UsersPage() {
   // happened to be last. Real operators hit the same path by navigating away
   // mid-load; they just do not have a runner to fail.
   //
-  // So each handler checks `mountedRef` before it writes. Note this guards the
-  // WRITE, never the control flow — in `handleEditSave` the awaits in between
-  // are server writes the operator already asked for, and bailing out of those
-  // would silently apply half a save.
+  // So each handler below re-checks `mountedRef` before it writes. Note this
+  // guards the WRITE, never the control flow — in `handleEditSave` the awaits
+  // in between are server writes the operator already asked for, and bailing
+  // out of those would silently apply half a save.
+  //
+  // SCOPE, so the next reader does not mistake this for a whole-file audit:
+  // guarded here are the four best-effort chains, `handleEditSave`, `reload()`
+  // and `openEdit`'s two fetches. NOT guarded, and tracked on WARP-2696, are 19
+  // post-await writes in the modal/action handlers — handleCreateAccount,
+  // handleCopyTempPassword, handleGenerateInvite, handleCopyInviteUrl,
+  // performRevokeInvite, performDeleteUser, performEnable, performDisable.
+  // Same defect, different blast radius; they are reachable only while their
+  // own modal is open.
+  //
+  // A staleness check is NOT a mount check. `openEdit`'s `editSeedTokenRef`
+  // answers "is this still the current editor?" and is only bumped by the next
+  // openEdit(), so it still matches after an unmount. Both are needed.
   // WARP-1270 (T18) — department list for the invite modal's "Add to a
   // department" section. Best-effort (the invite modal's core email/role
   // flow must not break if this fails — the section just doesn't render).
@@ -824,6 +841,12 @@ export default function UsersPage() {
       // best-effort; an absent T3 backend just leaves the block empty.
       fetchEffectiveAccess(u.userId)
         .then((eff) => {
+          // The token below answers "is this still the current editor?";
+          // it is only ever bumped by the NEXT openEdit(), so it still
+          // matches after an unmount with no second open. That is a
+          // staleness check, not a mount check, and the writes below need
+          // both.
+          if (!mountedRef.current) return;
           // F4: bail if another editor opened (or this one closed and
           // reopened) since this fetch started — stale data must never
           // seed the current person's exception list.
