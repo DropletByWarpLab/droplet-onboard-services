@@ -11,8 +11,11 @@ inventory that makes the next drift visible without an API call.
 
 ## What is required today
 
-Verified 2026-08-24 against the live rulesets and against real PR heads
-(#1729, `base=stage`, open; #1690, `base=stage`, merged).
+Verified **2026-09-07** against the live rulesets via the API, and against real
+PR heads (#2053, `base=stage`, merged; #2048, `base=stage`, merged). The
+2026-08-24 verification this line used to carry predates both the WARP-2187
+retirement note and its correction under WARP-2824, so it no longer bounded the
+section it sits above.
 
 ### `Stage Protection` — ruleset id 20877684, `refs/heads/stage`
 
@@ -116,11 +119,23 @@ when reading the result:
   here emits check *runs*, so that endpoint returns
   `{"state":"pending","statuses":[]}` even when all gates are green. Use
   `/check-runs`.
-- **"It merged" is not evidence a gate works.** Both rulesets carry
-  `bypass_actors: [{actor_type: OrganizationAdmin, bypass_mode: always}]`, so
-  org admins merge straight through a context that never reports. WARP-2171's
-  broken gate survived from 2026-08-16 to 2026-08-24 for exactly this reason,
-  while #1687, #1689 and #1693 all merged over it.
+- **"It merged" is not evidence a gate works** — but the reason has changed,
+  and the old reason is no longer true. Through 2026-08-24 both rulesets carried
+  `bypass_actors: [{actor_type: OrganizationAdmin, bypass_mode: always}]`, so org
+  admins merged straight through a context that never reported: WARP-2171's broken
+  gate survived from 2026-08-16 to 2026-08-24 for exactly that reason, while
+  #1687, #1689 and #1693 all merged over it.
+
+  🔴 **Today both rulesets carry `bypass_actors: []`.** Re-verified against the
+  API on 2026-09-07 — `Stage Protection` (20877684) and `Main Protection`
+  (14884851) both return an empty bypass list, so `--admin` bypasses neither and
+  no org admin can delete `stage`. The claim above contradicted the top of this
+  same file, which is precisely the kind of two-answers-in-one-document defect
+  this file exists to prevent.
+
+  What still holds is the *lesson*: a merge proves nothing about a gate that
+  never reported. A required context that does not run is not a check — verify
+  the check LIST, not the colour.
 
 ## Not required, and why
 

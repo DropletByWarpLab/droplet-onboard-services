@@ -73,13 +73,31 @@
 #      real fix and remains a decision, not a config tweak. See ENGINEERING.md §3.2.
 #
 #   4. NO `target-branch` — Dependabot targets the repository DEFAULT branch,
-#      which is `main`, and that is now the only long-lived branch. Every block
-#      used to pin `target-branch: "stage"` because WARP-1670 refused any PR
-#      into `main` whose head was not `stage`. `stage` was deleted on purpose
-#      (WARP-2187) and `branch-flow-guard` retired with it, so the pin now
-#      names a ref that does not exist. Do not reintroduce it without also
-#      recreating the branch: a Dependabot PR aimed at a missing base cannot
-#      be rescued by a re-run.
+#      which is `main`. Every block used to pin `target-branch: "stage"`
+#      because WARP-1670 refused any PR into `main` whose head was not
+#      `stage`.
+#
+#      🔴 CORRECTED 2026-09-07 (WARP-2824). This comment used to say `stage`
+#      "was deleted on purpose (WARP-2187)" and that the pin "names a ref that
+#      does not exist". Both are FALSE. `stage` exists, is the branch every
+#      feature PR targets, and is protected by ruleset 20877684 with
+#      `bypass_actors: []` — no org admin can delete it. Nothing here is
+#      blocked by a missing base.
+#
+#      ⚠ The pin itself is a SEPARATE, OPEN question and is deliberately not
+#      changed here, because it is a behaviour change with measured
+#      consequences in both directions:
+#        - Targeting `main` (today) means every dependency batch lands on
+#          `main` and CONFLICTS the stage->main promote in the dependency
+#          manifests. While that promote conflicts it gets zero Actions runs,
+#          and since `ci.yml` is `push: branches: [main]` only, `stage` is
+#          left with no CI reporting of its own. Observed repeatedly.
+#        - Targeting `stage` puts dependency updates through the soak like
+#          everything else, but a base that is force-pushed or deleted
+#          auto-closes every open Dependabot PR against it — which is how the
+#          pin came to be removed in the first place.
+#      Decide it on its own ticket with its own evidence; do not flip it as a
+#      side effect of a docs correction.
 #
 version: 2
 updates:
