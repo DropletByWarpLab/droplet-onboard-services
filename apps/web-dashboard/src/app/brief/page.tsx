@@ -89,13 +89,22 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
           Worth its own sentence rather than folding into the count: those
           documents are NOT queued and will not be read on a later tick, so
           leaving them inside "still working through the rest" would be the
-          same overstatement in a new place. */}
+          same overstatement in a new place.
+
+          ONE STRING PER COUNT, not four switches inside one sentence. The
+          noun, its verb, the possessive pronoun and the sentence that
+          follows all turn on the same number. The first draft spread them
+          across independent ternaries and two of the four were never
+          switched, so a single passed-over document read "whose it were …
+          They are not queued". Held together as one string per count so the
+          agreement cannot come apart again; pinned in
+          `__tests__/brief.coverage-passed-over.test.tsx`. */}
       {passedOver > 0 ? (
         <p className="brief-coverage-detail">
           <strong>{passedOver.toLocaleString()}</strong>{" "}
-          {passedOver === 1 ? "document was" : "documents were"} passed over —
-          no readable text, or the box could not tell whose {passedOver === 1 ? "it" : "they"} were.
-          {" "}They are not queued for a later pass.
+          {passedOver === 1
+            ? "document was passed over — no readable text, or the box could not tell whose it was. It is not queued for a later pass."
+            : "documents were passed over — no readable text, or the box could not tell whose they were. They are not queued for a later pass."}
         </p>
       ) : null}
       <p className="brief-coverage-detail">
