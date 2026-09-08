@@ -47,10 +47,27 @@ npx prisma generate
 #    OWN sources natively but follows package entry points for workspace
 #    deps, so a fresh named volume without these builds crashes at require
 #    time (fips-selftest → shared-types → auth-policy, in dependency order).
-#    tools-core is last because it is the one that needs step 2's output.
+#    tools-core needs step 2's output; erp-connector needs shared-types, so
+#    both sit after it.
+#
+#    WARP-2845: `services/erp-connector` is in this list because the
+#    orchestrator IMPORTS IT AT RUNTIME (erp.service.ts, erp-provider.ts,
+#    erp-sync/*). It was missing, so the stack got all the way past migrations
+#    and the seed and then died on the handoff to `npm run dev`:
+#
+#      Error: Cannot find module
+#      '/workspace/node_modules/@droplet/erp-connector/dist/index.js'
+#
+#    It lives under services/, not packages/ — which is exactly why a list
+#    written as "the packages/*" set missed it. Building it also drops the
+#    orchestrator's `tsc --noEmit` from 38 errors to 1.
+#
+#    Deliberately NOT here: `services/mcp-server`. The orchestrator references
+#    it only from a test file, never at runtime, so building it on every boot
+#    would cost time the dev loop does not get back.
 #    Idempotent: tsc is incremental and a warm volume rebuilds in seconds.
-log "Building workspace packages (fips-selftest, shared-types, auth-policy, tools-core)…"
-for w in packages/fips-selftest packages/shared-types packages/auth-policy packages/tools-core; do
+log "Building workspace packages (fips-selftest, shared-types, auth-policy, tools-core, erp-connector)…"
+for w in packages/fips-selftest packages/shared-types packages/auth-policy packages/tools-core services/erp-connector; do
   if grep -q '"build"' "/workspace/$w/package.json"; then
     (cd /workspace && npm run build -w "./$w")
   fi
