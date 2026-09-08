@@ -52,7 +52,7 @@ services.
    cd ~ && mkdir -p code && cd code
    git clone git@github.com:DropletByWarpLab/droplet-onboard-services.git
    cd droplet-onboard-services
-   git checkout feat/dashboard-redesign
+   git checkout stage
    ```
 
 3. **Copy the env file:**
@@ -79,9 +79,28 @@ services.
 
 5. **Open** http://localhost:3001 — the dashboard.
 
-   Sign in as:
-   - **username:** `admin`
-   - **password:** `dropletdev`
+   A fresh stack has **no accounts at all**, so the first thing you see is the
+   setup wizard, not a login. Walk it:
+
+   - **Claim code:** `DRPL7K2Q9F4M` — already set in `docker/dev/.env.example`.
+     On a real box this is minted and shown on the lid display; the dev stack
+     has no display, so the env file pins a known one.
+   - **Account step:** pick any email and password you'll remember. The
+     password must be 12–128 characters with at least 3 of
+     {lowercase, uppercase, digit, symbol} — the same policy the product
+     enforces (`packages/auth-policy/src/password.ts`).
+
+   That creates the box's single `owner`. **Afterwards you sign in with the
+   email, not a username** — ADR-013 made the local directory the auth source
+   of truth, so `POST /auth/login` looks the account up by email and verifies
+   argon2id against `User.passwordHash`. Nextcloud does not authenticate
+   anyone, and the username is derived server-side from the email's local part
+   (`dev@warp-lab.ai` → `dev`); typing it will not log you in.
+
+   > Setup is one-shot. Once an `owner` row exists, `POST /auth/setup` answers
+   > `409 OWNER_EXISTS` and touches nothing — so a re-POST can neither create a
+   > second owner nor overwrite the first one's password. To start over, tear
+   > the stack down **with its volumes** (see "Wipe everything" below).
 
 6. **Optional — seed Nextcloud users + 10 sample files** (one-time):
 
@@ -92,6 +111,11 @@ services.
    This adds a `stefan` user and uploads 10 markdown / CSV samples to the
    admin's Nextcloud home so the Files tab isn't empty.
 
+   Note what this does **not** do: it creates users in Nextcloud over OCS and
+   never writes the local `User` row the dashboard authenticates against. A
+   user created here cannot sign in to the dashboard. Its job is to give the
+   Files surface something to show.
+
 ---
 
 ## Service URLs
@@ -100,7 +124,7 @@ services.
 |---|---|
 | http://localhost:3001 | Dashboard (Next.js, hot-reload) |
 | http://localhost:3000 | Orchestrator API (Express, tsx watch) |
-| http://localhost:8082 | Nextcloud admin UI (login: `admin` / `dropletdev`) |
+| http://localhost:8082 | Nextcloud admin UI (login: `admin` / `dropletdev` — a Nextcloud-only credential; it is not a dashboard login) |
 | `postgresql://droplet:dropletdev@localhost:5432/droplet` | Postgres (use TablePlus / DataGrip / psql) |
 | `redis://localhost:6379` | Redis (use redis-cli / RedisInsight) |
 | `mqtt://localhost:1883` | MQTT broker (use MQTT Explorer) |

@@ -225,9 +225,24 @@ export interface DegradeResult {
   /** Estimated tokens after degradation. */
   estimatedTokens: number;
   /**
-   * True when the request STILL overflows after dropping both optional
-   * blocks — the caller must fall through to the existing history/
-   * attachment trimming (which this pure function does not own).
+   * True when the request STILL overflows after dropping ALL THREE optional
+   * blocks (business, persona, brain — it said "both" until the brain block
+   * was added by WARP-2752).
+   *
+   * 🔴 NO CALLER READS THIS. The sentence that stood here — "the caller must
+   * fall through to the existing history/attachment trimming (which this pure
+   * function does not own)" — described a handoff that was never built. There
+   * is no history or attachment trimming anywhere in the orchestrator, and
+   * `routes/llm.ts` takes `personaBlock` / `businessBlock` / `brainBlock` off
+   * the result and discards the rest. `tool-budget.service.ts` in turn cited
+   * this gate as the thing that "protects history", which is why the gap was
+   * invisible from both ends.
+   *
+   * A turn that reaches here therefore goes to the model over-budget and comes
+   * back as the WARP-854 empty completion — a failed turn with a retry chip
+   * and no stated cause. It is also the ONLY outcome of this function that
+   * emits no `warn`. Tracked on WARP-2849; until then, treat this field as a
+   * diagnostic that nothing acts on.
    */
   historyTrimNeeded: boolean;
 }

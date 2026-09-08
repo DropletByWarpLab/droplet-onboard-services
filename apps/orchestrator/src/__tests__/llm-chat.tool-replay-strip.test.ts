@@ -98,6 +98,13 @@ vi.mock("../services/chat-persistence.service.js", () => ({
   })),
 }));
 
+// The streaming branch probes the model runtime before it calls the loop.
+// Keep it off the network; it is irrelevant to what these tests assert.
+vi.mock("../services/model-readiness.service.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  probeColdModel: vi.fn().mockResolvedValue(null),
+}));
+
 const mockRunAgent = vi.fn();
 vi.mock("../services/llm-agent.service.js", () => ({
   runAgent: (...args: unknown[]) => mockRunAgent(...args),
@@ -321,5 +328,137 @@ describe("POST /api/llm/chat — client tool fields never reach the agent loop",
       ["assistant", "hi"],
       ["user", "how are you?"],
     ]);
+  });
+});
+
+/**
+ * The strip is silent to the caller unless the route says so.
+ *
+ * Before WARP-2849 a client that replayed a tool result got a 422 it could
+ * not miss. Dropping the fields is the right call — the 422 failed the WHOLE
+ * turn — but on its own it trades a loud failure for a quiet one: a clean 200
+ * whose answer ignores the tool output the caller supplied, indistinguishable
+ * from a turn where the model simply chose not to use it. The counters have to
+ * come back on the response.
+ *
+ * They ride on headers because that is how this route already returns per-turn
+ * metadata (`X-Conversation-Id`, `X-Assistant-Message-Id`, `X-User-Message-Id`)
+ * — the streaming path has no response body to put a field in, and the
+ * non-streaming body is the ai-gateway's completion, not ours to extend.
+ */
+describe("POST /api/llm/chat — the caller can see that its tool replay was discarded", () => {
+  const DROPPED = "x-tool-replay-dropped-messages";
+  const STRIPPED = "x-tool-replay-stripped-tool-call-ids";
+
+  it("reports a dropped tool message, and reports zero for the other counter", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [
+          { role: "user", content: "list my devices" },
+          { role: "assistant", content: "" },
+          { role: "tool", content: '{"devices":[]}', tool_call_id: "call_1" },
+        ],
+        stream: false,
+        ephemeral: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers[DROPPED]).toBe("1");
+    // Set as a PAIR, so a client only has to look at one of them to know the
+    // route intervened at all.
+    expect(res.headers[STRIPPED]).toBe("0");
+  });
+
+  it("reports a tool_call_id stripped off a non-tool turn", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [{ role: "user", content: "hello", tool_call_id: "call_7" }],
+        stream: false,
+        ephemeral: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers[STRIPPED]).toBe("1");
+    expect(res.headers[DROPPED]).toBe("0");
+  });
+
+  it("counts every discarded field, not just the first", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [
+          { role: "user", content: "one", tool_call_id: "call_1" },
+          { role: "tool", content: "{}", tool_call_id: "call_2" },
+          { role: "assistant", content: "two", tool_call_id: "call_3" },
+          { role: "tool", content: "{}", tool_call_id: "call_4" },
+          { role: "user", content: "three" },
+        ],
+        stream: false,
+        ephemeral: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers[DROPPED]).toBe("2");
+    expect(res.headers[STRIPPED]).toBe("2");
+  });
+
+  it("sets neither header on an ordinary thread — absence is the all-clear", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "hi" },
+          { role: "user", content: "how are you?" },
+        ],
+        stream: false,
+        ephemeral: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers[DROPPED]).toBeUndefined();
+    expect(res.headers[STRIPPED]).toBeUndefined();
+    // Every shipping client sends exactly this shape, so the headers must not
+    // appear on an ordinary turn — a "0/0" on every response would train
+    // callers to ignore them.
+    expectGatewayWouldAccept(agentMessages());
+  });
+
+  it("keeps the headers on the streaming path, where writeHead runs afterwards", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [
+          { role: "user", content: "list my devices" },
+          { role: "tool", content: '{"devices":[]}', tool_call_id: "call_1" },
+        ],
+        stream: true,
+        ephemeral: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    // `res.writeHead(200, {...})` on the SSE branch merges with whatever
+    // `setHeader` already put on the response — it does not replace it. This
+    // test is what pins that, because the strip runs ~800 lines earlier.
+    expect(res.headers[DROPPED]).toBe("1");
+    expect(res.headers[STRIPPED]).toBe("0");
   });
 });
