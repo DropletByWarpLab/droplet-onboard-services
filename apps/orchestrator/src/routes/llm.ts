@@ -401,6 +401,28 @@ const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
  *  above. The dashboard re-ids its optimistic user bubble with it so
  *  edit-and-resend can truncate the persisted thread by a real row id. */
 const USER_MESSAGE_ID_HEADER = "X-User-Message-Id";
+/**
+ * WARP-2849: the counters `stripClientToolReplay` returns, handed back to the
+ * caller that supplied the discarded fields.
+ *
+ * Without them the strip is invisible from the client side: the turn 200s and
+ * the model answers as if the tool output had never been sent, which reads
+ * exactly like a turn where the model chose not to use it. That is a quieter
+ * failure than the ai-gateway 422 the strip replaces, and it lands on precisely
+ * the callers who were trying to use tool replay. Headers, because this route
+ * already returns its per-turn metadata that way (the three above), because the
+ * streaming branch has no response body to put a field in, and because the
+ * non-streaming body is the ai-gateway's completion rather than ours to extend.
+ *
+ * Set as a PAIR and ONLY when something was actually discarded — so their
+ * presence alone is the signal, and a client can branch on either one. An
+ * unconditional `0`/`0` on every ordinary turn would train callers to ignore
+ * them.
+ */
+const TOOL_REPLAY_DROPPED_MESSAGES_HEADER = "X-Tool-Replay-Dropped-Messages";
+/** @see TOOL_REPLAY_DROPPED_MESSAGES_HEADER — always set with it, never alone. */
+const TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER =
+  "X-Tool-Replay-Stripped-Tool-Call-Ids";
 
 // RBAC helpers for /api/llm/chat. The ADR-004 tier gate itself —
 // `WRITE_TOOLS`, `VOICE_WRITE_TOOLS`, `isPrivilegedRole` — moved to
@@ -566,13 +588,48 @@ export function replayedWriteToolAttempt(
     });
 }
 
-/** A message as `chatRequestSchema` parses it — post-zod, so `tool_calls` is
- *  already gone whatever the client sent. */
-export type ReplayedChatMessage = {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-  tool_call_id?: string;
-};
+/**
+ * A message as `chatRequestSchema` parses it — post-zod, so `tool_calls` is
+ * already gone whatever the client sent.
+ *
+ * DERIVED, not restated. A hand-written copy of the schema's shape is a second
+ * source of truth that nothing keeps in step: the two can drift silently, and
+ * `stripClientToolReplay`'s drop rules are written against this shape.
+ */
+export type ReplayedChatMessage = z.infer<
+  typeof chatRequestSchema
+>["messages"][number];
+
+/**
+ * Every message field `stripClientToolReplay` has actually reasoned about.
+ * Deriving the type above stops the SHAPE drifting; this stops the DECISION
+ * drifting, which is the half that bites.
+ *
+ * WARP-2849's own second slice adds `tool_calls` to the schema. Inference
+ * alone would widen `ReplayedChatMessage` and let the strip keep compiling
+ * untouched — the new field would ride through unexamined, which is how the
+ * orphaned tool message this slice removes gets re-created. So: add a field to
+ * the message object in `chatRequestSchema` and the assertion below stops
+ * compiling until someone lists it here, having decided whether the strip
+ * forwards it or drops it.
+ */
+type StripDecidedMessageField = "role" | "content" | "tool_call_id";
+type StripUndecidedMessageField = Exclude<
+  keyof ReplayedChatMessage,
+  StripDecidedMessageField
+>;
+/**
+ * The assertion itself. `[X] extends [never]` (tuple-wrapped so a union
+ * distributes as one thing) holds only while nothing is undecided; otherwise
+ * the annotated type becomes an object literal that `true` cannot satisfy, and
+ * the compiler names the offending field in the error text.
+ */
+const _stripCoversEveryMessageField: [StripUndecidedMessageField] extends [never]
+  ? true
+  : { "undecided message field, add it to StripDecidedMessageField": StripUndecidedMessageField } =
+  true;
+// Compile-time only; `void` keeps `noUnusedLocals` quiet without an eslint escape.
+void _stripCoversEveryMessageField;
 
 /**
  * WARP-2849 — drop the tool fields a client cannot legitimately supply.
@@ -595,6 +652,12 @@ export type ReplayedChatMessage = {
  * discarded so a client that sends them keeps working; rejecting would turn a
  * silent no-op into a hard break for callers whose turns succeed today by
  * simply not exercising the path.
+ *
+ * Lenient is not the same as silent. Both counters are returned so the caller
+ * can be TOLD, on the response, that its tool-replay content never reached the
+ * model — see `TOOL_REPLAY_DROPPED_MESSAGES_HEADER`. Discarding without saying
+ * so would swap the ai-gateway's loud 422 for a 200 that looks like a normal
+ * answer, which is worse to debug than the failure it replaces.
  *
  * This is NOT the cross-turn carry, and it must not grow into one. Prior
  * results have to be reconstructed SERVER-side from the persisted trace —
@@ -1121,6 +1184,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // request exactly as the client sent it.
       const replayStrip = stripClientToolReplay(chatReq.messages);
       if (replayStrip.droppedToolMessages > 0 || replayStrip.strippedToolCallIds > 0) {
+        // Tell the CALLER, not just the box's log. Set here rather than beside
+        // the id headers below so every response shape carries it: ephemeral
+        // turns, turns whose persistence failed, the `turn_already_completed`
+        // 409, and the streaming branch — `res.writeHead` merges with headers
+        // already set, it does not replace them.
+        res.setHeader(
+          TOOL_REPLAY_DROPPED_MESSAGES_HEADER,
+          String(replayStrip.droppedToolMessages),
+        );
+        res.setHeader(
+          TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER,
+          String(replayStrip.strippedToolCallIds),
+        );
         // eslint-disable-next-line no-console
         console.warn("[llm/chat] dropped unusable client tool fields", {
           conversationId: chatReq.conversationId ?? null,
