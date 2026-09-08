@@ -5,7 +5,9 @@
 >
 > **See also:** [`SETUP.md`](SETUP.md) (connect an integration — setup guide, in two tracks) · [`credential-handling.md`](credential-handling.md) (what the box does with a pasted SaaS credential) · [`ADD-A-PROVIDER.md`](ADD-A-PROVIDER.md) (build a new integration — developer guide) · [`eaglesoft.md`](eaglesoft.md) (the Eaglesoft provider reference) · [`export-drop.md`](export-drop.md) (the vendor-agnostic file-export track).
 >
-> **Per-vendor customer setup guides (cloud/SaaS):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md).
+> **Per-vendor customer setup guides (cloud/SaaS/REST):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md) · [`brevo.md`](brevo.md) · [`klaviyo.md`](klaviyo.md) · [`pipedrive.md`](pipedrive.md) · [`square.md`](square.md) · [`calcom.md`](calcom.md) · [`atlassian.md`](atlassian.md).
+>
+> ⚠️ **This line is not gated in either direction.** `scripts/check-setup-guides.sh` skips `README` by name (its reverse-coverage pass reads `SETUP.md` only), so a twelfth vendor can ship with every check green and be invisible from the page that is the repo's own entry point — and which the box serves at `/help/integrations/readme`. It was six vendors stale until WARP-2833. **Add your vendor here by hand.**
 
 ---
 

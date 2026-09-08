@@ -291,16 +291,27 @@ function fmtClock(now) {
   return { hh, mm, suf, is12, str: hh + ':' + mm + (is12 ? (' ' + suf) : '') };
 }
 
-// Droplet mark — geometry matches DropletMark.tsx
-const MARK_LEFT  = [[26,0],[44,28],[36,48],[16,48],[8,28]];
-const MARK_RIGHT = [[26,0],[44,28],[26,36]];
+// Droplet mark — the canonical wide drop, geometry matching DropletMark.tsx
+// and display.py/pyportal's _MARK_LEFT/_MARK_RIGHT (WARP-2853). This file is
+// the design reference both renderers cite by name, so the numbers below and
+// the projection are theirs: the 512x512 source space, projected against the
+// mark's own bounding box (the mark is centred in the viewBox, so projecting
+// against the BOX would add ~28% padding) and scaled to MARK_H_RATIO of the
+// size-box's height. tests/test_mark_geometry.py pins the three together.
+const MARK_LEFT  = [[256,72],[420,308],[352,440],[160,440],[92,308]];
+const MARK_RIGHT = [[256,72],[420,308],[256,368]];
+const MARK_BX = 92, MARK_BY = 72, MARK_BW = 328, MARK_BH = 368;
+const MARK_H_RATIO = 48 / 60;
+const markScale = size => size * MARK_H_RATIO / MARK_BH;   // one factor, both axes
+const markH = size => size * MARK_H_RATIO;                 // drawn height
+const markX0 = (x, size) => x + (size - MARK_BW * markScale(size)) / 2;
 function drawMark(x, y, size, primary, highlight) {
   primary = primary || T.accent; highlight = highlight || T.accentInk;
-  const vw = 52, vh = 60, s = size/vh, xOff = x + (size - vw*s)/2;
+  const s = markScale(size), xOff = markX0(x, size);
   const poly = (pts, fill) => {
     ctx.beginPath();
     pts.forEach(([px,py],i) => {
-      const X = xOff + px*s, Y = y + py*s;
+      const X = xOff + (px - MARK_BX)*s, Y = y + (py - MARK_BY)*s;
       if (i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
     });
     ctx.closePath();
@@ -788,10 +799,10 @@ function easeOutCubic(p) { return 1 - Math.pow(1 - p, 3); }
 
 // Droplet silhouette (MARK_LEFT only) as a clip path
 function markSilhouette(x, y, size) {
-  const s = size / 60, xOff = x + (size - 52 * s) / 2;
+  const s = markScale(size), xOff = markX0(x, size);
   ctx.beginPath();
   MARK_LEFT.forEach(([px, py], i) => {
-    const X = xOff + px * s, Y = y + py * s;
+    const X = xOff + (px - MARK_BX) * s, Y = y + (py - MARK_BY) * s;
     if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
   });
   ctx.closePath();
@@ -799,7 +810,7 @@ function markSilhouette(x, y, size) {
 
 // Mark drawn as a vessel filled to `frac` (0..1) with liquid
 function drawMarkLiquid(x, y, size, frac, t) {
-  const s = size / 60, top = y, bottom = y + 48 * s;
+  const top = y, bottom = y + markH(size);
   frac = pclamp(frac);
   drawMark(x, y, size, '#181828', '#20203a');         // empty shell (dim, flat)
   if (frac > 0.002) {
@@ -820,7 +831,7 @@ function drawMarkLiquid(x, y, size, frac, t) {
 
 function drawBootFrame(t) {
   ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
-  const size = 116, mx = (W - size) / 2, my = 44, mb = my + size * 48 / 60;
+  const size = 116, mx = (W - size) / 2, my = 44, mb = my + markH(size);
   const fillP = easeOutCubic(pclamp((t - 250) / 2200));
 
   if (fillP >= 1) drawMark(mx, my, size, T.accent, T.accentInk);
@@ -848,7 +859,7 @@ function drawBootFrame(t) {
 
 function drawShutdownFrame(t) {
   ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
-  const size = 116, mx = (W - size) / 2, my = 44, mb = my + size * 48 / 60;
+  const size = 116, mx = (W - size) / 2, my = 44, mb = my + markH(size);
   const collapseAt = SHUT_DUR - 470;
 
   if (t < collapseAt) {
@@ -877,7 +888,7 @@ function drawShutdownFrame(t) {
 
 function drawOffScreen() {
   ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
-  const size = 78, mx = (W - size) / 2, my = H / 2 - size * 0.55, mb = my + size * 48 / 60;
+  const size = 78, mx = (W - size) / 2, my = H / 2 - size * 0.55, mb = my + markH(size);
   drawMark(mx, my, size, '#141422', '#1a1a30');
   text('STANDBY', W / 2, mb + 20, { size: 10, weight: 700, color: T.label4, align: 'center', letter: 3 });
   text('tap to power on', W / 2, mb + 38, { size: 11, weight: 500, color: T.label3, align: 'center' });

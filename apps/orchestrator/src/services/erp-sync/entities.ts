@@ -126,13 +126,42 @@ export interface ErpSyncEntity {
  * lookups rather than enumerations. Polling any of them would mean inventing a
  * query the product does not ask.
  *
- * Stripe's `charge` is absent for the same reason and it is worth naming,
- * because Stripe is otherwise a fully wired connector: `get_recent_charges`
- * pushes a half-open `[from, to)` window down to Stripe's own `created` filter
- * precisely so a metered endpoint is not asked for all history. Called with
- * no window it has no query to send. Stripe still syncs — it serves `invoice`,
- * which is the first row below. (`charge` also emits no `updated_at`: that
- * column comes from `/v1/events`, which this read does not touch.)
+ * Stripe's `charge` is absent for a related but SHARPER reason, and it is
+ * worth naming precisely because Stripe is otherwise a fully wired connector.
+ * `get_recent_charges` pushes a half-open `[from, to)` window down to Stripe's
+ * own `created` filter so a metered endpoint is not asked for all history.
+ *
+ * 🔴 WARP-2835 — this paragraph used to end "Called with no window it has no
+ * query to send", and that was FALSE in the reassuring direction: it made the
+ * omission sound inert, so a reader adding a `charge` row would believe the
+ * worst case was an empty read. What actually happens, pinned by
+ * `stripe.test.ts` "a WINDOWLESS get_recent_charges scans all history":
+ *
+ *   • `epochSeconds(undefined)` is `undefined`, and the connector's `list()`
+ *     DROPS an undefined search param rather than refusing. The request that
+ *     leaves is `GET /v1/charges` with no `created` filter — the merchant's
+ *     entire history, paged to `STRIPE_MAX_PAGES` (50), metered, every tick.
+ *   • That case reads `params.from`/`params.to` and never `params.since`, and
+ *     `since` is the ONLY param `runOneCursor` sends. So the watermark cannot
+ *     narrow it even once it exists.
+ *
+ * The omission is therefore correct, and correct for a reason the old sentence
+ * did not give. Stripe still syncs — it serves `invoice`, the first row below.
+ * (`charge` also emits no `updated_at`: that column comes from `/v1/events`,
+ * which this read does not touch.)
+ *
+ * 🔴 And the reason is STRIPE'S, not the dataset's — which matters because
+ * this table is keyed by DATASET NAME, so a decision made about one vendor's
+ * connector is silently enforced on every other vendor serving that name.
+ * Square (`track: "rest"`) declares `charge` and `refund` with `complete: true`
+ * watermarks that the REST track pushes VENDOR-SIDE in `firstPageUrl`, so a
+ * windowless call there is a properly narrowed incremental read, not a scan.
+ * Square's money datasets are held unscheduled today by Stripe's constraint.
+ * Splitting that — keying the table by (provider, dataset), or giving a
+ * descriptor a per-dataset opt-out — is WARP-2835. Square's `payout` stays
+ * blocked either way, and for a real reason of its own: its `begin_time`
+ * watermark is `complete: false`, which `erp-provider.descriptor.test.ts`
+ * turns into a build failure while `RestWatermark.complete` has no reader.
  *
  * ## WARP-2509 — the eight rows that made the connectors reachable
  *

@@ -195,7 +195,7 @@ describe("cloud_query_dataset (WARP-2497)", () => {
     }
   });
 
-  it("exports the seventeen dataset names the schema advertises, in one list", async () => {
+  it("exports the twenty dataset names the schema advertises, in one list", async () => {
     const schema = cloudQueryDataset.inputSchema as {
       properties: { dataset: { enum: readonly string[] } };
       required: string[];
@@ -242,6 +242,19 @@ describe("cloud_query_dataset (WARP-2497)", () => {
       "booking",
       "employee",
       "task",
+      // WARP-2833 — three datasets shipped connectors already produced and no
+      // surface could reach. `audience` is Brevo's and Klaviyo's (BOTH serve
+      // it, with canonical projections and delta clauses); `refund` and
+      // `payout` are Square's.
+      //
+      // Appended for the reason the WARP-2832 note above almost caught and
+      // did not: the per-provider gate that ticket added asks whether a
+      // provider has AT LEAST ONE askable dataset, and Square passed it on
+      // `charge` alone while two of its three datasets stayed unreachable. The
+      // gate that catches this one is per-DATASET, not per-provider.
+      "audience",
+      "refund",
+      "payout",
     ]);
     // Mutation: drop `additionalProperties: false` → an unknown arg reaches
     // the route as a query param nobody validated.

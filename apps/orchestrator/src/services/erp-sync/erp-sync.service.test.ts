@@ -24,7 +24,15 @@ import {
 
 import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
 import { CLAIMABLE_ERP_SYNC_STATES } from "./cursor.service.js";
-import { createErpSyncRunner, type SyncConnectionRow } from "./erp-sync.service.js";
+// The READ path's own capability classification, imported rather than retyped
+// — its docstring says so in as many words ("the agreement is asserted against
+// THIS set rather than a second hand-written copy of it").
+import { CAPABILITY_LIMITED_CODES } from "../erp.service.js";
+import {
+  createErpSyncRunner,
+  CAPABILITY_BLOCKED_ERRORS,
+  type SyncConnectionRow,
+} from "./erp-sync.service.js";
 
 const NOW = new Date("2026-08-27T12:00:00Z");
 const LATER = new Date("2026-08-27T13:00:00Z");
@@ -933,29 +941,60 @@ describe("registerCursors", () => {
     expect(entities).toEqual(["invoice"]);
   });
 
-  it("keeps BOTH accounting cursors for an SQL-track provider, and gains none of the eight", async () => {
-    // Two rules meeting, and the reason `openToUndeclaredTracks` exists.
+  it("🔴 WARP-2840 registers NOTHING for `eaglesoft` — it declares three datasets and none is synced", async () => {
+    // This test replaces one that asserted the OPPOSITE and was green.
     //
-    // KEEP invoice/bill: the lan track's descriptor lists only the practice
-    // datasets, but the export-drop connector genuinely serves invoices and
-    // bills when the practice's export carries them — that served set is
-    // computed from the export, not declared. Filtering lan tracks by the
-    // descriptor would silently stop the accounting sync the track shipped
-    // with (WARP-2533).
+    // The old one — "keeps BOTH accounting cursors for an SQL-track provider" —
+    // asserted `["invoice", "bill"]` against `provider: "eaglesoft"`, justified
+    // by WARP-2533: "the export-drop connector genuinely serves invoices and
+    // bills when the practice's export carries them". That justification is
+    // TRUE, and it is about a DIFFERENT PROVIDER. `connectorFactoryFor` routes
+    // to `exportDropFactory` only when `vendorFromExportProvider` matches, and
+    // that needs the `-export` suffix; bare `"eaglesoft"` falls through to the
+    // direct-SQL factory, whose `servesDatasets` is `PRACTICE_DATASETS` and
+    // which refuses `get_open_invoices` in `assertDatasetsServed` BEFORE any
+    // I/O.
     //
-    // REFUSE the other eight: no lan track serves a CRM or marketing dataset,
-    // and the failure is not symmetric with a missing cursor. Each unserved
-    // cursor fails its first tick with DatasetNotServedError, is classified
-    // FATAL, parks FAILED, and `foldSyncState` renders the WHOLE connection as
-    // a failed sync — so eight of them would make every Eaglesoft box on earth
-    // report a broken integration it never asked for.
+    // 🔴 What that cost, and why it is the flagship integration's worst bug:
+    // `DatasetNotServedError` is not in `isCapabilityBlocked`, so it classifies
+    // FATAL; FATAL parks the cursor FAILED with `nextAttemptAt: null`; FAILED
+    // is not in CLAIMABLE_ERP_SYNC_STATES and `upsertErpCursor`'s `update: {}`
+    // never revives it; and FAILED outranks every state in `foldSyncState`. So
+    // one dead cursor renders the WHOLE connection as a failed sync forever,
+    // clearable only by disconnect-then-reconnect.
     //
-    // Mutation: flip `openToUndeclaredTracks` to true on any WARP-2509 row, or
-    //           restore `entityServedBy`'s bare `return true` → red, and the
-    //           extra entity is named in the diff.
-    const h = harness({
-      connections: [connectionRow({ provider: "eaglesoft" })],
-    });
+    // And it INVERTS: `connect()` calls `requireBridge` first, so a box with no
+    // SQL bridge throws ConnectorBlockedError → 503 → TRANSIENT → BACKOFF and
+    // looks fine. The FATAL only fires once the bridge WORKS. The integration
+    // reported itself permanently broken exactly when the practice's database
+    // came up.
+    //
+    // The old test's own comment described this failure mode, in detail, while
+    // asserting the cursors that cause it.
+    //
+    // Mutation: restore `descriptor.track === "lan"` to `entityServedBy`'s
+    //           first arm → red, naming invoice and bill.
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft" })] });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
+  it("registers nothing for `eaglesoft-api` either — same declaration, same refusal", async () => {
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft-api" })] });
+    await runnerFor(h).registerCursors();
+    expect(h.prisma.erpSyncCursor.upsert).not.toHaveBeenCalled();
+  });
+
+  it("🔴 KEEPS both accounting cursors for `eaglesoft-export`, which is what WARP-2533 protected", async () => {
+    // The other half, and the one the replaced test was actually arguing for.
+    // An export-drop provider has NO descriptor at all — its served set is
+    // computed from the operator's export profiles at runtime — so it is the
+    // genuine "no evidence" case `openToUndeclaredTracks` exists to decide,
+    // and it must keep syncing invoices and bills exactly as it always has.
+    //
+    // Mutation: make `entityServedBy` return false for a provider with no
+    //           descriptor → red, and the accounting sync silently stops.
+    const h = harness({ connections: [connectionRow({ provider: "eaglesoft-export" })] });
     await runnerFor(h).registerCursors();
     const entities = h.prisma.erpSyncCursor.upsert.mock.calls.map(
       (c: any[]) => c[0].where.connectionId_entity.entity,
@@ -1251,5 +1290,127 @@ describe("WARP-2623 — a refused dataset must not park the connection at FAILED
     expect(h.prisma.__cursor("cur-1")!.state).toBe("IDLE");
     expect(h.prisma.__cursor("cur-1")!.consecutiveFailures).toBe(0);
     expect(h.prisma.__cursor("cur-1")!.lastError).toBeNull();
+  });
+});
+
+/**
+ * WARP-2841 — the list that had been forgotten seven times.
+ *
+ * `isCapabilityBlocked` is a hand-maintained `instanceof` list, and its own
+ * docstring states the contract: "A third connector growing a capability error
+ * must be added HERE." Seven connectors grew one and none was added. The cost
+ * is spelled out in `asSyncFailure` directly beneath it: FATAL parks the cursor
+ * FAILED with `nextAttemptAt: null`, FAILED is unclaimable, `upsertErpCursor`'s
+ * `update: {}` never revives it, and `foldSyncState` ranks it highest — so one
+ * refused dataset renders the WHOLE connection failed forever, including after
+ * the owner buys the plan that would have fixed it.
+ *
+ * Extending the list by seven only resets the clock. This derives the
+ * expectation from the CONNECTOR PACKAGE'S OWN EXPORTS, so the tenth one fails
+ * the build instead of a customer's connection.
+ */
+describe("WARP-2841 — every capability error the connectors export is classified", () => {
+  /**
+   * Errors that are capability facts — "this connection does not serve that" —
+   * as opposed to faults. Matched on the exported NAME so the set is derived
+   * from `@droplet/erp-connector` rather than retyped here; a second hand-list
+   * would be the same defect wearing a test's clothes.
+   */
+  const CAPABILITY_NAME = /(CapabilityMissing|CapabilityUnavailable|ColumnNotAvailable|ScopeMissing|DatasetNotServed)Error$/;
+
+  it("🔴 leaves no exported capability error unclassified", async () => {
+    const pkg = (await import("@droplet/erp-connector")) as Record<string, unknown>;
+    const exported = Object.keys(pkg)
+      .filter((k) => CAPABILITY_NAME.test(k))
+      .sort();
+
+    // The regex must actually be finding things — an expression that matches
+    // nothing would make this whole file a no-op that passes forever.
+    expect(exported.length).toBeGreaterThanOrEqual(8);
+
+    const unclassified = exported.filter((name) => {
+      const Cls = pkg[name] as new (...a: never[]) => Error;
+      // Construct without arguments: these are all Error subclasses, and the
+      // check under test is `instanceof`, which does not read any field.
+      const instance = Object.create(Cls.prototype) as Error;
+      return !CAPABILITY_BLOCKED_ERRORS.some((c) => instance instanceof c);
+    });
+
+    expect(
+      unclassified,
+      "these are capability facts that would classify FATAL and park a cursor " +
+        "FAILED forever — add them to CAPABILITY_BLOCKED_ERRORS, or give them " +
+        "their own branch in asSyncFailure the way XeroScopeMissingError has",
+    ).toEqual(["XeroScopeMissingError"]);
+  });
+
+  /**
+   * 🔴 The SECOND derivation, and the reason there are two.
+   *
+   * The assertion above finds capability errors by NAME. That closes the hole
+   * it was written for — a matching class added and never listed — but it can
+   * only ever see classes somebody happened to name with one of five suffixes.
+   * `ShopifyProtectedDataDeniedError` is named with none of them, and it is a
+   * capability fact by every other definition in this codebase: its
+   * `PROTECTED_CUSTOMER_DATA_DENIED` code is in `CAPABILITY_LIMITED_CODES` on
+   * the READ path and maps to the `CAPABILITY_LIMITED` STATUS in
+   * `cloud-connection-state.ts`. Only the sync path called it a fault.
+   *
+   * So this derives the same expectation from the CODE — the classification
+   * two other tables already made — rather than from the spelling. The two
+   * derivations are independent and complementary: a class the read path has
+   * already classified is caught here whatever it is called, and a class whose
+   * constructor needs arguments (so its code cannot be read) is caught above by
+   * its name. The final assertion is that nothing escapes BOTH.
+   */
+  it("🔴 leaves no error the READ path already calls capability-class unclassified", async () => {
+    const pkg = (await import("@droplet/erp-connector")) as Record<string, unknown>;
+    const errorNames = Object.keys(pkg).filter((k) => k.endsWith("Error"));
+    // Guard against a vacuous pass, the same way the name derivation does.
+    expect(errorNames.length).toBeGreaterThanOrEqual(50);
+
+    const unreadable: string[] = [];
+    const capabilityByCode: string[] = [];
+    for (const name of errorNames) {
+      const Cls = pkg[name] as new () => Error & { code?: unknown };
+      let code: unknown;
+      try {
+        // `code` is a class FIELD initializer on every one of these, so it is
+        // set before the constructor body runs — but a constructor that reads
+        // its arguments still throws with none. Those fall to `unreadable`
+        // rather than being silently skipped.
+        code = new Cls().code;
+      } catch {
+        unreadable.push(name);
+        continue;
+      }
+      if (typeof code === "string" && CAPABILITY_LIMITED_CODES.has(code)) {
+        capabilityByCode.push(name);
+      }
+    }
+
+    // Nothing escapes both derivations. An error whose code cannot be read AND
+    // whose name matches nothing would be invisible to this whole suite, which
+    // is the failure mode the two derivations exist to make impossible.
+    expect(
+      unreadable.filter((n) => !CAPABILITY_NAME.test(n)).sort(),
+      "these classes are invisible to both derivations — give the class a " +
+        "no-argument-safe constructor, or a name the convention above matches",
+    ).toEqual([]);
+
+    const unclassified = capabilityByCode
+      .filter((name) => {
+        const Cls = pkg[name] as new (...a: never[]) => Error;
+        const instance = Object.create(Cls.prototype) as Error;
+        return !CAPABILITY_BLOCKED_ERRORS.some((c) => instance instanceof c);
+      })
+      .sort();
+
+    expect(
+      unclassified,
+      "the read path and the hub already call these capability-class; the sync " +
+        "path calling them FATAL parks the cursor FAILED forever and renders " +
+        "the whole connection broken — add them to CAPABILITY_BLOCKED_ERRORS",
+    ).toEqual([]);
   });
 });

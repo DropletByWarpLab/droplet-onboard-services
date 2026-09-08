@@ -61,6 +61,10 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
   const { documentsReady, documentsDigested } = coverage.corpus;
   const detectors = coverage.passes.find((p) => p.passKey === "detectors");
   const corpus = coverage.passes.find((p) => p.passKey === "corpus.documents");
+  // Reached but not read. Clamped at zero: the two counters are incremented in
+  // separate statements over the pass's life, and a negative here would render
+  // as a nonsense sentence rather than as the accounting slip it would be.
+  const passedOver = Math.max(0, (corpus?.unitsSeen ?? 0) - (corpus?.unitsDigested ?? 0));
 
   return (
     <div className="brief-coverage">
@@ -75,6 +79,34 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
             : " — the rest is not queued to be read."
           : "."}
       </p>
+      {/* WARP-2834 — units the pass REACHED but could not read. `unitsSeen`
+          advances for every document the loop touched; `unitsDigested` only
+          for the ones the model actually read. The gap is documents with no
+          extractable text, or whose owner could not be resolved — the
+          `__household__` / `__dept_<uuid>__` sentinel owners the file-indexer
+          writes for the shared drive.
+
+          Worth its own sentence rather than folding into the count: those
+          documents are NOT queued and will not be read on a later tick, so
+          leaving them inside "still working through the rest" would be the
+          same overstatement in a new place.
+
+          ONE STRING PER COUNT, not four switches inside one sentence. The
+          noun, its verb, the possessive pronoun and the sentence that
+          follows all turn on the same number. The first draft spread them
+          across independent ternaries and two of the four were never
+          switched, so a single passed-over document read "whose it were …
+          They are not queued". Held together as one string per count so the
+          agreement cannot come apart again; pinned in
+          `__tests__/brief.coverage-passed-over.test.tsx`. */}
+      {passedOver > 0 ? (
+        <p className="brief-coverage-detail">
+          <strong>{passedOver.toLocaleString()}</strong>{" "}
+          {passedOver === 1
+            ? "document was passed over — no readable text, or the box could not tell whose it was. It is not queued for a later pass."
+            : "documents were passed over — no readable text, or the box could not tell whose they were. They are not queued for a later pass."}
+        </p>
+      ) : null}
       <p className="brief-coverage-detail">
         {detectors?.lastSucceededAt
           ? `Business records last checked ${new Date(detectors.lastSucceededAt).toLocaleString()}.`
