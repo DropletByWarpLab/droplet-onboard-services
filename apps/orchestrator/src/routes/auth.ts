@@ -83,6 +83,9 @@ import {
   countLiveSessions,
   revokeAllSessions,
   checkSession,
+  listUserSessions,
+  idleLimitSecondsForRole,
+  absoluteLimitSeconds,
 } from "../services/session.service.js";
 import {
   storeNcToken,
@@ -3497,6 +3500,65 @@ export function createProtectedAuthRouter(
     },
   );
 
+  // ── Who is signed in (owner/admin) ──
+  // WARP-2820. Revocation has existed since WARP-116 and nothing in the
+  // product could tell an operator whether there was anything to revoke —
+  // "has the person who left actually been cut off" had no answer short of
+  // reading Redis by hand.
+  //
+  // ONE call for the whole box rather than one per person: the roster is
+  // already a single query, and N round trips from the browser would make the
+  // page's cost grow with the company.
+  //
+  // A person whose sessions cannot be read reports `sessions: null`, NOT an
+  // empty list. An operator must never be shown "nobody is signed in" by a
+  // cache outage — the same rule /admin's overview tiles follow when a probe
+  // fails. The sid is deliberately not returned: it identifies a session
+  // without being needed to end one, and revocation here is per person.
+  router.get("/auth/sessions", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      if (!prisma) {
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
+      }
+      const users = await prisma.user.findMany({
+        select: { id: true, username: true, displayName: true, role: true },
+        orderBy: { username: "asc" },
+      });
+      const rows = await Promise.all(
+        users.map(async (u) => {
+          const sessions = await listUserSessions(u.id);
+          return {
+            username: u.username,
+            displayName: u.displayName,
+            role: u.role,
+            // null = could not read, distinct from [] = signed out everywhere.
+            sessions:
+              sessions === null
+                ? null
+                : sessions.map((sn) => ({
+                    role: sn.role,
+                    createdAt: sn.createdAt,
+                    lastSeenAt: sn.lastSeenAt,
+                    // The deadlines are computed HERE, from the session's own
+                    // role, because they are policy the box owns — a dashboard
+                    // that recomputed them would drift the moment the limits
+                    // are made configurable.
+                    idleDeadline: sn.lastSeenAt + idleLimitSecondsForRole(sn.role),
+                    absoluteDeadline: sn.createdAt + absoluteLimitSeconds(),
+                  })),
+          };
+        }),
+      );
+      res.json({ users: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Revoke all sessions for a user (admin only) ──
   // WARP-116: the explicit, opt-in "revoke now" path. v1 RBAC propagates a
   // role/account change at the next access-token refresh (≤15 min); this
@@ -3519,10 +3581,33 @@ export function createProtectedAuthRouter(
           });
           return;
         }
-        const row = await prisma.user.findUnique({
-          where: { nextcloudUsername: req.params.username },
-          select: { id: true },
-        });
+        // WARP-2820 — the Nextcloud mapping key FIRST, then the local login
+        // handle. Resolving only `nextcloudUsername` missed every SCIM- and
+        // SSO-provisioned account: `provisionUser` and the SSO just-in-time
+        // create both seed `username` from the email and never write the
+        // mapping key, which the schema leaves nullable with no default.
+        // Those accounts mint ordinary sessions keyed on `User.id`, so
+        // GET /auth/sessions lists them as genuinely live while every
+        // "Sign out everywhere" on them 404'd USER_NOT_FOUND — silently, and
+        // for exactly the population an offboarding admin comes here to cut
+        // off. The read and the revoke have to be able to name the same row.
+        //
+        // Two ORDERED findUniques, not one `findFirst({ OR: [...] })`: both
+        // columns are @unique, and keeping the mapping key ahead of the login
+        // handle means no call that resolved before this change can resolve
+        // to a different row after it. An OR would leave the winner to row
+        // order. Every path that writes `nextcloudUsername` writes the same
+        // value into `username`, so the second lookup only ever runs for rows
+        // that never had a mapping key at all.
+        const row =
+          (await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          })) ??
+          (await prisma.user.findUnique({
+            where: { username: req.params.username },
+            select: { id: true },
+          }));
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
