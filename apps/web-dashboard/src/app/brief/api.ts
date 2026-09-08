@@ -86,17 +86,50 @@ export async function fetchCoverage(): Promise<Coverage | null> {
   return res.json();
 }
 
+export type RunPassReason =
+  /** Another worker holds the lease right now. */
+  | "busy"
+  /** An operator switched this pass off. */
+  | "disabled"
+  /** No `BrainPass` row for this key. Waiting does not fix it. */
+  | "missing"
+  /** The box has no model configured, so this pass cannot run at all. */
+  | "no_model"
+  /** The box is restarting; the claim was handed straight back (WARP-2837). */
+  | "shutting_down"
+  /** The manual duty-cycle limit. */
+  | "too_soon"
+  /** The brain is off entirely — no pass was ever registered. */
+  | "off"
+  /** Anything unclassified. */
+  | "failed";
+
 export type RunPassOutcome =
   | { ok: true }
-  | { ok: false; reason: "busy" | "disabled" | "too_soon" | "off" | "failed"; retryAfterSeconds?: number };
+  | { ok: false; reason: RunPassReason; retryAfterSeconds?: number };
+
+/**
+ * The 409 reasons this dashboard has a sentence for.
+ *
+ * 🔴 AN ALLOW-LIST, and the fallback below is `busy` ON PURPOSE. `missing`,
+ * `no_model` and `shutting_down` used to collapse into `busy`, which told the
+ * operator "already running — give it a moment" about three states where
+ * nothing is running and waiting achieves nothing. Anything NOT listed here is
+ * an orchestrator newer than this dashboard, and "hold on" is the right way to
+ * degrade for a reason we have no copy for.
+ */
+const KNOWN_409: readonly string[] = ["disabled", "missing", "no_model", "shutting_down"];
 
 /**
  * Ask the box to run a pass now (WARP-2850).
  *
  * Returns rather than throws, because every refusal here is a THING TO SAY to
- * the operator and not an error: already running, switched off, too soon, or
- * the brain is off entirely. Collapsing them into one failure is what made
- * /admin/sessions report a permissions decision as an outage.
+ * the operator and not an error: already running, switched off, too soon, no
+ * model configured, no row for this pass, the box restarting, or the brain
+ * being off entirely. Collapsing them into one failure is what made
+ * /admin/sessions report a permissions decision as an outage — and collapsing
+ * three of them into `busy` was the same mistake one layer down, which is what
+ * `KNOWN_409` above exists to stop.
  */
 export async function runBrainPass(passKey: string): Promise<RunPassOutcome> {
   const res = await authFetch(`/api/brain/passes/${encodeURIComponent(passKey)}/run`, {
@@ -110,7 +143,8 @@ export async function runBrainPass(passKey: string): Promise<RunPassOutcome> {
   if (res.status === 503) return { ok: false, reason: "off" };
   if (res.status === 409) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, reason: body.error === "disabled" ? "disabled" : "busy" };
+    const reason = body.error ?? "";
+    return { ok: false, reason: KNOWN_409.includes(reason) ? (reason as RunPassReason) : "busy" };
   }
   return { ok: false, reason: "failed" };
 }
