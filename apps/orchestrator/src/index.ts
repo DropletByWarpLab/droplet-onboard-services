@@ -775,6 +775,10 @@ async function main() {
             logger.debug({ reason: outcome.reason }, "brain.boot_run.skipped");
           }
         },
+        // ERROR, and tagged. Nothing awaits the boot run, so without this a
+        // failed claim is an untagged `unhandledRejection` with no passKey on
+        // it — see scheduleBootRun.
+        (err) => logger.error({ err, passKey: DETECTOR_PASS_KEY }, "brain.boot_run.failed"),
       );
     }
 

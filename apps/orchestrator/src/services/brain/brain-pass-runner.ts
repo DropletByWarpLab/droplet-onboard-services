@@ -171,15 +171,28 @@ export function createBrainPassTrigger(deps: TriggerDeps): BrainPassTrigger {
  * Deliberately silent about the outcome beyond a log: nothing is waiting on
  * this, and a boot run that loses its claim to a tick is not a problem worth
  * telling anybody about.
+ *
+ * A THROW is different, and `onError` is why it is a separate callback. Nothing
+ * awaits this run, so a rejection out of `trigger` — the claim's DB round trip
+ * failing, which a boot run is unusually likely to meet with migrations still
+ * settling — has no subscriber and becomes an untagged `unhandledRejection`.
+ * The process survives (index.ts installs a handler for those) but the failure
+ * arrives without its `passKey` and without saying that it was the boot run.
+ * Reported here, in the one place this caller goes through, for the same reason
+ * `runWithLease` catches its own run.
  */
 export function scheduleBootRun(
   trigger: BrainPassTrigger,
   passKey: string,
   delayMs: number,
   onDone?: (outcome: TriggerOutcome) => void,
+  onError?: (err: unknown) => void,
 ): NodeJS.Timeout {
   const t = setTimeout(() => {
-    void trigger.trigger(passKey).then((outcome) => onDone?.(outcome));
+    void trigger
+      .trigger(passKey)
+      .then((outcome) => onDone?.(outcome))
+      .catch((err: unknown) => onError?.(err));
   }, delayMs);
   t.unref?.();
   return t;

@@ -241,6 +241,26 @@ describe("scheduleBootRun (WARP-2850)", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("reports a claim that THROWS instead of leaving an untagged rejection", async () => {
+    // 🔴 NOTHING AWAITS THE BOOT RUN. `trigger` rejects if the claim's DB round
+    // trip fails — and a boot run lands while migrations may still be settling,
+    // which is the likeliest moment for exactly that. A rejection with no
+    // subscriber became an untagged `unhandledRejection`: the process survives,
+    // because index.ts installs a handler, but the failure arrived without its
+    // passKey and without saying it was the boot run that hit it. Same reason
+    // `runWithLease` catches its own run rather than asking every caller to
+    // remember a `.catch`.
+    const t = makeTrigger();
+    vi.spyOn(t, "trigger").mockRejectedValueOnce(new Error("db down"));
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    scheduleBootRun(t, DETECTOR, 1_000, onDone, onError);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]![0] as Error).message).toBe("db down");
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it("triggers it as a SCHEDULED run, so the rate limit never blocks a boot", async () => {
     const t = makeTrigger(new Date());
     const spy = vi.spyOn(t, "trigger");
