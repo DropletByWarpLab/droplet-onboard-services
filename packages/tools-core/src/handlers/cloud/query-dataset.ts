@@ -59,6 +59,16 @@ export const CLOUD_QUERY_DATASETS = [
   "booking",
   "employee",
   "task",
+  // ── WARP-2833 ──
+  // Datasets shipped connectors already produce that no surface could reach:
+  // `audience` (Brevo + Klaviyo), `refund` and `payout` (Square). Kept in
+  // lockstep with `CLOUD_DATASET_READS` as above — and note what that lockstep
+  // did NOT catch, which is why WARP-2833 exists: the two lists agreed with
+  // each other perfectly while both omitted a dataset two available providers
+  // declared. Agreement between mirrors is not coverage of the vocabulary.
+  "audience",
+  "refund",
+  "payout",
 ] as const;
 
 const DATASET_SET: ReadonlySet<string> = new Set(CLOUD_QUERY_DATASETS);
