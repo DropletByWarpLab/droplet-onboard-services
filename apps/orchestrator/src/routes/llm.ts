@@ -270,9 +270,22 @@ function scrubInterceptorChallenge(result: unknown): unknown {
   return { ...(r as Record<string, unknown>), error };
 }
 
-// /llm/chat accepts tool-role messages on replay so a client can resume a
-// session that already went through the agent loop. tool_call_id / tool_calls
-// are optional so plain chat callers don't have to care.
+// /llm/chat accepts `role:"tool"` and `tool_call_id` on the wire, and then
+// DROPS them (`stripClientToolReplay`, below). It has never declared
+// `tool_calls` — the comment that stood here until WARP-2849 claimed it did,
+// and had said so since the schema was written (`136890fa`, #95).
+//
+// The claim was never true, and the shape it promised could not work: zod
+// strips the undeclared `tool_calls` off every replayed assistant turn, so a
+// surviving tool message is an ORPHAN, and the ai-gateway rejects exactly that
+// fail-closed (`services/ai-gateway/schemas.py` — "tool result references
+// unknown tool_call_id" → 422). A client that followed the old comment failed
+// every turn.
+//
+// Cross-turn tool continuity is real but it is NOT built from the request
+// body: `prior_tool_names` (WARP-1921) is read server-side from the persisted
+// trace, because a client must not be able to claim a tool result it never
+// received. Carrying the RESULTS the same way is WARP-2849's second slice.
 //
 // WARP-304: `conversationId` lets the caller continue an existing thread.
 // When absent, the server mints a new one and returns it via the
@@ -545,6 +558,67 @@ export function replayedWriteToolAttempt(
         !(exempt?.has(name) ?? false)
       );
     });
+}
+
+/** A message as `chatRequestSchema` parses it — post-zod, so `tool_calls` is
+ *  already gone whatever the client sent. */
+export type ReplayedChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  tool_call_id?: string;
+};
+
+/**
+ * WARP-2849 — drop the tool fields a client cannot legitimately supply.
+ *
+ * Post-condition: no returned message carries `role:"tool"` or a
+ * `tool_call_id`. Both are unusable by construction, and forwarding either one
+ * does not degrade the turn — it FAILS the turn, at the ai-gateway:
+ *
+ *   - a tool message is an orphan, because zod stripped the assistant
+ *     `tool_calls` it answers → "tool result references unknown tool_call_id",
+ *   - a `tool_call_id` on any other role hits the same validator's rule 4,
+ *     "tool_call_id is only valid on tool messages".
+ *
+ * Both raise → FastAPI 422 (`services/ai-gateway/schemas.py`
+ * `_validate_tool_message_integrity`). Dropping them lets the rest of the
+ * thread answer, which is what every shipping client already gets: the
+ * dashboard's `replayMessages` (useChat.ts) has never sent a tool message.
+ *
+ * Deliberately lenient rather than a 400. The fields are accepted and
+ * discarded so a client that sends them keeps working; rejecting would turn a
+ * silent no-op into a hard break for callers whose turns succeed today by
+ * simply not exercising the path.
+ *
+ * This is NOT the cross-turn carry, and it must not grow into one. Prior
+ * results have to be reconstructed SERVER-side from the persisted trace —
+ * WARP-1921's rule is that a client cannot claim a tool result it never
+ * received, and `replayedWriteToolAttempt` above already treats this surface
+ * as hostile. This function is what guarantees nothing arrives from the client
+ * to be carried.
+ */
+export function stripClientToolReplay(messages: readonly ReplayedChatMessage[]): {
+  messages: ReplayedChatMessage[];
+  droppedToolMessages: number;
+  strippedToolCallIds: number;
+} {
+  let droppedToolMessages = 0;
+  let strippedToolCallIds = 0;
+  const kept: ReplayedChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "tool") {
+      droppedToolMessages += 1;
+      continue;
+    }
+    if (m.tool_call_id !== undefined) {
+      const { tool_call_id: _unusable, ...rest } = m;
+      strippedToolCallIds += 1;
+      kept.push(rest);
+      continue;
+    }
+    kept.push(m);
+  }
+  return { messages: kept, droppedToolMessages, strippedToolCallIds };
 }
 
 // WARP-329 replaced the post-stream `persistTurn` helper with
@@ -1035,7 +1109,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // `chatReq.messages` intact for the persistence reads above. A copy (not
       // an alias) so attaching image blocks never mutates the persisted user
       // text. `agentModel` may be overridden per-turn by vision auto-routing.
-      let agentMessages: ChatMessage[] = [...chatReq.messages];
+      // WARP-2849 — the client's unusable tool fields are dropped here, before
+      // anything reads `agentMessages`. Still a fresh array (the copy the
+      // comment above requires), and the persistence reads above still see the
+      // request exactly as the client sent it.
+      const replayStrip = stripClientToolReplay(chatReq.messages);
+      if (replayStrip.droppedToolMessages > 0 || replayStrip.strippedToolCallIds > 0) {
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] dropped unusable client tool fields", {
+          conversationId: chatReq.conversationId ?? null,
+          role: role ?? null,
+          droppedToolMessages: replayStrip.droppedToolMessages,
+          strippedToolCallIds: replayStrip.strippedToolCallIds,
+        });
+      }
+      let agentMessages: ChatMessage[] = replayStrip.messages;
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
       // `agentModel`. Vision auto-routing (below) can swap the user's selected
