@@ -42,12 +42,28 @@ import { runWithLease } from "./brain-lease.service.js";
  *  model client and the config. */
 export type PassRunner = () => Promise<void>;
 
+/**
+ * A reason this box cannot run this pass AT ALL right now, or `null` to
+ * proceed. Synchronous and cheap on purpose — see `preconditions`.
+ */
+export type PassPrecondition = () => TriggerReason | null;
+
 export type TriggerReason =
+  /** Another worker holds the lease. */
   | "busy"
+  /** An operator switched this pass off. */
   | "disabled"
+  /** No `BrainPass` row. `seedBrainPasses` creates one for every key in
+   *  `BRAIN_PASS_KEYS` at boot, so this means the row was removed after. */
   | "missing"
+  /** WARP-2837 — the claim won, but the process is on its way out and handed
+   *  it straight back. Distinct from `busy`: nothing is running. */
+  | "shutting_down"
   | "unknown_pass"
+  /** Manual duty-cycle limit — see `manualMinIntervalMs`. */
   | "too_soon"
+  /** The box cannot do this pass at all in its current configuration. Raised
+   *  by a PRECONDITION, before the claim. */
   | "no_model";
 
 export type TriggerOutcome =
@@ -71,10 +87,27 @@ export interface TriggerDeps {
    * nothing anyone would notice.
    */
   manualMinIntervalMs?: Readonly<Record<string, number>>;
+  /**
+   * "Can this box do this pass at all", asked BEFORE the claim.
+   *
+   * 🔴 THE ORDERING IS THE ENTIRE REASON THIS EXISTS, and putting such a check
+   * inside a `PassRunner` instead is a real regression this branch shipped
+   * once. `claimPass` writes `runState: "running"`, `claimedAt` and
+   * `lastRunAt` in one atomic `updateMany` that lands BEFORE `run()` is
+   * called. A runner that opens with `if (nothing to do) return` therefore
+   * marks a run that never happened: the route answers 202 `{status:
+   * "started"}`, the row reads `running`, and the advanced `lastRunAt` spends
+   * the `too_soon` budget of the first REAL run once the box is configured.
+   *
+   * A precondition is for a CONFIGURATION fact — "no model is set" — not for
+   * "there is no work this time". A pass with nothing to read should claim,
+   * find nothing and release; that is a run, and `lastRunAt` should move.
+   */
+  preconditions?: Readonly<Record<string, PassPrecondition>>;
 }
 
 export function createBrainPassTrigger(deps: TriggerDeps): BrainPassTrigger {
-  const { prisma, runners, manualMinIntervalMs = {} } = deps;
+  const { prisma, runners, manualMinIntervalMs = {}, preconditions = {} } = deps;
 
   return {
     knownPasses: () => Object.keys(runners),
@@ -85,6 +118,14 @@ export function createBrainPassTrigger(deps: TriggerDeps): BrainPassTrigger {
       // route validates too; this is the layer that cannot be bypassed by a
       // future caller that forgets.
       if (!run) return { ok: false, reason: "unknown_pass" };
+
+      // 🔴 BEFORE THE CLAIM, and before the rate limit's DB read. Both would
+      // refuse a manual run on a box with no model configured, but only one of
+      // them is honest: "just ran, try again in 4 min" sends an operator away
+      // to wait for something that is never going to work. The true reason
+      // wins, and it costs no round trip to ask for it first.
+      const refusal = preconditions[passKey]?.();
+      if (refusal) return { ok: false, reason: refusal };
 
       const now = opts.now ?? new Date();
 

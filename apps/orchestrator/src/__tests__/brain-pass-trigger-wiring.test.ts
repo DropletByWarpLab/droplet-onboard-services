@@ -52,6 +52,29 @@ describe("brain pass trigger is wired into the app (WARP-2850)", () => {
     expect(brainBlock).not.toContain("lockKey");
   });
 
+  it("🔴 the no-model check is a PRECONDITION, not the first line of the runner", () => {
+    // The regression rjouffret caught, pinned in the only lane that can see
+    // it. `index.ts` never runs in the unit suite — it opens sockets, schedules
+    // crons and connects to Postgres on import — so nothing else in this lane
+    // can tell whether the check sits before or after the claim, and moving it
+    // back would look like a tidy-up in a diff.
+    //
+    // Before the claim it is a refusal the route can report. After it,
+    // `claimPass` has already stamped `runState: "running"` and `lastRunAt`,
+    // the route answers 202 "started", and nothing runs.
+    const index = read("index.ts");
+    const from = index.indexOf("preconditions: {");
+    expect(from).toBeGreaterThan(-1);
+    expect(index.slice(from, from + 400)).toContain("no_model");
+
+    // ...and the runner body must NOT still carry its own silent bail-out.
+    const runnerAt = index.indexOf("[CORPUS_PASS_KEY]: async () => {");
+    expect(runnerAt).toBeGreaterThan(-1);
+    const runner = index.slice(runnerAt, index.indexOf("createBrainPassTrigger({", runnerAt));
+    expect(runner.length).toBeGreaterThan(200);
+    expect(runner).not.toMatch(/if \(!brainModel\)/);
+  });
+
   it("🔴 the run route does NOT use the mcp-admitting gate", () => {
     // `requireRoleOrMcpService` calls next() for `_service:mcp` before any
     // role check. The reads survive that because a row filter re-checks the

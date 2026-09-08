@@ -125,6 +125,34 @@ describe("the contract a UI depends on (WARP-2850)", () => {
     expect(off.body.error).toBe("disabled");
   });
 
+  it("reports NO MODEL as its own answer, never as 202 started", async () => {
+    // 🔴 The regression this case exists for: the "no model configured" check
+    // had drifted INSIDE the runner, which runs only after the claim already
+    // stamped the row. The route saw `started: true` and told the operator
+    // "Started. This page will show what it finds." while nothing ran.
+    // `no_model` is a configuration answer, and the box must say so.
+    trigger.mockResolvedValueOnce({ ok: false, reason: "no_model" });
+    const res = await post(owner, "corpus.documents");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("no_model");
+  });
+
+  it("reports a MISSING pass row as itself, not as busy", async () => {
+    // `claimPass` answers `missing` when the row is not there at all — a
+    // different problem from contention, and one waiting will never fix.
+    trigger.mockResolvedValueOnce({ ok: false, reason: "missing" });
+    const res = await post(owner);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("missing");
+  });
+
+  it("reports a shutting-down box as itself (WARP-2837's latch)", async () => {
+    trigger.mockResolvedValueOnce({ ok: false, reason: "shutting_down" });
+    const res = await post(owner);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("shutting_down");
+  });
+
   it("answers 429 with Retry-After when a manual run is too soon", async () => {
     trigger.mockResolvedValueOnce({ ok: false, reason: "too_soon", retryAfterMs: 90_000 });
     const res = await post(owner, "corpus.documents");

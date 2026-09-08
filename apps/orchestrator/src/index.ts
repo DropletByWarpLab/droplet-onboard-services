@@ -665,6 +665,12 @@ async function main() {
   if (config.brain.enabled) {
     await seedBrainPasses(prisma);
 
+    // Same resolution the agent-run routes use. Read at CALL time, not once at
+    // boot: `DEFAULT_MODEL` is what the box is configured with now, and a
+    // process that started before the operator set one should pick it up.
+    const resolveBrainModel = () =>
+      (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
+
     // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
     // and the operator's "check now" are three callers of the same function
     // with the same lease, rather than three code paths with three ideas about
@@ -695,13 +701,15 @@ async function main() {
 
       // Corpus pass: DOES call the model, and therefore competes with
       // interactive chat for the only inference slot. Bounded units per tick.
+      //
+      // NO "is a model configured" GUARD HERE, deliberately — it is a
+      // precondition below, and putting it back would put it on the wrong side
+      // of the claim. By the time this body runs, `claimPass` has already
+      // stamped `runState` and `lastRunAt`, so a bail-out here is a run the
+      // box has already recorded and the route has already reported started.
       [CORPUS_PASS_KEY]: async () => {
-        // Same resolution the agent-run routes use. No model configured =
-        // nothing to call.
-        const brainModel = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
-        if (!brainModel) return;
         const outcome = await runCorpusPass(
-          { prisma, chat: aiGateway.chat, model: brainModel },
+          { prisma, chat: aiGateway.chat, model: resolveBrainModel() },
           { limit: config.brain.corpusUnitsPerRun },
         );
         if (outcome.errors.length > 0) {
@@ -716,6 +724,17 @@ async function main() {
       // Corpus only. The detector pass is bounded indexed SQL and re-running
       // it costs the box nothing anyone would notice.
       manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
+      // 🔴 CHECKED BEFORE THE CLAIM. `BRAIN_ENABLED` and `DEFAULT_MODEL` are
+      // independent env vars with no cross-validation, so "brain on, no model
+      // configured" is a reachable box. On one of those, a check living inside
+      // the runner would run only AFTER `claimPass` had stamped
+      // `runState: "running"` and `lastRunAt` — the operator gets a 202 and
+      // "Started. This page will show what it finds.", nothing runs, and the
+      // advanced `lastRunAt` then blocks the first real run once a model is
+      // finally set. Here it is a refusal the route reports as `no_model`.
+      preconditions: {
+        [CORPUS_PASS_KEY]: () => (resolveBrainModel() ? null : "no_model"),
+      },
     });
 
     // 🔴 NEITHER PASS TAKES cron-runtime's `lockKey`, and neither may be given

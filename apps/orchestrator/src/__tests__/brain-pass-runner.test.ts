@@ -32,6 +32,7 @@ vi.mock("../services/brain/brain-lease.service.js", () => ({ runWithLease }));
 import {
   createBrainPassTrigger,
   scheduleBootRun,
+  type TriggerReason,
 } from "../services/brain/brain-pass-runner";
 
 const NOW = new Date("2033-06-10T12:00:00.000Z");
@@ -48,11 +49,15 @@ function prismaWith(lastRunAt: Date | null) {
   } as unknown as PrismaClient;
 }
 
-function makeTrigger(lastRunAt: Date | null = null) {
+function makeTrigger(
+  lastRunAt: Date | null = null,
+  preconditions?: Record<string, () => TriggerReason | null>,
+) {
   return createBrainPassTrigger({
     prisma: prismaWith(lastRunAt),
     runners: { [DETECTOR]: detectorRun, [CORPUS]: corpusRun },
     manualMinIntervalMs: { [CORPUS]: FIVE_MIN },
+    preconditions,
   });
 }
 
@@ -138,6 +143,77 @@ describe("manual rate limit — duty cycle, not concurrency (WARP-2850)", () => 
     await expect(
       makeTrigger(null).trigger(CORPUS, { manual: true, now: NOW }),
     ).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("preconditions — checked BEFORE the claim (WARP-2850 review)", () => {
+  // 🔴 THE ORDERING IS THE WHOLE POINT, and getting it wrong was a real
+  // regression on this branch. `claimPass` stamps `runState: "running"`,
+  // `claimedAt` AND `lastRunAt` in one atomic `updateMany` that lands BEFORE
+  // `run()` is ever called. So a "this box cannot do this pass at all" check
+  // that lives inside the runner marks a run that never happened: the route
+  // answers 202 `{status:"started"}`, the row reads `running`, and `lastRunAt`
+  // moves — which then silently spends the `too_soon` budget of the first real
+  // run, once the box is finally configured.
+  //
+  // These cases pin the check on the OTHER side of the claim, where a refusal
+  // is a refusal.
+  const noModel = { [CORPUS]: () => "no_model" as const };
+
+  it("refuses with the precondition's own reason", async () => {
+    await expect(makeTrigger(null, noModel).trigger(CORPUS)).resolves.toEqual({
+      ok: false,
+      reason: "no_model",
+    });
+  });
+
+  it("🔴 never claims — so runState and lastRunAt do not move", async () => {
+    await makeTrigger(null, noModel).trigger(CORPUS, { manual: true, now: NOW });
+    expect(runWithLease).not.toHaveBeenCalled();
+    expect(corpusRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a SCHEDULED tick too, not just a manual one", async () => {
+    // The tick is the caller that runs hourly forever. If only the manual path
+    // were guarded, `lastRunAt` would still crawl forward on its own.
+    await makeTrigger(null, noModel).trigger(CORPUS);
+    expect(runWithLease).not.toHaveBeenCalled();
+  });
+
+  it("is checked BEFORE the rate limit, so the refusal is the true one", async () => {
+    // Both would refuse; only one of them is honest. "Just ran, try again in
+    // 4 min" on a box with no model configured sends an operator away to wait
+    // for something that is never going to work.
+    const justRan = new Date(NOW.getTime() - 60_000);
+    const out = await makeTrigger(justRan, noModel).trigger(CORPUS, {
+      manual: true,
+      now: NOW,
+    });
+    expect(out).toEqual({ ok: false, reason: "no_model" });
+  });
+
+  it("claims as normal once the precondition is satisfied", async () => {
+    const ok = { [CORPUS]: () => null };
+    await expect(makeTrigger(null, ok).trigger(CORPUS)).resolves.toEqual({ ok: true });
+    expect(runWithLease).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a pass with no precondition of its own alone", async () => {
+    await expect(makeTrigger(null, noModel).trigger(DETECTOR)).resolves.toEqual({ ok: true });
+    expect(runWithLease).toHaveBeenCalledOnce();
+  });
+});
+
+describe("shutdown, seen from the trigger (WARP-2837 + WARP-2850)", () => {
+  it("passes `shutting_down` through as itself, not as `busy`", async () => {
+    // WARP-2837's latch hands a claim straight back when the process is on its
+    // way out. That is a THIRD answer — not contention, not a switched-off
+    // pass — and `trigger` must not flatten it into the default.
+    runWithLease.mockResolvedValueOnce({ started: false, reason: "shutting_down" } as never);
+    await expect(makeTrigger().trigger(CORPUS)).resolves.toEqual({
+      ok: false,
+      reason: "shutting_down",
+    });
   });
 });
 
