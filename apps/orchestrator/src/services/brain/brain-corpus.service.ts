@@ -40,7 +40,20 @@ import { upsertDigest, type BrainSourceRef } from "./brain-digest.service";
 import { decryptChunkRows } from "../file-search.service";
 
 export const CORPUS_PASS_KEY = "corpus.documents";
-export const BRAIN_CORPUS_LOCK_KEY = "droplet:brain-corpus";
+
+// 🔴 WARP-2837 — `BRAIN_CORPUS_LOCK_KEY` USED TO LIVE HERE AND IS GONE ON
+// PURPOSE. This pass must not be registered with cron-runtime's `lockKey`:
+// that runs the handler inside `prisma.$transaction(..., { timeout: 60_000 })`,
+// and this pass makes up to CORPUS_UNITS_PER_RUN sequential model calls on a
+// box with one inference slot. The transaction expired mid-run, released the
+// lock while the pass was still working, and threw P2028 on writes that had
+// already committed through the outer client.
+//
+// Exclusion is the lease in brain-lease.service.ts instead — a conditional
+// UPDATE, atomic without holding anything open, correct across replicas.
+// The constant is deleted rather than left unused because an exported lock key
+// sitting next to a pass is an invitation to pass it to `scheduleInterval`,
+// which is exactly the regression.
 
 /** Units per tick. Deliberately small — see the yielding note above. */
 export const CORPUS_UNITS_PER_RUN = 10;
