@@ -1,4 +1,10 @@
 import { z } from "zod";
+// WARP-2825 — the daily-retention horizon lives next to the downsample that
+// enforces it, and every reader that must sit inside it imports the same
+// constant. `money-snapshot.service.ts` has exactly one import of its own and
+// it is a `import type`, so this adds NOTHING to config.ts's runtime module
+// graph — the concern the `resolveAgentIterLimits` note below is about.
+import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -835,7 +841,12 @@ const envSchema = z.object({
   // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
   // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
   // negative window is nonsensical input, so the schema rejects it at startup.
-  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce.number().int().min(0).finite().default(90),
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .finite()
+    .default(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT),
 
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
@@ -1015,6 +1026,22 @@ const envSchema = z.object({
   // for a network problem that isn't there. The REST track (`eaglesoft-api`)
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
+
+  // WARP-2590 — the bridge's service bearer, minted per box by
+  // scripts/lib/secrets.sh and wired to BOTH ends via ${SERVICE_TOKEN_ERP_BRIDGE}.
+  //
+  // Read the `.env` name directly and do NOT re-declare it in compose as a
+  // `${VAR}` substitution: that resolves against docker/.env — a different,
+  // untracked file — and because `environment:` outranks `env_file:` the empty
+  // result SHADOWS the real value. That exact mistake blanked
+  // SERVICE_TOKEN_RAG_EVAL and 401'd 15 consecutive nightly eval runs.
+  //
+  // Empty is a legitimate state on a box with no ERP deployed (the bridge is
+  // profile-gated to "erp"), and it degrades the same honest way an empty
+  // ERP_SQL_BRIDGE_URL does: the connector keeps its blocked I/O boundary.
+  // Against a bridge that IS running, an empty token means 401 on every call —
+  // loudly, rather than looking like the practice's server is down.
+  SERVICE_TOKEN_ERP_BRIDGE: z.string().default(""),
 
   // --- ERP export-drop track (WARP-1964) ---
   // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports

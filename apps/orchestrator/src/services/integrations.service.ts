@@ -864,7 +864,11 @@ export function createIntegrationsService(
        * that yields PROVISIONING, which makes that a property of the code
        * rather than a rule this call site has to remember.
        */
-      const isCloudTrack = providerDescriptor(provider)?.track === "cloud";
+      // WARP-2707 — `rest` takes the cloud path here too. Omit it and a REST
+      // row follows the LAN branch, which probes a host it does not have and
+      // can leave the connection at PROVISIONING forever.
+      const connectTrack = providerDescriptor(provider)?.track;
+      const isCloudTrack = connectTrack === "cloud" || connectTrack === "rest";
       try {
         await connector.connect();
         await connector.introspect();

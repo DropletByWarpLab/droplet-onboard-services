@@ -53,6 +53,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from allowlist import STATEMENT_MISMATCH, UNKNOWN_STATEMENT, check_statement
+from auth import setup_auth
 from db import (
     BridgeConfigError,
     ConnectionPool,
@@ -83,6 +84,12 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Droplet ERP SQL bridge", version="1.0.0", lifespan=lifespan)
+
+# WARP-2590. Installed here, immediately after the app exists and BEFORE any
+# route is declared, so a route added below is gated the moment it is written —
+# the middleware matches on path, not on a decorator anyone has to remember.
+# `/health` is the one exemption (see auth.EXEMPT_PATHS).
+setup_auth(app)
 
 
 def _target_from(req: ExecRequest | IntrospectRequest) -> Target:

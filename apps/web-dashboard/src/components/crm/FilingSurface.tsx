@@ -81,6 +81,31 @@ export function headlineFor(p: FilingProposal): string {
   }
 }
 
+/**
+ * WARP-2737 — why this card cannot be filed yet, or null when it can.
+ *
+ * 🔴 MONEY ONLY, and the narrowness is the point. Every other kind either names
+ * its target in the payload or does not need one; `CREATE_CUSTOMER` in
+ * particular has no `companyId` BY DEFINITION, and reading "no companyId" as
+ * "not ready" would freeze the one card that unblocks the money card and
+ * deadlock the queue.
+ *
+ * A money document read off a first invoice has no customer, because the
+ * customer does not exist yet. There is nothing to pick, so the card does not
+ * offer a picker — it points at the card in this same queue that would create
+ * them. Once that one is applied the server resolves the customer through the
+ * chain and this returns null, so the gate opens rather than merely explaining
+ * itself forever.
+ */
+export function cannotFileYet(p: FilingProposal): string | null {
+  if (p.kind !== "CREATE_MONEY_DOC") return null;
+  if (p.payload?.companyId || p.resolvedCustomer) return null;
+  const who = p.payload?.counterpartyName;
+  return who
+    ? `Add ${who} as a customer first — then Droplet can file this.`
+    : "Droplet could not tell which customer this is from, so there is nowhere to file it.";
+}
+
 /** The filename, shown only here and only to a reviewer. */
 function fileNameOf(p: FilingProposal): string | null {
   const path = p.payload?.file?.filePath;
@@ -93,6 +118,13 @@ function Fields({ p }: { p: FilingProposal }): JSX.Element | null {
   const d = p.payload;
   if (!d) return null;
   const rows: [string, string][] = [];
+  // WARP-2737 — the customer a money document will land on, when its own
+  // reading did not name one. A money payload carries a companyId at most and
+  // never a company NAME, so without this row the owner would be approving a
+  // filing whose subject appears nowhere on the card. "Files under" rather than
+  // "Customer" because it is a different fact from "From" two lines down: one
+  // is what the document said, this is which record it lands on.
+  if (p.resolvedCustomer) rows.push(["Files under", p.resolvedCustomer.companyName]);
   if (d.domain) rows.push(["Website", d.domain]);
   if (d.phone) rows.push(["Phone", d.phone]);
   if (d.address) rows.push(["Address", d.address]);
@@ -153,6 +185,8 @@ export function FilingCard({
   const [choice, setChoice] = useState<string>("");
   const fileName = fileNameOf(p);
   const blocked = p.policyClass === "NEVER";
+  const waiting = cannotFileYet(p);
+  const waitingId = `filing-waiting-${p.id}`;
 
   if (!p.readable) {
     // Shown rather than hidden. A card an owner cannot see is a card they
@@ -218,13 +252,24 @@ export function FilingCard({
             <button
               className="pm-btn primary"
               onClick={() => onApply(choice || undefined)}
-              disabled={busy || (p.kind === "MATCH_REVIEW" && !choice)}
+              disabled={busy || (p.kind === "MATCH_REVIEW" && !choice) || waiting !== null}
+              // The sentence beside it, tied to the control it explains. A
+              // disabled button whose reason is only visually adjacent tells a
+              // screen reader nothing about why it will not respond.
+              {...(waiting ? { "aria-describedby": waitingId } : {})}
             >
               Yes, file it
             </button>
             <button className="pm-btn" onClick={onReject} disabled={busy}>
               No thanks
             </button>
+            {/* 🔴 Reject stays live. A card an owner can neither file nor clear
+                is a permanent member of a queue that is meant to be finished. */}
+            {waiting ? (
+              <span className="filing-note" id={waitingId}>
+                {waiting}
+              </span>
+            ) : null}
             {p.payload?.companyId ? (
               <button
                 className="pm-btn ghost"

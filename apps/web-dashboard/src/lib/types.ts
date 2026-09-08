@@ -2817,6 +2817,88 @@ export interface ToolCatalogEntry {
   requiresConfirmation: boolean;
 }
 
+// ── WARP-2823: the admin console's prompt + tool inspector ────────────────
+//
+// Mirrors the orchestrator's `tool-inspect.service.ts` / `prompt-inspect.service.ts`
+// response shapes. Deliberately structural rather than a re-derivation: the
+// dashboard renders these fields and never re-decides any of them.
+
+/** The gates a chat turn applies, in the order it applies them. */
+export type InspectGate =
+  | "write_tier"
+  | "role_grant"
+  | "interview_strip"
+  | "off_lan_withhold"
+  | "chat_policy"
+  | "turn_relevance";
+
+/** Why an identity could not be established. */
+export type AttributionFailure =
+  | "no_principal"
+  | "user_missing"
+  | "user_deactivated"
+  | "read_failed";
+
+export interface ToolInspectRow {
+  name: string;
+  domain: string;
+  homeDescription: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  advertised: boolean;
+  /** The FIRST gate that withheld it. Null when advertised. */
+  gate: InspectGate | null;
+  reason: string | null;
+  /** Every other gate that would also have withheld it. */
+  alsoWithheldBy: InspectGate[];
+  /** Present on a lock-capable tool the person may not use for locks. */
+  lockCaveat?: string;
+}
+
+export interface ToolInspectResponse {
+  targetUserId: string;
+  tier: string | null;
+  unresolved: AttributionFailure | null;
+  /** `true` = no role narrowing. NOT "unrestricted" — the tier gate still runs. */
+  noRoleNarrowing: boolean;
+  counts: {
+    registered: number;
+    advertised: number;
+    withheld: number;
+    byGate: Record<InspectGate, number>;
+  };
+  rows: ToolInspectRow[];
+}
+
+export type PromptBlockStatus =
+  | "present"
+  | "absent"
+  | "errored"
+  | "dropped"
+  | "not_modelled";
+
+export interface PromptBlockView {
+  key: string;
+  label: string;
+  status: PromptBlockStatus;
+  text: string | null;
+  chars: number;
+  cap: number | null;
+  neverDropped: boolean;
+  note?: string;
+}
+
+export interface PromptInspectResponse {
+  targetUserId: string;
+  tier: string | null;
+  unresolved: AttributionFailure | null;
+  blocks: PromptBlockView[];
+  /** The assembled system message, verbatim. */
+  assembled: string;
+  assembledChars: number;
+  erroredBlocks: string[];
+}
+
 export interface ToolCatalogResponse {
   tools: ToolCatalogEntry[];
   /** Domains in the orchestrator's canonical IA order — drives filter order. */

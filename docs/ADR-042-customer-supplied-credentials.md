@@ -56,6 +56,8 @@ Vendor facts have a shelf life — prefixes, plan tiers and scope models change 
 | **Brevo** | An API key from the account owner's own profile | A single opaque key, sent in an `api-key` header — **not** `Authorization`, not `Bearer` | No — there is only one privilege level | **None. The key is full access to the Brevo account, including SEND.** | **Yes — and it is the only vendor here that expires two ways.** The owner picks a lifetime at creation (7 days to 1 year, or none), AND an unused key is retired after **90 days** of inactivity. | 2026-09-03, WARP-2708 |
 | **Klaviyo** | A **private** API key created in the owner's own account | `pk_…`. The public API key (a six-character site id) is a different credential and will not authenticate | No — but the *public* key is the confusable one, and it fails as a 401 that reads like a wrong password | Read-only / Full / Custom, chosen at creation and **immutable afterwards** — changing it means deleting the key and issuing a new one | **No.** | 2026-09-03, WARP-2709 |
 | **Pipedrive** | A personal API token **and** the company domain, which are two halves of one credential | An opaque token in an `x-api-token` header, plus the account's own subdomain | No — but the legacy `?api_token=` query form must be refused: v1-only, and it puts the credential in the customer's own proxy logs | **The token carries its creator's permissions exactly.** Narrowing it needs a dedicated user in a custom permission set, which is a **higher-tier plan feature** — on the entry plan the token is unavoidably full account access | **No.** | 2026-09-03, WARP-2710 |
+| **Square** | A **production** access token from an application the seller created in their own developer console | An opaque token in `Authorization: Bearer`. **No documented prefix or length** — Square publishes neither, so the box refuses an empty value and nothing else | No — but the **Sandbox** token is the confusable one, and it authenticates only against `connect.squareupsandbox.com`, a host this box never dials | **None on the token itself.** Square's own permission model sits on the application, and the box narrows by reading three endpoints and no more | **No.** | 2026-09-07, WARP-2676 |
+| **Cal.com** | An API key from the owner's own developer settings, on any plan including free | An opaque key in `Authorization: Bearer`. 🔴 **Do not pattern-match it:** a hosted live key is `cal_live_…` but a hosted *test* key is `cal_…`, and on a self-hosted install the prefix is the operator-set `API_KEY_PREFIX` and can be anything | No — there is one key shape | **None. The key carries its creator's access.** | **Optional — the owner picks an expiry at creation, or none.** | 2026-09-07, WARP-2828 |
 
 Two rows carry a hazard the others do not, and both are already ACs on their stories:
 
@@ -95,6 +97,8 @@ Per vendor, the check is:
 | Mailchimp | a key carrying a `-<dc>` suffix | a key with **no** suffix — never default the datacentre, because that silently dials the wrong host |
 | Shopify | a Dev Dashboard client id + secret pair | a `shpat_` admin-created token — the flow that minted it was removed 2026-01-01 and it cannot be re-created |
 | Xero | Path A: client id + secret. Path B: client id with **no** secret field | a Path A config carrying a redirect URI, or a Path B config carrying a secret — these are disjoint variants, not optional fields |
+| Square | any non-empty token | **nothing by shape** — Square documents no prefix and no length, so a regex here would be a guess that refuses valid tokens |
+| Cal.com | any non-empty key | **nothing by shape** — `^cal_(live\|test)_` would reject a valid hosted *test* key (`cal_…`, no second segment) and every self-hosted key, whose prefix is an operator-set env var |
 
 Two limits of this rule, stated so nobody over-reads it:
 
@@ -140,6 +144,8 @@ Three cases. The third is stated rather than left silent, because "nothing needs
 | Shopify | The merchant, in their own Dev Dashboard, installed on their own store | **No** — and a Warp-Lab-owned app with custom distribution is **explicitly rejected** in WARP-2296, because it would put our client secret on customer hardware |
 | Xero | The customer, as a Custom Connection or their own PKCE app | **No** — Xero App Store certification is structurally unreachable for an appliance fleet (WARP-2383), not merely expensive |
 | Atlassian | The customer creates an API token; their org admin enables Rovo MCP | **No** |
+| Square | The seller, in their own Square developer console | **No** |
+| Cal.com | The account owner, in their own Cal.com developer settings | **No** |
 | Eaglesoft · Dentrix · Open Dental · QuickBooks Desktop | **Neither.** A credential inside the customer's own database on their own LAN | **Nothing to register** — no vendor relationship, no console, no app |
 | **Slack** | Per-user OAuth on top of a **workspace-level app** | **Yes — and Slack is the only one.** See below. |
 

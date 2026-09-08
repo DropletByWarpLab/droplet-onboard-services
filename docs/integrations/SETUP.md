@@ -123,6 +123,7 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **The key expires if nobody uses it.** Brevo retires a key after a period of inactivity, so a connection that works today can stop on its own with nothing changed. | Brevo | [`brevo.md`](brevo.md) |
 | **The scope cannot be changed after you create it.** Picking the wrong one means deleting the key and making a new one. | Klaviyo | [`klaviyo.md`](klaviyo.md) |
 | **The token carries the permissions of the person who made it**, so it stops seeing data if that person's access changes — and it is shared with every other tool that account has connected. | Pipedrive | [`pipedrive.md`](pipedrive.md) |
+| **You run your own copy of the product.** The hosted service and the self-hosted edition (cal.diy) answer different API contracts, so a self-hoster cannot connect at all yet — and nothing on the connect screen would tell them before they made a key. | Cal.com | [`calcom.md`](calcom.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -139,10 +140,14 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **Brevo** | An API key from your own Brevo profile | [`brevo.md`](brevo.md) |
 | **Klaviyo** | A **private** API key (`pk_…`), scoped read-only | [`klaviyo.md`](klaviyo.md) |
 | **Pipedrive** | A personal API token **and** your company domain | [`pipedrive.md`](pipedrive.md) |
+| **Square** | A **production** access token from your own Developer Console application | [`square.md`](square.md) |
+| **Cal.com** | An API key from your own **My Settings → Developer** | [`calcom.md`](calcom.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
 
-> Atlassian is the odd one out in this table in two ways, both covered in its guide: the token **expires** (365 days at most), and it is the only credential here that is **not scoped** — it carries the full access of whoever created it, so *whose* account creates it is the access decision. Droplet limits itself instead, to reads only, from a list held in the product.
+> Atlassian is still the odd one out on expiry: its token **expires** within 365 days, as a hard stop with no grace period and no renewal, which is a date the owner has to diary. Cal.com's key can expire too, but only because the owner chose a date at creation, and Brevo's expires from disuse — both covered in their guides.
+
+> **Not every credential in this table is scoped, and the unscoped ones are the majority.** Stripe, Klaviyo and Shopify let you narrow what the credential may do. Atlassian, Mailchimp, Brevo, Pipedrive, Square and Cal.com do not — each carries the full access of whoever created it, so on those *whose* account creates it is the access decision, and there is nothing to tick. Droplet limits itself instead, to reads only, from a list held in the product; each guide says plainly which of the two you are getting.
 
 ### 3.4 What Droplet does with your credential
 

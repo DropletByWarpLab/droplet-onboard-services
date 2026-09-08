@@ -70,6 +70,19 @@ export interface SqlBridgeOptions {
   fetchImpl?: FetchLike;
   timeoutMs?: number;
   target?: BridgeTarget;
+  /**
+   * WARP-2590 — the bridge's service bearer (`SERVICE_TOKEN_ERP_BRIDGE`).
+   *
+   * This is the ONE credential that crosses this boundary, and it is not a
+   * database credential: it authenticates the orchestrator TO the bridge. The
+   * practice's `droplet_ro` / `droplet_rw` passwords still live only in the
+   * bridge's own environment, so the header above the module still holds.
+   *
+   * Absent ⇒ no `Authorization` header, and a provisioned bridge answers 401.
+   * That is the intended failure: a caller that cannot authenticate must not
+   * silently look like a bridge outage.
+   */
+  authToken?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -79,6 +92,7 @@ export class SqlBridgeClient {
   private readonly timeoutMs: number;
   private readonly target?: BridgeTarget;
   private readonly fetchImpl?: FetchLike;
+  private readonly authToken?: string;
 
   constructor(opts: SqlBridgeOptions = {}) {
     // Trim trailing slashes by index: `/\/+$/` re-scans the run from every
@@ -90,6 +104,11 @@ export class SqlBridgeClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.target = opts.target;
     this.fetchImpl = opts.fetchImpl;
+    // Empty string and undefined mean the same thing here: send no header. An
+    // `Authorization: Bearer ` with nothing after it is not a weaker
+    // credential, it is a malformed one, and a provisioned bridge 401s either
+    // way — collapsing them keeps one failure shape instead of two.
+    this.authToken = opts.authToken?.trim() || undefined;
   }
 
   private resolveFetch(): FetchLike {
@@ -105,7 +124,14 @@ export class SqlBridgeClient {
     try {
       res = await fetchImpl(`${this.baseUrl}${path}`, {
         method,
-        headers: { "content-type": "application/json", accept: "application/json" },
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          // WARP-2590. Spread rather than a conditional property so an
+          // unconfigured client sends NO header at all — an empty bearer would
+          // read as an attempt rather than an omission in the bridge's logs.
+          ...(this.authToken ? { authorization: `Bearer ${this.authToken}` } : {}),
+        },
         signal: AbortSignal.timeout(this.timeoutMs),
         ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
       });

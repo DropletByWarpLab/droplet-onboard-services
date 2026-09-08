@@ -80,6 +80,9 @@ import {
   exportProviders,
   parseProfileJson,
   vendorFromExportProvider,
+  restProfileFor,
+  RestProfileConnector,
+  authPlaceholders,
   type Connector,
   type EaglesoftApiRouteMap,
   type ExportProfile,
@@ -135,7 +138,11 @@ export const KNOWN_ERP_PROVIDERS: readonly string[] = buildableProviderIds();
 export const CLOUD_ERP_PROVIDERS: readonly string[] = cloudProviderIds();
 
 export function isCloudErpProvider(provider: string): boolean {
-  return providerDescriptor(provider)?.track === "cloud";
+  // WARP-2707 — `rest` answers YES. It is the cloud SHAPE (identity in
+  // `providerConfig`, credential in `providerTokensEnc`); only its dispatch
+  // differs, and dispatch is `connectorFactoryFor`'s question, not this one.
+  const track = providerDescriptor(provider)?.track;
+  return track === "cloud" || track === "rest";
 }
 
 /**
@@ -172,7 +179,15 @@ export function isKnownErpProvider(provider: string): boolean {
   // with no connector at all, so the negative form would have answered "yes,
   // this factory can build it" and then thrown.
   const descriptor = providerDescriptor(provider);
-  if (descriptor) return descriptor.track === "lan" || descriptor.track === "cloud";
+  // WARP-2707 — `rest` is buildable: `connectorFactoryFor` resolves it through
+  // `restProfileFor` before the static map. Classified deliberately, not
+  // inherited: omit it and `connect()`, `test()` and the write toggle all
+  // refuse every REST vendor.
+  if (descriptor) {
+    return (
+      descriptor.track === "lan" || descriptor.track === "cloud" || descriptor.track === "rest"
+    );
+  }
   if (!vendorFromExportProvider(provider)) return false;
   return exportProviders(loadOperatorExportProfiles().profiles).includes(provider);
 }
@@ -198,7 +213,13 @@ export function isConnectionProvider(provider: string): boolean {
   const descriptor = providerDescriptor(provider);
   if (descriptor) {
     return (
-      descriptor.track === "lan" || descriptor.track === "cloud" || descriptor.track === "mcp"
+      descriptor.track === "lan" ||
+      descriptor.track === "cloud" ||
+      // WARP-2707 — a REST row is a row like any other, so `disconnect()`'s
+      // credential purge has to admit it or ADR-041's "purged on disconnect"
+      // has no implementation on this track.
+      descriptor.track === "rest" ||
+      descriptor.track === "mcp"
     );
   }
   // No descriptor: the export-drop family, which `isKnownErpProvider` owns.
@@ -600,8 +621,19 @@ export function cloudMaterialFromRow(
   // The provider must be a KNOWN cloud descriptor before we hand back a
   // resolver: an unrecognised key reaching this line means a row written by a
   // newer build, and `connectorForProvider` refuses it by name a moment later.
+  //
+  // 🔴 WARP-2707 — `rest` MUST be admitted here, and this is the single most
+  // load-bearing line of the track's wiring. A REST connection's credential is
+  // the same customer-supplied bundle in the same `providerTokensEnc` column;
+  // omit the track and `cloudTokens` comes back `undefined`, the connector
+  // keeps its `blockedRestCredentialResolver`, and EVERY REST connection
+  // reports ERP_NOT_CONNECTED — with a green build, a green tsc and green
+  // tests, because nothing here is a compile error.
   const descriptor = providerDescriptor(row.provider);
-  if (descriptor?.track === "cloud" && row.providerTokensEnc) {
+  if (
+    (descriptor?.track === "cloud" || descriptor?.track === "rest") &&
+    row.providerTokensEnc
+  ) {
     const blob = row.providerTokensEnc;
     return {
       connectionId: row.id,
@@ -742,6 +774,10 @@ registerConnectorFactory(EAGLESOFT_PROVIDER, ({ selector: sel }) =>
       // blocked I/O boundary and reports that the SAP client is missing —
       // which is the accurate remediation for a box with no bridge deployed.
       bridgeUrl: config.ERP_SQL_BRIDGE_URL || undefined,
+      // WARP-2590: the bridge now requires a service bearer. Undefined when
+      // unset, so a box with no ERP deployed keeps the same blocked-I/O
+      // degradation rather than sending an empty credential.
+      bridgeAuthToken: config.SERVICE_TOKEN_ERP_BRIDGE || undefined,
     },
   ),
 );
@@ -1104,8 +1140,64 @@ const exportDropFactory: ConnectorFactory = ({ selector: sel }) => {
   );
 };
 
+/**
+ * WARP-2707 / ADR-046 — the declarative REST track's factory.
+ *
+ * ONE factory for N vendors, exactly as `exportDropFactory` is one factory for
+ * the whole export-drop family. Everything vendor-specific is in the profile;
+ * everything connection-specific is read generically here.
+ */
+const restProfileFactory: ConnectorFactory = ({ selector: sel, descriptor, config: cfg }) => {
+  const profile = restProfileFor(sel.provider);
+  if (!profile) {
+    // Unreachable through `connectorFactoryFor`, which only selects this
+    // factory when a profile exists. Refused by name rather than left to
+    // throw a TypeError, because absence is never a silent anything.
+    throw new ConnectorBlockedError(
+      `construct (no REST profile for "${sel.provider}")`,
+      UNKNOWN_PROVIDER_REMEDIATION,
+    );
+  }
+  const resolve = sel.cloudTokens?.resolveSaasSecret;
+  return new RestProfileConnector(
+    profile,
+    {
+      provider: sel.provider,
+      // The per-account host, named by the DESCRIPTOR's `dynamicEgress.configKey`
+      // rather than by a literal here — so the connection field, the allowlist
+      // entry's `config_key` and this read are one declaration, not three that
+      // can drift. Undefined for a static profile, which is what the host guard
+      // expects.
+      hostConfigValue: descriptor?.dynamicEgress
+        ? providerConfigString(cfg, descriptor.dynamicEgress.configKey)
+        : undefined,
+    },
+    {
+      // Resolved by DESCRIPTOR FIELD NAME, generically: the profile's auth
+      // template names its own placeholders and each is looked up as a
+      // credential field. That is what lets a two-secret vendor (Open Dental's
+      // `ODFHIR {{developerKey}}/{{customerKey}}`) work with no code here.
+      // Left undefined when nothing is sealed, so the connector keeps its
+      // blocked resolver and says what is missing.
+      resolveCredentials: resolve
+        ? async () => {
+            const out: Record<string, string> = {};
+            for (const field of authPlaceholders(profile.auth)) {
+              out[field] = await resolve(field);
+            }
+            return out;
+          }
+        : undefined,
+    },
+  );
+};
+
 function connectorFactoryFor(provider: string): ConnectorFactory | undefined {
   if (vendorFromExportProvider(provider)) return exportDropFactory;
+  // WARP-2707 — consulted BEFORE the static map, mirroring the export-drop
+  // branch above. A REST vendor registers no factory of its own; its profile
+  // IS its registration.
+  if (restProfileFor(provider)) return restProfileFactory;
   return connectorFactories.get(provider);
 }
 

@@ -37,6 +37,7 @@ import { TOOLS, CLOUD_QUERY_DATASETS } from "@droplet/tools-core";
 import { createErpService, CLOUD_DATASET_READS } from "./erp.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { selectAdvertisedTools } from "./tool-selection.service.js";
+import { providerDescriptors } from "@droplet/shared-types";
 
 const OWNER = { id: "user-owner", role: "owner" as const };
 const TOOL = "cloud_query_dataset";
@@ -236,6 +237,36 @@ describe("WARP-2497 — 'what did we bill last week', end to end", () => {
     // Mutation: add a key to CLOUD_DATASET_READS (or a value to the tool's
     // enum) without the other → red.
     expect([...CLOUD_QUERY_DATASETS].sort()).toEqual(Object.keys(CLOUD_DATASET_READS).sort());
+  });
+
+  it("🔴 every cloud and rest provider has at least one dataset the model can ask about", () => {
+    // WARP-2832. The gate that was missing, and the omission it would have
+    // caught is a real one: Cal.com shipped on WARP-2707 serving `appointment`
+    // alone — a name in NEITHER `CLOUD_DATASET_READS` nor `CLOUD_QUERY_DATASETS`
+    // — so a customer could connect it, watch the card go green, and never
+    // reach a single booking from any surface on the box.
+    //
+    // Nothing went red, and the assertion above is why: it gates the two lists
+    // against EACH OTHER, and they agreed perfectly while both lagged the
+    // vocabulary. Neither is typed `DatasetName`, so they can lag it forever,
+    // in lockstep, with every test green.
+    //
+    // Deliberately NOT "every declared dataset is reachable" — that is false
+    // today and knowingly so: Stripe serves `refund`, `payout`,
+    // `balance_transaction` and `subscription`, none of which is wired, and
+    // the test below records `refund`'s unreachability as a decision rather
+    // than an accident. The property that actually matters is weaker and
+    // sharper: a connector the model cannot ask ANYTHING about is a connector
+    // that does nothing for the owner who connected it.
+    //
+    // Mutation: drop `booking` from CLOUD_DATASET_READS → red, naming calcom.
+    const askable = new Set(Object.keys(CLOUD_DATASET_READS));
+    const dark = providerDescriptors()
+      .filter((d) => d.track === "cloud" || d.track === "rest")
+      .filter((d) => d.catalog?.availability === "available")
+      .filter((d) => !d.datasets.some((name) => askable.has(name)))
+      .map((d) => d.id);
+    expect(dark, "these providers ship an available card the assistant cannot query").toEqual([]);
   });
 
   it("refuses a dataset outside the enum instead of answering it empty", async () => {

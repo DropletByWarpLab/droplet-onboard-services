@@ -87,6 +87,15 @@
     ],
     "get_ecommerce_orders": [
       "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+    ],
+    "get_bookings": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id>, <id>"
+    ],
+    "find_employee": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '' ORDER BY <id>, <id>"
+    ],
+    "get_tasks_by_status": [
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
     ]
   },
   "writes": {

@@ -5,7 +5,8 @@
  * promise like that is worth exactly as much as its worst case. So the shape
  * here is deliberately narrow: undo reverses ONLY through the proposal's own
  * back-pointers — `createdCompanyId`, `createdContactId`, `createdProjectId`,
- * `createdEntityLinkId`, `createdActivityId` — and never searches for anything
+ * `createdEntityLinkId`, `createdActivityId`, `createdErpDocumentId` — and
+ * never searches for anything
  * that "looks like" what it made. A reversal that guesses is a reversal that
  * can take something a person meant to keep.
  *
@@ -41,6 +42,7 @@ import type { PrismaClient, IngestProposal } from "@prisma/client";
 
 import { createLogger } from "../../lib/logger.js";
 import { FILING_ERRORS, notSameKey } from "./apply.service.js";
+import { deleteDraftDocument } from "../money/document-status.js";
 import { parsePayload } from "./payloads.js";
 
 const logger = createLogger("filing-undo");
@@ -69,6 +71,10 @@ export interface UndoResult {
    */
   linkRemoved: boolean;
   activityRemoved: boolean;
+  /** WARP-2737 — TRUE only if a money document was actually deleted. It is
+   *  `false` both when there was none and when there was one the undo refused
+   *  to touch because it had moved past DRAFT. The card says which. */
+  documentRemoved: boolean;
   /** True when a `NOT_SAME` rule was written so the pair is not re-offered. */
   ruleWritten: boolean;
 }
@@ -151,6 +157,7 @@ async function reverse(
   let linkArchived = false;
   let linkRemoved = false;
   let activityRemoved = false;
+  let documentRemoved = false;
 
   // ── The caption ──────────────────────────────────────────────────────────
   //
@@ -162,6 +169,29 @@ async function reverse(
       where: { id: proposal.createdActivityId, origin: "EXTRACTED" },
     });
     activityRemoved = n.count === 1;
+  }
+
+  // ── The money document ───────────────────────────────────────────────────
+  //
+  // 🔴 DELETE, and only while it is still a DRAFT. `deleteDraftDocument`
+  // enforces both halves; this reads its answer rather than assuming one.
+  //
+  // Why deletion is the only branch available, stated rather than hidden:
+  // `ErpDocument` has no `isArchived`, so the delete-vs-archive rule the CRM
+  // records below follow cannot be applied here. And why the DRAFT bound is
+  // not a limitation but the correct behaviour — a document that has been SENT
+  // has left the building, and one that is PART_PAID has money against it.
+  // Removing the row would destroy the record of both. `false` here means the
+  // owner's Undo did not take the document back, and `UndoResult` says so
+  // instead of reporting a success it did not achieve.
+  //
+  // ⚠ Ordering: this runs BEFORE the company is decided, for the same reason
+  // WARP-2731's link does. `ErpDocument.companyId` is `onDelete: SetNull`, so
+  // deleting the customer first would leave the invoice alive with a NULL
+  // party — legal under the provenance CHECK, permanent, and invisible.
+  if (proposal.createdErpDocumentId) {
+    documentRemoved = await deleteDraftDocument(tx, proposal.createdErpDocumentId);
+    if (documentRemoved) mode = "delete";
   }
 
   // ── The created records ──────────────────────────────────────────────────
@@ -263,6 +293,7 @@ async function reverse(
     linkArchived,
     linkRemoved,
     activityRemoved,
+    documentRemoved,
     ruleWritten,
   };
 }

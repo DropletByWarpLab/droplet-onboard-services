@@ -129,6 +129,26 @@ function matches(row: StoredRow, where: Record<string, unknown> | undefined): bo
       continue;
     }
 
+    if (key === "NOT") {
+      // Prisma reads sibling fields inside NOT as a conjunction, so the whole
+      // sub-object is one predicate and the row is excluded only when ALL of
+      // it holds. Delegating to `matches` keeps that reading honest — a hand
+      // written `row.origin === … && row.status === …` here would drift the
+      // moment the service narrows on something else.
+      if (matches(row, cond as Record<string, unknown>)) return false;
+      continue;
+    }
+
+    if (key === "origin" || key === "status") {
+      // Plain equality; both are enum columns. `status` is NULL on every
+      // landed row (the provenance CHECK puts the vendor's word in
+      // `vendorStatus`), and `null !== "DRAFT"` is the answer that keeps the
+      // vendor ledger out of the LOCAL-draft exclusion.
+      if (cond !== null && typeof cond !== "string") unsupported(`${key} filter ${JSON.stringify(cond)}`);
+      if ((row as unknown as Record<string, unknown>)[key] !== cond) return false;
+      continue;
+    }
+
     if (key === "kind") {
       // WARP-2739 — a direction is a SET of kinds, so `{ in: [...] }` is the
       // ordinary shape here and a bare equality is no longer produced by the

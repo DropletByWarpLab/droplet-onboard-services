@@ -91,8 +91,10 @@ function ProjectsWorkspace(): JSX.Element {
   // ADR-045 §5.3 — the department filter. Client-side like `savedView` and `q`:
   // the board already holds every item for the project in one fetch, so a
   // server round-trip buys nothing and would cost the instant saved-view
-  // counts. The server-side `?department=` filter exists for the API and the
-  // LLM's pm_list_work_items, and applies the identical rollup rule.
+  // counts. The server-side `?department=` filter exists for the API and for
+  // the assistant (`business_find` with a `department` argument, WARP-2719 —
+  // `pm_list_work_items` was deleted by ADR-045 slice C), and applies the
+  // identical rollup rule.
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);

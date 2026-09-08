@@ -37,6 +37,14 @@ import type { CatalogQuerySet } from "../src/introspection.js";
 const BRIDGE_URL = process.env.ERP_BRIDGE_LIVE_URL;
 
 /**
+ * WARP-2590 — the bridge's service bearer. `scripts/test-erp-sql-bridge.sh`
+ * exports the same value it starts the bridge with, so this lane exercises the
+ * REAL authenticated path rather than a bridge with the gate disabled. A lane
+ * that ran unauthenticated would prove nothing about what ships.
+ */
+const BRIDGE_TOKEN = process.env.SERVICE_TOKEN_ERP_BRIDGE;
+
+/**
  * Postgres-flavoured catalog queries. Shaped to return exactly the columns
  * `introspect()` reads (`table_name` + `owner`, `column_name` + `type`), which
  * is the same contract the SQL Anywhere sets in `introspection.ts` satisfy.
@@ -64,7 +72,12 @@ const CONFIG = {
 type ConnectorDeps = NonNullable<ConstructorParameters<typeof EaglesoftConnector>[1]>;
 
 const makeConnector = (over: ConnectorDeps = {}) =>
-  new EaglesoftConnector(CONFIG, { bridgeUrl: BRIDGE_URL, catalog: PG_CATALOG, ...over });
+  new EaglesoftConnector(CONFIG, {
+    bridgeUrl: BRIDGE_URL,
+    bridgeAuthToken: BRIDGE_TOKEN,
+    catalog: PG_CATALOG,
+    ...over,
+  });
 
 /** Raw bridge access for test setup only (reading a guard watermark). The
  *  connector has no read query that exposes `last_modified`, by design — and
@@ -72,7 +85,7 @@ const makeConnector = (over: ConnectorDeps = {}) =>
  *  shapes, so this scaffolding borrows the registered `get_patient` shape
  *  (three columns, one equality predicate) against the appointment table.
  *  Identifier names are free under the allowlist; the shape is not. */
-const raw = () => new SqlBridgeClient({ baseUrl: BRIDGE_URL });
+const raw = () => new SqlBridgeClient({ baseUrl: BRIDGE_URL, authToken: BRIDGE_TOKEN });
 
 const VERIFY_APPT_SQL =
   'SELECT "status", "operatory_id", "last_modified" FROM "dba"."appointment" WHERE "appt_id" = ?';

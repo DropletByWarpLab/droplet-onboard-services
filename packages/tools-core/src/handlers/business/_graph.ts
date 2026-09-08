@@ -102,8 +102,12 @@ const HONOURED_ARGS: Record<FindEntity, ReadonlySet<string>> = {
   customer: new Set(["id", "query", "limit"]),
   contact: new Set(["id", "query", "parent_id", "limit"]),
   deal: new Set(["id", "query", "status", "parent_id", "idle_days", "limit"]),
-  project: new Set(["id", "query", "limit"]),
-  work_item: new Set(["id", "query", "parent_id", "limit"]),
+  // WARP-2719 — `department` is honoured on the two entities that HAVE one.
+  // No CRM model carries a `departmentId` (checked against every one of them),
+  // so accepting it on `customer`/`deal`/`contact` would be a filter that
+  // silently matches everything.
+  project: new Set(["id", "query", "department", "limit"]),
+  work_item: new Set(["id", "query", "parent_id", "department", "limit"]),
   pipeline: new Set(["id"]),
   // `status` is honoured for findings and means the review state
   // (new/acknowledged/actioned/dismissed/stale), NOT a deal outcome. The two
@@ -121,11 +125,13 @@ const ARG_HINT: Record<string, string> = {
   parent_id:
     'parent_id is a customer id for entity "deal"/"contact" and a project id for entity "work_item"',
   query: "this entity has no free-text search",
+  department:
+    'department applies to entity "project" and "work_item" — nothing in the CRM belongs to a department',
 };
 
 /** The arguments that shape a SEARCH. `id` is not one of them: it is the
  *  argument that turns a search into a node read. */
-const SEARCH_ARGS = ["query", "status", "parent_id", "idle_days"] as const;
+const SEARCH_ARGS = ["query", "status", "parent_id", "idle_days", "department"] as const;
 
 /**
  * Refuse an argument the chosen entity cannot honour, or `null` to proceed.
@@ -368,6 +374,11 @@ export function toGraphWorkItem(
         assignees: w.assignees,
         labels: w.labels,
         updated_at: w.updated_at,
+        // WARP-2719 — on the COMPACT row too, and only the name. A model that
+        // filtered by department and got rows carrying no department back
+        // cannot tell a correct answer from a dropped filter. ~30 chars
+        // against the 8,000-char result cap, at the default limit of 20.
+        ...(w.department ? { department: w.department } : {}),
       };
 }
 
@@ -548,6 +559,19 @@ export function businessError(err: unknown, entity: string): ToolResult {
       return fail(
         "BUSINESS_MODULE_OFF",
         `The ${mod} module is switched off on this Droplet, so that record cannot be reached. It can be turned on in Settings.`,
+      );
+    }
+    // WARP-2719 — the one 404 whose bare token is useless to a model.
+    // `callOrch` throws `OrchPmError(json.error, status)`, so an unknown
+    // department arrives here as the literal string "department_not_found" and
+    // would reach the model as exactly that. It is also the ONLY 404 in this
+    // family that is a mistake in the ARGUMENT rather than a missing record —
+    // the fix is to use a different word, and the sentence has to say so or
+    // the model retries the same one.
+    if (err.status === 404 && err.message === "department_not_found") {
+      return fail(
+        "BUSINESS_NOT_FOUND",
+        "No department by that name. Ask for the list of departments, or leave it out to see everything.",
       );
     }
     const code =

@@ -316,6 +316,54 @@ const TABLES: IntrospectedTable[] = [
       { name: "processed_at", type: "timestamp" },
     ],
   },
+  // ── WARP-2832 — scheduling, people, projects ──────────────────────────────
+  {
+    name: "booking",
+    owner: "dba",
+    columns: [
+      { name: "booking_id", type: "varchar" },
+      { name: "starts_at", type: "timestamp" },
+      { name: "ends_at", type: "timestamp" },
+      { name: "status", type: "varchar" },
+      { name: "staff_id", type: "varchar" },
+      { name: "customer_id", type: "varchar" },
+      { name: "customer_name", type: "varchar" },
+      { name: "service_name", type: "varchar" },
+      { name: "created_at", type: "timestamp" },
+      { name: "updated_at", type: "timestamp" },
+    ],
+  },
+  {
+    name: "employee",
+    owner: "dba",
+    columns: [
+      { name: "employee_id", type: "varchar" },
+      { name: "first_name", type: "varchar" },
+      { name: "last_name", type: "varchar" },
+      { name: "email", type: "varchar" },
+      { name: "job_title", type: "varchar" },
+      { name: "department", type: "varchar" },
+      { name: "status", type: "varchar" },
+      { name: "hired_at", type: "timestamp" },
+      { name: "manager_id", type: "varchar" },
+      { name: "updated_at", type: "timestamp" },
+    ],
+  },
+  {
+    name: "task",
+    owner: "dba",
+    columns: [
+      { name: "task_id", type: "varchar" },
+      { name: "project_id", type: "varchar" },
+      { name: "created_at", type: "timestamp" },
+      { name: "closed_at", type: "timestamp" },
+      { name: "title", type: "varchar" },
+      { name: "status", type: "varchar" },
+      { name: "priority", type: "varchar" },
+      { name: "assignee_id", type: "varchar" },
+      { name: "updated_at", type: "timestamp" },
+    ],
+  },
 ];
 
 const map = buildSchemaMap(TABLES);
@@ -352,6 +400,13 @@ describe("read-query registry", () => {
         "get_engagements",
         "get_audience_members",
         "get_ecommerce_orders",
+        // WARP-2832 — scheduling, people, projects. One query each, and each
+        // is the ONLY thing that makes its dataset reachable: a dataset with
+        // no read query is refused by `dataset-vocabulary.test.ts` before it
+        // can ship as a name nothing can ask for.
+        "get_bookings",
+        "find_employee",
+        "get_tasks_by_status",
       ].sort(),
     );
   });

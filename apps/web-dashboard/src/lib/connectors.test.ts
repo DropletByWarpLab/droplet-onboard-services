@@ -151,6 +151,43 @@ const CATALOG_WARP_2214 = [
   },
 ];
 
+/**
+ * WARP-2707 / ADR-046 — the first two vendors on the DECLARATIVE REST track.
+ *
+ * A third fixture list rather than two more entries in `CATALOG_WARP_2214`,
+ * for the reason that list gives for not folding into `CATALOG_BEFORE`: each
+ * block is the record of one story's cards, and merging them turns a
+ * regression anchor into a running total nobody can read a diff against.
+ *
+ * These cards are pinned in exactly the same shape as the cloud ones, and that
+ * sameness is the assertion. `hubCardFor` puts `rest` and `cloud` through one
+ * arm deliberately (`connectors.ts:56-65`) — "declarative" is a fact about our
+ * source tree, not about the hub — so a rest card that came out looking
+ * DIFFERENT from a cloud card would mean the track had leaked into the
+ * product, and that goes red here.
+ */
+const CATALOG_WARP_2707 = [
+  {
+    // WARP-2707 — the REST track's first vendor, at catalog.order 12.
+    id: "square",
+    name: "Square",
+    category: "Payments",
+    description:
+      "Payments, refunds and payouts — read from Square, so the money side of the business is on the box.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/square",
+  },
+  {
+    // WARP-2707 — the REST track's second vendor, at catalog.order 13.
+    id: "calcom",
+    name: "Cal.com",
+    category: "Scheduling",
+    description: "Bookings and their times, hosts and status — read from Cal.com.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/calcom",
+  },
+];
+
 describe("the derived catalog is byte-identical to the hand-written one", () => {
   it("still renders the original four cards first, same copy, same order", () => {
     // Order is part of it: the Claude Design handoff is Eaglesoft · Dentrix ·
@@ -164,7 +201,32 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
   it("appends the WARP-2214 vendors, in hub order", () => {
     // Mutation: change a `catalog.order` so a SaaS card lands among the
     // practice cards → red.
-    expect(CONNECTORS.slice(CATALOG_BEFORE.length)).toEqual(CATALOG_WARP_2214);
+    //
+    // WARP-2707 turned this from an open-ended tail into a BOUNDED window, the
+    // same move `CATALOG_BEFORE` made when the SaaS cards landed: this block is
+    // a record of what WARP-2214 shipped, and an open tail would have made
+    // every later story edit it. The "nothing unexpected on the end" half it
+    // used to carry now lives on the REST-track assertion below, which is the
+    // one holding the last slot.
+    expect(
+      CONNECTORS.slice(
+        CATALOG_BEFORE.length,
+        CATALOG_BEFORE.length + CATALOG_WARP_2214.length,
+      ),
+    ).toEqual(CATALOG_WARP_2214);
+  });
+
+  it("appends the WARP-2707 REST-track vendors last, in hub order", () => {
+    // Open-ended on purpose — this is the assertion that a NEW card cannot
+    // appear on the hub unnoticed, whatever track it claims. `hubCardFor`
+    // routes `rest` through the cloud arm, so a rest descriptor landing a
+    // fourteenth card would otherwise render silently.
+    //
+    // Mutation: give Square or Cal.com a `catalog.order` below Xero's 11 and
+    // the card leaves this window → red.
+    expect(
+      CONNECTORS.slice(CATALOG_BEFORE.length + CATALOG_WARP_2214.length),
+    ).toEqual(CATALOG_WARP_2707);
   });
 
   it("keeps every id inside the ConnectorId union the rest of the hub uses", () => {
@@ -181,8 +243,14 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     // `ConnectorId[]` is what finally makes it one — adding an id here without
     // adding it to the union is now a compile error, while the runtime
     // assertion below goes on pinning the DERIVED ids against it.
+    //
+    // WARP-2707 — `square` and `calcom` join the list for the same reason, and
+    // the `rest` track does not change the argument one bit: `hubCardFor`
+    // hands a rest card to the same `as ConnectorId` cast, so it needs the same
+    // hand-written literal. Sorted, because the assertion sorts the derived ids.
     const allowed: ConnectorId[] = [
       "brevo",
+      "calcom",
       "dentrix",
       "eaglesoft",
       "hubspot",
@@ -192,6 +260,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "pipedrive",
       "quickbooks",
       "shopify",
+      "square",
       "stripe",
       "xero",
     ];
@@ -293,6 +362,31 @@ describe("credential fields come from the shared descriptor, not from this file"
 // WARP-2342 — the setup guide is part of a cloud card's contract
 // ---------------------------------------------------------------------------
 
+/**
+ * The tracks whose `available` card MUST carry a setup guide.
+ *
+ * Read by BOTH shipped-catalog loops below, and it exists because of the exact
+ * failure WARP-2707 walked into: those loops said `track !== "cloud"` and
+ * `continue`d, so the two new `rest` cards were SILENTLY SKIPPED. A skipped
+ * card is not a passing card — the loops went on reporting green over a set
+ * that had quietly stopped including the vendors most likely to ship without a
+ * guide, which is the one thing they were written to catch.
+ *
+ * `rest` belongs here on the descriptor type's own authority, not by analogy:
+ * `provider-descriptor.ts` puts `cloud` and `rest` on ONE union arm precisely
+ * so `CloudProviderCatalogMeta` makes `setupGuideHref` required at
+ * `availability: "available"` for both (ADR-046 §5 — *"a profile without a
+ * guide is a connector the owner cannot use"*). These loops are the runtime
+ * witness for that compile-time rule, so their predicate has to name the same
+ * set the arm does.
+ *
+ * Stated as a list rather than derived from "has a catalog block", because
+ * `lan` and `catalog` cards have one too and are deliberately exempt. A fifth
+ * track joining that arm and not this set is the same silent skip again — so
+ * it is written to be checked against the arm by eye.
+ */
+const GUIDE_REQUIRED_TRACKS: ReadonlySet<string> = new Set(["cloud", "rest"]);
+
 describe("the setup guide travels with the card", () => {
   /**
    * The pass-through is real, and a card with no guide carries no key —
@@ -352,6 +446,68 @@ describe("the setup guide travels with the card", () => {
   });
 
   /**
+   * WARP-2707 — the witness the two guide loops cannot give on their own.
+   *
+   * Both of them open with `continue`, and a `continue` that skips everything
+   * leaves a green test behind: that is precisely how `!== "cloud"` went on
+   * passing while covering neither Square nor Cal.com. A loop cannot report the
+   * cards it never reached, so the set it reaches is asserted HERE, by name,
+   * where it is falsifiable.
+   *
+   * Mutation: narrow {@link GUIDE_REQUIRED_TRACKS} back to `cloud` alone → this
+   * goes red, while both loops stay green. That asymmetry is the whole reason
+   * this test exists.
+   */
+  it("actually visits the rest-track cards — a skipped card is not a passing card", () => {
+    const covered = CONNECTORS.filter((card) => {
+      const descriptor = descriptorForCatalogId(card.id);
+      return descriptor !== undefined && GUIDE_REQUIRED_TRACKS.has(descriptor.track);
+    }).map((card) => card.id);
+
+    // The two REST cards WARP-2707 ships…
+    expect(covered).toContain("square");
+    expect(covered).toContain("calcom");
+    // …and a cloud card, so a set that had SWAPPED one track for the other
+    // rather than widening would still be caught.
+    expect(covered).toContain("stripe");
+    // Practice-management cards stay out: `lan` and `catalog` are exempt on
+    // purpose, and a predicate that swept them in would be demanding a guide
+    // for a card with no vendor console to send anyone to.
+    expect(covered).not.toContain("eaglesoft");
+    expect(covered).not.toContain("opendental");
+  });
+
+  /**
+   * WARP-2707 — the same rule, from the `rest` side, and it compiles for the
+   * same reason: `rest` shares the cloud arm, so `CloudProviderCatalogMeta`
+   * refuses an `available` card with no href here too. Worth its own fixture
+   * rather than trusting the arm to stay shared — the moment someone gives
+   * `rest` an arm of its own with a plain `ProviderCatalogMeta`, THIS is what
+   * goes red, and ADR-046 §5 is the clause it protects.
+   */
+  it("makes an available REST card without a guide a TYPE error too", () => {
+    // @ts-expect-error -- an `available` rest card must declare setupGuideHref.
+    const bad: ProviderDescriptor = {
+      id: "fixture-rest-no-guide",
+      displayName: "Fixture REST No Guide",
+      category: "Payments",
+      track: "rest",
+      credentialFields: [],
+      egressHosts: [],
+      datasets: [],
+      catalog: {
+        id: "fixture-rest-no-guide",
+        name: "Fixture REST No Guide",
+        category: "Payments",
+        description: "Offered on the declarative track, with nowhere to read about it.",
+        availability: "available",
+        order: 99,
+      },
+    };
+    expect(bad.catalog?.setupGuideHref).toBeUndefined();
+  });
+
+  /**
    * …and a `coming-soon` cloud card is deliberately exempt: it has no connect
    * flow, so there is no moment of use to link from, and requiring a href
    * would mean pointing at a guide nobody has written. Both shipped cloud
@@ -395,13 +551,19 @@ describe("the setup guide travels with the card", () => {
     //   • a `coming-soon` cloud card need not.
     // Mutation: drop `setupGuideHref` from any of the three → tsc red AND red
     // here.
+    //
+    // WARP-2707 widened the predicate from `!== "cloud"` to the shared
+    // {@link GUIDE_REQUIRED_TRACKS} set. The old form skipped the two `rest`
+    // cards without saying so, and a skipped card is not a passing card: the
+    // loop kept reporting green while covering neither of the vendors that had
+    // just been added to the contract it checks.
     for (const card of CONNECTORS) {
       const d = descriptorForCatalogId(card.id);
-      if (d?.track !== "cloud") continue;
+      if (!d || !GUIDE_REQUIRED_TRACKS.has(d.track)) continue;
       if (card.availability === "available") {
         expect(
           d.catalog?.setupGuideHref,
-          `${card.id} is an available cloud card with no setup guide`,
+          `${card.id} is an available ${d.track} card with no setup guide`,
         ).toBeTruthy();
       }
     }
@@ -530,12 +692,20 @@ describe("the setup guide travels with the card", () => {
     };
     expect(offered.catalog?.setupGuideHref).toBe("/help/integrations/fixture-offered");
 
-    // And the property over the SHIPPED catalog — every cloud card that is
-    // offered carries a guide. Vacuous today (both cloud cards are
-    // coming-soon) and load-bearing the moment WARP-2466 lands.
+    // And the property over the SHIPPED catalog — every card on a
+    // guide-requiring track that is offered carries a guide. No longer vacuous:
+    // WARP-2466 landed the first `available` cloud cards, and WARP-2707 added
+    // two `rest` ones.
+    //
+    // The predicate here was `descriptor?.track !== "cloud"` and it SKIPPED
+    // those two rest cards in silence — the assertion below never ran for
+    // Square or Cal.com, so the guide contract had quietly stopped covering the
+    // newest vendors while this test still passed. A skipped card is not a
+    // passing card. It now reads the same {@link GUIDE_REQUIRED_TRACKS} set as
+    // the loop in the sibling block, so the two cannot drift apart again.
     for (const card of CONNECTORS) {
       const descriptor = descriptorForCatalogId(card.id);
-      if (descriptor?.track !== "cloud") continue;
+      if (!descriptor || !GUIDE_REQUIRED_TRACKS.has(descriptor.track)) continue;
       if (card.availability !== "available") continue;
       expect(card.setupGuideHref, `${card.id} is offered with no setup guide`).toBeTruthy();
     }

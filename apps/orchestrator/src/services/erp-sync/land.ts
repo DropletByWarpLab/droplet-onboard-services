@@ -70,6 +70,12 @@ export type LandingDb = Pick<
   | "crmPipeline"
   | "crmPipelineStage"
   | "erpDocument"
+  // WARP-2750 — the timeline. Its absence was not a missing feature but a
+  // STRUCTURAL one: without this key the landing path could not write a
+  // `CrmActivity` even if it wanted to, so every synced deal had an empty
+  // timeline forever and `listDeals({ idleDays })` reported the whole
+  // connector book as untouched no matter how active it was upstream.
+  | "crmActivity"
 >;
 
 export interface LandingConnection {
@@ -106,7 +112,28 @@ export const LANDED_ENTITIES = ["company", "contact", "deal"] as const;
  * meets rather than an absence they have to notice. PHI on this box is
  * read-through, per connector, behind the ERP gate.
  */
-export const NEVER_LANDED_ENTITIES = ["patient", "appointment", "account"] as const;
+export const NEVER_LANDED_ENTITIES = [
+  "patient",
+  "appointment",
+  "account",
+  // ── WARP-2832 ──
+  // Read-through, not landed, and each is a decision rather than an absence.
+  //
+  // `booking` — a schedule is the same class of fact as `appointment` above:
+  // it is read when someone asks and it goes stale the moment the vendor
+  // changes it. Landing it would put a second, always-slightly-wrong copy of
+  // the customer's calendar on the box.
+  //
+  // `employee` — HR records are the most sensitive non-clinical data a vendor
+  // holds. `CANONICAL_COLUMNS.employee` deliberately carries no compensation
+  // column, and landing what remains would still make the box a copy of the
+  // payroll directory. Read-through keeps the copy in the vendor's system.
+  //
+  // `task` — a work item's whole value is that it is current.
+  "booking",
+  "employee",
+  "task",
+] as const;
 
 export function landsInCrm(entity: string): boolean {
   return (LANDED_ENTITIES as readonly string[]).includes(entity);
@@ -517,6 +544,113 @@ async function syncedStage(
   }
 }
 
+/**
+ * WARP-2750 — what, if anything, this landing should write to the timeline.
+ *
+ * 🔴 RETURNING null WHEN NOTHING CHANGED IS THE LOAD-BEARING PART, and getting
+ * it wrong inverts the very bug this ticket exists to fix.
+ *
+ * `listDeals({ idleDays })` judges on two arms (crm.service.ts): a deal with NO
+ * timeline is idle by `createdAt`, and a deal WITH one is idle when `every`
+ * activity is older than the cutoff. A landing that wrote a row on every pass
+ * would keep the newest activity minutes old forever, the second arm would
+ * never be true again, and no connector deal would EVER be reported idle — the
+ * exact mirror of today's "everything is idle", and harder to notice because
+ * an empty chase list looks like good news.
+ *
+ * So a row is written only when the vendor's own values actually MOVED.
+ *
+ * Provenance is `EXTERNAL`, never the `LOCAL` default. `landed-purge.ts`
+ * decides whether a disconnected record may be deleted by asking whether any
+ * `origin: "LOCAL"` activity hangs off it — the test for "did a human write
+ * prose here". A machine-written row left at the default would answer yes, and
+ * every synced deal on every box would silently become archive-only. The
+ * `CrmActivity` schema comment already anticipates exactly this row.
+ *
+ * `externalId` stays NULL. The table carries a global `@@unique([externalSystem,
+ * externalId])`, and Postgres treats NULLs as distinct — so many landed rows
+ * from one vendor coexist, while any real vendor id we later learn still has a
+ * free slot. Inventing one now (the deal's id, say) would spend that slot on a
+ * value no vendor ever issued.
+ */
+function timelineEntryFor(
+  before: {
+    title: string;
+    stageId: string;
+    amountMinor: bigint | null;
+    currency: string | null;
+    closedAt: Date | null;
+  } | null,
+  after: {
+    title: string;
+    stageId: string;
+    amountMinor: bigint | null;
+    currency: string | null;
+    closedAt: Date | null;
+  },
+  connection: LandingConnection,
+  vendorStageWord: string,
+): {
+  kind: "CREATED" | "STAGE_CHANGE" | "SYNCED";
+  summary: string;
+  fromStageId?: string;
+  toStageId?: string;
+  origin: "EXTERNAL";
+  externalSystem: string;
+} | null {
+  const vendor = vendorLabel(connection.provider);
+  const provenance = { origin: "EXTERNAL" as const, externalSystem: connection.provider };
+
+  if (before === null) {
+    return { kind: "CREATED", summary: `Landed from ${vendor}`, ...provenance };
+  }
+
+  // 🔴 THE FIELD DIFF IS COMPUTED BEFORE THE STAGE BRANCH, NOT AFTER IT.
+  //
+  // Returning on the stage move first looked harmless because the two seemed
+  // like alternatives. They are not: one vendor push writes every column at
+  // once, so a deal that is advanced AND re-priced in the same sync moved two
+  // things and the timeline recorded one. The other change went into no row
+  // anywhere — a `LandOutcome` carries counts (`landed`, `skipped`), never
+  // which fields moved — so "why is this 9,999 now" had no answer on the box
+  // at all. That is this ticket's own failure mode, a record that does not
+  // admit what it leaves out, recurring inside the fix for it.
+  const changed: string[] = [];
+  if (before.title !== after.title) changed.push("name");
+  if (before.amountMinor !== after.amountMinor || before.currency !== after.currency) {
+    changed.push("amount");
+  }
+  if ((before.closedAt?.getTime() ?? null) !== (after.closedAt?.getTime() ?? null)) {
+    changed.push("close date");
+  }
+
+  if (before.stageId !== after.stageId) {
+    // ONE row, not a STAGE_CHANGE plus a SYNCED. Two rows would be written
+    // with the same defaulted `occurredAt`, leaving the order the timeline
+    // renders them in to a tie-break — and `activity-notify.service.ts`
+    // notifies on the STAGE_CHANGE arm, so the pair would also have to agree
+    // about which of them is the notifiable one. The move stays the headline
+    // (it is what carries `fromStageId`/`toStageId`), and everything else the
+    // same push changed is named in the same sentence.
+    //
+    // The VENDOR'S OWN WORD for the stage, not our stage row's name: the two
+    // agree today only because `syncedStage` seeds `name` from `externalKey`,
+    // and a rename on our side must not rewrite what the vendor said happened.
+    const moved = `${vendor} moved this to ${vendorStageWord}`;
+    return {
+      kind: "STAGE_CHANGE",
+      summary: changed.length === 0 ? moved : `${moved} and changed ${changed.join(", ")}`,
+      fromStageId: before.stageId,
+      toStageId: after.stageId,
+      ...provenance,
+    };
+  }
+
+  if (changed.length === 0) return null;
+
+  return { kind: "SYNCED", summary: `${vendor} changed ${changed.join(", ")}`, ...provenance };
+}
+
 async function landDeals(
   db: LandingDb,
   connection: LandingConnection,
@@ -570,13 +704,32 @@ async function landDeals(
       closedAt: kind === "OPEN" ? null : date(row, "closed_at"),
     };
 
+    // WARP-2750 — read BEFORE the write, for two reasons that both block the
+    // timeline. `updateMany` returns a count and nothing else, so on the update
+    // path there is no deal id — and `CrmActivity.dealId` is not optional in
+    // practice: `CrmActivity_subject_exactly_one` refuses any row that does not
+    // carry exactly one subject matching its `subjectType`. And a diff needs
+    // the prior values, which the write is about to destroy.
+    const before = await db.crmDeal.findFirst({
+      where: { connectionId: connection.id, externalId },
+      select: {
+        id: true,
+        title: true,
+        stageId: true,
+        amountMinor: true,
+        currency: true,
+        closedAt: true,
+      },
+    });
+
     const updated = await db.crmDeal.updateMany({
       where: { connectionId: connection.id, externalId },
       data: vendorOwned,
     });
+    let dealId = before?.id ?? null;
     if (updated.count === 0) {
       try {
-        await db.crmDeal.create({
+        const created = await db.crmDeal.create({
           data: {
             ...vendorOwned,
             origin: "EXTERNAL",
@@ -584,12 +737,33 @@ async function landDeals(
             externalSystem: connection.provider,
             externalId,
           },
+          select: { id: true },
         });
+        dealId = created.id;
       } catch (err) {
         if (!isUniqueViolation(err)) throw err;
         await db.crmDeal.updateMany({
           where: { connectionId: connection.id, externalId },
           data: vendorOwned,
+        });
+        // Lost the race: somebody else created it between our read and our
+        // create, so re-read for the id rather than leaving the timeline out.
+        const raced = await db.crmDeal.findFirst({
+          where: { connectionId: connection.id, externalId },
+          select: { id: true },
+        });
+        dealId = raced?.id ?? null;
+      }
+    }
+
+    if (dealId !== null) {
+      const entry = timelineEntryFor(before, vendorOwned, connection, externalKey);
+      // null means the vendor sent us the same deal again — see
+      // `timelineEntryFor`. Writing anyway is how "everything is idle" becomes
+      // "nothing is ever idle".
+      if (entry !== null) {
+        await db.crmActivity.create({
+          data: { subjectType: "DEAL", dealId, ...entry },
         });
       }
     }

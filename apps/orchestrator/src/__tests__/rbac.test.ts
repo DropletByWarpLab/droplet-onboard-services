@@ -188,6 +188,14 @@ const MATRIX: GuardedRoute[] = [
   // storage. Same posture as the rest of /api/admin/files.
   { method: "get", path: "/api/admin/files/usage", allowed: ["owner", "admin"] },
 
+  // ── admin console: the prompt + tool inspector ── (owner + admin) ──
+  //
+  // WARP-2823. Both read somebody ELSE's assembled prompt and tool reach, so
+  // the guard is the whole of their access control — there is no second check
+  // downstream and nothing about the target narrows what the CALLER may see.
+  { method: "get", path: "/api/admin/prompt-inspect/u1", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/admin/tool-inspect/u1", allowed: ["owner", "admin"] },
+
   // WARP-1258 (T6): departments/teams CRUD — same owner+admin posture as
   // people mutations. GET /api/departments is open (not in this matrix as it's
   // a read with no role restriction).

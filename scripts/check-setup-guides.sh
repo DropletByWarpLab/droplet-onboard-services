@@ -88,7 +88,13 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # The cloud/SaaS providers that must each have a customer setup guide.
 # Source of truth: ADR-042 §2. Space-separated (bash 3.2 — macOS ships
 # 3.2.57 and has no associative arrays; keep this script 3.2-compatible).
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive"
+# WARP-2707 — `square` and `calcom` are the ADR-046 declarative REST track's
+# first two vendors. They belong here for the same reason every id above
+# does: the customer mints the credential in a vendor console we do not
+# control, so an undocumented click-path is the connector being unusable.
+# The track they ride on changes nothing about that obligation — ADR-046 §5
+# is explicit that a profile ships only with its guide and its ADR-042 row.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.

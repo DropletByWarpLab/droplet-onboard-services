@@ -2133,6 +2133,13 @@ services:
       - ERP_DB_RW_USER=${ERP_DB_RW_USER:-droplet_rw}
       - ERP_ODBC_DRIVER=${ERP_ODBC_DRIVER:-SQL Anywhere 17}
       - ERP_DB_ENCRYPTION=${ERP_DB_ENCRYPTION:-NONE}
+      # WARP-2590: the service bearer. NOT declared here as a `${VAR}`
+      # substitution on purpose — `env_file: ../.env` above already delivers
+      # SERVICE_TOKEN_ERP_BRIDGE, and re-declaring it would resolve against
+      # docker/.env (a different, untracked file) and, because `environment:`
+      # outranks `env_file:`, SHADOW the real value with "". That is exactly
+      # how SERVICE_TOKEN_RAG_EVAL got blanked and 401'd 15 nightly runs.
+      # The bridge fails CLOSED without it (503 BRIDGE_NOT_PROVISIONED).
     healthcheck:
       # /health returns 200 with ok:false when the practice's DB is
       # unreachable — that is the honest answer, and it is deliberately NOT a
@@ -3003,8 +3010,15 @@ services:
   dmr-cuda:
     # The CUDA build. Same upstream version as `dmr`'s ROCm tag — keep the two
     # pinned in lockstep, they are one decision. Bare `v1.2.6` is the CPU-only
-    # build and is refused by assert_dmr_image_is_accelerated in gpu.sh; a
-    # hand-pinned bare tag in docker/.env is exactly how WARP-2543 happened.
+    # build, and a hand-pinned bare tag in docker/.env is exactly how WARP-2543
+    # happened. `configure_gpu_env` (scripts/lib/gpu.sh) REWRITES such a pin to
+    # the detected vendor's image — whether it is bare, or built for the wrong
+    # vendor after a card swap — rather than refusing it. Refusing was tried and
+    # reverted: `materialize_artifacts` exports the whole .env before
+    # `configure_single_box_env` runs, so the box's OWN stored value reaches the
+    # check, and a `return 1` there aborted setup.sh mid-run on precisely the box
+    # the guard existed to repair. Opt out with DMR_IMAGE_CPU_OPT_IN=1; an absent
+    # DMR_IMAGE is left absent, so this default stays the source of truth.
     image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}
     container_name: droplet-dmr
     profiles: ["dmr-cuda"]

@@ -133,9 +133,16 @@ describe("GET /api/money/documents", () => {
         // No DIRECTION narrowing — the open predicate is the only filter, and
         // its own `kind` clause is the money-kinds allow-list, not a direction.
         // WARP-2739: a quote is not money owed and never reaches this surface.
+        //
+        // Written out in full rather than with `objectContaining`, deliberately:
+        // an exact `where` is what makes an accidental extra narrowing visible
+        // here. WARP-2737's `NOT` is listed for that reason and not because the
+        // shape was relaxed to accommodate it — a filed LOCAL draft nobody has
+        // sent is not money owed, on this route as on the summary.
         where: {
           kind: { in: ["INVOICE", "CREDIT_NOTE", "RECEIPT", "BILL"] },
           OR: [{ balance: null }, { balance: { not: 0 } }],
+          NOT: { origin: "LOCAL", status: "DRAFT" },
         },
       }),
     );

@@ -46,11 +46,16 @@ import { createLogger } from "../lib/logger.js";
 const logger = createLogger("tool-budget");
 
 /**
- * `buildMemoryFactsBlock`'s MEMORY_FACTS_CHAR_BUDGET (routes/llm.ts). The
- * const is route-local and unexported, so it is mirrored here to keep the
- * fixed-block sum complete. A change to the route budget must update this in
- * lockstep — `base-prompt-budget.test.ts` pins the total, so a drift shows up
- * as a red canary rather than as a quietly wrong ceiling.
+ * `buildMemoryFactsBlock`'s memory-block budget, and the ONE definition of it.
+ *
+ * It lives here rather than beside the block it bounds because the fixed-block
+ * sum below is composed here, and a budget that is not in the sum is a ceiling
+ * that is quietly wrong. `system-prompt.service.ts` imports it.
+ *
+ * 🔴 WARP-2823 corrected this comment. It used to say the const was
+ * "route-local and unexported, so it is mirrored here" — true until
+ * `buildMemoryFactsBlock` moved out of `routes/llm.ts`, and a lie afterwards.
+ * There is no mirror now; there is one export and one importer.
  */
 export const MEMORY_FACTS_CHAR_BUDGET = 2000;
 
@@ -137,9 +142,24 @@ export function toAdvertisedSpec(tool: {
  *
  * Note what this ceiling does NOT reserve: conversation history and tool
  * RESULTS. A turn is allowed to spend its whole non-fixed budget on tool
- * schemas here; the runtime `degradeToFit` gate is what protects history. The
- * split is deliberate — this module's job is to make an impossible
- * advertisement loud, not to second-guess the runtime estimator.
+ * schemas here. The split is deliberate — this module's job is to make an
+ * impossible advertisement loud, not to second-guess the runtime estimator.
+ *
+ * ⚠ This paragraph used to end "the runtime `degradeToFit` gate is what
+ * protects history". IT DOES NOT, and a reader sizing a change against that
+ * sentence would be reasoning from a gate that isn't there. `degradeToFit`
+ * drops three optional SYSTEM BLOCKS — business, then persona, then brain —
+ * and then sets `historyTrimNeeded`, whose own doc says the caller "must fall
+ * through to the existing history/attachment trimming (which this pure
+ * function does not own)". There is no such trimming anywhere, and no caller
+ * reads the flag: `routes/llm.ts` consumes `degraded.{persona,business,brain}
+ * Block` and discards the rest of the result.
+ *
+ * So on a turn that still overflows after all three drops, nothing protects
+ * history. The request goes to the model as-is and returns
+ * `finish_reason=length` with zero output tokens — surfacing as the WARP-854
+ * empty completion, i.e. a failed turn with a retry chip and no stated cause.
+ * Tracked on WARP-2849.
  */
 export function toolAdvertisementCeilingTokens(opts?: {
   contextWindow?: number;

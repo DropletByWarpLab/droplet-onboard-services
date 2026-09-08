@@ -124,6 +124,16 @@ const inputSchema = {
       maximum: 3650,
       description: "Deals only: untouched this long — finds who needs chasing.",
     },
+    department: {
+      // 🔴 A PLAIN STRING, and it must stay one. The ai-gateway's DMR
+      // sanitizer strips `pattern`/`format`/`min*`/`max*` but copies `enum`
+      // through untouched to llama.cpp's GBNF compiler, so a department enum
+      // would be a per-box grammar built from live rows — the shape WARP-1839
+      // took the box down with. The name is resolved server-side instead.
+      type: "string",
+      description:
+        'Projects and work items: the department that owns it, by name — or "none" for unassigned.',
+    },
     limit: { type: "number", minimum: 1, maximum: 50 },
   },
   required: ["entity"],
@@ -137,6 +147,7 @@ interface Args {
   status?: string;
   parent_id?: string;
   idle_days?: number;
+  department?: string;
   limit?: number;
 }
 
@@ -201,6 +212,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const id = a.id?.trim() ? encodeURIComponent(a.id.trim()) : null;
   const parent = a.parent_id?.trim() ? encodeURIComponent(a.parent_id.trim()) : null;
   const q = a.query?.trim();
+  // Sent verbatim, resolved by the orchestrator. It is a NAME here — the
+  // assistant cannot look one up, because `GET /api/departments` scopes its
+  // listing to the caller's own memberships and the service principal holds
+  // none, so it receives an empty list however the request is shaped.
+  const department = a.department?.trim() ? a.department.trim() : null;
 
   try {
     switch (entity) {
@@ -426,10 +442,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         }
         // No workspace argument on purpose: `/api/pm/projects` takes an
         // OPTIONAL workspace, which is what let `pm_list_workspaces` go.
+        const projectParams = new URLSearchParams({ per_page: String(limit) });
+        if (department) projectParams.set("department", department);
         const data = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
           ctx,
           "get",
-          `/api/pm/projects?per_page=${limit}`,
+          `/api/pm/projects?${projectParams.toString()}`,
         );
         const all = (data.projects ?? []).map(toPlaneProject);
         // The route has no `q`; filtering here keeps ONE search vocabulary
@@ -457,6 +475,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         if (parent) {
           const params = new URLSearchParams();
           if (q) params.set("q", q);
+          if (department) params.set("department", department);
           params.set("per_page", String(limit));
           const data = await callOrch<{ work_items?: Parameters<typeof toGraphWorkItem>[0][] }>(
             ctx,
@@ -472,6 +491,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           };
         }
         const params = new URLSearchParams({ q: q ?? "" });
+        // The department alone is a complete query here: "what is Front Desk
+        // working on?" carries no search term, and the route's empty-`q`
+        // short-circuit was relaxed for exactly this call.
+        if (department) params.set("department", department);
         params.set("per_page", String(limit));
         const data = await callOrch<{ work_items?: Parameters<typeof toGraphWorkItem>[0][] }>(
           ctx,
@@ -558,13 +581,43 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
 
       case "pipeline": {
+        type Board = { id: string; name: string; isDefault: boolean };
         const data = await callOrch<{
           pipelineId: string;
           stages?: Parameters<typeof toStageRollup>[0][];
+          covered?: Board[];
+          omitted?: Board[];
         }>(ctx, "get", `/api/crm/summary${id ? `?pipeline=${id}` : ""}`);
+        const omitted = data.omitted ?? [];
         return {
           ok: true,
-          data: { entity, stages: (data.stages ?? []).map(toStageRollup) },
+          data: {
+            entity,
+            // WARP-2750 — the id was declared here and then dropped on the
+            // floor, so an answer never said which board it described.
+            pipeline_id: data.pipelineId,
+            stages: (data.stages ?? []).map(toStageRollup),
+            ...(omitted.length > 0
+              ? {
+                  // 🔴 THE SILENCE WAS THE BUG. Every connector pipeline is
+                  // created `isDefault: false`, and a no-id summary resolves
+                  // only the default board — so a business whose deals live in
+                  // HubSpot was handed an empty local funnel with nothing
+                  // saying another board existed. The model can already ask
+                  // for one by id; it could not find out there was one.
+                  covers_only: data.pipelineId,
+                  other_pipelines: omitted.map((b) => ({ id: b.id, name: b.name })),
+                  // The count and the VERB both agree with `omitted.length`.
+                  // Pluralising only the noun produced "1 other exist and are
+                  // NOT included" — ungrammatical in the commonest shape there
+                  // is, a local board plus one connector's, in the one
+                  // sentence whose entire job is to be relayed to the owner.
+                  note: `this roll-up covers one pipeline; ${omitted.length} ${
+                    omitted.length === 1 ? "other exists and is" : "others exist and are"
+                  } NOT included — ask again with that pipeline's id`,
+                }
+              : {}),
+          },
         };
       }
     }

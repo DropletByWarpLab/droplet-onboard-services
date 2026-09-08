@@ -1102,6 +1102,109 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 11,
     },
   },
+  // ── WARP-2707 / ADR-046 — the declarative REST track ──────────────────────
+  //
+  // `track: "rest"` carries no connector of its own. Its behaviour is a
+  // `RestVendorProfile` in `services/erp-connector/src/rest/vendors/`, and
+  // `connectorFactoryFor` resolves it through `restProfileFor(provider)` before
+  // the static factory map — the same shape `vendorFromExportProvider` has had
+  // since WARP-1964. Adding the NEXT such vendor is a descriptor here, a profile
+  // there, an egress entry and a setup guide. No new machinery.
+  {
+    id: "square",
+    displayName: "Square",
+    category: "Payments",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "Square access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo reason. The `EAAA` prefix and ~64-char
+        // length are repeated widely but appear on NO Square documentation
+        // page — the only corroboration is a community forum thread and an
+        // OAuth sample. A regex anchored on an undocumented shape is a false
+        // rejection that blocks a paying seller for zero security gain.
+        help:
+          "In Square: developer.squareup.com → your application → Credentials → " +
+          "Production → Access token. Use the PRODUCTION token, not the sandbox one.",
+      },
+    ],
+    // ONE FIXED HOST — no region code, no seller subdomain, no self-hosted
+    // option. So this is a plain registered destination and the connector's
+    // origin is a whole-string literal the egress scanner reads directly.
+    egressHosts: ["connect.squareup.com"],
+    // 🔴 THREE of the eight datasets Square could serve. The other five are
+    // omitted for reasons written out in `rest/vendors/square.ts` — a POST
+    // search body, a required location fan-out, cross-endpoint joins, an
+    // absent watermark, and one vocabulary decision that is Romain's. Listed
+    // there rather than silently missing here.
+    datasets: ["charge", "refund", "payout"],
+    // NO `rateLimit`. Square publishes no ceiling AND no rate-limit response
+    // headers; its documented behaviour is to answer `RATE_LIMITED` when it
+    // decides to. A number here would be a guess wearing a policy's clothes —
+    // the same reasoning that leaves Dentrix Ascend without one.
+    catalog: {
+      id: "square",
+      name: "Square",
+      category: "Payments",
+      description:
+        "Payments, refunds and payouts — read from Square, so the money side of the business is on the box.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/square",
+      order: 12,
+    },
+  },
+  // WARP-2828 — the second REST profile, and the first SCHEDULING vendor.
+  {
+    id: "calcom",
+    displayName: "Cal.com",
+    category: "Scheduling",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "apiKey",
+        label: "Cal.com API key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // 🔴 NO `pattern`, and here the reason is stronger than usual. A hosted
+        // LIVE key is `cal_live_…` but a hosted TEST key is `cal_…` with no
+        // second segment, so `^cal_(live|test)_` REJECTS valid keys. And on a
+        // self-hosted install the prefix is not a vendor constant at all — it
+        // is the operator-set `API_KEY_PREFIX` env var (default `cal_`), so it
+        // can be anything. Pinned absent by `calcom-profile.test.ts`.
+        help:
+          "In Cal.com: your name (top right) → My Settings → Developer → API keys → + Add. " +
+          "Any plan works, including the free one.",
+      },
+    ],
+    egressHosts: ["api.cal.com"],
+    // WARP-2832 — moved from `appointment` to `booking`. `appointment` is the
+    // WARP-1964 DENTAL shape (`patient_id`, `operatory_id`), which Cal.com had
+    // no honest source for and shipped `undefined`; worse, it is in neither
+    // `CLOUD_DATASET_READS` nor `ERP_SYNC_ENTITIES`, so a connected Cal.com
+    // was unreadable from every surface on the box. `booking` is a scheduling
+    // dataset that is wired to both, and Cal.com fills nine of its eleven
+    // columns rather than four of six.
+    datasets: ["booking"],
+    // 120 requests per minute for API-key auth, documented. Expressed as the
+    // hourly figure the `ProviderRateLimit` shape holds.
+    rateLimit: { callCeiling: 7_200, periodMs: 3_600_000 },
+    catalog: {
+      id: "calcom",
+      name: "Cal.com",
+      category: "Scheduling",
+      description: "Bookings and their times, hosts and status — read from Cal.com.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/calcom",
+      order: 13,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**
@@ -1161,8 +1264,13 @@ export function providerDescriptor(id: string): ProviderDescriptor | undefined {
  * track's author classify it rather than inherit an answer.
  */
 export function buildableProviderIds(): readonly string[] {
+  // `rest` (WARP-2707) is buildable: `connectorFactoryFor` resolves it through
+  // `restProfileFor(provider)` before the static factory map, exactly as it
+  // resolves the export-drop family. Classified deliberately, per the rule
+  // above — omitting it would make `resolveProvider` reject every REST connect
+  // while the build stayed green.
   return providerDescriptors()
-    .filter((d) => d.track === "lan" || d.track === "cloud")
+    .filter((d) => d.track === "lan" || d.track === "cloud" || d.track === "rest")
     .map((d) => d.id);
 }
 
@@ -1204,10 +1312,19 @@ export function providersWithSetupGuide(): readonly string[] {
  * Kept as a distinction rather than collapsed away: cloud rows take their
  * account identity from `providerConfig` and their credentials from
  * `providerTokensEnc`, so a caller genuinely needs to know which kind a row is.
+ *
+ * 🔴 `rest` (WARP-2707) IS one of these, and the classification is the whole
+ * reason this function is not `track === "cloud"` any more. A REST row stores
+ * its account identity in `providerConfig` and its customer-minted credential
+ * in `providerTokensEnc` — byte for byte the cloud shape. Leaving it out is the
+ * silent failure the seam review called the worst of the set: `cloudMaterialFromRow`
+ * would never wire `resolveSaasSecret`, every REST connector would keep its
+ * blocked credential resolver, and every REST connection would report
+ * ERP_NOT_CONNECTED with a green build and green tests.
  */
 export function cloudProviderIds(): readonly string[] {
   return providerDescriptors()
-    .filter((d) => d.track === "cloud")
+    .filter((d) => d.track === "cloud" || d.track === "rest")
     .map((d) => d.id);
 }
 

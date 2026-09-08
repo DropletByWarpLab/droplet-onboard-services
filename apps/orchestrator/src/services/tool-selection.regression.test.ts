@@ -204,6 +204,24 @@ const TURNS: Turn[] = [
     message: "what's still open on the kitchen remodel project?",
     requires: "business_find",
   },
+  // ── WARP-2719 — the department question, in the words the ticket used ──
+  //
+  // The sentence the department filter was built to answer, kept as a
+  // regression case because it is ALSO the sentence the vocabulary above does
+  // not match: no project, no ticket, no work item, and a proper noun no rule
+  // can enumerate. Shipping the filter without a rule for it would have made a
+  // tool that is registered, budgeted, advertised on zero relevant turns —
+  // WARP-2058 / WARP-2454 / WARP-2546, a fourth time.
+  {
+    label: "business graph / who is doing what, by department",
+    message: "what is Front Desk working on?",
+    requires: "business_find",
+  },
+  {
+    label: "business graph / the same question asked backwards",
+    message: "what is assigned to the Clinical team right now?",
+    requires: "business_find",
+  },
   {
     label: "business graph / history, in the words a person uses",
     message: "what's been happening with that roofing customer lately?",
@@ -427,6 +445,11 @@ describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () =>
     ["find me a good plumber", "search_files", "files/subject"],
     ["what channel is the game on tonight?", "slack_send_message", "team_chat"],
     ["I need a thread that matches the blue cushion", "slack_send_message", "team_chat"],
+    // WARP-2719 — the department vocabulary, sat just outside it. `team` in
+    // its household sense must not buy the business graph.
+    ["the team is coming over for dinner", "business_find", "pm/department"],
+    ["my football team lost again", "business_find", "pm/department"],
+    ["I need to go to the department store", "business_find", "pm/department"],
   ])("%s does not drag in %s (%s)", (message, tool) => {
     expect(
       advertisedFor(message as string),
@@ -474,5 +497,30 @@ describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () =>
         "slack_send_message",
       ]),
     ).toContain("slack_send_message");
+  });
+
+  it("the continuity fixture's own wording matches NO domain rule (WARP-2719)", () => {
+    // WARP-2719 review — the assertion above says the fixture reaches no
+    // team_chat RULE, and that is all it ever said. It cannot see a rule from
+    // some OTHER domain claiming the same sentence, because an over-matching
+    // rule only ever ADDS tools and every assertion here is a `toContain`.
+    //
+    // That is not hypothetical: WARP-2719's first cut put a bare `teams?`
+    // into the pm/business noun rule, this sentence has the word `team` in
+    // it, and the whole file stayed green while a Slack-only follow-up
+    // quietly advertised the project tracker and the business graph.
+    //
+    // So the invariant is stated on `matchedDomains` instead of on the tool
+    // list: this turn is carried by CONTINUITY ALONE, which means its words
+    // must reach nothing at all. Any future widening that touches it — in any
+    // domain — goes red here.
+    const fresh = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and post that where the team will see it",
+      pool: POOL_WITH_REMOTE,
+      conversationToolNames: [],
+      runtimeTools: REMOTE_TOOLS,
+    });
+    expect(fresh.matchedDomains).toEqual([]);
   });
 });

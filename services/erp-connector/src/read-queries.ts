@@ -713,6 +713,90 @@ const getEcommerceOrders: ReadQuery = {
   },
 };
 
+// ── WARP-2832 — the three datasets ADR-046's follow-up gated on ────────────
+
+const getBookings: ReadQuery = {
+  name: "get_bookings",
+  description: "Bookings starting in a window, earliest first.",
+  dependsOnTables: ["booking"],
+  exampleParams: { from: "2026-09-07T00:00:00Z", to: "2026-09-08T00:00:00Z" },
+  build(map, params) {
+    const booking = resolveTable(map, "booking");
+    const bookingId = resolveColumn(map, "booking", "booking_id");
+    const startsAt = resolveColumn(map, "booking", "starts_at");
+    const endsAt = resolveColumn(map, "booking", "ends_at");
+    const status = resolveColumn(map, "booking", "status");
+    const staffId = resolveColumn(map, "booking", "staff_id");
+    const customerId = resolveColumn(map, "booking", "customer_id");
+    const customerName = resolveColumn(map, "booking", "customer_name");
+    const serviceName = resolveColumn(map, "booking", "service_name");
+    // HALF-OPEN `[from, to)`, like every other window in this file: a booking
+    // at exactly midnight must belong to one day, not to both. Deliberately
+    // NOT the shape of `get_schedule_today` — that query is the dental one and
+    // this dataset is not its dataset.
+    const sql =
+      `SELECT ${bookingId}, ${startsAt}, ${endsAt}, ${status}, ${staffId}, ` +
+      `${customerId}, ${customerName}, ${serviceName} ` +
+      `FROM ${booking} ` +
+      `WHERE ${startsAt} >= ? AND ${startsAt} < ? ` +
+      `ORDER BY ${startsAt}, ${bookingId}`;
+    return { sql, params: [params.from, params.to] };
+  },
+};
+
+const findEmployee: ReadQuery = {
+  name: "find_employee",
+  description: "Search staff by last-name prefix; with no term, the directory.",
+  dependsOnTables: ["employee"],
+  exampleParams: { query: "smith" },
+  build(map, params) {
+    const employee = resolveTable(map, "employee");
+    const employeeId = resolveColumn(map, "employee", "employee_id");
+    const firstName = resolveColumn(map, "employee", "first_name");
+    const lastName = resolveColumn(map, "employee", "last_name");
+    const email = resolveColumn(map, "employee", "email");
+    const jobTitle = resolveColumn(map, "employee", "job_title");
+    const department = resolveColumn(map, "employee", "department");
+    const status = resolveColumn(map, "employee", "status");
+    const sql =
+      `SELECT ${employeeId}, ${firstName}, ${lastName}, ${email}, ${jobTitle}, ` +
+      `${department}, ${status} ` +
+      `FROM ${employee} ` +
+      `WHERE ${lastName} LIKE ? ESCAPE '\' ` +
+      `ORDER BY ${lastName}, ${firstName}`;
+    // Same escaping as `find_patient` and `find_contact`: a bare "%" would
+    // turn a name search into a full-table scan of everyone on the payroll.
+    return { sql, params: [`${escapeLike(String(params.query))}%`] };
+  },
+};
+
+const getTasksByStatus: ReadQuery = {
+  name: "get_tasks_by_status",
+  description: "Work items in one vendor-supplied status, oldest first.",
+  dependsOnTables: ["task"],
+  exampleParams: { status: "open" },
+  build(map, params) {
+    const task = resolveTable(map, "task");
+    const taskId = resolveColumn(map, "task", "task_id");
+    const projectId = resolveColumn(map, "task", "project_id");
+    const createdAt = resolveColumn(map, "task", "created_at");
+    const closedAt = resolveColumn(map, "task", "closed_at");
+    const title = resolveColumn(map, "task", "title");
+    const status = resolveColumn(map, "task", "status");
+    const priority = resolveColumn(map, "task", "priority");
+    const assigneeId = resolveColumn(map, "task", "assignee_id");
+    // Oldest first, for `get_tickets_by_status`'s reason: the item that has
+    // been waiting longest is the one worth surfacing.
+    const sql =
+      `SELECT ${taskId}, ${projectId}, ${createdAt}, ${closedAt}, ${title}, ` +
+      `${status}, ${priority}, ${assigneeId} ` +
+      `FROM ${task} ` +
+      `WHERE ${status} = ? ` +
+      `ORDER BY ${createdAt}, ${taskId}`;
+    return { sql, params: [params.status] };
+  },
+};
+
 export const READ_QUERIES: readonly ReadQuery[] = [
   getScheduleToday,
   findPatient,
@@ -741,6 +825,10 @@ export const READ_QUERIES: readonly ReadQuery[] = [
   getEngagements,
   getAudienceMembers,
   getEcommerceOrders,
+  // WARP-2832 — scheduling, people and projects.
+  getBookings,
+  findEmployee,
+  getTasksByStatus,
 ];
 
 const BY_NAME: ReadonlyMap<string, ReadQuery> = new Map(READ_QUERIES.map((q) => [q.name, q]));
