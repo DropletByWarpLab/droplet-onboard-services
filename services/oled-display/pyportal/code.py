@@ -288,19 +288,45 @@ def _rounded_rect(g, x, y, w, h, r, color):
 # bitmap path (_make_mark_bmp / the _MARK_SMALL/_MARK_MED/_MARK_LARGE caches /
 # _mark_tg) was removed in WARP-638: the 160px _MARK_LARGE alone pinned several
 # KB of bitmap for the whole process lifetime, and every mark on every screen
-# now goes through this vector path (52x60 source coordinate space).
+# now goes through this vector path (512x512 source coordinate space).
+#
+# The mapping used to be written out three times, each with its own 52/60 and
+# 48/60 literals, and each placed the mark slightly LEFT of the box it was
+# centred in. It lives in _mark_pts now. Drawn height stays _MARK_H_RATIO of
+# `size` — the ratio the old geometry happened to have — so the hand-tuned
+# `my` and `mb` values on the screens below still land where they did.
+_MARK_OUTER = ((256, 72), (420, 308), (352, 440), (160, 440), (92, 308))
+_MARK_INNER = ((256, 72), (420, 308), (256, 368))
+_MARK_BX, _MARK_BY, _MARK_BW, _MARK_BH = 92, 72, 328, 368
+_MARK_H_RATIO = 48 / 60
+
+
+def _mark_h(size):
+    """Drawn height of the mark inside a `size`-tall box."""
+    return int(size * _MARK_H_RATIO)
+
+
+def _mark_w(size):
+    """Drawn width of the mark inside a `size`-tall box."""
+    return int(_mark_h(size) * _MARK_BW / _MARK_BH)
+
+
+def _mark_pts(pts, size, x, y):
+    """Project canonical mark points into a `size`-box at (x, y), centred."""
+    h = _mark_h(size)
+    w = _mark_w(size)
+    ox = x + (size - w) // 2
+    return [(int(ox + (px - _MARK_BX) * w / _MARK_BW),
+             int(y + (py - _MARK_BY) * h / _MARK_BH)) for px, py in pts]
+
+
 def _mark_poly(g, size, x, y):
-    w = int(size * 52 / 60)
-    h = size
-    sx = lambda px: x + int(px / 52 * w)  # noqa: E731
-    sy = lambda py: y + int(py / 60 * h)  # noqa: E731
-    outer = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(36), sy(48)),
-             (sx(16), sy(48)), (sx(8), sy(28))]
-    inner = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(26), sy(36))]
     g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT_PRI),
-                              points=outer, x=0, y=0))
+                              points=_mark_pts(_MARK_OUTER, size, x, y),
+                              x=0, y=0))
     g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT_LIGHT),
-                              points=inner, x=0, y=0))
+                              points=_mark_pts(_MARK_INNER, size, x, y),
+                              x=0, y=0))
 
 
 # ---------------------------------------------------------------------------
@@ -1186,31 +1212,21 @@ def _mark_vessel(g, x, y, size, frac):
     clamped to at/below the liquid level (so only the filled portion shows in
     accent). Cheap: 2 polygons. Mirrors preview.html drawMarkLiquid intent.
     """
-    mw = int(size * 52 / 60)
-    xo = x + (size - mw) // 2
-
-    def sx(px):
-        return xo + int(px / 52 * mw)
-
-    def sy(py):
-        return y + int(py / 60 * size)
-
-    body = [(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)]
     # Empty shell (dim).
     g.append(vectorio.Polygon(pixel_shader=_palette(0x181828),
-                              points=[(sx(px), sy(py)) for px, py in body],
+                              points=_mark_pts(_MARK_OUTER, size, x, y),
                               x=0, y=0))
     frac = max(0.0, min(1.0, frac))
     if frac <= 0.01:
         return
-    bottom_v = 48
-    top_v = 0
+    top_v = _MARK_BY
+    bottom_v = _MARK_BY + _MARK_BH
     level_v = bottom_v - (bottom_v - top_v) * frac
     # Clamp each body vertex's y up to the liquid level (in viewbox space) so
     # the overlay only covers the filled lower portion.
-    filled = [(px, py if py >= level_v else level_v) for px, py in body]
+    filled = [(px, py if py >= level_v else level_v) for px, py in _MARK_OUTER]
     g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT),
-                              points=[(sx(px), sy(py)) for px, py in filled],
+                              points=_mark_pts(filled, size, x, y),
                               x=0, y=0))
 
 
@@ -1240,7 +1256,7 @@ def render_boot():
     size = 116
     mx = (DISPLAY_W - size) // 2
     my = 44
-    mb = my + int(size * 48 / 60)
+    mb = my + _mark_h(size)
     if frac >= 0.999:
         _mark_poly(g, size, mx, my)   # full accent mark
     else:
@@ -1296,7 +1312,7 @@ def render_shutdown():
     size = 116
     mx = (DISPLAY_W - size) // 2
     my = 44
-    mb = my + int(size * 48 / 60)
+    mb = my + _mark_h(size)
     collapse_start = 0.80
     if frac < collapse_start:
         drain = 1.0 - (frac / collapse_start)
@@ -1333,24 +1349,15 @@ def render_standby():
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
     size = 78
-    mw = int(size * 52 / 60)
-    mx = (DISPLAY_W - mw) // 2
+    mx = (DISPLAY_W - size) // 2
     my = DISPLAY_H // 2 - int(size * 0.55)
-    mb = my + int(size * 48 / 60)
-
-    def sx(px):
-        return mx + int(px / 52 * mw)
-
-    def sy(py):
-        return my + int(py / 60 * size)
-
-    outer = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(36), sy(48)),
-             (sx(16), sy(48)), (sx(8), sy(28))]
-    inner = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(26), sy(36))]
+    mb = my + _mark_h(size)
     g.append(vectorio.Polygon(pixel_shader=_palette(0x141422),
-                              points=outer, x=0, y=0))
+                              points=_mark_pts(_MARK_OUTER, size, mx, my),
+                              x=0, y=0))
     g.append(vectorio.Polygon(pixel_shader=_palette(0x1A1A30),
-                              points=inner, x=0, y=0))
+                              points=_mark_pts(_MARK_INNER, size, mx, my),
+                              x=0, y=0))
     _tracked(g, "STANDBY", x=DISPLAY_W // 2, y=mb + 20, scale=1, color=LABEL_4,
              anchor_y=0.5, tracking=3, align="center")
     g.append(_text("tap to power on", x=DISPLAY_W // 2, y=mb + 38, scale=1,

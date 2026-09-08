@@ -545,11 +545,18 @@ def _get_font(size: int, bold: bool = False,
 # Canonical Droplet brand mark
 # ---------------------------------------------------------------------------
 # Geometry copied verbatim from apps/web-dashboard/src/components/DropletMark.tsx
-# (52x60 viewBox). Rendering it here rather than bundling a PNG keeps the
+# (512x512 viewBox). Rendering it here rather than bundling a PNG keeps the
 # device logo pixel-perfect across panel sizes and rotations.
-_MARK_VIEWBOX = (52, 60)
-_MARK_LEFT = [(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)]
-_MARK_RIGHT = [(26, 0), (44, 28), (26, 36)]
+_MARK_VIEWBOX = (512, 512)
+_MARK_LEFT = [(256, 72), (420, 308), (352, 440), (160, 440), (92, 308)]
+_MARK_RIGHT = [(256, 72), (420, 308), (256, 368)]
+# The mark's bounding box inside that viewBox — it is centred in the box, so
+# projecting against the BOX would hand callers 28% padding they did not ask
+# for. Project against the bbox and scale by the ratio the old 52x60 geometry
+# happened to have (48 of 60), which keeps the drawn height identical and so
+# leaves every hand-tuned call-site coordinate below where it already was.
+_MARK_BBOX = (92, 72, 328, 368)  # x, y, w, h
+_MARK_HEIGHT_RATIO = 48 / 60
 
 
 def draw_droplet_mark(
@@ -561,16 +568,17 @@ def draw_droplet_mark(
     """Draw the Droplet brand mark at (x, y) sized to `size` pixels tall.
 
     (x, y) is the top-left of the bounding box; the mark is drawn
-    proportionally so the full 52x60 geometry fits inside `size x size`.
+    proportionally, `_MARK_HEIGHT_RATIO` of `size` tall and centred
+    horizontally inside `size x size`.
     """
-    vw, vh = _MARK_VIEWBOX
-    scale = size / vh  # scale by height so the mark looks like its web twin
+    bx, by, bw, bh = _MARK_BBOX
+    scale = size * _MARK_HEIGHT_RATIO / bh
     # Horizontal centering offset inside the size-box
-    x_off = x + (size - int(vw * scale)) // 2
+    x_off = x + (size - int(bw * scale)) // 2
     y_off = y
 
     def proj(pt):
-        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+        return (int(x_off + (pt[0] - bx) * scale), int(y_off + (pt[1] - by) * scale))
 
     draw.polygon([proj(p) for p in _MARK_LEFT], fill=primary)
     draw.polygon([proj(p) for p in _MARK_RIGHT], fill=highlight)
@@ -588,13 +596,13 @@ def draw_droplet_mark_liquid(
     markSilhouette. `img` is the frame `draw` is bound to (PIL gives no public
     way back from a Draw to its Image, so callers pass both).
     """
-    vw, vh = _MARK_VIEWBOX
-    scale = size / vh
-    x_off = x + (size - int(vw * scale)) // 2
+    bx, by, bw, bh = _MARK_BBOX
+    scale = size * _MARK_HEIGHT_RATIO / bh
+    x_off = x + (size - int(bw * scale)) // 2
     y_off = y
 
     def proj(pt):
-        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+        return (int(x_off + (pt[0] - bx) * scale), int(y_off + (pt[1] - by) * scale))
 
     body = [proj(p) for p in _MARK_LEFT]
     # Empty shell — dim flat fill so the vessel reads before it fills.
@@ -602,9 +610,9 @@ def draw_droplet_mark_liquid(
     frac = max(0.0, min(1.0, frac))
     if frac <= 0.002:
         return
-    # Liquid level rises from the bottom of the body (viewbox y=48) upward.
+    # Liquid level rises from the bottom of the body upward.
     top = y_off
-    bottom = y_off + int(48 * scale)
+    bottom = y_off + int(bh * scale)
     level = bottom - int((bottom - top) * frac)
     # Build a clip mask = body silhouette ∩ (everything at/below the level).
     from PIL import ImageChops
@@ -612,7 +620,7 @@ def draw_droplet_mark_liquid(
     ImageDraw.Draw(body_mask).polygon(body, fill=255)
     level_mask = Image.new("L", img.size, 0)
     ImageDraw.Draw(level_mask).rectangle(
-        [x_off - 4, level, x_off + int(vw * scale) + 4, bottom + 6], fill=255)
+        [x_off - 4, level, x_off + int(bw * scale) + 4, bottom + 6], fill=255)
     liquid = Image.new("RGB", img.size, V3_ACCENT)
     img.paste(liquid, (0, 0), ImageChops.multiply(body_mask, level_mask))
 
