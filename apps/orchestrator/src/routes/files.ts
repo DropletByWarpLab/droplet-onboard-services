@@ -89,12 +89,16 @@ import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 import { getEffectiveUsage } from "../services/effective-usage.service.js";
 // WARP-2821 — the ONE corpus-visibility rule, shared with the mcp-server.
+// Both halves come from here: who a caller can see (`visibleDepartmentsFor`)
+// and what that resolves to in the chunk table (`deptCorpusKeys`). Neither is
+// re-typed below; a copy of either is how the assistant and this page came to
+// disagree in the first place.
 import {
-  HOUSEHOLD_INDEX_USER as SHARED_HOUSEHOLD_INDEX_USER,
-  deptSentinel as sharedDeptSentinel,
   visibleDepartmentsFor,
+  deptCorpusKeys,
   maxAclVersion,
 } from "@droplet/tools-core";
+import type { VisibleDept } from "@droplet/tools-core";
 
 const logger = pino({ name: "files-route" });
 
@@ -611,25 +615,6 @@ function unionContentAndNameHits(
   return out.slice(0, limit);
 }
 
-/**
- * WARP-1140 — index owner of shared "Household" (groupfolder) chunks.
- *
- * The file-indexer physically watches `__groupfolders/{id}/…` (groupfolder
- * content never lives under any user's home dir) and writes those chunks
- * under this sentinel userId with a `/<SHARED_FOLDER_NAME>/…` display path —
- * the same path each member sees in their own WebDAV home. Must match the
- * file-indexer's `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
- */
-const HOUSEHOLD_INDEX_USER = SHARED_HOUSEHOLD_INDEX_USER;
-
-/**
- * WARP-1264 — department chunk-corpus sentinel. The file-indexer emits
- * chunks for a non-household groupfolder-backed department under this
- * sentinel userId (services/file-indexer/watcher.py
- * `_lookup_department_for_groupfolder`).
- */
-const deptSentinel = sharedDeptSentinel;
-
 /** Corpus resolution result: the FileContentChunk `userId` list this caller
  * may search, plus the max `aclVersion` across their visible departments
  * (folded into the search cache key so a rights/membership change can never
@@ -667,16 +652,14 @@ async function resolveSearchCaller(
   return { id, role };
 }
 
-/** One ACTIVE department the caller is visible into, with the `aclVersion`
- * that any cache key derived from it must carry. */
-interface VisibleDept {
-  id: string;
-  kind: string;
-  aclVersion: number;
-}
-
 /**
  * The caller's department visibility, as read from Prisma.
+ *
+ * `VisibleDept` — one ACTIVE department the caller is visible into, with the
+ * `aclVersion` any cache key derived from it must carry — is imported from
+ * `@droplet/tools-core` rather than restated here: it is the return shape of
+ * `visibleDepartmentsFor` and the argument shape of `deptCorpusKeys`, and a
+ * local structural copy would keep compiling against a stale shape.
  *
  * `resolved: false` is the FAIL-CLOSED sentinel (WARP-1556): the walk could
  * not be completed — no resolvable caller identity, or a DB hiccup — so
@@ -783,11 +766,17 @@ async function aclCacheTag(
  * per ACTIVE department the caller is visible into (see
  * `visibleDeptsForCaller` for the visibility rule).
  *
- * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
- * among the caller's visible departments, BOTH the legacy `__household__`
- * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
- * under either form (old watcher builds vs. WARP-1264 builds) stays
- * searchable without a reindex.
+ * Turning that department list into owner keys is `deptCorpusKeys`, in
+ * `@droplet/tools-core` — CALLED, not re-typed (WARP-2821). It is the same
+ * function the mcp-server's `resolveChunkOwnerIds` runs behind
+ * `search_content` and `read_document_text`, and it carries the HOUSEHOLD
+ * DUAL-SENTINEL: both the legacy `__household__` owner and its
+ * `__dept_<uuid>__` form, so content indexed by either watcher generation
+ * stays searchable without a reindex. A second copy of that rule here is how
+ * this page and the assistant answered the same question differently.
+ *
+ * The caller's own corpus stays FIRST and separate: it is the `$1` binding on
+ * the query side, and it is the one key that is never a sentinel.
  *
  * Best-effort by design: any failure (no session, DB hiccup) means
  * "personal only" — content search must never fail outright just because
@@ -801,14 +790,7 @@ async function deptSearchCorpora(
   user: string,
 ): Promise<DeptSearchCorpora> {
   const { depts, aclVersion } = await visibleDeptsForCaller(req, prisma);
-  const corpora = [user];
-  for (const dept of depts) {
-    if (dept.kind === "HOUSEHOLD") {
-      corpora.push(HOUSEHOLD_INDEX_USER);
-    }
-    corpora.push(deptSentinel(dept.id));
-  }
-  return { corpora, aclVersion };
+  return { corpora: [user, ...deptCorpusKeys(depts)], aclVersion };
 }
 
 /**

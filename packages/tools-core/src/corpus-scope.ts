@@ -30,16 +30,26 @@
 import type { PrismaClient } from "@prisma/client";
 
 /**
- * The legacy household sentinel. Must match the file-indexer's
- * `HOUSEHOLD_USER_ID` (`services/file-indexer/config.py`) — that side is
- * Python and cannot import this.
+ * The legacy household sentinel (WARP-1140). Groupfolder content never lives
+ * under any user's home directory, so the file-indexer watches
+ * `__groupfolders/{id}/…` and writes those chunks under this sentinel owner
+ * with a `/<SHARED_FOLDER_NAME>/…` display path — the same path each member
+ * sees in their own WebDAV home.
+ *
+ * Must match the file-indexer's `HOUSEHOLD_USER_ID`
+ * (`services/file-indexer/config.py`) — that side is Python and cannot import
+ * this.
  */
 export const HOUSEHOLD_INDEX_USER = "__household__";
 
 /**
- * One department's corpus sentinel. Must match `watcher.py`'s
- * `f"__dept_{dept['id']}__"` exactly: a mismatch is silent, and reads as "the
- * department has no documents" rather than as an error.
+ * One department's corpus sentinel (WARP-1264) — the owner the file-indexer
+ * emits chunks under for a non-household groupfolder-backed department
+ * (`services/file-indexer/watcher.py`, `_lookup_department_for_groupfolder`).
+ *
+ * Must match `watcher.py`'s `f"__dept_{dept['id']}__"` exactly: a mismatch is
+ * silent, and reads as "the department has no documents" rather than as an
+ * error.
  */
 export function deptSentinel(departmentId: string): string {
   return `__dept_${departmentId}__`;
