@@ -25,6 +25,14 @@ import { PrismaClient } from "@prisma/client";
 // WARP-992: canonical box name — never os.hostname(), which is the docker
 // container id inside the dev stack and leaks onto the dashboard identity chip.
 import { boxDisplayName } from "../src/lib/box-identity.js";
+// WARP-2844: the guards around minting an owner live in their own tested
+// module — this script's only job is to gather the inputs and obey.
+import { decideDevOwnerSeed } from "../src/services/dev-owner-seed.policy.js";
+import { hashPassword } from "../src/services/password.service.js";
+import { emailWriteData } from "../src/services/user-directory.service.js";
+import { setModuleEnabled, ModuleToggleError } from "../src/services/modules.service.js";
+import { MODULES } from "../src/modules/module-registry.js";
+import { config } from "../src/config.js";
 
 const prisma = new PrismaClient();
 
@@ -301,6 +309,206 @@ async function seedConversations() {
   console.log(`[seed] chat conversations upserted (${CONVERSATIONS.length})`);
 }
 
+// ─── dev owner account (WARP-2844) ───────────────────────────────
+//
+// Before this, a fresh dev stack had NO way in: nothing seeded a local `User`
+// row, and the dashboard authenticates against that row and nothing else
+// (ADR-013 — Nextcloud stopped authenticating anyone). The setup wizard was
+// the only door, and on this stack it could not be walked either, because
+// compose never passed DEVICE_SECRET_KEY and `emailWriteData` throws without
+// it. Both halves are fixed here and in docker-compose.dev.yml.
+//
+// Every guard around minting an owner lives in `dev-owner-seed.policy.ts`,
+// tested separately and mutation-verified. Read that file before changing
+// anything here — the refusals are the feature.
+
+const DEV_OWNER_EMAIL = process.env.DROPLET_DEV_OWNER_EMAIL?.trim() || "dev@warp-lab.ai";
+const DEV_OWNER_DISPLAY_NAME = "Droplet Dev";
+
+/**
+ * Nextcloud group name for the household space.
+ *
+ * Deliberately duplicated from `routes/auth-groups.ts:householdGroupName`
+ * rather than imported: that module reaches into the department provisioner,
+ * and a seed script that drags in the service graph fails for reasons that
+ * have nothing to do with seeding. Same rationale auth-groups.ts itself gives
+ * for inlining its role check instead of importing ADMIN_TIER_ROLES.
+ */
+function householdGroupSlug(sharedFolderName: string | undefined): string {
+  return (
+    String(sharedFolderName ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "household"
+  );
+}
+
+/**
+ * Give the seeded owner a Nextcloud account so the Files surface has an
+ * identity to talk to. BEST-EFFORT on purpose: the dashboard login does not
+ * depend on it, so a Nextcloud that is slow to install must not fail the seed
+ * — it must say what it could not do and move on.
+ */
+async function provisionNextcloudAccount(username: string, password: string): Promise<void> {
+  const base = (process.env.NEXTCLOUD_URL ?? "").replace(/\/+$/, "");
+  const admin = process.env.NEXTCLOUD_ADMIN_USER ?? "";
+  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD ?? "";
+  if (!base || !admin || !adminPassword) {
+    console.log("[seed] Nextcloud account skipped — NEXTCLOUD_URL/ADMIN_USER/ADMIN_PASSWORD unset");
+    return;
+  }
+
+  const headers = {
+    Authorization: `Basic ${Buffer.from(`${admin}:${adminPassword}`).toString("base64")}`,
+    "OCS-APIRequest": "true",
+    Accept: "application/json",
+    "Content-Type": "application/x-www-form-urlencoded",
+  };
+
+  // An owner's groups, per buildNcGroups(). `droplet-admins` is created lazily
+  // by the department provisioner and the household group by the occ init
+  // script, so on a fresh dev stack neither exists yet — and OCS REFUSES a
+  // create-user naming a group that does not exist (the WARP-990 trigger).
+  // Ensure them first, exactly as POST /auth/setup does.
+  const groups = ["admin", "droplet-admins", householdGroupSlug(process.env.DROPLET_SHARED_FOLDER_NAME)];
+
+  try {
+    for (const groupid of groups) {
+      await fetch(`${base}/ocs/v1.php/cloud/groups`, {
+        method: "POST",
+        headers,
+        body: new URLSearchParams({ groupid }),
+      }).catch(() => undefined); // already-exists is the common case
+    }
+
+    const params: Array<[string, string]> = [
+      ["userid", username],
+      ["password", password],
+      ["displayName", DEV_OWNER_DISPLAY_NAME],
+    ];
+    for (const g of groups) params.push(["groups[]", g]);
+
+    const resp = await fetch(`${base}/ocs/v1.php/cloud/users`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams(params),
+    });
+    if (!resp.ok) {
+      console.log(`[seed] Nextcloud account not created (HTTP ${resp.status}) — /files will 401 for this user`);
+      return;
+    }
+    console.log(`[seed] Nextcloud account provisioned for '${username}' in ${groups.join(", ")}`);
+  } catch (err) {
+    console.log(`[seed] Nextcloud account not created (${(err as Error).message}) — /files will 401 for this user`);
+  }
+}
+
+async function seedDevOwner(): Promise<void> {
+  // Not a safety guard — an environment precondition, and the one that made
+  // the setup wizard 500 on this stack. Named explicitly so the failure is
+  // actionable rather than an argon2/HKDF stack trace.
+  if (!config.DEVICE_SECRET_KEY) {
+    console.log("[seed] dev owner not seeded — DEVICE_SECRET_KEY is unset, so the email column cannot be encrypted");
+    return;
+  }
+
+  const [existingOwnerCount, rows] = await Promise.all([
+    prisma.user.count({ where: { role: "owner" } }),
+    prisma.user.findMany({ select: { username: true, nextcloudUsername: true } }),
+  ]);
+  const takenUserIds = new Set<string>();
+  for (const r of rows) {
+    if (r.username) takenUserIds.add(r.username);
+    if (r.nextcloudUsername) takenUserIds.add(r.nextcloudUsername);
+  }
+
+  const password = process.env.DROPLET_DEV_OWNER_PASSWORD;
+  const decision = decideDevOwnerSeed({
+    nodeEnv: process.env.NODE_ENV,
+    email: DEV_OWNER_EMAIL,
+    password,
+    existingOwnerCount,
+    takenUserIds,
+  });
+
+  if (decision.action === "skip") {
+    console.log(`[seed] dev owner not seeded — ${decision.reason}`);
+    return;
+  }
+
+  const { username } = decision;
+  await prisma.user.create({
+    data: {
+      username,
+      displayName: DEV_OWNER_DISPLAY_NAME,
+      ...emailWriteData(DEV_OWNER_EMAIL),
+      nextcloudUsername: username,
+      passwordHash: await hashPassword(password as string),
+      role: "owner",
+      // accessRoleId stays NULL on purpose: the full feature catalog is
+      // resolved only on the null branch of effective-access, so ANY custom
+      // role would narrow this account rather than widen it.
+    },
+  });
+  console.log(`[seed] dev owner created — sign in as ${DEV_OWNER_EMAIL} (username '${username}')`);
+
+  await provisionNextcloudAccount(username, password as string);
+}
+
+// ─── module visibility (WARP-2844) ───────────────────────────────
+
+/**
+ * The availability key behind each module whose config default is the EMPTY
+ * string. Every other module gates on a URL that config defaults to something
+ * non-empty, so it reads as available on a box with no hardware at all —
+ * availability is a config read, not a health probe (module-registry.ts:92-98).
+ */
+const AVAILABILITY_KEY: Partial<Record<string, string>> = {
+  docs: "DOCS_ENABLED=1 and DOCS_INTERNAL_URL",
+  email: "SERVICE_TOKEN_EMAIL",
+  voice: "SERVICE_TOKEN_VOICE",
+};
+
+/**
+ * Turn on every non-core module.
+ *
+ * 10 of the 15 ship `defaultEnabled: false`, and layer 1 (`requireModuleEnabled`)
+ * 404s the whole route prefix without ever inspecting `req.user` — there is no
+ * owner bypass. So an owner on a stock box still cannot reach two thirds of the
+ * app until these rows exist.
+ *
+ * Explicitly NOT done by applying a business-type preset: that upserts an
+ * `enabled:false` row for every non-core module OUTSIDE the preset, and no
+ * preset contains team_chat, crm, money or contacts. Presets remove surfaces.
+ */
+async function seedAllModulesOn(): Promise<void> {
+  const enabled: string[] = [];
+  const unavailable: string[] = [];
+
+  for (const m of MODULES) {
+    if (m.core) continue; // core modules are always on and refuse the toggle
+    try {
+      await setModuleEnabled(prisma, config, m.id, true, "dev-seed");
+      enabled.push(m.id);
+    } catch (err) {
+      if (err instanceof ModuleToggleError && err.code === "module_unavailable") {
+        const key = AVAILABILITY_KEY[m.id];
+        unavailable.push(key ? `${m.id} (needs ${key})` : m.id);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  console.log(`[seed] modules enabled (${enabled.length}): ${enabled.join(", ")}`);
+  if (unavailable.length > 0) {
+    // Never silent: a module that could not be enabled is a surface the
+    // developer will find missing, and they should learn it here.
+    console.log(`[seed] modules NOT available on this stack (${unavailable.length}): ${unavailable.join(", ")}`);
+  }
+}
+
 // ─── main ────────────────────────────────────────────────────────
 
 async function main() {
@@ -309,12 +517,13 @@ async function main() {
   await seedCameras();
   await seedMatterDevices();
   await seedConversations();
+  await seedDevOwner();
+  await seedAllModulesOn();
   console.log("[seed] dev seed complete");
   console.log("[seed] ──────────────────────────────────────────────");
-  console.log("[seed] Note: users + the 10 dev files live in Nextcloud.");
-  console.log("[seed] Run docker/dev/nextcloud-bootstrap.sh after the");
-  console.log("[seed] stack is up to create the second user + sample");
-  console.log("[seed] files via WebDAV.");
+  console.log("[seed] Sample files still live in Nextcloud — run");
+  console.log("[seed] docker/dev/nextcloud-bootstrap.sh once the stack");
+  console.log("[seed] is up to upload them via WebDAV.");
   console.log("[seed] ──────────────────────────────────────────────");
 }
 
