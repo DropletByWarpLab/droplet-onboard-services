@@ -15,7 +15,7 @@
  * different answers and are asserted separately below.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import React from "react";
 
 const fetchSessionsMock = vi.fn();
@@ -171,5 +171,52 @@ describe("/admin/sessions — null is still not [] (WARP-2820)", () => {
     // Exactly one Sign out button: the person the box could actually see.
     expect(screen.getAllByRole("button", { name: /^sign out$/i })).toHaveLength(1);
     expect(screen.queryByText(OUTAGE)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-2820 (review round 3) — the page sends back the identifier the box
+ * listed, and nothing else.
+ *
+ * The revoke route resolves the row this `username` names; the cross-boundary
+ * proof lives in the orchestrator suite (admin-sessions.routes.test.ts), which
+ * drives GET /auth/sessions and feeds its own payload into the POST. What this
+ * side can pin is that the value leaving the page is the payload's `username`
+ * — not the display name, and not some field a later refactor invents. Sending
+ * anything else re-opens the mismatch from the other end.
+ */
+describe("/admin/sessions — revoke sends the listed identifier (WARP-2820)", () => {
+  it("POSTs the row's `username`, not its display name", async () => {
+    mockRole = "owner";
+    // Display name deliberately unlike the username: a page that reached for
+    // the wrong field would still render correctly and still 404 the box.
+    fetchSessionsMock.mockResolvedValue({
+      users: [
+        {
+          username: "dana.chen",
+          displayName: "Dana Chen",
+          role: "family",
+          sessions: [live()],
+        },
+      ],
+    });
+    revokeUserSessionsMock.mockResolvedValue({ status: "ok", revoked: 2 });
+
+    render(<AdminSessionsPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^sign out$/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^sign out everywhere$/i }),
+    );
+
+    await waitFor(() => {
+      expect(revokeUserSessionsMock).toHaveBeenCalledWith("dana.chen");
+    });
+    expect(revokeUserSessionsMock).not.toHaveBeenCalledWith("Dana Chen");
+    // A successful revoke re-reads the roster rather than guessing the new
+    // state — the initial load plus one refresh.
+    await waitFor(() => {
+      expect(fetchSessionsMock).toHaveBeenCalledTimes(2);
+    });
   });
 });

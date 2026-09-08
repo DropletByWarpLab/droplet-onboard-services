@@ -58,6 +58,10 @@ function SessionsCard({
     setBusy(true);
     setError(null);
     try {
+      // The identifier the list itself carried. Nothing else on this row names
+      // the person to the box, and the route now resolves this exact field —
+      // see WARP-2820 on revoke-sessions, where trying only the Nextcloud
+      // mapping key silently 404'd every SSO-provisioned account.
       await revokeUserSessions(person.username);
       setConfirming(false);
       onRevoked();

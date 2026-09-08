@@ -593,7 +593,13 @@ export async function fetchSessions(): Promise<{ users: SessionsForUser[] }> {
 }
 
 /** Ends every live session for one person. Already-issued access tokens die at
- *  the next middleware check; see WARP-116/WARP-247 on the route. */
+ *  the next middleware check; see WARP-116/WARP-247 on the route.
+ *
+ *  `username` is the local `User.username` — the same field `fetchSessions`
+ *  returns per row, and the only identifier this surface holds. The route
+ *  resolves it against `nextcloudUsername` first and then `username`
+ *  (WARP-2820): it used to try the mapping key alone, which is `null` on every
+ *  SCIM/SSO account, so revoking one 404'd while the list showed it signed in. */
 export async function revokeUserSessions(
   username: string,
 ): Promise<{ status: string; revoked: number }> {

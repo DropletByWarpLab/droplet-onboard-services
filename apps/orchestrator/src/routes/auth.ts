@@ -3581,10 +3581,33 @@ export function createProtectedAuthRouter(
           });
           return;
         }
-        const row = await prisma.user.findUnique({
-          where: { nextcloudUsername: req.params.username },
-          select: { id: true },
-        });
+        // WARP-2820 — the Nextcloud mapping key FIRST, then the local login
+        // handle. Resolving only `nextcloudUsername` missed every SCIM- and
+        // SSO-provisioned account: `provisionUser` and the SSO just-in-time
+        // create both seed `username` from the email and never write the
+        // mapping key, which the schema leaves nullable with no default.
+        // Those accounts mint ordinary sessions keyed on `User.id`, so
+        // GET /auth/sessions lists them as genuinely live while every
+        // "Sign out everywhere" on them 404'd USER_NOT_FOUND — silently, and
+        // for exactly the population an offboarding admin comes here to cut
+        // off. The read and the revoke have to be able to name the same row.
+        //
+        // Two ORDERED findUniques, not one `findFirst({ OR: [...] })`: both
+        // columns are @unique, and keeping the mapping key ahead of the login
+        // handle means no call that resolved before this change can resolve
+        // to a different row after it. An OR would leave the winner to row
+        // order. Every path that writes `nextcloudUsername` writes the same
+        // value into `username`, so the second lookup only ever runs for rows
+        // that never had a mapping key at all.
+        const row =
+          (await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          })) ??
+          (await prisma.user.findUnique({
+            where: { username: req.params.username },
+            select: { id: true },
+          }));
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
