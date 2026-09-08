@@ -264,7 +264,23 @@ export async function runCorpusPass(
       });
       const ownerId = ownerRow?.id ?? null;
 
-      if (text.trim().length > 0 && ownerId) {
+      // 🔴 WARP-2834 — DID WE ACTUALLY READ IT? A unit is `digested` when the
+      // model read it, not when the loop reached it. The two skip conditions
+      // below are permanent, not transient: a document with no extractable
+      // text has none to extract, and a file whose owner cannot be resolved
+      // stays unresolvable — which is most of the shared drive, because the
+      // file-indexer writes groupfolder documents under the `__household__` /
+      // `__dept_<uuid>__` SENTINEL owners and no `User` row carries those.
+      //
+      // Counting a skip as a digest is what let /brief report "read 240 of
+      // 5,000" on a business box that had read close to none of them — an
+      // overstatement concentrated on exactly the corpus that matters most.
+      // The coverage line is the most important thing on that page precisely
+      // because an operator who believes the brain has read everything stops
+      // trusting it the moment it misses something.
+      const digestible = text.trim().length > 0 && ownerId !== null;
+
+      if (digestible) {
         const res = await chat({
           model,
           messages: [
@@ -313,7 +329,15 @@ export async function runCorpusPass(
       cursor = encodeCursor(f.updatedAt, f.userId, f.path);
       await prisma.brainPass.update({
         where: { passKey: CORPUS_PASS_KEY },
-        data: { cursor, unitsSeen: { increment: 1 }, unitsDigested: { increment: 1 } },
+        data: {
+          cursor,
+          unitsSeen: { increment: 1 },
+          // Only when the model actually read it. A unit the model READ and
+          // found nothing worth recording in IS digested — the inference was
+          // spent and the document has been considered; `rowsWritten` is where
+          // "produced nothing" shows up, not here.
+          ...(digestible ? { unitsDigested: { increment: 1 } } : {}),
+        },
       });
     } catch (err) {
       errors.push(`${f.path}: ${err instanceof Error ? err.message : String(err)}`);

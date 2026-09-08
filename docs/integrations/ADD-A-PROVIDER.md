@@ -146,6 +146,53 @@ The moment the **orchestrator imports your connector package**, the build graph 
 
 ---
 
+## 7b. Reach every dataset you declared (the links that fail SILENTLY)
+
+> **Read this section even if you are extending `erp-connector` and skipped §7.** Everything in §7 fails loudly — a missing dependency reddens CI. Everything here fails **silently**: green build, green `tsc`, green tests, a card that reads CONNECTED, and data nobody can reach.
+
+Declaring a dataset in your descriptor's `datasets` does **not** make it reachable. The descriptor says what your connector *can* produce; four other lists decide whether anything ever *asks* for it or *keeps* it, and **none of them is derived from the descriptor**.
+
+This is not a hypothetical failure mode. It is how three shipped features got there:
+
+| what shipped | what was missing | how long it was invisible |
+|---|---|---|
+| Cal.com (WARP-2707) | `appointment` was in no read map | until WARP-2832, with every test green |
+| Square's `refund` + `payout` (WARP-2676) | both read maps | until WARP-2833 |
+| `audience` — Brevo **and** Klaviyo, both projecting canonical rows | both read maps, and `ERP_SYNC_ENTITIES` | until WARP-2833 |
+
+### The four links, and what each one's absence costs you
+
+1. **`CLOUD_DATASET_READS`** — `apps/orchestrator/src/services/erp.service.ts`. Maps `dataset → read-query name`. **Absent ⇒ `queryDataset` throws `unknown dataset "…"`.** Nothing on the box can ask.
+2. **`CLOUD_QUERY_DATASETS`** — `packages/tools-core/src/handlers/cloud/query-dataset.ts`. The tool's `enum`, a hand-maintained **mirror** of (1). **Absent ⇒ the model is never shown the name**, so it cannot ask even when the route would answer.
+3. **`ERP_SYNC_ENTITIES`** — `apps/orchestrator/src/services/erp-sync/entities.ts`. `registerCursors` walks **this table**, never your descriptor. **Absent ⇒ zero cursors ⇒ no incremental tick and no reconciliation sweep**, so a healthy connection is never polled and the sweep skips it entirely.
+4. **The landing classification** — `LANDED_ENTITIES` / `NEVER_LANDED_ENTITIES` (`erp-sync/land.ts`) and `MONEY_ENTITIES` (`erp-sync/land-money.ts`). `landsOnBox()` is checked **after** the vendor has already been read and paged. **In none of the three ⇒ the rows are fetched, discarded, the watermark advanced past them, and the tick audited `"Connector synced", true`.**
+
+> 🔴 **(1) and (2) are gated only against EACH OTHER.** They can agree perfectly while both lag what your connector serves — which is exactly what happened all three times above. `cloud-dataset-tool.e2e.test.ts` now also gates *every declared dataset of an available provider* against (1); that guard is what catches you, so read its failure message rather than adding your name to a list to make it pass.
+
+### Do this, per dataset, before opening the PR
+
+```bash
+# every dataset your descriptor declares that nothing can ask for:
+node -e 'const {providerDescriptor}=require("@droplet/shared-types");
+console.log(providerDescriptor("<your-id>").datasets)'
+# then check each against CLOUD_DATASET_READS and CLOUD_QUERY_DATASETS by eye.
+```
+
+For each declared dataset, answer all four in the PR body:
+
+- **Askable?** In (1) and (2), or say why not.
+- **Polled?** A row in (3), or say why not — the reason must be about **your** vendor. `ERP_SYNC_ENTITIES` is keyed by dataset **name**, so a reason recorded for another vendor's connector is silently applied to yours (WARP-2835).
+- **Landed?** In one of (4)'s three lists. If it should not land, put it in `NEVER_LANDED_ENTITIES` **with a reason** — do not leave it unclassified, which reads identically at runtime and is what `land.test.ts`'s debt pin exists to stop.
+- **Swept?** If its watermark is `complete: false`, it must not be scheduled until something reads that flag — `erp-provider.descriptor.test.ts` turns it into a build failure.
+
+### Adding a dataset NAME (not just wiring an existing one)
+
+Widening `DATASET_NAMES` is a much larger job than it looks — the two vocabulary arrays must agree **at matching indexes**, four total `Record<DatasetName, …>`s must gain an entry (`DATASET_CATEGORY`, `CANONICAL_COLUMNS`, `REQUIRED_CANONICAL`, and **`NATURAL_KEY` in `scan.ts`**, which is easy to miss), `COLUMN_KIND` throws at module load rather than failing `tsc`, and `statement_manifest.json` is cross-language. Follow ADR-046 and copy WARP-2832's diff.
+
+🔴 **A dataset name is a WIRE FORMAT.** Operators author export-drop profile JSON on their own sites naming datasets as bare strings, and Warp Lab does not hold those files. Add a name beside an existing one; never rename or reshape one.
+
+---
+
 ## 8. The hard rules (a review will block violations)
 
 - **The assistant never emits SQL** — named registry commands only; no raw-SQL escape hatch against a live third-party system.
@@ -179,6 +226,9 @@ The moment the **orchestrator imports your connector package**, the build graph 
 - [ ] `provision.sql` / `revoke.sql` (idempotent, least-privilege, `secretRef`).
 - [ ] tools-core handlers (`requiresWrite`/`requiresConfirmation`, writes stage a request).
 - [ ] Dashboard connector metadata + visual.
+- [ ] **Every declared dataset is ASKABLE** — in `CLOUD_DATASET_READS` *and* `CLOUD_QUERY_DATASETS` (§7b). Silent if missed.
+- [ ] **Every declared dataset is POLLED or deliberately not** — a row in `ERP_SYNC_ENTITIES`, or a reason that is about *your* vendor. Silent if missed.
+- [ ] **Every declared dataset is CLASSIFIED for landing** — `LANDED_ENTITIES`, `MONEY_ENTITIES`, or `NEVER_LANDED_ENTITIES` *with a reason*. Silent if missed.
 - [ ] Build graph wired (dep + Dockerfile + ship-check leaf + lockfile) — if a new package.
 - [ ] Unit tests green; ship-check `tsc-full` + `lifecycle-naming` pass.
 - [ ] A WARP ticket filed for the work; PR opened review-ready (never self-merged).

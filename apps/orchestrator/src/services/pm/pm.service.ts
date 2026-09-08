@@ -595,7 +595,20 @@ export async function createProject(
   // ADR-045 §5.3 — refuse HOUSEHOLD and archive-intent departments, but NOT a
   // department that is merely pending / provisioning / failed: storage
   // convergence is not a precondition for owning work.
-  if (input.departmentId) await assertAssignableDepartment(prisma, input.departmentId);
+  //
+  // 🔴 WARP-2724 — `!== undefined`, not truthiness, and the reason is written
+  // out three lines below this for `companyId`: `department_id: ""` is FALSY,
+  // so a truthy check skipped the guard entirely, and `??` does not coerce ""
+  // either — so the empty string survived to `departmentId: input.departmentId
+  // ?? null` and reached Postgres as an empty FK. A raw P2003 500 on a request
+  // the API had every chance to refuse in words.
+  //
+  // The two columns had the same bug; only one of them had been found. Now
+  // `assertAssignableDepartment` sees the "" and answers `department_not_found`
+  // (→404), which is what the two UPDATE paths in this file already do.
+  if (input.departmentId !== undefined) {
+    await assertAssignableDepartment(prisma, input.departmentId);
+  }
   // ADR-048 — a project may only be filed under a customer that exists.
   // Checked here rather than left to the FK so the caller gets
   // `company_not_found` (→404) instead of a redacted P2003 500 — the exact
@@ -1157,7 +1170,26 @@ export async function createWorkItem(
   // after. Refuses HOUSEHOLD (it is the unit everyone is already in, so routing
   // to it is indistinguishable from routing nothing) and archive-intent states.
   // Does NOT refuse pending / provisioning / failed.
-  if (input.departmentId) await assertAssignableDepartment(prisma, input.departmentId);
+  // 🔴 WARP-2724 — TWO fixes, and they are separate defects that happened to
+  // sit on one line.
+  //
+  // 1. `!== undefined`, not truthiness. `department_id: ""` is FALSY, so a
+  //    truthy check skipped the guard, and `??` does not coerce "" either — so
+  //    the empty string survived to `departmentId: input.departmentId ?? null`
+  //    and reached Postgres as an empty FK: a raw P2003 500 on a request the
+  //    API could have refused in words. The same bug was on `createProject`,
+  //    three lines under a comment describing it for `companyId`.
+  //
+  // 2. The check MOVED INSIDE the transaction (below). It used to run here,
+  //    before `prisma.$transaction` opened, so a department archived in the
+  //    window between the two was checked in one world and written in another.
+  //    The window is small and the write is the thing that matters, so the
+  //    check now runs against `tx` — same connection, same snapshot, no gap.
+  //
+  // `createProject` keeps its check outside, because it has no transaction to
+  // move into: its own comment records that the identifier loop and the create
+  // are deliberately not one. Narrowing that window is a different change with
+  // a different risk, and is not smuggled in here.
 
   // Landing state: explicit → isDefault → first by sortOrder → none.
   const stateId =
@@ -1179,6 +1211,11 @@ export async function createWorkItem(
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
+      // WARP-2724 — inside the tx, against `tx`, so the department that is
+      // checked is the department the row is written against.
+      if (input.departmentId !== undefined) {
+        await assertAssignableDepartment(tx, input.departmentId);
+      }
       // Bump the per-project counter atomically → the work item's number.
       const bumped = await tx.pmProject.update({
         where: { id: projectId },
