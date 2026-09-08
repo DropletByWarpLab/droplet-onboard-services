@@ -232,7 +232,10 @@ describe("Users roster — enable / disable a person", () => {
       delete (globalThis as { window?: unknown }).window;
       // The catch arm is the one that writes state.
       failEnable(new Error("box unreachable"));
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      // Microtasks only: a timer here would let a stray jsdom event dispatch
+      // into React while `window` is missing, throwing the very error under
+      // test from the wrong direction (CI run 34291647020).
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
     } finally {
       (globalThis as { window?: unknown }).window = realWindow;
       process.off("unhandledRejection", onRejection);

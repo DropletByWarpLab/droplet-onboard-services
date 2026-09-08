@@ -152,6 +152,24 @@ async function openEditDialog() {
  * dialog either says "Loading usage…" or it does not, and no test proceeds
  * until it does not.
  */
+/**
+ * Run the promise chain forward WITHOUT letting a macrotask through.
+ *
+ * The teardown cases below delete `globalThis.window`. A `setTimeout` wait
+ * there hands the loop to whatever else is pending — `closeEdit` schedules a
+ * `focus()` on a 0 ms timer — and a jsdom DOM event dispatched into React with
+ * no `window` throws the very ReferenceError these tests exist to prevent,
+ * failing the whole run from the wrong direction. Seen on CI, run 34291647020:
+ * 572 files passed, one uncaught `window is not defined` out of
+ * `dispatchDiscreteEvent`.
+ *
+ * `.then`/`.catch`/`.finally` are microtasks, so draining microtasks alone
+ * carries the chain to its end and no timer can interleave.
+ */
+async function drainMicrotasks(hops = 20) {
+  for (let i = 0; i < hops; i += 1) await Promise.resolve();
+}
+
 async function awaitUsageLoaded(dialog: HTMLElement) {
   await waitFor(() => expect(dialog.textContent).not.toMatch(/Loading usage…/));
 }
@@ -350,7 +368,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     try {
       delete (globalThis as { window?: unknown }).window;
       resolveUsage({ policy: null, usedBytes: "1" });
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      await drainMicrotasks();
     } finally {
       (globalThis as { window?: unknown }).window = realWindow;
       process.off("unhandledRejection", onRejection);
@@ -384,7 +402,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
    * fire directly, but it also swallows unrelated async errors raised while
    * `window` is missing and made both tests here fail spuriously. Not worth it.
    */
-  it("a roster reload landing after unmount + teardown escapes nothing", async () => {
+  it("a roster reload landing after unmount touches nothing afterwards", async () => {
     let resolveUsers!: (value: unknown) => void;
     fetchUsersMock.mockImplementation(
       () => new Promise((resolve) => { resolveUsers = resolve; }),
@@ -392,26 +410,18 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
     const view = render(<UsersPage />);
     await waitFor(() => expect(fetchUsersMock).toHaveBeenCalled());
+    const invitesBefore = listInvitesMock.mock.calls.length;
 
     // The page goes away while the very first roster read is still in flight.
     view.unmount();
+    resolveUsers({ users: [] });
+    await drainMicrotasks();
 
-    const escaped: string[] = [];
-    const onRejection = (err: unknown) =>
-      escaped.push(String((err as { message?: string })?.message ?? err));
-    process.on("unhandledRejection", onRejection);
-
-    const realWindow = (globalThis as { window?: unknown }).window;
-    try {
-      delete (globalThis as { window?: unknown }).window;
-      resolveUsers({ users: [] });
-      await new Promise((resolve) => setTimeout(resolve, 60));
-    } finally {
-      (globalThis as { window?: unknown }).window = realWindow;
-      process.off("unhandledRejection", onRejection);
-    }
-
-    expect(escaped).toEqual([]);
+    // `reload()` runs straight into `listInvites()` once the roster lands, so
+    // "did the continuation get past the guard?" is observable as a call count
+    // — no environment surgery needed, and nothing here can be upset by an
+    // unrelated timer.
+    expect(listInvitesMock.mock.calls.length).toBe(invitesBefore);
   });
 
   it("rejects a non-positive upload cap without saving", async () => {
