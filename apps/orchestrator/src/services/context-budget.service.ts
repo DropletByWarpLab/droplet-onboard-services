@@ -26,7 +26,7 @@
  * tokens" note in routes/llm.ts) rounding UP, so we under-fill rather than
  * over-fill the real window.
  */
-import { OUTPUT_RESERVE, ITERATION_MIN_HEADROOM } from "./prompt-budget.consts.js";
+import { OUTPUT_RESERVE } from "./prompt-budget.consts.js";
 
 /**
  * The shipping single-box context window (tokens). Mirrors the
@@ -59,27 +59,41 @@ export const GATEWAY_MAX_TOTAL_CONTENT_CHARS = 128_000;
  * on this box: every request goes through the ai-gateway, which refuses more
  * than `GATEWAY_MAX_TOTAL_CONTENT_CHARS` of message content. So budgeting a
  * 200,000-token model at 200,000 does not unlock 200,000 tokens — it unlocks a
- * 422, and it does so by DISABLING the graceful stop that would otherwise have
- * fired first:
+ * 422, and it does so by DISABLING the graceful degradation that would
+ * otherwise have kept the request inside the cap.
  *
+ * DERIVED AGAINST `degradeToFit`, NOT AGAINST THE IN-LOOP GUARD. Two gates
+ * size a turn, and they do not use the same formula:
+ *
+ *   degradeToFit trips at    window − OUTPUT_RESERVE
  *   in-loop guard trips at   window − OUTPUT_RESERVE − ITERATION_MIN_HEADROOM
  *   gateway refuses at       tokens(GATEWAY_MAX_TOTAL_CONTENT_CHARS)
  *
- * Setting the ceiling where those two meet keeps the guard strictly ahead of
- * the refusal, so an over-long turn still ends with "answer now from what you
- * have" rather than a failed turn. The loop's estimate is
+ * `degradeToFit` is the one that matters here, because it is the ONLY budget
+ * gate the turn's FIRST completion call passes through: the in-loop guard is
+ * gated `iter > 0` (`llm-agent.service.ts`), so iteration 0 never reaches it.
+ * Sizing the ceiling against the loop's laxer-by-ITERATION_MIN_HEADROOM
+ * formula would leave `degradeToFit`'s threshold ITERATION_MIN_HEADROOM tokens
+ * ABOVE the gateway's cap — a request in that band drops nothing, is not
+ * flagged to anyone who acts on it (`historyTrimNeeded` has no reader), and
+ * 422s on the first call. That band is unreachable at the local 16,384 window;
+ * it is this ceiling that would have made it reachable.
+ *
+ * So the ceiling is `tokens(cap) + OUTPUT_RESERVE`, which puts
+ * `degradeToFit`'s threshold exactly on the gateway's cap, and leaves the
+ * in-loop guard firing one whole ITERATION_MIN_HEADROOM EARLIER — additive
+ * margin, not margin the two gates share. The loop's estimate is also
  * `JSON.stringify(messages)`, which over-counts against the gateway's
- * text-only sum, so in practice the guard fires earlier still — conservative
- * in the safe direction.
+ * text-only sum, and `estimateRequestTokens` counts `toolSchemasJson`, which
+ * the gateway does not count as message content at all: both errors point the
+ * same, safe way.
  *
  * Deliberately NOT an env knob. A ceiling an operator can raise above the
  * gateway's cap re-introduces exactly the 422 this prevents, and one they can
  * lower is already expressible as `OLLAMA_CONTEXT_LENGTH` for the local model.
  */
 export const MAX_RESOLVABLE_CONTEXT_WINDOW =
-  Math.ceil(GATEWAY_MAX_TOTAL_CONTENT_CHARS / CHARS_PER_TOKEN) +
-  OUTPUT_RESERVE +
-  ITERATION_MIN_HEADROOM;
+  Math.ceil(GATEWAY_MAX_TOTAL_CONTENT_CHARS / CHARS_PER_TOKEN) + OUTPUT_RESERVE;
 
 /** Where a turn's budgeted window came from — stamped on the log line so a
  *  wrong budget is diagnosable without reproducing the turn. */
@@ -197,8 +211,16 @@ export type DroppedBlock = "business" | "persona" | "brain";
 
 export interface DegradeOptions {
   /**
-   * Effective context window in tokens (config.OLLAMA_CONTEXT_LENGTH in
-   * production). The request must fit under `contextWindow − OUTPUT_RESERVE`.
+   * Effective context window in tokens — in production, whatever
+   * `resolveTurnContextWindow` returned for THIS turn's model (WARP-2851; the
+   * local `config.OLLAMA_CONTEXT_LENGTH` for every local model, the model's
+   * own catalogue window capped at `MAX_RESOLVABLE_CONTEXT_WINDOW` otherwise).
+   * The request must fit under `contextWindow − OUTPUT_RESERVE`.
+   *
+   * That threshold is why `MAX_RESOLVABLE_CONTEXT_WINDOW` is derived the way
+   * it is: this is the only budget gate the turn's FIRST call passes through,
+   * so the ceiling is sized so `contextWindow − OUTPUT_RESERVE` lands ON the
+   * ai-gateway's content cap and never above it.
    */
   contextWindow: number;
   /**

@@ -39,7 +39,7 @@ describe("resolveTurnContextWindow", () => {
   // on this box is the ai-gateway's 128,000-char content cap, NOT the model:
   // anthropic's 200,000 and openai's 128,000 are equally unreachable through
   // it. This change is therefore worth 16,384 → MAX_RESOLVABLE_CONTEXT_WINDOW
-  // (~2.1x), not 16,384 → 200,000. Raising the gateway cap is a separate
+  // (~2.0x), not 16,384 → 200,000. Raising the gateway cap is a separate
   // decision with its own memory/DoS trade-off (see `_MAX_TOTAL_CONTENT_CHARS`
   // and its "100 messages × 32k chars = 3.2MB" rationale).
   describe("caps every window larger than the gateway can carry", () => {
