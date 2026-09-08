@@ -27,6 +27,7 @@ import businessUpdate from "../../../src/handlers/business/update.js";
 import businessLink from "../../../src/handlers/business/link.js";
 import {
   LINK_EDGES,
+  LIVE_EDGES_CARRY_A_WRITE,
   businessError as writeBusinessError,
 } from "../../../src/handlers/business/write-shared.js";
 import { businessError as readBusinessError } from "../../../src/handlers/business/_graph.js";
@@ -507,11 +508,56 @@ describe("business_link degrades", () => {
   });
 
   it("has exactly the two live edges, and both are on the deal", () => {
-    // Non-vacuity for the degradation test above, and the assertion that
-    // goes red the moment a slice flips a row to `live` without wiring a
-    // dispatch branch for it.
+    // Non-vacuity for the degradation test above.
     const live = LINK_EDGES.filter((e) => e.status === "live");
     expect(live.map((e) => `${e.from}->${e.to}`)).toEqual(["deal->project", "deal->customer"]);
+  });
+
+  // ── WARP-2757 item 1: the dispatch belongs to the row ────────────────────
+
+  it("🔴 every LIVE edge carries its own write dispatch", () => {
+    // What this replaced could not be asserted: the dispatch was a ternary in
+    // link.ts, thirty lines away in another file, and "is there a branch for
+    // this edge" was not a question the table could answer. Now it is a field,
+    // so a row flipped live without one is a compile error at the table AND a
+    // throw at import (LIVE_EDGES_CARRY_A_WRITE) — this is the third layer,
+    // for a reader who wants to see the rule stated.
+    for (const edge of LINK_EDGES.filter((e) => e.status === "live")) {
+      const label = `${edge.from}->${edge.to} (${edge.kind})`;
+      expect(edge.write, label).toBeTruthy();
+      expect(typeof edge.write!.body, label).toBe("function");
+      expect(typeof edge.write!.readBack, label).toBe("function");
+      expect(edge.write!.subject, label).toBeTruthy();
+    }
+    expect(LIVE_EDGES_CARRY_A_WRITE).toBe(true);
+  });
+
+  it("🔴 the PATCH is addressed and shaped by the EDGE, not by `to === project`", () => {
+    // The defect this closes: both live edges are deal columns today, so the
+    // old ternary `to === "project" ? {projectId} : {companyId}` was right by
+    // coincidence. Asserting through the row means the next live edge — which
+    // is `project -> customer`, and `PmProject.companyId` already exists —
+    // cannot inherit a deal endpoint by falling through an else.
+    const delivers = LINK_EDGES.find((e) => e.from === "deal" && e.to === "project")!;
+    const belongs = LINK_EDGES.find((e) => e.from === "deal" && e.to === "customer")!;
+
+    expect(delivers.write!.body("p1")).toEqual({ projectId: "p1" });
+    expect(belongs.write!.body("c1")).toEqual({ companyId: "c1" });
+    // Same subject today, and each row says so for itself rather than the
+    // handler assuming it of all of them. The ROUTE stays in link.ts so the
+    // manifest gate can still read it out of the handler source.
+    expect(delivers.write!.subject).toBe("deal");
+    expect(belongs.write!.subject).toBe("deal");
+  });
+
+  it("MUTATION: a live edge whose body ignored its column would send the wrong field", () => {
+    // Written down because the plausible regression is a shared `dealWrite()`
+    // that hard-codes one column: both edges would then PATCH the same field
+    // and `delivers` would silently set companyId.
+    const bodies = LINK_EDGES.filter((e) => e.status === "live").map(
+      (e) => Object.keys(e.write!.body("x"))[0],
+    );
+    expect(new Set(bodies).size).toBe(bodies.length);
   });
 });
 
