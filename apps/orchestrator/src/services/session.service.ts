@@ -11,9 +11,10 @@
  * The record is the source of truth for three controls the stateless design
  * could not express:
  *
- *   • sliding idle timeout   — role-dependent (admin 15 min / user 60 min),
- *     enforced by the auth middleware on every request via checkSession();
- *   • absolute timeout       — 8 h from login, never extended (refresh calls
+ *   • sliding idle timeout   — role-dependent by construction, though both
+ *     classes currently default to 12 h (WARP-2856), enforced by the auth
+ *     middleware on every request via checkSession();
+ *   • absolute timeout       — 30 d from login, never extended (refresh calls
  *     checkSession with touch:false so a token-refresh loop can't slide it);
  *   • immediate revocation   — deleting the record kills the ACCESS token at
  *     the next middleware check (not just refresh, unlike WARP-116's
@@ -49,16 +50,21 @@ export const SESSION_INDEX_PREFIX = "sess:user:";
 
 /** Write-throttle for the sliding lastSeenAt update: at most one Redis write
  *  per session per this many seconds. Bounds write amplification on chatty
- *  dashboards while keeping idle-window resolution far below the 15-min
- *  admin limit. */
+ *  dashboards while keeping idle-window resolution far below the shortest
+ *  idle limit (12 h since WARP-2856). */
 export const SESSION_TOUCH_INTERVAL_SECONDS = 30;
 
 /** GC grace past the absolute cap — see module docstring. */
 const RECORD_GC_GRACE_SECONDS = 24 * 60 * 60;
 
-export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 15 * 60;
-export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 60 * 60;
-export const DEFAULT_ABSOLUTE_TIMEOUT_SECONDS = 8 * 60 * 60;
+/** WARP-2856 — admin-class idle window. Deliberately EQUAL to the user-class
+ *  window (Romain, 2026-09-07: a signed-in person stays signed in for 12 h of
+ *  inactivity, whatever their role). Kept as its own constant, and read
+ *  through its own env var, so the stricter admin window can be restored by
+ *  changing this line alone. */
+export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 12 * 60 * 60;
+export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 12 * 60 * 60;
+export const DEFAULT_ABSOLUTE_TIMEOUT_SECONDS = 30 * 24 * 60 * 60;
 export const DEFAULT_MAX_CONCURRENT_SESSIONS = 5;
 
 export interface SessionRecord {

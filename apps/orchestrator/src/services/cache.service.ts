@@ -152,7 +152,7 @@ export async function cacheDel(key: string): Promise<void> {
  * Used to index the live refresh-token sessions for a user so the
  * revoke-sessions admin endpoint can denylist them all at once. Non-fatal
  * on Redis error: a missed index write only means that one session can't be
- * force-revoked early — it still expires on its own ≤7-day TTL.
+ * force-revoked early — it still expires on its own refresh-token TTL.
  */
 export async function cacheSetAdd(
   key: string,

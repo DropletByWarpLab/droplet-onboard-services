@@ -60,7 +60,10 @@ export interface JwtPayload {
 // Single source of truth for token lifetimes. Both the jwt `expiresIn` option
 // and the cookie `maxAge` derive from these — keep them in sync here only.
 export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
-export const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+// WARP-2856 — 30 days, matched to SESSION_ABSOLUTE_TIMEOUT_SECONDS so a
+// refresh stays possible for the whole life of a session record. Shortening
+// this below the absolute cap would strand live sessions at the old boundary.
+export const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 const REFRESH_DENYLIST_PREFIX = "jwt:deny:";
 const REFRESH_LOCK_PREFIX = "jwt:rotate:";
@@ -233,7 +236,7 @@ export function signAccessToken(user: {
 }
 
 /**
- * Sign a long-lived refresh token (7 days).
+ * Sign a long-lived refresh token (30 days — REFRESH_TOKEN_TTL_SECONDS).
  * Carries username/displayName/role so refresh doesn't need a Nextcloud
  * round-trip and the new access token preserves the user's identity.
  *
@@ -400,7 +403,7 @@ export async function claimRefreshRotation(token: string): Promise<boolean> {
  * Verifies the token first (rejects forged/expired) so a caller can't poison
  * the index with garbage members. Non-fatal on any failure — the session
  * index is an optimization that makes "revoke now" possible; a missed write
- * just means that one session falls back to its own ≤7-day TTL.
+ * just means that one session falls back to its own ≤30-day TTL.
  */
 export async function registerRefreshSession(
   userId: string,

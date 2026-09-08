@@ -480,9 +480,14 @@ const envSchema = z.object({
   // or token refresh. The cap evicts the OLDEST session at login (audited).
   // Enforced via Redis session records (services/session.service.ts) keyed
   // by the JWT `sid` claim.
-  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(15 * 60),
-  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(60 * 60),
-  SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce.number().default(8 * 60 * 60),
+  // WARP-2856 — both idle classes default to 12 h and the absolute cap to
+  // 30 d (Romain, 2026-09-07: a signed-in person stays signed in for 12 h of
+  // inactivity, 30 d absolute). Admin-class keeps its own var so the stricter
+  // window can be restored without touching everyone else. Defaults mirror
+  // services/session.service.ts's DEFAULT_* constants — change both.
+  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(12 * 60 * 60),
+  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(12 * 60 * 60),
+  SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce.number().default(30 * 24 * 60 * 60),
   SESSION_MAX_CONCURRENT_PER_USER: z.coerce.number().default(5),
 
   // --- OAuth2 ---

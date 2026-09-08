@@ -1650,8 +1650,9 @@ export function createPublicAuthRouter(
         // DB row, NOT from the role carried in the old refresh token. A
         // session that escapes the denylist (the revoke-after-clear race, or a
         // Redis outage that drops the best-effort deny write) would otherwise
-        // keep its stale — possibly higher — role for the full 7-day refresh
-        // TTL, partially defeating the "immediate propagation" promise.
+        // keep its stale — possibly higher — role for the full refresh TTL
+        // (30 d since WARP-2856), partially defeating the "immediate
+        // propagation" promise.
         // Precedence: DB role wins; the token-carried `role` is only a fallback
         // for a legitimate rotation where the local row somehow lacks a role
         // (defensive — `localUser` is non-null and gated past the !localUser /
@@ -1689,7 +1690,7 @@ export function createPublicAuthRouter(
 
         // Extend the NC session token's TTL so it doesn't expire mid-session
         // (the user would otherwise see silent 401s on /api/files after the
-        // original 7-day window elapses even though their JWT is fresh).
+        // original refresh window elapses even though their JWT is fresh).
         await touchNcToken(sub, REFRESH_TOKEN_TTL_SECONDS);
 
         const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
