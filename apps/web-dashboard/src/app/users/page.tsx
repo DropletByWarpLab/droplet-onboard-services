@@ -426,14 +426,24 @@ export default function UsersPage() {
   // in between are server writes the operator already asked for, and bailing
   // out of those would silently apply half a save.
   //
-  // SCOPE, so the next reader does not mistake this for a whole-file audit:
-  // guarded here are the four best-effort chains, `handleEditSave`, `reload()`
-  // and `openEdit`'s two fetches. NOT guarded, and tracked on WARP-2696, are 19
-  // post-await writes in the modal/action handlers — handleCreateAccount,
-  // handleCopyTempPassword, handleGenerateInvite, handleCopyInviteUrl,
-  // performRevokeInvite, performDeleteUser, performEnable, performDisable.
-  // Same defect, different blast radius; they are reachable only while their
-  // own modal is open.
+  // SCOPE: this IS now a whole-file pass. Every state write reachable after an
+  // await or inside a promise handler re-checks `mountedRef` — the four
+  // best-effort chains, `handleEditSave`, `reload()`, `openEdit`'s two fetches,
+  // and the eight modal/action handlers. Derived mechanically rather than by
+  // reading (for each write: is mount re-checked since the last suspension
+  // point?), because two were missed on the first pass by eye.
+  //
+  // The two `setTimeout` copy-confirmations re-check inside the timer as well:
+  // a 2 s "Copied" reset outlives most dialogs.
+  //
+  // Where the whole remainder of a handler is UI-only, the guard is an early
+  // return; where server writes still follow, individual writes are wrapped
+  // instead. `handleEditSave` is the one with several sequential server writes,
+  // so it must never early-return — that would apply half a save. The single-
+  // write handlers have no such hazard: their write has already landed by the
+  // time the guard is reached. The `throw` in the revoke/delete/disable catch
+  // blocks is deliberately left outside the guard so the confirm dialogs still
+  // see the rejection.
   //
   // A staleness check is NOT a mount check. `openEdit`'s `editSeedTokenRef`
   // answers "is this still the current editor?" and is only bumped by the next
@@ -649,22 +659,26 @@ export default function UsersPage() {
         true,
         createRole,
       );
+      if (!mountedRef.current) return;
       setCreateEmail(email);
       setCreatePhase("handoff");
       // Refresh the roster behind the dialog; non-fatal if it fails.
       void reload();
     } catch (err: any) {
-      setCreateError(err?.message || "Failed to create the account");
+      if (mountedRef.current) setCreateError(err?.message || "Failed to create the account");
     } finally {
-      setCreateSubmitting(false);
+      if (mountedRef.current) setCreateSubmitting(false);
     }
   };
 
   const handleCopyTempPassword = async () => {
     try {
       await navigator.clipboard.writeText(createPassword);
+      if (!mountedRef.current) return;
       setCreatePwCopied(true);
-      setTimeout(() => setCreatePwCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setCreatePwCopied(false);
+      }, 2000);
     } catch {
       // Clipboard might be blocked (insecure context); the field stays
       // selectable so the admin can copy manually.
@@ -700,19 +714,20 @@ export default function UsersPage() {
         ttlHours: inviteTtlHours,
         departments: deptGrants,
       });
+      if (!mountedRef.current) return;
       setInviteResult(result);
       setInvitePhase("share");
       // Refresh the pending list.
       try {
         const inviteData = await listInvites();
-        setInvites(inviteData.invites || []);
+        if (mountedRef.current) setInvites(inviteData.invites || []);
       } catch {
         // ignore
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to create invite");
+      if (mountedRef.current) setError(err?.message || "Failed to create invite");
     } finally {
-      setInviteSubmitting(false);
+      if (mountedRef.current) setInviteSubmitting(false);
     }
   };
 
@@ -720,8 +735,11 @@ export default function UsersPage() {
     if (!inviteResult) return;
     try {
       await navigator.clipboard.writeText(inviteResult.url);
+      if (!mountedRef.current) return;
       setInviteCopied(true);
-      setTimeout(() => setInviteCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setInviteCopied(false);
+      }, 2000);
     } catch {
       // Clipboard might be blocked (insecure context); leave the textbox
       // visible so the admin can manually select the link.
@@ -742,11 +760,14 @@ export default function UsersPage() {
     );
     try {
       await apiRevokeInvite(invite.token);
+      if (!mountedRef.current) return;
       setRevokeInvite(null);
       toast(`Invite for ${invite.username} revoked.`, "success");
     } catch (err: any) {
-      setInvites(before);
-      setError(err?.message || "Failed to revoke invite");
+      if (mountedRef.current) {
+        setInvites(before);
+        setError(err?.message || "Failed to revoke invite");
+      }
       throw err;
     }
   };
@@ -764,11 +785,12 @@ export default function UsersPage() {
     if (!u) return;
     try {
       await apiDeleteUser(u.id);
+      if (!mountedRef.current) return;
       setDeleteUserTarget(null);
       toast(`Deleted ${u.id}.`, "success");
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to delete user");
+      if (mountedRef.current) setError(err?.message || "Failed to delete user");
       throw err;
     }
   };
@@ -789,7 +811,7 @@ export default function UsersPage() {
       await setUserEnabled(u.id, true);
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to enable user");
+      if (mountedRef.current) setError(err?.message || "Failed to enable user");
     }
   };
 
@@ -798,11 +820,12 @@ export default function UsersPage() {
     if (!u) return;
     try {
       await setUserEnabled(u.id, false);
+      if (!mountedRef.current) return;
       setDisableUserTarget(null);
       toast(`${u.id} disabled.`, "success");
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to disable user");
+      if (mountedRef.current) setError(err?.message || "Failed to disable user");
       throw err;
     }
   };
