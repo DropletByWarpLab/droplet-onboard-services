@@ -163,6 +163,33 @@ describe("resolveChunkOwnerIds — department corpora (WARP-2821)", () => {
     expect(ids).toEqual(["alice", UUID]);
   });
 
+  it("SAYS SO on the way down — the fail-closed path is not silent", async () => {
+    // Degrading quietly makes a real bug in this lookup indistinguishable from
+    // "this caller is in no departments", forever: the assistant just stops
+    // finding shared documents and nothing anywhere says why. The orchestrator's
+    // equivalent catch already logs; this one has to as well.
+    //
+    // STDERR, never stdout: the stdio transport carries JSON-RPC on stdout and
+    // any other byte on it corrupts the stream.
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      findUnique.mockResolvedValueOnce({ id: UUID, username: "alice", role: "family" });
+      memberFindMany.mockRejectedValueOnce(new Error("db down"));
+
+      await resolveChunkOwnerIds(prisma, "alice");
+
+      expect(stderr).toHaveBeenCalledTimes(1);
+      const [message, err] = stderr.mock.calls[0];
+      expect(String(message)).toContain("department lookup failed");
+      expect((err as Error).message).toBe("db down");
+      expect(stdout).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+      stdout.mockRestore();
+    }
+  });
+
   it("dedupes when two departments would emit the same sentinel", async () => {
     findUnique.mockResolvedValueOnce({ id: UUID, username: "alice", role: "family" });
     memberFindMany.mockResolvedValueOnce([

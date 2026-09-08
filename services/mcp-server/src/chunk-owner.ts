@@ -93,10 +93,23 @@ export async function resolveChunkOwnerIds(
 
   try {
     keys.push(...deptCorpusKeys(await visibleDepartmentsFor(prisma, row)));
-  } catch {
+  } catch (err) {
     // Personal only. See the fail-closed note above. `visibleDepartmentsFor`
     // THROWS on a database failure rather than answering "no departments",
     // precisely so this decision is made here and not inside it.
+    //
+    // And it SAYS SO. Degrading quietly makes a non-transient failure here
+    // indistinguishable from "this caller is in no departments" forever: the
+    // assistant simply stops finding shared documents, with no operator-visible
+    // signal anywhere. The orchestrator's equivalent catch logs; so does this.
+    //
+    // STDERR, never stdout — the stdio transport carries JSON-RPC on stdout and
+    // any other byte on it corrupts the stream. Same channel `index.ts` uses;
+    // this process has no logger.
+    console.error(
+      "resolveChunkOwnerIds: department lookup failed; personal keys only",
+      err,
+    );
   }
 
   return [...new Set(keys)];
