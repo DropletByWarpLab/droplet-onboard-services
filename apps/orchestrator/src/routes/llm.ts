@@ -270,22 +270,28 @@ function scrubInterceptorChallenge(result: unknown): unknown {
   return { ...(r as Record<string, unknown>), error };
 }
 
-// /llm/chat accepts `role:"tool"` and `tool_call_id` on the wire, and then
-// DROPS them (`stripClientToolReplay`, below). It has never declared
-// `tool_calls` — the comment that stood here until WARP-2849 claimed it did,
-// and had said so since the schema was written (`136890fa`, #95).
+// /llm/chat accepts `role:"tool"` messages and `tool_call_id` on the wire and
+// then DROPS both, before the turn runs. `stripClientToolReplay` (below) is
+// where that happens; its doc comment is the canonical explanation of WHY the
+// two fields are unusable, why they are discarded rather than rejected, and
+// what the caller is told instead. Do not restate it here.
 //
-// The claim was never true, and the shape it promised could not work: zod
-// strips the undeclared `tool_calls` off every replayed assistant turn, so a
-// surviving tool message is an ORPHAN, and the ai-gateway rejects exactly that
-// fail-closed (`services/ai-gateway/schemas.py` — "tool result references
-// unknown tool_call_id" → 422). A client that followed the old comment failed
-// every turn.
+// The comment that stood in this spot until WARP-2849 promised the opposite —
+// a working resume path built out of the request body. It was never true.
+// `tool_calls` is not in the schema below and never has been: the field and
+// that comment landed in the same commit (`136890fa`, #95, 2026-04-24)
+// already contradicting each other, so a client that followed it broke on
+// EVERY turn rather than merely losing context silently.
 //
-// Cross-turn tool continuity is real but it is NOT built from the request
-// body: `prior_tool_names` (WARP-1921) is read server-side from the persisted
-// trace, because a client must not be able to claim a tool result it never
-// received. Carrying the RESULTS the same way is WARP-2849's second slice.
+// Consequence for anyone reading this before building a client: send
+// user/assistant text only. Nothing a previous turn's tools returned re-enters
+// the model's context today. `prior_tool_names` (WARP-1921) carries the tool
+// NAMES server-side from the persisted trace — server-side precisely because a
+// client must not be able to claim a tool result it never received. Carrying
+// the calls and RESULTS the same way is WARP-2849's second slice.
+//
+// `tool_call_id` stays declared: removing a wire field is a breaking change,
+// and accepting-then-discarding it costs nothing.
 //
 // WARP-304: `conversationId` lets the caller continue an existing thread.
 // When absent, the server mints a new one and returns it via the
