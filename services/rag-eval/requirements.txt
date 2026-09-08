@@ -43,13 +43,22 @@ requests>=2.31
 # WARP-519: HTTP trigger server. FastAPI + uvicorn host the ad-hoc /run,
 # /bootstrap, and run-listing endpoints the orchestrator proxies to. The
 # scheduler (AsyncIOScheduler) and uvicorn share one asyncio event loop.
-fastapi>=0.140.7
+fastapi>=0.141.1
 uvicorn[standard]>=0.52.4
 
 # WARP-1948 — OSV floors, kept in LOCKSTEP with tests/retrieval-eval/ragas/
 # requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
 # deps at their minimum resolvable version; these state the real minimums.
-scipy>=1.10.0
+#
+# WARP-2818: this scipy floor CONSTRAINS THE BASE IMAGE. scipy 1.18.x
+# declares Requires-Python >=3.12 (1.17.x was the last line to build on
+# 3.11), so the floor is unsatisfiable on any interpreter below 3.12 and
+# `pip install -r requirements.txt` fails outright at resolution — which is
+# exactly how it failed while the Dockerfile was still on python:3.11-slim.
+# The Dockerfile is now python:3.12-slim (matching every other service) and
+# .github/workflows/rag-eval-tests.yml pins the same 3.12. Do not move any
+# of those three back below 3.12 while this floor stands.
+scipy>=1.18.1
 filelock>=3.20.3
 
 # WARP-2732 — ADR-048's extraction canary. `tests/extraction-eval/

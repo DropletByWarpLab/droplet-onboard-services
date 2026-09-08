@@ -74,6 +74,17 @@ export interface FilingProposal {
   autoApplied: boolean;
   readable: boolean;
   payload: FilingPayload | null;
+  /**
+   * WARP-2737 — the customer a money card will be filed under when its own
+   * payload does not name one: the one the `CREATE_CUSTOMER` card beside it
+   * created.
+   *
+   * 🔴 SERVER-RESOLVED, on every read, from the parent proposal's live state —
+   * never cached onto the payload, because undo takes that customer back and a
+   * cached copy would still point at them. `null` is the load-bearing value: it
+   * is what tells the card not to offer a button the box cannot honour.
+   */
+  resolvedCustomer?: { companyId: string; companyName: string } | null;
   evidence: { quote: string; chunkIdx?: number }[];
 }
 

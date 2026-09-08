@@ -154,6 +154,39 @@ export const DATASETS = [
   "audience",
   "audience_member",
   "ecommerce_order",
+  // ── WARP-2832 — the three names ADR-046's follow-up said the remaining
+  // vendor waves could not declare honestly without. Appended, never
+  // interleaved: the drift test against `DATASET_NAMES` is an ORDERED
+  // `toEqual`, and `dataset-vocabulary.test.ts` pins both the first six and
+  // the partition of everything after them.
+  //
+  // Each earned its place against the rule this file's own docstring states —
+  // two vendors share a name only when their rows are INTERCHANGEABLE, same
+  // columns, same units, same meaning — and each names a vendor that is
+  // blocked without it rather than a shape that seemed general.
+
+  // scheduling (WARP-2832). NOT `appointment`, and that is the whole point.
+  // `appointment` is WARP-1964's DENTAL shape: its columns are `patient_id`
+  // and `operatory_id`, and Cal.com's `BookingAttendee` carries no id at all
+  // while Cal.com has no room concept — `location` is free text that is
+  // variously a meeting URL, a phone number, a street address or "Cal Video".
+  // Square Appointments hits the same wall from the other side.
+  //
+  // `appointment` is deliberately UNTOUCHED rather than widened, because it is
+  // a WIRE FORMAT: operators author export-drop profile JSON on their own
+  // sites naming datasets and columns as bare strings, and Warp Lab does not
+  // hold those files. Renaming or reshaping it would be an un-migratable field
+  // change; adding a name beside it costs no operator anything.
+  "booking",
+  // people (WARP-2832) — BambooHR, Deputy.
+  "employee",
+  // projects (WARP-2832). Named `task`, NOT `issue`, deliberately. The lesson
+  // is `appointment`'s: it was named for the first wave that asked (dental)
+  // and broke on the second. Naming a work-item dataset after the four dev
+  // trackers that happen to be first would repeat that — and the columns below
+  // are all fillable by a dev tracker AND a general one, which is exactly what
+  // `patient_id` never was.
+  "task",
 ] as const;
 export type DatasetName = (typeof DATASETS)[number];
 
@@ -185,7 +218,19 @@ export type DatasetCategory =
   | "payments"
   | "commerce"
   | "crm"
-  | "marketing";
+  | "marketing"
+  // ── WARP-2832 ──
+  // Widened six → nine. Each new value exists because forcing its dataset into
+  // one of the six would have been a lie about the shape, which is the failure
+  // this union's docstring warns about one paragraph above.
+  //
+  // `scheduling` rather than folding `booking` into `practice`: `practice` is
+  // the clinical domain, and a general booking product filed there would put
+  // non-clinical rows behind a PHI-shaped label on a dashboard that groups by
+  // exactly this value.
+  | "scheduling"
+  | "people"
+  | "projects";
 
 /**
  * What a dataset is *about*.
@@ -228,6 +273,10 @@ export const DATASET_CATEGORY: Readonly<Record<DatasetName, DatasetCategory>> = 
   audience: "marketing",
   audience_member: "marketing",
   ecommerce_order: "commerce",
+  // ── WARP-2832 ──
+  booking: "scheduling",
+  employee: "people",
+  task: "projects",
 };
 
 /**
@@ -683,6 +732,83 @@ export const CANONICAL_COLUMNS: Readonly<Record<DatasetName, readonly string[]>>
     "currency",
     "processed_at",
   ],
+  // ── scheduling (WARP-2832) ────────────────────────────────────────────────
+
+  // One booked slot in a general scheduling product. Deliberately NOT
+  // `appointment`: no `patient_id`, no `operatory_id`, and a `customer_id`
+  // that means what it says. `customer_name` sits beside the id rather than
+  // instead of it because several vendors (Cal.com among them) identify an
+  // attendee by name and email and issue no id at all — a row that can name
+  // who booked is more useful than one that can only say it does not know,
+  // and putting an email in an `_id` column would silently make a contact
+  // detail a join key.
+  booking: [
+    "booking_id",
+    "starts_at",
+    "ends_at",
+    "status",
+    // The staff member the slot is with. LOSSY where a vendor allows several
+    // (Cal.com round-robin and collective event types return multiple hosts);
+    // the profile that maps it says which one it kept.
+    "staff_id",
+    "customer_id",
+    "customer_name",
+    "service_name",
+    "created_at",
+    // Cal.com's `afterUpdatedAt` is a genuine last-modified filter and this is
+    // where its value finally lands — `appointment` is one of the datasets
+    // WARP-2464 withheld `updated_at` from, so a booking synced under that
+    // name threw its own watermark away.
+    "updated_at",
+  ],
+
+  // ── people (WARP-2832) ────────────────────────────────────────────────────
+
+  // One person on the payroll. NO compensation column, and that is a decision
+  // rather than an omission: salary is the most sensitive field an HR system
+  // holds, no read query the product asks needs it, and a column that exists
+  // is a column something will eventually read. `status` carries active /
+  // terminated rather than a boolean, because "not active" and "left" are not
+  // the same fact and a vendor that distinguishes them should be able to say so.
+  employee: [
+    "employee_id",
+    "first_name",
+    "last_name",
+    "email",
+    "job_title",
+    "department",
+    "status",
+    "hired_at",
+    "manager_id",
+    // BambooHR `lastChanged`, from `GET /v1/employees/changed?since=`. A
+    // COMPLETE source: it fires on any field change, including the
+    // employment-status, job-info and compensation tables, so it sees a
+    // promotion and a termination as well as a spelling fix.
+    "updated_at",
+  ],
+
+  // ── projects (WARP-2832) ──────────────────────────────────────────────────
+
+  // One work item. `title` rather than `subject` (which `ticket` uses) because
+  // the two are NOT interchangeable and the column names should not suggest
+  // they are: a `ticket` is a customer-support conversation with a
+  // `contact_id`, a `task` is a work item with a `project_id` and an assignee.
+  // A vendor serving both serves both datasets.
+  task: [
+    "task_id",
+    "project_id",
+    "created_at",
+    "closed_at",
+    "title",
+    "status",
+    "priority",
+    "assignee_id",
+    // GitHub `updated_at` on `/issues`; GitLab `updated_after` on issues. Note
+    // ADR-046's verified finding that GitHub's `since` is ABSENT on `/pulls`
+    // and on `/orgs/{org}/repos` — which is part of why this dataset is a work
+    // item and not a pull request or a repository.
+    "updated_at",
+  ],
 };
 
 /**
@@ -740,6 +866,17 @@ export const REQUIRED_CANONICAL: Readonly<Record<DatasetName, readonly string[]>
   // Same rule as `order` minus the columns this shape does not carry: an
   // amount whose currency has to be guessed is not a number.
   ecommerce_order: ["ecommerce_order_id", "total_amount", "currency"],
+  // ── WARP-2832 ──
+  // Minimal by design, as everything above is: a required column is one
+  // without which the row means nothing, not one we would like to have.
+  // A booking with no id and no start time is not a booking.
+  booking: ["booking_id", "starts_at"],
+  // A person with no id and no surname cannot be found or referred to.
+  employee: ["employee_id", "last_name"],
+  // `status` is required rather than `title` because the only read query over
+  // this dataset filters on it — a row that cannot say what state it is in
+  // cannot answer the one question the product asks of it.
+  task: ["task_id", "status"],
 };
 
 /**
@@ -856,6 +993,29 @@ export const COLUMN_KIND: Readonly<Record<string, "text" | "money" | "count" | "
   ecommerce_order_id: "text",
   store_id: "text",
   processed_at: "timestamp",
+  // ── scheduling (WARP-2832) ──
+  booking_id: "text",
+  // `starts_at` / `ends_at`, NOT `appt_time`. Timestamps, never text — the
+  // reason `updated_at` gives above applies to every instant in this map: a
+  // string comparison orders "2026-9-1" after "2026-10-1".
+  starts_at: "timestamp",
+  ends_at: "timestamp",
+  staff_id: "text",
+  // The attendee's name as the vendor gives it. TEXT and not an identifier:
+  // it sits beside `customer_id` for vendors that issue no id, and nothing
+  // should ever join on it.
+  customer_name: "text",
+  service_name: "text",
+  // ── people (WARP-2832) ──
+  employee_id: "text",
+  job_title: "text",
+  department: "text",
+  hired_at: "timestamp",
+  manager_id: "text",
+  // ── projects (WARP-2832) ──
+  task_id: "text",
+  project_id: "text",
+  assignee_id: "text",
 };
 
 /**

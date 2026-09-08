@@ -426,11 +426,33 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
 
 export async function listProjects(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; includeArchived?: boolean; perPage?: number } = {},
+  opts: {
+    workspaceSlug?: string;
+    includeArchived?: boolean;
+    perPage?: number;
+    /**
+     * WARP-2719 — an id filters to that department AND its teams; `null`
+     * filters to projects no department owns; `undefined` applies no filter.
+     * The same three-way encoding `listWorkItems` uses.
+     *
+     * 🔴 NO INHERITANCE HERE, and `departmentWorkItemWhere` must not be used.
+     * A work item can borrow its project's department when it has none of its
+     * own; a project has nothing to borrow from. Reaching for the work-item
+     * helper would ask whether the project's own project has a department,
+     * which is not a question.
+     */
+    departmentId?: string | null;
+  } = {},
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.isArchived = false;
+  if (opts.departmentId !== undefined) {
+    where.departmentId =
+      opts.departmentId === null
+        ? null
+        : { in: await expandDepartmentScope(prisma, opts.departmentId) };
+  }
   const take =
     opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
@@ -573,7 +595,20 @@ export async function createProject(
   // ADR-045 §5.3 — refuse HOUSEHOLD and archive-intent departments, but NOT a
   // department that is merely pending / provisioning / failed: storage
   // convergence is not a precondition for owning work.
-  if (input.departmentId) await assertAssignableDepartment(prisma, input.departmentId);
+  //
+  // 🔴 WARP-2724 — `!== undefined`, not truthiness, and the reason is written
+  // out three lines below this for `companyId`: `department_id: ""` is FALSY,
+  // so a truthy check skipped the guard entirely, and `??` does not coerce ""
+  // either — so the empty string survived to `departmentId: input.departmentId
+  // ?? null` and reached Postgres as an empty FK. A raw P2003 500 on a request
+  // the API had every chance to refuse in words.
+  //
+  // The two columns had the same bug; only one of them had been found. Now
+  // `assertAssignableDepartment` sees the "" and answers `department_not_found`
+  // (→404), which is what the two UPDATE paths in this file already do.
+  if (input.departmentId !== undefined) {
+    await assertAssignableDepartment(prisma, input.departmentId);
+  }
   // ADR-048 — a project may only be filed under a customer that exists.
   // Checked here rather than left to the FK so the caller gets
   // `company_not_found` (→404) instead of a redacted P2003 500 — the exact
@@ -1019,18 +1054,46 @@ export async function getWorkItem(prisma: PrismaClient, id: string): Promise<Api
  *  `pm_search_work_items` MCP tool, which keys on workspace_slug (not project). */
 export async function searchWorkItems(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; q: string; perPage?: number },
+  opts: {
+    workspaceSlug?: string;
+    q: string;
+    perPage?: number;
+    /** WARP-2719 — same three-way encoding as `listWorkItems`, and the same
+     *  override rule: an item's own department wins, and an item with none
+     *  inherits its project's. */
+    departmentId?: string | null;
+  },
 ): Promise<ApiWorkItem[]> {
   const q = opts.q.trim();
-  if (q.length === 0) return [];
+  // 🔴 An empty `q` used to be an unconditional empty list, which was right
+  // while free text was the only filter this reader had. It is now the answer
+  // to "what is Front Desk working on?" — a question with no search term in it
+  // at all — so the short-circuit narrows to "no filter of any kind".
+  if (q.length === 0 && opts.departmentId === undefined) return [];
   const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
-  const where: Prisma.PmWorkItemWhereInput = {
-    isArchived: false,
-    OR: [
+  // 🔴 The free-text `OR` is added CONDITIONALLY, and it did not used to be:
+  // it was an unconditional member of this literal, safe only because the
+  // guard above made an empty `q` unreachable. With that guard relaxed, an
+  // unconditional member would run `contains: ""` — an `ILIKE '%%'` pair — on
+  // every department-only query.
+  const where: Prisma.PmWorkItemWhereInput = { isArchived: false };
+  if (q.length > 0) {
+    where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { descriptionHtml: { contains: q, mode: "insensitive" } },
-    ],
-  };
+    ];
+  }
+  // `where.AND`, never `where.OR` — the free-text filter above owns `OR`, and
+  // `departmentWorkItemWhere` returns a bare-`OR` fragment for exactly this
+  // reason. Writing it to `where.OR` would turn "items in Front Desk matching
+  // X" into "items in Front Desk".
+  if (opts.departmentId !== undefined) {
+    const scope =
+      opts.departmentId === null
+        ? null
+        : await expandDepartmentScope(prisma, opts.departmentId);
+    where.AND = [departmentWorkItemWhere(scope)];
+  }
   if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
   const rows = await prisma.pmWorkItem.findMany({
     where,
@@ -1107,7 +1170,26 @@ export async function createWorkItem(
   // after. Refuses HOUSEHOLD (it is the unit everyone is already in, so routing
   // to it is indistinguishable from routing nothing) and archive-intent states.
   // Does NOT refuse pending / provisioning / failed.
-  if (input.departmentId) await assertAssignableDepartment(prisma, input.departmentId);
+  // 🔴 WARP-2724 — TWO fixes, and they are separate defects that happened to
+  // sit on one line.
+  //
+  // 1. `!== undefined`, not truthiness. `department_id: ""` is FALSY, so a
+  //    truthy check skipped the guard, and `??` does not coerce "" either — so
+  //    the empty string survived to `departmentId: input.departmentId ?? null`
+  //    and reached Postgres as an empty FK: a raw P2003 500 on a request the
+  //    API could have refused in words. The same bug was on `createProject`,
+  //    three lines under a comment describing it for `companyId`.
+  //
+  // 2. The check MOVED INSIDE the transaction (below). It used to run here,
+  //    before `prisma.$transaction` opened, so a department archived in the
+  //    window between the two was checked in one world and written in another.
+  //    The window is small and the write is the thing that matters, so the
+  //    check now runs against `tx` — same connection, same snapshot, no gap.
+  //
+  // `createProject` keeps its check outside, because it has no transaction to
+  // move into: its own comment records that the identifier loop and the create
+  // are deliberately not one. Narrowing that window is a different change with
+  // a different risk, and is not smuggled in here.
 
   // Landing state: explicit → isDefault → first by sortOrder → none.
   const stateId =
@@ -1129,6 +1211,11 @@ export async function createWorkItem(
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
+      // WARP-2724 — inside the tx, against `tx`, so the department that is
+      // checked is the department the row is written against.
+      if (input.departmentId !== undefined) {
+        await assertAssignableDepartment(tx, input.departmentId);
+      }
       // Bump the per-project counter atomically → the work item's number.
       const bumped = await tx.pmProject.update({
         where: { id: projectId },

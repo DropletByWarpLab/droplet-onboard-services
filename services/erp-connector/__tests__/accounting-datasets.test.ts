@@ -160,7 +160,8 @@ describe("the dataset vocabulary", () => {
     // typo'd category, which is the thing it exists to catch.
     for (const dataset of DATASETS) {
       expect(DATASET_CATEGORY[dataset], dataset).toMatch(
-        /^(practice|accounting|payments|commerce|crm|marketing)$/,
+        // WARP-2832 widened this six → nine (scheduling, people, projects).
+        /^(practice|accounting|payments|commerce|crm|marketing|scheduling|people|projects)$/,
       );
     }
   });

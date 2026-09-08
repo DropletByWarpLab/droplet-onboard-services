@@ -162,13 +162,15 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  * the exclusion list names local tools, so an Atlassian `pm` tool matched by
  * the `pm` rule is advertised even though nine of ten local `pm_*` tools are not.
  *
- * ⚠ WARP-2580 — this paragraph named `pm` as the dead-rule example and had
- * been wrong since 2026-08-17, when `pm_create_project` landed and was not
- * added to the exclusion block beside its nine siblings. `pm` is NOT dead:
- * exactly one local tool survives in it. `chat-tool-scope.test.ts` has pinned
- * that ("the pm rule is NOT dead — WARP-2058's comment is stale") since before
- * this correction; the comment simply never followed. `notifications` is the
- * genuine dead-rule case and is what that test's `deadRules` set contains.
+ * ⚠ This paragraph has now been wrong twice, in opposite directions, and the
+ * lesson is the same both times: the answer is measured, not remembered.
+ * WARP-2580 corrected an older claim that `pm` was the dead-rule example (one
+ * local tool had survived in it). ADR-045 slice C then deleted every local
+ * `pm_*` and `crm_*` tool, so `catalog.ts` now carries `pm: []` and `crm: []`
+ * and BOTH rules are dead after all — along with `notifications`.
+ * `chat-tool-scope.test.ts` computes `deadRules` from the catalog rather than
+ * asserting a list, which is why it stayed green through both changes while
+ * this comment did not. Read the test, not this paragraph (WARP-2823).
  *
  * WARP-1921 — vocabulary widened from the original WARP-1207 cut, which was
  * written from the TOOL NAMES rather than from how people talk. The tell:
@@ -269,6 +271,60 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // catalog that registers into this domain, WARP-2316), and two rules
   // carrying the same words is two places to keep in step.
   { pattern: /\b(projects?|backlogs?|sprints?|milestones?|work items?|tickets?|issues?|kanban|epics?|tracker|scope of work|statement of work)\b/i, domains: ["pm", "business"] },
+  // WARP-2719 — DEPARTMENT vocabulary, and why `teams?` is not simply in the
+  // list above.
+  //
+  // The department filter needs the words a person uses to name a group of
+  // people. `departments?` is safe as a bare word — outside "department
+  // store" nobody says it about their house — but a bare `teams?` is NOT.
+  // Dropped into the alternation above it matched, among others, this
+  // repo's own team_chat continuity fixture:
+  //
+  //     "and post that where the team will see it"
+  //
+  // a turn that must reach Slack and nothing else. It opened `pm` and
+  // `business` on it, and the harness stayed green because that turn only
+  // ever asserted that `slack_send_message` was PRESENT — an over-match adds
+  // tools, it does not remove them, so no assertion in the file could see it.
+  // "the team is coming over for dinner" and "my football team lost again"
+  // did the same. That is the WARP-2454 `\bfree\b` mistake in a new word: the
+  // domain is admitted WHOLE, so one incidental noun buys two whole domains
+  // of schema on a turn that wanted none of them.
+  //
+  // So `team` is admitted only in a department-ish frame, and each frame is
+  // pinned by a positive in tool-selection.service.test.ts:
+  //
+  //   `which/whose team`      — the question is about the team itself
+  //   `the <name> team`, after `on`/`in` — membership in a NAMED team;
+  //                             "in the team meeting" has no name and is out
+  //   `team('s) <work noun>`  — the team as an owner of work
+  //
+  // Everything else about a team's work already has a rule: "what is Front
+  // Desk working on?" and "what is assigned to the Clinical team right now?"
+  // — the ticket's own two acceptance sentences — are carried by the
+  // `work(ing|ed) on` / `assigned to` rule below, NOT by this one. Narrowing
+  // here costs the ticket nothing.
+  { pattern: /\bdepartments?\b(?!\s+stores?)|\b(which|whose)\s+teams?\b|\bteams?('|’)?s?\s+(workloads?|capacity|roster|members?|backlogs?|boards?|sprints?|queue|work)\b|\b(on|in)\s+the\s+[a-z][\w-]*(\s+[a-z][\w-]*)?\s+teams?\b/i, domains: ["pm", "business"] },
+  // WARP-2719 — the question the department filter exists to answer, and the
+  // one the vocabulary above does NOT match.
+  //
+  // "What is Front Desk working on?" contains no project, no ticket, no work
+  // item and no department — `working` is not `work items?`, and the name of
+  // the department is a proper noun no rule can enumerate. With no match,
+  // `selectAdvertisedTools` falls back to core-only and `business_find` is
+  // never advertised, so shipping the filter without this line would be a
+  // filter reachable only by a model that had already used the domain for some
+  // other reason. Fourth instance of the WARP-2058 / WARP-2454 / WARP-2546
+  // class, and the one the ticket's own acceptance sentence sits on.
+  //
+  // Deliberately narrow, and its false positives are named rather than
+  // discovered: "what am I working on", "who is working on the kitchen" and
+  // "what is Sam working on" all advertise the project tools, which is what a
+  // person asking any of them wants. `assigned to` is the same question asked
+  // the other way round. What it must NOT catch is the household sense — "the
+  // dishwasher is not working" has no `on` after it — and the negatives in
+  // tool-selection.service.test.ts pin that.
+  { pattern: /\b(work(ing|ed) on|workloads?|assigned to)\b/i, domains: ["pm", "business"] },
   // WARP-2454 — `repl(y|ies|ied|ying)`, never `replied?`. The original was
   // "replie" plus an OPTIONAL "d": it matched `replied` and the non-word
   // `replie`, and missed `reply` and `replies` entirely — so "did the
@@ -308,12 +364,14 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // reaches one place, and keeping two rules would mean two places to add a
   // word and one of them silently not mattering.
   //
-  // `domains` is still BOTH. `crm` is not vestigial: `crm_log_activity` is in
-  // the chat pool and `crm_move_deal_stage` is registered, and
-  // `chat-tool-scope.test.ts` fails when a domain with in-scope tools has no
-  // rule that can advertise them. Dropping `crm` here would recreate exactly
-  // the WARP-2058 / WARP-2454 / WARP-2546 defect this rule was written to end.
-  // ADR-045 slice D is what retires the `crm` half.
+  // `domains` is still BOTH, and the reason has changed. This used to say
+  // `crm` is "not vestigial: `crm_log_activity` is in the chat pool and
+  // `crm_move_deal_stage` is registered" — true until slice D, which deleted
+  // both. `catalog.ts` now carries `crm: []`, so the rule advertises no LOCAL
+  // tool at all. It is kept because a domain is also the unit a REMOTE tool
+  // registers into (`extraDomains`, `runtimeTools`): dropping the word would
+  // make a future connector's CRM tools unreachable by the only vocabulary a
+  // person would use for them. Measured, not remembered — WARP-2823.
   //
   // WARP-2552 — `customers` claimed both domains on purpose, and still does.
   // The word is the natural way to ask either "what does Droplet know about my
@@ -414,7 +472,18 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // served the `bill` dataset — so "what do we owe?" selected this reader and
   // met an enum with no way to ask. The Xero track serves it, and the enum
   // now carries it; the words did not change, the answer did.
-  { pattern: /\b(stripe|hubspot|mailchimp|shopify|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?)\b/i, domains: ["cloud"] },
+  // WARP-2832 added the scheduling, people and projects words alongside the
+  // `booking`, `employee` and `task` datasets — in the SAME commit, because
+  // WARP-2383's lesson is that neither half is any use alone: words claimed
+  // here with nothing behind them select this reader and then meet an enum
+  // that cannot answer, and datasets added to the enum with no words here are
+  // never advertised on the turns that want them.
+  //
+  // Bare `appointment` and bare `ticket` are deliberately NOT claimed. The
+  // first belongs to the practice track's own tools and the second is already
+  // the support-ticket vocabulary; taking either would drag the cloud reader
+  // into questions another tool answers better.
+  { pattern: /\b(stripe|hubspot|mailchimp|shopify|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.

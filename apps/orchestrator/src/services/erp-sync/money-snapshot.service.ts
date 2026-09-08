@@ -63,6 +63,21 @@ const DEFAULT_TRIM_MAX_ROWS = 100_000;
 export const MONEY_SNAPSHOT_RETENTION_CRON = "45 3 * * *";
 export const MONEY_SNAPSHOT_RETENTION_LOCK_KEY = "droplet:money-snapshot-retention";
 
+/**
+ * How many days of DAILY rows the downsample keeps, by default.
+ *
+ * 🔴 THE ONE PLACE THIS NUMBER LIVES. `config.ts` takes it as the zod default
+ * for `DROPLET_MONEY_SNAPSHOT_DAILY_DAYS`, and any READER that has to sit
+ * inside the daily-grain window imports it from here — `receivables-ageing.ts`
+ * being the first. The alternative is what was there before: a `90` in the
+ * config schema, a `90` in a detector's comment, and a `90` typed into that
+ * detector's guard test, which compared one literal against another and so
+ * could not fail. Beyond this horizon the tail survives only as one row per
+ * month, so a reader that assumes daily grain past it is reading a series that
+ * is no longer daily.
+ */
+export const MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT = 90;
+
 /** The raw seam. Narrow on purpose — it is also the mock's shape. */
 export interface MoneySnapshotPrisma {
   $executeRaw(query: TemplateStringsArray, ...values: unknown[]): Promise<number>;

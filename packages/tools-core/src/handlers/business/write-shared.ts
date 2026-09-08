@@ -127,17 +127,83 @@ export { businessError } from "./_graph.js";
  */
 export type LinkStatus = "live" | "not_built";
 
-export interface LinkEdge {
+/**
+ * How a LIVE edge is actually written.
+ *
+ * 🔴 WARP-2757 item 1 — this used to be a bare ternary in `link.ts`:
+ *
+ *     const body = edge.to === "project" ? { projectId: toId } : { companyId: toId };
+ *
+ * It was correct only by coincidence. Both live edges happen to be columns on
+ * the DEAL, so "not project" could stand in for "customer" and the PATCH
+ * endpoint could be hard-coded to `/api/crm/deals/`. The moment a live edge
+ * starts anywhere else — `project → customer` is next, and
+ * `PmProject.companyId` already exists — that ternary PATCHes `{companyId}` to
+ * `/api/crm/deals/<a project id>`: wrong endpoint, wrong record, and a 404 the
+ * caller would read as "no such deal".
+ *
+ * The failure needed an author to update this table and its tests and NOT the
+ * ternary thirty lines away in another file, which is the ordinary way that
+ * change gets made. So the dispatch moved onto the row: a `live` edge carries
+ * its own write, the type makes one without a write impossible to declare, and
+ * `link.ts` no longer knows the word "deal".
+ */
+export interface LinkWrite {
+  /**
+   * Which entity OWNS the column — the record the PATCH is addressed to, and
+   * the key `link.ts` looks its ROUTE up under.
+   *
+   * The route literal deliberately stays in the handler: `tool-routes.test.ts`
+   * reads declared hops out of the handler SOURCE, and a URL that moved into
+   * this file would be invisible to it — the manifest would then claim a hop
+   * nothing could be shown to make. So the row owns the CHOICE and the handler
+   * owns the literals, and adding a subject fails in two places at once:
+   * `link.ts` has no route for it, and the manifest has no entry.
+   */
+  subject: string;
+  /** The PATCH body that sets the edge to `targetId`. */
+  body: (targetId: string) => Record<string, string>;
+  /** Read the subject's id and display name back out of the response. */
+  readBack: (json: unknown) => { id: string; name: string };
+}
+
+interface LinkEdgeBase {
   /** Entity the edge starts at. */
   from: string;
   /** Entity it points to. */
   to: string;
   /** The edge's own name, so one pair can carry several relationships. */
   kind: string;
-  status: LinkStatus;
-  /** `not_built` only — what has to exist first. Rendered to the caller. */
-  blockedBy?: string;
 }
+
+/**
+ * A discriminated union, not one shape with two optional fields.
+ *
+ * `status: "live"` REQUIRES `write`, so an edge flipped live without a
+ * dispatch is a compile error at the table rather than a wrong PATCH at
+ * runtime — which is the strongest version of the guard the ticket asked for.
+ * `LIVE_EDGES_CARRY_A_WRITE` below is the same check for callers who reach
+ * this table from JavaScript.
+ */
+export type LinkEdge =
+  | (LinkEdgeBase & { status: "live"; write: LinkWrite; blockedBy?: never })
+  | (LinkEdgeBase & { status: "not_built"; blockedBy: string; write?: never });
+
+/** Shape of `PATCH /api/crm/deals/:id`'s response, as this file reads it. */
+interface DealPatchResponse {
+  deal: { id: string; title: string };
+}
+
+/** Both live edges today are columns on the DEAL, and each one says so for
+ *  itself rather than letting the handler assume it of all of them. */
+const dealWrite = (column: "projectId" | "companyId"): LinkWrite => ({
+  subject: "deal",
+  body: (targetId) => ({ [column]: targetId }),
+  readBack: (json) => {
+    const d = (json as DealPatchResponse).deal;
+    return { id: d.id, name: d.title };
+  },
+});
 
 /**
  * Every edge ADR-045 intends, with the truth about each one on `stage`.
@@ -179,30 +245,44 @@ export interface LinkEdge {
  */
 export const LINK_EDGES: readonly LinkEdge[] = [
   // ── live on `stage` ──
-  { from: "deal", to: "project", kind: "delivers", status: "live" },
-  { from: "deal", to: "customer", kind: "belongs_to", status: "live" },
+  // `CrmDeal.projectId` and `CrmDeal.companyId` are both SetNull precisely so
+  // losing the project or the account leaves the commercial record intact.
+  { from: "deal", to: "project", kind: "delivers", status: "live", write: dealWrite("projectId") },
+  { from: "deal", to: "customer", kind: "belongs_to", status: "live", write: dealWrite("companyId") },
 
-  // ── real edges with no table behind them yet ──
+  // ── real edges whose SUBSTRATE now exists, and whose write tool does not ──
+  //
+  // 🔴 All three of these said "not built yet" and had stopped being true.
+  // `PmWorkItemRelation` landed with WARP-2586 (schema.prisma, plus
+  // pm-relations.service.ts and routes/pm/relations.ts), and `PmWorkItem`
+  // gained `departmentId` with WARP-2717. A table that reads "blocked on a
+  // table that already exists" is worse than no note: it tells the next reader
+  // the expensive half is missing when what is actually missing is the cheap
+  // half, and that is the wrong estimate to act on.
+  //
+  // They stay `not_built` because `business_link` genuinely cannot write them
+  // yet — the reason is now the WRITE, not the substrate, and the text says so.
   {
     from: "task",
     to: "task",
     kind: "blocks",
     status: "not_built",
-    blockedBy: "the work-item relation table is not built yet",
+    blockedBy: "PmWorkItemRelation exists (WARP-2586); business_link has no writer for it yet",
   },
   {
     from: "task",
     to: "task",
     kind: "relates_to",
     status: "not_built",
-    blockedBy: "the work-item relation table is not built yet",
+    blockedBy: "PmWorkItemRelation exists (WARP-2586); business_link has no writer for it yet",
   },
   {
     from: "task",
     to: "department",
     kind: "owned_by",
     status: "not_built",
-    blockedBy: "work items carry no department column yet",
+    blockedBy:
+      "the column exists (WARP-2717) and business_find can FILTER on it (WARP-2719); assigning one still needs a writer",
   },
 
   // ── real edges whose column or table EXISTS, and whose write route admits
@@ -243,6 +323,26 @@ export const LINK_EDGES: readonly LinkEdge[] = [
     blockedBy: "the contact-link route does not admit the assistant yet",
   },
 ];
+
+/**
+ * The same invariant the type enforces, checked at load for callers who reach
+ * this table from JavaScript — the tools are consumed as compiled `dist`, and
+ * `tsc` has no say over what a JS caller constructs.
+ *
+ * A throw at import is deliberate and is the cheap end of the trade: the
+ * process refuses to start with a mis-declared edge, rather than serving one
+ * wrong PATCH per call for as long as nobody notices.
+ */
+export const LIVE_EDGES_CARRY_A_WRITE = ((): true => {
+  const bad = LINK_EDGES.filter((e) => e.status === "live" && !e.write);
+  if (bad.length > 0) {
+    throw new Error(
+      `LINK_EDGES: live edge(s) with no write dispatch: ` +
+        bad.map((e) => `${e.from}->${e.to} (${e.kind})`).join(", "),
+    );
+  }
+  return true;
+})();
 
 export function resolveEdge(
   from: unknown,

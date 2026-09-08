@@ -122,6 +122,22 @@ const ADDED_BY_WARP_2466: readonly DatasetName[] = [
   "ecommerce_order",
 ];
 
+/**
+ * WARP-2832 — the three names the ADR-046 vendor programme was gated on.
+ *
+ * Its own const, following this file's rule that each records what shipped on
+ * ONE ticket: folding them into an older list would turn a regression anchor
+ * into a running total.
+ *
+ * `booking` is the load-bearing one. It is added BESIDE `appointment`, never
+ * instead of it — `appointment` is WARP-1964's dental shape AND a wire format
+ * operators name in their own on-site profile JSON, so renaming it would be an
+ * un-migratable field change. Cal.com and Square Appointments both have no
+ * honest source for its `patient_id` / `operatory_id`, which is what made the
+ * widening necessary rather than merely tidy.
+ */
+const ADDED_BY_WARP_2832: readonly DatasetName[] = ["booking", "employee", "task"];
+
 describe("the widening is additive — the original six are untouched", () => {
   it("keeps every original name, its category and its pinned columns intact", () => {
     // Mutation: reorder CANONICAL_COLUMNS.invoice, rename one of its columns,
@@ -166,7 +182,7 @@ describe("the widening is additive — the original six are untouched", () => {
     ]);
   });
 
-  it("adds exactly fourteen names, then WARP-2466's three, and nothing else", () => {
+  it("adds fourteen names, then WARP-2466's three, then WARP-2832's three, and nothing else", () => {
     // Mutation: add a dataset without deciding its category and columns → red
     // here before it is red anywhere subtler.
     //
@@ -175,10 +191,15 @@ describe("the widening is additive — the original six are untouched", () => {
     // with an existing name — `engagement` sits with the CRM names it belongs
     // to and the two marketing ones sit at the end. Per-name evidence: the
     // table in `profiles.ts`'s docstring.
-    expect(DATASETS).toHaveLength(23);
+    expect(DATASETS).toHaveLength(26);
     const added = DATASETS.slice(6);
-    expect(added.filter((d) => !ADDED_BY_WARP_2466.includes(d))).toEqual(ADDED_BY_WARP_2280);
+    const laterWaves = [...ADDED_BY_WARP_2466, ...ADDED_BY_WARP_2832];
+    expect(added.filter((d) => !laterWaves.includes(d))).toEqual(ADDED_BY_WARP_2280);
     expect(added.filter((d) => ADDED_BY_WARP_2466.includes(d))).toEqual(ADDED_BY_WARP_2466);
+    // WARP-2832's three sit LAST and in declaration order, so the partition
+    // above stays a partition rather than becoming a running total.
+    expect(added.filter((d) => ADDED_BY_WARP_2832.includes(d))).toEqual(ADDED_BY_WARP_2832);
+    expect(DATASETS.slice(-3)).toEqual(ADDED_BY_WARP_2832);
   });
 });
 
@@ -189,12 +210,26 @@ describe("the widened vocabulary is internally consistent", () => {
     // Mutation: revert DatasetCategory to "practice" | "accounting" → tsc goes
     // red first, but if the union were loosened to `string` this catches the
     // typo that follows.
-    const allowed = ["practice", "accounting", "payments", "commerce", "crm", "marketing"];
+    // WARP-2832 widened this six → nine. `scheduling` rather than folding
+    // `booking` into `practice`: `practice` is the CLINICAL domain, and a
+    // general booking product filed there would put non-clinical rows behind a
+    // PHI-shaped label on a dashboard that groups by exactly this value.
+    const allowed = [
+      "practice",
+      "accounting",
+      "payments",
+      "commerce",
+      "crm",
+      "marketing",
+      "scheduling",
+      "people",
+      "projects",
+    ];
     for (const dataset of DATASETS) {
       expect(allowed, dataset).toContain(DATASET_CATEGORY[dataset]);
     }
-    // All six category values are actually USED. A category nothing is filed
-    // under is a value union that grew for no reason.
+    // Every category value is actually USED. A category nothing is filed under
+    // is a value union that grew for no reason.
     expect([...new Set(DATASETS.map((d) => DATASET_CATEGORY[d]))].sort()).toEqual(
       [...allowed].sort(),
     );

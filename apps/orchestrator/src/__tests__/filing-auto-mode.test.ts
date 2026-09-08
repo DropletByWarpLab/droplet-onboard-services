@@ -36,7 +36,7 @@ import {
   classify,
 } from "../services/filing/policy.js";
 import { capReachedFor, readCaps, reconsiderBounded } from "../services/filing/caps.js";
-import { preflight } from "../services/filing/auto-apply.js";
+import { preflight, runAutoApply } from "../services/filing/auto-apply.js";
 import { runFilingReconcile } from "../services/filing/reconcile.js";
 import { buildDrafts } from "../services/filing/propose.js";
 import {
@@ -220,9 +220,25 @@ describe("🔴 NEVER means never, including for a human", () => {
     }
   });
 
-  it("money documents are NEVER in every mode", () => {
+  /**
+   * 🔴 WARP-2737 changed this assertion from NEVER to REVIEW, and the change is
+   * a narrowing of the guarantee, not a loosening of it.
+   *
+   * NEVER was right while `ErpDocument` was landed-only: there was no row shape
+   * a local invoice could take, so offering an Apply button would have been a
+   * lie. WARP-2739 widened the table, so a PERSON can now file one.
+   *
+   * What did not change — and what this test is really pinning — is that only a
+   * person ever can. The assertion below is deliberately `not.toBe("AUTO")`
+   * rather than `toBe("REVIEW")`, because the invariant worth defending is the
+   * absence of the automatic path, and a future third class must not slip
+   * through an equality check written for two.
+   */
+  it("money documents are never AUTO, in any mode", () => {
     for (const mode of MODES) {
-      expect(classify(best({ kind: "CREATE_MONEY_DOC", mode })).policyClass).toBe("NEVER");
+      const v = classify(best({ kind: "CREATE_MONEY_DOC", mode }));
+      expect(v.policyClass, mode).not.toBe("AUTO");
+      expect(v.policyClass, mode).toBe("REVIEW");
     }
   });
 });
@@ -745,5 +761,116 @@ describe("🔴 the reconcile sweep frees capped work with no model at all", () =
     const result = await runFilingReconcile(prisma);
     expect(result.freed).toBe(0);
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 🔴 A REFUSAL THIS LOOP DOES NOT RECOGNISE TAKES THE WHOLE TICK WITH IT.
+ *
+ * `runAutoApply`'s catch re-throws anything `isExpected` does not list. That is
+ * the right default — an unrecognised failure must not be swallowed — but it
+ * means an OMISSION from that list does not fail where the omission is. It
+ * aborts the tick, abandons every proposal queued behind the offending one, and
+ * leaves the box with unattended filing quietly stopped until somebody reads a
+ * stack trace.
+ *
+ * `MONEY_MODULE_OFF` and `CUSTOMER_REQUIRED` are money refusals, and money is
+ * REVIEW in every cell of the policy table, so neither is reachable today. They
+ * are listed anyway, and pinned here anyway, because "unreachable" is a
+ * property of a table somebody could widen — and the day they widen it is
+ * exactly the day nobody is looking at this loop.
+ */
+describe("🔴 an unrecognised refusal would abandon the rest of the tick", () => {
+  const SETTINGS = {
+    mode: "auto" as const,
+    level: "also_create" as const,
+    vertical: "general" as const,
+    enabledById: "u-owner",
+    enabledAt: new Date("2026-09-05T08:00:00.000Z"),
+    folders: [],
+    pathDenylist: [],
+    hourlyApplyCap: 50,
+    dailyCreateCap: 10,
+    digestHour: 8,
+  };
+
+  /** Two AUTO money proposals: the first refused for the module, the second for
+   *  having no customer. Both are the codes under test, and the second only
+   *  runs at all if the first was walked past rather than thrown. */
+  const harness = (moneyEnabled: boolean) => {
+    const rows = [
+      { id: "p-money-1", kind: "CREATE_MONEY_DOC" },
+      { id: "p-money-2", kind: "CREATE_MONEY_DOC" },
+    ];
+    const erpCreate = vi.fn(async () => {
+      throw new Error("REACHED_CREATE");
+    });
+    const prisma = {
+      moduleSetting: {
+        findUnique: vi.fn(async (args: { where: { moduleId: string } }) =>
+          args.where.moduleId === "crm"
+            ? { moduleId: "crm", enabled: true }
+            : { moduleId: "money", enabled: moneyEnabled },
+        ),
+      },
+      ingestProposal: {
+        count: vi.fn(async () => 0),
+        findMany: vi.fn(async (args: { where: Record<string, unknown> }) =>
+          args.where.policyClass === "AUTO" && args.where.status === "PENDING" ? rows : [],
+        ),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        update: vi.fn(async () => ({})),
+        findUnique: vi.fn(async (args: { where: { id: string } }) => ({
+          id: args.where.id,
+          status: "PENDING",
+          policyClass: "AUTO",
+          kind: "CREATE_MONEY_DOC",
+          confidence: 99,
+          dependsOnProposalId: null,
+          payload: {
+            kind: "INVOICE",
+            currency: "USD",
+            total: "4250.00",
+            direction: "RECEIVABLE",
+          },
+        })),
+      },
+      crmCompany: { findUnique: vi.fn(async () => null) },
+      erpDocument: { create: erpCreate },
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    };
+    return { prisma, erpCreate };
+  };
+
+  it("🔴 MUTATION: walks past a Money-module refusal and keeps going", async () => {
+    const { prisma, erpCreate } = harness(false);
+    const result = await runAutoApply(prisma as never, SETTINGS, {
+      resolveFileId: async () => null,
+    });
+    // Not a throw, and not a tick that stopped at the first card.
+    expect(result).toEqual({ applied: 0, refused: 2, freed: 0 });
+    expect(erpCreate).not.toHaveBeenCalled();
+  });
+
+  it("🔴 MUTATION: walks past a money document with no customer too", async () => {
+    // Module ON this time, so the refusal can only be the customer one.
+    const { prisma, erpCreate } = harness(true);
+    const result = await runAutoApply(prisma as never, SETTINGS, {
+      resolveFileId: async () => null,
+    });
+    expect(result).toEqual({ applied: 0, refused: 2, freed: 0 });
+    expect(erpCreate).not.toHaveBeenCalled();
+  });
+
+  it("VACUITY: a refusal nobody listed still stops the tick", async () => {
+    // The default has to stay fail-loud, or the two tests above would pass just
+    // as well against a catch that swallowed everything.
+    const { prisma } = harness(true);
+    prisma.ingestProposal.updateMany = vi.fn(async () => {
+      throw new Error("something nobody has thought about");
+    }) as never;
+    await expect(
+      runAutoApply(prisma as never, SETTINGS, { resolveFileId: async () => null }),
+    ).rejects.toThrow("something nobody has thought about");
   });
 });

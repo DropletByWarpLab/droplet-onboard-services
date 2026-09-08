@@ -20,6 +20,7 @@ import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
 import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
+import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
 
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
@@ -84,7 +85,11 @@ const projectCreateSchema = z.object({
   icon: z.string().max(64).optional(),
   color: z.string().max(32).optional(),
   // ADR-045 §5.3 — the department that owns this project's work.
-  department_id: z.string().max(64).optional(),
+  // WARP-2724 — `.min(1)`: an empty string is a 400 here rather than a
+    // falsy value the service has to notice. The comment in `pm.service.ts`
+    // claiming "the zod schemas reject '' at the boundary" was true of
+    // `company_id` and not of this one.
+    department_id: z.string().min(1).max(64).optional(),
   // ADR-048 (WARP-2729) — the customer this project is FOR. The column has
   // existed since WARP-2562 with no writer on any path; this is the first.
   // `.min(1)`: an empty string is not a customer id. Without it, "" skipped the
@@ -99,7 +104,9 @@ const projectPatchSchema = z.object({
   color: z.string().max(32).nullable().optional(),
   leadId: z.string().max(64).nullable().optional(),
   // ADR-045 §5.3 — `null` clears the department; omitting it leaves it alone.
-  department_id: z.string().max(64).nullable().optional(),
+  // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
+    // assignment. "" was neither: it skipped the guard and disconnected.
+    department_id: z.string().min(1).max(64).nullable().optional(),
   // ADR-048 — `null` clears the customer; omitting it leaves it alone.
   // `null` clears; "" is a malformed id, not a clear — see the create schema.
   company_id: z.string().min(1).max(64).nullable().optional(),
@@ -139,7 +146,11 @@ const workItemCreateSchema = z.object({
   label_ids: z.array(z.string().max(64)).max(50).optional(),
   parent_id: z.string().max(64).optional(),
   // ADR-045 §5.3 — overrides the project's department for this item.
-  department_id: z.string().max(64).optional(),
+  // WARP-2724 — `.min(1)`: an empty string is a 400 here rather than a
+    // falsy value the service has to notice. The comment in `pm.service.ts`
+    // claiming "the zod schemas reject '' at the boundary" was true of
+    // `company_id` and not of this one.
+    department_id: z.string().min(1).max(64).optional(),
   start_date: z.string().datetime().optional(),
   due_date: z.string().datetime().optional(),
 });
@@ -154,7 +165,9 @@ const workItemPatchSchema = z.object({
   parent_id: z.string().max(64).nullable().optional(),
   // ADR-045 §5.3 — `null` clears the OVERRIDE, so the item inherits its
   // project's department again (which may itself be none).
-  department_id: z.string().max(64).nullable().optional(),
+  // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
+    // assignment. "" was neither: it skipped the guard and disconnected.
+    department_id: z.string().min(1).max(64).nullable().optional(),
   start_date: z.string().datetime().nullable().optional(),
   due_date: z.string().datetime().nullable().optional(),
   // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
@@ -222,9 +235,23 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
         perPage,
+        // WARP-2719 — `?department=` takes an id, a slug or a NAME, and
+        // `none` for "owned by nobody". Resolved here rather than left to the
+        // caller because the assistant cannot look a name up: the department
+        // listing scopes itself to the caller's own memberships, and the
+        // service principal holds none.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          req.query.department === undefined ? undefined : String(req.query.department),
+        ),
       });
       res.json({ projects });
     } catch (err) {
+      // WARP-2719 — was a bare `next(err)`. An unknown department throws
+      // `department_not_found` here, and without this it reaches the model as
+      // a 500 (`BUSINESS_API_ERROR`) instead of the 404 that says which half
+      // of the request was wrong.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });
@@ -405,16 +432,19 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
               : undefined)
           : undefined,
         parentId: parentRaw === undefined ? undefined : parentRaw === "none" ? null : String(parentRaw),
-        // ADR-045 §5.3 — `?department=<id>` matches that department AND its
-        // teams; `?department=none` matches work no department owns. The
-        // `none` sentinel mirrors `?parent=none` directly above so the API has
-        // ONE way to say "explicitly nothing".
-        departmentId:
-          q.department === undefined
-            ? undefined
-            : q.department === "none"
-              ? null
-              : String(q.department),
+        // WARP-2717 — `?department=` matches that department AND its teams;
+        // `?department=none` matches work no department owns. The `none`
+        // sentinel mirrors `?parent=none` directly above so the API has ONE
+        // way to say "explicitly nothing".
+        //
+        // WARP-2719 widened it from an id to an id-or-slug-or-name and moved
+        // the three-way decoding into `resolveDepartmentFilter`, so all three
+        // readers answer the same word the same way — and an unknown one is a
+        // 404 rather than an empty board.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          q.department === undefined ? undefined : String(q.department),
+        ),
         q: q.q ? String(q.q) : undefined,
         perPage: pageParsed.data.per_page,
         page: pageParsed.data.page,
@@ -462,9 +492,20 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         q: req.query.q ? String(req.query.q) : "",
         perPage: req.query.per_page ? Number(req.query.per_page) : undefined,
+        // WARP-2719 — this reader is the one that answers "what is Front Desk
+        // working on?", a question carrying no search term, so an empty `q`
+        // alongside a department is now a real query rather than an empty list.
+        departmentId: await resolveDepartmentFilter(
+          prisma,
+          req.query.department === undefined
+            ? undefined
+            : String(req.query.department),
+        ),
       });
       res.json({ work_items });
     } catch (err) {
+      // WARP-2719 — see GET /pm/projects. Was a bare `next(err)`.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });

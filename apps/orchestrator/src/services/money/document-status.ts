@@ -149,6 +149,19 @@ export interface MoveResult {
  * Every refusal is a named error rather than a silent no-op: a caller that
  * asked for PAID and got back a document that is still SENT would show the
  * owner a success and an unchanged row.
+ *
+ * ⚠ THIS HAS NO CALLER YET, AND THAT IS TRACKED RATHER THAN ACCIDENTAL —
+ * WARP-2778. `createLocalDocument` below mints every filed document DRAFT and
+ * nothing on the box can move it: the money surface is two GET routes. What is
+ * missing is not a route, it is an access decision — `access-catalog.ts` says
+ * Money is READ-ONLY, "there is no `act` level: there is no action", and
+ * `FEATURE_GATED_MODULES` mounts only a view gate at the money prefix, so a
+ * PATCH here would be a write endpoint on a module whose access model says
+ * writes do not exist.
+ *
+ * Until that lands, an un-sent local DRAFT is excluded from the money
+ * aggregates (`money.service.ts`'s `OPEN`), so a filed invoice cannot inflate
+ * what an owner is told they are owed while they have no way to settle it.
  */
 export async function moveDocumentStatus(
   prisma: PrismaClient,
@@ -185,6 +198,121 @@ export async function moveDocumentStatus(
     await writeTimelineEntry(tx, doc.companyId, doc.kind, from, to, actorId);
     return { id: documentId, from, to };
   });
+}
+
+/**
+ * Mint a LOCAL document — the box's own invoice, quote or credit note.
+ *
+ * ── Why the creator lives HERE and not at the call site ────────────────────
+ *
+ * 🔴 Two rules this repo already had collide head-on, and this function is
+ * where they are reconciled rather than argued with.
+ *
+ *   - `ErpDocument_provenance` REQUIRES `status IS NOT NULL` on a LOCAL row.
+ *     A local document without a lifecycle is unrepresentable.
+ *   - `money-status-single-writer.guard.test.ts` fails ANY Prisma write
+ *     against `erpDocument` whose `data` mentions `status`, outside this file.
+ *
+ * So a `CREATE_MONEY_DOC` apply branch physically cannot write the row itself.
+ * That is not an obstacle the guard failed to anticipate — it is the guard
+ * working: the file that owns the lifecycle owns the moment the lifecycle
+ * BEGINS, and every document on this box starts in exactly one state.
+ *
+ * ── Takes a transaction client, deliberately ───────────────────────────────
+ *
+ * `applyProposal` already runs its writes and its back-pointer update in one
+ * transaction. A creator that opened its own would commit an invoice that a
+ * later rollback could not take back, and the proposal would then point at a
+ * document nobody agreed to.
+ */
+export interface LocalDocumentInput {
+  kind: ErpDocumentKind;
+  /** 🔴 REQUIRED. See `NEEDS_PARTY` below. */
+  companyId: string;
+  /** The number the DOCUMENT carries, as printed on it. Never `externalId` —
+   *  that column is the vendor's and is NULL on every local row by CHECK. */
+  documentNumber?: string | null;
+  currency: string;
+  /** 🔴 DECIMAL STRINGS. Never a JS number: `Number()` rounds above 2^53 and
+   *  the column is NUMERIC(20,6), so a rounded figure is a wrong invoice
+   *  rather than an error anybody notices. Passed straight through to Prisma,
+   *  which accepts a string for a Decimal field. */
+  total: string;
+  balance?: string | null;
+  issuedAt?: Date | null;
+  dueAt?: Date | null;
+  counterpartyName?: string | null;
+}
+
+export async function createLocalDocument(
+  tx: Prisma.TransactionClient,
+  input: LocalDocumentInput,
+): Promise<{ id: string; status: ErpDocumentStatus }> {
+  // 🔴 The first caller `DOCUMENT_ERRORS.NEEDS_PARTY` has ever had, and the
+  // reason it was declared before anything could throw it.
+  //
+  // The provenance CHECK deliberately does NOT carry `companyId IS NOT NULL`
+  // on its LOCAL arm — under an `onDelete: SetNull` FK that constraint would
+  // fire inside the statement that nulls it and make the customer
+  // un-deletable. So the invariant has to be enforced by the only code that
+  // creates these rows, which is this function.
+  if (!input.companyId) throw new Error(DOCUMENT_ERRORS.NEEDS_PARTY);
+
+  const doc = await tx.erpDocument.create({
+    data: {
+      origin: "LOCAL",
+      kind: input.kind,
+      // Every document starts as a DRAFT. Uniform across kinds so a caller
+      // cannot mint one straight into a state that skips the transition with
+      // the side effect.
+      status: INITIAL_STATUS,
+      companyId: input.companyId,
+      documentNumber: input.documentNumber ?? null,
+      currency: input.currency,
+      amount: input.total,
+      balance: input.balance ?? input.total,
+      issuedAt: input.issuedAt ?? null,
+      dueAt: input.dueAt ?? null,
+      counterpartyName: input.counterpartyName ?? null,
+      // 🔴 Stated, not defaulted. All four are NULL by the CHECK's LOCAL arm,
+      // and writing them out is what makes a reader of this function able to
+      // see that a local row borrows nothing from a vendor.
+      connectionId: null,
+      externalSystem: null,
+      externalId: null,
+      vendorStatus: null,
+    },
+    select: { id: true, status: true },
+  });
+
+  return { id: doc.id, status: doc.status ?? INITIAL_STATUS };
+}
+
+/**
+ * Delete a LOCAL document that is still a draft.
+ *
+ * The reverse of `createLocalDocument`, and the only deletion this file
+ * permits. Bounded to DRAFT on purpose: once a document has been SENT it has
+ * left the building — somebody has it — and once it is PART_PAID money has
+ * moved against it. Neither can be undone by removing the row, and a delete
+ * that silently succeeded on those would destroy the record of both.
+ *
+ * ⚠ `ErpDocument` has no `isArchived`, so the delete-vs-archive rule the CRM
+ * undo path follows has only one branch available here. That is stated rather
+ * than worked around: an archive column for money documents is a decision
+ * about how a business's books read, not a detail to add in a filing slice.
+ */
+export async function deleteDraftDocument(
+  tx: Prisma.TransactionClient,
+  documentId: string,
+): Promise<boolean> {
+  const removed = await tx.erpDocument.deleteMany({
+    // Guarded on BOTH origin and status. A landed row is the vendor's and a
+    // sent one is somebody else's; neither is ours to remove, and a bare
+    // delete-by-id would take either.
+    where: { id: documentId, origin: "LOCAL", status: INITIAL_STATUS },
+  });
+  return removed.count === 1;
 }
 
 /**

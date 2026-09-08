@@ -356,6 +356,64 @@ CREATE TABLE dba.ecommerce_order (
   processed_at       timestamp
 );
 
+-- ── WARP-2832 — scheduling, people, projects ────────────────────────────────
+
+-- A booked slot in a GENERAL scheduling product. Deliberately not
+-- `dba.appointment`: no patient, no operatory, and a `customer_id` that means
+-- what it says. `customer_name` sits beside the id because several vendors
+-- (Cal.com among them) identify an attendee by name and email and issue no id
+-- at all — putting the email in an `_id` column would make a contact detail a
+-- join key.
+CREATE TABLE dba.booking (
+  booking_id    varchar(64) PRIMARY KEY,
+  starts_at     timestamp,
+  ends_at       timestamp,
+  status        varchar(30),
+  staff_id      varchar(64),
+  customer_id   varchar(64),
+  customer_name varchar(200),
+  service_name  varchar(200),
+  created_at    timestamp,
+  updated_at    timestamp
+);
+
+-- One person on the payroll. NO compensation column, and that is a decision:
+-- salary is the most sensitive field an HR system holds, no read query the
+-- product asks needs it, and a column that exists is one something eventually
+-- reads.
+CREATE TABLE dba.employee (
+  employee_id varchar(64) PRIMARY KEY,
+  first_name  varchar(100),
+  last_name   varchar(100),
+  email       varchar(200),
+  job_title   varchar(200),
+  department  varchar(200),
+  status      varchar(30),
+  hired_at    timestamp,
+  manager_id  varchar(64),
+  updated_at  timestamp
+);
+
+-- One work item. `title` rather than `subject` (which `dba.ticket` uses)
+-- because the two are NOT interchangeable: a ticket is a customer-support
+-- conversation with a contact, a task is a work item with a project and an
+-- assignee. The primary key is COMPOSITE because a task id is unique only
+-- within its project on several trackers (GitLab numbers issues per project,
+-- Jira per project key), so a bare task_id would collide across projects on
+-- one connection.
+CREATE TABLE dba.task (
+  task_id     varchar(64),
+  project_id  varchar(64),
+  created_at  timestamp,
+  closed_at   timestamp,
+  title       varchar(500),
+  status      varchar(30),
+  priority    varchar(30),
+  assignee_id varchar(64),
+  updated_at  timestamp,
+  PRIMARY KEY (project_id, task_id)
+);
+
 -- Watermark trigger: bump last_modified on every UPDATE (mimics the SQL
 -- Anywhere DEFAULT TIMESTAMP column the connector discovers + guards on).
 CREATE OR REPLACE FUNCTION dba.touch_last_modified() RETURNS trigger AS $$

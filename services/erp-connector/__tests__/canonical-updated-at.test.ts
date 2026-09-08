@@ -77,6 +77,31 @@ const VENDOR_SOURCE: Readonly<Record<string, string>> = {
   order: "updated_at_min",
   product: "updated_at_min",
   customer: "updated_at_min",
+  // ── WARP-2832 ──
+  // Cal.com. VERIFIED against the hosted OpenAPI spec while shipping the
+  // profile: `afterUpdatedAt` is a genuine last-modified filter, and a
+  // booking's `status` moves after creation (accepted → cancelled), so a
+  // creation-time filter would freeze every cancellation out of view. This is
+  // exactly the value that was thrown away while Cal.com served `appointment`,
+  // which WARP-2464 withheld `updated_at` from.
+  booking: "afterUpdatedAt",
+  // BambooHR. `GET /v1/employees/changed?since=` returns each changed employee
+  // with a `lastChanged` stamp, and it fires on ANY field change — including
+  // the employment-status, job-info and compensation tables — so it is a
+  // COMPLETE modification source rather than a creation feed.
+  //
+  // Endpoint and semantics corroborated across BambooHR's published
+  // changed-employees documentation; the exact response field spelling is
+  // pinned by the connector's own vendor test when BambooHR ships, per
+  // ADR-046 §2's rule that a watermark name is pinned by a test citing the
+  // vendor page rather than trusted from a design doc.
+  employee: "lastChanged",
+  // GitHub and GitLab. Both carry a real modification stamp on a work item —
+  // GitHub `updated_at` on `/issues`, GitLab `updated_after` on issues. Note
+  // the ADR-046 finding that GitHub's `since` is ABSENT on `/pulls` and on
+  // `/orgs/{org}/repos`: that is why this dataset is `task` (a work item) and
+  // not a repository or a pull request.
+  task: "updated_at",
 };
 
 /**
@@ -125,8 +150,8 @@ const NO_HONEST_SOURCE: Readonly<Record<string, string>> = {
 };
 
 describe("updated_at exists exactly where a vendor can populate it", () => {
-  it("covers every dataset, splitting the twenty-three into sourced and unsourced", () => {
-    // Mutation: add a twenty-fourth dataset without deciding whether it has a
+  it("covers every dataset, splitting the twenty-six into sourced and unsourced", () => {
+    // Mutation: add a twenty-seventh dataset without deciding whether it has a
     // modification source → red here, before that decision gets made by
     // default somewhere subtler.
     const decided = [...Object.keys(VENDOR_SOURCE), ...Object.keys(NO_HONEST_SOURCE)].sort();

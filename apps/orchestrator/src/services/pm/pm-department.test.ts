@@ -21,6 +21,7 @@ import {
   assertAssignableDepartment,
   departmentWorkItemWhere,
   expandDepartmentScope,
+  resolveDepartmentFilter,
   resolveDepartmentRef,
 } from "./pm-department.js";
 
@@ -219,5 +220,145 @@ describe("departmentWorkItemWhere", () => {
     // will actually look.
     const frag = departmentWorkItemWhere(["d1"]);
     expect(Object.keys(frag)).toEqual(["OR"]);
+  });
+});
+
+// ── WARP-2719: resolving the word a person said ────────────────────────────
+
+/**
+ * A db stand-in for the resolver, which needs BOTH lookups.
+ *
+ * `findFirst` is modelled honestly rather than as "return the first row": the
+ * resolver relies on Prisma's `mode: "insensitive"`, and a fake that matched
+ * case-sensitively would let a broken implementation pass.
+ */
+function makeResolverDb(
+  rows: Array<{ id: string; slug: string; name: string }>,
+) {
+  const calls = { findUnique: 0, findFirst: 0 };
+  return {
+    calls,
+    db: {
+      department: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          calls.findUnique += 1;
+          const r = rows.find((x) => x.id === where.id);
+          return r ? { id: r.id } : null;
+        },
+        findFirst: async ({ where }: { where: { OR: Array<Record<string, { equals: string; mode?: string }>> } }) => {
+          calls.findFirst += 1;
+          const needle = where.OR[0].slug.equals.toLowerCase();
+          const insensitive = where.OR.every((c) => Object.values(c)[0].mode === "insensitive");
+          const r = rows.find(
+            (x) =>
+              (insensitive ? x.slug.toLowerCase() : x.slug) === (insensitive ? needle : where.OR[0].slug.equals) ||
+              (insensitive ? x.name.toLowerCase() : x.name) === (insensitive ? needle : where.OR[1].name.equals),
+          );
+          return r ? { id: r.id } : null;
+        },
+      },
+    } as never,
+  };
+}
+
+const ROWS = [
+  { id: "dept-front-desk", slug: "front-desk", name: "Front Desk" },
+  { id: "dept-clinical", slug: "clinical", name: "Clinical" },
+];
+
+describe("resolveDepartmentFilter turns a word into an id, or refuses", () => {
+  it("passes an id straight through without a second lookup", async () => {
+    const { db, calls } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "dept-clinical")).toBe("dept-clinical");
+    expect(calls.findFirst).toBe(0);
+  });
+
+  it("resolves a slug and a name", async () => {
+    const { db } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "front-desk")).toBe("dept-front-desk");
+    expect(await resolveDepartmentFilter(db, "Front Desk")).toBe("dept-front-desk");
+  });
+
+  it("🔴 resolves them case-insensitively, because nobody types the stored case", async () => {
+    // The whole reason the filter takes a name at all is that a person — or a
+    // model quoting one — says "front desk", not "Front Desk". A
+    // case-SENSITIVE match here would refuse the most likely spelling of the
+    // most likely question.
+    const { db } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "front desk")).toBe("dept-front-desk");
+    expect(await resolveDepartmentFilter(db, "CLINICAL")).toBe("dept-clinical");
+  });
+
+  it("trims, because a name pasted out of a sentence carries whitespace", async () => {
+    const { db } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "  Clinical  ")).toBe("dept-clinical");
+  });
+
+  it("returns null for the `none` sentinel and undefined for no filter", async () => {
+    // Three distinct answers, and the caller must not have to re-derive which
+    // it got: undefined = no filter, null = owned by nobody, string = that one.
+    const { db, calls } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "none")).toBeNull();
+    expect(await resolveDepartmentFilter(db, undefined)).toBeUndefined();
+    expect(await resolveDepartmentFilter(db, null)).toBeUndefined();
+    expect(await resolveDepartmentFilter(db, "   ")).toBeUndefined();
+    expect(calls.findUnique).toBe(0);
+  });
+
+  it("🔴 the `none` sentinel is case-insensitive, like every match around it", async () => {
+    // WARP-2719 review, finding 3. This was the one case-SENSITIVE comparison
+    // in a function whose whole premise is that nobody types the stored case:
+    // `"none"` meant "owned by nobody", `"None"` fell through to the id/slug/
+    // name lookups, matched nothing, and threw `department_not_found` → 404.
+    //
+    // A model capitalising the first letter of a value it was told to send is
+    // doing the ordinary thing, and the answer it got back — "no such
+    // department" — named the wrong problem. `none` is a RESERVED WORD in this
+    // parameter, so it is reserved in every casing.
+    //
+    // MUTATION: restore `needle === DEPARTMENT_FILTER_NONE` and the first two
+    // of these throw instead of returning null.
+    const { db, calls } = makeResolverDb(ROWS);
+    expect(await resolveDepartmentFilter(db, "None")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "NONE")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "  none  ")).toBeNull();
+    // Non-vacuity: still a short-circuit, not a lookup that happens to miss.
+    expect(calls.findUnique).toBe(0);
+    expect(calls.findFirst).toBe(0);
+  });
+
+  it("a department whose NAME is the sentinel is unreachable, and that is the trade", async () => {
+    // Written down rather than discovered. Reserving the word in every casing
+    // costs exactly one thing: a real department called "None" can no longer
+    // be filtered to by name. It is still reachable by id and by slug, which
+    // is why the trade is worth making — and `?parent=none` on the same route
+    // reserves the word the same way.
+    const { db } = makeResolverDb([
+      ...ROWS,
+      { id: "dept-none", slug: "none-dept", name: "None" },
+    ]);
+    expect(await resolveDepartmentFilter(db, "None")).toBeNull();
+    expect(await resolveDepartmentFilter(db, "dept-none")).toBe("dept-none");
+    expect(await resolveDepartmentFilter(db, "none-dept")).toBe("dept-none");
+  });
+
+  it("🔴 THROWS on an unknown name rather than letting it become an empty board", async () => {
+    // `expandDepartmentScope` deliberately returns `[id]` for an unknown id so
+    // the filter matches nothing instead of degrading to no filter. Right for
+    // an id, and exactly wrong for a name: a person asking about a department
+    // that does not exist would be told, silently, that it has no work. The
+    // refusal has to happen HERE, before the scope expansion is reached.
+    const { db } = makeResolverDb(ROWS);
+    await expect(resolveDepartmentFilter(db, "Frnot Desk")).rejects.toThrow(
+      PM_DEPARTMENT_ERRORS.DEPARTMENT_NOT_FOUND,
+    );
+  });
+
+  it("MUTATION: return undefined instead of throwing — the filter silently vanishes", async () => {
+    // Named so the mutation is written down: a resolver that swallowed the
+    // miss would answer a question about Front Desk with the whole board, and
+    // every other test in this file would stay green.
+    const { db } = makeResolverDb(ROWS);
+    await expect(resolveDepartmentFilter(db, "nope")).rejects.toThrow();
   });
 });

@@ -32,7 +32,10 @@ import {
   HUBSPOT_PROVIDER,
   MAILCHIMP_PROVIDER,
   ConnectorBlockedError,
+  RestProfileConnector,
+  restProfileFor,
   type DatasetName as ConnectorDatasetName,
+  REST_VENDOR_PROFILES,
 } from "@droplet/erp-connector";
 import {
   DATASET_NAMES,
@@ -54,6 +57,7 @@ import {
   type ProviderDescriptor,
   type CredentialVariant,
 } from "@droplet/shared-types";
+import { ERP_SYNC_ENTITIES } from "./erp-sync/entities.js";
 import {
   connectorForProvider,
   registerConnectorFactory,
@@ -126,6 +130,37 @@ const SAAS_PROVIDERS_WARP_2214 = [
  */
 const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
 
+/**
+ * WARP-2707 / ADR-046 — the first two vendors on the DECLARATIVE REST track.
+ *
+ * Its own const for the reason every const above is its own: each records what
+ * shipped on one ticket, and folding these into an older list would turn a
+ * regression anchor into a running total.
+ *
+ * What makes this list different in kind from the ones above: these two
+ * providers register NO connector factory. `track: "rest"` means their
+ * behaviour is a `RestVendorProfile` in
+ * `services/erp-connector/src/rest/vendors/`, and `connectorFactoryFor`
+ * resolves them through `restProfileFor(provider)` before consulting the static
+ * factory map — exactly as it resolves the export-drop family through
+ * `vendorFromExportProvider`.
+ *
+ * ⚠ That dispatch branch is proved by the POSITIVE test below ("dispatches
+ * every REST provider to a RestProfileConnector"), NOT by the older "every
+ * buildable descriptor can actually be built" loop. That loop asserts
+ * `.not.toThrow(/unknown ERP provider/)`, which passes on any other error:
+ * break `restProfileFactory` so it throws something else and the loop stays
+ * green over a track that cannot construct a single connection. Verified by
+ * running exactly that mutation.
+ *
+ * They appear in `cloudProviderIds()` as well, and that is deliberate rather
+ * than sloppy — a REST row takes its identity from `providerConfig` and its
+ * credential from `providerTokensEnc`, which is byte for byte the cloud shape.
+ * Omitting them there is the silent failure that leaves every REST connection
+ * reporting ERP_NOT_CONNECTED with a green build.
+ */
+const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+
 afterEach(() => {
   __resetRegisteredProvidersForTest();
   __resetCallBudgetsForTest();
@@ -144,6 +179,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...KNOWN_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
+        ...REST_PROVIDERS_WARP_2707,
       ]),
     );
   });
@@ -160,6 +196,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...CLOUD_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
+        ...REST_PROVIDERS_WARP_2707,
       ]),
     );
   });
@@ -174,6 +211,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
+      ...REST_PROVIDERS_WARP_2707,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -181,6 +219,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
+      ...REST_PROVIDERS_WARP_2707,
     ]);
   });
 
@@ -209,6 +248,109 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         }),
       ).not.toThrow(/unknown ERP provider/);
     }
+  });
+
+  it("🔴 dispatches every REST provider to a RestProfileConnector — asserted POSITIVELY", () => {
+    // The loop above is a NEGATIVE: `.not.toThrow(/unknown ERP provider/)`
+    // passes on any OTHER error, so it would stay green if `connectorFactoryFor`
+    // never consulted `restProfileFor` at all and the construction failed for
+    // some entirely different reason. `REST_PROVIDERS_WARP_2707`'s docstring
+    // calls that loop "the only thing proving the profile-dispatch branch is
+    // wired at all", and until this test it was not proving it.
+    //
+    // Asserted three ways, because each catches a different way the branch can
+    // be wrong:
+    //   - a profile is REGISTERED for the id (`restProfileFor` is the registry
+    //     `connectorFactoryFor` consults, so an unregistered id would fall
+    //     through to the static factory map and throw "unknown ERP provider");
+    //   - dispatch returns a `RestProfileConnector` and not some other
+    //     connector — an id that also had a hand-written factory would silently
+    //     take whichever branch ran first;
+    //   - the connector it returns carries THAT provider's identity and serves
+    //     THAT profile's datasets, so one profile cannot be handed to every id.
+    //
+    // Mutation: delete the `if (restProfileFor(provider)) return
+    // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
+    // the negative loop above stays green.
+    for (const id of REST_PROVIDERS_WARP_2707) {
+      const profile = restProfileFor(id);
+      expect(profile, `${id} must have a registered REST profile`).toBeDefined();
+
+      const connector = connectorForProvider({
+        provider: id,
+        host: "10.0.0.5",
+        connectionId: "conn-1",
+        providerConfig: { provider: id },
+      });
+
+      expect(connector, `${id} must dispatch to the REST track`).toBeInstanceOf(
+        RestProfileConnector,
+      );
+      expect(connector.provider).toBe(id);
+      expect([...connector.servesDatasets].sort()).toEqual([...profile!.datasets.map((d) => d.dataset)].sort());
+    }
+  });
+
+  it("🔴 schedules no REST dataset whose watermark is documented to MISS edits", () => {
+    // WARP-2832 narrowed this. It was "registers NO sync cursor for either REST
+    // vendor", which was true — and it was true because the track was DARK.
+    // Cal.com declared `appointment`, a name in neither `ERP_SYNC_ENTITIES` nor
+    // `CLOUD_DATASET_READS`, so a healthy connection was never polled and could
+    // not be asked anything. Pinning that as "a declared state" recorded the
+    // defect faithfully; it did not make it correct.
+    //
+    // `booking` now HAS a row, so Cal.com is ticked and swept like any other
+    // connection. What survives from the original tripwire is the half that was
+    // always the real risk, and it is sharper stated this way:
+    //
+    // 🔴 `RestWatermark.complete` is recorded by every profile and read by
+    // NOTHING. The reconciliation sweep's cadence is uniform, so a dataset
+    // whose watermark is documented to miss edits — Square's `payout`, whose
+    // `begin_time` filters on CREATION, so a payout that moves SENT → PAID
+    // after its window closes is never re-read — would be swept exactly as
+    // often as a complete one and could freeze at a stale status.
+    //
+    // Scheduling a COMPLETE watermark is fine and is what `booking` does.
+    // Scheduling an INCOMPLETE one is the moment `complete` needs a reader.
+    //
+    // Mutation: add `payout` to ERP_SYNC_ENTITIES, or flip Cal.com's watermark
+    // to `complete: false` → red, naming the dataset.
+    const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
+    const scheduledButIncomplete: string[] = [];
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        if (!syncedEntities.has(spec.dataset)) continue;
+        if (spec.watermark && !spec.watermark.complete) {
+          scheduledButIncomplete.push(`${profile.provider}.${spec.dataset}`);
+        }
+      }
+    }
+    expect(
+      scheduledButIncomplete,
+      "these are scheduled on a watermark documented to miss edits — give " +
+        "RestWatermark.complete a reader before this ships, or the sweep " +
+        "cadence is uniform over a watermark that cannot see a status change",
+    ).toEqual([]);
+  });
+
+  it("🔴 every REST vendor's declared datasets are all schedulable or all deliberate", () => {
+    // The other half of the original tripwire, kept: a REST dataset that is
+    // declared but has no `ERP_SYNC_ENTITIES` row is reached on demand through
+    // `runRead` and nowhere else. That is a legitimate state — Square's
+    // `charge` is deliberately unscheduled because `get_recent_charges` needs a
+    // window a poller has no basis to choose — but it must be VISIBLE, because
+    // it is silent in every direction: nothing fails, nothing logs, and the
+    // owner's card reads CONNECTED while nothing is stored.
+    const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
+    const unscheduled: Record<string, string[]> = {};
+    for (const id of REST_PROVIDERS_WARP_2707) {
+      const declared = providerDescriptor(id)!.datasets as readonly string[];
+      const missing = declared.filter((d) => !syncedEntities.has(d));
+      if (missing.length > 0) unscheduled[id] = missing;
+    }
+    // Square's three money datasets are on-demand by design; Cal.com's
+    // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
   it("keeps the catalog-only placeholder OUT of the buildable set", () => {
@@ -915,6 +1057,13 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "pipedrive",
       // WARP-2383 — Xero, at `catalog.order: 11`, after the wave-1 cards that shipped first.
       "xero",
+      // WARP-2707 — the first two ADR-046 declarative REST cards. They render
+      // through the SAME `catalog` block as a cloud card on purpose: to an
+      // owner reading the hub there is no such thing as a "declarative"
+      // connector, and a track that looked different would be leaking an
+      // implementation detail into the product.
+      "square",
+      "calcom",
     ]);
   });
 

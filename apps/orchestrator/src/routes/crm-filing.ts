@@ -62,6 +62,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { filingPauseState } from "../services/filing/worker.js";
 import { preflight } from "../services/filing/auto-apply.js";
+import { resolveChainedCustomer } from "../services/filing/money-customer.js";
 import {
   buildReadback,
   promotionSentence,
@@ -160,6 +161,7 @@ function mapError(err: unknown, res: Response): boolean {
     case FILING_ERRORS.PAYLOAD_UNREADABLE:
     case FILING_ERRORS.SOURCE_CHANGED:
     case FILING_ERRORS.CHOICE_REQUIRED:
+    case FILING_ERRORS.MONEY_MODULE_OFF:
     case FILING_ERRORS.CHOICE_NOT_OFFERED:
       // Well-formed request, refused on its merits. 422 rather than 400 so it
       // does not read as a malformed body the client could fix by retrying.
@@ -179,7 +181,7 @@ function mapError(err: unknown, res: Response): boolean {
  * cannot reject it, and a queue with an invisible permanent member is a queue
  * that stops being finishable.
  */
-function toCard(row: {
+interface ProposalRow {
   id: string;
   kind: Parameters<typeof parsePayload>[0];
   status: string;
@@ -195,7 +197,20 @@ function toCard(row: {
   autoApplied: boolean;
   createdAt: Date;
   decidedAt: Date | null;
-}) {
+}
+
+function toCard(
+  row: ProposalRow,
+  /**
+   * WARP-2737 — the customer a money card with no `companyId` of its own would
+   * be filed under, resolved LIVE through `dependsOnProposalId`.
+   *
+   * Passed in rather than looked up here so `toCard` stays a pure shaping
+   * function, and absent for every other kind. `null` is the load-bearing
+   * value: it is what tells the surface not to offer a button it cannot honour.
+   */
+  resolvedCustomer: { companyId: string; companyName: string } | null = null,
+) {
   const payload = parsePayload(row.kind, row.payload);
   return {
     id: row.id,
@@ -217,11 +232,24 @@ function toCard(row: {
     decidedAt: row.decidedAt?.toISOString() ?? null,
     readable: payload !== null,
     payload,
+    resolvedCustomer,
     // Quotes only reach a reviewer. They are nulled on reject/not-same, and on
     // a MENTIONS document they are already locator-only by the time they were
     // stored.
     evidence: row.status === "PENDING" ? (row.evidence ?? []) : [],
   };
+}
+
+/** Does this payload already name a customer? Read off the raw JSON rather
+ *  than through `parsePayload`, because the only question here is whether the
+ *  chain needs consulting at all — the authoritative parse happens in `toCard`
+ *  and again in `applyProposal`. */
+function readsCompanyId(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    typeof (payload as { companyId?: unknown }).companyId === "string"
+  );
 }
 
 /** Postgres surfaces a CHECK violation by NAME (unlike a unique violation,
@@ -582,8 +610,30 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
         ...(parsed.data.cursor ? { cursor: { id: parsed.data.cursor }, skip: 1 } : {}),
       });
       const page = rows.slice(0, PAGE_SIZE);
+
+      // WARP-2737 — resolve the chained customer for the money cards whose
+      // payload does not name one. Per row rather than as one batched query on
+      // purpose: the rule about what counts as resolved lives in exactly one
+      // place (`money-customer.ts`) and is the same one the apply path runs, and
+      // a second batched copy of it would be free to drift from the first. The
+      // set is bounded by the money cards on a single page.
+      const customers = new Map<string, { companyId: string; companyName: string }>();
+      await Promise.all(
+        page
+          .filter(
+            (r) =>
+              r.kind === "CREATE_MONEY_DOC" &&
+              Boolean(r.dependsOnProposalId) &&
+              !readsCompanyId(r.payload),
+          )
+          .map(async (r) => {
+            const found = await resolveChainedCustomer(prisma, r.dependsOnProposalId);
+            if (found) customers.set(r.id, found);
+          }),
+      );
+
       res.json({
-        proposals: page.map(toCard),
+        proposals: page.map((r) => toCard(r, customers.get(r.id) ?? null)),
         nextCursor: rows.length > PAGE_SIZE ? page[page.length - 1].id : null,
       });
     } catch (err) {

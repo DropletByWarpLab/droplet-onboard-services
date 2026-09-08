@@ -118,6 +118,109 @@ describe("🔴 the card says who applied it", () => {
   });
 });
 
+/**
+ * 🔴 WARP-2737 — the money card's customer, resolved on the way out.
+ *
+ * The dashboard cannot work this out for itself. A money payload written for a
+ * business the box did not have carries NO `companyId`, and it never gains one:
+ * the payload is the record of what was read, and the customer only comes into
+ * existence later, when the `CREATE_CUSTOMER` card beside it is applied. So the
+ * card is gated on a field only the server can fill, and if that field stops
+ * reaching the wire the gate never opens — the surface would show an honest
+ * sentence forever about a document it could in fact file, which is the same
+ * dead end this slice exists to remove, wearing better manners.
+ */
+describe("🔴 the money card carries the customer it will be filed under", () => {
+  const MONEY = {
+    kind: "CREATE_MONEY_DOC",
+    status: "PENDING",
+    policyClass: "REVIEW",
+    autoApplied: false,
+    payload: {
+      kind: "INVOICE",
+      currency: "USD",
+      total: "4250.00",
+      direction: "RECEIVABLE",
+      counterpartyName: "ACME Dental Supply Ltd",
+    },
+    dependsOnProposalId: "prop-customer",
+  };
+
+  function withChain(
+    rows: ReturnType<typeof row>[],
+    parent: { status: string; createdCompanyId: string | null } | null,
+    company: { id: string; name: string; isArchived: boolean } | null,
+  ) {
+    const prisma = createPrismaMock(rows, "propose") as unknown as {
+      ingestProposal: { findUnique?: unknown };
+      crmCompany?: unknown;
+    };
+    prisma.ingestProposal.findUnique = vi.fn(async () => parent);
+    prisma.crmCompany = { findUnique: vi.fn(async () => company) };
+    return prisma as never;
+  }
+
+  it("names the customer once the card it depends on has been applied", async () => {
+    const app = makeApp(
+      withChain(
+        [row(MONEY)],
+        { status: "APPLIED", createdCompanyId: "c-1" },
+        { id: "c-1", name: "ACME Dental Supply Ltd", isArchived: false },
+      ),
+    );
+    const res = await request(app).get("/api/crm/filing/proposals");
+    expect(res.status).toBe(200);
+    expect(res.body.proposals[0].resolvedCustomer).toEqual({
+      companyId: "c-1",
+      companyName: "ACME Dental Supply Ltd",
+    });
+  });
+
+  it("🔴 MUTATION: sends null while that card is still waiting to be applied", async () => {
+    // Null is the load-bearing value: it is what keeps the surface from
+    // offering a button the box would refuse.
+    const app = makeApp(
+      withChain(
+        [row(MONEY)],
+        { status: "PENDING", createdCompanyId: null },
+        { id: "c-1", name: "ACME Dental Supply Ltd", isArchived: false },
+      ),
+    );
+    const res = await request(app).get("/api/crm/filing/proposals");
+    expect(res.body.proposals[0].resolvedCustomer).toBeNull();
+  });
+
+  it("MUTATION: does not go looking for a customer a card already names", async () => {
+    // A payload with a companyId carries the resolution the matcher already
+    // made. Consulting the chain as well would be a second answer, and a query
+    // per card on every page load for no gain.
+    const prisma = withChain(
+      [row({ ...MONEY, payload: { ...MONEY.payload, companyId: "c-9" } })],
+      { status: "APPLIED", createdCompanyId: "c-1" },
+      { id: "c-1", name: "ACME Dental Supply Ltd", isArchived: false },
+    ) as unknown as { crmCompany: { findUnique: { mock: { calls: unknown[] } } } };
+    const res = await request(makeApp(prisma as never)).get("/api/crm/filing/proposals");
+    expect(res.body.proposals[0].resolvedCustomer).toBeNull();
+    expect(prisma.crmCompany.findUnique.mock.calls).toHaveLength(0);
+  });
+
+  it("🔴 MUTATION: every other kind carries null, even one that IS chained", async () => {
+    // A `LINK_FILE` against a customer the same run proposes creating is the
+    // schema's own example of a chained child, so "has a pointer" cannot be the
+    // test — the resolution is MONEY's, and every other kind names its target in
+    // its payload or does not need one. Without the kind filter this card would
+    // sprout a customer it never asked for, and pay a query per page for it.
+    const prisma = withChain(
+      [row({ kind: "LINK_FILE", dependsOnProposalId: "prop-customer" })],
+      { status: "APPLIED", createdCompanyId: "c-1" },
+      { id: "c-1", name: "ACME Dental Supply Ltd", isArchived: false },
+    ) as unknown as { crmCompany: { findUnique: { mock: { calls: unknown[] } } } };
+    const res = await request(makeApp(prisma as never)).get("/api/crm/filing/proposals");
+    expect(res.body.proposals[0].resolvedCustomer).toBeNull();
+    expect(prisma.crmCompany.findUnique.mock.calls).toHaveLength(0);
+  });
+});
+
 describe("🔴 the summary carries the consent record", () => {
   it("MUTATION: ship no readback — the settings card promises nothing", async () => {
     const app = makeApp(createPrismaMock([]));

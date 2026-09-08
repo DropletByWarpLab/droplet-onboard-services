@@ -276,6 +276,21 @@ function isCreate(kind: string): boolean {
   return kind === "CREATE_CUSTOMER" || kind === "CREATE_PROJECT";
 }
 
+/**
+ * The refusals a tick may walk past.
+ *
+ * 🔴 EVERY member of `FILING_ERRORS` that `applyProposal` can throw belongs
+ * here, whether or not the kind that throws it can currently reach this loop.
+ * An omission does not fail loudly at the point of the omission: it throws out
+ * of the `catch` below, aborts the WHOLE tick, and abandons the four proposals
+ * behind it in the queue — a single refusable card stopping unattended filing
+ * for the box until somebody reads the stack trace.
+ *
+ * `MONEY_MODULE_OFF` and `CUSTOMER_REQUIRED` are both money refusals, and money
+ * is REVIEW in every cell of the policy table, so neither is reachable today.
+ * They are listed anyway, because "unreachable" is a property of a table
+ * somebody could widen and not of this function.
+ */
 function isExpected(message: string): boolean {
   return (
     message === FILING_ERRORS.NOT_PENDING ||
@@ -283,6 +298,9 @@ function isExpected(message: string): boolean {
     message === FILING_ERRORS.PAYLOAD_UNREADABLE ||
     message === FILING_ERRORS.NEVER_APPLIABLE ||
     message === FILING_ERRORS.CHOICE_REQUIRED ||
+    message === FILING_ERRORS.CHOICE_NOT_OFFERED ||
+    message === FILING_ERRORS.CUSTOMER_REQUIRED ||
+    message === FILING_ERRORS.MONEY_MODULE_OFF ||
     message === FILING_ERRORS.PROPOSAL_NOT_FOUND
   );
 }

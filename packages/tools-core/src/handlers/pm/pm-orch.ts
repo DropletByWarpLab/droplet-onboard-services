@@ -32,6 +32,10 @@ export interface PlaneProject {
   name: string;
   identifier: string;
   workspace: string;
+  /** WARP-2719 — who owns it, by NAME. The id is deliberately absent: a model
+   *  filters by the word a person says, and an id on every row is characters
+   *  spent against the result cap for something nothing reads. */
+  department?: string;
 }
 
 export interface PlaneWorkItem {
@@ -43,6 +47,11 @@ export interface PlaneWorkItem {
   labels?: string[];
   created_at: string;
   updated_at: string;
+  /** WARP-2719 — the department this item answers to, by NAME, ALREADY
+   *  RESOLVED by the orchestrator: an item with none inherits its project's,
+   *  and `ApiWorkItem.department` is the resolved value rather than the raw
+   *  column. Name only, for the same reason as `PlaneProject.department`. */
+  department?: string;
 }
 
 export class OrchPmError extends Error {
@@ -54,11 +63,21 @@ export class OrchPmError extends Error {
 
 // ── Native (orchestrator) shapes we read ─────────────────────────────────────
 
+/** The department shape the orchestrator sends, trimmed to what a tool reads.
+ *  `kind`, `parentId` and `source` exist on the wire and are deliberately not
+ *  consumed here — they are org structure, and a tool answering "who is
+ *  working on this" has no question they answer. */
+interface ApiDepartmentRef {
+  id: string;
+  name: string;
+}
+
 interface ApiProject {
   id: string;
   name: string;
   identifier: string;
   workspaceSlug: string;
+  department?: ApiDepartmentRef | null;
 }
 
 interface ApiWorkItem {
@@ -71,12 +90,22 @@ interface ApiWorkItem {
   labels: Array<{ name: string }>;
   createdAt: string;
   updatedAt: string;
+  department?: ApiDepartmentRef | null;
 }
 
 // ── Mappers: native → wire ───────────────────────────────────────────────────
 
 export function toPlaneProject(p: ApiProject): PlaneProject {
-  return { id: p.id, name: p.name, identifier: p.identifier, workspace: p.workspaceSlug };
+  return {
+    id: p.id,
+    name: p.name,
+    identifier: p.identifier,
+    workspace: p.workspaceSlug,
+    // Omitted entirely when absent rather than sent as null: an unowned
+    // project should read as one that says nothing about a department, not one
+    // that asserts it has none.
+    ...(p.department ? { department: p.department.name } : {}),
+  };
 }
 
 export function toPlaneWorkItem(w: ApiWorkItem): PlaneWorkItem {
@@ -91,6 +120,7 @@ export function toPlaneWorkItem(w: ApiWorkItem): PlaneWorkItem {
     labels: (w.labels ?? []).map((l) => l.name),
     created_at: w.createdAt,
     updated_at: w.updatedAt,
+    ...(w.department ? { department: w.department.name } : {}),
   };
 }
 
