@@ -27,7 +27,10 @@ import { PrismaClient } from "@prisma/client";
 import { boxDisplayName } from "../src/lib/box-identity.js";
 // WARP-2844: the guards around minting an owner live in their own tested
 // module — this script's only job is to gather the inputs and obey.
-import { decideDevOwnerSeed } from "../src/services/dev-owner-seed.policy.js";
+import {
+  decideDevOwnerSeed,
+  decideDevOwnerNextcloudRepair,
+} from "../src/services/dev-owner-seed.policy.js";
 import { hashPassword } from "../src/services/password.service.js";
 import { emailWriteData } from "../src/services/user-directory.service.js";
 import { setModuleEnabled, ModuleToggleError } from "../src/services/modules.service.js";
@@ -374,6 +377,20 @@ async function provisionNextcloudAccount(username: string, password: string): Pr
   const groups = ["admin", "droplet-admins", householdGroupSlug(process.env.DROPLET_SHARED_FOLDER_NAME)];
 
   try {
+    // WARP-2845: probe FIRST, so this function is safe to call on every boot.
+    // It is the repair path's entry point, not just the create path's, and a
+    // blind create would log a scary failure on every restart of a healthy
+    // stack. A non-2xx here means "not provisioned or cannot tell" — both of
+    // which we answer by attempting the create below.
+    const probe = await fetch(`${base}/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`, {
+      method: "GET",
+      headers,
+    }).catch(() => undefined);
+    if (probe?.ok) {
+      console.log(`[seed] Nextcloud account for '${username}' already present`);
+      return;
+    }
+
     for (const groupid of groups) {
       await fetch(`${base}/ocs/v1.php/cloud/groups`, {
         method: "POST",
@@ -432,28 +449,59 @@ async function seedDevOwner(): Promise<void> {
     takenUserIds,
   });
 
-  if (decision.action === "skip") {
+  if (decision.action === "seed") {
+    await prisma.user.create({
+      data: {
+        username: decision.username,
+        displayName: DEV_OWNER_DISPLAY_NAME,
+        ...emailWriteData(DEV_OWNER_EMAIL),
+        nextcloudUsername: decision.username,
+        passwordHash: await hashPassword(password as string),
+        role: "owner",
+        // accessRoleId stays NULL on purpose: the full feature catalog is
+        // resolved only on the null branch of effective-access, so ANY custom
+        // role would narrow this account rather than widen it.
+      },
+    });
+    console.log(
+      `[seed] dev owner created — sign in as ${DEV_OWNER_EMAIL} (username '${decision.username}')`,
+    );
+  } else {
     console.log(`[seed] dev owner not seeded — ${decision.reason}`);
+  }
+
+  // WARP-2845 — the Nextcloud half is decided SEPARATELY, and deliberately
+  // runs even when the row already existed.
+  //
+  // Nextcloud installs far more slowly than Postgres + migrate + seed, and the
+  // orchestrator only waits on db and cache, so the very first OCS call
+  // usually lands before Nextcloud can answer it. That failure used to be
+  // swallowed with the row left behind, and guard 4 then skipped seeding on
+  // every later boot — so the account stayed Nextcloud-less forever and the
+  // only way out was dropping the DB volume. Deciding this half on its own
+  // makes the next boot repair it.
+  const existingOwnerUsername =
+    (await prisma.user.findFirst({ where: { role: "owner" }, select: { username: true } }))
+      ?.username ?? null;
+
+  const repair = decideDevOwnerNextcloudRepair({
+    seedDecision: decision,
+    existingOwnerUsername,
+    nodeEnv: process.env.NODE_ENV,
+    email: DEV_OWNER_EMAIL,
+    password,
+  });
+
+  if (repair.action === "skip") {
+    // Only worth a line when there was plausibly something to repair; the
+    // ordinary "no password configured" case is already reported above.
+    if (repair.code === "not_the_dev_owner") {
+      console.log(`[seed] Nextcloud account not touched — ${repair.reason}`);
+    }
     return;
   }
 
-  const { username } = decision;
-  await prisma.user.create({
-    data: {
-      username,
-      displayName: DEV_OWNER_DISPLAY_NAME,
-      ...emailWriteData(DEV_OWNER_EMAIL),
-      nextcloudUsername: username,
-      passwordHash: await hashPassword(password as string),
-      role: "owner",
-      // accessRoleId stays NULL on purpose: the full feature catalog is
-      // resolved only on the null branch of effective-access, so ANY custom
-      // role would narrow this account rather than widen it.
-    },
-  });
-  console.log(`[seed] dev owner created — sign in as ${DEV_OWNER_EMAIL} (username '${username}')`);
-
-  await provisionNextcloudAccount(username, password as string);
+  await provisionNextcloudAccount(repair.username, password as string);
 }
 
 // ─── module visibility (WARP-2844) ───────────────────────────────

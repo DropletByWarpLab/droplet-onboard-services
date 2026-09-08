@@ -133,3 +133,101 @@ export function decideDevOwnerSeed(inputs: DevOwnerSeedInputs): DevOwnerSeedDeci
 
   return { action: "seed", username };
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * WARP-2845 — the Nextcloud REPAIR decision.
+ *
+ * The seed writes the local `User` row first and provisions Nextcloud second,
+ * best-effort. That ordering is deliberate — the dashboard authenticates
+ * against the local row alone (ADR-013), so a Nextcloud that is slow to
+ * install must not cost the developer their login.
+ *
+ * But best-effort plus guard 4 was a trap. The dev compose's orchestrator
+ * `depends_on` covers db and cache only, and Nextcloud's first-boot install is
+ * far slower than Postgres + migrate + seed — so on a fresh `up` the OCS call
+ * usually fires before Nextcloud can answer it. The failure was swallowed, the
+ * row survived pointing at an account that was never created, and on every
+ * later boot `owner_exists` skipped seeding entirely. Nothing else in the repo
+ * heals it: nextcloud-bootstrap.sh only ever provisions the hardcoded `stefan`,
+ * and no auth path back-fills a missing account. The only recovery was dropping
+ * the DB volume — destroying the stack to undo a startup race.
+ *
+ * So `owner_exists` must stop meaning "there is nothing left to do". It means
+ * the ROW is done. This decides the other half.
+ *
+ * Deliberately NOT the WARP-989 rollback that `POST /auth/setup` performs. The
+ * economics are inverted: on an appliance a half-created owner is a permanent
+ * lockout, so discarding the row is right. Here the row is a WORKING LOGIN and
+ * only /files is degraded — rolling it back would throw away the good half and
+ * leave the developer with no account until they restarted. Healing keeps both.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+export type DevOwnerRepairSkipCode =
+  | "production"
+  | "no_password"
+  | "not_seeded"
+  | "not_the_dev_owner";
+
+export type DevOwnerRepairDecision =
+  | { action: "provision"; username: string }
+  | { action: "skip"; code: DevOwnerRepairSkipCode; reason: string };
+
+export interface DevOwnerRepairInputs {
+  /** The result of `decideDevOwnerSeed` for this same run. */
+  seedDecision: DevOwnerSeedDecision;
+  /** `User.username` of the row that already holds role=owner, if any. */
+  existingOwnerUsername: string | null;
+  nodeEnv: string | undefined;
+  email: string;
+  password: string | undefined;
+}
+
+export function decideDevOwnerNextcloudRepair(
+  inputs: DevOwnerRepairInputs,
+): DevOwnerRepairDecision {
+  if (inputs.nodeEnv === "production") {
+    return { action: "skip", code: "production", reason: "NODE_ENV=production" };
+  }
+
+  // Provisioning needs the plaintext; without it there is nothing to create an
+  // account WITH, even when a row is sitting there unhealed.
+  if (!inputs.password) {
+    return {
+      action: "skip",
+      code: "no_password",
+      reason: "DROPLET_DEV_OWNER_PASSWORD is not set, so no Nextcloud account can be created",
+    };
+  }
+
+  // Normal path: we just created the row, so provision its account.
+  if (inputs.seedDecision.action === "seed") {
+    return { action: "provision", username: inputs.seedDecision.username };
+  }
+
+  // Repair path: a row already exists. Only heal it when it is OUR dev owner.
+  if (inputs.seedDecision.code === "owner_exists") {
+    const expected = deriveUserId(inputs.email, () => false);
+    if (inputs.existingOwnerUsername === expected) {
+      return { action: "provision", username: expected };
+    }
+    // 🔴 The box's owner is somebody else — a human who walked the wizard, or
+    // a differently-configured seed. Creating a Nextcloud account for them,
+    // with a password from OUR env, would be a silent credential injection
+    // into an account this script does not own. Never.
+    return {
+      action: "skip",
+      code: "not_the_dev_owner",
+      reason:
+        `the existing owner is '${inputs.existingOwnerUsername ?? "unknown"}', not '${expected}' — ` +
+        "leaving its Nextcloud account alone",
+    };
+  }
+
+  // Every other skip (weak password, username taken) means no row of ours
+  // exists to repair.
+  return {
+    action: "skip",
+    code: "not_seeded",
+    reason: `no dev owner row to repair (${inputs.seedDecision.code})`,
+  };
+}

@@ -9,7 +9,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { decideDevOwnerSeed, type DevOwnerSeedInputs } from "./dev-owner-seed.policy.js";
+import {
+  decideDevOwnerSeed,
+  decideDevOwnerNextcloudRepair,
+  type DevOwnerSeedInputs,
+  type DevOwnerRepairInputs,
+} from "./dev-owner-seed.policy.js";
 
 const GOOD_PASSWORD = "Dev-Stack-Local-1";
 const EMAIL = "dev@warp-lab.ai";
@@ -145,5 +150,103 @@ describe("username derivation", () => {
   it("ignores unrelated taken ids", () => {
     const d = decideDevOwnerSeed(inputs({ takenUserIds: new Set(["stefan", "romain"]) }));
     expect(d).toEqual({ action: "seed", username: "dev" });
+  });
+});
+
+describe("decideDevOwnerNextcloudRepair — WARP-2845", () => {
+  function repair(over: Partial<DevOwnerRepairInputs> = {}): DevOwnerRepairInputs {
+    return {
+      seedDecision: { action: "seed", username: "dev" },
+      existingOwnerUsername: null,
+      nodeEnv: "development",
+      email: EMAIL,
+      password: GOOD_PASSWORD,
+      ...over,
+    };
+  }
+
+  it("provisions on the normal path, right after the row is created", () => {
+    expect(decideDevOwnerNextcloudRepair(repair())).toEqual({
+      action: "provision",
+      username: "dev",
+    });
+  });
+
+  it("HEALS: owner_exists no longer means 'nothing to do' when the owner is ours", () => {
+    // This is the whole bug. Before, guard 4 returned early and the missing
+    // Nextcloud account stayed missing forever.
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: "dev",
+      }),
+    );
+    expect(d).toEqual({ action: "provision", username: "dev" });
+  });
+
+  it("REFUSES to touch an owner that is not ours", () => {
+    // Creating an account for someone else, with a password from OUR env, is a
+    // silent credential injection. Never.
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: "stefan",
+      }),
+    );
+    expect(d).toMatchObject({ action: "skip", code: "not_the_dev_owner" });
+    expect(d.action === "skip" && d.reason).toContain("stefan");
+  });
+
+  it("refuses when the existing owner is unknown rather than assuming it is ours", () => {
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: null,
+      }),
+    );
+    expect(d).toMatchObject({ action: "skip", code: "not_the_dev_owner" });
+  });
+
+  it("never provisions in production, even on the heal path", () => {
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        nodeEnv: "production",
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: "dev",
+      }),
+    );
+    expect(d).toMatchObject({ action: "skip", code: "production" });
+  });
+
+  it("skips without a password — there is nothing to create an account with", () => {
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        password: undefined,
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: "dev",
+      }),
+    );
+    expect(d).toMatchObject({ action: "skip", code: "no_password" });
+  });
+
+  it.each(["weak_password", "username_taken"] as const)(
+    "skips as not_seeded when the seed refused for %s — no row of ours exists",
+    (code) => {
+      const d = decideDevOwnerNextcloudRepair(
+        repair({ seedDecision: { action: "skip", code, reason: "..." } }),
+      );
+      expect(d).toMatchObject({ action: "skip", code: "not_seeded" });
+    },
+  );
+
+  it("matches a reserved-base owner too — admin@ heals admin-2, not 'admin'", () => {
+    const d = decideDevOwnerNextcloudRepair(
+      repair({
+        email: "admin@warp-lab.ai",
+        seedDecision: { action: "skip", code: "owner_exists", reason: "..." },
+        existingOwnerUsername: "admin-2",
+      }),
+    );
+    expect(d).toEqual({ action: "provision", username: "admin-2" });
   });
 });

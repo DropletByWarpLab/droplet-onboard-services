@@ -138,6 +138,13 @@ services:
         condition: service_healthy
       cache:
         condition: service_healthy
+      # WARP-2845: wait for Nextcloud too. The dev seed provisions the dev
+      # owner's Nextcloud account over OCS, and Nextcloud's first-boot install
+      # is far slower than Postgres + migrate + seed — so without this the very
+      # first OCS call reliably lost the race. The seed now repairs itself on a
+      # later boot either way, but not racing beats healing.
+      nextcloud:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
