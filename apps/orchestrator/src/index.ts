@@ -59,6 +59,10 @@ import {
   BRAIN_CORPUS_LOCK_KEY,
 } from "./services/brain/brain-corpus.service.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
+import {
+  brainPassesSchedulable,
+  isBrainEnabled,
+} from "./services/brain/brain-switch.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -653,7 +657,19 @@ async function main() {
   // `prisma/seed.ts`, which is invoked nowhere in scripts/ or docker/ on a
   // shipped box — the reason the daily-report ToolSpec does not exist in
   // production and its /reports button 404s.
-  if (config.brain.enabled) {
+  //
+  // WARP-2838 — SCHEDULED WHENEVER THE BRAIN COULD BE ON, not when it was on at
+  // boot. The owner's switch writes a row; gating registration on the
+  // boot-time value meant flipping it changed nothing until the next restart,
+  // which is a switch that does not switch. Each tick asks
+  // `isBrainEnabled(prisma)` instead. A box pinned OFF by `BRAIN_ENABLED`
+  // registers nothing at all — the pin is policy, not a per-tick early return.
+  if (brainPassesSchedulable()) {
+    // Seeding now runs on every box that is not pinned off, because the pass
+    // rows are what `/api/brain/coverage` reads and what the corpus pass
+    // claims — an owner who switches the brain on must not have to wait for a
+    // restart to see it. They are registry rows: a pass key, a cursor and
+    // counters, no business content.
     await seedBrainPasses(prisma);
 
     // Deterministic pass: no model call, so it never contends for the box's
@@ -661,6 +677,7 @@ async function main() {
     cronRuntime.scheduleInterval(
       config.brain.detectorTickMs,
       async () => {
+        if (!(await isBrainEnabled(prisma))) return;
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
           // 🔴 ERROR, not warn (WARP-2825). `runDetectorPass` catches per
@@ -688,6 +705,10 @@ async function main() {
     cronRuntime.scheduleInterval(
       config.brain.corpusTickMs,
       async () => {
+        // Asked FIRST, before the model lookup: a box whose owner has not
+        // consented must not have its documents read even by the code that
+        // decides whether it can read them.
+        if (!(await isBrainEnabled(prisma))) return;
         // Same resolution the agent-run routes use. No model configured =
         // nothing to call, so the pass is skipped rather than scheduled to
         // fail hourly and fill `lastError` with noise.

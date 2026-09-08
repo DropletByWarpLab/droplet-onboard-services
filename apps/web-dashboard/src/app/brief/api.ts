@@ -33,6 +33,11 @@ export type Coverage = {
    *  dashboard newer than its orchestrator does not read `undefined` as off and
    *  paint a running brain disabled. */
   enabled?: boolean;
+  /** WARP-2838 — whether this box's answer is the owner's to give. False when
+   *  `BRAIN_ENABLED` is set in the environment, which wins in both directions.
+   *  Optional for the same reason `enabled` is: an older orchestrator omits it,
+   *  and `undefined` must not paint a togglable box as pinned. */
+  canToggle?: boolean;
   passes: {
     passKey: string;
     enabled: boolean;
@@ -91,6 +96,27 @@ export async function moveFinding(
     body: JSON.stringify(body),
   });
   if (res.status === 204) return { ok: true };
+  const detail = await res.json().catch(() => ({}));
+  return { ok: false, error: (detail as { error?: string }).error ?? "failed" };
+}
+
+/**
+ * WARP-2838 — turn the brain on or off.
+ *
+ * The write the `/brief` empty state used to describe and could not perform.
+ * Returns the box's answer rather than the requested value: on a box pinned by
+ * `BRAIN_ENABLED` the orchestrator answers 409 and the state is unchanged, and
+ * a page that optimistically painted the switch would be lying about it.
+ */
+export async function setBrainEnabled(
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`/api/brain/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (res.ok) return { ok: true };
   const detail = await res.json().catch(() => ({}));
   return { ok: false, error: (detail as { error?: string }).error ?? "failed" };
 }

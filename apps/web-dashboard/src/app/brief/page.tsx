@@ -33,6 +33,7 @@ import {
   type Coverage,
   type Finding,
 } from "./api";
+import { BrainSwitchPanel } from "./BrainSwitchPanel";
 
 const KIND_ICON = {
   loss: TrendingDown,
@@ -207,20 +208,28 @@ export default function BriefPage() {
     >
       <CoverageLine coverage={coverage} />
 
+      {/* WARP-2838 — the switch, not a sentence about one. Held back until the
+          first fetch resolves: `coverage` is null while loading and
+          `brainIsOff(null)` is true, so rendering it earlier would flash a
+          consent screen at every owner whose brain is already on. */}
+      {loading ? null : <BrainSwitchPanel coverage={coverage} onChanged={load} />}
+
       {loading ? (
         <p className="brief-empty">Loading…</p>
+      ) : brainIsOff(coverage) ? (
+        // Nothing more to say: the panel above IS the state of this page, and a
+        // second line under it repeating "turn the brain on" would be the
+        // dead-end copy this ticket exists to remove.
+        null
       ) : findings.length === 0 ? (
         // Two different nothings, said differently. "No findings" on a running
-        // brain is good news; on a brain that has never run it is a setup step.
+        // brain is good news; on a brain that has never run it is a setup step —
+        // and that second case is now the panel above rather than a sentence.
         // The discriminator is `coverage.enabled`, NOT whether the fetch
         // succeeded (WARP-2812): /coverage answers 200 on a box where the brain
         // has never been switched on, so keying on truthiness told every such
         // owner they were all clear.
-        <p className="brief-empty">
-          {!brainIsOff(coverage)
-            ? "Nothing needs your attention right now."
-            : "Turn the brain on to start reading your business."}
-        </p>
+        <p className="brief-empty">Nothing needs your attention right now.</p>
       ) : (
         <div className="brief-list">
           {findings.map((f) => (

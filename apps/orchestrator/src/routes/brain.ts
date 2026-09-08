@@ -5,6 +5,8 @@
  *   GET   /api/brain/digests          the standing understanding
  *   GET   /api/brain/coverage         how much has actually been read
  *   PATCH /api/brain/findings/:id     acknowledge / action / dismiss / assign
+ *   GET   /api/brain/settings         is the brain on, and can this box say
+ *   PUT   /api/brain/settings         turn it on or off, recording who and when
  *
  * WHO. `requireRoleOrMcpService("owner", "admin")`, the agent-runs posture, so
  * the `_service:mcp` principal can reach here on behalf of a chat user whose
@@ -31,8 +33,9 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
-import { config } from "../config.js";
+import { requireRole, requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import {
   listDigests,
   listFindings,
@@ -40,6 +43,11 @@ import {
 } from "../services/brain/brain-digest.service.js";
 import { DETECTOR_PASS_KEY } from "../services/brain/brain-pass.service.js";
 import { CORPUS_PASS_KEY } from "../services/brain/brain-corpus.service.js";
+import {
+  BRAIN_SWITCH_PINNED,
+  readBrainSwitch,
+  setBrainEnabled,
+} from "../services/brain/brain-switch.service.js";
 
 /** Maps the service's stable error codes to HTTP, mirroring crm.ts. */
 const STATUS_BY_CODE: Record<string, number> = {
@@ -50,6 +58,9 @@ const STATUS_BY_CODE: Record<string, number> = {
   impact_needs_currency: 400,
   scope_department_mismatch: 400,
   invalid_detector_key: 400,
+  // WARP-2838. A 409, not a 403: the caller has the role, the request is
+  // well-formed, and the answer is that this box's answer is not ours to give.
+  [BRAIN_SWITCH_PINNED]: 409,
 };
 
 function fail(res: Response, err: unknown, next: NextFunction): void {
@@ -143,6 +154,10 @@ const digestQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+/** WARP-2838. `.strict()` so a body that also names `enabledById` is a 400
+ *  rather than a silently ignored attempt to attribute the consent elsewhere. */
+const settingsSchema = z.object({ enabled: z.boolean() }).strict();
+
 const patchSchema = z.object({
   status: z.enum(FINDING_STATUS),
   dismissedReason: z.string().max(500).optional(),
@@ -210,13 +225,14 @@ export function createBrainRouter(prisma: PrismaClient): Router {
     try {
       // Neither read depends on the other, and `brain-digest.service.ts`
       // already uses Promise.all for the equivalent rows/count pair.
-      const [passes, totalIndexed] = await Promise.all([
+      const [passes, totalIndexed, brain] = await Promise.all([
         prisma.brainPass.findMany({
           where: { passKey: { in: [DETECTOR_PASS_KEY, CORPUS_PASS_KEY] } },
         }),
         // How much there is to read, so "digested" has a denominator. Without
         // it the number is a count with no scale and reads as completeness.
         prisma.fileIndexStatus.count({ where: { status: "ready" } }),
+        readBrainSwitch(prisma),
       ]);
       res.json({
         // WARP-2812 — whether the brain is scheduled AT ALL. Without this the
@@ -224,7 +240,16 @@ export function createBrainRouter(prisma: PrismaClient): Router {
         // succeeds on a box where nothing is running: it reads BrainPass rows
         // that were never seeded and counts files nothing will ever digest.
         // A truthy body then read as a healthy brain with nothing to say.
-        enabled: config.brain.enabled,
+        //
+        // WARP-2838 — the EFFECTIVE value, resolved from the environment and
+        // the consent row together. It was `config.brain.enabled`, which is the
+        // boot-time env value: after the owner switched the brain on, the page
+        // that told them to do it went on saying it was off.
+        enabled: brain.enabled,
+        // Whether this box's answer is the owner's to give. False on a box
+        // pinned by `BRAIN_ENABLED`, so the page states the position instead of
+        // rendering a control that 409s.
+        canToggle: !brain.pinnedByOperator,
         passes: passes.map((p) => ({
           passKey: p.passKey,
           enabled: p.enabled,
@@ -266,6 +291,91 @@ export function createBrainRouter(prisma: PrismaClient): Router {
         }
         await setFindingStatus(prisma, caller, req.params.id!, parsed.data);
         res.status(204).end();
+      } catch (err) {
+        fail(res, err, next);
+      }
+    },
+  );
+
+  /**
+   * WARP-2838 — the switch `/brief` sends people to.
+   *
+   * 🔴 `requireRole`, NOT `requireRoleOrMcpService`, and the difference is the
+   * whole gate. `requireRoleOrMcpService` admits `_service:mcp` BEFORE any role
+   * check; on the read routes above that is safe only because
+   * `visibleScopeFilter` re-checks the resolved human inside the query. A route
+   * with no rows has no filter, so on the tool path it would have nothing at
+   * all — a `family` or `guest` chat user passes as the service principal,
+   * `resolveCaller` resolves them to a real `User` row, and `if (!caller)` is
+   * not a role check. `requireRole` reads `req.user.role`, and the principal
+   * carries `"service"`, which is in no allowed set.
+   *
+   * owner + admin, matching every other brain surface and ADR-051 §9: findings
+   * and digests can be derived from the whole-company corpus, and the decision
+   * to let the model read it belongs to the same people who can read the
+   * output.
+   */
+  const settingsGate = requireRole("owner", "admin");
+
+  router.get(
+    "/brain/settings",
+    settingsGate,
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const brain = await readBrainSwitch(prisma);
+        res.json({
+          enabled: brain.enabled,
+          canToggle: !brain.pinnedByOperator,
+          enabledById: brain.enabledById,
+          enabledAt: brain.enabledAt,
+        });
+      } catch (err) {
+        fail(res, err, next);
+      }
+    },
+  );
+
+  router.put(
+    "/brain/settings",
+    settingsGate,
+    async (req: Request, res: Response, next: NextFunction) => {
+      const parsed = settingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_body" });
+        return;
+      }
+      // The session, never the body. A consent record an HTTP client can
+      // address to somebody else is not a consent record — and the service
+      // principal is not a person who can consent to anything.
+      const actorId = req.user?.id;
+      if (!actorId || actorId.startsWith("_service:")) {
+        noActor(res);
+        return;
+      }
+      try {
+        const brain = await setBrainEnabled(prisma, {
+          enabled: parsed.data.enabled,
+          actorId,
+        });
+        // Audited like every other consent write. IDS AND CODES ONLY — the
+        // audit stream is exported wholesale and retained longer than what it
+        // describes, so this says THAT the brain was switched, never anything
+        // it went on to read.
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "sparkles",
+          what: brain.enabled ? "Company brain turned on" : "Company brain turned off",
+          sub: null,
+          refs: { enabled: brain.enabled },
+          actor: actorFromRequest(req),
+        });
+        res.json({
+          enabled: brain.enabled,
+          canToggle: !brain.pinnedByOperator,
+          enabledById: brain.enabledById,
+          enabledAt: brain.enabledAt,
+        });
       } catch (err) {
         fail(res, err, next);
       }
