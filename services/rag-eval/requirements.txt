@@ -18,7 +18,7 @@
 # RAGAS + LangChain wrapper (judge-LLM scoring)
 ragas==0.4.3
 langchain>=0.3,<0.4
-langchain-core>=0.3,<0.4
+langchain-core>=1.6.2,<1.7
 langchain-community>=0.3,<0.4
 langchain-openai>=0.2,<0.4
 openai>=1.0
