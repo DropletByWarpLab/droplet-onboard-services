@@ -392,7 +392,14 @@ export function RolesAccessPanel({
   useEffect(() => {
     if (listState !== "ready" || selectedId) return;
     const first = activeRoles[0] ?? archivedRoles[0];
-    if (first) setSelectedId(first.id);
+    // WARP-2696 — a FUNCTIONAL update, because this effect can run one commit
+    // late. It is scheduled on the commit that first reports `listState:
+    // "ready"`, and it captures `selectedId` as null from that commit. If an
+    // operator (or a spec) picks a role before React flushes it, the plain
+    // `setSelectedId(first.id)` overwrote that pick with the first role and the
+    // selection silently reverted. Reading `prev` inside the updater sees the
+    // choice the stale closure cannot.
+    if (first) setSelectedId((prev) => prev ?? first.id);
   }, [listState, activeRoles, archivedRoles, selectedId]);
 
   // Close the overflow menu on outside click / Escape.
