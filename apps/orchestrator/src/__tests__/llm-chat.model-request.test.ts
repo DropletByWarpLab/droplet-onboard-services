@@ -143,6 +143,10 @@ interface CapturedModelRequest {
   tool_choice?: "auto" | "none";
 }
 vi.mock("../services/ai-gateway.client.js", () => ({
+  // WARP-2851 — ollama publishes no window; `null` keeps these suites on
+  // the local default, i.e. byte-for-byte the window they budgeted against
+  // before per-model resolution existed.
+  getModelContextWindow: vi.fn().mockResolvedValue(null),
   chat: vi.fn(async (req: CapturedModelRequest) => {
     modelRequests.push(req);
     return {

@@ -97,6 +97,7 @@ import {
 } from "../services/business-profile.service.js";
 import {
   degradeToFit,
+  resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
 
@@ -1762,6 +1763,73 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       //
       // Additive splice at index 0 (same pattern as pins/attachments
       // above; this unshift runs LAST so the base prompt lands first).
+      // WARP-2851 — how many tokens THIS turn can actually carry.
+      //
+      // Resolved ONCE, here, and handed to all three budget sites below
+      // (`degradeToFit` and both `runAgent` calls) so they cannot disagree
+      // about the window they are budgeting against.
+      //
+      // Keyed off `agentModel`, NOT `chatReq.model`: vision auto-routing above
+      // may have swapped the caller's pick for a local VISION_MODEL, and the
+      // budget has to describe the model that actually runs. That is the same
+      // reason `agentProvider` tracks `agentModel` (WARP-904).
+      //
+      // Placed outside the `tool_choice !== "none"` block below because both
+      // `runAgent` calls need it and only `degradeToFit` is inside.
+      //
+      // Never blocks the turn: `getModelContextWindow` degrades to `undefined`
+      // on an unreachable gateway, and `undefined` resolves to the local
+      // window — the value every turn used before this change.
+      //
+      // AWAITED HERE, ahead of the four Prisma reads that follow, and that is
+      // not a serialized gateway round-trip in front of the DB work: THIS
+      // request already called `getModelProvider` twice — unconditionally, at
+      // `decideCloudTurn` and `resolveOffLanProvider` above — and
+      // `findModelInfo` caches the whole model LIST, not one model's entry. So
+      // `_modelsCache` is warm by the time we get here and this call does no
+      // I/O, including for a local-only turn that will resolve to
+      // `local_default` anyway, and including when vision auto-routing made
+      // `agentModel` a different id than the one the provider lookups used.
+      // Pinned by `ai-gateway.client.capabilities-cache.test.ts` (WARP-2851
+      // block) so a future per-model cache cannot make this a real fetch
+      // silently. Moving the await down to the use site would buy nothing:
+      // the only paths where it is a fetch are the ones where the gateway is
+      // already unreachable or listed degraded, and there the cost is a
+      // timeout, not the few ms of DB work it could overlap with.
+      //
+      // try/catch, NOT `.catch()` — the same reason spelled out at the
+      // WARP-1921 continuity lookup below. `.catch()` only handles a REJECTED
+      // promise; if `getModelContextWindow` is missing from the module object
+      // entirely (an injected double in a suite that predates it, a
+      // partially-migrated deployment) the call throws TypeError
+      // SYNCHRONOUSLY, before any promise exists, and every chat turn 500s.
+      // A budget optimisation must never cost the user their answer.
+      let advertisedWindow: number | undefined;
+      try {
+        advertisedWindow = await aiGateway.getModelContextWindow(agentModel);
+      } catch (err: unknown) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[llm/chat] context-window lookup failed; budgeting against the local window:",
+          err,
+        );
+      }
+      const turnWindow = resolveTurnContextWindow({
+        advertised: advertisedWindow,
+        localWindow: config.OLLAMA_CONTEXT_LENGTH,
+      });
+      if (turnWindow.source !== "local_default") {
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] context window resolved from the model catalogue", {
+          conversationId: conversationId ?? null,
+          model: agentModel,
+          advertised: turnWindow.advertised,
+          window: turnWindow.window,
+          source: turnWindow.source,
+          localWindow: config.OLLAMA_CONTEXT_LENGTH,
+        });
+      }
+
       // Skipped when tool_choice="none": that's voice-io's greeting
       // path, which advertises zero tools and ships its own persona
       // prompt — tool guidance there would be misleading. Memory-fact
@@ -1948,7 +2016,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           historyText: assembledText,
         };
         const degraded = degradeToFit(sizeParts, {
-          contextWindow: config.OLLAMA_CONTEXT_LENGTH,
+          // WARP-2851 — the model's own window, not the local runtime's.
+          contextWindow: turnWindow.window,
           warn: (event) => {
             // Structured warn on every drop (§10) so an overflow-driven
             // degradation is diagnosable in the box logs.
@@ -2132,7 +2201,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1442 — resolved reasoning effort (voice → "low" default).
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
-            context_window: config.OLLAMA_CONTEXT_LENGTH,
+            context_window: turnWindow.window,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
@@ -2219,7 +2288,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — resolved reasoning effort (voice → "low" default).
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
-          context_window: config.OLLAMA_CONTEXT_LENGTH,
+          context_window: turnWindow.window,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,

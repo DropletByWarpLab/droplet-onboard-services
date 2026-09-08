@@ -41,6 +41,119 @@ export const DEFAULT_CONTEXT_WINDOW = 16384;
 const CHARS_PER_TOKEN = 4;
 
 /**
+ * WARP-2851 — the ai-gateway's total-message-content cap, in chars.
+ *
+ * `services/ai-gateway/schemas.py` `_MAX_TOTAL_CONTENT_CHARS`, enforced
+ * fail-closed by `_validate_total_content` → FastAPI 422. Restated here
+ * because this module is TypeScript and that one is Python; the two are held
+ * in step by `context-window-ceiling.guard.test.ts`, which READS the Python
+ * file rather than trusting this literal.
+ */
+export const GATEWAY_MAX_TOTAL_CONTENT_CHARS = 128_000;
+
+/**
+ * WARP-2851 — the largest window the orchestrator will budget against, however
+ * large a window the model catalogue advertises.
+ *
+ * DERIVED, not hand-picked. A model's own window is not the binding constraint
+ * on this box: every request goes through the ai-gateway, which refuses more
+ * than `GATEWAY_MAX_TOTAL_CONTENT_CHARS` of message content. So budgeting a
+ * 200,000-token model at 200,000 does not unlock 200,000 tokens — it unlocks a
+ * 422, and it does so by DISABLING the graceful degradation that would
+ * otherwise have kept the request inside the cap.
+ *
+ * DERIVED AGAINST `degradeToFit`, NOT AGAINST THE IN-LOOP GUARD. Two gates
+ * size a turn, and they do not use the same formula:
+ *
+ *   degradeToFit trips at    window − OUTPUT_RESERVE
+ *   in-loop guard trips at   window − OUTPUT_RESERVE − ITERATION_MIN_HEADROOM
+ *   gateway refuses at       tokens(GATEWAY_MAX_TOTAL_CONTENT_CHARS)
+ *
+ * `degradeToFit` is the one that matters here, because it is the ONLY budget
+ * gate the turn's FIRST completion call passes through: the in-loop guard is
+ * gated `iter > 0` (`llm-agent.service.ts`), so iteration 0 never reaches it.
+ * Sizing the ceiling against the loop's laxer-by-ITERATION_MIN_HEADROOM
+ * formula would leave `degradeToFit`'s threshold ITERATION_MIN_HEADROOM tokens
+ * ABOVE the gateway's cap — a request in that band drops nothing, is not
+ * flagged to anyone who acts on it (`historyTrimNeeded` has no reader), and
+ * 422s on the first call. That band is unreachable at the local 16,384 window;
+ * it is this ceiling that would have made it reachable.
+ *
+ * So the ceiling is `tokens(cap) + OUTPUT_RESERVE`, which puts
+ * `degradeToFit`'s threshold exactly on the gateway's cap, and leaves the
+ * in-loop guard firing one whole ITERATION_MIN_HEADROOM EARLIER — additive
+ * margin, not margin the two gates share. The loop's estimate is also
+ * `JSON.stringify(messages)`, which over-counts against the gateway's
+ * text-only sum, and `estimateRequestTokens` counts `toolSchemasJson`, which
+ * the gateway does not count as message content at all: both errors point the
+ * same, safe way.
+ *
+ * Deliberately NOT an env knob. A ceiling an operator can raise above the
+ * gateway's cap re-introduces exactly the 422 this prevents, and one they can
+ * lower is already expressible as `OLLAMA_CONTEXT_LENGTH` for the local model.
+ */
+export const MAX_RESOLVABLE_CONTEXT_WINDOW =
+  Math.ceil(GATEWAY_MAX_TOTAL_CONTENT_CHARS / CHARS_PER_TOKEN) + OUTPUT_RESERVE;
+
+/** Where a turn's budgeted window came from — stamped on the log line so a
+ *  wrong budget is diagnosable without reproducing the turn. */
+export type ContextWindowSource =
+  /** The model catalogue published a window and it fit under the ceiling. */
+  | "catalogue"
+  /** The catalogue published a window larger than the gateway can carry. */
+  | "catalogue_capped"
+  /** No published window (every local model, an unknown id, or a gateway
+   *  the client could not reach) — the operator's local setting stands. */
+  | "local_default";
+
+export interface ResolvedContextWindow {
+  window: number;
+  source: ContextWindowSource;
+  /** What the catalogue said, for the log line. `null` when it said nothing. */
+  advertised: number | null;
+}
+
+/**
+ * WARP-2851 — how many tokens THIS turn's model can actually carry.
+ *
+ * Before this, every budget site passed `config.OLLAMA_CONTEXT_LENGTH`
+ * regardless of provider, so a 200,000-token cloud model was budgeted at
+ * 16,384: the tool advertisement ceiling threw, `degradeToFit` dropped the
+ * business, persona and brain blocks, and the in-loop guard cut the turn short
+ * — all with ~92% of the window unused.
+ *
+ * Fail-safe direction is DOWN. Anything the catalogue cannot vouch for
+ * (absent, null, non-finite, zero or negative) resolves to the local window,
+ * because over-stating a window is the WARP-854 overflow and under-stating it
+ * only costs headroom.
+ */
+export function resolveTurnContextWindow(opts: {
+  /** `getModelContextWindow()` for the model that will actually run. */
+  advertised: number | null | undefined;
+  /** `config.OLLAMA_CONTEXT_LENGTH` — the deployed local runtime's window. */
+  localWindow: number;
+  /** Test seam; production takes the derived ceiling. */
+  ceiling?: number;
+}): ResolvedContextWindow {
+  const ceiling = opts.ceiling ?? MAX_RESOLVABLE_CONTEXT_WINDOW;
+  const advertised = opts.advertised;
+  if (
+    typeof advertised !== "number" ||
+    !Number.isFinite(advertised) ||
+    advertised <= 0
+  ) {
+    return { window: opts.localWindow, source: "local_default", advertised: null };
+  }
+  // A catalogue window BELOW the local setting is still authoritative: it is a
+  // real property of a real model, and honouring it is what stops us
+  // over-filling a small cloud model.
+  if (advertised > ceiling) {
+    return { window: ceiling, source: "catalogue_capped", advertised };
+  }
+  return { window: advertised, source: "catalogue", advertised };
+}
+
+/**
  * Every char-bearing component of the assembled chat request. The route
  * builds these strings (or their serialized form, for tools[]) and hands
  * them here — the estimator stays a pure function with no Prisma / no I/O.
@@ -98,8 +211,16 @@ export type DroppedBlock = "business" | "persona" | "brain";
 
 export interface DegradeOptions {
   /**
-   * Effective context window in tokens (config.OLLAMA_CONTEXT_LENGTH in
-   * production). The request must fit under `contextWindow − OUTPUT_RESERVE`.
+   * Effective context window in tokens — in production, whatever
+   * `resolveTurnContextWindow` returned for THIS turn's model (WARP-2851; the
+   * local `config.OLLAMA_CONTEXT_LENGTH` for every local model, the model's
+   * own catalogue window capped at `MAX_RESOLVABLE_CONTEXT_WINDOW` otherwise).
+   * The request must fit under `contextWindow − OUTPUT_RESERVE`.
+   *
+   * That threshold is why `MAX_RESOLVABLE_CONTEXT_WINDOW` is derived the way
+   * it is: this is the only budget gate the turn's FIRST call passes through,
+   * so the ceiling is sized so `contextWindow − OUTPUT_RESERVE` lands ON the
+   * ai-gateway's content cap and never above it.
    */
   contextWindow: number;
   /**
