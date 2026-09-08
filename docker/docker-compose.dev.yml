@@ -238,7 +238,10 @@ services:
       # owner-role account is a backdoor no matter which file it lives in.
       # The seed additionally refuses when NODE_ENV=production and whenever an
       # owner already exists — see src/services/dev-owner-seed.policy.ts.
-      DROPLET_DEV_OWNER_EMAIL: ${DROPLET_DEV_OWNER_EMAIL:-dev@warp-lab.ai}
+      #
+      # The ADDRESS is deliberately not settable here: it is fixed at
+      # dev@warp-lab.ai in the seed, so the documented way in cannot drift
+      # from what the stack actually creates.
       DROPLET_DEV_OWNER_PASSWORD: ${DROPLET_DEV_OWNER_PASSWORD:-}
       # ── CORS for the dashboard reaching the API from the browser ──
       CORS_ORIGINS: http://localhost:3001,http://localhost:3000

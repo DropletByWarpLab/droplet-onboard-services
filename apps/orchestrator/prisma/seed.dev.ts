@@ -31,6 +31,10 @@ import {
   decideDevOwnerSeed,
   decideDevOwnerNextcloudRepair,
 } from "../src/services/dev-owner-seed.policy.js";
+// WARP-2845: same reason — OCS reports a logical failure inside an HTTP 200
+// body, so "did the account get created" is a value that module returns and
+// a test asserts, never something this script infers from a status line.
+import { provisionDevOwnerNextcloudAccount } from "../src/services/dev-owner-nextcloud.js";
 import { hashPassword } from "../src/services/password.service.js";
 import { emailWriteData } from "../src/services/user-directory.service.js";
 import { setModuleEnabled, ModuleToggleError } from "../src/services/modules.service.js";
@@ -325,101 +329,14 @@ async function seedConversations() {
 // tested separately and mutation-verified. Read that file before changing
 // anything here — the refusals are the feature.
 
-const DEV_OWNER_EMAIL = process.env.DROPLET_DEV_OWNER_EMAIL?.trim() || "dev@warp-lab.ai";
+// Fixed, not an env override. The password MUST come from the environment —
+// a tracked default on an owner-role account is a backdoor — but the address
+// is just the documented way in, and an operator-settable one buys nothing
+// except a second thing that can disagree with the .env.example comment and a
+// `User.email` column written without the RFC shape check `POST /auth/setup`
+// applies to every other account.
+const DEV_OWNER_EMAIL = "dev@warp-lab.ai";
 const DEV_OWNER_DISPLAY_NAME = "Droplet Dev";
-
-/**
- * Nextcloud group name for the household space.
- *
- * Deliberately duplicated from `routes/auth-groups.ts:householdGroupName`
- * rather than imported: that module reaches into the department provisioner,
- * and a seed script that drags in the service graph fails for reasons that
- * have nothing to do with seeding. Same rationale auth-groups.ts itself gives
- * for inlining its role check instead of importing ADMIN_TIER_ROLES.
- */
-function householdGroupSlug(sharedFolderName: string | undefined): string {
-  return (
-    String(sharedFolderName ?? "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "household"
-  );
-}
-
-/**
- * Give the seeded owner a Nextcloud account so the Files surface has an
- * identity to talk to. BEST-EFFORT on purpose: the dashboard login does not
- * depend on it, so a Nextcloud that is slow to install must not fail the seed
- * — it must say what it could not do and move on.
- */
-async function provisionNextcloudAccount(username: string, password: string): Promise<void> {
-  const base = (process.env.NEXTCLOUD_URL ?? "").replace(/\/+$/, "");
-  const admin = process.env.NEXTCLOUD_ADMIN_USER ?? "";
-  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD ?? "";
-  if (!base || !admin || !adminPassword) {
-    console.log("[seed] Nextcloud account skipped — NEXTCLOUD_URL/ADMIN_USER/ADMIN_PASSWORD unset");
-    return;
-  }
-
-  const headers = {
-    Authorization: `Basic ${Buffer.from(`${admin}:${adminPassword}`).toString("base64")}`,
-    "OCS-APIRequest": "true",
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded",
-  };
-
-  // An owner's groups, per buildNcGroups(). `droplet-admins` is created lazily
-  // by the department provisioner and the household group by the occ init
-  // script, so on a fresh dev stack neither exists yet — and OCS REFUSES a
-  // create-user naming a group that does not exist (the WARP-990 trigger).
-  // Ensure them first, exactly as POST /auth/setup does.
-  const groups = ["admin", "droplet-admins", householdGroupSlug(process.env.DROPLET_SHARED_FOLDER_NAME)];
-
-  try {
-    // WARP-2845: probe FIRST, so this function is safe to call on every boot.
-    // It is the repair path's entry point, not just the create path's, and a
-    // blind create would log a scary failure on every restart of a healthy
-    // stack. A non-2xx here means "not provisioned or cannot tell" — both of
-    // which we answer by attempting the create below.
-    const probe = await fetch(`${base}/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`, {
-      method: "GET",
-      headers,
-    }).catch(() => undefined);
-    if (probe?.ok) {
-      console.log(`[seed] Nextcloud account for '${username}' already present`);
-      return;
-    }
-
-    for (const groupid of groups) {
-      await fetch(`${base}/ocs/v1.php/cloud/groups`, {
-        method: "POST",
-        headers,
-        body: new URLSearchParams({ groupid }),
-      }).catch(() => undefined); // already-exists is the common case
-    }
-
-    const params: Array<[string, string]> = [
-      ["userid", username],
-      ["password", password],
-      ["displayName", DEV_OWNER_DISPLAY_NAME],
-    ];
-    for (const g of groups) params.push(["groups[]", g]);
-
-    const resp = await fetch(`${base}/ocs/v1.php/cloud/users`, {
-      method: "POST",
-      headers,
-      body: new URLSearchParams(params),
-    });
-    if (!resp.ok) {
-      console.log(`[seed] Nextcloud account not created (HTTP ${resp.status}) — /files will 401 for this user`);
-      return;
-    }
-    console.log(`[seed] Nextcloud account provisioned for '${username}' in ${groups.join(", ")}`);
-  } catch (err) {
-    console.log(`[seed] Nextcloud account not created (${(err as Error).message}) — /files will 401 for this user`);
-  }
-}
 
 async function seedDevOwner(): Promise<void> {
   // Not a safety guard — an environment precondition, and the one that made
@@ -480,9 +397,16 @@ async function seedDevOwner(): Promise<void> {
   // every later boot — so the account stayed Nextcloud-less forever and the
   // only way out was dropping the DB volume. Deciding this half on its own
   // makes the next boot repair it.
+  //
+  // Only the repair branch needs the existing owner's id; on the seed branch
+  // `decision.username` IS the row we just wrote, and the policy never reads
+  // this field on that path — so the query is skipped rather than paid for on
+  // every first boot.
   const existingOwnerUsername =
-    (await prisma.user.findFirst({ where: { role: "owner" }, select: { username: true } }))
-      ?.username ?? null;
+    decision.action === "seed"
+      ? decision.username
+      : (await prisma.user.findFirst({ where: { role: "owner" }, select: { username: true } }))
+          ?.username ?? null;
 
   const repair = decideDevOwnerNextcloudRepair({
     seedDecision: decision,
@@ -501,7 +425,31 @@ async function seedDevOwner(): Promise<void> {
     return;
   }
 
-  await provisionNextcloudAccount(repair.username, password as string);
+  const outcome = await provisionDevOwnerNextcloudAccount(
+    repair.username,
+    password as string,
+    DEV_OWNER_DISPLAY_NAME,
+  );
+  switch (outcome.status) {
+    case "provisioned":
+      console.log(
+        `[seed] Nextcloud account provisioned for '${repair.username}' in ${outcome.groups.join(", ")}`,
+      );
+      break;
+    case "already_present":
+      console.log(`[seed] Nextcloud account for '${repair.username}' already present`);
+      break;
+    case "skipped":
+      console.log(`[seed] Nextcloud account skipped — ${outcome.reason}`);
+      break;
+    case "failed":
+      // Best-effort, but never silent: the developer learns here that /files
+      // will 401, and WHY, on the same run it happened.
+      console.log(
+        `[seed] Nextcloud account not created (${outcome.reason}) — /files will 401 for this user`,
+      );
+      break;
+  }
 }
 
 // ─── module visibility (WARP-2844) ───────────────────────────────
