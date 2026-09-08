@@ -482,6 +482,7 @@ model BrainDigest {
   /// the corpus that produced the row is the only thing that knows.
   scope BrainScope @default(personal)
 
+
   /// WARP-2752 — WHOSE personal row this is. Required exactly when `scope` is
   /// `personal`, and forbidden otherwise (`*_personal_scope_needs_owner`).
   ///
@@ -734,11 +735,11 @@ model BrainPass {
   /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
   enabled Boolean @default(true)
 
-  lastRunAt       DateTime?
+  lastRunAt      DateTime?
   lastSucceededAt DateTime?
   /// Cleared on every success. A stale error string on a healthy pass is the
   /// same lie as a status column nothing resets.
-  lastError       String?   @db.VarChar(1000)
+  lastError      String?  @db.VarChar(1000)
 
   /// Cumulative coverage counters, for the /brief coverage line.
   unitsSeen     Int @default(0)
@@ -766,10 +767,18 @@ model BrainPass {
   /// that has since died".
   runState BrainPassRunState @default(idle)
 
-  /// Which process holds the lease. The FENCE: every write the executing pass
-  /// makes is conditioned on this still being its own worker id, so a run
-  /// whose lease was reclaimed cannot overwrite its successor's cursor with an
-  /// older one.
+  /// Which process holds the lease, and the FENCE the lease's own writes ride:
+  /// `beatPass` and `releasePass` both condition on this still being their own
+  /// worker id, so a process whose claim was reclaimed learns it at its next
+  /// beat instead of releasing the SUCCESSOR's claim on the way out.
+  ///
+  /// SCOPE, stated so nobody reads more into the column than it does: the
+  /// fence covers the LEASE. It does not yet cover the cursor and counter
+  /// writes `runCorpusPass` makes DURING a run — those key on `passKey`
+  /// alone (brain-corpus.service.ts), so a worker stalled past the lease
+  /// window can still write over its successor. Fencing those means the pass
+  /// has to STOP when it finds its claim gone mid-run, which is a behaviour
+  /// change to the pass rather than a column, and is tracked as its own change.
   claimedBy   String?
   /// When the current run started. Rendered as "running since" rather than
   /// inferred from `lastRunAt`, which means "last STARTED" and keeps moving.
@@ -2693,10 +2702,10 @@ model User {
   // SetNull/Cascade): deleting an in-use role is blocked server-side
   // ("reassign first") and the DB backs that up — a role delete must never
   // silently strip or downgrade a person's assignment.
-  accessRoleId       String?
-  accessRole         AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId     String?
+  accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
-  accessExceptions   UserAccessException[]
+  accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
   // owning side — removing a person must not delete the business's findings.
   // WARP-2748: findings ASSIGNED to this person (SetNull — removing someone
@@ -2705,8 +2714,8 @@ model User {
   // WARP-2752: personal-scope rows this person OWNS. Distinct relations, and
   // distinct delete behaviour: an owned row is Cascade because `ownerId` is an
   // access-control key, where an assignment is mere provenance.
-  brainFindingsOwned BrainFinding[]        @relation("BrainFindingOwner")
-  brainDigestsOwned  BrainDigest[]         @relation("BrainDigestOwner")
+  brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
+  brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
 
   @@index([role])
   @@index([accessRoleId])
@@ -5916,6 +5925,7 @@ model MoneySnapshot {
   /// Retention sweeps by date across all subjects.
   @@index([capturedOn])
 }
+
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these
