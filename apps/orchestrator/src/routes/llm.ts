@@ -270,9 +270,26 @@ function scrubInterceptorChallenge(result: unknown): unknown {
   return { ...(r as Record<string, unknown>), error };
 }
 
-// /llm/chat accepts tool-role messages on replay so a client can resume a
-// session that already went through the agent loop. tool_call_id / tool_calls
-// are optional so plain chat callers don't have to care.
+// /llm/chat accepts tool-role messages on replay, but the resume path they
+// were meant to serve DOES NOT WORK, and this comment used to claim it did.
+//
+// `tool_calls` is not in the schema below and never has been: the field and
+// this comment landed in the same commit (#95, 2026-04-24) already
+// contradicting each other. So zod strips the assistant `tool_calls` that
+// would pair with a replayed `role: "tool"` message, the route forwards the
+// orphaned tool result verbatim (~:1038), and the ai-gateway rejects the turn
+// — `tool result references unknown tool_call_id`, a 422. A client that
+// followed the old comment therefore broke on EVERY turn rather than merely
+// losing context silently.
+//
+// Consequence for anyone reading this before building a client: send
+// user/assistant text only. Nothing a previous turn's tools returned re-enters
+// the model's context today; `prior_tool_names` (WARP-1921) carries the tool
+// NAMES server-side from the persisted trace, and nothing else survives.
+// Carrying the calls and results themselves is WARP-2849.
+//
+// `tool_call_id` stays declared: removing a wire field is a breaking change,
+// and WARP-2849 is where that decision belongs.
 //
 // WARP-304: `conversationId` lets the caller continue an existing thread.
 // When absent, the server mints a new one and returns it via the
