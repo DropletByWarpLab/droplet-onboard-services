@@ -163,7 +163,9 @@ describe("session revocation (WARP-116)", () => {
       expect(denyKeys).toHaveLength(1);
 
       // The captured TTL must be the token's REMAINING lifetime (exp - now ≈
-      // the full 7-day TTL for a freshly-minted token), NOT a fixed constant.
+      // the full REFRESH_TOKEN_TTL_SECONDS for a freshly-minted token), NOT a
+      // fixed constant. Asserted against the constant so the WARP-2856 bump
+      // from 7 to 30 days flows through instead of needing a new literal.
       // A regression to e.g. `cacheSet(key, true, 3600)` would fail this.
       const ttl = scalarTtlStore.get(denyKeys[0]);
       expect(ttl).toBeDefined();

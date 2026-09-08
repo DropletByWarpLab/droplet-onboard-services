@@ -7,6 +7,16 @@
  * deterministic. config is mocked with a cap of 3 to keep eviction
  * tests small; activity.singleton and jwt.service.revokeUserSessions
  * are spied to assert audit + denylist wiring.
+ *
+ * WARP-2856 — the mocked idle/absolute windows below are FIXTURES, not the
+ * shipped policy (which is 12 h / 12 h / 30 d, pinned in
+ * __tests__/session-lifetime-defaults.test.ts). They are kept small and, for
+ * the two idle classes, DELIBERATELY UNEQUAL: equal windows would make
+ * `idleLimitSecondsForRole` pass while reading the wrong variable, and a
+ * 30-day absolute cap would only make the fake clock spin longer.
+ *
+ * The tests below therefore assert MECHANISM — that each window is read from
+ * its own config key and enforced — never what the numbers ought to be.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -138,7 +148,7 @@ function advanceSeconds(s: number) {
 }
 
 describe("idleLimitSecondsForRole", () => {
-  it("gives admin-class roles 15 min and user-class roles 60 min", () => {
+  it("reads the ADMIN key for owner/admin and the USER key for family/guest", () => {
     expect(idleLimitSecondsForRole("owner")).toBe(900);
     expect(idleLimitSecondsForRole("admin")).toBe(900);
     expect(idleLimitSecondsForRole("family")).toBe(3600);
@@ -221,7 +231,7 @@ describe("checkSession — idle + absolute enforcement", () => {
     expect(after.lastSeenAt).toBe(before.lastSeenAt);
   });
 
-  it("expires a family session idle for 60 min, deletes it, audits idle_timeout", async () => {
+  it("expires a user-class session at its idle window, deletes it, audits idle_timeout", async () => {
     const { sid } = await createSession(alice);
     advanceSeconds(3600);
 
@@ -242,23 +252,24 @@ describe("checkSession — idle + absolute enforcement", () => {
     );
   });
 
-  it("expires an owner session idle for only 15 min (admin window)", async () => {
+  it("expires an owner session at the SHORTER admin window", async () => {
     const { sid } = await createSession(owner);
     advanceSeconds(900);
     const result = await checkSession(sid);
     expect(result).toEqual({ kind: "expired", reason: "idle_timeout" });
   });
 
-  it("keeps an owner session alive at 14 min idle", async () => {
+  it("keeps an owner session alive just inside the admin window", async () => {
     const { sid } = await createSession(owner);
     advanceSeconds(14 * 60);
     const result = await checkSession(sid);
     expect(result.kind).toBe("ok");
   });
 
-  it("enforces the 8h absolute cap even when activity is continuous", async () => {
+  it("enforces the absolute cap even when activity is continuous", async () => {
     const { sid } = await createSession(alice);
-    // Stay "active": touch every 30 min for 8 hours.
+    // Stay "active": touch every 30 min until the configured 8 h cap (the
+    // fixture's SESSION_ABSOLUTE_TIMEOUT_SECONDS) is reached.
     for (let i = 0; i < 16; i++) {
       advanceSeconds(30 * 60);
       if (i < 15) {

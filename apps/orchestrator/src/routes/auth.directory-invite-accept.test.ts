@@ -621,8 +621,11 @@ describe("invite-accept auto-login provisions the Nextcloud session token", () =
     const acceptedUserId = accept.body.user.id as string;
 
     expect(nc.ncLoginWithCredentials).toHaveBeenCalledWith("alice", INVITE_PASSWORD);
-    // Keyed by the local User.id UUID (WARP-485), same TTL as /auth/login.
-    expect(storeNcToken).toHaveBeenCalledWith(acceptedUserId, "nc-app-password", 604800);
+    // Keyed by the local User.id UUID (WARP-485), same TTL as /auth/login —
+    // REFRESH_TOKEN_TTL_SECONDS, 30 days since WARP-2856. The literal is on
+    // purpose: this is the Nextcloud app-password's lifetime in Redis, and it
+    // should not move silently with the JWT constant.
+    expect(storeNcToken).toHaveBeenCalledWith(acceptedUserId, "nc-app-password", 2592000);
   });
 
   it("still accepts (200, session minted) when NC session provisioning fails — fail-open like /auth/login", async () => {
