@@ -308,6 +308,58 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     expect(fetchUsersMock.mock.calls.length).toBe(reloadsBeforeUnmount);
   });
 
+  /**
+   * WARP-2696, the other half. The guard above covers the post-save beat; this
+   * covers the OPEN path, which is the one that actually took a run down.
+   *
+   * `openEdit` fires `fetchUserUsage(...).then(...).catch(...).finally(...)` and
+   * never awaits it. `.finally` is the end of that chain, so a throw inside it
+   * has nothing to catch it and escapes the test as an unhandled rejection. If
+   * the page unmounts while the read is in flight and the promise settles after
+   * vitest has torn the jsdom environment down, the handler writes state,
+   * `window` no longer exists, and the run dies with all 555 files green and no
+   * test to point at (run 33938733210).
+   *
+   * Deleting `window` here is not theatre: it is precisely the post-teardown
+   * condition, and it is the only way to observe a fault whose whole signature
+   * is that it lands after every test has finished. Restored in `finally` so a
+   * failure here cannot take the rest of the file with it.
+   */
+  it("a usage read landing after unmount + teardown escapes nothing", async () => {
+    let resolveUsage!: (value: unknown) => void;
+    fetchUserUsageMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsage = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    // The page goes away while the usage read is still in flight.
+    view.unmount();
+
+    const escaped: string[] = [];
+    const onRejection = (err: unknown) =>
+      escaped.push(String((err as { message?: string })?.message ?? err));
+    process.on("unhandledRejection", onRejection);
+
+    const realWindow = (globalThis as { window?: unknown }).window;
+    try {
+      delete (globalThis as { window?: unknown }).window;
+      resolveUsage({ policy: null, usedBytes: "1" });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    } finally {
+      (globalThis as { window?: unknown }).window = realWindow;
+      process.off("unhandledRejection", onRejection);
+    }
+
+    // Without the mountedRef guards this is ["window is not defined"].
+    expect(escaped).toEqual([]);
+  });
+
   it("rejects a non-positive upload cap without saving", async () => {
     const dialog = await openEditDialog();
     await awaitUsageLoaded(dialog);
