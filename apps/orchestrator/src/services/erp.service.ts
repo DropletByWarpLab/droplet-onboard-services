@@ -657,15 +657,19 @@ export function createErpService(
         a.localeCompare(b),
     );
 
-    // One single-provider lookup per candidate, in that order — the same shape
-    // `eaglesoftRow()` uses above and for the same stated reason: the `provider`
-    // filter stays a plain string, which keeps the query trivially indexable on
-    // `@@index([provider, status])`. The candidate list is at most five.
+    // One single-provider lookup per candidate, in that order — through the
+    // SAME `rowForProvider` helper `eaglesoftRow()` uses above, and for the same
+    // stated reason: the `provider` filter stays a plain string, which keeps the
+    // query trivially indexable on `@@index([provider, status])`. The candidate
+    // list is at most five.
+    //
+    // Called rather than re-typed. The body here was byte-for-byte the helper
+    // defined ~100 lines up, and two copies of one query is two things to keep
+    // in step — the next edit to how a provider's row is read (an `orderBy`, a
+    // `select`) would land on one of them.
     let degraded: ConnRow | null = null;
     for (const provider of inHubOrder) {
-      const row = (await prisma.integrationConnection.findFirst({
-        where: { provider },
-      })) as ConnRow | null;
+      const row = await rowForProvider(provider);
       if (!row) continue;
       if (row.status === "CONNECTED") return row;
       // The degrade path takes the SAME ordering. A box with a PROVISIONING
