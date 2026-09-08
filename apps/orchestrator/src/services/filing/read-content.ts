@@ -21,17 +21,25 @@
  *      without it is not the document's order and a contract read out of order
  *      is a contract the model gets wrong.
  *
- * 🔴 READER AUTHORIZATION. This read is keyed by `ncFileId`, which escapes
- * `resolveChunkOwnerIds` — that helper omits the `__household__` / `__dept_*`
- * sentinel owners, so an ncFileId-keyed read sees rows an owner-scoped one
- * would not. The only other ncFileId-keyed reader on the box
- * (`routes/files.ts`, pinned by `files-content.test.ts`) is safe because it
- * returns a PATH and re-authorizes against the caller's own Nextcloud token.
- * There is no equivalent here — the worker has no caller — so the CALLER of
- * this module (worker.ts) constrains which files it will claim at all, to the
- * enabling owner's own space plus `__household__`. This function therefore
- * takes the permitted owner set and filters on it: defence in depth, and the
- * place a future department grant (WARP-2026) plugs in.
+ * 🔴 READER AUTHORIZATION. This read is keyed by `ncFileId`, so it carries no
+ * owner predicate of its own — an ncFileId names a document, not a permission.
+ * The only other ncFileId-keyed reader on the box (`routes/files.ts`, pinned by
+ * `files-content.test.ts`) is safe because it returns a PATH and re-authorizes
+ * against the caller's own Nextcloud token. There is no equivalent here,
+ * because THE WORKER HAS NO CALLER: it runs on a cron for an enabling owner who
+ * is not present. So the caller of this module (worker.ts) constrains which
+ * files it will claim at all, to that owner's own space plus `__household__`,
+ * and this function takes that permitted set and filters on it — defence in
+ * depth, and the place a future department grant plugs in (WARP-2822).
+ *
+ * WARP-2821 CORRECTED THIS PARAGRAPH. It used to say the scoping was needed
+ * because `resolveChunkOwnerIds` "omits the `__household__` / `__dept_*`
+ * sentinel owners" — true when written, and the very defect that ticket fixed:
+ * the mcp-server's resolver now emits those sentinels through the shared
+ * `visibleDepartmentsFor` rule. The reason this module still scopes is
+ * unchanged and is stated above; it was never really about that helper's gaps,
+ * and leaving the old wording would have had the next person auditing this
+ * trust boundary reasoning from a premise that is now false.
  */
 import type { PrismaClient } from "@prisma/client";
 import { createHash } from "node:crypto";
