@@ -211,6 +211,10 @@ A **pinned box refuses the write** (`PUT /api/brain/settings` → 409) rather th
 
 The **read** surface is deliberately *not* gated. A disabled brain is a readable-but-empty brain that explains itself through `/coverage`, not an absent surface — and `/coverage` reports `enabled` for exactly that reason, so `/brief` can tell "quiet" from "never ran" (WARP-2812).
 
+**Turning the brain off hides nothing it already wrote.** `GET /api/brain/findings` is role-gated, never brain-gated — `listFindings` filters by scope, status and kind and does not ask whether the brain is enabled — so the rows survive the switch, and `/brief` renders them whatever the switch says. Hiding them would break, in the same screenful, the consent sentence that promises "what it has already written stays until you delete it": an owner would watch their findings vanish on the click and conclude the box had deleted them. The off state changes the sentence above the list, not the list.
+
+**And "the box did not answer" is a third state, not a synonym for off.** `/coverage` failing — a one-off 500, an expired session, a momentarily unreachable orchestrator — is not evidence of anything about the brain. The dashboard carries reachability alongside the body (`CoverageResult`) rather than inferring it from a null, because collapsing the two let a transient fetch failure render the one message that names `BRAIN_ENABLED` and sends the owner to their administrator over a pin nobody had set. Only a box that **answered** `canToggle: false` may be described as pinned.
+
 The consent statement covers the **corpus pass** specifically. The deterministic detector pass and the `MoneySnapshot` capture read the business's own ERP and CRM rows, which the product already treats as household-shared, and the snapshot capture today runs on the ERP legs outside this switch. **WARP-2753 owns the operator-facing consent posture.** Until it lands, corpus digests are written at `personal` scope, and a file whose owner cannot be resolved is **skipped rather than written unscoped** — an unattributable digest is precisely the row that would leak.
 
 ### 10. Money: two representations, one rule

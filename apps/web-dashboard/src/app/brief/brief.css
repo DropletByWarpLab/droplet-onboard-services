@@ -308,6 +308,69 @@
   font-size: 0.82rem;
 }
 
+/* ------------------------------------------------------------
+   WARP-2838 (review) — the box did not answer.
+
+   Deliberately the QUIETEST state on the page: nothing is wrong with the
+   business, we simply could not ask. It gets muted body text and a bordered
+   button, not the filled one — an unanswered read must not out-shout a real
+   finding, and must not look like the consent card it replaces.
+   ------------------------------------------------------------ */
+
+.brief-coverage--unknown {
+  color: var(--text-muted);
+}
+
+.brief-switch--unknown {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 1.25rem;
+}
+
+.brief-switch--unknown p {
+  margin: 0;
+  flex: 1 1 20rem;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.brief-switch--unknown button {
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--card-bd);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.brief-switch--unknown button:hover {
+  background: var(--brand-subtle, var(--surface));
+  color: var(--text);
+}
+
+/* Findings the brain wrote before it was switched off. The consent copy
+   promises they stay; this line stops the list being read as live output
+   from a brain that is not running. */
+.brief-retained {
+  margin: 0 0 0.75rem;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .brief-switch--unknown button {
+    width: 100%;
+    min-height: 2.5rem;
+  }
+}
+
 /* Cross-viewport rule: a decision button must be a tap target on a phone,
    and the off-switch must not sit under the thumb by accident. */
 @media (max-width: 480px) {
