@@ -34,7 +34,17 @@ import { DETECTORS, type Detector } from "./detectors";
 import { upsertFinding } from "./brain-digest.service";
 
 export const DETECTOR_PASS_KEY = "detectors";
-export const BRAIN_PASS_LOCK_KEY = "droplet:brain-pass";
+// 🔴 WARP-2850 — `BRAIN_PASS_LOCK_KEY` USED TO LIVE HERE AND IS GONE ON
+// PURPOSE, for the reason WARP-2837 removed the corpus one: cron-runtime's
+// `lockKey` runs the handler inside a 60 s `$transaction`, and both brain
+// passes now take the lease in brain-lease.service.ts instead. The detector
+// pass would probably have fitted in sixty seconds — but two passes with two
+// different exclusion mechanisms is two answers to "is this pass running",
+// which is exactly the shape of defect this epic keeps finding. One answer,
+// for every caller: the tick, the boot run and the operator's "check now".
+//
+// Deleted rather than left unused: an exported lock key beside a pass is an
+// invitation to hand it to `scheduleInterval`.
 
 /** Statuses a pass may transition to `stale`. A human's decision (`dismissed`,
  *  `actioned`) is left exactly where they put it. */

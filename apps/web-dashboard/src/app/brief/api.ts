@@ -36,6 +36,11 @@ export type Coverage = {
   passes: {
     passKey: string;
     enabled: boolean;
+    /** WARP-2850 — "running" means a pass holds the lease right now. Optional
+     *  on the wire so a dashboard newer than its orchestrator does not read
+     *  `undefined` as idle and offer a button that will 409. */
+    runState?: "idle" | "running";
+    runningSince?: string | null;
     lastRunAt: string | null;
     lastSucceededAt: string | null;
     lastError: string | null;
@@ -79,6 +84,35 @@ export async function fetchCoverage(): Promise<Coverage | null> {
   const res = await authFetch(`/api/brain/coverage`);
   if (!res.ok) return null;
   return res.json();
+}
+
+export type RunPassOutcome =
+  | { ok: true }
+  | { ok: false; reason: "busy" | "disabled" | "too_soon" | "off" | "failed"; retryAfterSeconds?: number };
+
+/**
+ * Ask the box to run a pass now (WARP-2850).
+ *
+ * Returns rather than throws, because every refusal here is a THING TO SAY to
+ * the operator and not an error: already running, switched off, too soon, or
+ * the brain is off entirely. Collapsing them into one failure is what made
+ * /admin/sessions report a permissions decision as an outage.
+ */
+export async function runBrainPass(passKey: string): Promise<RunPassOutcome> {
+  const res = await authFetch(`/api/brain/passes/${encodeURIComponent(passKey)}/run`, {
+    method: "POST",
+  });
+  if (res.ok) return { ok: true };
+  if (res.status === 429) {
+    const body = (await res.json().catch(() => ({}))) as { retryAfterSeconds?: number };
+    return { ok: false, reason: "too_soon", retryAfterSeconds: body.retryAfterSeconds };
+  }
+  if (res.status === 503) return { ok: false, reason: "off" };
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, reason: body.error === "disabled" ? "disabled" : "busy" };
+  }
+  return { ok: false, reason: "failed" };
 }
 
 export async function moveFinding(

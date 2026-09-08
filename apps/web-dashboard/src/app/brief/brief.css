@@ -192,3 +192,23 @@
     min-height: 2.25rem;
   }
 }
+
+/* WARP-2850 — the "check now" controls. Deliberately quiet: they sit under the
+   coverage line, which is the important thing on this page, and they must not
+   compete with it. Provisional pending design. */
+.brief-coverage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.brief-checknow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brief-checknow-said {
+  color: var(--text-muted);
+  font-size: 12px;
+}

@@ -264,6 +264,30 @@ const envSchema = z.object({
   // Documents digested per corpus tick. Bounded so one tick is a predictable
   // slice of the inference slot rather than an open-ended sweep.
   BRAIN_CORPUS_UNITS_PER_RUN: z.coerce.number().int().min(1).max(100).default(10),
+  // WARP-2850 — how long after boot the DETECTOR pass runs once.
+  //
+  // Only the detector pass gets a boot run, and only after a delay. It makes
+  // no model call, so it never touches the box's single inference slot; the
+  // delay is for the rest of the stack, which at t=0 is still coming up. The
+  // corpus pass deliberately has NO boot run — see brain-pass-runner.ts and
+  // ADR-051 §9.9: it reads a person's documents through the model, and
+  // "enabled the feature" must not mean "and it started reading, seconds
+  // later, before you could disable that pass".
+  //
+  // 0 disables the boot run outright, which is the explicit off state rather
+  // than a sentinel guessed from a missing value.
+  BRAIN_BOOT_DELAY_MS: z.coerce.number().int().min(0).finite().default(30_000),
+  // WARP-2850 — how soon a MANUALLY triggered corpus pass may re-fire.
+  //
+  // Not about concurrency, which the lease already answers: a caller who
+  // re-fires the instant a run ENDS holds the only inference slot at ~100%,
+  // and each of those inferences is queued ahead of whatever the person in
+  // the chat window asks next. Measured from `BrainPass.lastRunAt`, so it is
+  // durable across restarts and also refuses a manual run moments after a
+  // scheduled tick — when the pass has nothing new to read anyway.
+  //
+  // The detector pass is exempt: bounded indexed SQL, no model call.
+  BRAIN_MANUAL_MIN_INTERVAL_MS: z.coerce.number().int().min(0).finite().default(5 * 60_000),
   // Master switch. OFF by default: the corpus pass reads the user's documents
   // and writes derived rows, which is a capability an operator opts into (see
   // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
@@ -1472,6 +1496,8 @@ export const config = {
     detectorTickMs: parsed.BRAIN_DETECTOR_TICK_MS,
     corpusTickMs: parsed.BRAIN_CORPUS_TICK_MS,
     corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
+    bootDelayMs: parsed.BRAIN_BOOT_DELAY_MS,
+    manualMinIntervalMs: parsed.BRAIN_MANUAL_MIN_INTERVAL_MS,
   },
   // WARP-2177 — see resolveAgentRunLimits.
   agentRuns: {

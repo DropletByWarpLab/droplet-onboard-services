@@ -26,6 +26,8 @@ import { ShellPage } from "@/components/shell/ShellPage";
 import "./brief.css";
 import {
   brainIsOff,
+  runBrainPass,
+  type RunPassOutcome,
   fetchCoverage,
   fetchFindings,
   formatImpact,
@@ -42,7 +44,81 @@ const KIND_ICON = {
   inconsistency: AlertTriangle,
 } as const;
 
-function CoverageLine({ coverage }: { coverage: Coverage | null }) {
+/**
+ * "Check now" (WARP-2850).
+ *
+ * PROVISIONAL — the affordance is engineering's, pending design. What is NOT
+ * provisional is the copy rule it follows: every refusal here is a different
+ * sentence, because they are different answers. Already running is "hold on";
+ * switched off is a decision somebody made; too soon is a duty-cycle limit on
+ * the box's only inference slot. Collapsing them into "something went wrong"
+ * is the failure /admin/sessions had, where a permissions decision read as an
+ * outage.
+ *
+ * It does NOT spin. The pass takes minutes and the request returns in
+ * milliseconds — the button reports that a run STARTED, and the coverage line
+ * above is where the outcome actually shows up.
+ */
+function CheckNowButton({
+  passKey,
+  label,
+  running,
+  onStarted,
+}: {
+  passKey: string;
+  label: string;
+  running: boolean;
+  onStarted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+
+  const say = (o: RunPassOutcome) => {
+    if (o.ok) return "Started. This page will show what it finds.";
+    switch (o.reason) {
+      case "busy":
+        return "Already running — give it a moment.";
+      case "disabled":
+        return "This check is switched off.";
+      case "too_soon":
+        return o.retryAfterSeconds
+          ? `Just ran. Try again in about ${Math.ceil(o.retryAfterSeconds / 60)} min.`
+          : "Just ran — try again shortly.";
+      case "off":
+        return "The brain is off, so there is nothing to run.";
+      default:
+        return "Could not start it. Nothing was changed.";
+    }
+  };
+
+  const click = useCallback(async () => {
+    setBusy(true);
+    setSaid(null);
+    const out = await runBrainPass(passKey).catch(
+      (): RunPassOutcome => ({ ok: false, reason: "failed" }),
+    );
+    setBusy(false);
+    setSaid(say(out));
+    if (out.ok) onStarted();
+  }, [passKey, onStarted]);
+
+  return (
+    <span className="brief-checknow">
+      <button type="button" disabled={busy || running} onClick={() => void click()}>
+        {running ? `${label}: running…` : busy ? "Starting…" : label}
+      </button>
+      {said ? <span className="brief-checknow-said">{said}</span> : null}
+    </span>
+  );
+}
+
+function CoverageLine({
+  coverage,
+  onStarted,
+}: {
+  coverage: Coverage | null;
+  onStarted: () => void;
+}) {
   // WARP-2812 — TWO different offs. `coverage === null` is "the box did not
   // answer"; `enabled === false` is "the box answered, and said nothing is
   // running". The second used to be unreachable here, because /coverage
@@ -74,6 +150,24 @@ function CoverageLine({ coverage }: { coverage: Coverage | null }) {
             ? " — still working through the rest."
             : " — the rest is not queued to be read."
           : "."}
+      </p>
+      {/* WARP-2850 — the two checks an operator can ask for by hand. Separate
+          buttons because they are separate things: one reads business records
+          and is instant, the other reads documents through the model and
+          competes with chat for the box's only inference slot. */}
+      <p className="brief-coverage-actions">
+        <CheckNowButton
+          passKey="detectors"
+          label="Check records now"
+          running={detectors?.runState === "running"}
+          onStarted={onStarted}
+        />
+        <CheckNowButton
+          passKey="corpus.documents"
+          label="Read more documents"
+          running={corpus?.runState === "running"}
+          onStarted={onStarted}
+        />
       </p>
       <p className="brief-coverage-detail">
         {detectors?.lastSucceededAt
@@ -205,7 +299,7 @@ export default function BriefPage() {
       title="Brief"
       sub="What the box noticed about your business"
     >
-      <CoverageLine coverage={coverage} />
+      <CoverageLine coverage={coverage} onStarted={load} />
 
       {loading ? (
         <p className="brief-empty">Loading…</p>

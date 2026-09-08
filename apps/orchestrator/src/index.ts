@@ -52,10 +52,15 @@ import {
 import {
   runDetectorPass,
   seedBrainPasses,
-  BRAIN_PASS_LOCK_KEY,
+  DETECTOR_PASS_KEY,
 } from "./services/brain/brain-pass.service.js";
 import { CORPUS_PASS_KEY, runCorpusPass } from "./services/brain/brain-corpus.service.js";
-import { runWithLease, releaseAllPasses } from "./services/brain/brain-lease.service.js";
+import { releaseAllPasses } from "./services/brain/brain-lease.service.js";
+import {
+  createBrainPassTrigger,
+  scheduleBootRun,
+  type BrainPassTrigger,
+} from "./services/brain/brain-pass-runner.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
@@ -468,6 +473,12 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+  // WARP-2850 — built inside the brain block when the feature is on, and
+  // handed to createApp so the manual-run route can reach it. Undefined
+  // when BRAIN_ENABLED is off: the READ surface is mounted unconditionally,
+  // so the route must exist and refuse rather than 404.
+  let brainPassTrigger: BrainPassTrigger | undefined;
+  let brainBootTimer: NodeJS.Timeout | undefined;
 
   // WARP-2651 / ADR-043 §5 — reconcile this process's attachment against the
   // sessions the bridge actually holds, every 30 s.
@@ -654,11 +665,14 @@ async function main() {
   if (config.brain.enabled) {
     await seedBrainPasses(prisma);
 
-    // Deterministic pass: no model call, so it never contends for the box's
-    // single inference slot.
-    cronRuntime.scheduleInterval(
-      config.brain.detectorTickMs,
-      async () => {
+    // WARP-2850 — the pass BODIES, named once. The interval tick, the boot run
+    // and the operator's "check now" are three callers of the same function
+    // with the same lease, rather than three code paths with three ideas about
+    // exclusion — which is the shape of defect this epic has already hit twice.
+    const passRunners = {
+      // Deterministic pass: no model call, so it never contends for the box's
+      // single inference slot.
+      [DETECTOR_PASS_KEY]: async () => {
         const outcome = await runDetectorPass(prisma);
         if (outcome.errors.length > 0) {
           // 🔴 ERROR, not warn (WARP-2825). `runDetectorPass` catches per
@@ -670,7 +684,7 @@ async function main() {
           // human solely if somebody opens /brief and reads the banner.
           logger.error({ outcome }, "brain.detector_pass.detector_failed");
         }
-        // Delivery runs INSIDE the same lock as the pass that produced the
+        // Delivery runs INSIDE the same claim as the pass that produced the
         // findings. Two instances notifying concurrently would double-announce
         // the window between one stamping `notifiedAt` and the other reading it.
         const notified = await notifyFindings(prisma);
@@ -678,55 +692,72 @@ async function main() {
           logger.info({ notified }, "brain.findings.notified");
         }
       },
-      { lockKey: BRAIN_PASS_LOCK_KEY },
-    );
 
-    // Corpus pass: DOES call the model, and therefore competes with
-    // interactive chat for the only inference slot. Bounded units per tick.
-    //
-    // 🔴 WARP-2837 — NO `lockKey`, deliberately, and this must not be added
-    // back. cron-runtime's lock is `pg_try_advisory_xact_lock` inside
-    // `prisma.$transaction(..., { timeout: 60_000 })`; this handler makes up
-    // to ten sequential model calls, which do not fit in sixty seconds on a
-    // CPU box. Under the lock the transaction expired mid-run, released the
-    // lock while the pass was still working, and threw P2028 on a pass whose
-    // writes (outer client, not `tx`) had already committed. The rule is the
-    // one agent-run-worker.service.ts states for the same reason: the
-    // transaction-scoped lock is right for a tick and wrong for a long run.
-    //
-    // Exclusion is `runWithLease`'s conditional UPDATE instead — atomic in
-    // Postgres with nothing held open, correct across replicas, and it SKIPS
-    // rather than queues, which is what a cursor-shaped job wants.
-    cronRuntime.scheduleInterval(
-      config.brain.corpusTickMs,
-      async () => {
+      // Corpus pass: DOES call the model, and therefore competes with
+      // interactive chat for the only inference slot. Bounded units per tick.
+      [CORPUS_PASS_KEY]: async () => {
         // Same resolution the agent-run routes use. No model configured =
-        // nothing to call, so the pass is skipped rather than scheduled to
-        // fail hourly and fill `lastError` with noise. Checked BEFORE the
-        // claim, so a box with no model never marks the pass `running`.
+        // nothing to call.
         const brainModel = (process.env.DEFAULT_MODEL ?? process.env.LLM_MODEL ?? "").trim();
         if (!brainModel) return;
-
-        // The tick claims and returns. It does NOT await the pass: that is
-        // the whole point, and awaiting here would put a ten-inference run
-        // back on the cron tick's shoulders.
-        const lease = await runWithLease(prisma, CORPUS_PASS_KEY, async () => {
-          const outcome = await runCorpusPass(
-            { prisma, chat: aiGateway.chat, model: brainModel },
-            { limit: config.brain.corpusUnitsPerRun },
-          );
-          if (outcome.errors.length > 0) {
-            logger.warn({ outcome }, "brain.corpus_pass.partial");
-          }
-        });
-        if (!lease.started) {
-          // Debug, not warn. A tick that arrives while the previous one is
-          // still working is the design behaving correctly, and logging it
-          // loudly would train an operator to ignore this pass's warnings.
-          logger.debug({ reason: lease.reason }, "brain.corpus_pass.skipped");
+        const outcome = await runCorpusPass(
+          { prisma, chat: aiGateway.chat, model: brainModel },
+          { limit: config.brain.corpusUnitsPerRun },
+        );
+        if (outcome.errors.length > 0) {
+          logger.warn({ outcome }, "brain.corpus_pass.partial");
         }
       },
-    );
+    };
+
+    brainPassTrigger = createBrainPassTrigger({
+      prisma,
+      runners: passRunners,
+      // Corpus only. The detector pass is bounded indexed SQL and re-running
+      // it costs the box nothing anyone would notice.
+      manualMinIntervalMs: { [CORPUS_PASS_KEY]: config.brain.manualMinIntervalMs },
+    });
+
+    // 🔴 NEITHER PASS TAKES cron-runtime's `lockKey`, and neither may be given
+    // one. That lock runs the handler inside a 60 s `$transaction` (WARP-2837);
+    // exclusion is the lease, which holds across replicas without keeping a
+    // transaction open. Both passes now share it, so there is exactly one
+    // answer to "is this pass already running" for every caller.
+    for (const [passKey, tickMs] of [
+      [DETECTOR_PASS_KEY, config.brain.detectorTickMs],
+      [CORPUS_PASS_KEY, config.brain.corpusTickMs],
+    ] as const) {
+      cronRuntime.scheduleInterval(tickMs, async () => {
+        const outcome = await brainPassTrigger!.trigger(passKey);
+        if (!outcome.ok) {
+          // Debug, not warn. A tick arriving while the previous one still
+          // works is the design behaving correctly, and logging it loudly
+          // would train an operator to ignore this pass's real warnings.
+          logger.debug({ passKey, reason: outcome.reason }, "brain.pass.skipped");
+        }
+      });
+    }
+
+    // WARP-2850 — the run shortly after boot. DETECTOR ONLY.
+    //
+    // The hole it closes: `setInterval` restarts its countdown at every boot,
+    // so a box that reboots for OTA more often than the tick period could go
+    // indefinitely without ever producing a finding. It now produces them on
+    // every boot instead.
+    //
+    // The corpus pass is deliberately excluded — see brain-pass-runner.ts.
+    if (config.brain.bootDelayMs > 0) {
+      brainBootTimer = scheduleBootRun(
+        brainPassTrigger,
+        DETECTOR_PASS_KEY,
+        config.brain.bootDelayMs,
+        (outcome) => {
+          if (!outcome.ok) {
+            logger.debug({ reason: outcome.reason }, "brain.boot_run.skipped");
+          }
+        },
+      );
+    }
 
     logger.info(
       {
@@ -1737,7 +1768,10 @@ async function main() {
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   // feat/scene-schedules: pass the hoisted Matter dispatcher so the scenes
   // router and the scene-schedule ticker share ONE instance.
-  const app = createApp(prisma, sceneMatterDispatcher);
+  // WARP-2850 — the manual-run route needs the trigger. `brain-pass-trigger-wiring.test.ts`
+  // pins this call, because a route wired only here answers 503 in every unit
+  // test and a deleted argument would otherwise be invisible to that lane.
+  const app = createApp(prisma, sceneMatterDispatcher, brainPassTrigger);
   // WARP-236: when internal mTLS is enabled the SAME port serves HTTPS and
   // every caller (nginx gateway included) must present a CA-signed client
   // cert. Dev installs (DROPLET_INTERNAL_TLS unset) keep plain HTTP.
@@ -1764,6 +1798,10 @@ async function main() {
     // lease. Without this a redeploy leaves the row `running` until the
     // 15-minute lease expires, and the box that just restarted skips its
     // first tick for no reason. Bounded: a corpus tick is ten units.
+    // WARP-2850 — a boot run that has not fired yet must not fire during
+    // shutdown; `.unref()` keeps it from holding the process open, it does not
+    // stop it running if something else does.
+    if (brainBootTimer) clearTimeout(brainBootTimer);
     await releaseAllPasses().catch((err) => {
       logger.warn("brain pass release failed: %s", (err as Error).message);
     });

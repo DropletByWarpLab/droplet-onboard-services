@@ -61,6 +61,7 @@ import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
+import type { BrainPassTrigger } from "./services/brain/brain-pass-runner.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -146,6 +147,11 @@ export function createApp(
     sendCommand: (nodeId, command, actor, args) =>
       sendMatterCommand(nodeId, command, actor, args),
   },
+  // WARP-2850 — how the manual-run route starts a brain pass. Optional so the
+  // ~100 callers in tests keep compiling; the route answers 503 without it,
+  // which is also the correct answer on a box where BRAIN_ENABLED is off and
+  // no pass was ever registered.
+  brainPassTrigger?: BrainPassTrigger,
 ) {
   const app = express();
 
@@ -462,7 +468,7 @@ export function createApp(
   // + recurring schedules. Owner/admin, admitting the mcp principal on behalf
   // of a named chat user (the `start_agent_run` / `list_agent_runs` tools).
   app.use("/api", createAgentRunsRouter(prisma));
-  app.use("/api", createBrainRouter(prisma));
+  app.use("/api", createBrainRouter(prisma, brainPassTrigger));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.
