@@ -1292,6 +1292,62 @@ describe.each(READ_ONLY_TRACK_PROVIDERS)(
   },
 );
 
+/**
+ * WARP-2833 — the SECOND write-enable path. `setWriteEnabled` is not the only
+ * way a row reaches `writeEnabled: true`.
+ *
+ * `connect()` takes its own opt-in off the wizard body (`enableWrites`) and
+ * `persistBase()` commits it BEFORE the connector is constructed, let alone
+ * probed — so guarding only the PATCH verb left the flag reachable through the
+ * sibling site, on a track whose `applyWrite` throws unconditionally. That is
+ * the same "flag nothing can honour" state, and it feeds the same two
+ * consumers: `effective-access.service.ts`'s per-provider `read_write` grant
+ * (WARP-2465) and the claim in `docs/integrations/square.md` that writes are
+ * off and nobody can turn them back on.
+ *
+ * Driven over EVERY rest-track provider rather than Square alone, so a third
+ * REST vendor is covered the day its descriptor lands.
+ */
+describe.each(READ_ONLY_TRACK_PROVIDERS)(
+  "connect(%s, { enableWrites: true }) — the connect-time opt-in is refused too",
+  (provider) => {
+    it("refuses, and persists NOTHING — no row, no flag, no consent record", async () => {
+      // The absence assertions are the point. A guard placed after
+      // `persistBase()` would still reject, and would still have written
+      // `writeEnabled: true` to the database first.
+      //
+      // Mutation: move the guard below `const base = await persistBase()` →
+      // the `create` assertion goes red while the `rejects` one stays green.
+      const prisma = stubPrisma(null);
+      await expect(
+        serviceFor(prisma).connect(
+          { provider, host: "", enableWrites: true } as never,
+          { actor: { type: "user", id: "u-owner" } } as never,
+        ),
+      ).rejects.toThrow(/read-only by construction/);
+
+      expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+      expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    });
+
+    it("still connects READ-ONLY, so the guard refuses the opt-in and not the vendor", async () => {
+      // The asymmetry `setWriteEnabled` already has, on this site: refusing
+      // the whole connect would un-ship every REST vendor.
+      // Mutation: guard on `track === "rest"` alone, ignoring `enableWrites`
+      // → red, because connecting Square at all would start throwing.
+      const prisma = stubPrisma(null);
+      await serviceFor(prisma).connect(
+        { provider, host: "", enableWrites: false } as never,
+        { actor: { type: "user", id: "u-owner" } } as never,
+      );
+
+      expect(prisma.integrationConnection.create).toHaveBeenCalledTimes(1);
+      expect(rowFor(prisma, provider).writeEnabled).toBe(false);
+    });
+  },
+);
+
 describe.each(WRITE_CAPABLE_PROVIDERS)(
   "setWriteEnabled(ctx, %s, …) on a box where every provider is connected",
   (provider) => {
