@@ -82,22 +82,83 @@ export function isDmrRuntime(): boolean {
   return inferenceRuntime() === "dmr";
 }
 
+/** The canonical name for the inference daemon's base URL. */
+export const RUNTIME_URL_ENV = "INFERENCE_RUNTIME_URL";
+/** The deprecated name. Still honored — every deployed box's .env carries it. */
+export const LEGACY_RUNTIME_URL_ENV = "OLLAMA_URL";
+/** Unchanged: the Docker Desktop dev fallback this repo has always used. */
+export const DEFAULT_RUNTIME_URL = "http://host.docker.internal:11434";
+
+/** Warn once per process, not once per probe — this is read on every page load. */
+let warnedLegacyRuntimeUrl = false;
+let warnedRuntimeUrlSplit = false;
+
+/** Exported for testing: re-arms the once-only runtime-URL warnings. */
+export function resetRuntimeUrlWarnsForTests(): void {
+  warnedLegacyRuntimeUrl = false;
+  warnedRuntimeUrlSplit = false;
+}
+
 /**
- * Base URL of the inference daemon's management API.
+ * Base URL of the inference daemon — the ONE resolver for every consumer.
  *
- * Same precedence as the merged runtime adapter: `INFERENCE_RUNTIME_URL` wins,
- * `OLLAMA_URL` is the fallback so an existing box keeps working after the flip
- * without a second variable. Used ONLY by DMR-only probes — the Ollama-shaped
- * endpoints (`/api/tags`, `/api/ps`, `/api/pull`) keep reading the `OLLAMA_URL`
- * constants their modules already captured, so nothing moves on the default
- * path.
+ * Precedence, identical to ai-gateway's `_resolve_runtime_url` and the
+ * inference-manager's `resolve_base_url`: `INFERENCE_RUNTIME_URL` wins,
+ * `OLLAMA_URL` is the warned fallback, then the dev default.
+ *
+ * WARP-2857 — this used to be reachable only from the DMR-only `/models`
+ * probes, while `model-readiness`, `model-metrics` and `model-benchmark` each
+ * captured their own `process.env.OLLAMA_URL` at module load. Four resolvers,
+ * one of which knew about the canonical name. That is how the rename becomes
+ * a partial migration nobody can complete: set the new variable and the
+ * `/models` probe moves while `/api/tags`, `/api/ps`, `/api/pull` and the
+ * warm-up chat all stay pointed at the old one — or at the dev default, which
+ * on the appliance is nothing at all. There is now exactly one resolver.
+ *
+ * Reading `process.env` per call rather than once at module load is
+ * deliberate and is what makes that consolidation safe: a module-level capture
+ * silently ignores anything that sets the variable after import, which is
+ * precisely why the three services could not share this function before.
  */
 export function inferenceRuntimeUrl(): string {
-  const explicit = (process.env.INFERENCE_RUNTIME_URL ?? "").trim();
-  if (explicit) return explicit.replace(/\/+$/, "");
-  const legacy = (process.env.OLLAMA_URL ?? "").trim();
-  if (legacy) return legacy.replace(/\/+$/, "");
-  return "http://host.docker.internal:11434";
+  const explicit = (process.env[RUNTIME_URL_ENV] ?? "").trim();
+  const legacy = (process.env[LEGACY_RUNTIME_URL_ENV] ?? "").trim();
+
+  if (explicit) {
+    // Both names set and DISAGREEING is the only interesting case. Both set and
+    // agreeing is the expected steady state for the whole migration window —
+    // compose writes the canonical name, every field .env still carries the
+    // legacy one — so warning on it would fire on every healthy box. (This is
+    // the one place the idiom diverges from `INFERENCE_MANAGER_URL`, which is
+    // not written for every box and so warns whenever both are present.)
+    if (legacy && legacy !== explicit && !warnedRuntimeUrlSplit) {
+      warnedRuntimeUrlSplit = true;
+      logger.warn(
+        { canonical: explicit, legacy },
+        `${RUNTIME_URL_ENV} and the deprecated ${LEGACY_RUNTIME_URL_ENV} DISAGREE — ` +
+          `using ${RUNTIME_URL_ENV}. Delete the ${LEGACY_RUNTIME_URL_ENV} line from ` +
+          `the repo-root .env so chat, lifecycle and metrics cannot split across ` +
+          `two daemons.`,
+      );
+    }
+    return explicit.replace(/\/+$/, "");
+  }
+
+  if (legacy) {
+    if (!warnedLegacyRuntimeUrl) {
+      warnedLegacyRuntimeUrl = true;
+      logger.warn(
+        `${LEGACY_RUNTIME_URL_ENV} is DEPRECATED — rename it to ${RUNTIME_URL_ENV} ` +
+          `in the repo-root .env, then recreate the container (\`docker restart\` ` +
+          `re-reads no env). The endpoint serves Docker Model Runner on a default ` +
+          `box, so the OLLAMA_ prefix names an implementation detail rather than ` +
+          `the contract. Honoring the deprecated name for now.`,
+      );
+    }
+    return legacy.replace(/\/+$/, "");
+  }
+
+  return DEFAULT_RUNTIME_URL;
 }
 
 // ──────────────────────────────────────────────────────────────────────

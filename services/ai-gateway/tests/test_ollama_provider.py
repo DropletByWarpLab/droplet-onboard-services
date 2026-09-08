@@ -12,12 +12,16 @@ import pytest
 import respx
 
 from providers.ollama_local import (
+    _DEFAULT_RUNTIME_URL,
     _LEGACY_MANAGER_URL_ENV,
+    _LEGACY_RUNTIME_URL_ENV,
     _MANAGER_URL_ENV,
     _MAX_CONNECTIONS,
+    _RUNTIME_URL_ENV,
     OllamaLocalProvider,
     _LimitsCache,
     _resolve_manager_url,
+    _resolve_runtime_url,
     prettify_model_name,
 )
 from schemas import ChatMessage, ToolDefinition, ToolFunction
@@ -132,6 +136,125 @@ class TestConnectionPoolSizing:
             assert _MAX_CONNECTIONS > 1
         finally:
             await provider.close()
+
+
+# ---------------------------------------------------------------------------
+# WARP-2857 — INFERENCE_RUNTIME_URL, with OLLAMA_URL as a warned shim
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeUrlResolution:
+    """These are the tests that prove a field box keeps serving chat.
+
+    `OLLAMA_URL` is in the .env of every deployed box and reaches this process
+    through the ai-gateway's `env_file: ../.env`. If the fallback regresses,
+    the chat endpoint silently becomes `_DEFAULT_RUNTIME_URL` — a
+    host-installed Ollama that does not exist on the appliance — while the
+    orchestrator's Models page and /ai/readiness keep resolving through
+    INFERENCE_RUNTIME_URL and stay green. Dead chat, healthy dashboard. Hence
+    a case per branch.
+
+    Precedence under test: canonical -> legacy (warned) -> the unchanged
+    default. An explicitly-EMPTY value counts as unset at every step (the
+    compose `${VAR:-}` trap).
+    """
+
+    @staticmethod
+    def _resolve(monkeypatch, canonical: str | None, legacy: str | None) -> str:
+        """Resolve with the two vars forced to the given state.
+
+        `None` means "not in the environment at all" — distinct from `""`,
+        which is what compose's `${VAR:-}` actually delivers and which the
+        resolver must treat as unset.
+        """
+        for name, value in ((_RUNTIME_URL_ENV, canonical), (_LEGACY_RUNTIME_URL_ENV, legacy)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        return _resolve_runtime_url()
+
+    @staticmethod
+    def _warnings(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_canonical_name_wins(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://dmr:12434", None)
+        assert resolved == "http://dmr:12434"
+        # A fully-migrated box must not be nagged.
+        assert self._warnings(caplog) == []
+
+    def test_legacy_name_still_works_and_warns(self, monkeypatch, caplog):
+        # THE field-box case: an un-migrated .env carries only the old name.
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, None, "http://dmr:12434")
+        assert resolved == "http://dmr:12434"
+
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1
+        msg = warnings[0]
+        # The warning has to be ACTIONABLE: old name, new name, and the file.
+        assert _LEGACY_RUNTIME_URL_ENV in msg
+        assert _RUNTIME_URL_ENV in msg
+        assert "DEPRECATED" in msg
+        assert ".env" in msg
+
+    def test_agreeing_pair_is_silent(self, monkeypatch, caplog):
+        """The steady state for the whole migration window — must not warn.
+
+        Compose writes the canonical name while every field .env still carries
+        the legacy one. Warning here would fire on every healthy box, which is
+        how a log line stops being read.
+        """
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://dmr:12434", "http://dmr:12434")
+        assert resolved == "http://dmr:12434"
+        assert self._warnings(caplog) == []
+
+    def test_disagreeing_pair_warns_and_canonical_wins(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://dmr:12434", "http://droplet-ollama:11434")
+        assert resolved == "http://dmr:12434"
+
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1
+        # Both values are named so the operator can see WHICH pair split.
+        assert "http://dmr:12434" in warnings[0]
+        assert "http://droplet-ollama:11434" in warnings[0]
+
+    def test_blank_canonical_does_not_shadow_a_working_legacy(self, monkeypatch, caplog):
+        """The compose `${VAR:-}` trap, and the one that would kill chat.
+
+        A blank canonical value must not win over the legacy name every
+        deployed box still carries.
+        """
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "   ", "http://dmr:12434")
+        assert resolved == "http://dmr:12434"
+        assert len(self._warnings(caplog)) == 1
+
+    def test_blank_legacy_does_not_defeat_the_default(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, None, "")
+        assert resolved == _DEFAULT_RUNTIME_URL
+        assert self._warnings(caplog) == []
+
+    def test_nothing_configured_is_unchanged(self, monkeypatch, caplog):
+        """No default is introduced and no default changes."""
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, None, None)
+        assert resolved == "http://host.docker.internal:11434"
+        assert self._warnings(caplog) == []
+
+    def test_provider_uses_the_resolved_url(self, monkeypatch):
+        """The resolution has to reach the thing that actually posts chat.
+
+        A resolver nobody calls is the same outage with extra tests, so this
+        asserts the provider's base_url, not just the helper's return value.
+        """
+        monkeypatch.setattr("providers.ollama_local.INFERENCE_RUNTIME_URL", "http://dmr:12434/")
+        assert OllamaLocalProvider().base_url == "http://dmr:12434"
 
 
 # ---------------------------------------------------------------------------
