@@ -57,12 +57,12 @@ export const SESSION_TOUCH_INTERVAL_SECONDS = 30;
 /** GC grace past the absolute cap — see module docstring. */
 const RECORD_GC_GRACE_SECONDS = 24 * 60 * 60;
 
-// WARP-2854 — shipped lifetimes: owner/admin log in again every 24 h,
-// family/guest every 7 days. Idle equals the cap by default (see config.ts).
-export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 24 * 60 * 60;
-export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 7 * 24 * 60 * 60;
-export const DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS = 24 * 60 * 60;
-export const DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS = 7 * 24 * 60 * 60;
+// WARP-2854 — shipped lifetimes are the NIST 800-63B AAL2 maximum for every
+// role: 12 h absolute, 30 min inactivity (see config.ts).
+export const DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS = 30 * 60;
+export const DEFAULT_IDLE_TIMEOUT_USER_SECONDS = 30 * 60;
+export const DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS = 12 * 60 * 60;
+export const DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS = 12 * 60 * 60;
 export const DEFAULT_MAX_CONCURRENT_SESSIONS = 5;
 
 export interface SessionRecord {

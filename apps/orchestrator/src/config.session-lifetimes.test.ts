@@ -1,8 +1,8 @@
 /**
- * WARP-2854 — shipped session lifetimes are a product decision: an
- * owner/admin logs in again once every 24 h, a family/guest once every
- * 7 days, nothing shorter. The idle window defaults to the role's cap so it
- * never fires first unless an operator lowers it. Loading config.ts is
+ * WARP-2854 — shipped session lifetimes sit at the NIST 800-63B AAL2
+ * maximum for every role: 12 h absolute, 30 min inactivity. Both are
+ * per-role knobs so a class can be tightened without the other. Loading
+ * config.ts is
  * environment-sensitive, so each case imports it in an isolated module
  * registry with a controlled process.env (same approach as
  * config.review-nudge.test.ts).
@@ -35,28 +35,28 @@ describe("WARP-2854 — session lifetime defaults", () => {
     }
   });
 
-  it("owner/admin: 24 h cap, idle equal to the cap", async () => {
+  it("owner/admin: 12 h cap, 30 min idle (AAL2 §4.2.3)", async () => {
     const { config } = await import("./config.js");
-    expect(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(24 * 60 * 60);
-    expect(config.SESSION_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS);
+    expect(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(12 * 60 * 60);
+    expect(config.SESSION_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(30 * 60);
   });
 
-  it("family/guest: 7 d cap, idle equal to the cap", async () => {
+  it("family/guest: 12 h cap, 30 min idle (AAL2 §4.2.3)", async () => {
     const { config } = await import("./config.js");
-    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(7 * 24 * 60 * 60);
-    expect(config.SESSION_IDLE_TIMEOUT_USER_SECONDS).toBe(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS);
+    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(12 * 60 * 60);
+    expect(config.SESSION_IDLE_TIMEOUT_USER_SECONDS).toBe(30 * 60);
   });
 
   it("a stale single-cap line from a pre-WARP-2854 .env is ignored, not applied to either role", async () => {
     process.env.SESSION_ABSOLUTE_TIMEOUT_SECONDS = "28800";
     vi.resetModules();
     const { config } = await import("./config.js");
-    expect(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(24 * 60 * 60);
-    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(7 * 24 * 60 * 60);
+    expect(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(12 * 60 * 60);
+    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(12 * 60 * 60);
     expect("SESSION_ABSOLUTE_TIMEOUT_SECONDS" in config).toBe(false);
   });
 
-  it("operators can set the WARP-247 AAL2 posture back per role", async () => {
+  it("operators can tighten one role class without moving the other", async () => {
     process.env.SESSION_IDLE_TIMEOUT_ADMIN_SECONDS = "900";
     process.env.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS = "28800";
     vi.resetModules();
@@ -64,6 +64,7 @@ describe("WARP-2854 — session lifetime defaults", () => {
     expect(config.SESSION_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(900);
     expect(config.SESSION_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(28800);
     // The other class is untouched.
-    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(7 * 24 * 60 * 60);
+    expect(config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(12 * 60 * 60);
+    expect(config.SESSION_IDLE_TIMEOUT_USER_SECONDS).toBe(30 * 60);
   });
 });

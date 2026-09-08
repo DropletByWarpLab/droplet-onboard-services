@@ -162,14 +162,14 @@ describe("absoluteLimitSecondsForRole (WARP-2854)", () => {
     expect(absoluteLimitSecondsForRole("guest")).toBe(7 * 24 * 3600);
   });
 
-  it("ships owner/admin at 24 h and family/guest at 7 d, idle equal to the cap", () => {
-    // The product decision behind WARP-2854. config.ts carries the same
-    // numbers as zod defaults (pinned in config.session-lifetimes.test.ts);
-    // these are the fallbacks session.service uses when config lacks a value.
-    expect(DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(24 * 3600);
-    expect(DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(7 * 24 * 3600);
-    expect(DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS);
-    expect(DEFAULT_IDLE_TIMEOUT_USER_SECONDS).toBe(DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS);
+  it("ships every role at the NIST 800-63B AAL2 maximum: 12 h absolute, 30 min idle", () => {
+    // The decision behind WARP-2854. config.ts carries the same numbers as
+    // zod defaults (pinned in config.session-lifetimes.test.ts); these are
+    // the fallbacks session.service uses when config lacks a value.
+    expect(DEFAULT_ABSOLUTE_TIMEOUT_ADMIN_SECONDS).toBe(12 * 3600);
+    expect(DEFAULT_ABSOLUTE_TIMEOUT_USER_SECONDS).toBe(12 * 3600);
+    expect(DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS).toBe(30 * 60);
+    expect(DEFAULT_IDLE_TIMEOUT_USER_SECONDS).toBe(30 * 60);
   });
 });
 
