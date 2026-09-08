@@ -399,6 +399,52 @@ function requireConnectionProvider(provider: string): string {
   return provider;
 }
 
+/**
+ * WARP-2833 — a track that CANNOT write must not accept the write opt-in.
+ *
+ * ADR-046 §4 makes the REST track read-only by construction:
+ * `RestProfileConnector.applyWrite` always throws, and there is no profile
+ * field that could turn it on. Setting `writeEnabled` for one therefore sets a
+ * flag no code path can honour, and it was not inert in three separate ways:
+ *
+ *  • `effective-access.service.ts`'s `connectionLevels()` keys
+ *    `read` / `read_write` off this column PER PROVIDER (WARP-2465), so a role
+ *    could hold a `read_write` grant on a connector with no write path — a
+ *    permission describing a capability that does not exist.
+ *  • The audit row records a `write-enable` against Square as a
+ *    security-relevant event that never happened.
+ *  • `docs/integrations/square.md` tells the customer, in as many words, that
+ *    "writes are off" is not a setting anyone could turn back on. That was
+ *    false while this was accepted, and a setup guide the code contradicts is
+ *    worse than one that says nothing.
+ *
+ * Refused rather than silently coerced to `false`: a caller that asked for
+ * writes and got a 200 would reasonably believe it had them.
+ *
+ * ONE function, called from BOTH write-enable sites, because there are two and
+ * the first fix only covered one. `setWriteEnabled` is the PATCH verb;
+ * `connect()` carries its own `enableWrites` off the wizard body and commits it
+ * in `persistBase()` before the connector is constructed or probed — reachable
+ * today through the still-live deprecated alias `POST
+ * /api/integrations/eaglesoft/connect`, which takes its provider from the BODY
+ * and is not gated by `requireLanProvider`, so `{ provider: "square",
+ * enableWrites: true }` posted there used to persist the flag. A guard living
+ * at one call site is a guard the sibling site can be written past; this is why
+ * it is a named function and not two copies of an `if`.
+ *
+ * `enabled === false` is always legal, on every track. Refusing it would make a
+ * row that somehow holds `true` — from before this guard, or from a direct DB
+ * edit — impossible to clear through the product.
+ */
+function requireWritableTrack(provider: string, enabled: boolean): void {
+  if (!enabled) return;
+  if (providerDescriptor(provider)?.track !== "rest") return;
+  throw ErpError.validation(
+    `the "${provider}" connector is read-only by construction (ADR-046 §4) — ` +
+      "it has no write path to enable",
+  );
+}
+
 function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
   // Dual-track selection lives in erp-provider.ts; the SQL branch is unchanged.
   // The REST material comes straight off the ConnectInput here (rather than the
@@ -712,6 +758,17 @@ export function createIntegrationsService(
 
     async connect(input, ctx) {
       const provider = resolveProvider(input.provider);
+      // Honor the wizard's connect-time write opt-in (default off / read-only).
+      const writeEnabled = !!input.enableWrites;
+      /**
+       * WARP-2833 — the SECOND write-enable path, guarded at the same layer as
+       * the PATCH verb below (see {@link requireWritableTrack}).
+       *
+       * FIRST, before the row is even read: `persistBase()` commits
+       * `writeEnabled` before the connector is constructed, so a refusal placed
+       * any later would have already written the flag it exists to prevent.
+       */
+      requireWritableTrack(provider, writeEnabled);
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
       const existing = await findRow(provider);
@@ -719,8 +776,6 @@ export function createIntegrationsService(
       // The backend owns the credential — mint a pointer if the client didn't
       // send one (the real secret is created during live provisioning).
       const secretRef = input.secretRef ?? `${provider}:pending`;
-      // Honor the wizard's connect-time write opt-in (default off / read-only).
-      const writeEnabled = !!input.enableWrites;
       // REST-track material. Each is written only when supplied, so a reconnect
       // that changes just the host doesn't silently wipe the credentials or the
       // discovered route map already on the row.
@@ -989,6 +1044,11 @@ export function createIntegrationsService(
       const scoped = requireKnownProvider(provider);
       const row = await findRow(scoped);
       if (!row) throw ErpError.notConfigured(scoped);
+
+      // WARP-2833 — the PATCH verb's half of the same rule. See
+      // {@link requireWritableTrack}; `connect()` calls it too, because the
+      // write opt-in has two entry points and only one of them was guarded.
+      requireWritableTrack(scoped, enabled);
 
       const updated = await prisma.integrationConnection.update({
         where: { id: row.id },

@@ -1312,6 +1312,54 @@ describe("payments read surface (WARP-2497)", () => {
     );
   });
 
+  it("🔴 WARP-2835 — a WINDOWLESS get_recent_charges scans all history, and ignores `since`", async () => {
+    // This pins a DANGEROUS TRUTH, not a desirable behaviour, and it exists
+    // because the codebase currently records the opposite.
+    //
+    // `apps/orchestrator/src/services/erp-sync/entities.ts` explains why
+    // `charge` has no `ERP_SYNC_ENTITIES` row with: "Called with no window it
+    // has no query to send." That is false, and the falsehood points the
+    // reassuring way — it makes the omission sound inert, so the next reader
+    // adding a `charge` row believes the worst case is an empty read.
+    //
+    // What actually happens, and both halves matter:
+    //
+    //  1. `epochSeconds(undefined)` returns `undefined`, and `list()` DROPS an
+    //     undefined search param rather than refusing the call. So the request
+    //     that leaves is `GET /v1/charges` with NO `created` filter at all —
+    //     the merchant's entire charge history, paged to STRIPE_MAX_PAGES (50),
+    //     against a METERED endpoint, on every tick, forever.
+    //  2. This case reads `params.from`/`params.to` and never `params.since` —
+    //     and `since` is the ONLY param the poller sends
+    //     (`erp-sync.service.ts`: `cursor.watermark === null ? {} : { since }`).
+    //     So even a cursor with a healthy watermark narrows nothing here.
+    //
+    // Together those mean scheduling `charge` on the Stripe track is not a
+    // slightly-inefficient read; it is an unbounded one that can never narrow.
+    //
+    // 🔴 This test must FLIP, not be deleted, when the connector learns
+    // `since`. At that point the assertion becomes "a windowless read sends
+    // `created[gte]` from `since`" and `entities.ts` can finally say something
+    // true. Deleting it instead restores the silence this pins.
+    //
+    // Mutation: make `list()` send `created[gte]=NaN`/`undefined` instead of
+    // dropping it, or teach the case to read `params.since` → red, correctly.
+    const { c, f } = connector({
+      routes: [{ match: /\/v1\/charges/, responses: [{ body: { has_more: false, data: [] } }] }],
+    });
+
+    await c.runRead("get_recent_charges", { since: "2026-08-01T00:00:00Z" });
+
+    expect(f.calls).toHaveLength(1);
+    const url = new URL(f.calls[0].url);
+    expect(url.pathname).toBe("/v1/charges");
+    // The window the poller asked for is nowhere on the wire.
+    expect(url.searchParams.get("created[gte]")).toBeNull();
+    expect(url.searchParams.get("created[lt]")).toBeNull();
+    expect(url.search).not.toContain("2026-08-01");
+    expect(url.search).not.toContain("since");
+  });
+
   it("returns charges newest first", async () => {
     // The canonical ordering for this dataset (read-queries.ts orders by
     // created_at DESC, charge_id). Stripe's own list order is not contractual,
