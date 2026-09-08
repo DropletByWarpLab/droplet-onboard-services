@@ -301,23 +301,42 @@ _MARK_BX, _MARK_BY, _MARK_BW, _MARK_BH = 92, 72, 328, 368
 _MARK_H_RATIO = 48 / 60
 
 
+def _mark_scale(size):
+    """Source units to pixels for a mark drawn inside a `size`-tall box.
+
+    ONE factor for both axes. Deriving the x factor from the truncated
+    `_mark_h` instead skews the drop — at size=26, the nav-bar icon, x lands
+    at 17/328 against y at 20/368, ~4.6% apart — and the whole point of this
+    helper is that the firmware draws the mark display.py draws.
+    """
+    return size * _MARK_H_RATIO / _MARK_BH
+
+
 def _mark_h(size):
-    """Drawn height of the mark inside a `size`-tall box."""
+    """Drawn height of the mark inside a `size`-tall box.
+
+    The bottom edge of the projection below, so the screens can hang a
+    wordmark off `my + _mark_h(size)`.
+    """
     return int(size * _MARK_H_RATIO)
 
 
 def _mark_w(size):
     """Drawn width of the mark inside a `size`-tall box."""
-    return int(_mark_h(size) * _MARK_BW / _MARK_BH)
+    return int(_MARK_BW * _mark_scale(size))
 
 
 def _mark_pts(pts, size, x, y):
-    """Project canonical mark points into a `size`-box at (x, y), centred."""
-    h = _mark_h(size)
-    w = _mark_w(size)
-    ox = x + (size - w) // 2
-    return [(int(ox + (px - _MARK_BX) * w / _MARK_BW),
-             int(y + (py - _MARK_BY) * h / _MARK_BH)) for px, py in pts]
+    """Project canonical mark points into a `size`-box at (x, y), centred.
+
+    Coordinate for coordinate the same output as display.py's
+    `draw_droplet_mark`, which is the point: the two renderers are the same
+    mark on two different panels.
+    """
+    s = _mark_scale(size)
+    ox = x + (size - _mark_w(size)) // 2
+    return [(int(ox + (px - _MARK_BX) * s),
+             int(y + (py - _MARK_BY) * s)) for px, py in pts]
 
 
 def _mark_poly(g, size, x, y):

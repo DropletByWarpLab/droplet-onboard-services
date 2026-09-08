@@ -547,7 +547,6 @@ def _get_font(size: int, bold: bool = False,
 # Geometry copied verbatim from apps/web-dashboard/src/components/DropletMark.tsx
 # (512x512 viewBox). Rendering it here rather than bundling a PNG keeps the
 # device logo pixel-perfect across panel sizes and rotations.
-_MARK_VIEWBOX = (512, 512)
 _MARK_LEFT = [(256, 72), (420, 308), (352, 440), (160, 440), (92, 308)]
 _MARK_RIGHT = [(256, 72), (420, 308), (256, 368)]
 # The mark's bounding box inside that viewBox — it is centred in the box, so
@@ -557,6 +556,20 @@ _MARK_RIGHT = [(256, 72), (420, 308), (256, 368)]
 # leaves every hand-tuned call-site coordinate below where it already was.
 _MARK_BBOX = (92, 72, 328, 368)  # x, y, w, h
 _MARK_HEIGHT_RATIO = 48 / 60
+
+
+def _mark_height(size: int) -> int:
+    """Drawn height of the mark inside a `size`-tall box.
+
+    render_boot/render_shutdown/render_standby hand-place a wordmark and a
+    status line under the mark, so they need the same number the draw
+    functions scale by. Mirrors pyportal/code.py's `_mark_h`.
+
+    The draw functions below scale by the UNtruncated `size *
+    _MARK_HEIGHT_RATIO`; truncating first and dividing by `bh` moves points
+    inside the mark, so this is a baseline helper, not a scale factor.
+    """
+    return int(size * _MARK_HEIGHT_RATIO)
 
 
 def draw_droplet_mark(
@@ -1878,7 +1891,7 @@ class TFTDisplay:
         size = 116
         mx = (WIDTH - size) // 2
         my = 44
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         if progress >= 0.999:
             draw_droplet_mark(draw, mx, my, size, primary=V3_ACCENT,
                               highlight=V3_ACCENT_INK)
@@ -1948,7 +1961,7 @@ class TFTDisplay:
         size = 116
         mx = (WIDTH - size) // 2
         my = 44
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         # collapse phase begins at 80% of the sequence.
         collapse_start = 0.80
         if progress < collapse_start:
@@ -2583,7 +2596,7 @@ class TFTDisplay:
         size = 78
         mx = (WIDTH - size) // 2
         my = HEIGHT // 2 - int(size * 0.55)
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         draw_droplet_mark(draw, mx, my, size, primary=(0x14, 0x14, 0x22),
                           highlight=(0x1A, 0x1A, 0x30))
         _v3_text(draw, "STANDBY", WIDTH // 2, mb + 20,
