@@ -22,10 +22,10 @@
  * show the last measurement without re-running the generation.
  */
 import { createLogger } from "../lib/logger.js";
+import { inferenceRuntimeUrl } from "./inference-runtime.js";
 
 const logger = createLogger("model-benchmark");
-const OLLAMA_URL =
-  process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
+// WARP-2857 — see model-readiness: one resolver, read per call.
 
 // A tiny, deterministic prompt + a bounded token count: enough tokens for a
 // stable rate reading, short enough that the generation itself is quick
@@ -71,7 +71,7 @@ export async function benchmarkModel(
   try {
     const signal = AbortSignal.timeout(BENCH_TIMEOUT_MS);
     const startedAt = performance.now();
-    const resp = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
+    const resp = await fetch(`${inferenceRuntimeUrl()}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
