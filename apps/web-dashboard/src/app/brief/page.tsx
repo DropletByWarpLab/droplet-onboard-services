@@ -26,6 +26,8 @@ import { ShellPage } from "@/components/shell/ShellPage";
 import "./brief.css";
 import {
   brainIsOff,
+  runBrainPass,
+  type RunPassOutcome,
   COVERAGE_UNREACHABLE,
   fetchCoverage,
   fetchFindings,
@@ -36,6 +38,25 @@ import {
 } from "./api";
 import { BrainSwitchPanel } from "./BrainSwitchPanel";
 
+/**
+ * How often to re-read coverage WHILE a pass holds the lease (WARP-2850
+ * review).
+ *
+ * `/brief` is otherwise a load-once page, and it stays one: this interval is
+ * armed only while the box says something is running, and torn down the moment
+ * it stops. Without it the "check now" control was terminal — `runState` came
+ * from the mount fetch and the one refresh right after the 202, and a corpus
+ * pass runs for MINUTES after that, so the button sat disabled on "running…"
+ * long past completion until somebody reloaded the page.
+ *
+ * Ten seconds is chosen against the thing being waited on, not against a feel:
+ * the detector pass is bounded SQL that finishes in seconds. The upper bound on
+ * the polling itself is the lease — a worker that dies leaves `running` until
+ * the 15-minute expiry, so the worst case is two cheap GETs every ten seconds
+ * for fifteen minutes, on a tab somebody left open.
+ */
+const RUNNING_POLL_MS = 10_000;
+
 const KIND_ICON = {
   loss: TrendingDown,
   risk: AlertTriangle,
@@ -44,7 +65,93 @@ const KIND_ICON = {
   inconsistency: AlertTriangle,
 } as const;
 
-function CoverageLine({ result }: { result: CoverageResult }) {
+/**
+ * "Check now" (WARP-2850).
+ *
+ * PROVISIONAL — the affordance is engineering's, pending design. What is NOT
+ * provisional is the copy rule it follows: every refusal here is a different
+ * sentence, because they are different answers. Already running is "hold on";
+ * switched off is a decision somebody made; too soon is a duty-cycle limit on
+ * the box's only inference slot. Collapsing them into "something went wrong"
+ * is the failure /admin/sessions had, where a permissions decision read as an
+ * outage.
+ *
+ * It does NOT spin. The pass takes minutes and the request returns in
+ * milliseconds — the button reports that a run STARTED, and the coverage line
+ * above is where the outcome actually shows up.
+ */
+function CheckNowButton({
+  passKey,
+  label,
+  running,
+  onStarted,
+}: {
+  passKey: string;
+  label: string;
+  running: boolean;
+  onStarted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+
+  const say = (o: RunPassOutcome) => {
+    if (o.ok) return "Started. This page will show what it finds.";
+    switch (o.reason) {
+      case "busy":
+        return "Already running — give it a moment.";
+      case "disabled":
+        return "This check is switched off.";
+      case "missing":
+        // NOT "already running". Nothing is running, and no amount of waiting
+        // will change that — the row is created at boot, so a restart is the
+        // actual next step.
+        return "This check is not set up on this box. Restarting it will add it.";
+      case "no_model":
+        // The brain can be on while no model is configured; they are separate
+        // switches. Saying "busy" here sends somebody away to wait for a run
+        // that cannot happen.
+        return "No AI model is set up yet, so there is nothing to read with.";
+      case "shutting_down":
+        return "The box is restarting. Try again in a moment.";
+      case "too_soon":
+        return o.retryAfterSeconds
+          ? `Just ran. Try again in about ${Math.ceil(o.retryAfterSeconds / 60)} min.`
+          : "Just ran — try again shortly.";
+      case "off":
+        return "The brain is off, so there is nothing to run.";
+      default:
+        return "Could not start it. Nothing was changed.";
+    }
+  };
+
+  const click = useCallback(async () => {
+    setBusy(true);
+    setSaid(null);
+    const out = await runBrainPass(passKey).catch(
+      (): RunPassOutcome => ({ ok: false, reason: "failed" }),
+    );
+    setBusy(false);
+    setSaid(say(out));
+    if (out.ok) onStarted();
+  }, [passKey, onStarted]);
+
+  return (
+    <span className="brief-checknow">
+      <button type="button" disabled={busy || running} onClick={() => void click()}>
+        {running ? `${label}: running…` : busy ? "Starting…" : label}
+      </button>
+      {said ? <span className="brief-checknow-said">{said}</span> : null}
+    </span>
+  );
+}
+
+function CoverageLine({
+  result,
+  onStarted,
+}: {
+  result: CoverageResult;
+  onStarted: () => void;
+}) {
   // WARP-2812 — TWO different offs. "The box did not answer" and "the box
   // answered, and said nothing is running" are not the same sentence. The
   // second used to be unreachable here, because /coverage succeeds whichever
@@ -73,6 +180,10 @@ function CoverageLine({ result }: { result: CoverageResult }) {
   const { documentsReady, documentsDigested } = coverage.corpus;
   const detectors = coverage.passes.find((p) => p.passKey === "detectors");
   const corpus = coverage.passes.find((p) => p.passKey === "corpus.documents");
+  // Reached but not read. Clamped at zero: the two counters are incremented in
+  // separate statements over the pass's life, and a negative here would render
+  // as a nonsense sentence rather than as the accounting slip it would be.
+  const passedOver = Math.max(0, (corpus?.unitsSeen ?? 0) - (corpus?.unitsDigested ?? 0));
 
   return (
     <div className="brief-coverage">
@@ -86,6 +197,52 @@ function CoverageLine({ result }: { result: CoverageResult }) {
             ? " — still working through the rest."
             : " — the rest is not queued to be read."
           : "."}
+      </p>
+      {/* WARP-2834 — units the pass REACHED but could not read. `unitsSeen`
+          advances for every document the loop touched; `unitsDigested` only
+          for the ones the model actually read. The gap is documents with no
+          extractable text, or whose owner could not be resolved — the
+          `__household__` / `__dept_<uuid>__` sentinel owners the file-indexer
+          writes for the shared drive.
+
+          Worth its own sentence rather than folding into the count: those
+          documents are NOT queued and will not be read on a later tick, so
+          leaving them inside "still working through the rest" would be the
+          same overstatement in a new place.
+
+          ONE STRING PER COUNT, not four switches inside one sentence. The
+          noun, its verb, the possessive pronoun and the sentence that
+          follows all turn on the same number. The first draft spread them
+          across independent ternaries and two of the four were never
+          switched, so a single passed-over document read "whose it were …
+          They are not queued". Held together as one string per count so the
+          agreement cannot come apart again; pinned in
+          `__tests__/brief.coverage-passed-over.test.tsx`. */}
+      {passedOver > 0 ? (
+        <p className="brief-coverage-detail">
+          <strong>{passedOver.toLocaleString()}</strong>{" "}
+          {passedOver === 1
+            ? "document was passed over — no readable text, or the box could not tell whose it was. It is not queued for a later pass."
+            : "documents were passed over — no readable text, or the box could not tell whose they were. They are not queued for a later pass."}
+        </p>
+      ) : null}
+      {/* WARP-2850 — the two checks an operator can ask for by hand. Separate
+          buttons because they are separate things: one reads business records
+          and is instant, the other reads documents through the model and
+          competes with chat for the box's only inference slot. */}
+      <p className="brief-coverage-actions">
+        <CheckNowButton
+          passKey="detectors"
+          label="Check records now"
+          running={detectors?.runState === "running"}
+          onStarted={onStarted}
+        />
+        <CheckNowButton
+          passKey="corpus.documents"
+          label="Read more documents"
+          running={corpus?.runState === "running"}
+          onStarted={onStarted}
+        />
       </p>
       <p className="brief-coverage-detail">
         {detectors?.lastSucceededAt
@@ -215,6 +372,17 @@ export default function BriefPage() {
     void load();
   }, [load]);
 
+  // Derived to a BOOLEAN before it reaches the dependency array. `coverage` is
+  // a fresh object on every poll, so depending on it would tear the interval
+  // down and build a new one each time — the countdown would restart forever
+  // and, when nothing is running, the effect would still churn.
+  const passRunning = coverage?.passes.some((p) => p.runState === "running") ?? false;
+  useEffect(() => {
+    if (!passRunning) return;
+    const timer = setInterval(() => void load(), RUNNING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [passRunning, load]);
+
   return (
     <ShellPage
       icon={<Sparkles size={15} />}
@@ -222,7 +390,7 @@ export default function BriefPage() {
       title="Brief"
       sub="What the box noticed about your business"
     >
-      <CoverageLine result={result} />
+      <CoverageLine result={result} onStarted={load} />
 
       {/* WARP-2838 — the switch, not a sentence about one. Held back until the
           first fetch resolves: nothing is known about the box before then, and

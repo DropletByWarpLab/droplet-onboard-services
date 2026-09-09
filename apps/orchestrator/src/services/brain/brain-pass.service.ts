@@ -32,9 +32,38 @@
 import type { PrismaClient } from "@prisma/client";
 import { DETECTORS, type Detector } from "./detectors";
 import { upsertFinding } from "./brain-digest.service";
+import { CORPUS_PASS_KEY } from "./brain-corpus.service";
 
 export const DETECTOR_PASS_KEY = "detectors";
-export const BRAIN_PASS_LOCK_KEY = "droplet:brain-pass";
+// 🔴 WARP-2850 — `BRAIN_PASS_LOCK_KEY` USED TO LIVE HERE AND IS GONE ON
+// PURPOSE, for the reason WARP-2837 removed the corpus one: cron-runtime's
+// `lockKey` runs the handler inside a 60 s `$transaction`, and both brain
+// passes now take the lease in brain-lease.service.ts instead. The detector
+// pass would probably have fitted in sixty seconds — but two passes with two
+// different exclusion mechanisms is two answers to "is this pass running",
+// which is exactly the shape of defect this epic keeps finding. One answer,
+// for every caller: the tick, the boot run and the operator's "check now".
+//
+// Deleted rather than left unused: an exported lock key beside a pass is an
+// invitation to hand it to `scheduleInterval`.
+
+/**
+ * EVERY pass this box runs, and the only list of them.
+ *
+ * 🔴 WARP-2837 — THE CORPUS KEY IS LOAD-BEARING HERE, and leaving it out was a
+ * fresh-install boot deadlock. Until the lease landed, the corpus row was
+ * self-created by `runCorpusPass`'s own upsert on tick 1, so seeding only the
+ * detector row was survivable. The lease inverted that: the tick now claims
+ * BEFORE it runs, and `claimPass` is a conditional `updateMany` — it matches
+ * zero rows when the row does not exist, so the run that would have created it
+ * never happens. A genuinely fresh box would have failed every corpus tick with
+ * `reason: "missing"`, at `debug`, forever, with nothing in the system able to
+ * un-wedge it.
+ *
+ * The rule that falls out: a pass that takes the lease MUST be seeded here.
+ * Nothing downstream of the claim can bootstrap its own row any more.
+ */
+export const BRAIN_PASS_KEYS = [DETECTOR_PASS_KEY, CORPUS_PASS_KEY] as const;
 
 /** Statuses a pass may transition to `stale`. A human's decision (`dismissed`,
  *  `actioned`) is left exactly where they put it. */
@@ -162,10 +191,12 @@ export async function runDetectorPass(
  * run, and nobody would find out until they asked why /brief was empty.
  */
 export async function seedBrainPasses(prisma: PrismaClient): Promise<void> {
-  await prisma.brainPass.upsert({
-    where: { passKey: DETECTOR_PASS_KEY },
-    create: { passKey: DETECTOR_PASS_KEY },
-    // Deliberately empty: never re-enable a pass an operator switched off.
-    update: {},
-  });
+  for (const passKey of BRAIN_PASS_KEYS) {
+    await prisma.brainPass.upsert({
+      where: { passKey },
+      create: { passKey },
+      // Deliberately empty: never re-enable a pass an operator switched off.
+      update: {},
+    });
+  }
 }

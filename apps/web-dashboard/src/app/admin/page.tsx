@@ -19,6 +19,7 @@ import {
   Activity as ActivityIcon,
   Bot,
   HardDrive,
+  KeyRound,
   ScrollText,
   ServerCog,
   ShieldCheck,
@@ -44,6 +45,12 @@ const AREAS = [
     icon: <UsersIcon size={15} />,
     title: "People",
     sub: "Accounts, invites, departments, and the roles that decide what each person can reach.",
+  },
+  {
+    href: "/admin/sessions",
+    icon: <KeyRound size={15} />,
+    title: "Sessions",
+    sub: "Who is signed in to this box right now, and how to sign them out.",
   },
   {
     href: "/admin/audit",

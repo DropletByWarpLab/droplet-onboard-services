@@ -552,6 +552,64 @@ export async function fetchUsers(): Promise<{ users: RosterUser[] }> {
   return res.json();
 }
 
+/** One live session as /admin/sessions shows it. No sid — see the route. */
+export interface LiveSession {
+  role: string;
+  /** Epoch SECONDS (not ms) — the session store's own unit. */
+  createdAt: number;
+  lastSeenAt: number;
+  idleDeadline: number;
+  absoluteDeadline: number;
+}
+
+export interface SessionsForUser {
+  username: string;
+  displayName: string | null;
+  role: string;
+  /** `null` means the box could not read this person's sessions. It is NOT
+   *  "signed out" — rendering it as an empty list would tell an operator that
+   *  a departing employee had been cut off when nobody had checked. */
+  sessions: LiveSession[] | null;
+}
+
+/**
+ * The failure carries `res.status` (same `Error & { status?: number }` shape
+ * the invite helpers above use) because /admin/sessions has to tell two very
+ * different failures apart. A 403 is the orchestrator's `requireRole` doing
+ * its job — a permissions answer. Anything else is the box or the session
+ * store not answering. Collapsing them into one bare Error is what made a
+ * refusal render as an outage (WARP-2820 review round 2).
+ */
+export async function fetchSessions(): Promise<{ users: SessionsForUser[] }> {
+  const res = await authFetch(`${BASE}/api/auth/sessions`);
+  if (!res.ok) {
+    const err = new Error(`Failed to fetch sessions: ${res.status}`) as Error & {
+      status?: number;
+    };
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+/** Ends every live session for one person. Already-issued access tokens die at
+ *  the next middleware check; see WARP-116/WARP-247 on the route.
+ *
+ *  `username` is the local `User.username` — the same field `fetchSessions`
+ *  returns per row, and the only identifier this surface holds. The route
+ *  resolves it against `nextcloudUsername` first and then `username`
+ *  (WARP-2820): it used to try the mapping key alone, which is `null` on every
+ *  SCIM/SSO account, so revoking one 404'd while the list showed it signed in. */
+export async function revokeUserSessions(
+  username: string,
+): Promise<{ status: string; revoked: number }> {
+  const res = await authFetch(`${BASE}/api/auth/users/${encodeURIComponent(username)}/revoke-sessions`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to revoke sessions: ${res.status}`);
+  return res.json();
+}
+
 export async function createUser(
   email: string,
   password: string,

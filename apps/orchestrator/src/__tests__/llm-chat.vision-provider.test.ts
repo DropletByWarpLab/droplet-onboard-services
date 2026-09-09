@@ -94,6 +94,10 @@ vi.mock("../services/vision-attachments.service.js", async (importActual) => {
 const mockGetModelCapabilities = vi.fn();
 const mockGetModelProvider = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
+  // WARP-2851 — ollama publishes no window; `null` keeps these suites on
+  // the local default, i.e. byte-for-byte the window they budgeted against
+  // before per-model resolution existed.
+  getModelContextWindow: vi.fn().mockResolvedValue(null),
   getModelCapabilities: (...a: unknown[]) => mockGetModelCapabilities(...a),
   getModelProvider: (...a: unknown[]) => mockGetModelProvider(...a),
   chat: vi.fn(),
