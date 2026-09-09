@@ -1355,8 +1355,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        // WARP-561: close over the requesting user's id so the gateway scopes
-        // BYOK key resolution to their namespace for every agent-loop turn.
+        // WARP-561: close over the requesting user's id for the gateway's
+        // per-request context. It no longer selects a key namespace —
+        // WARP-2871 made cloud keys box-wide — but the principal is still
+        // forwarded, so the header keeps working if scoping ever returns.
         // WARP-329: forward the agent loop's client-disconnect AbortSignal so an
         // in-flight inference fetch is cancelled when the client goes away.
         aiGateway: {
@@ -1365,8 +1367,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — SERVER-SIDE token streaming. The agent loop only
           // consumes this when the caller streams (onEvent present, i.e. the
           // stream=true branch below); the non-streaming path never touches it.
-          // Closes over the same user id for BYOK scoping (WARP-561) and threads
-          // the WARP-329 disconnect signal into the streaming read.
+          // Closes over the same user id (WARP-561; no longer key-scoping
+          // since WARP-2871) and threads the WARP-329 disconnect signal into
+          // the streaming read.
           chatStream: (chatReq, signal) =>
             aiGateway.chatStream(chatReq, signal, (req as AuthedRequest).user?.id),
         },
@@ -2451,9 +2454,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           model,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
-          // WARP-561: scope BYOK key resolution to the caller when the
-          // request carries a human user; service principals fall through
-          // to the shared/device namespace.
+          // WARP-561 scoped BYOK key resolution to the caller; WARP-2871
+          // made cloud keys box-wide, so the gateway ignores this for key
+          // lookup. Still forwarded as the request principal.
           userId: (req as AuthedRequest).user?.id,
         });
         res.json(result);
@@ -2993,10 +2996,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
   // Key management (proxy to ai-gateway)
   // WARP-2871: cloud-provider API keys are BOX-WIDE and admin-managed.
-  // Every call below goes to the gateway with NO user id — omitting
-  // `X-Droplet-User` selects the shared namespace, which the gateway's
-  // keystore now falls back to for a per-user chat turn with no personal
-  // key. owner/admin only (was owner/admin/family under WARP-171, when
+  // Every call below goes to the gateway with NO user id — and since
+  // WARP-2871 that no longer matters either way: the gateway's keystore
+  // reads, writes and deletes the shared namespace ONLY, whatever principal
+  // it is handed, and sweeps any leftover WARP-561 per-user namespace at
+  // startup. owner/admin only (was owner/admin/family under WARP-171, when
   // keys were per-user household credentials): a shared credential is
   // operator material. No `guest`, no `service`.
   router.post("/llm/keys/:provider", requireRole("owner", "admin"), async (req, res, next) => {

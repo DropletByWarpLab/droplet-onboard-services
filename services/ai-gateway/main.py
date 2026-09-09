@@ -208,6 +208,11 @@ grpc_server = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global provider_router, model_registry, session_store, inference_scheduler, grpc_server
+    # WARP-2871: cloud keys are box-wide and admin-managed. Sweep any
+    # WARP-561 per-user namespace left on disk before serving a request —
+    # nothing reads or deletes one any more, so a key sitting in one is
+    # material nobody can see or remove. Never raises; logs and continues.
+    keystore.retire_per_user_keys()
     provider_router = ProviderRouter()
     model_registry = ModelRegistry()
     session_store = create_session_store()
