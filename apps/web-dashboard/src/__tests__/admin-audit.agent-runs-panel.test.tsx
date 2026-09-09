@@ -151,7 +151,16 @@ describe("Background runs panel (WARP-2180)", () => {
     wire([parked, finished]);
     render(<AgentRunsPanel />);
     const list = await screen.findByRole("list", { name: "Background runs" });
-    expect(list.textContent).toContain("Needs approval");
+    // WARP-2696 — the <ul> renders immediately with `aria-busy`; only its rows
+    // wait on the fetch. So the list EXISTING is not the runs existing, and a
+    // synchronous read here sees an empty node:
+    //
+    //   AssertionError: expected '' to contain 'Needs approval'
+    //   (node / web-dashboard, run 34293492154)
+    //
+    // The Recurring-runs case further down already waits on the content; this
+    // one did not. Same element, same panel, two different habits.
+    await waitFor(() => expect(list.textContent).toContain("Needs approval"));
     expect(list.textContent).toContain("Finished");
     fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
     await screen.findByText("Reviewed 12 clips; nothing unusual.");
@@ -175,8 +184,10 @@ describe("Background runs panel (WARP-2180)", () => {
     });
     render(<AgentRunsPanel />);
     await screen.findByRole("list", { name: "Background runs" });
-    // Select the parked run (slow), then the finished one (fast).
-    fireEvent.click(screen.getByRole("button", { name: /tidy up the old files/i }));
+    // Select the parked run (slow), then the finished one (fast). The row
+    // buttons arrive with the fetch, not with the list element, so they have
+    // to be awaited too.
+    fireEvent.click(await screen.findByRole("button", { name: /tidy up the old files/i }));
     await waitFor(() => expect(pending["run-1"]).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /sweep last night's clips/i }));
     await waitFor(() => expect(pending["run-2"]).toBeTruthy());
