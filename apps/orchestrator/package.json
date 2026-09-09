@@ -76,7 +76,7 @@
     "@types/pngjs": "^6.0.5",
     "@types/qrcode": "^1.5.5",
     "@types/sanitize-html": "^2.16.1",
-    "@types/supertest": "^6.0.2",
+    "@types/supertest": "^7.2.1",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.10",
     "@types/yauzl": "^3.4.0",
