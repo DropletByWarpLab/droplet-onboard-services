@@ -199,6 +199,26 @@ updates:
       # a config-only bump cannot build.
       - dependency-name: "tailwindcss"
         update-types: ["version-update:semver-major"]
+
+      # #2059 (2026-09-07): jsdom 24 -> 30 declares
+      # engines.node "^22.22.2 || ^24.15.0 || >=26.0.0" -- 20 is excluded
+      # outright. #2121 (2026-09-08): undici 6 -> 8 declares ">=22.19.0", same
+      # story. Neither is a code-compat question we can resolve in this repo:
+      # npm refuses the engine, so there is no diff that makes them install.
+      #
+      # Same ceiling as the `@types/node` entry above, from the other side --
+      # that one says typings must not run ahead of the runtime, these two say
+      # dependencies must not either. This repo is Node 20 everywhere it
+      # declares one: root `engines.node: "20.x"`, `.nvmrc` = 20, and every
+      # ci.yml `node-version: "20"`.
+      #
+      # RECHECK TRIGGER: the Node 22+ runtime bump. Lift all three of these
+      # WITH it, in one change, never before -- and note `typescript` above
+      # already records that TS 7 needs @types/node to move at the same time.
+      - dependency-name: "jsdom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "undici"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: npm
