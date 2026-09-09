@@ -99,7 +99,24 @@
 #          everything else, but a base that is force-pushed or deleted
 #          auto-closes every open Dependabot PR against it — which is how the
 #          pin came to be removed in the first place.
-#      This file (stage's) keeps the pin, and the config below matches it.
+#
+#      ✅ DECIDED 2026-09-08 (WARP-2187, #2137 on `main`). The 2026-09-07
+#      revision left the pin as an open question and asked for it to be decided
+#      on its own ticket rather than flipped as a side effect of a docs
+#      correction. That decision was taken on `main` and reached the same answer
+#      this branch already held, for the reason the unpinned side measured
+#      worst: on 2026-09-08 eighteen Dependabot PRs opened against `main` in one
+#      day while the stage->main promote (#1798) sat conflicted — and the pin
+#      that fixes it can only reach `main` THROUGH that promote. The known cost
+#      of pinning (a force-pushed or deleted base auto-closes every open
+#      Dependabot PR) is no longer reachable: `Stage Protection` now blocks both
+#      `deletion` and `non_fast_forward` with an empty bypass list, admins
+#      included.
+#
+#      Both branches independently arrived at the same five pins; this merge
+#      keeps this branch's config body because it additionally carries the
+#      `@types/node` and `tailwindcss` major-version ignores (#1746, #1748) that
+#      `main`'s copy never had, and folds in `main`'s decision record above.
 #
 version: 2
 updates:
