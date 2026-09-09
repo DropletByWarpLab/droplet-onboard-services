@@ -30,7 +30,7 @@ langchain-core>=0.3,<0.4
 langchain-community>=0.3,<0.4
 langchain-openai>=0.2,<0.4
 openai>=1.0
-datasets>=2.14
+datasets>=5.0.1
 pandas>=2.0
 pyyaml>=6.0
 
