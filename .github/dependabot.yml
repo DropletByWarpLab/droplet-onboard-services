@@ -199,6 +199,26 @@ updates:
       # a config-only bump cannot build.
       - dependency-name: "tailwindcss"
         update-types: ["version-update:semver-major"]
+
+      # #2059 (2026-09-07): jsdom 24 -> 30 declares
+      # engines.node "^22.22.2 || ^24.15.0 || >=26.0.0" -- 20 is excluded
+      # outright. #2121 (2026-09-08): undici 6 -> 8 declares ">=22.19.0", same
+      # story. Neither is a code-compat question we can resolve in this repo:
+      # npm refuses the engine, so there is no diff that makes them install.
+      #
+      # Same ceiling as the `@types/node` entry above, from the other side --
+      # that one says typings must not run ahead of the runtime, these two say
+      # dependencies must not either. This repo is Node 20 everywhere it
+      # declares one: root `engines.node: "20.x"`, `.nvmrc` = 20, and every
+      # ci.yml `node-version: "20"`.
+      #
+      # RECHECK TRIGGER: the Node 22+ runtime bump. Lift all three of these
+      # WITH it, in one change, never before -- and note `typescript` above
+      # already records that TS 7 needs @types/node to move at the same time.
+      - dependency-name: "jsdom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "undici"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: npm
@@ -214,9 +234,9 @@ updates:
         update-types: ["minor", "patch"]
     labels: ["dependencies"]
 
-  # The twelve pip directories that share one ignore policy. ai-gateway is
-  # deliberately NOT here — it has a ceiling none of the others do; see the
-  # block after this one.
+  # The ten pip directories that share one ignore policy. ai-gateway and the
+  # two RAGAS directories are deliberately NOT here — each has a ceiling none
+  # of the others share; see the blocks after this one.
   - package-ecosystem: pip
     target-branch: "stage"
     directories:
@@ -227,11 +247,9 @@ updates:
       - "/services/fleet-agent"
       - "/services/oled-display"
       - "/services/ops-console"
-      - "/services/rag-eval"
       - "/services/routing"
       - "/services/switch"
       - "/services/voice-io"
-      - "/tests/retrieval-eval/ragas"
     schedule:
       interval: weekly
       day: monday
@@ -273,8 +291,64 @@ updates:
           - "huggingface_hub"          # as spelled in requirements.txt
           - "sounddevice"              # 0.5.x — voice-io
           - "vosk"                     # 0.3.x — voice-io
-          - "ragas"                    # 0.4.x — rag-eval
-          - "langchain*"               # 0.2.x / 0.3.x family, capped <0.4
+    labels: ["dependencies"]
+
+  # The two RAGAS directories alone. They are the ONLY two requirements files in
+  # the repo carrying langchain / ragas / openai (verified by grep, 2026-09-09),
+  # so their ignores live here rather than in the block above — same reasoning
+  # the ai-gateway block records below, and for the same reason: in the shared
+  # block these entries would suppress nothing extra today, but would silently
+  # cap any future service that adopts one of these packages.
+  #
+  # 🔴 WHY THESE ARE IGNORED — WARP-1406, re-derived 2026-09-09 from PyPI:
+  #
+  #   ragas 0.2.x AND 0.4.x  →  import langchain_community.chat_models.vertexai
+  #                             at import time, unconditionally
+  #   langchain-community 1.x →  that module is GONE
+  #
+  # so an unpinned install crashes at `from ragas import evaluate` in seconds,
+  # leaving no results file. The cap is load-bearing, and it is transitive:
+  #
+  #   langchain 1.4.0        →  langchain-core >=1.6.0,<2.0.0   (we pin <0.4)
+  #   langchain-openai 0.3.x →  openai <3.0.0                   (so openai>=3 cannot resolve)
+  #
+  # Both confirmed against PyPI metadata, and both reproduce as a literal pip
+  # `ResolutionImpossible` in `build rag-eval` (#2148, #2149, #2150, #2154).
+  #
+  # ⚠ THIS BLOCK EXISTS BECAUSE THE OLD ENTRIES DID NOT WORK. `ragas` and
+  # `langchain*` were listed under `groups.pip-minor-and-patch.exclude-patterns`,
+  # which is NOT an ignore — it only un-bundles a package from the grouped PR,
+  # i.e. it guarantees an INDIVIDUAL PR for each of them, every week. That is
+  # the opposite of the intent the comment beside them stated, and it is why
+  # six capped langchain PRs (#2148/#2149/#2150/#2157/#2158/#2162) opened on
+  # 2026-09-09. `ignore:` is the key that suppresses; `exclude-patterns:` is not.
+  #
+  # ⚠ The two files MUST move in lockstep — services/rag-eval/requirements.txt is
+  # the in-container eval, tests/retrieval-eval/ragas/requirements.txt the offline
+  # runner, and they only produce the same numbers if they match. No CI diff-guard
+  # enforces this, and CI does not install the offline file at all, so a bump there
+  # goes green while making the file uninstallable. That is exactly how #2157
+  # landed langchain 1.4 against a pinned langchain-core <0.4.
+  #
+  # RECHECK TRIGGER: a ragas release that drops the unconditional vertexai import.
+  # Delete this whole block then, bump both files together, and re-baseline.
+  - package-ecosystem: pip
+    target-branch: "stage"
+    directories:
+      - "/services/rag-eval"
+      - "/tests/retrieval-eval/ragas"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "ragas"
+      - dependency-name: "langchain"
+      - dependency-name: "langchain-core"
+      - dependency-name: "langchain-community"
+      - dependency-name: "langchain-openai"
+      - dependency-name: "openai"
     labels: ["dependencies"]
 
   # ai-gateway alone. It is the only service carrying `optimum-onnx`, and that
