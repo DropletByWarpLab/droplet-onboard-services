@@ -4,7 +4,7 @@ fastapi==0.141.1
 # it directly (`extra: forbid` is the allow-list that keeps a caller from
 # smuggling a field past the credential schema), and a transitive pin is one
 # somebody else's upgrade can move.
-pydantic==2.12.3
+pydantic==2.13.5
 uvicorn[standard]==0.52.4
 # APScheduler owns the IDLE per-account loops + the outbound SMTP
 # poller. No `while True` per droplet-architecture-guard rule 9.
