@@ -805,6 +805,42 @@ enum BrainPassRunState {
   running
 }
 
+/// WARP-2838 (ADR-051 §9) — the owner's consent to the brain, as a row.
+///
+/// The corpus pass reads the business's own documents THROUGH THE MODEL, so
+/// switching the brain on is a consent decision, not a tunable. Until this
+/// table the only switch was `BRAIN_ENABLED` in the environment: read in one
+/// place, written nowhere, absent from every deployment file — behind a
+/// `/brief` empty state that told the owner to "turn the brain on" while
+/// nothing in the product could. Same shape as WARP-2733, which fixed it for
+/// auto-filing by giving the off state its own door.
+///
+/// SINGLETON by primary key, the `AutoFilingSetting` shape. A MISSING row means
+/// nobody has consented and the resolver answers off. The row is never created
+/// by a read: a consent record that exists because something looked at it is
+/// not consent.
+///
+/// AN OPERATOR-SET `BRAIN_ENABLED` STILL WINS, in both directions, and this
+/// table does not try to represent that — the environment is not state the box
+/// owns. `brain-switch.service.ts` resolves the two, and refuses the write
+/// rather than storing a value that would not be read.
+model BrainSetting {
+  id String @id @default("singleton")
+
+  enabled Boolean @default(false)
+
+  /// Who turned it on, server-stamped from the session — never from the body.
+  /// Plain String and no FK, matching `AutoFilingSetting.enabledById`: the
+  /// record of who consented has to outlive the account that gave it, and an
+  /// FK with `SetNull` under the biconditional CHECK below would make deleting
+  /// that user fail inside a statement naming a table nobody touched.
+  enabledById String?
+  enabledAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
 ///
 /// A 60 s apscheduler tick in `services/routing/scheduler.py` polls

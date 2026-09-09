@@ -51,7 +51,7 @@ function prismaWith(lastRunAt: Date | null) {
 
 function makeTrigger(
   lastRunAt: Date | null = null,
-  preconditions?: Record<string, () => TriggerReason | null>,
+  preconditions?: Record<string, () => TriggerReason | null | Promise<TriggerReason | null>>,
 ) {
   return createBrainPassTrigger({
     prisma: prismaWith(lastRunAt),
@@ -195,6 +195,30 @@ describe("preconditions — checked BEFORE the claim (WARP-2850 review)", () => 
   it("claims as normal once the precondition is satisfied", async () => {
     const ok = { [CORPUS]: () => null };
     await expect(makeTrigger(null, ok).trigger(CORPUS)).resolves.toEqual({ ok: true });
+    expect(runWithLease).toHaveBeenCalledOnce();
+  });
+
+  // WARP-2838 — the master switch is a `BrainSetting` ROW, so asking whether
+  // the brain is on is a database read. A precondition may therefore return a
+  // promise, and `trigger()` has to await it. Left un-awaited the refusal is a
+  // truthy Promise object, so these tests would still see a refusal — but of
+  // the wrong shape, and any precondition resolving to `null` would refuse the
+  // pass forever. Both directions are pinned.
+  it("AWAITS an async precondition's refusal, and reports its reason", async () => {
+    const asyncOff = { [CORPUS]: async () => "disabled" as const };
+    await expect(makeTrigger(null, asyncOff).trigger(CORPUS)).resolves.toEqual({
+      ok: false,
+      reason: "disabled",
+    });
+    expect(runWithLease).not.toHaveBeenCalled();
+  });
+
+  it("🔴 an async precondition resolving to null must CLAIM, not refuse", async () => {
+    // The direction an un-awaited promise breaks silently: `Promise<null>` is
+    // truthy, so a satisfied async precondition would refuse every run and the
+    // pass would never fire again.
+    const asyncOk = { [CORPUS]: async () => null };
+    await expect(makeTrigger(null, asyncOk).trigger(CORPUS)).resolves.toEqual({ ok: true });
     expect(runWithLease).toHaveBeenCalledOnce();
   });
 

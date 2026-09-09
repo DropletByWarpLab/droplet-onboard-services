@@ -28,13 +28,15 @@ import {
   brainIsOff,
   runBrainPass,
   type RunPassOutcome,
+  COVERAGE_UNREACHABLE,
   fetchCoverage,
   fetchFindings,
   formatImpact,
   moveFinding,
-  type Coverage,
+  type CoverageResult,
   type Finding,
 } from "./api";
+import { BrainSwitchPanel } from "./BrainSwitchPanel";
 
 /**
  * How often to re-read coverage WHILE a pass holds the lease (WARP-2850
@@ -144,24 +146,34 @@ function CheckNowButton({
 }
 
 function CoverageLine({
-  coverage,
+  result,
   onStarted,
 }: {
-  coverage: Coverage | null;
+  result: CoverageResult;
   onStarted: () => void;
 }) {
-  // WARP-2812 — TWO different offs. `coverage === null` is "the box did not
-  // answer"; `enabled === false` is "the box answered, and said nothing is
-  // running". The second used to be unreachable here, because /coverage
-  // succeeds whichever way BRAIN_ENABLED is set, so a disabled brain rendered
-  // as a working one that had simply not got very far yet.
-  // `!coverage` is spelled out rather than left to brainIsOff so TypeScript
-  // narrows `coverage` for the rest of this function; a predicate hidden
-  // behind a call does not narrow at the call site.
-  if (!coverage || brainIsOff(coverage)) {
+  // WARP-2812 — TWO different offs. "The box did not answer" and "the box
+  // answered, and said nothing is running" are not the same sentence. The
+  // second used to be unreachable here, because /coverage succeeds whichever
+  // way BRAIN_ENABLED is set, so a disabled brain rendered as a working one
+  // that had simply not got very far yet.
+  //
+  // WARP-2838 (review) — and they are now SAID differently too. This line used
+  // to fold the unanswered case into "The brain is off. Nothing has been read",
+  // which states two facts about a box that told us nothing. A failed read is
+  // reported as a failed read.
+  if (!result.reached) {
+    return (
+      <p className="brief-coverage brief-coverage--unknown">
+        Could not reach this box to check what the brain has read.
+      </p>
+    );
+  }
+  const coverage = result.coverage;
+  if (brainIsOff(coverage)) {
     return (
       <p className="brief-coverage">
-        The brain is off. Nothing has been read, and no findings are being produced.
+        The brain is off. Nothing new is being read, and no findings are being produced.
       </p>
     );
   }
@@ -341,13 +353,18 @@ function FindingCard({
 
 export default function BriefPage() {
   const [findings, setFindings] = useState<Finding[]>([]);
-  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  // WARP-2838 (review) — the reachability of the box travels with its body.
+  // A bare `Coverage | null` made "the box did not answer" indistinguishable
+  // from "the brain is off", and every branch below read the first as the
+  // second. The initial value is honest: nothing has been asked yet, and
+  // `loading` is what holds the render back until it has.
+  const [result, setResult] = useState<CoverageResult>(COVERAGE_UNREACHABLE);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     const [f, c] = await Promise.all([fetchFindings("new"), fetchCoverage()]);
     setFindings(f.findings);
-    setCoverage(c);
+    setResult(c);
     setLoading(false);
   }, []);
 
@@ -359,7 +376,10 @@ export default function BriefPage() {
   // a fresh object on every poll, so depending on it would tear the interval
   // down and build a new one each time — the countdown would restart forever
   // and, when nothing is running, the effect would still churn.
-  const passRunning = coverage?.passes.some((p) => p.runState === "running") ?? false;
+  // WARP-2838 — reads through `result`, which is what this component now
+  // holds. An unreached box has `coverage: null`, and "we could not ask" is
+  // correctly not "a pass is running".
+  const passRunning = result.coverage?.passes.some((p) => p.runState === "running") ?? false;
   useEffect(() => {
     if (!passRunning) return;
     const timer = setInterval(() => void load(), RUNNING_POLL_MS);
@@ -373,28 +393,57 @@ export default function BriefPage() {
       title="Brief"
       sub="What the box noticed about your business"
     >
-      <CoverageLine coverage={coverage} onStarted={load} />
+      <CoverageLine result={result} onStarted={load} />
+
+      {/* WARP-2838 — the switch, not a sentence about one. Held back until the
+          first fetch resolves: nothing is known about the box before then, and
+          rendering it earlier would flash a consent screen at every owner whose
+          brain is already on. */}
+      {loading ? null : <BrainSwitchPanel result={result} onChanged={load} />}
 
       {loading ? (
         <p className="brief-empty">Loading…</p>
-      ) : findings.length === 0 ? (
+      ) : findings.length > 0 ? (
+        // 🔴 WARP-2838 (review) — FINDINGS ARE RENDERED WHATEVER THE SWITCH SAYS.
+        // The first draft hid this whole section behind `brainIsOff(coverage)`,
+        // which is a promise broken in the same screenful it is made:
+        // `GET /api/brain/findings` is role-gated, not brain-gated (`listFindings`
+        // filters by scope/status/kind and never asks about brain state), so the
+        // rows are still there — and the consent copy directly above says "What
+        // it has already written stays until you delete it". An owner who turned
+        // the brain off would have watched their findings vanish and concluded
+        // the box had deleted them.
+        <>
+          {brainIsOff(result.coverage) ? (
+            // Said once, above the list, so the list is not read as live.
+            <p className="brief-retained">
+              The brain is off. These are the findings it had already written —
+              they stay until you delete them, and nothing new is being produced.
+            </p>
+          ) : null}
+          <div className="brief-list">
+            {findings.map((f) => (
+              <FindingCard key={f.id} finding={f} onMoved={load} />
+            ))}
+          </div>
+        </>
+      ) : !result.reached || brainIsOff(result.coverage) ? (
+        // Nothing more to say: the panel above IS the state of this page. A
+        // second line under it repeating "turn the brain on" would be the
+        // dead-end copy this ticket exists to remove, and on an unreachable box
+        // "nothing needs your attention" would be a claim nothing supports —
+        // the findings read may have failed for the same reason the coverage
+        // one did.
+        null
+      ) : (
         // Two different nothings, said differently. "No findings" on a running
-        // brain is good news; on a brain that has never run it is a setup step.
+        // brain is good news; on a brain that has never run it is a setup step —
+        // and that second case is now the panel above rather than a sentence.
         // The discriminator is `coverage.enabled`, NOT whether the fetch
         // succeeded (WARP-2812): /coverage answers 200 on a box where the brain
         // has never been switched on, so keying on truthiness told every such
         // owner they were all clear.
-        <p className="brief-empty">
-          {!brainIsOff(coverage)
-            ? "Nothing needs your attention right now."
-            : "Turn the brain on to start reading your business."}
-        </p>
-      ) : (
-        <div className="brief-list">
-          {findings.map((f) => (
-            <FindingCard key={f.id} finding={f} onMoved={load} />
-          ))}
-        </div>
+        <p className="brief-empty">Nothing needs your attention right now.</p>
       )}
     </ShellPage>
   );

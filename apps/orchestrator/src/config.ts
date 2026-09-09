@@ -288,9 +288,18 @@ const envSchema = z.object({
   //
   // The detector pass is exempt: bounded indexed SQL, no model call.
   BRAIN_MANUAL_MIN_INTERVAL_MS: z.coerce.number().int().min(0).finite().default(5 * 60_000),
-  // Master switch. OFF by default: the corpus pass reads the user's documents
-  // and writes derived rows, which is a capability an operator opts into (see
-  // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  // Master switch OVERRIDE. OFF by default: the corpus pass reads the user's
+  // documents and writes derived rows, which is a capability someone opts into
+  // (see ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  //
+  // WARP-2838 — SETTING THIS PINS THE BOX. Leave it unset and the owner's
+  // `BrainSetting` row decides, which is how a box is meant to be run: the
+  // consent is recorded with an actor and a timestamp, in the product, where
+  // the person giving it can read what they are agreeing to. Set it and the
+  // environment wins in both directions, `PUT /api/brain/settings` answers 409,
+  // and the dashboard says the box is pinned rather than offering a control
+  // that does nothing. It exists for fleet policy — a box that must not read
+  // documents regardless of who asks — not as the ordinary way in.
   // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
   // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
   // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
@@ -1372,6 +1381,28 @@ const envSchema = z.object({
 // then the schema default, rather than parsing as an empty URL.
 const firstNonEmpty = (...vals: (string | undefined)[]): string | undefined =>
   vals.find((v) => v !== undefined && v.trim() !== "");
+/**
+ * WARP-2838 — did the OPERATOR pin the brain switch, as distinct from what it
+ * is pinned to?
+ *
+ * `BRAIN_ENABLED`'s schema entry has `.default("0")`, which collapses "unset"
+ * and "0" into the same boolean. The owner-facing switch has to tell them
+ * apart: unset means the `BrainSetting` row decides, set means the environment
+ * does and the dashboard says so rather than offering a control whose effect
+ * the next redeploy would silently undo.
+ *
+ * 🔴 AN EMPTY VALUE IS UNSET, NOT A PIN. `BRAIN_ENABLED=` in a `.env`, or
+ * `${BRAIN_ENABLED:-}` interpolated by a compose file, is a defined-but-empty
+ * string — the same trap `DROPLET_OTA_RELEASES_URL` documents below. Reading it
+ * as "the operator pinned it off" would remove the owner's switch from a box
+ * nobody meant to pin, with nothing on screen able to explain why. Exported and
+ * tested for that reason: `!== undefined` is the obvious simplification and it
+ * is wrong.
+ */
+export function resolveBrainPin(raw: string | undefined): boolean {
+  return (raw ?? "").trim().length > 0;
+}
+
 const envForParse: NodeJS.ProcessEnv = {
   ...process.env,
   DEVICE_BRIDGE_URL: firstNonEmpty(
@@ -1493,6 +1524,7 @@ export const config = {
   // corpus tick is the one that shares the box's single inference slot.
   brain: {
     enabled: parsed.BRAIN_ENABLED,
+    enabledPinnedByOperator: resolveBrainPin(process.env.BRAIN_ENABLED),
     detectorTickMs: parsed.BRAIN_DETECTOR_TICK_MS,
     corpusTickMs: parsed.BRAIN_CORPUS_TICK_MS,
     corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
