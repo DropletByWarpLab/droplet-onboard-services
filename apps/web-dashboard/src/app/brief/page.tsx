@@ -376,7 +376,10 @@ export default function BriefPage() {
   // a fresh object on every poll, so depending on it would tear the interval
   // down and build a new one each time — the countdown would restart forever
   // and, when nothing is running, the effect would still churn.
-  const passRunning = coverage?.passes.some((p) => p.runState === "running") ?? false;
+  // WARP-2838 — reads through `result`, which is what this component now
+  // holds. An unreached box has `coverage: null`, and "we could not ask" is
+  // correctly not "a pass is running".
+  const passRunning = result.coverage?.passes.some((p) => p.runState === "running") ?? false;
   useEffect(() => {
     if (!passRunning) return;
     const timer = setInterval(() => void load(), RUNNING_POLL_MS);
