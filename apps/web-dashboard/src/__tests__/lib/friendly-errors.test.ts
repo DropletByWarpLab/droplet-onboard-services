@@ -32,6 +32,7 @@ const DOMAINS: ErrorDomain[] = [
   "calendar",
   "subscription",
   "provider-key",
+  "cloud-access",
   "push",
   "knowledge",
   "media",
@@ -202,6 +203,28 @@ describe("translateError — provider-key domain", () => {
   it("falls back to a 'couldn't save' style string for unknowns", () => {
     const result = translateError({ message: "ECONNREFUSED" }, "provider-key");
     expect(result).not.toContain("ECONNREFUSED");
+  });
+});
+
+// WARP-2871 — the Models-page cloud switch + key actions are admin-only on
+// the wire; a member who reaches them must read WHO can, not a retry prompt.
+describe("translateError — cloud-access domain (WARP-2871)", () => {
+  it("maps a 403 to the owners/admins sentence", () => {
+    expect(translateError({ status: 403 }, "cloud-access")).toBe(
+      "Only owners and admins can change this.",
+    );
+  });
+
+  it("falls back to a fixed sentence, never the raw message", () => {
+    const result = translateError({ message: "ECONNRESET" }, "cloud-access");
+    expect(result).not.toContain("ECONNRESET");
+    expect(result.toLowerCase()).toMatch(/cloud access/);
+  });
+
+  it("provider-key maps a 403 to the manage-keys sentence", () => {
+    expect(translateError({ status: 403 }, "provider-key")).toBe(
+      "Only owners and admins can manage keys.",
+    );
   });
 });
 

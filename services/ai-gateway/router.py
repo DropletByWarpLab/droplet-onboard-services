@@ -102,15 +102,18 @@ class ProviderRouter:
         self._local_model = (os.getenv("LLM_MODEL") or "").strip().lower() or None
 
     async def refresh_keys(self, user_id: str | None = None):
-        """Reload API keys from the BYOK keystore for a given caller.
+        """Reload API keys from the BYOK keystore.
 
-        WARP-561: keys are namespaced per authenticated user. ``user_id`` is
-        the caller threaded down from the HTTP route (the orchestrator-provided
-        principal). ``None`` reads the shared/device namespace and is used by
-        server-side callers that have no per-request identity (model listing,
-        gRPC EmbedText). Cloud providers are rebuilt per call rather than
-        cached on the instance so two concurrent users never see each other's
-        key — the router holds no per-user key state between requests.
+        WARP-561 namespaced keys per authenticated user; WARP-2871 retired
+        that — cloud keys are box-wide and admin-managed, so the keystore
+        ignores ``user_id`` and every caller reads the one shared key.
+        ``user_id`` is still threaded down from the HTTP route (the
+        orchestrator-provided principal) for signature compatibility, and is
+        ``None`` for server-side callers with no per-request identity (model
+        listing, gRPC EmbedText). Cloud providers are still rebuilt per call
+        rather than cached on the instance, so a key saved or deleted mid-flight
+        takes effect on the next turn — the router holds no key state between
+        requests.
         """
         anthropic_key = await get_api_key("anthropic", user_id=user_id)
         openai_key = await get_api_key("openai", user_id=user_id)

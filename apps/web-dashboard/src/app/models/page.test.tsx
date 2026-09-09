@@ -6,11 +6,16 @@
  * populated) against a mocked `useModelsPage` hook, and — critically — pin the
  * one-model-rule guardrail (architecture-guard #13) on the MEMBER-visible
  * surface: no pull / swap / benchmark / delete / add-model control renders
- * for a non-admin (useAuth is mocked to user:null throughout, so admin-gated
- * controls — "Measure speed" since WARP-836, "Download" since WARP-1827 —
- * are exercised by their own component tests, not here).
+ * for a non-admin (useAuth defaults to user:null, so admin-gated controls —
+ * "Measure speed" since WARP-836, "Download" since WARP-1827 — are exercised
+ * by their own component tests, not here).
  * They also pin the honest-placeholder contract: not-yet-wired metrics render
  * as "—"/"Unavailable", and cloud spend as "$0.00", never fabricated values.
+ *
+ * WARP-2871 — the Cloud section is now the ONE place for cloud models: the
+ * workspace cloud_model_escape switch (admin, double-confirmed on the way ON)
+ * and per-provider key management. The `useAuth` mock is per-test so the
+ * admin and member views are both covered here.
  *
  * WARP-1340 adds the indigo-shell scope contract: the page must render inside
  * ShellPage's `.droplet-shell` wrapper, because every class the child
@@ -18,7 +23,7 @@
  * descendant-scoped to it in droplet-shell.css / indigo-tokens.css.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { ModelsPagePayload } from "@/lib/types";
 
@@ -60,12 +65,27 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ),
 }));
 
-// WARP-1112 — the active-model picker + auth context have their own tests
-// (ActiveModelPicker.test.tsx). Here we stub the picker to null and give
-// useAuth a stable no-user value, so these WARP-836 status/state tests stay
-// focused on the existing surface and don't double-render model names.
+// WARP-1112 — the active-model picker has its own tests
+// (ActiveModelPicker.test.tsx); stubbed to null so model names aren't
+// double-rendered. WARP-2871 — useAuth is a per-test fn (member by default,
+// `asAdmin()` for the owner view).
+const useAuthMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: null }),
+  useAuth: () => useAuthMock(),
+}));
+// WARP-2871 — the three cloud writes, hoisted so the mock factory can see
+// them; everything else in @/lib/api stays real (LocalModelCard imports it).
+const { setCloudModelEscapeMock, saveProviderKeyMock, deleteProviderKeyMock } =
+  vi.hoisted(() => ({
+    setCloudModelEscapeMock: vi.fn(),
+    saveProviderKeyMock: vi.fn(),
+    deleteProviderKeyMock: vi.fn(),
+  }));
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  setCloudModelEscape: setCloudModelEscapeMock,
+  saveProviderKey: saveProviderKeyMock,
+  deleteProviderKey: deleteProviderKeyMock,
 }));
 vi.mock("@/components/models/ActiveModelPicker", () => ({
   ActiveModelPicker: () => null,
@@ -89,10 +109,15 @@ function payload(over: Partial<ModelsPagePayload> = {}): ModelsPagePayload {
       },
     ],
     cloud: [
-      { provider: "anthropic", enabled: false, lastUsedAt: null, spendUsd: 0 },
-      { provider: "openai", enabled: false, lastUsedAt: null, spendUsd: 0 },
-      { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "anthropic", enabled: false, hasKey: true, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: false, hasKey: false, lastUsedAt: null, spendUsd: 0 },
     ],
+    cloudAccess: {
+      escapeEnabled: false,
+      escapeChangedBy: null,
+      escapeChangedAt: null,
+      allowedForYou: false,
+    },
     gpu: null,
     avgLatencyMs: 0,
     cloudSpendUsd: 0,
@@ -101,12 +126,31 @@ function payload(over: Partial<ModelsPagePayload> = {}): ModelsPagePayload {
 }
 
 function ready(over: Partial<ModelsPagePayload> = {}) {
+  const refresh = vi.fn();
   useModelsPageMock.mockReturnValue({
     data: payload(over),
     error: undefined,
     isLoading: false,
-    refresh: vi.fn(),
+    refresh,
   });
+  return refresh;
+}
+
+/** WARP-2871 — a payload with cloud models allowed on the box. */
+function escapeOn(over: Partial<ModelsPagePayload["cloudAccess"]> = {}) {
+  return {
+    cloudAccess: {
+      escapeEnabled: true,
+      escapeChangedBy: "romain",
+      escapeChangedAt: "2026-09-01T10:00:00.000Z",
+      allowedForYou: true,
+      ...over,
+    },
+  };
+}
+
+function asAdmin() {
+  useAuthMock.mockReturnValue({ user: { role: "owner" } });
 }
 
 /** All the model-mutation verbs the one-model rule forbids. The page must
@@ -144,6 +188,11 @@ function catalogReady(models: unknown[]) {
 beforeEach(() => {
   useModelsPageMock.mockReset();
   useModelsCatalogMock.mockReset();
+  useAuthMock.mockReset();
+  useAuthMock.mockReturnValue({ user: null });
+  setCloudModelEscapeMock.mockReset();
+  saveProviderKeyMock.mockReset();
+  deleteProviderKeyMock.mockReset();
   // Default: catalog not loaded → the section renders nothing, and every
   // pre-WARP-1827 test sees exactly the page it always did.
   useModelsCatalogMock.mockReturnValue({
@@ -246,27 +295,21 @@ describe("<ModelsPage /> (WARP-836)", () => {
     expect(screen.getByText(/error/i)).toBeInTheDocument();
   });
 
-  it("renders the three cloud provider rows (Anthropic, OpenAI, Gemini)", () => {
+  it("renders the cloud provider rows (Anthropic, OpenAI) and no Gemini", () => {
     ready();
     render(<ModelsPage />);
-    expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
-    expect(screen.getByText(/openai/i)).toBeInTheDocument();
-    expect(screen.getByText(/gemini/i)).toBeInTheDocument();
+    expect(screen.getByText("Anthropic")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.queryByText(/gemini/i)).toBeNull();
   });
 
-  it("renders cloud toggles as read-only/disabled (enabling happens in settings)", () => {
+  it("member sees the cloud state read-only: no switch, no key buttons (WARP-2871)", () => {
     ready();
     render(<ModelsPage />);
-    // The cloud toggles are switches reflecting enabled:false; on this surface
-    // they are non-interactive (disabled). There must be one per provider.
-    const switches = screen.getAllByRole("switch");
-    expect(switches.length).toBe(3);
-    for (const sw of switches) {
-      expect(sw).toBeDisabled();
-      expect(sw).toHaveAttribute("aria-checked", "false");
-    }
-    // Copy points the user at settings to actually enable a provider.
-    expect(screen.getByText(/settings/i)).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getByText("Cloud models are off on this Droplet")).toBeInTheDocument();
+    expect(screen.getByText("Only an admin can change this.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add key|replace key|remove .* key/i })).toBeNull();
   });
 
   it("renders honest placeholders for not-yet-wired metrics (no fabricated values)", () => {
@@ -370,12 +413,239 @@ describe("<ModelsPage /> one-model-rule guardrail (WARP-836)", () => {
     }
   });
 
-  it("the only switches are the disabled cloud toggles — none are operable", () => {
+  it("a member has no operable switch on the page", () => {
     ready();
     render(<ModelsPage />);
-    const switches = screen.getAllByRole("switch");
-    // Every switch on the page is disabled — there is no actionable toggle.
-    expect(switches.every((s) => (s as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+});
+
+// ── WARP-2871 — the Cloud section: escape switch + provider keys ──
+
+describe("<ModelsPage /> cloud section (WARP-2871)", () => {
+  it("admin sees the switch and the key buttons", () => {
+    asAdmin();
+    ready();
+    render(<ModelsPage />);
+    const sw = screen.getByRole("switch", { name: /allow cloud models on this droplet/i });
+    expect(sw).toBeEnabled();
+    expect(sw).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText("Allow cloud models on this Droplet")).toBeInTheDocument();
+    // anthropic has a key, openai does not
+    expect(screen.getByRole("button", { name: /replace key/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove Anthropic key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add key/i })).toBeInTheDocument();
+  });
+
+  it("badges: Not set up / Key saved · cloud off when escape is off", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText("Not set up")).toBeInTheDocument();
+    expect(screen.getByText("Key saved · cloud off")).toBeInTheDocument();
+  });
+
+  it("badges: Ready when escape is on and the caller is allowed", () => {
+    ready(escapeOn());
+    render(<ModelsPage />);
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+  });
+
+  it("badges: Blocked for your role when escape is on but the role says no", () => {
+    ready(escapeOn({ allowedForYou: false }));
+    render(<ModelsPage />);
+    expect(screen.getByText("Blocked for your role")).toBeInTheDocument();
+  });
+
+  it("hasKey null renders Unknown and never 'Not set up'", () => {
+    ready({
+      cloud: [
+        { provider: "anthropic", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+        { provider: "openai", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+      ],
+    });
+    render(<ModelsPage />);
+    expect(screen.getAllByText("Unknown")).toHaveLength(2);
+    expect(screen.queryByText("Not set up")).toBeNull();
+    expect(screen.getAllByText(/key status unavailable/i)).toHaveLength(2);
+  });
+
+  it("turning ON opens a red double-confirm; only 'Turn on' calls the API", async () => {
+    asAdmin();
+    setCloudModelEscapeMock.mockResolvedValue(undefined);
+    const refresh = ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Turn cloud models on?");
+    expect(dialog).toHaveTextContent(/logged to Activity/);
+    expect(setCloudModelEscapeMock).not.toHaveBeenCalled();
+    const confirm = screen.getByRole("button", { name: "Turn on" });
+    expect(confirm.className).toMatch(/\bdanger\b/);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(setCloudModelEscapeMock).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("cancelling the double-confirm calls nothing", async () => {
+    asAdmin();
+    ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(setCloudModelEscapeMock).not.toHaveBeenCalled();
+  });
+
+  it("a failed turn-on keeps the dialog open and shows the error", async () => {
+    asAdmin();
+    setCloudModelEscapeMock.mockRejectedValue(
+      Object.assign(new Error("Forbidden"), { status: 403 }),
+    );
+    ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Only owners and admins can change this.",
+      ),
+    );
+    // ConfirmDialog contract: a rejected onConfirm stays open for a retry.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("Add key hides while its editor is open", async () => {
+    asAdmin();
+    ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add key" }));
+    expect(screen.queryByRole("button", { name: "Add key" })).toBeNull();
+    expect(screen.getByRole("link", { name: /Get a key from OpenAI/ })).toHaveAttribute(
+      "href",
+      "https://platform.openai.com/api-keys",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Add key" })).toBeInTheDocument();
+  });
+
+  it("turning OFF is a plain flip — no dialog", async () => {
+    asAdmin();
+    setCloudModelEscapeMock.mockResolvedValue(undefined);
+    ready(escapeOn());
+    render(<ModelsPage />);
+    const sw = screen.getByRole("switch");
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(sw);
+    await waitFor(() => expect(setCloudModelEscapeMock).toHaveBeenCalledWith(false));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("a 403 on the switch says who can change it", async () => {
+    asAdmin();
+    setCloudModelEscapeMock.mockRejectedValue(
+      Object.assign(new Error("Forbidden"), { status: 403 }),
+    );
+    ready(escapeOn());
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Only owners and admins can change this.",
+      ),
+    );
+  });
+
+  it("shows who turned cloud on, and when", () => {
+    ready(escapeOn());
+    render(<ModelsPage />);
+    expect(screen.getByText(/Turned on by romain ·/)).toBeInTheDocument();
+    expect(screen.getByText("On")).toBeInTheDocument();
+  });
+
+  it("says 'Off since setup' when never changed", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText(/Off since setup · Nothing has left this Droplet/)).toBeInTheDocument();
+  });
+
+  it("add-key flow: expand → type → Save → saveProviderKey → refresh", async () => {
+    asAdmin();
+    saveProviderKeyMock.mockResolvedValue(undefined);
+    const refresh = ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /add key/i }));
+    const save = screen.getByRole("button", { name: /save key/i });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText("Paste the key"), {
+      target: { value: "sk-live-123" },
+    });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(saveProviderKeyMock).toHaveBeenCalledWith("openai", "sk-live-123"),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    // editor collapsed
+    expect(screen.queryByPlaceholderText("Paste the key")).toBeNull();
+  });
+
+  it("remove-key confirm → deleteProviderKey → refresh", async () => {
+    asAdmin();
+    deleteProviderKeyMock.mockResolvedValue(undefined);
+    const refresh = ready();
+    render(<ModelsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Anthropic key" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Remove Anthropic key?");
+    expect(deleteProviderKeyMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Remove key" }));
+    await waitFor(() => expect(deleteProviderKeyMock).toHaveBeenCalledWith("anthropic"));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("member strip when cloud is on but the role blocks the viewer", () => {
+    ready(escapeOn({ allowedForYou: false }));
+    render(<ModelsPage />);
+    expect(screen.getByText("Cloud keys are managed by an admin")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /roles & access/i })).toHaveAttribute(
+      "href",
+      "/users",
+    );
+  });
+
+  it("no member strip for an admin, nor while cloud is off", () => {
+    ready(); // off
+    const { unmount } = render(<ModelsPage />);
+    expect(screen.queryByText("Cloud keys are managed by an admin")).toBeNull();
+    unmount();
+    asAdmin();
+    ready(escapeOn({ allowedForYou: false }));
+    render(<ModelsPage />);
+    expect(screen.queryByText("Cloud keys are managed by an admin")).toBeNull();
+  });
+
+  it("caption variants: admin/off, admin/on, member", () => {
+    asAdmin();
+    ready();
+    const r1 = render(<ModelsPage />);
+    expect(screen.getByText(/You can add keys while cloud is off/)).toBeInTheDocument();
+    r1.unmount();
+    ready(escapeOn());
+    const r2 = render(<ModelsPage />);
+    expect(screen.getByText(/Keys are managed by admins, stored encrypted/)).toBeInTheDocument();
+    r2.unmount();
+    useAuthMock.mockReturnValue({ user: { role: "member" } });
+    ready(escapeOn());
+    render(<ModelsPage />);
+    expect(screen.getByText(/^Keys are stored encrypted on your Droplet/)).toBeInTheDocument();
+  });
+
+  it("the old 'enable them in Settings' caption is gone", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.queryByText(/enable them in Settings/i)).toBeNull();
   });
 });
 

@@ -9,7 +9,7 @@ import {
   buildImageBlocks,
   decideVisionRoute,
 } from "../services/vision-attachments.service.js";
-import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { completeOnce } from "../services/llm-complete.service.js";
 import {
   runAgent,
@@ -68,6 +68,7 @@ import {
   localModelIdentifiers,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import {
   decideCloudTurn,
   isLocalProvider,
@@ -124,6 +125,17 @@ function stripUndefined(
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
+// WARP-2871: routes/models.ts's page cache key, duplicated rather than
+// imported — the two routers are peers and neither should depend on the
+// other for a string. A key save/delete busts both so the chat selector
+// and the Models page reflect it inside the 30 s TTL.
+const MODELS_PAGE_CACHE_KEY = "models:page";
+
+/** WARP-2871: the cloud providers the gateway can hold a key for. Mirrors
+ *  services/ai-gateway/providers/ (anthropic_cloud, openai_cloud) — there is
+ *  no other cloud provider, so any other `:provider` is a 400, not a key
+ *  the gateway silently files under a name nothing will ever read. */
+const CLOUD_KEY_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "openai"]);
 
 /**
  * WARP-329: per-stream debounce for flushing assistant content to Postgres.
@@ -833,7 +845,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // model list instead of 500ing the dashboard's 30s SWR poll and the setup
   // wizard's AI step. Mirrors /api/models (models-summary.service.ts), which
   // already returns an empty local list on the same failure.
-  router.get("/llm/models", async (_req, res, next) => {
+  router.get("/llm/models", async (req, res, next) => {
     try {
       // WARP-1112 — stamp the box's active local model as `defaultModel` on
       // whatever list we return, so the dashboard chat can default its picker
@@ -865,9 +877,31 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       };
 
+      // WARP-2871 — the chat selector must only offer what a turn would not
+      // 451 on. A person whose effective verdict is not `cloud: true` gets
+      // the local models only; dispatch-time `decideCloudTurn` remains the
+      // boundary (this is presentation, not enforcement). Same edges as the
+      // gate: `service` principals and id-less sessions are not narrowed
+      // (§3 — nothing to resolve; the gateway's workspace 451 still applies),
+      // and a resolver failure hides cloud models (fail closed). Applied
+      // AFTER the cache read, on a copy, so the cached object stays
+      // caller-independent.
+      const user = (req as AuthedRequest).user;
+      const forCaller = async (resp: ModelsResponse): Promise<ModelsResponse> => {
+        if (!user?.id || user.role === "service") return resp;
+        let cloud = false;
+        try {
+          cloud = (await resolveEffectiveAccess(user.id))?.cloud === true;
+        } catch (err) {
+          console.warn("[llm/models] cloud verdict unavailable; hiding cloud models:", err);
+        }
+        if (cloud) return resp;
+        return { ...resp, models: resp.models.filter((m) => isLocalProvider(m.provider)) };
+      };
+
       const cached = await cacheGet<ModelsResponse>(MODELS_CACHE_KEY);
       if (cached) {
-        res.json(await stampDefault(cached));
+        res.json(await forCaller(await stampDefault(cached)));
         return;
       }
 
@@ -894,7 +928,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // "can't reach the AI service", not "no model pulled yet".
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
         const empty: ModelsResponse = { models: [], degraded: true };
-        res.json(await stampDefault(empty, true));
+        res.json(await forCaller(await stampDefault(empty, true)));
         return;
       }
       // WARP-1284: the gateway answered, but reported that its LOCAL Ollama
@@ -911,11 +945,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "[llm/models] ai-gateway reports degraded providers; serving uncached:",
           models.degraded_providers,
         );
-        res.json(await stampDefault({ ...models, degraded: true }, true));
+        res.json(await forCaller(await stampDefault({ ...models, degraded: true }, true)));
         return;
       }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
-      res.json(await stampDefault(models));
+      res.json(await forCaller(await stampDefault(models)));
     } catch (err) {
       next(err);
     }
@@ -1321,8 +1355,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        // WARP-561: close over the requesting user's id so the gateway scopes
-        // BYOK key resolution to their namespace for every agent-loop turn.
+        // WARP-561: close over the requesting user's id for the gateway's
+        // per-request context. It no longer selects a key namespace —
+        // WARP-2871 made cloud keys box-wide — but the principal is still
+        // forwarded, so the header keeps working if scoping ever returns.
         // WARP-329: forward the agent loop's client-disconnect AbortSignal so an
         // in-flight inference fetch is cancelled when the client goes away.
         aiGateway: {
@@ -1331,8 +1367,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — SERVER-SIDE token streaming. The agent loop only
           // consumes this when the caller streams (onEvent present, i.e. the
           // stream=true branch below); the non-streaming path never touches it.
-          // Closes over the same user id for BYOK scoping (WARP-561) and threads
-          // the WARP-329 disconnect signal into the streaming read.
+          // Closes over the same user id (WARP-561; no longer key-scoping
+          // since WARP-2871) and threads the WARP-329 disconnect signal into
+          // the streaming read.
           chatStream: (chatReq, signal) =>
             aiGateway.chatStream(chatReq, signal, (req as AuthedRequest).user?.id),
         },
@@ -2417,9 +2454,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           model,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
-          // WARP-561: scope BYOK key resolution to the caller when the
-          // request carries a human user; service principals fall through
-          // to the shared/device namespace.
+          // WARP-561 scoped BYOK key resolution to the caller; WARP-2871
+          // made cloud keys box-wide, so the gateway ignores this for key
+          // lookup. Still forwarded as the request principal.
           userId: (req as AuthedRequest).user?.id,
         });
         res.json(result);
@@ -2958,41 +2995,53 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   });
 
   // Key management (proxy to ai-gateway)
-  // WARP-171: per-route guard. Provider API keys are household-tier
-  // credentials (per-user OpenAI key etc.) — owner/admin/family scope.
-  // No `guest` (read-only family-tier) and no `service`.
-  router.post("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-2871: cloud-provider API keys are BOX-WIDE and admin-managed.
+  // Every call below goes to the gateway with NO user id — and since
+  // WARP-2871 that no longer matters either way: the gateway's keystore
+  // reads, writes and deletes the shared namespace ONLY, whatever principal
+  // it is handed, and sweeps any leftover WARP-561 per-user namespace at
+  // startup. owner/admin only (was owner/admin/family under WARP-171, when
+  // keys were per-user household credentials): a shared credential is
+  // operator material. No `guest`, no `service`.
+  router.post("/llm/keys/:provider", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { provider } = req.params;
+      if (!CLOUD_KEY_PROVIDERS.has(provider)) {
+        res.status(400).json({ error: "unknown_provider" });
+        return;
+      }
       const { api_key } = req.body;
       if (!api_key) {
         res.status(400).json({ error: "api_key is required" });
         return;
       }
-      // WARP-561: forward the caller so the gateway namespaces the key per user.
-      await aiGateway.saveKey(provider, api_key, (req as AuthedRequest).user?.id);
+      await aiGateway.saveKey(provider, api_key);
+      await Promise.all([cacheDel(MODELS_CACHE_KEY), cacheDel(MODELS_PAGE_CACHE_KEY)]);
       res.json({ status: "ok", provider });
     } catch (err) {
       next(err);
     }
   });
 
-  router.get("/llm/keys", async (req, res, next) => {
+  router.get("/llm/keys", async (_req, res, next) => {
     try {
-      const providers = await aiGateway.listKeys((req as AuthedRequest).user?.id);
+      const providers = await aiGateway.listKeys();
       res.json({ providers });
     } catch (err) {
       next(err);
     }
   });
 
-  // WARP-171: same posture as POST /llm/keys/:provider.
-  router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // WARP-2871: same posture as POST /llm/keys/:provider.
+  router.delete("/llm/keys/:provider", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      await aiGateway.deleteKey(
-        req.params.provider,
-        (req as AuthedRequest).user?.id
-      );
+      const { provider } = req.params;
+      if (!CLOUD_KEY_PROVIDERS.has(provider)) {
+        res.status(400).json({ error: "unknown_provider" });
+        return;
+      }
+      await aiGateway.deleteKey(provider);
+      await Promise.all([cacheDel(MODELS_CACHE_KEY), cacheDel(MODELS_PAGE_CACHE_KEY)]);
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

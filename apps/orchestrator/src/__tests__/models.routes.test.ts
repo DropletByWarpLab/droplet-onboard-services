@@ -23,8 +23,20 @@ vi.mock("../services/cache.service.js", () => ({
 }));
 
 const listModelsMock = vi.fn();
+// WARP-2871 — the box-wide key listing behind `cloud[].hasKey`. Called with
+// NO user id (shared namespace); the spy records the args so that is pinned.
+const listKeysMock = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
+  listKeys: (...a: unknown[]) => listKeysMock(...a),
+}));
+
+// WARP-2871 — the caller's cloud verdict (`cloudAccess.allowedForYou`) is
+// the T3 resolver's AND-gated `cloud`, read fresh per request, outside the
+// page cache. Stubbed whole: the route reads one field.
+const resolveEffectiveAccessMock = vi.fn();
+vi.mock("../services/effective-access.service.js", () => ({
+  resolveEffectiveAccess: (...a: unknown[]) => resolveEffectiveAccessMock(...a),
 }));
 
 // WARP-1112 — the active-model PATCH audits via recordActivity. Mock it so
@@ -105,7 +117,11 @@ const GPU_SNAPSHOT = {
 };
 
 import { createModelsRouter } from "../routes/models.js";
-import { getModelsPagePayload } from "../services/models-summary.service.js";
+import {
+  getModelsPagePayload,
+  overlayCloudState,
+  type ModelsPagePayload,
+} from "../services/models-summary.service.js";
 import { benchCacheKey } from "../services/model-benchmark.service.js";
 
 /**
@@ -113,9 +129,21 @@ import { benchCacheKey } from "../services/model-benchmark.service.js";
  * `initialActive` (null = unset) and mutates on upsert so a GET-after-PATCH
  * round-trips in-test.
  */
-function createPrismaMock(initialActive: string | null = null) {
+function createPrismaMock(
+  initialActive: string | null = null,
+  // WARP-2871 — the `cloud_model_escape` OffLanAllowlistChannel row; null =
+  // absent (a fresh box), which the route must read as escape OFF.
+  escapeRow: {
+    enabled: boolean;
+    lastChangedBy: string | null;
+    lastChangedAt: Date;
+  } | null = null,
+) {
   let active = initialActive;
   return {
+    offLanAllowlistChannel: {
+      findUnique: vi.fn(async () => escapeRow),
+    },
     workspaceSetting: {
       findUnique: vi.fn(async () =>
         active == null ? null : { valueJson: active },
@@ -130,7 +158,7 @@ function createPrismaMock(initialActive: string | null = null) {
 }
 
 function buildApp(
-  asUser: { username?: string; role?: string },
+  asUser: { id?: string; username?: string; role?: string },
   prismaMock: ReturnType<typeof createPrismaMock> = createPrismaMock(),
 ) {
   const app = express();
@@ -147,6 +175,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default: metrics probe returns nothing → rows keep honest null placeholders.
   fetchLocalModelMetricsMock.mockResolvedValue(new Map());
+  // WARP-2871 defaults: no box-wide keys, no person-level verdict.
+  listKeysMock.mockResolvedValue([]);
+  resolveEffectiveAccessMock.mockResolvedValue(null);
   // Default: no bridge → no GPU. Cases that want a card say so explicitly.
   fetchGpuTelemetryMock.mockResolvedValue(null);
 });
@@ -168,15 +199,19 @@ describe("WARP-471 — models page payload", () => {
     expect(payload.local[0]?.status).toBe("ready");
   });
 
-  it("returns 3 cloud providers all default-off", async () => {
+  it("returns the 2 providers the gateway actually has, default-off, key state unknown (WARP-2871)", async () => {
+    // No gemini: services/ai-gateway has no Gemini provider, so listing one
+    // was a fabricated row under the honesty contract.
     listModelsMock.mockResolvedValue({ models: [] });
     const payload = await getModelsPagePayload();
     expect(payload.cloud.map((c) => c.provider).sort()).toEqual([
       "anthropic",
-      "gemini",
       "openai",
     ]);
     expect(payload.cloud.every((c) => c.enabled === false)).toBe(true);
+    // The cached build never asks the keystore — `null` = not asked, and
+    // the route overlays the real answer per request.
+    expect(payload.cloud.every((c) => c.hasKey === null)).toBe(true);
     expect(payload.cloud.every((c) => c.spendUsd === 0)).toBe(true);
   });
 
@@ -184,7 +219,7 @@ describe("WARP-471 — models page payload", () => {
     listModelsMock.mockRejectedValue(new Error("connection refused"));
     const payload = await getModelsPagePayload();
     expect(payload.local).toEqual([]);
-    expect(payload.cloud).toHaveLength(3);
+    expect(payload.cloud).toHaveLength(2);
     expect(payload.gpu).toBeNull();
     expect(payload.cloudSpendUsd).toBe(0);
   });
@@ -414,7 +449,7 @@ describe("WARP-471 — /api/models route", () => {
     const res = await request(app).get("/api/models");
     expect(res.status).toBe(200);
     expect(res.body.local).toHaveLength(1);
-    expect(res.body.cloud).toHaveLength(3);
+    expect(res.body.cloud).toHaveLength(2);
     expect(res.body.gpu).toBeNull();
     // No bridge in the test env, so the payload must say WHY it has no GPU
     // over the wire — the dashboard cannot re-derive that from `gpu: null`.
@@ -1150,5 +1185,196 @@ describe("WARP-1827 — placement surfaced on LocalModelInfo", () => {
     expect(row.gpuFraction).toBeNull();
     expect(row.placement).toBeNull();
     expect(row.placementState).toBeNull();
+  });
+});
+
+// ── WARP-2871 — box-wide cloud keys + the escape switch on the Models page ──
+//
+// `hasKey` / `enabled` / `cloudAccess` are read OUTSIDE the 30 s page cache,
+// per request — the same way `activeModel` is merged fresh — because the
+// cached object is caller-independent and a key save must show up on the
+// next GET, not after a TTL. Every value here is either measured or null.
+describe("WARP-2871 — overlayCloudState (pure)", () => {
+  const base = (): ModelsPagePayload => ({
+    local: [],
+    cloud: [
+      { provider: "anthropic", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+    ],
+    gpu: null,
+    gpuReason: "unreachable",
+    avgLatencyMs: 0,
+    cloudSpendUsd: 0,
+    degraded: false,
+  });
+  const changedAt = new Date("2026-09-08T10:00:00.000Z");
+
+  it("enabled = escape && hasKey, per provider", () => {
+    const out = overlayCloudState(base(), {
+      keys: ["anthropic"],
+      escapeRow: { enabled: true, lastChangedBy: "stefan", lastChangedAt: changedAt },
+      allowedForYou: true,
+    });
+    expect(out.cloud).toEqual([
+      { provider: "anthropic", enabled: true, hasKey: true, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: false, hasKey: false, lastUsedAt: null, spendUsd: 0 },
+    ]);
+    expect(out.cloudAccess).toEqual({
+      escapeEnabled: true,
+      escapeChangedBy: "stefan",
+      escapeChangedAt: "2026-09-08T10:00:00.000Z",
+      allowedForYou: true,
+    });
+  });
+
+  it("a key with the escape OFF is not usable — and the row's provenance still shows", () => {
+    const out = overlayCloudState(base(), {
+      keys: ["anthropic", "openai"],
+      escapeRow: { enabled: false, lastChangedBy: null, lastChangedAt: changedAt },
+      allowedForYou: false,
+    });
+    expect(out.cloud.every((c) => c.hasKey === true)).toBe(true);
+    expect(out.cloud.every((c) => c.enabled === false)).toBe(true);
+    expect(out.cloudAccess.escapeEnabled).toBe(false);
+    expect(out.cloudAccess.escapeChangedBy).toBeNull();
+    expect(out.cloudAccess.escapeChangedAt).toBe("2026-09-08T10:00:00.000Z");
+  });
+
+  it("an absent escape row is OFF (fail closed) with null provenance", () => {
+    const out = overlayCloudState(base(), { keys: [], escapeRow: null, allowedForYou: null });
+    expect(out.cloudAccess).toEqual({
+      escapeEnabled: false,
+      escapeChangedBy: null,
+      escapeChangedAt: null,
+      allowedForYou: null,
+    });
+  });
+
+  it("keys unknown (gateway could not be asked) ⇒ hasKey null and enabled false, even with escape ON", () => {
+    const out = overlayCloudState(base(), {
+      keys: null,
+      escapeRow: { enabled: true, lastChangedBy: "stefan", lastChangedAt: changedAt },
+      allowedForYou: true,
+    });
+    expect(out.cloud.every((c) => c.hasKey === null)).toBe(true);
+    expect(out.cloud.every((c) => c.enabled === false)).toBe(true);
+  });
+
+  it("never mutates the (cached) input", () => {
+    const input = base();
+    const snapshot = JSON.parse(JSON.stringify(input));
+    overlayCloudState(input, {
+      keys: ["anthropic"],
+      escapeRow: { enabled: true, lastChangedBy: "stefan", lastChangedAt: changedAt },
+      allowedForYou: true,
+    });
+    expect(input).toEqual(snapshot);
+  });
+});
+
+describe("WARP-2871 — GET /api/models cloud state, per request", () => {
+  const escapeOn = { enabled: true, lastChangedBy: "stefan", lastChangedAt: new Date("2026-09-08T10:00:00.000Z") };
+
+  beforeEach(() => {
+    listModelsMock.mockResolvedValue({ models: [] });
+  });
+
+  it("overlays box-wide keys + escape + the caller's verdict; asks the keystore with NO user id", async () => {
+    listKeysMock.mockResolvedValue(["openai"]);
+    resolveEffectiveAccessMock.mockResolvedValue({ cloud: true });
+    const app = buildApp(
+      { id: "u-1", username: "stefan", role: "family" },
+      createPrismaMock(null, escapeOn),
+    );
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.cloud).toEqual([
+      { provider: "anthropic", enabled: false, hasKey: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: true, hasKey: true, lastUsedAt: null, spendUsd: 0 },
+    ]);
+    expect(res.body.cloudAccess).toEqual({
+      escapeEnabled: true,
+      escapeChangedBy: "stefan",
+      escapeChangedAt: "2026-09-08T10:00:00.000Z",
+      allowedForYou: true,
+    });
+    // Shared namespace: no X-Droplet-User ⇒ no argument at all.
+    expect(listKeysMock).toHaveBeenCalledWith();
+    expect(resolveEffectiveAccessMock).toHaveBeenCalledWith("u-1");
+  });
+
+  it("the overlay applies to a CACHED payload too (it lives outside the cache)", async () => {
+    const { cacheGet } = await import("../services/cache.service.js");
+    vi.mocked(cacheGet).mockResolvedValueOnce({
+      local: [],
+      cloud: [
+        { provider: "anthropic", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+        { provider: "openai", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+      ],
+      gpu: null,
+      gpuReason: "unreachable",
+      avgLatencyMs: 0,
+      cloudSpendUsd: 0,
+      degraded: false,
+    });
+    listKeysMock.mockResolvedValue(["anthropic"]);
+    const app = buildApp({ username: "stefan", role: "family" }, createPrismaMock(null, escapeOn));
+    const res = await request(app).get("/api/models");
+    expect(listModelsMock).not.toHaveBeenCalled();
+    expect(res.body.cloud[0]).toMatchObject({ provider: "anthropic", hasKey: true, enabled: true });
+    expect(res.body.cloudAccess.escapeEnabled).toBe(true);
+  });
+
+  it("keystore unreachable ⇒ hasKey null, enabled false, page NOT degraded", async () => {
+    listKeysMock.mockRejectedValue(new Error("connection refused"));
+    const app = buildApp({ username: "stefan", role: "family" }, createPrismaMock(null, escapeOn));
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.cloud.every((c: { hasKey: unknown }) => c.hasKey === null)).toBe(true);
+    expect(res.body.cloud.every((c: { enabled: unknown }) => c.enabled === false)).toBe(true);
+    expect(res.body.degraded).toBe(false);
+  });
+
+  it("absent escape row ⇒ escapeEnabled false, provenance null", async () => {
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.body.cloudAccess).toMatchObject({
+      escapeEnabled: false,
+      escapeChangedBy: null,
+      escapeChangedAt: null,
+    });
+  });
+
+  it("allowedForYou: false when the resolver says the person may not use cloud", async () => {
+    resolveEffectiveAccessMock.mockResolvedValue({ cloud: false });
+    const app = buildApp({ id: "u-1", username: "reception", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.body.cloudAccess.allowedForYou).toBe(false);
+  });
+
+  it("allowedForYou: null with no person id — the resolver is never asked", async () => {
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.body.cloudAccess.allowedForYou).toBeNull();
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("allowedForYou: null for a service principal — §3 keeps it out of layer 2", async () => {
+    const app = buildApp({ id: "svc-1", username: "voice", role: "service" });
+    const res = await request(app).get("/api/models");
+    expect(res.body.cloudAccess.allowedForYou).toBeNull();
+    expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("allowedForYou: null when the resolver throws or finds no user — never guessed, page still 200", async () => {
+    resolveEffectiveAccessMock.mockRejectedValueOnce(new Error("db down"));
+    const app = buildApp({ id: "u-1", username: "stefan", role: "family" });
+    let res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.cloudAccess.allowedForYou).toBeNull();
+
+    resolveEffectiveAccessMock.mockResolvedValueOnce(null);
+    res = await request(app).get("/api/models");
+    expect(res.body.cloudAccess.allowedForYou).toBeNull();
   });
 });

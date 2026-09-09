@@ -12,8 +12,12 @@
  * via the ActiveModelPicker → PATCH /api/models/active. It never pulls, swaps,
  * benchmarks, or deletes — it only re-points chat at a model already on the box
  * (the catalog/download story is separate). Members see the active model
- * read-only. The cloud toggles remain shown-but-DISABLED: enabling a provider
- * is a Settings action (the off-LAN allowlist) that logs to Activity.
+ * read-only.
+ *
+ * WARP-2871 — the Cloud section is the ONE place for cloud models: the
+ * workspace `cloud_model_escape` switch (owner/admin, double-confirmed on the
+ * way ON, logged to Activity) and per-provider API keys (moved off Settings)
+ * both live here, in `CloudSection`. Members see the state read-only.
  *
  * Honesty contract: metrics ai-gateway doesn't expose yet (per-model disk,
  * tokens/sec, role, GPU, average latency) render as "—"/"Unavailable", and
@@ -55,7 +59,7 @@ import { KpiStrip } from "@/components/models/KpiStrip";
 import { LocalModelCard } from "@/components/models/LocalModelCard";
 import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
 import { CatalogModelCard } from "@/components/models/CatalogModelCard";
-import { CloudProviderRow } from "@/components/models/CloudProviderRow";
+import { CloudSection } from "@/components/models/CloudSection";
 
 // Honesty-contract copy — local-first framing. Owners/admins can change the
 // active local model here (WARP-1112); members see it read-only.
@@ -142,7 +146,7 @@ export default function ModelsPage() {
     );
   }
 
-  const { local, cloud, gpu, gpuReason, avgLatencyMs, cloudSpendUsd } = data;
+  const { local, cloud, cloudAccess, gpu, gpuReason, avgLatencyMs, cloudSpendUsd } = data;
   const localEmpty = local.length === 0;
   // WARP-1289 — the orchestrator's honesty flag: the local list can't be
   // trusted as complete (ai-gateway unreachable, or its Ollama provider
@@ -333,30 +337,15 @@ export default function ModelsPage() {
           </section>
         )}
 
-        {/* Cloud section */}
-        <section aria-labelledby="models-cloud-heading">
-          <div className="sect">
-            <h2 id="models-cloud-heading">Cloud</h2>
-            <span className="sx">Opt-in, off by default</span>
-          </div>
-
-          <div className="card" style={{ padding: 6 }}>
-            <div className="rows">
-              {cloud.map((c) => (
-                <CloudProviderRow key={c.provider} provider={c} />
-              ))}
-            </div>
-          </div>
-
-          <p
-            className="type-caption-1"
-            style={{ color: "var(--text-muted)", marginTop: 12 }}
-          >
-            Cloud models stay off until you enable them in Settings. Turning one
-            on sends prompts off your Droplet, so it’s an explicit, logged
-            choice.
-          </p>
-        </section>
+        {/* WARP-2871 — Cloud: escape switch + provider keys, one place. */}
+        <CloudSection
+          cloud={cloud}
+          cloudAccess={cloudAccess}
+          canManage={canManage}
+          onChanged={() => {
+            void refresh();
+          }}
+        />
       </div>
     </ShellPage>
   );

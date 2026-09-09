@@ -19,11 +19,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 const deleteUserMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: (...a: any[]) => deleteUserMock(...a),
@@ -52,11 +50,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
-// ProviderKeyForm pulls in fetch wrappers and isn't the subject under test.
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: () => null,
-}));
-
 vi.mock("@/components/ThemeToggle", () => ({
   ThemeToggle: () => null,
 }));
@@ -65,9 +58,7 @@ import SettingsPage from "@/app/settings/page";
 
 beforeEach(() => {
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
   deleteUserMock.mockReset();
-  listProviderKeysMock.mockResolvedValue([]);
 });
 
 describe("Settings page — user-row delete action (WARP-292)", () => {

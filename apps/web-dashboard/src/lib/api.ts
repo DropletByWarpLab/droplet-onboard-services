@@ -4652,22 +4652,48 @@ export async function saveProviderKey(
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Failed to save key: ${body}`);
+    // WARP-2871: status attached so a member's 403 reads as "who can".
+    throw Object.assign(new Error(`Failed to save key: ${body}`), { status: res.status });
   }
-}
-
-export async function listProviderKeys(): Promise<string[]> {
-  const res = await authFetch(`${BASE}/api/llm/keys`);
-  if (!res.ok) throw new Error(`Failed to list keys: ${res.status}`);
-  const data = await res.json();
-  return data.providers;
 }
 
 export async function deleteProviderKey(provider: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/llm/keys/${provider}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
+  // WARP-2871: status attached so translateError("provider-key") can map a
+  // member's 403 to "who can", not a retry prompt.
+  if (!res.ok)
+    throw Object.assign(new Error(`Failed to delete key: ${res.status}`), {
+      status: res.status,
+    });
+}
+
+/**
+ * WARP-2871 — flip the workspace `cloud_model_escape` channel from the Models
+ * page. Owner/admin only (the route enforces it). The route REQUIRES a
+ * non-empty reason; the product chose a fixed one over asking the user, so
+ * the dialog stays a two-click confirm.
+ */
+export async function setCloudModelEscape(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/cloud_model_escape`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled ? "Turned on from the Models page" : "Turned off from the Models page",
+    }),
+  });
+  if (!res.ok) {
+    let detail = `Failed to change cloud access: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail || body?.error) detail = body.detail ?? body.error;
+    } catch {
+      /* non-JSON error body — keep the status-code message */
+    }
+    throw Object.assign(new Error(detail), { status: res.status });
+  }
 }
 
 // --- Outbound email channel (BUG-11) ---

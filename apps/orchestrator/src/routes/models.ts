@@ -36,8 +36,10 @@ import * as aiGateway from "../services/ai-gateway.client.js";
 import { isLocalProvider } from "../services/cloud-access.service.js";
 import {
   getModelsPagePayload,
+  overlayCloudState,
   type ModelsPagePayload,
 } from "../services/models-summary.service.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import {
   ACTIVE_CHAT_MODEL_KEY,
   readActiveChatModel,
@@ -69,7 +71,7 @@ export function createModelsRouter(prisma: PrismaClient): Router {
   // requests by the time this handler runs.
   router.get(
     "/models",
-    async (_req: Request, res: Response, next: NextFunction) => {
+    async (req: Request, res: Response, next: NextFunction) => {
       try {
         // The gateway-derived payload is cached; `activeModel` is NOT — it's
         // merged fresh from the setting on every request so a PATCH below
@@ -110,7 +112,38 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           installed,
         );
 
-        res.json({ ...payload, activeModel });
+        // WARP-2871 — cloud key + escape state is merged fresh here, per
+        // request, for the same reason `activeModel` is: the cached payload
+        // is shared by every caller for 30 s, and an admin who just saved a
+        // key (or flipped the escape) must see it on the next GET. Each
+        // source degrades on its own to null / OFF, never to a guess, and
+        // none of them marks the page degraded — the local list is fine.
+        const user = req.user;
+        const [keys, escapeRow, allowedForYou] = await Promise.all([
+          aiGateway.listKeys().catch((err: unknown) => {
+            logger.warn({ err }, "GET /models: could not list cloud keys");
+            return null;
+          }),
+          prisma.offLanAllowlistChannel.findUnique({
+            where: { key: "cloud_model_escape" },
+            select: { enabled: true, lastChangedBy: true, lastChangedAt: true },
+          }),
+          // §3: service principals never resolve through layer 2, and a
+          // session with no person id has nothing to resolve.
+          !user?.id || user.role === "service"
+            ? Promise.resolve(null)
+            : resolveEffectiveAccess(user.id)
+                .then((access) => access?.cloud ?? null)
+                .catch((err: unknown) => {
+                  logger.warn({ err, userId: user.id }, "GET /models: cloud verdict unavailable");
+                  return null;
+                }),
+        ]);
+
+        res.json({
+          ...overlayCloudState(payload, { keys, escapeRow, allowedForYou }),
+          activeModel,
+        });
       } catch (err) {
         next(err);
       }
