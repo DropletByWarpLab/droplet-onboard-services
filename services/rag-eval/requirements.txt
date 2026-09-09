@@ -28,7 +28,7 @@ datasets>=5.0.1
 pandas>=2.0.0
 
 # Goldens / queries parsing
-PyYAML>=6.0
+PyYAML>=6.0.3
 
 # Scheduler (CLAUDE.md "no while True for scheduling" rule)
 # Same primitive used by services/file-indexer/scheduler_service.py.
