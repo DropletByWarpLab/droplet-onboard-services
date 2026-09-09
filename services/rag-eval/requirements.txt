@@ -68,4 +68,4 @@ filelock>=3.32.5
 # missing, so without this line `run-once --suite extraction` and
 # POST /run-extraction fail before they ever reach the database — on the very
 # image built to run them. `[binary]` so no libpq build toolchain is needed.
-psycopg[binary]>=3.2
+psycopg[binary]>=3.3.5
