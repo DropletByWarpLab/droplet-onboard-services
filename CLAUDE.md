@@ -128,6 +128,13 @@ rationale, measured costs, and the cost-estimation formula:
 
 ## Branching and releases (read before opening a PR)
 
+> **Decision record: [WARP-2824](https://warp-lab.atlassian.net/browse/WARP-2824).**
+> It supersedes WARP-2187's *branching* decision only — WARP-2187's dependency
+> work stands, and the separate question of the `stage` OTA channel is untouched.
+> If you last read the WARP-2187 version of this section, which said `main` was
+> the only long-lived branch and that `stage` had been deleted, that is what
+> changed and why. The full gate list is `docs/ci-required-checks.md`.
+
 Two long-lived branches, and **feature branches never target `main`**:
 
 ```

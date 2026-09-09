@@ -81,6 +81,26 @@
 #      26 of them otherwise fully green. This is not cosmetic: a PR based on
 #      main cannot be rescued by a re-run, because re-running the guard replays
 #      the ORIGINAL event payload and still sees the old base.
+#
+#      🔴 RECORDED 2026-09-07 (WARP-2824), carried over from `main`: an earlier
+#      version of this comment claimed `stage` "was deleted on purpose
+#      (WARP-2187)" and that the pin "names a ref that does not exist". Both
+#      were FALSE. `stage` exists, is the branch every feature PR targets, and
+#      is protected by ruleset 20877684 with `bypass_actors: []` — no org admin
+#      can delete it. Nothing here is blocked by a missing base.
+#
+#      The trade-off, measured in both directions:
+#        - Targeting `main` means every dependency batch lands on `main` and
+#          CONFLICTS the stage->main promote in the dependency manifests. While
+#          that promote conflicts it gets zero Actions runs, and since `ci.yml`
+#          is `push: branches: [main]` only, `stage` is left with no CI
+#          reporting of its own. Observed repeatedly.
+#        - Targeting `stage` puts dependency updates through the soak like
+#          everything else, but a base that is force-pushed or deleted
+#          auto-closes every open Dependabot PR against it — which is how the
+#          pin came to be removed in the first place.
+#      This file (stage's) keeps the pin, and the config below matches it.
+#
 version: 2
 updates:
   - package-ecosystem: npm
