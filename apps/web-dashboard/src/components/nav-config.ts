@@ -304,6 +304,15 @@ export const NAV_GROUPS: NavGroup[] = [
       // (money findings need the ERP connectors, document findings need the
       // corpus pass) and each degrades on its own — a module gate here would
       // hide the whole page because one source is off.
+      //
+      // WARP-2838 — AND NOT CAPABILITY-GATED ON THE BRAIN EITHER. That was the
+      // open question: hide /brief until the brain is on, the way /messages
+      // hides behind team_chat, or leave it visible as its own discovery
+      // surface? DECIDED: visible. /brief's off state is now the only place in
+      // the product that can turn the brain ON, so gating the entry on the
+      // brain being on would make the switch reachable only once it no longer
+      // needed pressing. /messages can hide because nothing about team chat is
+      // decided from that page; this one carries the consent screen.
       {
         href: "/brief",
         label: "Brief",

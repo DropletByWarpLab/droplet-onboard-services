@@ -46,6 +46,7 @@ import {
   checkSession,
   deleteSession,
   countLiveSessions,
+  listUserSessions,
   revokeAllSessions,
   idleLimitSecondsForRole,
   absoluteLimitSecondsForRole,
@@ -513,5 +514,88 @@ describe("session-index ZRANGE bounds (ioredis 6 compat)", () => {
 
     expect(await revokeAllSessions(alice.id)).toBe(3);
     expect(await countLiveSessions(alice.id)).toBe(0);
+  });
+});
+
+
+/**
+ * WARP-2820 — who is signed in.
+ *
+ * The distinction this whole surface rests on: `null` means the box COULD NOT
+ * TELL, `[]` means nobody is signed in. An operator asking "has the person who
+ * left been cut off" must never be answered "yes" by a Redis outage, so the
+ * two are different values all the way to the screen.
+ */
+describe("listUserSessions (WARP-2820)", () => {
+  it("returns an EMPTY LIST for a user with no sessions, not null", async () => {
+    expect(await listUserSessions("u-nobody")).toEqual([]);
+  });
+
+  it("returns one summary per live session, newest first", async () => {
+    await createSession(alice);
+    advanceSeconds(60);
+    await createSession(alice);
+
+    const out = await listUserSessions(alice.id);
+    expect(out).toHaveLength(2);
+    // Newest first: the session an operator is most likely asking about.
+    expect(out![0]!.createdAt).toBeGreaterThan(out![1]!.createdAt);
+    expect(out![0]!.role).toBe("family");
+  });
+
+  it("carries the clocks the page renders", async () => {
+    await createSession(owner);
+    const [only] = (await listUserSessions(owner.id))!;
+    expect(only!.createdAt).toBe(Math.floor(Date.now() / 1000));
+    expect(only!.lastSeenAt).toBe(Math.floor(Date.now() / 1000));
+    expect(only!.role).toBe("owner");
+  });
+
+  it("does NOT report a revoked session as live", async () => {
+    await createSession(alice);
+    await revokeAllSessions(alice.id);
+    expect(await listUserSessions(alice.id)).toEqual([]);
+  });
+
+  it("prunes an index member whose record is gone, like countLiveSessions", async () => {
+    const { sid } = await createSession(alice);
+    // Simulate the record TTL lapsing while the index entry survives.
+    fake.kv.delete(SESSION_KEY_PREFIX + sid);
+
+    expect(await listUserSessions(alice.id)).toEqual([]);
+    expect(fake.zrem).toHaveBeenCalledWith(SESSION_INDEX_PREFIX + alice.id, sid);
+  });
+
+  it("returns NULL when Redis fails — never an empty list", async () => {
+    // The failure that must not read as "signed out". countLiveSessions makes
+    // the same choice for the same reason.
+    fake.zrange.mockRejectedValueOnce(new Error("redis down"));
+    expect(await listUserSessions(alice.id)).toBeNull();
+  });
+
+  it("skips an unparseable record rather than failing the whole list", async () => {
+    const { sid: good } = await createSession(alice);
+    advanceSeconds(1);
+    const { sid: bad } = await createSession(alice);
+    fake.kv.set(SESSION_KEY_PREFIX + bad, { value: "{not json", expiresAt: 0 });
+
+    const out = await listUserSessions(alice.id);
+    expect(out).toHaveLength(1);
+    // The good record is still reported; one corrupt row does not blind the
+    // operator to the rest.
+    expect(fake.kv.has(SESSION_KEY_PREFIX + good)).toBe(true);
+    // And the corrupt row is LEFT ALONE — a parse failure is a bug in
+    // session.service, and deleting the evidence would hide it.
+    expect(fake.kv.has(SESSION_KEY_PREFIX + bad)).toBe(true);
+  });
+
+  it("enumerates the WHOLE index — [0, -1], like every other sweep", async () => {
+    await createSession(alice);
+    fake.zrange.mockClear();
+    await listUserSessions(alice.id);
+    for (const [, start, stop] of fake.zrange.mock.calls) {
+      expect(Number(start)).toBe(0);
+      expect(Number(stop)).toBe(-1);
+    }
   });
 });

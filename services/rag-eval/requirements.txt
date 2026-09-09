@@ -22,23 +22,23 @@ langchain-core>=0.3,<0.4
 langchain-community>=0.3,<0.4
 langchain-openai>=0.2,<0.4
 openai>=1.0
-datasets>=3.0.0
+datasets>=5.0.1
 
 # Data wrangling for the aggregator
 pandas>=2.0.0
 
 # Goldens / queries parsing
-PyYAML>=6.0
+PyYAML>=6.0.3
 
 # Scheduler (CLAUDE.md "no while True for scheduling" rule)
 # Same primitive used by services/file-indexer/scheduler_service.py.
-apscheduler>=3.10.4
+apscheduler>=3.11.3
 tzlocal>=5.4.4
 
 # HTTP to the orchestrator (used by ragas_runner.py's call_search).
 # Already a stdlib option (urllib) but explicit requests is friendlier
 # for timeout + retry semantics if we expand later.
-requests>=2.31
+requests>=2.34.2
 
 # WARP-519: HTTP trigger server. FastAPI + uvicorn host the ad-hoc /run,
 # /bootstrap, and run-listing endpoints the orchestrator proxies to. The
@@ -59,7 +59,7 @@ uvicorn[standard]>=0.52.4
 # .github/workflows/rag-eval-tests.yml pins the same 3.12. Do not move any
 # of those three back below 3.12 while this floor stands.
 scipy>=1.18.1
-filelock>=3.20.3
+filelock>=3.32.5
 
 # WARP-2732 — ADR-048's extraction canary. `tests/extraction-eval/
 # extraction_runner.py` is COPYd into this image by the Dockerfile and reads the
@@ -68,4 +68,4 @@ filelock>=3.20.3
 # missing, so without this line `run-once --suite extraction` and
 # POST /run-extraction fail before they ever reach the database — on the very
 # image built to run them. `[binary]` so no libpq build toolchain is needed.
-psycopg[binary]>=3.2
+psycopg[binary]>=3.3.5

@@ -97,6 +97,7 @@ import {
 } from "../services/business-profile.service.js";
 import {
   degradeToFit,
+  resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
 
@@ -270,9 +271,28 @@ function scrubInterceptorChallenge(result: unknown): unknown {
   return { ...(r as Record<string, unknown>), error };
 }
 
-// /llm/chat accepts tool-role messages on replay so a client can resume a
-// session that already went through the agent loop. tool_call_id / tool_calls
-// are optional so plain chat callers don't have to care.
+// /llm/chat accepts `role:"tool"` messages and `tool_call_id` on the wire and
+// then DROPS both, before the turn runs. `stripClientToolReplay` (below) is
+// where that happens; its doc comment is the canonical explanation of WHY the
+// two fields are unusable, why they are discarded rather than rejected, and
+// what the caller is told instead. Do not restate it here.
+//
+// The comment that stood in this spot until WARP-2849 promised the opposite —
+// a working resume path built out of the request body. It was never true.
+// `tool_calls` is not in the schema below and never has been: the field and
+// that comment landed in the same commit (`136890fa`, #95, 2026-04-24)
+// already contradicting each other, so a client that followed it broke on
+// EVERY turn rather than merely losing context silently.
+//
+// Consequence for anyone reading this before building a client: send
+// user/assistant text only. Nothing a previous turn's tools returned re-enters
+// the model's context today. `prior_tool_names` (WARP-1921) carries the tool
+// NAMES server-side from the persisted trace — server-side precisely because a
+// client must not be able to claim a tool result it never received. Carrying
+// the calls and RESULTS the same way is WARP-2849's second slice.
+//
+// `tool_call_id` stays declared: removing a wire field is a breaking change,
+// and accepting-then-discarding it costs nothing.
 //
 // WARP-304: `conversationId` lets the caller continue an existing thread.
 // When absent, the server mints a new one and returns it via the
@@ -382,6 +402,28 @@ const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
  *  above. The dashboard re-ids its optimistic user bubble with it so
  *  edit-and-resend can truncate the persisted thread by a real row id. */
 const USER_MESSAGE_ID_HEADER = "X-User-Message-Id";
+/**
+ * WARP-2849: the counters `stripClientToolReplay` returns, handed back to the
+ * caller that supplied the discarded fields.
+ *
+ * Without them the strip is invisible from the client side: the turn 200s and
+ * the model answers as if the tool output had never been sent, which reads
+ * exactly like a turn where the model chose not to use it. That is a quieter
+ * failure than the ai-gateway 422 the strip replaces, and it lands on precisely
+ * the callers who were trying to use tool replay. Headers, because this route
+ * already returns its per-turn metadata that way (the three above), because the
+ * streaming branch has no response body to put a field in, and because the
+ * non-streaming body is the ai-gateway's completion rather than ours to extend.
+ *
+ * Set as a PAIR and ONLY when something was actually discarded — so their
+ * presence alone is the signal, and a client can branch on either one. An
+ * unconditional `0`/`0` on every ordinary turn would train callers to ignore
+ * them.
+ */
+const TOOL_REPLAY_DROPPED_MESSAGES_HEADER = "X-Tool-Replay-Dropped-Messages";
+/** @see TOOL_REPLAY_DROPPED_MESSAGES_HEADER — always set with it, never alone. */
+const TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER =
+  "X-Tool-Replay-Stripped-Tool-Call-Ids";
 
 // RBAC helpers for /api/llm/chat. The ADR-004 tier gate itself —
 // `WRITE_TOOLS`, `VOICE_WRITE_TOOLS`, `isPrivilegedRole` — moved to
@@ -545,6 +587,108 @@ export function replayedWriteToolAttempt(
         !(exempt?.has(name) ?? false)
       );
     });
+}
+
+/**
+ * A message as `chatRequestSchema` parses it — post-zod, so `tool_calls` is
+ * already gone whatever the client sent.
+ *
+ * DERIVED, not restated. A hand-written copy of the schema's shape is a second
+ * source of truth that nothing keeps in step: the two can drift silently, and
+ * `stripClientToolReplay`'s drop rules are written against this shape.
+ */
+export type ReplayedChatMessage = z.infer<
+  typeof chatRequestSchema
+>["messages"][number];
+
+/**
+ * Every message field `stripClientToolReplay` has actually reasoned about.
+ * Deriving the type above stops the SHAPE drifting; this stops the DECISION
+ * drifting, which is the half that bites.
+ *
+ * WARP-2849's own second slice adds `tool_calls` to the schema. Inference
+ * alone would widen `ReplayedChatMessage` and let the strip keep compiling
+ * untouched — the new field would ride through unexamined, which is how the
+ * orphaned tool message this slice removes gets re-created. So: add a field to
+ * the message object in `chatRequestSchema` and the assertion below stops
+ * compiling until someone lists it here, having decided whether the strip
+ * forwards it or drops it.
+ */
+type StripDecidedMessageField = "role" | "content" | "tool_call_id";
+type StripUndecidedMessageField = Exclude<
+  keyof ReplayedChatMessage,
+  StripDecidedMessageField
+>;
+/**
+ * The assertion itself. `[X] extends [never]` (tuple-wrapped so a union
+ * distributes as one thing) holds only while nothing is undecided; otherwise
+ * the annotated type becomes an object literal that `true` cannot satisfy, and
+ * the compiler names the offending field in the error text.
+ */
+const _stripCoversEveryMessageField: [StripUndecidedMessageField] extends [never]
+  ? true
+  : { "undecided message field, add it to StripDecidedMessageField": StripUndecidedMessageField } =
+  true;
+// Compile-time only; `void` keeps `noUnusedLocals` quiet without an eslint escape.
+void _stripCoversEveryMessageField;
+
+/**
+ * WARP-2849 — drop the tool fields a client cannot legitimately supply.
+ *
+ * Post-condition: no returned message carries `role:"tool"` or a
+ * `tool_call_id`. Both are unusable by construction, and forwarding either one
+ * does not degrade the turn — it FAILS the turn, at the ai-gateway:
+ *
+ *   - a tool message is an orphan, because zod stripped the assistant
+ *     `tool_calls` it answers → "tool result references unknown tool_call_id",
+ *   - a `tool_call_id` on any other role hits the same validator's rule 4,
+ *     "tool_call_id is only valid on tool messages".
+ *
+ * Both raise → FastAPI 422 (`services/ai-gateway/schemas.py`
+ * `_validate_tool_message_integrity`). Dropping them lets the rest of the
+ * thread answer, which is what every shipping client already gets: the
+ * dashboard's `replayMessages` (useChat.ts) has never sent a tool message.
+ *
+ * Deliberately lenient rather than a 400. The fields are accepted and
+ * discarded so a client that sends them keeps working; rejecting would turn a
+ * silent no-op into a hard break for callers whose turns succeed today by
+ * simply not exercising the path.
+ *
+ * Lenient is not the same as silent. Both counters are returned so the caller
+ * can be TOLD, on the response, that its tool-replay content never reached the
+ * model — see `TOOL_REPLAY_DROPPED_MESSAGES_HEADER`. Discarding without saying
+ * so would swap the ai-gateway's loud 422 for a 200 that looks like a normal
+ * answer, which is worse to debug than the failure it replaces.
+ *
+ * This is NOT the cross-turn carry, and it must not grow into one. Prior
+ * results have to be reconstructed SERVER-side from the persisted trace —
+ * WARP-1921's rule is that a client cannot claim a tool result it never
+ * received, and `replayedWriteToolAttempt` above already treats this surface
+ * as hostile. This function is what guarantees nothing arrives from the client
+ * to be carried.
+ */
+export function stripClientToolReplay(messages: readonly ReplayedChatMessage[]): {
+  messages: ReplayedChatMessage[];
+  droppedToolMessages: number;
+  strippedToolCallIds: number;
+} {
+  let droppedToolMessages = 0;
+  let strippedToolCallIds = 0;
+  const kept: ReplayedChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "tool") {
+      droppedToolMessages += 1;
+      continue;
+    }
+    if (m.tool_call_id !== undefined) {
+      const { tool_call_id: _unusable, ...rest } = m;
+      strippedToolCallIds += 1;
+      kept.push(rest);
+      continue;
+    }
+    kept.push(m);
+  }
+  return { messages: kept, droppedToolMessages, strippedToolCallIds };
 }
 
 // WARP-329 replaced the post-stream `persistTurn` helper with
@@ -1035,7 +1179,34 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // `chatReq.messages` intact for the persistence reads above. A copy (not
       // an alias) so attaching image blocks never mutates the persisted user
       // text. `agentModel` may be overridden per-turn by vision auto-routing.
-      let agentMessages: ChatMessage[] = [...chatReq.messages];
+      // WARP-2849 — the client's unusable tool fields are dropped here, before
+      // anything reads `agentMessages`. Still a fresh array (the copy the
+      // comment above requires), and the persistence reads above still see the
+      // request exactly as the client sent it.
+      const replayStrip = stripClientToolReplay(chatReq.messages);
+      if (replayStrip.droppedToolMessages > 0 || replayStrip.strippedToolCallIds > 0) {
+        // Tell the CALLER, not just the box's log. Set here rather than beside
+        // the id headers below so every response shape carries it: ephemeral
+        // turns, turns whose persistence failed, the `turn_already_completed`
+        // 409, and the streaming branch — `res.writeHead` merges with headers
+        // already set, it does not replace them.
+        res.setHeader(
+          TOOL_REPLAY_DROPPED_MESSAGES_HEADER,
+          String(replayStrip.droppedToolMessages),
+        );
+        res.setHeader(
+          TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER,
+          String(replayStrip.strippedToolCallIds),
+        );
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] dropped unusable client tool fields", {
+          conversationId: chatReq.conversationId ?? null,
+          role: role ?? null,
+          droppedToolMessages: replayStrip.droppedToolMessages,
+          strippedToolCallIds: replayStrip.strippedToolCallIds,
+        });
+      }
+      let agentMessages: ChatMessage[] = replayStrip.messages;
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
       // `agentModel`. Vision auto-routing (below) can swap the user's selected
@@ -1592,6 +1763,73 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       //
       // Additive splice at index 0 (same pattern as pins/attachments
       // above; this unshift runs LAST so the base prompt lands first).
+      // WARP-2851 — how many tokens THIS turn can actually carry.
+      //
+      // Resolved ONCE, here, and handed to all three budget sites below
+      // (`degradeToFit` and both `runAgent` calls) so they cannot disagree
+      // about the window they are budgeting against.
+      //
+      // Keyed off `agentModel`, NOT `chatReq.model`: vision auto-routing above
+      // may have swapped the caller's pick for a local VISION_MODEL, and the
+      // budget has to describe the model that actually runs. That is the same
+      // reason `agentProvider` tracks `agentModel` (WARP-904).
+      //
+      // Placed outside the `tool_choice !== "none"` block below because both
+      // `runAgent` calls need it and only `degradeToFit` is inside.
+      //
+      // Never blocks the turn: `getModelContextWindow` degrades to `undefined`
+      // on an unreachable gateway, and `undefined` resolves to the local
+      // window — the value every turn used before this change.
+      //
+      // AWAITED HERE, ahead of the four Prisma reads that follow, and that is
+      // not a serialized gateway round-trip in front of the DB work: THIS
+      // request already called `getModelProvider` twice — unconditionally, at
+      // `decideCloudTurn` and `resolveOffLanProvider` above — and
+      // `findModelInfo` caches the whole model LIST, not one model's entry. So
+      // `_modelsCache` is warm by the time we get here and this call does no
+      // I/O, including for a local-only turn that will resolve to
+      // `local_default` anyway, and including when vision auto-routing made
+      // `agentModel` a different id than the one the provider lookups used.
+      // Pinned by `ai-gateway.client.capabilities-cache.test.ts` (WARP-2851
+      // block) so a future per-model cache cannot make this a real fetch
+      // silently. Moving the await down to the use site would buy nothing:
+      // the only paths where it is a fetch are the ones where the gateway is
+      // already unreachable or listed degraded, and there the cost is a
+      // timeout, not the few ms of DB work it could overlap with.
+      //
+      // try/catch, NOT `.catch()` — the same reason spelled out at the
+      // WARP-1921 continuity lookup below. `.catch()` only handles a REJECTED
+      // promise; if `getModelContextWindow` is missing from the module object
+      // entirely (an injected double in a suite that predates it, a
+      // partially-migrated deployment) the call throws TypeError
+      // SYNCHRONOUSLY, before any promise exists, and every chat turn 500s.
+      // A budget optimisation must never cost the user their answer.
+      let advertisedWindow: number | undefined;
+      try {
+        advertisedWindow = await aiGateway.getModelContextWindow(agentModel);
+      } catch (err: unknown) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[llm/chat] context-window lookup failed; budgeting against the local window:",
+          err,
+        );
+      }
+      const turnWindow = resolveTurnContextWindow({
+        advertised: advertisedWindow,
+        localWindow: config.OLLAMA_CONTEXT_LENGTH,
+      });
+      if (turnWindow.source !== "local_default") {
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] context window resolved from the model catalogue", {
+          conversationId: conversationId ?? null,
+          model: agentModel,
+          advertised: turnWindow.advertised,
+          window: turnWindow.window,
+          source: turnWindow.source,
+          localWindow: config.OLLAMA_CONTEXT_LENGTH,
+        });
+      }
+
       // Skipped when tool_choice="none": that's voice-io's greeting
       // path, which advertises zero tools and ships its own persona
       // prompt — tool guidance there would be misleading. Memory-fact
@@ -1778,7 +2016,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           historyText: assembledText,
         };
         const degraded = degradeToFit(sizeParts, {
-          contextWindow: config.OLLAMA_CONTEXT_LENGTH,
+          // WARP-2851 — the model's own window, not the local runtime's.
+          contextWindow: turnWindow.window,
           warn: (event) => {
             // Structured warn on every drop (§10) so an overflow-driven
             // degradation is diagnosable in the box logs.
@@ -1962,7 +2201,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1442 — resolved reasoning effort (voice → "low" default).
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
-            context_window: config.OLLAMA_CONTEXT_LENGTH,
+            context_window: turnWindow.window,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
@@ -2049,7 +2288,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — resolved reasoning effort (voice → "low" default).
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
-          context_window: config.OLLAMA_CONTEXT_LENGTH,
+          context_window: turnWindow.window,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,

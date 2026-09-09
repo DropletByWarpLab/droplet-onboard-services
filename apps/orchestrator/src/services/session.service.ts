@@ -339,6 +339,58 @@ export async function countLiveSessions(userId: string): Promise<number | null> 
   }
 }
 
+/** One live session, as an operator may see it. Deliberately WITHOUT the sid:
+ *  an admin needs to know that a session exists and how old it is, not its
+ *  identifier, and revocation here is all-or-nothing per person. */
+export interface SessionSummary {
+  role: Role;
+  /** Epoch seconds, fixed at login. */
+  createdAt: number;
+  /** Epoch seconds, slid by activity. */
+  lastSeenAt: number;
+}
+
+/**
+ * Every live session for a user, newest first (WARP-2820).
+ *
+ * `null` means CANNOT TELL — Redis was unreachable — and never an empty list.
+ * The distinction is the whole point: an operator asking "is this person still
+ * signed in" must not be shown "no" by a cache outage. Same failure posture as
+ * `countLiveSessions`, whose pruning loop this mirrors: an index member with no
+ * surviving record is a session that expired or was revoked, and is swept here
+ * rather than reported as live.
+ */
+export async function listUserSessions(userId: string): Promise<SessionSummary[] | null> {
+  const idxKey = SESSION_INDEX_PREFIX + userId;
+  try {
+    const redis = getRedis();
+    const members = await redis.zrange(idxKey, 0, "-1");
+    const out: SessionSummary[] = [];
+    for (const sid of members) {
+      const raw = await redis.get(SESSION_KEY_PREFIX + sid);
+      if (!raw) {
+        await redis.zrem(idxKey, sid);
+        continue;
+      }
+      try {
+        const rec = JSON.parse(raw) as SessionRecord;
+        out.push({ role: rec.role, createdAt: rec.createdAt, lastSeenAt: rec.lastSeenAt });
+      } catch {
+        // A record we cannot parse is not a record we can report on. Leave it
+        // for the TTL rather than deleting it — a parse failure is a bug in
+        // this file, and destroying the evidence would hide it.
+        continue;
+      }
+    }
+    // Newest first: the session an operator is most likely asking about.
+    out.sort((x, y) => y.createdAt - x.createdAt);
+    return out;
+  } catch (err) {
+    logger.warn({ err, userId }, "live-session list failed");
+    return null;
+  }
+}
+
 /**
  * Kill every live session record for a user. Returns the number of records
  * actually deleted.

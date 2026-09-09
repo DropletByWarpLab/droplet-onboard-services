@@ -130,6 +130,45 @@ function renderPanel(props: Partial<React.ComponentProps<typeof RolesAccessPanel
   return { onOpenPerson, onOpenDepartments, ...utils };
 }
 
+/**
+ * WARP-2696 — the panel auto-selects the first active role one commit AFTER
+ * the list renders (the `listState`-keyed effect in `RolesAccessPanel.tsx`),
+ * so "a role name is on screen" is NOT "a role is selected". Measured on this
+ * fixture, `waitFor(getByText("Finance"))` returns with NOTHING selected in
+ * roughly one run in three.
+ *
+ * A spec that then clicks a DIFFERENT role is racing that pending effect. The
+ * click sets the selection; the effect — still carrying `selectedId === null`
+ * from the commit it was scheduled on — then overwrites it with the first
+ * role. The panel lands on Finance and the spec reports the assertion that
+ * followed, not the wrong selection that caused it:
+ *
+ *   TestingLibraryElementError: Unable to find an element with the text:
+ *   Network · configure          (PR #2114, run 34180889806)
+ *
+ * So wait for a selection to EXIST — the state the click depends on — rather
+ * than for the request that produces it to have been answered.
+ */
+async function waitForRoleSelection() {
+  await waitFor(() => expect(screen.getByRole("button", { pressed: true })).toBeInTheDocument());
+}
+
+/**
+ * Select a role and wait for it to actually BE the selected one. A
+ * `fireEvent.click` on a card is a request, not an outcome.
+ *
+ * The specs that click /Finance/ do not need this only because Finance is
+ * also what auto-selection picks — the clobber writes the value they wanted.
+ * Add one active role ahead of it in a fixture and that stops being true, so
+ * new specs should select through here.
+ */
+async function selectRole(name: RegExp | string) {
+  const card = () => screen.getByRole("button", { name });
+  fireEvent.click(card());
+  await waitFor(() => expect(card()).toHaveAttribute("aria-pressed", "true"));
+  return screen.getByTestId("access-role-detail");
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   listAccessRolesMock.mockResolvedValue({ roles: [role()] });
@@ -199,9 +238,9 @@ describe("§4.1 roles list", () => {
 
   it("owner built-in row carries the §12 meta; selecting it shows the untouchable note", async () => {
     renderPanel();
-    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    await waitForRoleSelection();
     expect(screen.getByText(ACCESS_COPY.ownerRowMeta)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Owner/ }));
+    await selectRole(/Owner/);
     expect(screen.getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.ownerDetailNote)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit role" })).not.toBeInTheDocument();
@@ -284,20 +323,18 @@ describe("§4.2 role detail", () => {
 
   it("built-in detail carries the read-only catalog summary; service keeps notes only (QA send-back 5)", async () => {
     renderPanel();
-    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /Admin/ }));
-    const detail = screen.getByTestId("access-role-detail");
+    await waitForRoleSelection();
+    const detail = await selectRole(/Admin/);
     // Ceiling levels for the admin tier, catalog-derived.
     expect(within(detail).getByText("Network · configure")).toBeInTheDocument();
     expect(within(detail).getByText("Files · share & manage")).toBeInTheDocument();
     expect(within(detail).getByText("No limit storage")).toBeInTheDocument();
     expect(within(detail).getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
     // Guest ceilings clamp to view.
-    fireEvent.click(screen.getByRole("button", { name: /Guest/ }));
-    expect(within(screen.getByTestId("access-role-detail")).getByText("Network · view")).toBeInTheDocument();
+    const guestDetail = await selectRole(/Guest/);
+    expect(within(guestDetail).getByText("Network · view")).toBeInTheDocument();
     // Service is a system principal — notes only, no feature chips.
-    fireEvent.click(screen.getByRole("button", { name: /Service/ }));
-    const serviceDetail = screen.getByTestId("access-role-detail");
+    const serviceDetail = await selectRole(/Service/);
     expect(within(serviceDetail).queryByText(/Network ·/)).not.toBeInTheDocument();
     expect(within(serviceDetail).getByText(/Not assignable to a person/)).toBeInTheDocument();
   });

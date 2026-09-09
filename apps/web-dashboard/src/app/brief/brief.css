@@ -192,3 +192,213 @@
     min-height: 2.25rem;
   }
 }
+
+/* WARP-2850 — the "check now" controls. Deliberately quiet: they sit under the
+   coverage line, which is the important thing on this page, and they must not
+   compete with it. Provisional pending design. */
+.brief-coverage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.brief-checknow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brief-checknow-said {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ============================================================
+   WARP-2838 — the on switch, and the consent that goes with it.
+
+   The off state is the PRIMARY content of this page on a box where the brain
+   has never run, so it is a card at reading width rather than a banner: the
+   four lines under the heading are what the owner is agreeing to, and a
+   banner's density is wrong for text somebody has to actually read.
+
+   Same tokens as everything above — no hard-coded hex, no new ramp.
+   ============================================================ */
+
+.brief-switch--off {
+  margin: 0 0 1.25rem;
+  padding: 1rem 1.15rem 1.15rem;
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  color: var(--text);
+}
+
+.brief-switch--off h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.brief-switch--off p {
+  margin: 0 0 0.75rem;
+  /* Long-form here, unlike the terse lines elsewhere on the page — this is
+     the one place the product explains itself before acting. */
+  max-width: 62ch;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.brief-switch--off ul {
+  margin: 0 0 1rem;
+  padding-left: 1.1rem;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.brief-switch--off li {
+  margin-bottom: 0.3rem;
+}
+
+.brief-switch--off button {
+  padding: 0.45rem 0.95rem;
+  background: var(--brand);
+  /* The one filled button on this page. Every other control here moves a
+     finding somebody can move back; this one changes what the box reads. */
+  color: var(--brand-on, var(--surface));
+  border: 1px solid var(--brand);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.brief-switch--off button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Pinned by BRAIN_ENABLED: a statement, not a disabled control. A greyed
+   button invites clicking and explains nothing. */
+.brief-switch-pinned {
+  margin: 0 !important;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.brief-switch-pinned code {
+  font-size: 0.82em;
+}
+
+/* On. Deliberately quiet and last-in-reading-order: leaving is available,
+   not advertised. */
+.brief-switch--on {
+  margin: -0.5rem 0 1.25rem;
+  text-align: right;
+}
+
+.brief-switch--on button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--card-bd);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.brief-switch--on button:hover:not(:disabled) {
+  background: var(--brand-subtle, var(--surface));
+  color: var(--text);
+}
+
+.brief-switch--on p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.brief-switch-error {
+  margin: 0.5rem 0 0 !important;
+  color: var(--color-system-danger, var(--text));
+  font-size: 0.82rem;
+}
+
+/* ------------------------------------------------------------
+   WARP-2838 (review) — the box did not answer.
+
+   Deliberately the QUIETEST state on the page: nothing is wrong with the
+   business, we simply could not ask. It gets muted body text and a bordered
+   button, not the filled one — an unanswered read must not out-shout a real
+   finding, and must not look like the consent card it replaces.
+   ------------------------------------------------------------ */
+
+.brief-coverage--unknown {
+  color: var(--text-muted);
+}
+
+.brief-switch--unknown {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 1.25rem;
+}
+
+.brief-switch--unknown p {
+  margin: 0;
+  flex: 1 1 20rem;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.brief-switch--unknown button {
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--card-bd);
+  border-radius: calc(var(--radius-card) / 2);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.brief-switch--unknown button:hover {
+  background: var(--brand-subtle, var(--surface));
+  color: var(--text);
+}
+
+/* Findings the brain wrote before it was switched off. The consent copy
+   promises they stay; this line stops the list being read as live output
+   from a brain that is not running. */
+.brief-retained {
+  margin: 0 0 0.75rem;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .brief-switch--unknown button {
+    width: 100%;
+    min-height: 2.5rem;
+  }
+}
+
+/* Cross-viewport rule: a decision button must be a tap target on a phone,
+   and the off-switch must not sit under the thumb by accident. */
+@media (max-width: 480px) {
+  .brief-switch--off button {
+    width: 100%;
+    min-height: 2.5rem;
+  }
+  .brief-switch--on {
+    text-align: left;
+  }
+}

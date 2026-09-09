@@ -22,6 +22,7 @@
  * for no read-side gain.
  */
 import type { PrismaClient } from "@prisma/client";
+import { deptCorpusKeys, visibleDepartmentsFor } from "@droplet/tools-core";
 
 /**
  * UUID-shaped (8-4-4-4-12) test, version-agnostic. Mirrors the WARP-493
@@ -44,7 +45,34 @@ const UUID_SHAPE =
  *
  * Unknown keys (service principals, the auth-disabled dev stub, rows
  * orphaned from the directory) return the incoming key alone — exactly
- * the pre-WARP-1014 single-shape scope.
+ * the pre-WARP-1014 single-shape scope, and NO department corpora: an
+ * unresolvable caller must never widen into shared content.
+ *
+ * 🔴 WARP-2821 — SHARED AND DEPARTMENT CORPORA. Until this ticket the
+ * result was the caller's own two key shapes and nothing else, while the
+ * file-indexer writes every groupfolder document under a sentinel owner
+ * (`__household__`, or `__dept_<uuid>__` since WARP-1264). So the Files
+ * page listed a shared document and the assistant could not see it:
+ * `search_content` silently returned fewer hits and `read_document_text`
+ * answered NOT_INDEXED for a file the user was looking at. For a business
+ * the shared drive IS the corpus, so that was most of it.
+ *
+ * The visibility rule is `visibleDepartmentsFor` in `@droplet/tools-core`,
+ * CALLED here rather than copied — the same function the orchestrator's Files
+ * search route runs. Owner/admin see every ACTIVE department, everyone else
+ * sees the ones they are a member of, and the HOUSEHOLD department is
+ * dual-sentinelled so content indexed by either watcher generation stays
+ * readable without a reindex.
+ *
+ * The first fix duplicated that rule here and guarded it with a test asserting
+ * both files held the same literal strings. That guard could not have caught a
+ * third privileged role: every string it checked would be unchanged while the
+ * two resolvers diverged again. One implementation cannot drift from itself.
+ *
+ * FAILS CLOSED. Any error in the department lookup returns the personal
+ * keys alone. Narrowing this list can only hide content; widening it on a
+ * half-answered query would disclose it. The Files route makes the same
+ * call for the same reason ("best-effort by design … personal only").
  */
 export async function resolveChunkOwnerIds(
   prisma: PrismaClient,
@@ -53,12 +81,36 @@ export async function resolveChunkOwnerIds(
   const row = UUID_SHAPE.test(userId)
     ? await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, username: true },
+        select: { id: true, username: true, role: true },
       })
     : await prisma.user.findUnique({
         where: { username: userId },
-        select: { id: true, username: true },
+        select: { id: true, username: true, role: true },
       });
   if (!row) return [userId];
-  return [...new Set([userId, row.username, row.id])];
+
+  const keys = [userId, row.username, row.id];
+
+  try {
+    keys.push(...deptCorpusKeys(await visibleDepartmentsFor(prisma, row)));
+  } catch (err) {
+    // Personal only. See the fail-closed note above. `visibleDepartmentsFor`
+    // THROWS on a database failure rather than answering "no departments",
+    // precisely so this decision is made here and not inside it.
+    //
+    // And it SAYS SO. Degrading quietly makes a non-transient failure here
+    // indistinguishable from "this caller is in no departments" forever: the
+    // assistant simply stops finding shared documents, with no operator-visible
+    // signal anywhere. The orchestrator's equivalent catch logs; so does this.
+    //
+    // STDERR, never stdout — the stdio transport carries JSON-RPC on stdout and
+    // any other byte on it corrupts the stream. Same channel `index.ts` uses;
+    // this process has no logger.
+    console.error(
+      "resolveChunkOwnerIds: department lookup failed; personal keys only",
+      err,
+    );
+  }
+
+  return [...new Set(keys)];
 }

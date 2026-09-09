@@ -7,7 +7,16 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { landCanonicalRows, landsInCrm, NEVER_LANDED_ENTITIES } from "./land.js";
+import { DATASET_NAMES } from "@droplet/shared-types";
+
+import {
+  landCanonicalRows,
+  landsInCrm,
+  LANDED_ENTITIES,
+  NEVER_LANDED_ENTITIES,
+} from "./land.js";
+import { MONEY_ENTITIES } from "./land-money.js";
+import { ERP_SYNC_ENTITIES } from "./entities.js";
 
 const CONNECTION = { id: "conn-1", provider: "hubspot" };
 const NOW = new Date("2026-09-01T04:00:00.000Z");
@@ -92,6 +101,103 @@ describe("what never lands", () => {
     expect(landsInCrm("contact")).toBe(true);
     expect(landsInCrm("deal")).toBe(true);
     for (const phi of NEVER_LANDED_ENTITIES) expect(landsInCrm(phi)).toBe(false);
+  });
+});
+
+/**
+ * WARP-2836 — the classification is not total, and until this file nothing said so.
+ *
+ * `landsOnBox = landsInCrm || landsMoney` decides whether a tick keeps what it
+ * read. A dataset in NONE of the three lists falls through to
+ * `{ reason: "not-landed" }` — the SAME value a deliberate PHI refusal returns.
+ * So "we decided not to keep this" and "nobody ever considered it" are
+ * indistinguishable at runtime, and the two tests above cannot tell them apart
+ * either: they iterate the lists, so a name in no list is invisible to both.
+ *
+ * The consequence is not theoretical. `landsOnBox` is evaluated at
+ * `erp-sync.service.ts:600`, AFTER `readEntity` has already paged the vendor —
+ * so an unclassified-but-scheduled dataset is fetched, discarded, its watermark
+ * advanced past the rows, and the tick audited `"Connector synced", true`.
+ * Mailchimp and Shopify keep NOTHING today; every dataset either polls is here.
+ */
+describe("WARP-2836 — every dataset is classified, or is named debt", () => {
+  /**
+   * 🔴 DEBT, PINNED SO IT CAN ONLY SHRINK. Not an allowlist to grow.
+   *
+   * These are scheduled in `ERP_SYNC_ENTITIES` and land nowhere, and unlike
+   * `booking`/`employee`/`task` — which are also polled without landing, and
+   * carry a written reason each in `NEVER_LANDED_ENTITIES` — no reason for
+   * these exists anywhere, because nothing ever required one.
+   *
+   * The exemption set is deliberately SEPARATE from `NEVER_LANDED_ENTITIES`
+   * rather than folded into it: merging them would let real debt hide behind a
+   * list whose name claims the omission was a decision. Resolving one means
+   * either building its sink or moving it to `NEVER_LANDED_ENTITIES` WITH a
+   * reason — and either way it comes out of this array, which is why the
+   * assertion is an exact `toEqual` and not a superset check.
+   */
+  const UNCLASSIFIED_SCHEDULED_DEBT = [
+    "audience_member",
+    "campaign",
+    "customer",
+    "ecommerce_order",
+    "engagement",
+    "order",
+    "product",
+    "ticket",
+  ] as const;
+
+  it("🔴 pins the eight scheduled datasets that land nowhere and say nothing about it", () => {
+    // Mutation: give `order` a sink (add it to LANDED_ENTITIES/MONEY_ENTITIES)
+    // or move it to NEVER_LANDED_ENTITIES → red, and the fix is to delete it
+    // from the array above. That is the direction this test is built to move.
+    const classified = new Set<string>([
+      ...LANDED_ENTITIES,
+      ...MONEY_ENTITIES,
+      ...NEVER_LANDED_ENTITIES,
+    ]);
+    const scheduledAndUnclassified = ERP_SYNC_ENTITIES.map((e) => e.entity)
+      .filter((e) => !classified.has(e))
+      .sort();
+
+    expect(
+      scheduledAndUnclassified,
+      "these are polled from the vendor on every tick and thrown away, with no " +
+        "recorded decision that they should be — resolve one by giving it a sink " +
+        "or by naming it in NEVER_LANDED_ENTITIES with a reason",
+    ).toEqual([...UNCLASSIFIED_SCHEDULED_DEBT]);
+  });
+
+  it("🔴 refuses a NEW dataset name that is classified nowhere at all", () => {
+    // The forward-looking half. The pin above freezes today's debt; this stops
+    // tomorrow's from being added silently, which is how all eight arrived.
+    //
+    // Scoped to the vocabulary rather than to the sync table on purpose: a name
+    // enters `DATASET_NAMES` first and is scheduled later, so gating at the
+    // vocabulary catches it one step earlier — at the commit that invents it.
+    //
+    // Mutation: append a 27th name to DATASET_NAMES without classifying it → red.
+    const classified = new Set<string>([
+      ...LANDED_ENTITIES,
+      ...MONEY_ENTITIES,
+      ...NEVER_LANDED_ENTITIES,
+      ...UNCLASSIFIED_SCHEDULED_DEBT,
+    ]);
+    const unknown = DATASET_NAMES.filter((n) => !classified.has(n)).sort();
+
+    // The remainder is the READ-THROUGH-ONLY tail: real vocabulary that no
+    // available provider is scheduled on, so it never reaches a landing at all.
+    // Named here rather than waved past, so the next dataset to be scheduled
+    // has to move out of this list into a real classification.
+    expect(unknown, "unclassified dataset names — decide where each one lands").toEqual([
+      "ap_summary",
+      "audience",
+      "balance_transaction",
+      "charge",
+      "payout",
+      "refund",
+      "subscription",
+    ]);
   });
 });
 

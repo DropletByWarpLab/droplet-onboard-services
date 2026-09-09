@@ -138,6 +138,13 @@ services:
         condition: service_healthy
       cache:
         condition: service_healthy
+      # WARP-2845: wait for Nextcloud too. The dev seed provisions the dev
+      # owner's Nextcloud account over OCS, and Nextcloud's first-boot install
+      # is far slower than Postgres + migrate + seed — so without this the very
+      # first OCS call reliably lost the race. The seed now repairs itself on a
+      # later boot either way, but not racing beats healing.
+      nextcloud:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
@@ -154,6 +161,21 @@ services:
       # ── Auth ──
       JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-ship}
       DEVICE_SECRET: ${DEVICE_SECRET:-dev-only-device-secret-do-not-ship}
+      # WARP-2844 — the column-encryption master key. WITHOUT IT THE SETUP
+      # WIZARD CANNOT COMPLETE, so the dev stack had no way to create an
+      # account at all: emailWriteData HKDFs the User.email column key from
+      # this value and deviceIkm() throws when it is empty
+      # (column-crypto.service.ts:40-50), so POST /auth/setup answered
+      # 500 SETUP_FAILED on every dev stack. config.ts defaults it to "" and
+      # compose never passed it — same class as the NEXTCLOUD_ADMIN_* note
+      # below, which was found the same way.
+      #
+      # Must base64-decode to EXACTLY 32 bytes or deviceIkm() throws a
+      # different error. Never copy a real box's value in, and never change it
+      # on a stack that already has users: both the email ciphertext and the
+      # emailLookupHash blind index derive from it, so a change silently 401s
+      # every existing login rather than failing loudly.
+      DEVICE_SECRET_KEY: ${DEVICE_SECRET_KEY:-ZHJvcGxldC1kZXYtY29sdW1uLWtleS0zMmJ5dGVzISE=}
       # Audit-chain signing key (WARP-456/476). The container has no /data
       # mount, so the env fallback is the only source in dev; without it the
       # orchestrator fails closed at boot. base64 of a ≥32-byte dev string.
@@ -186,8 +208,41 @@ services:
       FRIGATE_URL: http://frigate-disabled:5000
       # ── FIPS off in dev (no provider available on this base image) ──
       DROPLET_FIPS_REQUIRED: "false"
+      # ── WARP-2844: module availability ──
+      # A module is effective iff `available && enabled`, and availability is a
+      # CONFIG READ, not a health probe (module-registry.ts:92-98) — which is
+      # why cameras/network/switch/smart_home all read as available here with
+      # no hardware attached: their config defaults are non-empty URLs.
+      #
+      # These three are the exception. Their defaults are the EMPTY STRING, so
+      # without them `docs`, `email` and `voice` are not merely off — they
+      # cannot be turned on at all: setModuleEnabled answers 409
+      # module_unavailable and no API call or UI toggle gets past it.
+      #
+      # The values are deliberately unreachable hosts/placeholder tokens. The
+      # surfaces render and their backend calls degrade, which is the point:
+      # a developer can walk every screen without owning a Droplet.
+      DOCS_ENABLED: ${DOCS_ENABLED:-1}
+      DOCS_INTERNAL_URL: ${DOCS_INTERNAL_URL:-http://docs-disabled:9980}
+      SERVICE_TOKEN_EMAIL: ${SERVICE_TOKEN_EMAIL:-dev-only-email-token-unused}
+      SERVICE_TOKEN_VOICE: ${SERVICE_TOKEN_VOICE:-dev-only-voice-token-unused}
+      # Household group name — the seed puts the dev owner in it so the Files
+      # space has an identity. Matches the occ init script's group folder.
+      DROPLET_SHARED_FOLDER_NAME: ${DROPLET_SHARED_FOLDER_NAME:-Household}
       # ── Seed dev data on first boot (idempotent) ──
       DROPLET_DEV_SEED: "1"
+      # ── WARP-2844: the seeded dev owner ──
+      # NO DEFAULT for the password, on purpose. Unset means the seed skips
+      # the account entirely and says so; it must never fall back to a
+      # well-known credential, because a tracked default password on an
+      # owner-role account is a backdoor no matter which file it lives in.
+      # The seed additionally refuses when NODE_ENV=production and whenever an
+      # owner already exists — see src/services/dev-owner-seed.policy.ts.
+      #
+      # The ADDRESS is deliberately not settable here: it is fixed at
+      # dev@warp-lab.ai in the seed, so the documented way in cannot drift
+      # from what the stack actually creates.
+      DROPLET_DEV_OWNER_PASSWORD: ${DROPLET_DEV_OWNER_PASSWORD:-}
       # ── CORS for the dashboard reaching the API from the browser ──
       CORS_ORIGINS: http://localhost:3001,http://localhost:3000
       # ── File storage ──

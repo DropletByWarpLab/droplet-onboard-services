@@ -73,6 +73,10 @@ vi.mock("../services/file-citation.service.js", () => ({
 }));
 
 vi.mock("../services/ai-gateway.client.js", () => ({
+  // WARP-2851 — ollama publishes no window; `null` keeps these suites on
+  // the local default, i.e. byte-for-byte the window they budgeted against
+  // before per-model resolution existed.
+  getModelContextWindow: vi.fn().mockResolvedValue(null),
   getModelCapabilities: vi.fn().mockResolvedValue({ vision: false }),
   getModelProvider: vi.fn().mockResolvedValue("local"),
   chat: vi.fn(),

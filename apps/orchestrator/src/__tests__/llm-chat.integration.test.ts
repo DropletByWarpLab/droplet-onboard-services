@@ -75,6 +75,10 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
 // Stub the ai-gateway client so we control what the agent loop sees.
 const mockChat = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
+  // WARP-2851 — ollama publishes no window; `null` keeps these suites on
+  // the local default, i.e. byte-for-byte the window they budgeted against
+  // before per-model resolution existed.
+  getModelContextWindow: vi.fn().mockResolvedValue(null),
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),
   chat: (...args: unknown[]) => mockChat(...args),

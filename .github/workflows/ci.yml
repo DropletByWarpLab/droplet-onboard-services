@@ -153,6 +153,18 @@ jobs:
               - "packages/auth-policy/**"
               - "services/mcp-server/**"
               - "services/erp-connector/**"
+              # WARP-2851: the ai-gateway's `_MAX_TOTAL_CONTENT_CHARS` is what
+              # the orchestrator's context-window ceiling is DERIVED from, and
+              # `context-window-ceiling.guard.test.ts` (this leg) reads that
+              # Python file at test time rather than trusting the TypeScript
+              # restatement of the number. Without this line the one PR most
+              # able to break the guard — a schemas.py-only change — runs the
+              # ai-gateway leg and skips the guard entirely, and the drift
+              # surfaces on some later, unrelated orchestrator PR instead.
+              # Narrowed to the single file the guard reads, not the whole
+              # service, so an ai-gateway PR that cannot touch the constant
+              # does not pull in this leg.
+              - "services/ai-gateway/schemas.py"
               # WARP-1984: the SSH toggle's privileged half. The orchestrator
               # writes the intent file these consume, so its leg is the right
               # owner — and the shell suite must run PRE-merge, not just as the

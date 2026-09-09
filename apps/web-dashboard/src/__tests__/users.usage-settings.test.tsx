@@ -152,6 +152,24 @@ async function openEditDialog() {
  * dialog either says "Loading usage…" or it does not, and no test proceeds
  * until it does not.
  */
+/**
+ * Run the promise chain forward WITHOUT letting a macrotask through.
+ *
+ * The teardown cases below delete `globalThis.window`. A `setTimeout` wait
+ * there hands the loop to whatever else is pending — `closeEdit` schedules a
+ * `focus()` on a 0 ms timer — and a jsdom DOM event dispatched into React with
+ * no `window` throws the very ReferenceError these tests exist to prevent,
+ * failing the whole run from the wrong direction. Seen on CI, run 34291647020:
+ * 572 files passed, one uncaught `window is not defined` out of
+ * `dispatchDiscreteEvent`.
+ *
+ * `.then`/`.catch`/`.finally` are microtasks, so draining microtasks alone
+ * carries the chain to its end and no timer can interleave.
+ */
+async function drainMicrotasks(hops = 20) {
+  for (let i = 0; i < hops; i += 1) await Promise.resolve();
+}
+
 async function awaitUsageLoaded(dialog: HTMLElement) {
   await waitFor(() => expect(dialog.textContent).not.toMatch(/Loading usage…/));
 }
@@ -306,6 +324,104 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     // resumed by now and called reload().
     await new Promise((resolve) => setTimeout(resolve, 1_200));
     expect(fetchUsersMock.mock.calls.length).toBe(reloadsBeforeUnmount);
+  });
+
+  /**
+   * WARP-2696, the other half. The guard above covers the post-save beat; this
+   * covers the OPEN path, which is the one that actually took a run down.
+   *
+   * `openEdit` fires `fetchUserUsage(...).then(...).catch(...).finally(...)` and
+   * never awaits it. `.finally` is the end of that chain, so a throw inside it
+   * has nothing to catch it and escapes the test as an unhandled rejection. If
+   * the page unmounts while the read is in flight and the promise settles after
+   * vitest has torn the jsdom environment down, the handler writes state,
+   * `window` no longer exists, and the run dies with all 555 files green and no
+   * test to point at (run 33938733210).
+   *
+   * Deleting `window` here is not theatre: it is precisely the post-teardown
+   * condition, and it is the only way to observe a fault whose whole signature
+   * is that it lands after every test has finished. Restored in `finally` so a
+   * failure here cannot take the rest of the file with it.
+   */
+  it("a usage read landing after unmount + teardown escapes nothing", async () => {
+    let resolveUsage!: (value: unknown) => void;
+    fetchUserUsageMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsage = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    // The page goes away while the usage read is still in flight.
+    view.unmount();
+
+    const escaped: string[] = [];
+    const onRejection = (err: unknown) =>
+      escaped.push(String((err as { message?: string })?.message ?? err));
+    process.on("unhandledRejection", onRejection);
+
+    const realWindow = (globalThis as { window?: unknown }).window;
+    try {
+      delete (globalThis as { window?: unknown }).window;
+      resolveUsage({ policy: null, usedBytes: "1" });
+      await drainMicrotasks();
+    } finally {
+      (globalThis as { window?: unknown }).window = realWindow;
+      process.off("unhandledRejection", onRejection);
+    }
+
+    // Without the mountedRef guards this is ["window is not defined"].
+    expect(escaped).toEqual([]);
+  });
+
+  /**
+   * Review follow-up on the same PR: `reload()` is the wider version of the
+   * same fault and the most reachable one in the file. It runs three awaits
+   * over six setters, and the mount effect calls it WITHOUT awaiting, so a
+   * throw inside it after teardown has nothing to catch it — on every single
+   * page mount, not just an Edit-dialog one.
+   *
+   * `handleEditSave`'s `if (!mountedRef.current) return;` before calling
+   * `reload()` does not cover this: it checks the mount state at the CALL
+   * SITE, not during `reload`'s own in-flight awaits.
+   *
+   * HOW THIS ONE DETECTS, because it is not obvious and the assertion below
+   * looks redundant: reverting the guard does NOT trip `expect(escaped)`. The
+   * un-awaited `reload()` surfaces through vitest's own unhandled-error
+   * channel rather than `unhandledRejection`, so the run ends
+   * `Tests 12 passed` + an Unhandled Errors section + exit 1 — which is the
+   * ORIGINAL failure signature, verbatim. Verified by mutation. Keep the
+   * assertion (it is the one that fires for the sibling usage case) and do
+   * not "simplify" this test on the grounds that it always passes.
+   *
+   * A `process.on("uncaughtException")` listener would make the assertion
+   * fire directly, but it also swallows unrelated async errors raised while
+   * `window` is missing and made both tests here fail spuriously. Not worth it.
+   */
+  it("a roster reload landing after unmount touches nothing afterwards", async () => {
+    let resolveUsers!: (value: unknown) => void;
+    fetchUsersMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsers = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() => expect(fetchUsersMock).toHaveBeenCalled());
+    const invitesBefore = listInvitesMock.mock.calls.length;
+
+    // The page goes away while the very first roster read is still in flight.
+    view.unmount();
+    resolveUsers({ users: [] });
+    await drainMicrotasks();
+
+    // `reload()` runs straight into `listInvites()` once the roster lands, so
+    // "did the continuation get past the guard?" is observable as a call count
+    // — no environment surgery needed, and nothing here can be upset by an
+    // unrelated timer.
+    expect(listInvitesMock.mock.calls.length).toBe(invitesBefore);
   });
 
   it("rejects a non-positive upload cap without saving", async () => {

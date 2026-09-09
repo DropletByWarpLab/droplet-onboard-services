@@ -746,10 +746,99 @@ model BrainPass {
   unitsDigested Int @default(0)
   rowsWritten   Int @default(0)
 
+  /// WARP-2837 — the LEASE, and the reason it exists.
+  ///
+  /// The corpus pass was registered with cron-runtime's `lockKey`, which runs
+  /// the handler inside `prisma.$transaction(..., { timeout: 60_000 })`. That
+  /// handler makes up to ten sequential model calls on a box with one
+  /// inference slot and no turn-level timeout. Ten CPU inferences do not fit
+  /// in sixty seconds, and when the transaction expired the advisory lock was
+  /// released MID-RUN while the pass kept going — its writes use the outer
+  /// client, so they had already committed out of band.
+  ///
+  /// `agent-run-worker.service.ts` reached this conclusion first and states
+  /// it: the transaction-scoped lock is "exactly right for a tick and exactly
+  /// wrong for a forty-minute run". So exclusion moves off the lock and onto
+  /// these columns: a conditional `updateMany` wins the row or does not, and
+  /// the pass then executes OUTSIDE any transaction.
+  ///
+  /// An explicit enum, never a `claimedAt IS NULL` — the repo's standing rule,
+  /// and the one that keeps "idle" distinguishable from "claimed by a process
+  /// that has since died".
+  runState BrainPassRunState @default(idle)
+
+  /// Which process holds the lease, and the FENCE the lease's own writes ride:
+  /// `beatPass` and `releasePass` both condition on this still being their own
+  /// worker id, so a process whose claim was reclaimed learns it at its next
+  /// beat instead of releasing the SUCCESSOR's claim on the way out.
+  ///
+  /// SCOPE, stated so nobody reads more into the column than it does: the
+  /// fence covers the LEASE. It does not yet cover the cursor and counter
+  /// writes `runCorpusPass` makes DURING a run — those key on `passKey`
+  /// alone (brain-corpus.service.ts), so a worker stalled past the lease
+  /// window can still write over its successor. Fencing those means the pass
+  /// has to STOP when it finds its claim gone mid-run, which is a behaviour
+  /// change to the pass rather than a column, and is tracked as its own change.
+  claimedBy   String?
+  /// When the current run started. Rendered as "running since" rather than
+  /// inferred from `lastRunAt`, which means "last STARTED" and keeps moving.
+  claimedAt   DateTime?
+  /// Beaten while the pass runs. A claim is stale — and reclaimable — once
+  /// this is older than the lease window. Without it a process killed
+  /// mid-corpus would wedge the pass forever, and `/coverage` reports
+  /// `lastRunAt`, which is liveness-blind.
+  heartbeatAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([enabled])
+  /// The stale-lease predicate the claim rides.
+  @@index([runState, heartbeatAt])
+}
+
+/// WARP-2837 — whether a pass is executing right now. Explicit, not derived
+/// from a nullable timestamp: `claimedAt IS NOT NULL` cannot tell a live run
+/// from a crashed one, and that distinction is the whole point of the lease.
+enum BrainPassRunState {
+  idle
+  running
+}
+
+/// WARP-2838 (ADR-051 §9) — the owner's consent to the brain, as a row.
+///
+/// The corpus pass reads the business's own documents THROUGH THE MODEL, so
+/// switching the brain on is a consent decision, not a tunable. Until this
+/// table the only switch was `BRAIN_ENABLED` in the environment: read in one
+/// place, written nowhere, absent from every deployment file — behind a
+/// `/brief` empty state that told the owner to "turn the brain on" while
+/// nothing in the product could. Same shape as WARP-2733, which fixed it for
+/// auto-filing by giving the off state its own door.
+///
+/// SINGLETON by primary key, the `AutoFilingSetting` shape. A MISSING row means
+/// nobody has consented and the resolver answers off. The row is never created
+/// by a read: a consent record that exists because something looked at it is
+/// not consent.
+///
+/// AN OPERATOR-SET `BRAIN_ENABLED` STILL WINS, in both directions, and this
+/// table does not try to represent that — the environment is not state the box
+/// owns. `brain-switch.service.ts` resolves the two, and refuses the write
+/// rather than storing a value that would not be read.
+model BrainSetting {
+  id String @id @default("singleton")
+
+  enabled Boolean @default(false)
+
+  /// Who turned it on, server-stamped from the session — never from the body.
+  /// Plain String and no FK, matching `AutoFilingSetting.enabledById`: the
+  /// record of who consented has to outlive the account that gave it, and an
+  /// FK with `SetNull` under the biconditional CHECK below would make deleting
+  /// that user fail inside a statement naming a table nobody touched.
+  enabledById String?
+  enabledAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.

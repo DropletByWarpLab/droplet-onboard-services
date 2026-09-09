@@ -91,30 +91,65 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!edge) return refuseUnknownEdge();
   if (edge.status === "not_built") return refuseNotBuilt(edge);
 
+  // 🔴 WARP-2757 — the dispatch comes off the EDGE ROW, and this file no
+  // longer knows the word "deal".
+  //
+  // It used to be `edge.to === "project" ? { projectId } : { companyId }` with
+  // the endpoint hard-coded to `/api/crm/deals/`. That was correct only by
+  // coincidence: both live edges happen to be columns on the deal, so "not
+  // project" could stand in for "customer". The next live edge is
+  // `project -> customer` — `PmProject.companyId` already exists — and under
+  // the old shape it would PATCH `{companyId}` to `/api/crm/deals/<a project
+  // id>`, then report the 404 as a missing deal. Nothing about updating the
+  // table would have made the author look at this line.
+  const { write } = edge;
+
+  // 🔴 The ROUTE literal stays inline HERE, and that is a constraint, not a
+  // style choice: `tool-routes.test.ts` reads a tool's declared hops out of
+  // its handler source by finding the literal in the `callOrch` call. A URL
+  // moved onto the edge row — or even into a local `const` built by a ternary
+  // — goes invisible to it, and the manifest then asserts a hop nothing can be
+  // shown to make. The row owns the CHOICE; this file owns the literals.
+  //
+  // So a new live subject fails in two places at once, which is the design:
+  // there is no route for it here, and there is no manifest entry for it.
+  if (write.subject !== "deal") {
+    // Unreachable while `deal` is the only live subject. A refusal rather than
+    // a throw: a live edge with no route here is a mis-wiring, and the caller
+    // should hear that this box cannot do it yet rather than see a 500.
+    return refuseNotBuilt({
+      from: edge.from,
+      to: edge.to,
+      kind: edge.kind,
+      status: "not_built",
+      blockedBy: `business_link has no route for a ${write.subject} subject yet`,
+    });
+  }
+
   try {
-    // Both live edges are columns on the DEAL, so both are one PATCH. The
-    // direction is the schema's, not a convenience: `CrmDeal.projectId` and
-    // `CrmDeal.companyId` are SetNull precisely so losing the project or
-    // the account leaves the commercial record intact.
-    const body =
-      edge.to === "project" ? { projectId: toId } : { companyId: toId };
-    const data = await callOrch<{
-      deal: { id: string; title: string; company: string | null };
-    }>(ctx, "patch", `/api/crm/deals/${encodeURIComponent(fromId)}`, body);
+    const data = await callOrch<unknown>(
+      ctx,
+      "patch",
+      `/api/crm/deals/${encodeURIComponent(fromId)}`,
+      write.body(toId),
+    );
+    const subject = write.readBack(data);
     return {
       ok: true,
       data: {
         linked: {
-          from: { entity: edge.from, id: data.deal.id, name: data.deal.title },
+          from: { entity: edge.from, id: subject.id, name: subject.name },
           to: { entity: edge.to, id: toId },
           kind: edge.kind,
         },
       },
     };
   } catch (err) {
-    // Both live edges are a deal PATCH under `/api/crm`, so the CRM is the
-    // module named if the 404 turns out to be a switch.
-    return businessError(err, "deal");
+    // The module named by a `module_disabled` refusal follows the SUBJECT of
+    // the write, not a constant: a future `project -> customer` edge is a
+    // Projects call, and telling its caller to switch on the CRM would send
+    // them to the wrong switch.
+    return businessError(err, write.subject);
   }
 }
 

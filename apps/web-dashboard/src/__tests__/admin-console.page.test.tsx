@@ -114,9 +114,25 @@ describe("/admin — Overview", () => {
 
     render(<AdminOverviewPage />);
 
-    await waitFor(() => expect(screen.getByText("Unknown")).toBeInTheDocument());
+    // WARP-2696 — wait for the FAILED state, which is the thing under test.
+    //
+    // The obvious wait, `waitFor(getByText("Unknown"))`, is wrong twice over.
+    // `page.tsx` renders the muted Unknown badge whenever `health.state !== "ok"`,
+    // which includes the very first paint, so that wait is satisfied before
+    // either probe has rejected — the assertion below then reads the LOADING
+    // frame and cannot find the note (`node / web-dashboard`, run 34286523672).
+    // Measured with the rejections delayed 10 ms: the note was absent at that
+    // wait in 99 of 100 renders.
+    //
+    // And it could never have waited for the settled frame either: once BOTH
+    // probes fail there are three "Unknown" nodes — the status badge plus the
+    // two KPI notes — so `getByText` would throw "found multiple elements".
+    // The spec only ever passed by landing its wait in the loading frame and
+    // its assertion in the settled one.
+    expect(await screen.findByText(/could not reach the box/i)).toBeInTheDocument();
+    // Status badge + both KPI notes.
+    expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
     expect(screen.queryByText("0")).not.toBeInTheDocument();
-    expect(screen.getByText(/could not reach the box/i)).toBeInTheDocument();
   });
 
   it("degrades one tile without blanking the other", async () => {

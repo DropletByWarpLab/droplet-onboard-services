@@ -148,6 +148,27 @@ export async function getModelProvider(
 }
 
 /**
+ * WARP-2851 — the model's OWN context window, from the same cached list.
+ *
+ * The gateway publishes this per provider (`schemas.py` `ModelInfo`):
+ * anthropic 200000, openai 128000, and **null for every local model** — Ollama
+ * does not report a window, and the deployed one is an operator setting
+ * (`OLLAMA_CONTEXT_LENGTH`) rather than a property of the model.
+ *
+ * `undefined` therefore means BOTH "unknown model / gateway unreachable" and
+ * "the provider does not publish one", and both must resolve to the local
+ * default — see `resolveTurnContextWindow`. Never guess a window: budgeting a
+ * 16K model as though it were 200K is the WARP-854 overflow, which is the
+ * failure this whole budget path exists to prevent.
+ */
+export async function getModelContextWindow(
+  model: string,
+  now: number = Date.now(),
+): Promise<number | undefined> {
+  return (await findModelInfo(model, now))?.context_window ?? undefined;
+}
+
+/**
  * WARP-2749 — per-call options. `priority` is the gateway's
  * `X-Request-Priority` (services/ai-gateway/main.py: 0 user-initiated, the
  * default when the header is absent; 5 automation; 10 background). Its

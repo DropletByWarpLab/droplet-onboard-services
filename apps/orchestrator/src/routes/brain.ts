@@ -5,6 +5,8 @@
  *   GET   /api/brain/digests          the standing understanding
  *   GET   /api/brain/coverage         how much has actually been read
  *   PATCH /api/brain/findings/:id     acknowledge / action / dismiss / assign
+ *   GET   /api/brain/settings         is the brain on, and can this box say
+ *   PUT   /api/brain/settings         turn it on or off, recording who and when
  *
  * WHO. `requireRoleOrMcpService("owner", "admin")`, the agent-runs posture, so
  * the `_service:mcp` principal can reach here on behalf of a chat user whose
@@ -31,8 +33,11 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
+import type { BrainPassTrigger } from "../services/brain/brain-pass-runner.js";
 import { config } from "../config.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import {
   listDigests,
   listFindings,
@@ -40,6 +45,11 @@ import {
 } from "../services/brain/brain-digest.service.js";
 import { DETECTOR_PASS_KEY } from "../services/brain/brain-pass.service.js";
 import { CORPUS_PASS_KEY } from "../services/brain/brain-corpus.service.js";
+import {
+  BRAIN_SWITCH_PINNED,
+  readBrainSwitch,
+  setBrainEnabled,
+} from "../services/brain/brain-switch.service.js";
 
 /** Maps the service's stable error codes to HTTP, mirroring crm.ts. */
 const STATUS_BY_CODE: Record<string, number> = {
@@ -50,6 +60,9 @@ const STATUS_BY_CODE: Record<string, number> = {
   impact_needs_currency: 400,
   scope_department_mismatch: 400,
   invalid_detector_key: 400,
+  // WARP-2838. A 409, not a 403: the caller has the role, the request is
+  // well-formed, and the answer is that this box's answer is not ours to give.
+  [BRAIN_SWITCH_PINNED]: 409,
 };
 
 function fail(res: Response, err: unknown, next: NextFunction): void {
@@ -143,15 +156,91 @@ const digestQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+/** WARP-2838. `.strict()` so a body that also names `enabledById` is a 400
+ *  rather than a silently ignored attempt to attribute the consent elsewhere. */
+const settingsSchema = z.object({ enabled: z.boolean() }).strict();
+
 const patchSchema = z.object({
   status: z.enum(FINDING_STATUS),
   dismissedReason: z.string().max(500).optional(),
   assigneeId: z.string().uuid().nullable().optional(),
 });
 
-export function createBrainRouter(prisma: PrismaClient): Router {
+export function createBrainRouter(
+  prisma: PrismaClient,
+  passTrigger?: BrainPassTrigger,
+): Router {
   const router = Router();
   const gate = requireRoleOrMcpService("owner", "admin");
+
+  /**
+   * WARP-2850 — POST /api/brain/passes/:passKey/run. "Check now."
+   *
+   * 🔴 `requireRole`, NOT the `gate` const every read on this router shares.
+   * That is a security decision, not an inconsistency, and it is the one thing
+   * about this route that must not be "tidied".
+   *
+   * `requireRoleOrMcpService` calls `next()` for `_service:mcp` BEFORE it
+   * evaluates any role (middleware/auth.ts). The READS survive that because
+   * `visibleScopeFilter` re-checks the resolved human inside the query — a ROW
+   * protection. An ACTION route has no rows, therefore no filter, therefore
+   * nothing at all: a `family` or `guest` chat user whose `X-Nextcloud-User`
+   * resolves would pass the gate, and `if (!caller)` is not a role check.
+   * `requireRole` reads `req.user.role`, and the principal carries `service`,
+   * which is in no allowed set — so the tool path 403s here, on purpose.
+   *
+   * Consequence, accepted deliberately: the LLM cannot start a pass. A chat
+   * turn queueing ten inferences ahead of the user's own next question is its
+   * own decision, and this is not it.
+   */
+  router.post(
+    "/brain/passes/:passKey/run",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        // The brain read surface is mounted unconditionally, so this route
+        // exists on a box where no pass was ever registered. It must refuse
+        // rather than 404 (which would read as "wrong URL") or mark a row
+        // running that nothing will ever execute.
+        if (!passTrigger) {
+          res.status(503).json({ error: "brain_disabled" });
+          return;
+        }
+        // Validated against the runner registry, never forwarded raw. A future
+        // caller cannot reach another job by shaping the path.
+        const passKey = req.params.passKey ?? "";
+        if (!passTrigger.knownPasses().includes(passKey)) {
+          res.status(400).json({ error: "unknown_pass" });
+          return;
+        }
+
+        const out = await passTrigger.trigger(passKey, { manual: true });
+        if (out.ok) {
+          // 202, never 200-with-a-result: the corpus pass takes minutes and an
+          // HTTP handler must not block for them. The outcome already has a
+          // home — GET /api/brain/coverage, which /brief polls.
+          res.status(202).json({ passKey, status: "started" });
+          return;
+        }
+
+        if (out.reason === "too_soon") {
+          // Retry-After is in SECONDS and is the HTTP spelling of the same
+          // number, so a client does not have to guess.
+          const secs = Math.max(1, Math.ceil((out.retryAfterMs ?? 0) / 1000));
+          res.setHeader("Retry-After", String(secs));
+          res.status(429).json({ error: "too_soon", retryAfterSeconds: secs });
+          return;
+        }
+        // `busy` and `disabled` are DIFFERENT answers and a UI must be able to
+        // say which: one is "hold on", the other is "somebody switched this
+        // off on purpose".
+        const status = out.reason === "unknown_pass" ? 400 : 409;
+        res.status(status).json({ error: out.reason });
+      } catch (err) {
+        fail(res, err, next);
+      }
+    },
+  );
 
   router.get("/brain/findings", gate, async (req: Request, res: Response, next: NextFunction) => {
     const q = findingQuerySchema.safeParse(req.query);
@@ -210,13 +299,14 @@ export function createBrainRouter(prisma: PrismaClient): Router {
     try {
       // Neither read depends on the other, and `brain-digest.service.ts`
       // already uses Promise.all for the equivalent rows/count pair.
-      const [passes, totalIndexed] = await Promise.all([
+      const [passes, totalIndexed, brain] = await Promise.all([
         prisma.brainPass.findMany({
           where: { passKey: { in: [DETECTOR_PASS_KEY, CORPUS_PASS_KEY] } },
         }),
         // How much there is to read, so "digested" has a denominator. Without
         // it the number is a count with no scale and reads as completeness.
         prisma.fileIndexStatus.count({ where: { status: "ready" } }),
+        readBrainSwitch(prisma),
       ]);
       res.json({
         // WARP-2812 — whether the brain is scheduled AT ALL. Without this the
@@ -224,10 +314,27 @@ export function createBrainRouter(prisma: PrismaClient): Router {
         // succeeds on a box where nothing is running: it reads BrainPass rows
         // that were never seeded and counts files nothing will ever digest.
         // A truthy body then read as a healthy brain with nothing to say.
-        enabled: config.brain.enabled,
+        //
+        // WARP-2838 — the EFFECTIVE value, resolved from the environment and
+        // the consent row together. It was `config.brain.enabled`, which is the
+        // boot-time env value: after the owner switched the brain on, the page
+        // that told them to do it went on saying it was off.
+        enabled: brain.enabled,
+        // Whether this box's answer is the owner's to give. False on a box
+        // pinned by `BRAIN_ENABLED`, so the page states the position instead of
+        // rendering a control that 409s.
+        canToggle: !brain.pinnedByOperator,
         passes: passes.map((p) => ({
           passKey: p.passKey,
           enabled: p.enabled,
+          // WARP-2850 — the lease, made observable. Without it a UI cannot
+          // tell "the box is working on it" from "nothing is happening", and
+          // WARP-2837's AC asks for a reclaimable run to be observable rather
+          // than merely bounded. `claimedBy` is deliberately NOT here: it is a
+          // process id, it identifies nothing a human needs, and this route
+          // has no row filter to justify putting an identifier on it.
+          runState: p.runState,
+          runningSince: p.claimedAt,
           lastRunAt: p.lastRunAt,
           lastSucceededAt: p.lastSucceededAt,
           lastError: p.lastError,
@@ -266,6 +373,91 @@ export function createBrainRouter(prisma: PrismaClient): Router {
         }
         await setFindingStatus(prisma, caller, req.params.id!, parsed.data);
         res.status(204).end();
+      } catch (err) {
+        fail(res, err, next);
+      }
+    },
+  );
+
+  /**
+   * WARP-2838 — the switch `/brief` sends people to.
+   *
+   * 🔴 `requireRole`, NOT `requireRoleOrMcpService`, and the difference is the
+   * whole gate. `requireRoleOrMcpService` admits `_service:mcp` BEFORE any role
+   * check; on the read routes above that is safe only because
+   * `visibleScopeFilter` re-checks the resolved human inside the query. A route
+   * with no rows has no filter, so on the tool path it would have nothing at
+   * all — a `family` or `guest` chat user passes as the service principal,
+   * `resolveCaller` resolves them to a real `User` row, and `if (!caller)` is
+   * not a role check. `requireRole` reads `req.user.role`, and the principal
+   * carries `"service"`, which is in no allowed set.
+   *
+   * owner + admin, matching every other brain surface and ADR-051 §9: findings
+   * and digests can be derived from the whole-company corpus, and the decision
+   * to let the model read it belongs to the same people who can read the
+   * output.
+   */
+  const settingsGate = requireRole("owner", "admin");
+
+  router.get(
+    "/brain/settings",
+    settingsGate,
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const brain = await readBrainSwitch(prisma);
+        res.json({
+          enabled: brain.enabled,
+          canToggle: !brain.pinnedByOperator,
+          enabledById: brain.enabledById,
+          enabledAt: brain.enabledAt,
+        });
+      } catch (err) {
+        fail(res, err, next);
+      }
+    },
+  );
+
+  router.put(
+    "/brain/settings",
+    settingsGate,
+    async (req: Request, res: Response, next: NextFunction) => {
+      const parsed = settingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_body" });
+        return;
+      }
+      // The session, never the body. A consent record an HTTP client can
+      // address to somebody else is not a consent record — and the service
+      // principal is not a person who can consent to anything.
+      const actorId = req.user?.id;
+      if (!actorId || actorId.startsWith("_service:")) {
+        noActor(res);
+        return;
+      }
+      try {
+        const brain = await setBrainEnabled(prisma, {
+          enabled: parsed.data.enabled,
+          actorId,
+        });
+        // Audited like every other consent write. IDS AND CODES ONLY — the
+        // audit stream is exported wholesale and retained longer than what it
+        // describes, so this says THAT the brain was switched, never anything
+        // it went on to read.
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "sparkles",
+          what: brain.enabled ? "Company brain turned on" : "Company brain turned off",
+          sub: null,
+          refs: { enabled: brain.enabled },
+          actor: actorFromRequest(req),
+        });
+        res.json({
+          enabled: brain.enabled,
+          canToggle: !brain.pinnedByOperator,
+          enabledById: brain.enabledById,
+          enabledAt: brain.enabledAt,
+        });
       } catch (err) {
         fail(res, err, next);
       }

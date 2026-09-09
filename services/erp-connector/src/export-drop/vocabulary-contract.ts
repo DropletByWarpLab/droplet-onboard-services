@@ -28,6 +28,7 @@
  */
 import type { Connector } from "../connector.js";
 import type { ReadQuery } from "../read-queries.js";
+import { NATURAL_KEY } from "./scan.js";
 import {
   CANONICAL_COLUMNS,
   DATASET_CATEGORY,
@@ -67,7 +68,7 @@ const _marketing: DatasetCategory = "marketing";
 // must not have turned it into `string`.
 const _notACategory: DatasetCategory = "logistics";
 
-// ── the three Records are TOTAL, not partial ────────────────────────────────
+// ── the FOUR Records are TOTAL, not partial ─────────────────────────────────
 //
 // A `Partial<Record<DatasetName, …>>` keeps the same `keyof`, so asserting on
 // keys cannot catch that mutation. Asserting that a lookup returns a defined
@@ -84,6 +85,31 @@ const _columnsAreTotal: (d: DatasetName) => readonly string[] = (d) => CANONICAL
 
 /** Mutation: make REQUIRED_CANONICAL partial, or drop an entry → tsc red. */
 const _requiredIsTotal: (d: DatasetName) => readonly string[] = (d) => REQUIRED_CANONICAL[d];
+
+/**
+ * WARP-2833 — the FOURTH total Record, and the one that had no fixture.
+ *
+ * `NATURAL_KEY` lives in `scan.ts` rather than `profiles.ts`, which is the only
+ * reason it was missed: the header above said "the three Records" and named
+ * the three that are neighbours in one file. ADR-046's Follow-ups still says
+ * three. It is four, and this is the fourth.
+ *
+ * Honest about what this adds, because overstating a guard is worse than not
+ * having it: the object literal already fails `tsc` if a new `DatasetName` has
+ * no entry, and relaxing the declaration to `Partial<Record<…>>` ALSO reddens
+ * three of `scan.ts`'s own call sites ("'naturalKey' is possibly 'undefined'").
+ * So this is not the only thing standing between the codebase and that
+ * mutation — it is the line that says the totality is INTENDED rather than
+ * incidental to who happens to read it today. A refactor that makes those
+ * three call sites defensive (`?? []`) would take the incidental guard away
+ * and leave this one, which is the scenario it is here for.
+ *
+ * `PLACEMENT_COLUMN` in the same file is deliberately `Partial` and correctly
+ * has no fixture here — partial is its contract, not a regression.
+ *
+ * Mutation: make NATURAL_KEY partial, or drop an entry → tsc red.
+ */
+const _naturalKeyIsTotal: (d: DatasetName) => readonly string[] = (d) => NATURAL_KEY[d];
 
 // ── the union at the two capability boundaries ──────────────────────────────
 

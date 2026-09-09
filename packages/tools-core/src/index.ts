@@ -18,6 +18,18 @@ export {
   type ToolDomain,
 } from "./catalog.js";
 export { confirmationRequired, isConfirmationResponse, passThroughConfirmation } from "./confirmation.js";
+// WARP-2821 — the ONE corpus-visibility rule, called by the orchestrator's
+// Files search route and by the mcp-server's chunk-owner resolver. Two copies
+// of this disagreed once, and every shared document was invisible to the
+// assistant while the Files page listed it.
+export {
+  HOUSEHOLD_INDEX_USER,
+  deptSentinel,
+  visibleDepartmentsFor,
+  deptCorpusKeys,
+  maxAclVersion,
+} from "./corpus-scope.js";
+export type { VisibleDept, CorpusCaller } from "./corpus-scope.js";
 // WARP-2305 — generic enforcement of `requiresConfirmation` at dispatch,
 // plus the runtime deny tier. `docs/tool-confirmation-contract.md`.
 export {

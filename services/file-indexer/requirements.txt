@@ -21,7 +21,7 @@ olefile>=0.47
 # ODF (.odt/.ods/.odp/.odg) is handled with stdlib zipfile + ElementTree —
 # no odfpy needed, see extractors/odf.py.
 # WARP-201 RAG Phase 1 extractors
-pypdf>=6.16.2
+pypdf>=6.17.0
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
 # pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
 # rebuilds words from glyph geometry. MIT-licensed.
@@ -32,7 +32,7 @@ pypdf>=6.16.2
 # otherwise turn every scanned PDF back into a silent `empty_extraction`.
 # Apache-2.0/BSD-3-Clause.
 pypdfium2>=5.13.0
-readability-lxml>=0.8.4.1
+readability-lxml>=0.9
 lxml_html_clean>=0.4.5
 pytesseract>=0.3.13
 Pillow>=12.3.0
@@ -73,7 +73,7 @@ uvicorn>=0.52.4
 # bge-small-en-v1.5 tokenizer (the embedder's tokenizer) for capacity
 # accounting.
 semantic-text-splitter>=0.32.0,<0.33
-tokenizers>=0.23.1,<1.0
+tokenizers>=0.23.2,<1.0
 # WARP-435 (ADR-003 Phase 1) — PPTX extraction with section-aware
 # hierarchical paths (section_name → slide_title). python-pptx is the
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,

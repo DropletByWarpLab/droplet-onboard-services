@@ -56,6 +56,16 @@ import {
   ConnectorBlockedError,
   HubSpotCapabilityUnavailableError,
   MailchimpCapabilityMissingError,
+  // WARP-2841 — the rest of the capability family. Imported as VALUES, not
+  // types: `isCapabilityBlocked` is an `instanceof` check, so a renamed class
+  // breaks the build rather than silently stopping to match.
+  BrevoCapabilityMissingError,
+  DatasetNotServedError,
+  KlaviyoCapabilityMissingError,
+  PipedriveCapabilityMissingError,
+  PipedriveColumnNotAvailableError,
+  ShopifyProtectedDataDeniedError,
+  ShopifyScopeMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
   // WARP-2383 — the Xero track's three named states.
@@ -270,11 +280,76 @@ function defaultBudgetFor(conn: SyncConnectionRow): SyncCallBudget {
  * same maintenance contract the three named branches already carry, and the
  * cost of forgetting is stated in `asSyncFailure`.
  */
+export const CAPABILITY_BLOCKED_ERRORS = [
+  HubSpotCapabilityUnavailableError,
+  MailchimpCapabilityMissingError,
+  // ── WARP-2841 — the seven this list had been missing ───────────────────────
+  //
+  // The contract above ("a third connector growing a capability error must be
+  // added HERE") was kept for zero of the seven connectors that grew one. The
+  // consequence is the one `asSyncFailure` spells out below: FATAL, cursor
+  // parked FAILED with `nextAttemptAt: null`, unclaimable, never revived, and
+  // `foldSyncState` ranking it highest so the WHOLE connection reads failed —
+  // including after the owner buys the plan that would have fixed it.
+  //
+  // 🔴 `PipedriveColumnNotAvailableError` was live on EVERY Pipedrive customer
+  // from day one, not on a plan edge: the descriptor declares `product`, so a
+  // cursor is registered, and `get_low_stock_products` is refused
+  // unconditionally before any I/O because Pipedrive has no source column for
+  // `inventory_quantity`. contact/company/deal landed perfectly while the
+  // connection reported itself broken.
+  //
+  // `DatasetNotServedError` is the generic form of the same fact and belongs
+  // here for the same reason: "this connection does not serve that" is a
+  // capability statement, not a fault.
+  BrevoCapabilityMissingError,
+  KlaviyoCapabilityMissingError,
+  PipedriveCapabilityMissingError,
+  PipedriveColumnNotAvailableError,
+  ShopifyScopeMissingError,
+  DatasetNotServedError,
+  /**
+   * 🔴 The EIGHTH, found by classification rather than by spelling — and the
+   * reason the completeness test now derives its expectation two ways.
+   *
+   * `ShopifyProtectedDataDeniedError` is a capability fact by every definition
+   * this codebase already holds: its `PROTECTED_CUSTOMER_DATA_DENIED` code is
+   * in `CAPABILITY_LIMITED_CODES` on the read path and maps to the
+   * `CAPABILITY_LIMITED` STATUS in `cloud-connection-state.ts`. Only the sync
+   * path called it a fault — and it was invisible to a name-matched sweep of
+   * this list, because it is the one capability class named for WHAT WAS
+   * DENIED rather than for the capability that is missing.
+   *
+   * It is not a plan edge case either. Shopify withholds protected customer
+   * data until the app is approved, so an unapproved store throws it
+   * UNCONDITIONALLY for `customer` — before any I/O in `runRead`, and again in
+   * `listEntityIds` — while `order` and `product` land perfectly. A store that
+   * downgrades mid-life reaches the same state through
+   * `detectProtectedDataRedaction`. Either way the `customer` cursor parked
+   * FAILED forever and `foldSyncState` rendered the whole Shopify connection
+   * broken.
+   */
+  ShopifyProtectedDataDeniedError,
+] as const;
+
+/**
+ * 🔴 `XeroScopeMissingError` is deliberately NOT here, and the omission is a
+ * decision rather than the same oversight repeated.
+ *
+ * It already has its own branch in `asSyncFailure` returning 403 → AUTH, with
+ * a written rationale ("the credential is fine and the connection is intact —
+ * a scope the owner has to tick is a re-consent"). That branch runs BEFORE the
+ * capability check, so listing it here would not change the classification at
+ * all. What it WOULD change is `retryAfterOf`, the predicate's other consumer,
+ * which answers `MAX_BACKOFF_MS` for anything capability-blocked — silently
+ * lengthening the retry interval on a state Xero's own branch is tuned for.
+ *
+ * Widening a list to include something already handled correctly is how a
+ * cleanup becomes a regression.
+ */
+
 function isCapabilityBlocked(err: unknown): boolean {
-  return (
-    err instanceof HubSpotCapabilityUnavailableError ||
-    err instanceof MailchimpCapabilityMissingError
-  );
+  return CAPABILITY_BLOCKED_ERRORS.some((cls) => err instanceof cls);
 }
 
 /** Pull a `Retry-After` off whatever shape the vendor error arrived in. */
@@ -688,11 +763,56 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
    * sync is failing" forever. That is WARP-2533's defect exactly, reintroduced
    * by a fourth track rather than by a new entity.
    */
+  /*
+   * 🔴 WARP-2840 — the `lan` arm above was the bug, and it was the flagship
+   * integration's worst one.
+   *
+   * The comment's own rule is right: the split is "does this track DECLARE its
+   * served set". It then named `lan` as a track that does not — and `eaglesoft`
+   * DOES. `provider-registry.ts` gives it `datasets: PRACTICE_DATASETS`
+   * (`appointment`, `patient`, `account`), and `EaglesoftConnector` refuses
+   * everything else in `assertDatasetsServed` before any I/O. Discarding that
+   * declaration handed every Eaglesoft connection an `invoice` and a `bill`
+   * cursor for reads the connector is built to refuse.
+   *
+   * The cost was total and silent. `DatasetNotServedError` is absent from
+   * `isCapabilityBlocked`, so it classifies FATAL; FATAL parks the cursor
+   * FAILED with `nextAttemptAt: null`; FAILED is not in
+   * `CLAIMABLE_ERP_SYNC_STATES` and `upsertErpCursor`'s `update: {}` never
+   * revives it; and FAILED outranks every other state in `foldSyncState`. One
+   * dead cursor rendered the WHOLE connection a failed sync forever, clearable
+   * only by disconnect-then-reconnect — Reconnect alone resets cursors only
+   * from `DISABLED`.
+   *
+   * And it INVERTED, which is why nobody hit it in a lab: `connect()` calls
+   * `requireBridge` first, so a box with no SQL bridge throws
+   * `ConnectorBlockedError` → 503 → TRANSIENT → BACKOFF and looks fine. The
+   * FATAL only fires once the bridge WORKS. The integration reported itself
+   * permanently broken exactly when the practice's database came up.
+   *
+   * What the `lan` arm was really protecting is the `<vendor>-export` family,
+   * which genuinely computes its served set at runtime from the operator's
+   * export profiles (WARP-2533) — and those providers have NO DESCRIPTOR at
+   * all, so they are already covered by the single clause below. The track
+   * name was never what distinguished them.
+   */
   function entityServedBy(provider: string, spec: ErpSyncEntity): boolean {
     const descriptor = providerDescriptor(provider);
-    if (!descriptor || descriptor.track === "lan" || descriptor.track === "catalog") {
-      return spec.openToUndeclaredTracks;
-    }
+    // No descriptor at all — the open `<vendor>-export` family. No evidence
+    // either way, so the ENTITY decides. WARP-2533's behaviour, unchanged.
+    if (!descriptor) return spec.openToUndeclaredTracks;
+    // Otherwise the descriptor HAS spoken, whatever its track, and it is
+    // reconciled against the connector's own `servesDatasets` by
+    // `erp-provider.descriptor.test.ts` — so it is the trustworthy answer.
+    //
+    // 🔴 The EMPTY tuple is a declaration too, and treating it as silence was
+    // my first attempt at this fix. It reddened WARP-2650's guard immediately:
+    // `atlassian` declares `datasets: []`, meaning "I serve nothing", and
+    // routing that to `openToUndeclaredTracks` hands every CONNECTED Atlassian
+    // row an invoice and a bill cursor — the exact defect that test exists to
+    // prevent. `opendental`'s empty `catalog` tuple is the same statement, and
+    // giving it zero cursors is a fix rather than a regression: it has no
+    // connector class, so any cursor it received would park FATAL too.
     return (descriptor.datasets as readonly string[]).includes(spec.entity);
   }
 

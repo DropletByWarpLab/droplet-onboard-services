@@ -264,9 +264,42 @@ const envSchema = z.object({
   // Documents digested per corpus tick. Bounded so one tick is a predictable
   // slice of the inference slot rather than an open-ended sweep.
   BRAIN_CORPUS_UNITS_PER_RUN: z.coerce.number().int().min(1).max(100).default(10),
-  // Master switch. OFF by default: the corpus pass reads the user's documents
-  // and writes derived rows, which is a capability an operator opts into (see
-  // ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  // WARP-2850 — how long after boot the DETECTOR pass runs once.
+  //
+  // Only the detector pass gets a boot run, and only after a delay. It makes
+  // no model call, so it never touches the box's single inference slot; the
+  // delay is for the rest of the stack, which at t=0 is still coming up. The
+  // corpus pass deliberately has NO boot run — see brain-pass-runner.ts and
+  // ADR-051 §9.9: it reads a person's documents through the model, and
+  // "enabled the feature" must not mean "and it started reading, seconds
+  // later, before you could disable that pass".
+  //
+  // 0 disables the boot run outright, which is the explicit off state rather
+  // than a sentinel guessed from a missing value.
+  BRAIN_BOOT_DELAY_MS: z.coerce.number().int().min(0).finite().default(30_000),
+  // WARP-2850 — how soon a MANUALLY triggered corpus pass may re-fire.
+  //
+  // Not about concurrency, which the lease already answers: a caller who
+  // re-fires the instant a run ENDS holds the only inference slot at ~100%,
+  // and each of those inferences is queued ahead of whatever the person in
+  // the chat window asks next. Measured from `BrainPass.lastRunAt`, so it is
+  // durable across restarts and also refuses a manual run moments after a
+  // scheduled tick — when the pass has nothing new to read anyway.
+  //
+  // The detector pass is exempt: bounded indexed SQL, no model call.
+  BRAIN_MANUAL_MIN_INTERVAL_MS: z.coerce.number().int().min(0).finite().default(5 * 60_000),
+  // Master switch OVERRIDE. OFF by default: the corpus pass reads the user's
+  // documents and writes derived rows, which is a capability someone opts into
+  // (see ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  //
+  // WARP-2838 — SETTING THIS PINS THE BOX. Leave it unset and the owner's
+  // `BrainSetting` row decides, which is how a box is meant to be run: the
+  // consent is recorded with an actor and a timestamp, in the product, where
+  // the person giving it can read what they are agreeing to. Set it and the
+  // environment wins in both directions, `PUT /api/brain/settings` answers 409,
+  // and the dashboard says the box is pinned rather than offering a control
+  // that does nothing. It exists for fleet policy — a box that must not read
+  // documents regardless of who asks — not as the ordinary way in.
   // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
   // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
   // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
@@ -1358,6 +1391,28 @@ const envSchema = z.object({
 // then the schema default, rather than parsing as an empty URL.
 const firstNonEmpty = (...vals: (string | undefined)[]): string | undefined =>
   vals.find((v) => v !== undefined && v.trim() !== "");
+/**
+ * WARP-2838 — did the OPERATOR pin the brain switch, as distinct from what it
+ * is pinned to?
+ *
+ * `BRAIN_ENABLED`'s schema entry has `.default("0")`, which collapses "unset"
+ * and "0" into the same boolean. The owner-facing switch has to tell them
+ * apart: unset means the `BrainSetting` row decides, set means the environment
+ * does and the dashboard says so rather than offering a control whose effect
+ * the next redeploy would silently undo.
+ *
+ * 🔴 AN EMPTY VALUE IS UNSET, NOT A PIN. `BRAIN_ENABLED=` in a `.env`, or
+ * `${BRAIN_ENABLED:-}` interpolated by a compose file, is a defined-but-empty
+ * string — the same trap `DROPLET_OTA_RELEASES_URL` documents below. Reading it
+ * as "the operator pinned it off" would remove the owner's switch from a box
+ * nobody meant to pin, with nothing on screen able to explain why. Exported and
+ * tested for that reason: `!== undefined` is the obvious simplification and it
+ * is wrong.
+ */
+export function resolveBrainPin(raw: string | undefined): boolean {
+  return (raw ?? "").trim().length > 0;
+}
+
 const envForParse: NodeJS.ProcessEnv = {
   ...process.env,
   DEVICE_BRIDGE_URL: firstNonEmpty(
@@ -1479,9 +1534,12 @@ export const config = {
   // corpus tick is the one that shares the box's single inference slot.
   brain: {
     enabled: parsed.BRAIN_ENABLED,
+    enabledPinnedByOperator: resolveBrainPin(process.env.BRAIN_ENABLED),
     detectorTickMs: parsed.BRAIN_DETECTOR_TICK_MS,
     corpusTickMs: parsed.BRAIN_CORPUS_TICK_MS,
     corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
+    bootDelayMs: parsed.BRAIN_BOOT_DELAY_MS,
+    manualMinIntervalMs: parsed.BRAIN_MANUAL_MIN_INTERVAL_MS,
   },
   // WARP-2177 — see resolveAgentRunLimits.
   agentRuns: {

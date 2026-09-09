@@ -183,4 +183,64 @@ describe("Users roster — enable / disable a person", () => {
     );
     expect(screen.queryByText(/deactivated/i)).not.toBeInTheDocument();
   });
+
+  /**
+   * WARP-2696, third shape of the same fault. The other two pinned cases live
+   * in users.usage-settings.test.tsx: a fire-and-forget `.then/.catch/.finally`
+   * chain, and `reload()` called without await from an effect. This is the
+   * ASYNC EVENT HANDLER version — `performEnable` is invoked from onClick and
+   * its promise floats, so a state write after its await lands on a page that
+   * may be gone, and after vitest tears the jsdom environment down there is no
+   * `window` to schedule against.
+   *
+   * A real admin does the same thing by clicking Enable and navigating away
+   * before the box answers.
+   */
+  it("an enable that resolves after unmount + teardown escapes nothing", async () => {
+    let failEnable!: (err: unknown) => void;
+    setUserEnabledMock.mockImplementation(
+      () => new Promise((_resolve, reject) => { failEnable = reject; }),
+    );
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        {
+          id: "tomas.w",
+          username: "tomas.w",
+          displayName: "Tomas Weber",
+          role: "family",
+          enabled: false,
+        },
+      ],
+    });
+
+    const view = render(<UsersPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /enable user Tomas Weber/i }),
+    );
+    await waitFor(() => expect(setUserEnabledMock).toHaveBeenCalled());
+
+    // The page goes away while the box is still deciding.
+    view.unmount();
+
+    const escaped: string[] = [];
+    const onRejection = (err: unknown) =>
+      escaped.push(String((err as { message?: string })?.message ?? err));
+    process.on("unhandledRejection", onRejection);
+
+    const realWindow = (globalThis as { window?: unknown }).window;
+    try {
+      delete (globalThis as { window?: unknown }).window;
+      // The catch arm is the one that writes state.
+      failEnable(new Error("box unreachable"));
+      // Microtasks only: a timer here would let a stray jsdom event dispatch
+      // into React while `window` is missing, throwing the very error under
+      // test from the wrong direction (CI run 34291647020).
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    } finally {
+      (globalThis as { window?: unknown }).window = realWindow;
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(escaped).toEqual([]);
+  });
 });

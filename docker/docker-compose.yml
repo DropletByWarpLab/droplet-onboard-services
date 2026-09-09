@@ -3010,8 +3010,15 @@ services:
   dmr-cuda:
     # The CUDA build. Same upstream version as `dmr`'s ROCm tag — keep the two
     # pinned in lockstep, they are one decision. Bare `v1.2.6` is the CPU-only
-    # build and is refused by assert_dmr_image_is_accelerated in gpu.sh; a
-    # hand-pinned bare tag in docker/.env is exactly how WARP-2543 happened.
+    # build, and a hand-pinned bare tag in docker/.env is exactly how WARP-2543
+    # happened. `configure_gpu_env` (scripts/lib/gpu.sh) REWRITES such a pin to
+    # the detected vendor's image — whether it is bare, or built for the wrong
+    # vendor after a card swap — rather than refusing it. Refusing was tried and
+    # reverted: `materialize_artifacts` exports the whole .env before
+    # `configure_single_box_env` runs, so the box's OWN stored value reaches the
+    # check, and a `return 1` there aborted setup.sh mid-run on precisely the box
+    # the guard existed to repair. Opt out with DMR_IMAGE_CPU_OPT_IN=1; an absent
+    # DMR_IMAGE is left absent, so this default stays the source of truth.
     image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}
     container_name: droplet-dmr
     profiles: ["dmr-cuda"]
@@ -3156,9 +3163,15 @@ services:
     # already retries behind a circuit breaker (it reports
     # {"ollama_reachable":…,"circuit_breaker":…} on /health for exactly this).
     environment:
-      # The lifecycle client's base URL. Named OLLAMA_URL for historical
-      # reasons; on this shape it is a DMR pointer (see runtime/factory.py).
-      OLLAMA_URL: http://dmr:12434
+      # The lifecycle client's base URL. WARP-2857 — this was `OLLAMA_URL`, a
+      # name that predates ADR-036 and on this shape points at DMR, not Ollama.
+      # `runtime/factory.py` prefers INFERENCE_RUNTIME_URL and keeps OLLAMA_URL
+      # as the fallback, so the rename is a no-op here and removes the last
+      # hardcoded legacy name in this file.
+      #
+      # Note this is `environment:`, which OUTRANKS the `env_file: ../.env`
+      # below — so a stale OLLAMA_URL in a field .env cannot shadow it.
+      INFERENCE_RUNTIME_URL: http://dmr:12434
       MODEL_MANIFEST: /app/models/model-manifest.json
       VRAM_RESERVE_GB: ${VRAM_RESERVE_GB:-2}
       # INFERENCE_AUTH_TOKEN is NOT listed here on purpose — it arrives via

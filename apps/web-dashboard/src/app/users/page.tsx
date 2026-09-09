@@ -372,35 +372,39 @@ export default function UsersPage() {
     setError(null);
     try {
       const data = await fetchUsers();
+      if (!mountedRef.current) return;
       setUsers(data.users || []);
       setIsAdmin(true);
       try {
         const inviteData = await listInvites();
-        setInvites(inviteData.invites || []);
+        if (mountedRef.current) setInvites(inviteData.invites || []);
       } catch {
         // Pending invites are nice-to-have; if the orchestrator hasn't
         // migrated yet, don't block the user list.
-        setInvites([]);
+        if (mountedRef.current) setInvites([]);
       }
       // WARP-1271 (T19a): the roster's "used / limit" column is best-effort
       // — a failed fetch (e.g. Nextcloud unreachable) leaves the column
       // blank rather than failing the whole page.
       try {
         const usage = await fetchAdminFilesUsage();
+        if (!mountedRef.current) return;
         const byUserId: Record<string, AdminUsageUserRow> = {};
         for (const row of usage.users) byUserId[row.userId] = row;
         setUsageRoster(byUserId);
       } catch {
-        setUsageRoster({});
+        if (mountedRef.current) setUsageRoster({});
       }
     } catch (err: any) {
+      if (!mountedRef.current) return;
       if (String(err?.message ?? "").includes("403")) {
         setIsAdmin(false);
       } else {
         setError(err?.message || "Failed to load users");
       }
     } finally {
-      setLoading(false);
+      // `return` above still runs this, so it is guarded too.
+      if (mountedRef.current) setLoading(false);
     }
   }, []);
 
@@ -408,14 +412,56 @@ export default function UsersPage() {
     reload();
   }, [reload]);
 
+  // WARP-2696 — every best-effort chain below is fire-and-forget, so its LAST
+  // handler is the end of the line: a throw there has nothing to catch it and
+  // escapes as an unhandled rejection. That is what killed a whole dashboard
+  // run with all 555 files green — the page unmounts, the read resolves after
+  // vitest has torn the jsdom environment down, the handler writes state,
+  // `window` is gone, and the ReferenceError is attributed to whichever file
+  // happened to be last. Real operators hit the same path by navigating away
+  // mid-load; they just do not have a runner to fail.
+  //
+  // So each handler below re-checks `mountedRef` before it writes. Note this
+  // guards the WRITE, never the control flow — in `handleEditSave` the awaits
+  // in between are server writes the operator already asked for, and bailing
+  // out of those would silently apply half a save.
+  //
+  // SCOPE: this IS now a whole-file pass. Every state write reachable after an
+  // await or inside a promise handler re-checks `mountedRef` — the four
+  // best-effort chains, `handleEditSave`, `reload()`, `openEdit`'s two fetches,
+  // and the eight modal/action handlers. Derived mechanically rather than by
+  // reading (for each write: is mount re-checked since the last suspension
+  // point?), because two were missed on the first pass by eye.
+  //
+  // The two `setTimeout` copy-confirmations re-check inside the timer as well:
+  // a 2 s "Copied" reset outlives most dialogs.
+  //
+  // Where the whole remainder of a handler is UI-only, the guard is an early
+  // return; where server writes still follow, individual writes are wrapped
+  // instead. `handleEditSave` is the one with several sequential server writes,
+  // so it must never early-return — that would apply half a save. The single-
+  // write handlers have no such hazard: their write has already landed by the
+  // time the guard is reached. The `throw` in the revoke/delete/disable catch
+  // blocks is deliberately left outside the guard so the confirm dialogs still
+  // see the rejection.
+  //
+  // A staleness check is NOT a mount check. `openEdit`'s `editSeedTokenRef`
+  // answers "is this still the current editor?" and is only bumped by the next
+  // openEdit(), so it still matches after an unmount. Both are needed.
   // WARP-1270 (T18) — department list for the invite modal's "Add to a
   // department" section. Best-effort (the invite modal's core email/role
   // flow must not break if this fails — the section just doesn't render).
   useEffect(() => {
     if (isAdmin !== true) return;
     listDepartments()
-      .then((data) => setDepartments(data.departments || []))
-      .catch(() => setDepartments([]));
+      .then((data) => {
+        if (!mountedRef.current) return;
+        setDepartments(data.departments || []);
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setDepartments([]);
+      });
   }, [isAdmin]);
 
   // WARP-1532 (T8) — custom roles for the roster chip / person editor and
@@ -425,6 +471,7 @@ export default function UsersPage() {
   const reloadAccessRoles = useCallback(() => {
     listAccessRoles()
       .then((data) => {
+        if (!mountedRef.current) return;
         const next = (data.roles || []).filter((r) => r.state !== "archived");
         setAccessRoles(next);
         setAccessRolesFailed(false);
@@ -442,6 +489,7 @@ export default function UsersPage() {
         );
       })
       .catch(() => {
+        if (!mountedRef.current) return;
         setAccessRoles([]);
         // WARP-1533: "failed to load" ≠ "no custom roles" — the invite
         // modal's picker degrades to built-in tiers with an honest caption
@@ -461,15 +509,19 @@ export default function UsersPage() {
     if (isAdmin !== true) return;
     reloadAccessRoles();
     fetchIntegrations()
-      .then((connections) =>
+      .then((connections) => {
+        if (!mountedRef.current) return;
         setConnectors(
           (connections || []).map((c) => ({
             provider: c.provider,
             label: c.provider.charAt(0).toUpperCase() + c.provider.slice(1),
           })),
-        ),
-      )
-      .catch(() => setConnectors([]));
+        );
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setConnectors([]);
+      });
   }, [isAdmin, reloadAccessRoles]);
 
   /** Anything carrying an assigned tier + optional custom role: a roster
@@ -607,22 +659,26 @@ export default function UsersPage() {
         true,
         createRole,
       );
+      if (!mountedRef.current) return;
       setCreateEmail(email);
       setCreatePhase("handoff");
       // Refresh the roster behind the dialog; non-fatal if it fails.
       void reload();
     } catch (err: any) {
-      setCreateError(err?.message || "Failed to create the account");
+      if (mountedRef.current) setCreateError(err?.message || "Failed to create the account");
     } finally {
-      setCreateSubmitting(false);
+      if (mountedRef.current) setCreateSubmitting(false);
     }
   };
 
   const handleCopyTempPassword = async () => {
     try {
       await navigator.clipboard.writeText(createPassword);
+      if (!mountedRef.current) return;
       setCreatePwCopied(true);
-      setTimeout(() => setCreatePwCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setCreatePwCopied(false);
+      }, 2000);
     } catch {
       // Clipboard might be blocked (insecure context); the field stays
       // selectable so the admin can copy manually.
@@ -658,19 +714,20 @@ export default function UsersPage() {
         ttlHours: inviteTtlHours,
         departments: deptGrants,
       });
+      if (!mountedRef.current) return;
       setInviteResult(result);
       setInvitePhase("share");
       // Refresh the pending list.
       try {
         const inviteData = await listInvites();
-        setInvites(inviteData.invites || []);
+        if (mountedRef.current) setInvites(inviteData.invites || []);
       } catch {
         // ignore
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to create invite");
+      if (mountedRef.current) setError(err?.message || "Failed to create invite");
     } finally {
-      setInviteSubmitting(false);
+      if (mountedRef.current) setInviteSubmitting(false);
     }
   };
 
@@ -678,8 +735,11 @@ export default function UsersPage() {
     if (!inviteResult) return;
     try {
       await navigator.clipboard.writeText(inviteResult.url);
+      if (!mountedRef.current) return;
       setInviteCopied(true);
-      setTimeout(() => setInviteCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setInviteCopied(false);
+      }, 2000);
     } catch {
       // Clipboard might be blocked (insecure context); leave the textbox
       // visible so the admin can manually select the link.
@@ -700,11 +760,14 @@ export default function UsersPage() {
     );
     try {
       await apiRevokeInvite(invite.token);
+      if (!mountedRef.current) return;
       setRevokeInvite(null);
       toast(`Invite for ${invite.username} revoked.`, "success");
     } catch (err: any) {
-      setInvites(before);
-      setError(err?.message || "Failed to revoke invite");
+      if (mountedRef.current) {
+        setInvites(before);
+        setError(err?.message || "Failed to revoke invite");
+      }
       throw err;
     }
   };
@@ -722,11 +785,12 @@ export default function UsersPage() {
     if (!u) return;
     try {
       await apiDeleteUser(u.id);
+      if (!mountedRef.current) return;
       setDeleteUserTarget(null);
       toast(`Deleted ${u.id}.`, "success");
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to delete user");
+      if (mountedRef.current) setError(err?.message || "Failed to delete user");
       throw err;
     }
   };
@@ -747,7 +811,7 @@ export default function UsersPage() {
       await setUserEnabled(u.id, true);
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to enable user");
+      if (mountedRef.current) setError(err?.message || "Failed to enable user");
     }
   };
 
@@ -756,11 +820,12 @@ export default function UsersPage() {
     if (!u) return;
     try {
       await setUserEnabled(u.id, false);
+      if (!mountedRef.current) return;
       setDisableUserTarget(null);
       toast(`${u.id} disabled.`, "success");
       await reload();
     } catch (err: any) {
-      setError(err?.message || "Failed to disable user");
+      if (mountedRef.current) setError(err?.message || "Failed to disable user");
       throw err;
     }
   };
@@ -799,6 +864,12 @@ export default function UsersPage() {
       // best-effort; an absent T3 backend just leaves the block empty.
       fetchEffectiveAccess(u.userId)
         .then((eff) => {
+          // The token below answers "is this still the current editor?";
+          // it is only ever bumped by the NEXT openEdit(), so it still
+          // matches after an unmount with no second open. That is a
+          // staleness check, not a mount check, and the writes below need
+          // both.
+          if (!mountedRef.current) return;
           // F4: bail if another editor opened (or this one closed and
           // reopened) since this fetch started — stale data must never
           // seed the current person's exception list.
@@ -823,6 +894,7 @@ export default function UsersPage() {
       setEditUsageLoading(true);
       fetchUserUsage(u.userId)
         .then((usage) => {
+          if (!mountedRef.current) return;
           const { value, unit } = bytesToStorageInput(usage.policy?.storageQuotaBytes ?? null);
           setEditStorageValue(value);
           setEditStorageUnit(unit);
@@ -834,7 +906,10 @@ export default function UsersPage() {
         .catch(() => {
           // Best-effort — the rest of the Edit dialog still works.
         })
-        .finally(() => setEditUsageLoading(false));
+        .finally(() => {
+          if (!mountedRef.current) return;
+          setEditUsageLoading(false);
+        });
     }
   };
 
@@ -917,9 +992,9 @@ export default function UsersPage() {
         // WARP-1270 QA fix: surface the sync-state transition under the
         // Usage fields instead of closing the dialog silently — the box
         // still has to push the quota to storage after this call resolves.
-        setEditUsageSyncText("Applying to storage…");
+        if (mountedRef.current) setEditUsageSyncText("Applying to storage…");
         await updateUserUsage(editing.userId, usagePatch);
-        setEditUsageSyncText("Applied");
+        if (mountedRef.current) setEditUsageSyncText("Applied");
         // Let "Applied" stay visible for a beat before the dialog closes.
         await beat();
         if (!mountedRef.current) return;
@@ -928,7 +1003,7 @@ export default function UsersPage() {
         // §8/§12 — the change revokes the target's sessions (WARP-116), so
         // the sync line states the consequence while the box applies it.
         const firstName = (editing.displayName || editing.id).split(" ")[0] ?? editing.id;
-        setEditAccessSyncText(ACCESS_COPY.sessionRevoke(firstName));
+        if (mountedRef.current) setEditAccessSyncText(ACCESS_COPY.sessionRevoke(firstName));
         const body = editAccessValue.startsWith("role:")
           ? { accessRoleId: editAccessValue.slice(5) }
           : {
@@ -936,7 +1011,7 @@ export default function UsersPage() {
               tier: editAccessValue.slice(5) as AccessStartingPoint,
             };
         await setPersonAccess(editing.userId, body);
-        setEditAccessSyncText(ACCESS_COPY.applied);
+        if (mountedRef.current) setEditAccessSyncText(ACCESS_COPY.applied);
         await beat();
         if (!mountedRef.current) return;
       }
