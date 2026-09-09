@@ -43,6 +43,7 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
+import { config } from "../config.js";
 import { createProtectedAuthRouter } from "../routes/auth.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -143,26 +144,34 @@ describe("GET /api/auth/sessions (WARP-2820)", () => {
   });
 
   it("computes both deadlines from the session's own role", async () => {
-    // admin-class idle window is 15 min, absolute is 8 h. Computed here so the
-    // dashboard never has to know either number.
+    // WARP-2854 — both classes sit at the AAL2 maximum: 30 min idle, 12 h
+    // absolute. Computed here so the dashboard never has to know either number.
     listUserSessions.mockResolvedValue([
       { role: "owner", createdAt: 1_000_000, lastSeenAt: 1_000_600 },
     ]);
     const res = await request(buildApp(owner)).get("/api/auth/sessions");
     const s = res.body.users[0].sessions[0];
-    expect(s.idleDeadline).toBe(1_000_600 + 15 * 60);
-    expect(s.absoluteDeadline).toBe(1_000_000 + 8 * 60 * 60);
+    expect(s.idleDeadline).toBe(1_000_600 + 30 * 60);
+    expect(s.absoluteDeadline).toBe(1_000_000 + 12 * 60 * 60);
   });
 
   it("uses the SESSION's role for the idle window, not the account's", async () => {
-    // A family member's session gets the 60-min window even when the roster
-    // row beside it is an owner. Reading the account role here would shorten
-    // or lengthen the wrong clock.
+    // A family member's session is measured by the USER-class knob even when
+    // the roster row beside it is an owner. Reading the account role here would
+    // shorten or lengthen the wrong clock. WARP-2854 currently sets both
+    // classes to the same AAL2 30 min, so this is asserted against the knob
+    // rather than a literal — it starts discriminating again the moment the
+    // two classes diverge, instead of quietly passing on the admin value.
     listUserSessions.mockResolvedValue([
       { role: "family", createdAt: 1_000_000, lastSeenAt: 1_000_000 },
     ]);
     const res = await request(buildApp(owner)).get("/api/auth/sessions");
-    expect(res.body.users[0].sessions[0].idleDeadline).toBe(1_000_000 + 60 * 60);
+    expect(res.body.users[0].sessions[0].idleDeadline).toBe(
+      1_000_000 + config.SESSION_IDLE_TIMEOUT_USER_SECONDS,
+    );
+    expect(res.body.users[0].sessions[0].absoluteDeadline).toBe(
+      1_000_000 + config.SESSION_ABSOLUTE_TIMEOUT_USER_SECONDS,
+    );
   });
 
   it("never returns a sid", async () => {
