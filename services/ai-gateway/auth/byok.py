@@ -42,7 +42,8 @@ async def save_api_key(provider: str, api_key: str, user_id: str | None = None) 
 
 
 async def get_api_key(provider: str, user_id: str | None = None) -> str | None:
-    """Retrieve a stored API key from the caller's namespace (WARP-561)."""
+    """Retrieve a stored API key from the caller's namespace, falling back
+    to the admin-managed shared key (WARP-561, WARP-2871)."""
     return await keystore.get_key(provider, user_id=user_id)
 
 

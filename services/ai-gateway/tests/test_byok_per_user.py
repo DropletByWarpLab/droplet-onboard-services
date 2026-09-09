@@ -3,8 +3,10 @@
 Keys were device-global (`{provider}.enc`); any caller could read any other
 user's cloud key. They are now namespaced per authenticated user
 (`{user_id}/{provider}.enc`), with a shared `_shared` namespace for identity-
-less server-side callers (model listing, gRPC). The user-id segment is
-sanitised so it can never escape KEYS_DIR.
+less server-side callers (model listing, gRPC). WARP-2871: `_shared` also
+holds the admin-managed box-wide keys, which `get_key` falls back to when a
+user has none of their own. The user-id segment is sanitised so it can never
+escape KEYS_DIR.
 """
 
 import os
@@ -60,14 +62,32 @@ class TestPerUserIsolation:
         assert await keystore.list_providers_with_keys(user_id="alice") == ["anthropic"]
         assert await keystore.list_providers_with_keys(user_id="bob") == ["openai"]
 
-    async def test_shared_namespace_for_no_user(self, clean_keys):
-        # Server-side callers (user_id=None) use the shared/device namespace,
-        # distinct from any real user's namespace.
+    async def test_user_without_own_key_falls_back_to_shared(self, clean_keys):
+        # WARP-2871: cloud keys are box-wide and admin-managed. The admin
+        # saves with no principal (user_id=None → `_shared`), and a user with
+        # no personal key must be served by it.
         await save_api_key("anthropic", "sk-ant-shared-key-1234567", user_id=None)
         assert await get_api_key("anthropic", user_id=None) == "sk-ant-shared-key-1234567"
-        # A real user does NOT see the shared key.
-        assert await get_api_key("anthropic", user_id="alice") is None
+        assert await get_api_key("anthropic", user_id="alice") == "sk-ant-shared-key-1234567"
 
+    async def test_per_user_key_wins_over_shared(self, clean_keys):
+        await save_api_key("anthropic", "sk-ant-shared-key-1234567", user_id=None)
+        await save_api_key("anthropic", "sk-ant-alice-key-1234567", user_id="alice")
+        assert await get_api_key("anthropic", user_id="alice") == "sk-ant-alice-key-1234567"
+        # Bob has none of his own → shared, never Alice's.
+        assert await get_api_key("anthropic", user_id="bob") == "sk-ant-shared-key-1234567"
+
+    async def test_list_does_not_include_shared_only_providers(self, clean_keys):
+        # The admin UI lists/deletes `_shared` explicitly (no header); a
+        # user's listing stays namespace-exact.
+        await save_api_key("anthropic", "sk-ant-shared-key-1234567", user_id=None)
+        assert await keystore.list_providers_with_keys(user_id="alice") == []
+        assert await keystore.list_providers_with_keys(user_id=None) == ["anthropic"]
+
+    async def test_delete_never_touches_shared_key(self, clean_keys):
+        await save_api_key("anthropic", "sk-ant-shared-key-1234567", user_id=None)
+        assert await delete_api_key("anthropic", user_id="alice") is False
+        assert await get_api_key("anthropic", user_id=None) == "sk-ant-shared-key-1234567"
 
 class TestNamespaceSafety:
     def test_traversal_user_id_cannot_escape_keys_dir(self, clean_keys):

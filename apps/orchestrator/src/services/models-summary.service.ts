@@ -85,16 +85,45 @@ export interface LocalModelInfo {
 }
 
 export interface CloudProviderInfo {
-  provider: "anthropic" | "openai" | "gemini";
-  /** From `OffLanAllowlistChannel.cloud_model_escape` once Phase E1
-   *  lands. Today: always false (cloud escape default-off per
-   *  FEATURES.md §8). */
+  /** WARP-2871: no `gemini`. services/ai-gateway has no Gemini provider
+   *  (providers/ holds anthropic_cloud, openai_cloud, ollama_local only), so
+   *  listing one was a fabricated row under the honesty contract. */
+  provider: "anthropic" | "openai";
+  /** `escapeEnabled && hasKey === true` — usable ON THIS BOX (not per
+   *  person; the caller's own verdict is `cloudAccess.allowedForYou`).
+   *  Overlaid per request by `overlayCloudState`; the cached build carries
+   *  false. */
   enabled: boolean;
+  /** WARP-2871: a box-wide (shared-namespace) key is present. `null` = the
+   *  gateway could not be asked (unreachable / timeout) — never guessed. The
+   *  cached build carries null; the route overlays the real answer. */
+  hasKey: boolean | null;
   /** ISO timestamp of last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until E2 wires
    *  `OffLanEgressSample` aggregation. */
   spendUsd: number;
+}
+
+/**
+ * WARP-2871 — the Models page's cloud-access state. Box-wide switch + the
+ * caller's own verdict, so the page can render the owner/admin switch AND
+ * tell a person whether cloud would work for THEM without re-deriving the
+ * AND-gate client-side.
+ */
+export interface CloudAccessInfo {
+  /** OffLanAllowlistChannel `cloud_model_escape.enabled` (absent row = false,
+   *  fail closed — the off-lan-gate posture). */
+  escapeEnabled: boolean;
+  /** `row.lastChangedBy`, or null when the row is absent / never attributed. */
+  escapeChangedBy: string | null;
+  /** `row.lastChangedAt` as ISO, or null when the row is absent. */
+  escapeChangedAt: string | null;
+  /** The CALLER's effective cloud verdict = `resolveEffectiveAccess(id).cloud`
+   *  (escape ∧ role; owner bypasses only the role limb). `null` when there is
+   *  no person to resolve (service principal / no id) or the resolver failed
+   *  — never a guessed boolean. */
+  allowedForYou: boolean | null;
 }
 
 export interface GpuInfo {
@@ -157,6 +186,13 @@ export interface ModelsPagePayload {
    * part of the cached payload), never fabricated here.
    */
   activeModel?: string | null;
+  /**
+   * WARP-2871 — box-wide cloud switch + the caller's verdict. Set by the
+   * /api/models route (`overlayCloudState`, merged fresh per request like
+   * `activeModel`), never part of the cached payload: the cache is
+   * caller-independent and a key save must show on the next GET.
+   */
+  cloudAccess?: CloudAccessInfo;
   /**
    * WARP-1289 — honesty flag, mirroring WARP-1284's `degraded` on
    * GET /api/llm/models: true when `local` can't be trusted as complete
@@ -308,13 +344,14 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     degraded = true;
   }
 
-  // Cloud list — three providers per FEATURES.md §2.11. All
-  // default-off; Phase E1 wires real enabled flags via OffLan
-  // allowlist channel state.
+  // Cloud list — the two providers the gateway actually has (WARP-2871
+  // dropped the fabricated gemini row). `hasKey: null` / `enabled: false`
+  // here is the honest "not asked yet" state: this object is cached for 30 s
+  // and shared by every caller, so the live key + escape state is overlaid
+  // per request in the route via `overlayCloudState`, not read here.
   const cloud: CloudProviderInfo[] = [
-    { provider: "anthropic", enabled: false, lastUsedAt: null, spendUsd: 0 },
-    { provider: "openai", enabled: false, lastUsedAt: null, spendUsd: 0 },
-    { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
+    { provider: "anthropic", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+    { provider: "openai", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
   ];
 
   // WARP-1861 — GPU counters via the host device-bridge. Never throws;
@@ -377,5 +414,49 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // cloud_model_escape. E2 dependency; placeholder 0.
     cloudSpendUsd: 0,
     degraded,
+  };
+}
+
+/** The `cloud_model_escape` row fields the overlay reads. */
+export interface CloudEscapeRow {
+  enabled: boolean;
+  lastChangedBy: string | null;
+  lastChangedAt: Date;
+}
+
+/**
+ * WARP-2871 — overlay the live, caller-dependent cloud state onto a (cached,
+ * caller-independent) page payload. Pure and non-mutating so it is
+ * unit-testable without HTTP and safe to run on the shared cache object.
+ *
+ *   keys      — `aiGateway.listKeys()` result (box-wide namespace), or null
+ *               when the gateway could not be asked ⇒ every `hasKey` is null
+ *               and nothing is `enabled` (a key we cannot confirm is not a
+ *               key we advertise).
+ *   escapeRow — the OffLanAllowlistChannel row, or null when absent ⇒ OFF.
+ *   allowedForYou — the caller's resolved verdict, or null (see the field).
+ */
+export function overlayCloudState(
+  payload: ModelsPagePayload,
+  state: {
+    keys: readonly string[] | null;
+    escapeRow: CloudEscapeRow | null;
+    allowedForYou: boolean | null;
+  },
+): ModelsPagePayload & { cloudAccess: CloudAccessInfo } {
+  const escapeEnabled = state.escapeRow?.enabled === true;
+  const keySet = state.keys === null ? null : new Set(state.keys);
+  return {
+    ...payload,
+    cloud: payload.cloud.map((row) => {
+      const hasKey = keySet === null ? null : keySet.has(row.provider);
+      return { ...row, hasKey, enabled: escapeEnabled && hasKey === true };
+    }),
+    cloudAccess: {
+      escapeEnabled,
+      escapeChangedBy: state.escapeRow?.lastChangedBy ?? null,
+      escapeChangedAt: state.escapeRow?.lastChangedAt.toISOString() ?? null,
+      allowedForYou: state.allowedForYou,
+    },
   };
 }

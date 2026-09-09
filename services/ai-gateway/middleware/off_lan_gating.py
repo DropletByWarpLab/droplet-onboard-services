@@ -171,9 +171,8 @@ async def check_off_lan_gate(provider_name: str) -> None:
             "channel": "cloud_model_escape",
             "provider": provider_name,
             "message": (
-                "Cloud model providers are disabled by the off-LAN "
-                "allowlist. An admin can enable cloud_model_escape "
-                "from Settings → Off-LAN allowlist with a reason."
+                "Cloud models are turned off on this Droplet. An owner "
+                "or admin can turn them on from the Models page."  # WARP-2871
             ),
         },
     )

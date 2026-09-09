@@ -108,8 +108,9 @@ class ProviderRouter:
         the caller threaded down from the HTTP route (the orchestrator-provided
         principal). ``None`` reads the shared/device namespace and is used by
         server-side callers that have no per-request identity (model listing,
-        gRPC EmbedText). Cloud providers are rebuilt per call rather than
-        cached on the instance so two concurrent users never see each other's
+        gRPC EmbedText). WARP-2871: a user with no key of their own is served
+        by the admin-managed shared key. Cloud providers are rebuilt per call
+        rather than cached on the instance so two concurrent users never see each other's
         key — the router holds no per-user key state between requests.
         """
         anthropic_key = await get_api_key("anthropic", user_id=user_id)

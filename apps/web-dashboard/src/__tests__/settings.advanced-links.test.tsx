@@ -28,10 +28,8 @@ vi.mock("next/link", () => ({
 }));
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: vi.fn(),
@@ -60,10 +58,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: () => null,
-}));
-
 vi.mock("@/components/ThemeToggle", () => ({
   ThemeToggle: () => null,
 }));
@@ -80,9 +74,7 @@ import SettingsPage from "@/app/settings/page";
 
 beforeEach(() => {
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
   fetchUsersMock.mockResolvedValue({ users: [] });
-  listProviderKeysMock.mockResolvedValue([]);
   modulesRef.current = {};
 });
 

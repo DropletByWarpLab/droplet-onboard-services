@@ -86,8 +86,9 @@ _KDF_ITERATIONS = 480_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 # `{user_id}/{provider}.enc` so one household member's cloud key is never
 # readable by another. `user_id is None` is the SHARED/device namespace
 # (`_shared/{provider}.enc`) — used by server-side callers that have no
-# per-request identity (model listing, gRPC EmbedText, router reload). The
-# segment is sanitised so a hostile id can never escape KEYS_DIR via
+# per-request identity (model listing, gRPC EmbedText, router reload) and,
+# since WARP-2871, where the admin's box-wide keys live — `get_key` falls
+# back to it. The segment is sanitised so a hostile id can never escape KEYS_DIR via
 # traversal or absolute paths.
 _SHARED_NAMESPACE = "_shared"
 
@@ -185,12 +186,22 @@ async def store_key(provider: str, api_key: str, user_id: str | None = None) -> 
 
 
 async def get_key(provider: str, user_id: str | None = None) -> str | None:
-    """Retrieve and decrypt an API key for a provider in the caller's namespace."""
+    """Retrieve and decrypt an API key for a provider in the caller's namespace.
+
+    WARP-2871: cloud keys are box-wide and admin-managed — the admin saves
+    them with no principal, i.e. into `_shared`. A user with no key of their
+    own therefore falls back to the shared key; a per-user key still wins
+    (retained for callers that set one). Only `_shared` is ever consulted as
+    a fallback — one user's namespace is never readable by another.
+    `delete_key` / `list_providers_with_keys` stay namespace-exact.
+    """
     if not _is_valid_provider(provider):
         return None  # a name that can't be a key file has no key
     key_path = _key_path(provider, user_id)
     if not key_path.exists():
-        return None
+        key_path = _key_path(provider, None)
+        if not key_path.exists():
+            return None
 
     try:
         fernet = _get_fernet()

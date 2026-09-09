@@ -278,6 +278,12 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/llm/chat", allowed: ["owner", "admin", "family", "guest", "service"] },
   { method: "delete", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
   { method: "patch", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
+  // WARP-2871: cloud-provider API keys are BOX-WIDE (the gateway's shared
+  // namespace) and admin-managed — the Models page's per-provider key card
+  // is an owner/admin surface. `family` used to be admitted when keys were
+  // per-user (WARP-561); a shared credential is operator material.
+  { method: "post", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
 
   // WARP-540: OTA update operator surface — owner+admin only INCLUDING
   // the GETs (voice-proxy posture: release SHAs, failure history, and the
