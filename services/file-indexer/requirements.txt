@@ -32,7 +32,7 @@ pypdf>=6.17.0
 # otherwise turn every scanned PDF back into a silent `empty_extraction`.
 # Apache-2.0/BSD-3-Clause.
 pypdfium2>=5.13.0
-readability-lxml>=0.8.4.1
+readability-lxml>=0.9
 lxml_html_clean>=0.4.5
 pytesseract>=0.3.13
 Pillow>=12.3.0
