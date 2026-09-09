@@ -15,7 +15,7 @@
   "dependencies": {
     "@droplet/auth-policy": "0.1.0",
     "@droplet/shared-types": "0.1.0",
-    "@simplewebauthn/browser": "13.3.0",
+    "@simplewebauthn/browser": "14.0.0",
     "@zxing/browser": "^0.1.5",
     "@zxing/library": "^0.21.3",
     "framer-motion": "^13.2.0",
