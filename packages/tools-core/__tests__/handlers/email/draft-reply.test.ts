@@ -7,11 +7,12 @@
  * no confirmation — send is the destructive surface.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import emailDraftReply from "../../../src/handlers/email/draft-reply.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(opts: {
-  post?: ReturnType<typeof vi.fn>;
+  post?: Mock;
   role?: Role;
   userId?: string;
 }): ToolContext {
@@ -37,7 +38,7 @@ function ctxWith(opts: {
   };
 }
 
-function okPost(): ReturnType<typeof vi.fn> {
+function okPost(): Mock {
   return vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ id: "d1", status: "draft" }), {
       status: 201,

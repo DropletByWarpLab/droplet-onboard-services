@@ -94,6 +94,7 @@ import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
 import { warmDefaultModel } from "../services/model-readiness.service.js";
 import { createLogger } from "../lib/logger.js";
+import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("setup-route");
 
@@ -364,7 +365,12 @@ export function createSetupRouter(
   });
 
   // ── PATCH /api/setup/state ─────────────────────────────────────
-  router.patch("/setup/state", async (req: Request, res, next) => {
+  // CodeQL js/missing-rate-limiting — these routes are PUBLIC (mounted before
+  // authMiddleware) and verify the session cookie inline, so they need their
+  // own per-IP ceiling: `sensitiveRateLimit` (60/min) on the writes that
+  // mutate the appliance lifecycle / workspace / box name, `standardRateLimit`
+  // (300/min) on the read. The WARP-631 claim-code backoff is untouched.
+  router.patch("/setup/state", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
       const parsed = patchSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -646,7 +652,7 @@ export function createSetupRouter(
   //
   // industry / size are LOCAL smart-default hints only — persisted on the box,
   // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
-  router.post("/setup/org", async (req: Request, res, next) => {
+  router.post("/setup/org", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
       // ORCH-04 — this route is on the public allow-list (no authMiddleware),
       // and `persistOrg` does an UNCONDITIONAL upsert of the Workspace
@@ -780,7 +786,7 @@ export function createSetupRouter(
   // dashboard session cookie is present, OR the appliance is not yet `ready`
   // (genuine first-run onboarding). The FQDN itself is CT-published by design
   // (vpn.ts), but an anonymous LAN client on a claimed box still gets nothing.
-  router.get("/setup/box-name", async (req: Request, res, next) => {
+  router.get("/setup/box-name", standardRateLimit, async (req: Request, res, next) => {
     try {
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
@@ -837,7 +843,7 @@ export function createSetupRouter(
   // appliance is not yet `ready` (genuine first-run onboarding). Once claimed,
   // an anonymous LAN client must not be able to silently rename the box's
   // secured address.
-  router.post("/setup/box-name", async (req: Request, res, next) => {
+  router.post("/setup/box-name", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
@@ -990,7 +996,7 @@ export function createSetupRouter(
   // reached AFTER a name exists, so in practice the box is claimed and the
   // authenticated owner drives it — but the same first-run allowance keeps the
   // wizard flow uniform.
-  router.post("/setup/box-name/rename", async (req: Request, res, next) => {
+  router.post("/setup/box-name/rename", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;

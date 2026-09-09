@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { resolve } from "node:path";
 import { McpClientService } from "../services/mcp-client.service.js";
+import { repoPath } from "./helpers/test-paths.js";
 
-// vitest runs from the orchestrator workspace root (apps/orchestrator),
-// so the workspace-relative path back to the mcp-server build resolves
-// without import.meta.url (which trips tsc when the workspace's
-// `package.json` doesn't set `"type": "module"`).
-const SERVER_BIN = resolve(process.cwd(), "../../services/mcp-server/dist/index.js");
+// Anchored to this test file, not to the runner's cwd (WARP-2654), so the
+// path to the mcp-server build is the same from any invocation. `__dirname`
+// under the hood, not import.meta.url, which trips tsc when the workspace's
+// `package.json` doesn't set `"type": "module"`.
+const SERVER_BIN = repoPath("services/mcp-server/dist/index.js");
 
 describe("McpClientService", () => {
   let svc: McpClientService;

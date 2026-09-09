@@ -52,7 +52,14 @@ _upsert_env_kv() {
   if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
     printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
+  # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
+  # well as a bare one. Every sed writer this primitive replaces matched
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
+  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # so a plain `^KEY=` strip would leave their commented placeholder behind and
+  # append a SECOND line for the same key. Only an assignment form is matched —
+  # `# KEY: prose` documentation lines in the generated .env are untouched.
+  ( umask 077; { grep -vE "^[[:space:]]*#?[[:space:]]*${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
   mv "$stage" "$target"
@@ -158,14 +165,24 @@ apply_fips_mode() {
 _rewrite_database_url_sslmode() {
   local target="$1"
   local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
-  local stage="${env_file}.upsert.$$"
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Staging beside the link and renaming onto
+  # it would REPLACE the link with a plain file on the unencrypted boot disk —
+  # and the stage sibling would itself be a full-secrets copy landing there.
+  # Resolve the link and write THROUGH it, exactly as _upsert_env_kv does.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+  local stage="${env_target}.upsert.$$"
   [ -f "$env_file" ] || return 0
   grep -qE '^DATABASE_URL=.*sslmode=' "$env_file" || return 0
-  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  rm -f "${env_target}".upsert.* 2>/dev/null || true
   ( umask 077; sed -E "s|^(DATABASE_URL=.*[?\&]sslmode=)[A-Za-z-]+|\1${target}|" \
       "$env_file" > "$stage" )
   chmod 600 "$stage"
-  mv "$stage" "$env_file"
+  mv "$stage" "$env_target"
 }
 
 # WARP-595: core keys that EVERY .env our heredoc has ever written contains
@@ -241,6 +258,19 @@ generate_env() {
   local env_file="$REPO_ROOT/.env"
   local force_regen=false
 
+  # WARP-232 (finding 2) / WARP-2621: once relocate_secrets_to_data has run,
+  # $env_file is a SYMLINK onto the encrypted /data. Every writer below stages
+  # beside the link's REAL target and renames onto it, so the regenerated (or
+  # restored) secrets stay inside the LUKS boundary and the symlink survives —
+  # never replace the link with a plain file on the unencrypted root. Resolved
+  # ONCE here rather than at the heredoc write: the torn-.env restore leg just
+  # below is a writer too, and it used to run before this resolution existed.
+  local env_write_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_write_target" ] || env_write_target="$env_file"
+  fi
+
   # --- WARP-595: recover a torn .env from an interrupted previous run ---
   # Interruption scenario closed: a power cut / SSH drop mid-heredoc left a
   # truncated .env; the old behaviour saw ".env already exists", skipped
@@ -254,20 +284,25 @@ generate_env() {
   if [ -f "$env_file" ] && [ "${REGENERATE_ENV:-false}" != "true" ] && _env_file_is_torn "$env_file"; then
     log_warn ".env is incomplete — torn write from an interrupted setup run detected"
     local newest_backup
-    newest_backup="$(ls -1t "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
+    # WARP-2624: backups now land beside the RESOLVED target, but a box
+    # upgraded mid-life still has pre-WARP-2624 backups beside the LINK — read
+    # BOTH and take the newest, so an interrupted upgrade can still recover.
+    # (When .env is not a symlink the two patterns are the same path; `ls -1t`
+    # just lists it twice and `head -n 1` still picks the newest.)
+    newest_backup="$(ls -1t "$env_write_target".bak.* "$env_file".bak.* 2>/dev/null | head -n 1 || true)"
     if [ -n "$newest_backup" ] && ! _env_file_is_torn "$newest_backup"; then
       local torn_copy
-      torn_copy="$env_file.torn.$(date +%s)"
+      torn_copy="$env_write_target.torn.$(date +%s)"
       cp "$env_file" "$torn_copy"
       # A legacy torn file sits at umask-default 644 (the pre-atomic writer
       # died BEFORE its chmod) and `cp` preserves that mode — force 600 so the
       # kept copy's leading secrets block is never world-readable.
       chmod 600 "$torn_copy"
-      local restore_tmp="$env_file.tmp.$$"
+      local restore_tmp="$env_write_target.tmp.$$"
       rm -f "$restore_tmp"
       cp "$newest_backup" "$restore_tmp"
       chmod 600 "$restore_tmp"
-      mv "$restore_tmp" "$env_file"
+      mv "$restore_tmp" "$env_write_target"
       log_success "Restored .env from $newest_backup (torn copy quarantined at $torn_copy until this run completes)"
       log_info "  migrate_env will backfill any keys added since that backup"
       log_divider
@@ -288,9 +323,12 @@ generate_env() {
   fi
 
   # --- Backup existing .env if regenerating ---
+  # WARP-2624: beside the RESOLVED target — a .bak of a relocated .env is a
+  # complete copy of every device secret, so writing it beside the LINK would
+  # put it back on the unencrypted boot disk.
   if [ -f "$env_file" ]; then
     # shellcheck disable=SC2155  # `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
-    local backup="$env_file.bak.$(date +%s)"
+    local backup="$env_write_target.bak.$(date +%s)"
     cp "$env_file" "$backup"
     # On the torn-no-backup regen path the source is a legacy 644 torn file
     # (see the torn_copy chmod above) — force the backup to 600 regardless.
@@ -301,7 +339,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -411,6 +449,29 @@ generate_env() {
   # container's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_RAG_EVAL}.
   # Without it every scheduled + ad-hoc RAGAS run 401s at the first query.
   service_token_rag_eval=$(openssl rand -hex 32)
+  # WARP-2590: bearer the orchestrator presents to services/erp-sql-bridge on
+  # /read, /write and /introspect. The bridge holds the practice's droplet_ro /
+  # droplet_rw ODBC credentials and reaches their system of record, so unlike
+  # inference-manager it fails CLOSED: with no token every route answers 503
+  # BRIDGE_NOT_PROVISIONED. Both ends read SERVICE_TOKEN_ERP_BRIDGE straight
+  # from .env via env_file — never re-declare it as a compose ${...}.
+  service_token_erp_bridge=$(openssl rand -hex 32)
+  # WARP-2211: bearer the orchestrator presents on POST /render to the
+  # services/doc-render container (the .pdf/.docx/.xlsx renderer behind
+  # POST /api/files/render). doc-render fails CLOSED — 503 on every
+  # non-/health route — when its side is empty, so an unminted token turns
+  # every "make me a report" request into a refusal rather than an open
+  # renderer. Minted here deliberately: WEB_FETCH_SERVICE_TOKEN was never
+  # added to this function, which is why /api/web/* fails closed on a box
+  # nobody hand-edited.
+  doc_render_service_token=$(openssl rand -hex 32)
+  # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
+  # container — the one component allowed to open an outbound MCP session
+  # (ADR-043 §5). Minted unconditionally even though the `remote-mcp` compose
+  # profile is off by default: the alternative is an operator who enables the
+  # profile and gets a service that 503s every route with nothing in the logs
+  # pointing at a missing secret. Both ends fail CLOSED when it is empty.
+  mcp_bridge_service_token=$(openssl rand -hex 32)
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -485,6 +546,19 @@ generate_env() {
 
   inference_runtime="${INFERENCE_RUNTIME:-dmr}"
 
+  # DROPLET_ENV — the deployment posture every production-only fail-closed
+  # guard keys on (WARP-1320). PRODUCTION by default: every provisioned box is
+  # the shipping product, and until this key existed nothing in provisioning
+  # ever set it, so ai-gateway's keystore guard (WARP-581 / GW-09: refuse the
+  # public dev DEVICE_SECRET), the WARP-588 session-store fail-loud, and
+  # device-identity's mock-TPM warning were all DORMANT on shipped boxes —
+  # they only armed via DROPLET_FIPS_REQUIRED, which a standard non-FIPS box
+  # never sets. A lab bench that wants the permissive dev posture opts out
+  # explicitly: `DROPLET_ENV=development ./scripts/setup.sh` (the guards
+  # treat anything other than production/prod as non-production).
+  local droplet_env
+  droplet_env="${DROPLET_ENV:-production}"
+
   # OLLAMA_URL — the CHAT endpoint, whichever engine serves it. The name is
   # historical and deliberately kept: it is how DMR is consumed too (compose
   # wires it, ai-gateway reads it), so renaming it would be a breaking change
@@ -514,16 +588,9 @@ generate_env() {
   # the new complete file, never a prefix. The temp file is created empty and
   # chmod'd 600 BEFORE any secret is written into it.
   #
-  # WARP-232 (finding 2): on a --regenerate-env re-run AFTER secrets have been
-  # relocated onto the encrypted /data, $env_file is a SYMLINK. Stage beside and
-  # rename onto the link's REAL target so the regenerated secrets stay inside the
-  # LUKS boundary and the symlink survives — never replace the link with a plain
-  # file on the unencrypted root.
-  local env_write_target="$env_file"
-  if [ -L "$env_file" ]; then
-    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
-    [ -n "$env_write_target" ] || env_write_target="$env_file"
-  fi
+  # WARP-232 (finding 2): $env_write_target is the link's REAL target, resolved
+  # once at the top of this function — stage beside it and rename onto it so the
+  # regenerated secrets stay inside the LUKS boundary and the symlink survives.
   local env_tmp="$env_write_target.tmp.$$"
   rm -f "$env_write_target".tmp.* 2>/dev/null || true
   : > "$env_tmp"
@@ -532,6 +599,18 @@ generate_env() {
 # Droplet Edge Platform — generated by setup.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # WARNING: Contains device-unique secrets. Do NOT commit this file.
 
+# --- Deployment posture (WARP-1320) ---
+# ARMS every production-only fail-closed guard in the stack: ai-gateway's
+# keystore refuses the public dev DEVICE_SECRET (WARP-581 / GW-09), its
+# session store fails LOUD instead of silently falling back to in-memory
+# (WARP-588), and device-identity-svc warns when the mock TPM backend serves
+# a shipping box. Reaches those services via compose \`env_file: ../.env\` —
+# never pin it in a compose \`environment:\` block (that outranks env_file).
+# Every provisioned box is the shipping product, so production is the
+# default; a lab bench opts out at provision time:
+# \`DROPLET_ENV=development ./scripts/setup.sh\` (preserved on re-runs).
+DROPLET_ENV=${droplet_env}
+
 # --- PostgreSQL ---
 POSTGRES_USER=droplet
 POSTGRES_PASSWORD=$pg_password
@@ -539,7 +618,7 @@ POSTGRES_DB=droplet
 DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet?sslmode=require
 
 # --- Redis ---
-# WARP-234: REDIS_PASSWORD is the ping-only `default` ACL user (health
+# WARP-234: REDIS_PASSWORD is the ping-only \`default\` ACL user (health
 # probes / the WARP-966 harness). Real clients authenticate as their own
 # ACL user via the per-service rediss:// URLs in docker-compose.yml.
 REDIS_PASSWORD=$redis_password
@@ -547,7 +626,7 @@ REDIS_URL=rediss://:${redis_password}@cache:6380
 REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
 REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
 REDIS_PASSWORD_MCP=$redis_mcp_password
-# Nextcloud expects this name for the Redis password (ACL user `nextcloud`)
+# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`)
 REDIS_HOST_PASSWORD=$redis_password
 
 # --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
@@ -703,6 +782,14 @@ DROPLET_MATTER_SERVICE_TOKEN=$droplet_matter_service_token
 # Compose wires email-indexer's ORCHESTRATOR_SERVICE_TOKEN to this value.
 SERVICE_TOKEN_EMAIL=$service_token_email
 
+# --- ERP SQL bridge service bearer (orchestrator -> erp-sql-bridge REST) ---
+# WARP-2590. The bridge executes registry-built SQL against a practice's
+# system of record as droplet_ro / droplet_rw. This bearer is what decides
+# WHO may ask; allowlist.py decides WHICH statement, and the database grant
+# decides what it may touch. Missing => the bridge refuses every route with
+# 503 (fail closed, by design). Both ends read it from .env via env_file.
+SERVICE_TOKEN_ERP_BRIDGE=$service_token_erp_bridge
+
 # --- RAG eval service bearer (rag-eval → orchestrator REST) ---
 # Bearer ragas_runner.py presents on /api/admin/retrieval-eval/search
 # (WARP-449 role gate). The orchestrator's SERVICE_PRINCIPALS matches it;
@@ -710,6 +797,24 @@ SERVICE_TOKEN_EMAIL=$service_token_email
 # this value. Rotate both sides in lockstep — change here, recreate
 # orchestrator + rag-eval together.
 SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
+
+# --- Document renderer bearer (orchestrator → doc-render) ---
+# WARP-2211. The orchestrator presents this on POST /render to the
+# doc-render container, which turns a document spec into .pdf/.docx/.xlsx
+# bytes for POST /api/files/render. Both ends read the same .env key via
+# compose — rotate in lockstep and recreate orchestrator + doc-render
+# together. doc-render fails CLOSED (503 on every non-/health route) when
+# its side is empty.
+DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
+
+# --- Outbound MCP bridge bearer (orchestrator -> mcp-bridge) ---
+# WARP-2627 / ADR-043 §5. The orchestrator presents this to the mcp-bridge
+# container, which is the ONLY component that opens a session to a remote MCP
+# server. Both ends read the same .env key via compose — rotate in lockstep and
+# recreate orchestrator + mcp-bridge together. mcp-bridge fails CLOSED (503 on
+# every non-/health route) when its side is empty, and the orchestrator refuses
+# without dialling when its side is.
+MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
 
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
@@ -797,7 +902,7 @@ OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
 OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}
 # TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
 #   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
-#   relay OFF — single-box.sh only activates the `relay` compose profile
+#   relay OFF — single-box.sh only activates the \`relay\` compose profile
 #   (cloudflared) when this is set, so an un-provisioned box never brings up a
 #   tokenless connector.
 TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
@@ -806,7 +911,7 @@ TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
 #   FACTORY-RESET box can re-enroll itself into the HQ registry. Factory-reset
 #   sends the ADR-023 signed deregister, which DELETES the device from the HQ
 #   registry — on the next boot tls-issuance is then rejected with 404
-#   `device_id not in registry` and the box would stay on the self-signed
+#   \`device_id not in registry\` and the box would stay on the self-signed
 #   bootstrap cert forever. When this token is set, the orchestrator self-provisions
 #   (POST /api/issuance/provision with a TPM proof-of-possession over the token)
 #   on that 404, then retries issuance and installs its droplet-us.com cert.
@@ -830,7 +935,38 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 #             install doesn't scan the LAN or hit a missing switch on boot)
 # macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
 # Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
+#
+# WARP-2734: \`email\` is appended below, not listed here, because it is
+# CONDITIONAL. The email-indexer is the only service whose profile depends on
+# a secret rather than on the platform: it needs SERVICE_TOKEN_EMAIL both to
+# call the orchestrator and to authenticate the provisioning endpoint that
+# takes a mailbox password. Same predicate the module registry already uses
+# (\`id: "email"\`, \`available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)\`).
+#
+# 🔴 It shipped under \`profiles: ["full"]\` alone, and \`full\` is never in this
+# default — so the IMAP subsystem has never run on any box that ever shipped.
+# That is the defect WARP-2734 exists to close; the conditional is the close.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
+
+# --- NVR recordings target (WARP-2099) ---
+# Where Frigate writes 24/7 camera footage. Written EXPLICITLY on every
+# provisioning path -- never merely absent -- so .env always STATES where
+# footage goes. Absence is what made this invisible: the compose seam is
+# \`\${NVR_MEDIA_SOURCE:-nvrdata}\`, and \`:-\` absorbs an unset variable with
+# no error, so a box silently recorded to the boot disk while a 2x2 TB
+# RAID1 sat empty.
+#
+#   nvrdata          the compose-declared named volume -- on the BOOT DISK.
+#                    Correct default: a fresh box has no pool to point at,
+#                    and auto-adopting whichever array it happens to find is
+#                    the same silent behaviour that hid this for a month.
+#   /absolute/path   a bind mount -- point this at a mounted storage pool
+#                    (e.g. /mnt/droplet/<pool>/nvr) once one exists.
+#
+# Change it with scripts/host/droplet-set-nvr-media.sh, which validates the
+# target and recreates frigate. Editing this line by hand does NOT move a
+# running container. See docs/ENVIRONMENT.md.
+NVR_MEDIA_SOURCE=nvrdata
 EOF
 
   mv "$env_tmp" "$env_write_target"
@@ -874,6 +1010,19 @@ migrate_env() {
   local env_file="$REPO_ROOT/.env"
   [ -f "$env_file" ] || return 0
 
+  # WARP-2621 / WARP-232: once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Stage beside the link's REAL target and
+  # rename onto it — renaming onto the LINK would replace it with a plain file
+  # on the unencrypted boot disk, and the .env.migrate.* stage (a full copy of
+  # every secret) would have been written there too. WARP-2624: the two
+  # pre-migration .env.bak.* copies below are complete secret snapshots for the
+  # same reason, so they are written beside the resolved target as well.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+
   local backed_up=false
   local appended_count=0
   local appended_keys=""
@@ -884,8 +1033,8 @@ migrate_env() {
   # matched the `^KEY=` existence check on the next run and the mangled value
   # was kept forever. With the stage + rename, the live .env is either the
   # pre-migration file or the fully-migrated file, never something in between.
-  local stage="$env_file.migrate.$$"
-  rm -f "$env_file".migrate.* 2>/dev/null || true
+  local stage="$env_target.migrate.$$"
+  rm -f "$env_target".migrate.* 2>/dev/null || true
   cp "$env_file" "$stage"
   chmod 600 "$stage"
 
@@ -903,7 +1052,7 @@ migrate_env() {
     if ! grep -qE "^${key}=" "$stage" 2>/dev/null; then
       if [ "$backed_up" = "false" ]; then
         # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
-        local backup="$env_file.bak.$(date +%s)"
+        local backup="$env_target.bak.$(date +%s)"
         cp "$env_file" "$backup"
         log_info "Backed up existing .env to $backup before migration"
         backed_up=true
@@ -949,6 +1098,21 @@ migrate_env() {
   [ "$(uname)" = "Linux" ] && smb_enabled_default=1
   _migrate_ensure_key SMB_PASSWORD "$(_gen_password 20)"
   _migrate_ensure_key SMB_ENABLED "$smb_enabled_default"
+  # WARP-2099 backfill: existing installs predate the NVR recordings-target
+  # key entirely, so their .env is silent about where camera footage goes.
+  # Backfill the honest CURRENT behaviour (`nvrdata` = the boot-disk named
+  # volume) rather than a pool we went looking for: only-when-missing means
+  # an operator who already pointed this at an array keeps their value, and
+  # nobody's footage relocates behind their back on a routine setup re-run.
+  _migrate_ensure_key NVR_MEDIA_SOURCE nvrdata
+  # WARP-2211: an existing box has no DOC_RENDER_SERVICE_TOKEN, and
+  # doc-render fails closed without one — so every document request would
+  # refuse until someone hand-edited .env. Backfill is only-when-missing, so
+  # an operator who already set one keeps it.
+  _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
+  # missing, so an operator who already set one keeps it.
+  _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
@@ -1032,9 +1196,47 @@ migrate_env() {
   # routing egress/throughput samplers 401 (WARP-268 egress-anomaly feed dies),
   # and an empty JWT_SECRET bricks the orchestrator at boot. Backfill on upgrade.
   _migrate_ensure_key SERVICE_TOKEN_EMAIL "$(openssl rand -hex 32)"
+  # WARP-2734 — the token above is not enough on an UPGRADE.
+  #
+  # `_migrate_ensure_key COMPOSE_PROFILES` only writes when the key is ABSENT,
+  # and it is present on every previously-provisioned box. So the backfill gave
+  # those boxes `SERVICE_TOKEN_EMAIL` — which is exactly what the dashboard's
+  # module registry keys availability off (`id: "email"`,
+  # `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`) — while `email-indexer`
+  # stayed out of COMPOSE_PROFILES and never started. The Email module lit up
+  # as available on a box where nothing was ingesting mail: the worst shape,
+  # because it fails silently and looks fine.
+  #
+  # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
+  # path's half of the same decision. Compared as a whole list element (the
+  # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
+  # for it, and an empty value does not gain a leading comma.
+  if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
+    # Last assignment wins, which is how docker compose reads a .env.
+    _current_profiles="$(sed -nE 's|^COMPOSE_PROFILES=[[:space:]]*(.*)$|\1|p' "$stage" | tail -n 1)"
+    _current_profiles="${_current_profiles%"${_current_profiles##*[![:space:]]}"}"
+    if ! printf ',%s,' "$_current_profiles" | grep -q ',email,'; then
+      if [ -n "$_current_profiles" ]; then
+        _new_profiles="$_current_profiles,email"
+      else
+        _new_profiles="email"
+      fi
+      awk -v v="$_new_profiles" '
+        /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
+      ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
+      normalized=true
+      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+    fi
+    unset _current_profiles _new_profiles
+  fi
   _migrate_ensure_key ORCHESTRATOR_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key AI_GATEWAY_SAMPLER_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key SERVICE_TOKEN_EGRESS_AUDIT "$(openssl rand -hex 32)"
+  # WARP-2590: a box provisioned before the bridge gate exists has no
+  # SERVICE_TOKEN_ERP_BRIDGE, and the bridge fails CLOSED — so without this
+  # backfill an upgraded ERP box loses its PMS sync at 503 rather than
+  # silently running unauthenticated. Mint it on upgrade too.
+  _migrate_ensure_key SERVICE_TOKEN_ERP_BRIDGE "$(openssl rand -hex 32)"
   _migrate_ensure_key JWT_SECRET "$(openssl rand -hex 64)"
   # RAG-eval auth backfill: existing installs predate the rag-eval service
   # token; without this key ragas_runner.py's /api/admin/retrieval-eval/search
@@ -1100,6 +1302,18 @@ migrate_env() {
   # without the flag a no-op on FIPS (never a silent enable/disable).
   _migrate_ensure_key DROPLET_FIPS_MODE 0
 
+  # WARP-1320: backfill the deployment posture. Every provisioned box
+  # predating this key ran with the production-only guards DORMANT — nothing
+  # ever set DROPLET_ENV, so ai-gateway's keystore fail-closed (WARP-581 /
+  # GW-09), the WARP-588 session-store fail-loud, and device-identity's
+  # mock-TPM warning only armed via DROPLET_FIPS_REQUIRED, which a standard
+  # non-FIPS box never sets. Backfill `production` — the truthful posture of
+  # a shipped box. Append-only-when-absent, so a bench box that explicitly
+  # opted out (e.g. DROPLET_ENV=development in .env) keeps its value across
+  # every setup re-run; the provisioning environment can also seed the
+  # backfill, mirroring generate_env's override.
+  _migrate_ensure_key DROPLET_ENV "${DROPLET_ENV:-production}"
+
   # WARP-1061: backfill the internal-mTLS knob (default OFF = plaintext,
   # byte-identical posture to before). Append-if-missing only, so a box whose
   # operator flipped it to 1 keeps that choice across setup re-runs.
@@ -1115,7 +1329,7 @@ migrate_env() {
   if grep -qE '^MQTT_BROKER(_LOCAL)?=mqtt://' "$stage" 2>/dev/null; then
     if [ "$backed_up" = "false" ]; then
       # shellcheck disable=SC2155  # Same rationale as above: `date +%s` cannot meaningfully fail.
-      local backup="$env_file.bak.$(date +%s)"
+      local backup="$env_target.bak.$(date +%s)"
       cp "$env_file" "$backup"
       log_info "Backed up existing .env to $backup before migration"
       backed_up=true
@@ -1139,7 +1353,7 @@ migrate_env() {
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
-    mv "$stage" "$env_file"
+    mv "$stage" "$env_target"
   else
     rm -f "$stage"
   fi

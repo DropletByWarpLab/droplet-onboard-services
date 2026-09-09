@@ -1,0 +1,93 @@
+-- WARP-2193 — give the vector arm a real ANN index: HNSW.
+--
+-- ## What was actually in the database
+--
+-- 20260412000000_add_file_content_index created an IVFFlat index
+-- ("FileContentChunk_embedding_idx", lists = 100). Thirteen days later
+-- 20260425220000_add_camera_audit_snapshot_tables opened with a GENERATED
+-- `DROP INDEX "FileContentChunk_embedding_idx";` — Prisma's schema diff
+-- cannot model an index on an `Unsupported("vector(384)")` column, so it read
+-- the index as drift and removed it. Nothing ever recreated it.
+--
+-- So the starting state is not "an IVFFlat index probing 1 of its 100 lists".
+-- It is NO approximate index at all: since 2026-04-25 every
+-- `ORDER BY embedding <=> $vec` has been an exact KNN sequential scan over
+-- the whole table.
+--
+-- That history is why the DROP below is `IF EXISTS`. On every database
+-- migrated past 20260425220000 the IVFFlat index is already gone, and a bare
+-- DROP would raise and abort `prisma migrate deploy` for this whole file.
+--
+-- ## Why HNSW and not a restored IVFFlat
+--
+-- IVFFlat scans `ivfflat.probes` of its `lists` partitions per query. That GUC
+-- is set nowhere in this repo, so Postgres' default of 1 would apply: one list
+-- out of a hundred, roughly 1% of the corpus considered per query. HNSW has no
+-- partition-count trap; its recall knob is `hnsw.ef_search`, which the
+-- orchestrator now sets per query in `searchByVector` (sized off the caller's
+-- own row budget, inside the transaction that makes SET LOCAL mean something).
+-- HNSW also builds correctly on an empty or unrepresentative table, where
+-- IVFFlat's centroids are only ever as good as whatever rows happened to exist
+-- at build time — which matters here, because a freshly provisioned box runs
+-- its migrations before it has indexed a single file.
+--
+-- ## WHICH WAY RECALL MOVES — read this before filing a bug
+--
+-- HNSW is an APPROXIMATE index. Measured against what this replaces, recall
+-- goes slightly DOWN, and that is the expected outcome, not a regression.
+--
+-- Be precise about the baseline, because there are two and they point in
+-- opposite directions:
+--
+--   * versus the state this database was ACTUALLY in (no ANN index, exact KNN
+--     by sequential scan): that scan was exhaustive, so its recall was 100% by
+--     construction. Any approximate index scores lower. What is bought with
+--     those points is the latency this ticket was raised for.
+--
+--   * versus the IVFFlat index the ticket THOUGHT was here (probes defaulting
+--     to 1, so ~1% of the corpus considered): recall goes sharply UP.
+--
+-- So: a small recall drop against today's numbers is the trade working as
+-- designed. `hnsw.ef_search`, set per query in `searchByVector`, is the dial
+-- that buys recall back toward exhaustive at the cost of walking more of the
+-- graph — it is not a knob for exceeding the exact scan, which is the ceiling.
+-- WARP-2193 also adds candidate-funnel instrumentation precisely so this can
+-- be MEASURED rather than argued about; whoever measures it should compare
+-- against the pre-migration exact scan and expect to give up a little.
+--
+-- Parameters m = 16, ef_construction = 64 are pgvector's own defaults and the
+-- operating point its documentation recommends at this corpus size.
+-- `vector_cosine_ops` is not optional: it must match the `<=>` operator the
+-- query uses, or the planner silently declines to use the index and the seq
+-- scan comes back with no error to notice.
+--
+-- ## Locking — read this before running it against a large corpus
+--
+-- This is a plain `CREATE INDEX`, deliberately NOT `CREATE INDEX
+-- CONCURRENTLY`. Prisma wraps each migration file in a single transaction and
+-- CONCURRENTLY cannot run inside a transaction block; getting out of that
+-- transaction needs machinery no migration in this repo has, and a
+-- CONCURRENTLY build that fails leaves an INVALID index behind that someone
+-- has to notice and rebuild by hand.
+--
+-- The price of the plain form is a SHARE lock on "FileContentChunk" for the
+-- duration of the build. SHARE blocks WRITES — the file-indexer's inserts —
+-- but NOT reads: search keeps answering throughout. On the bench corpus
+-- (~6k chunks x 384 dims) that window is on the order of a second.
+--
+-- On a large corpus it is not. HNSW build time grows faster than linearly in
+-- row count, and if the graph does not fit in `maintenance_work_mem` pgvector
+-- falls back to an on-disk build that is slower again. At ~500k chunks expect
+-- minutes, during which indexing stalls (searches do not). A deployment that
+-- cannot afford that window should build the index out of band —
+-- CONCURRENTLY, outside `migrate deploy` — beforehand; the IF NOT EXISTS below
+-- then makes this migration a no-op rather than a conflict.
+
+-- Drop the IVFFlat index IF this database still has one. Databases migrated
+-- past 20260425220000 do not — see the note above; the guard is the point.
+DROP INDEX IF EXISTS "FileContentChunk_embedding_idx";
+
+CREATE INDEX IF NOT EXISTS "FileContentChunk_embedding_hnsw_idx"
+    ON "FileContentChunk"
+    USING hnsw ("embedding" vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);

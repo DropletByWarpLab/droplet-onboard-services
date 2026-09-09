@@ -240,9 +240,17 @@ describe("step 2 · read the lines (§5/§7.5)", () => {
     renderWizard();
     await continueFromWho();
 
-    // Line 2 failed (crosstalk) — the captured line 1 offers Redo.
-    const redo = await screen.findByRole("button", { name: "Redo line 1" });
-    fireEvent.click(redo);
+    // Line 2 failed (crosstalk) — the captured line 1 offers Redo. The Redo
+    // button is rendered as soon as line 1 lands but stays DISABLED while
+    // line 2 is still recording (the box records one thing at a time), and
+    // findByRole matches disabled buttons too. Wait for it to become enabled
+    // — i.e. for the crosstalk result to land — before clicking; React 19
+    // commits the "line 1 captured" render far enough ahead of the crosstalk
+    // result that grabbing the first match clicked a disabled button.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Redo line 1" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Redo line 1" }));
     await waitFor(() =>
       expect(captureMock).toHaveBeenCalledWith(SESSION, 0),
     );

@@ -37,7 +37,8 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-import { mountModuleGates } from "./module-mounts.js";
+import { mountModuleGates, FEATURE_GATED_MODULES } from "./module-mounts.js";
+import { GATEABLE_MODULE_IDS } from "../services/access-catalog.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "./module-registry.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -333,5 +334,66 @@ describe("mount composition", () => {
     );
     app.get(KNOWLEDGE, (_q, res) => { res.json({ hit: "knowledge" }); });
     expect((await request(app).get(KNOWLEDGE)).status).toBe(200);
+  });
+});
+
+describe("FEATURE_GATED_MODULES — every module whose grant the panel offers", () => {
+  it("is the EXACT set, so a module cannot silently leave the per-person layer", () => {
+    // An exact set rather than `toContain`: the direction that matters is a
+    // module LEAVING this list, which opens a surface rather than closing one,
+    // and a containment check cannot see it.
+    //
+    // `crm` and `money` were absent while `access-catalog.ts` shipped ladders
+    // for both and the Access panel offered them as grants — the box
+    // advertising a permission it did not enforce.
+    expect([...FEATURE_GATED_MODULES].sort()).toEqual([
+      "cameras",
+      "crm",
+      "docs",
+      "files",
+      "knowledge",
+      "money",
+      "network",
+      "smart_home",
+    ]);
+  });
+
+  it("documents the modules that still have a ladder and NO per-person gate", () => {
+    // A ladder in `access-catalog.ts` is a permission the Access panel shows.
+    // Enforcing it needs an entry in FEATURE_GATED_MODULES, and seven modules
+    // have the first without the second — the same class of gap `crm` and
+    // `money` had until this change, and that `files`/`knowledge`/`docs` had
+    // until WARP-1585.
+    //
+    // Asserted as an EXPLICIT list rather than fixed here, because each one
+    // needs its own check before it is gated: whether its prefix nests inside
+    // another module's (the WARP-1585 collision), and whether any tool
+    // dispatches through it. This change only covers the two whose paths were
+    // traced.
+    //
+    // Shrinking this list is the goal. GROWING it means a new module shipped a
+    // ladder the box does not enforce, which is what should be caught here.
+    const ungatedWithLadder = [...GATEABLE_MODULE_IDS]
+      .filter((id) => !FEATURE_GATED_MODULES.has(id))
+      .sort();
+    expect(ungatedWithLadder).toEqual([
+      "calendar",
+      "contacts",
+      "email",
+      "managed_switch",
+      "projects",
+      "team_chat",
+      "voice",
+    ]);
+  });
+
+  it("names only modules that declare a route prefix to gate", () => {
+    // A gated id with no prefix gates nothing and reads as protection that is
+    // not there.
+    for (const id of FEATURE_GATED_MODULES) {
+      const def = MODULES.find((m) => m.id === id);
+      expect(def, `${id} is gated but not in the registry`).toBeDefined();
+      expect(def!.routePrefixes.length, `${id} has no prefix to gate`).toBeGreaterThan(0);
+    }
   });
 });

@@ -125,6 +125,8 @@ removes them.
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
 | `PANEL_RAIL_WIFI_QR` | `1` | Rack panel only. `0` removes the rail's Wi-Fi QR face — see below |
 | `PANEL_RAIL_WIFI_SECONDS` | `45` | How long the rail's Wi-Fi face stays up before reverting on its own |
+| `PANEL_ORCHESTRATOR_URL` | `http://127.0.0.1` | Rack panel only. Orchestrator origin behind the loopback gateway, read for the STORAGE cell (WARP-2668). Distinct from the bridge's own `ORCHESTRATOR_URL`, which defaults to `:3000` |
+| `STORAGE_REFRESH_SECONDS` | `60` | How often that read happens. Slow on purpose — a capacity total is not a hot-plug event |
 
 ## The rack panel's QR rail has two faces (WARP-1782)
 

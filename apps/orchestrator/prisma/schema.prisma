@@ -148,7 +148,7 @@ model ChatProject {
 }
 
 model ChatSession {
-  id              String           @id @default(uuid())
+  id              String            @id @default(uuid())
   userId          String
   title           String?
   model           String?
@@ -156,7 +156,7 @@ model ChatSession {
   /// WARP-845 — optional project membership. SetNull on project delete:
   /// the chats survive, falling back to the ungrouped date list.
   projectId       String?
-  project         ChatProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  project         ChatProject?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
@@ -168,10 +168,10 @@ model ChatSession {
   /// Both written together by setConversationPinned via raw SQL so the
   /// @updatedAt column is NOT bumped — unpinning must return the chat to
   /// its original chronological spot, not to "Today".
-  pinned          Boolean          @default(false)
+  pinned          Boolean           @default(false)
   pinnedAt        DateTime?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @default(now()) @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
   pins            ContextPin[]
   /// WARP-1118 — back-relation for BusinessProfile.interviewChat. Prisma
@@ -209,18 +209,47 @@ model ContextPin {
   meta      Json?
   addedAt   DateTime       @default(now())
 
+  /// WARP-2582 — one pin per record per thread. The record-drawer "Ask AI
+  /// about this customer" action makes a duplicate ONE CLICK, and a duplicate
+  /// is not cosmetic: it spends the pin block's char budget twice on every
+  /// turn thereafter. All three columns are NOT NULL, which is what makes this
+  /// safe as a P2002 target — a compound unique containing a NULLABLE column
+  /// never matches in Postgres (NULL = NULL is false) and an upsert against it
+  /// silently inserts forever. `meta` is excluded for that reason as much as
+  /// any other.
+  @@unique([sessionId, kind, ref])
   @@index([sessionId, addedAt])
 }
 
 /// WARP-460 — kinds of context the user can pin to a chat thread.
-/// Maps 1:1 to the dashboard's side-panel pill types and to the
-/// `context_pins` request shape in FEATURES.md §4.1.
+/// Maps 1:1 to the dashboard's side-panel pill types.
+///
+/// NOTE (WARP-2582): the "`context_pins` request shape in FEATURES.md §4.1"
+/// this comment used to cite was never implemented — no chat request field of
+/// that name exists in the orchestrator or the dashboard. Removed rather than
+/// left pointing at nothing. The consequence is real and load-bearing: a pin
+/// cannot exist before the first turn mints a session, so the dashboard's
+/// record hand-off seeds the composer for turn 1 and pins from turn 2.
+///
+/// WARP-2582 — the four BUSINESS kinds. Their `ref` is a record id, not a
+/// path, so unlike the first five they must be RESOLVED to a name before they
+/// can be rendered into the prompt (services/context-pin-targets.service.ts).
+/// They carry no foreign key deliberately: `ref` is polymorphic across all
+/// nine kinds, and giving four of them real FK columns would need four
+/// nullable columns plus an exactly-one-of CHECK Prisma cannot express — a lot
+/// of schema to buy a cascade whose absence is already handled. A dangling pin
+/// resolves to the explicit `missing` state, which is more useful than
+/// vanishing: the user gets a row they can remove.
 enum ContextPinKind {
   folder
   file
   email_thread
   camera
   camera_window
+  customer
+  deal
+  project
+  work_item
 }
 
 /// WARP-461 — Durable per-workspace memory facts the model can recall
@@ -379,6 +408,437 @@ model BusinessProfile {
   reviewDismissedAt DateTime?
   updatedBy         String?
   updatedAt         DateTime                @updatedAt
+}
+
+/// WARP-2748 (ADR-051) — the DERIVED half of the company's self-knowledge.
+///
+/// `BusinessProfile` above is what a human TYPED about the business: 1,500
+/// characters, written once by an onboarding interview, never refreshed from
+/// the company's own data. `BrainDigest` is what the box WORKED OUT by reading
+/// that data, one bounded pass at a time, and it accumulates.
+///
+/// WHY A TABLE AND NOT A BIGGER PROMPT. The shipped window is 16,384 tokens
+/// (`config.ts` OLLAMA_CONTEXT_LENGTH); a turn spends ~2,950 on fixed blocks
+/// plus ~3,426 on tool schemas, every tool result is capped at 8,000 chars by
+/// a Zod `.max(8000)` an operator cannot raise, and the in-loop guard
+/// force-finalizes past 13,824 tokens. That is ~40-45 KB of readable text per
+/// turn against a corpus five orders of magnitude larger. A question therefore
+/// CANNOT scan the company; it reads rows a scheduled run wrote earlier. The
+/// scan is offline and incremental, the read is cheap and always in budget.
+///
+/// WORKSPACE-WIDE, NO `workspaceId`. `Workspace` is a singleton (`id = 1`, and
+/// its own docstring calls it "the company brain"), so these rows follow the
+/// `MemoryFact` precedent and carry no workspace column. Visibility is `scope`
+/// plus the reader's role, not a tenancy key.
+///
+/// PROVENANCE IS NOT OPTIONAL. `sources` is a non-empty JSON array enforced by
+/// a CHECK in the migration, not by application code. A digest nobody can
+/// trace back to a document is a hallucination that has been given a row id,
+/// which is strictly worse than having no row: it reads as fact, it survives
+/// restarts, and it gets prompt-injected. The constraint is the feature.
+model BrainDigest {
+  id String @id @default(uuid())
+
+  kind BrainDigestKind
+
+  /// Short human-readable claim. `body` is length-capped so N rows fit the
+  /// fixed prompt block without the assembler truncating mid-row — the
+  /// `MemoryFact` MEMORY_FACTS_CHAR_BUDGET posture, applied at write time
+  /// instead of at splice time.
+  title String @db.VarChar(200)
+  body  String @db.VarChar(1200)
+
+  /// A LOOSE pointer, deliberately without a foreign key — the posture
+  /// `EntityLink` takes toward `File`, for the same reason plus one more.
+  ///
+  /// (1) Not every subject has a local row. An obligation found in a lease, a
+  /// theme across twenty documents, a project that exists only as a folder
+  /// nobody turned into a `PmProject` — these are exactly the things this
+  /// table exists to surface, and an FK would reject all of them.
+  /// (2) Evidence outlives its subject. A deleted deal's digest is still a
+  /// true statement about what happened; cascading it away destroys the record
+  /// of why a finding was ever raised.
+  ///
+  /// So a subject pointer CAN dangle, and the UI shows that. No column
+  /// pretends to track liveness: a `subjectState` nothing maintains is a
+  /// column that always lies (the `EntityLink.fileState` ruling).
+  subjectType BrainSubjectType?
+  subjectId   String?
+
+  /// Non-empty JSON array of `{sourceKind, sourceId, quote}`. See the CHECK
+  /// `BrainDigest_sources_not_empty` in the migration — the emptiness rule is
+  /// a database constraint on purpose, so a detector with a bug cannot write
+  /// an unfalsifiable row.
+  sources Json
+
+  /// Integer 0-100, NOT a 0..1 float — matching `EntityLink.confidence` and
+  /// `CrmPipelineStage.probability`. Two confidence scales in one schema is
+  /// how a 0.85 gets rendered as "85%" beside an 85 rendered as "8500%".
+  confidence Int?
+
+  /// Which corpus scope this was derived FROM, and therefore the widest
+  /// audience it may be shown TO. A `company` digest must never surface to a
+  /// `family` or `guest` reader: the enforcement point is this column, because
+  /// the corpus that produced the row is the only thing that knows.
+  scope BrainScope @default(personal)
+
+
+  /// WARP-2752 — WHOSE personal row this is. Required exactly when `scope` is
+  /// `personal`, and forbidden otherwise (`*_personal_scope_needs_owner`).
+  ///
+  /// Without it `personal` was UNENFORCEABLE: neither table had an owner
+  /// column, so `visibleScopeFilter` OR'd in `{ scope: "personal" }` for every
+  /// caller and every user saw every other user's personal rows — the exact
+  /// opposite of what the `BrainScope` docstring promises. An enum value
+  /// nothing can enforce is the same defect as a column nothing maintains, and
+  /// this is the second time that rule bit this schema.
+  ///
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for. Cascade: it is an ACCESS-CONTROL key, and an
+  /// access key that dangles is a leak.
+  owner   User?   @relation("BrainDigestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
+  /// WHICH department, when `scope` is `department`. Required exactly then
+  /// (`BrainDigest_department_scope_needs_id`), because a department-scoped row
+  /// with no department is unenforceable: the reader check is "is this person a
+  /// member of THAT groupfolder", and there is nothing to ask about. An enum
+  /// value nothing can enforce is the same defect as a column nothing maintains.
+  ///
+  /// Cascade, unlike the loose subject pointer above. This one is an
+  /// ACCESS-CONTROL key, and an access key that dangles is a leak: a digest
+  /// naming a deleted department would fall through the membership test.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  /// Accumulation and decay. A re-run over unchanged input advances
+  /// `lastConfirmedAt` and writes nothing else; a superseding row points back
+  /// here rather than deleting, so the reason a claim changed stays readable.
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+  supersededById  String?
+
+  /// The detector or pass that produced this. Lets one noisy producer be
+  /// switched off without touching the others.
+  detectorKey String
+
+  /// The idempotency key, computed and stored by the service — NOT a compound
+  /// `@@unique` over the nullable subject columns.
+  ///
+  /// READ THIS BEFORE "SIMPLIFYING" IT AWAY. `subjectType` and `subjectId` are
+  /// null on every theme-shaped row, and Postgres never treats two rows as
+  /// duplicates when an indexed column is NULL — so `@@unique([kind,
+  /// subjectType, subjectId, detectorKey])` would reject nothing and P2002
+  /// would never fire. `EntityLink` hit exactly this and paid for it with five
+  /// partial unique indexes that `prisma.upsert` cannot address, forcing an
+  /// updateMany-then-create retry at every call site. A single NOT NULL
+  /// derived column makes the uniqueness real AND keeps `upsert` usable, which
+  /// is precisely what an idempotent nightly loop needs.
+  dedupeKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  @@index([kind, scope])
+  @@index([subjectType, subjectId])
+  @@index([scope, lastConfirmedAt(sort: Desc)])
+  @@index([ownerId, scope])
+  @@index([departmentId, scope])
+  @@index([detectorKey])
+}
+
+/// WARP-2748 (ADR-051) — what the box thinks you should DO about what it read.
+///
+/// A digest is a claim; a finding is a claim with a consequence and a status a
+/// human moves. They are separate tables because their lifecycles differ: a
+/// digest is superseded silently as understanding improves, a finding is
+/// acknowledged, actioned or dismissed BY SOMEBODY and that decision must
+/// stick.
+///
+/// IDEMPOTENCY IS THE WHOLE DESIGN. `dedupeKey` (detector + subject) is what
+/// makes the same overdue invoice on Tuesday UPDATE Monday's row instead of
+/// creating a second one. Without it a nightly loop produces a growing pile of
+/// near-duplicates, the operator mutes the feature inside a week, and a muted
+/// feature is a deleted feature. This is the most likely way the brain fails in
+/// production, and it is a schema problem rather than a prompt problem.
+model BrainFinding {
+  id String @id @default(uuid())
+
+  kind BrainFindingKind
+
+  title     String @db.VarChar(200)
+  rationale String @db.VarChar(2000)
+
+  /// Minor units plus currency, the `CrmDeal.amountMinor` shape, and NULLABLE
+  /// on purpose. A finding without a number is still a finding ("this contract
+  /// auto-renews in 9 days and nobody has looked at it"); a finding carrying a
+  /// number the box invented is worse than one carrying none, so a detector
+  /// that cannot compute an impact must leave it null rather than guess. The
+  /// migration's `BrainFinding_impact_needs_currency` CHECK is the same
+  /// all-or-nothing pairing as `CrmDeal_amount_needs_currency`.
+  impactMinor BigInt?
+  currency    String?
+
+  /// Non-empty JSON `{digestIds, sources}`. Same rule and same reason as
+  /// `BrainDigest.sources`, enforced by CHECK: a finding whose evidence array
+  /// is empty must fail at the database, not merely look weak in review.
+  evidence Json
+
+  confidence Int?
+
+  /// EXPLICIT status column, never derived from a timestamp being null — the
+  /// no-guessing rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  status BrainFindingStatus @default(new)
+
+  /// Required when `status` is `dismissed` (`BrainFinding_dismissed_needs_reason`).
+  /// A dismissal with no reason is indistinguishable from a bug in the
+  /// detector, and the reason is the only thing that stops the same finding
+  /// being raised again next week.
+  dismissedReason String? @db.VarChar(500)
+
+  /// LOCAL `User.id` UUID, never a Nextcloud username — the IDOR ruling
+  /// `FileComment` paid for and `EntityLink.createdById` restates. SetNull:
+  /// removing a person must not delete the business's findings.
+  assignee   User?   @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  assigneeId String?
+
+  detectorKey String
+
+  /// See `BrainDigest.dedupeKey` — same reasoning, same NULL trap avoided.
+  dedupeKey String
+
+  scope BrainScope @default(personal)
+
+  /// See `BrainDigest.ownerId` — same rule, same CHECK, same Cascade.
+  owner   User?   @relation("BrainFindingOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String?
+
+  /// See `BrainDigest.departmentId` — same rule, same CHECK, same Cascade.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String?
+
+  firstSeenAt     DateTime @default(now())
+  lastConfirmedAt DateTime @default(now())
+
+  /// WARP-2752 — when this finding was last TOLD to somebody.
+  ///
+  /// Without it an hourly pass re-notifies the same overdue invoice every hour
+  /// forever, which is precisely how a nightly feature earns a mute. Null means
+  /// "nobody has been told yet", and it is the queue the digest drains.
+  /// Deliberately NOT derived from `status`: a finding can be acknowledged in
+  /// the UI without ever having been pushed, and re-notifying it then would be
+  /// telling someone what they just read.
+  notifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey])
+  /// Personal reads lead with the owner — "my open findings".
+  @@index([ownerId, status])
+  /// The notification queue: unnotified findings, newest first.
+  @@index([notifiedAt, status])
+  @@index([departmentId, status])
+  @@index([status, kind])
+  @@index([detectorKey, status])
+  @@index([status, impactMinor(sort: Desc)])
+  @@index([assigneeId, status])
+  @@index([scope, status])
+}
+
+/// What a digest is ABOUT, structurally. `metric` and `theme` rows normally
+/// carry no subject at all.
+enum BrainDigestKind {
+  entity
+  project
+  obligation
+  theme
+  metric
+  relationship
+}
+
+/// Mirrors `EntityLinkSubject` and extends it with the two things a digest can
+/// describe that a file-link cannot: a document and a bare file.
+enum BrainSubjectType {
+  COMPANY
+  CONTACT
+  DEAL
+  PROJECT
+  WORK_ITEM
+  DOCUMENT
+  FILE
+}
+
+/// The corpus a row was derived from, which bounds who may read it.
+/// `personal` = one user's own space; `department` = a groupfolder its members
+/// share; `company` = the household / whole-business corpus, owner+admin only.
+enum BrainScope {
+  personal
+  department
+  company
+}
+
+enum BrainFindingKind {
+  loss
+  risk
+  inefficiency
+  opportunity
+  inconsistency
+}
+
+enum BrainFindingStatus {
+  new
+  acknowledged
+  actioned
+  dismissed
+  stale
+}
+
+/// WARP-2749 (ADR-051) — the durable position of a brain pass.
+///
+/// ONE ROW PER PASS, and the row IS the cursor. A pass re-reads its own row on
+/// every tick, works from `cursor` forward, and writes the new position back in
+/// the SAME transaction as the rows it produced. That is what makes a crash
+/// mid-pass re-digest at most one unit instead of skipping one: there is no
+/// window in which the cursor has moved but the output has not landed.
+///
+/// NOT AN `AgentRun`, and not a second scheduler. `AgentRun` is a durable LLM
+/// conversation with a lease, a heartbeat and an iteration budget; this is a
+/// bookmark. The deterministic detector pass needs no model call at all (see
+/// `detectors/`), so giving it an AgentRun would buy a lease it does not need
+/// and an inference slot it must not hold. The corpus pass, which DOES call the
+/// model, still records its position here and runs under the one sanctioned
+/// clock (`cronRuntime.scheduleInterval` with an advisory lock), because the
+/// repo has exactly one scheduler and a guard test pins that.
+///
+/// COUNTERS ARE ON THE SURFACE ON PURPOSE. An operator who believes the brain
+/// read everything on night one stops trusting it the first time it misses
+/// something. `unitsSeen` / `unitsDigested` / `lastError` are what `/brief`
+/// renders as coverage, so "three weeks to first-pass a 5,000-document corpus"
+/// is a visible fact rather than a footnote in a brief nobody opened.
+model BrainPass {
+  /// Stable identifier for the pass, e.g. "detectors" or "corpus.documents".
+  /// Primary key: exactly one row per pass, upserted at boot, so a pass can
+  /// never accidentally run two positions in parallel.
+  passKey String @id
+
+  /// Opaque, pass-defined. The corpus pass stores an "updatedAt|id" watermark
+  /// (a bare timestamp loses rows that share a millisecond — the WARP-2743
+  /// pagination bug, avoided here rather than relearned). The detector pass
+  /// stores nothing: it is a set of deterministic queries over landed rows and
+  /// re-running it is the point, so it has no position to keep.
+  cursor String?
+
+  /// Explicit enable switch, never derived from absence. A pass that is off
+  /// must look different from a pass that has never run — the no-guessing
+  /// rule, canonical precedent WARP-218 `BrainMemoryItemStatus`.
+  enabled Boolean @default(true)
+
+  lastRunAt      DateTime?
+  lastSucceededAt DateTime?
+  /// Cleared on every success. A stale error string on a healthy pass is the
+  /// same lie as a status column nothing resets.
+  lastError      String?  @db.VarChar(1000)
+
+  /// Cumulative coverage counters, for the /brief coverage line.
+  unitsSeen     Int @default(0)
+  unitsDigested Int @default(0)
+  rowsWritten   Int @default(0)
+
+  /// WARP-2837 — the LEASE, and the reason it exists.
+  ///
+  /// The corpus pass was registered with cron-runtime's `lockKey`, which runs
+  /// the handler inside `prisma.$transaction(..., { timeout: 60_000 })`. That
+  /// handler makes up to ten sequential model calls on a box with one
+  /// inference slot and no turn-level timeout. Ten CPU inferences do not fit
+  /// in sixty seconds, and when the transaction expired the advisory lock was
+  /// released MID-RUN while the pass kept going — its writes use the outer
+  /// client, so they had already committed out of band.
+  ///
+  /// `agent-run-worker.service.ts` reached this conclusion first and states
+  /// it: the transaction-scoped lock is "exactly right for a tick and exactly
+  /// wrong for a forty-minute run". So exclusion moves off the lock and onto
+  /// these columns: a conditional `updateMany` wins the row or does not, and
+  /// the pass then executes OUTSIDE any transaction.
+  ///
+  /// An explicit enum, never a `claimedAt IS NULL` — the repo's standing rule,
+  /// and the one that keeps "idle" distinguishable from "claimed by a process
+  /// that has since died".
+  runState BrainPassRunState @default(idle)
+
+  /// Which process holds the lease, and the FENCE the lease's own writes ride:
+  /// `beatPass` and `releasePass` both condition on this still being their own
+  /// worker id, so a process whose claim was reclaimed learns it at its next
+  /// beat instead of releasing the SUCCESSOR's claim on the way out.
+  ///
+  /// SCOPE, stated so nobody reads more into the column than it does: the
+  /// fence covers the LEASE. It does not yet cover the cursor and counter
+  /// writes `runCorpusPass` makes DURING a run — those key on `passKey`
+  /// alone (brain-corpus.service.ts), so a worker stalled past the lease
+  /// window can still write over its successor. Fencing those means the pass
+  /// has to STOP when it finds its claim gone mid-run, which is a behaviour
+  /// change to the pass rather than a column, and is tracked as its own change.
+  claimedBy   String?
+  /// When the current run started. Rendered as "running since" rather than
+  /// inferred from `lastRunAt`, which means "last STARTED" and keeps moving.
+  claimedAt   DateTime?
+  /// Beaten while the pass runs. A claim is stale — and reclaimable — once
+  /// this is older than the lease window. Without it a process killed
+  /// mid-corpus would wedge the pass forever, and `/coverage` reports
+  /// `lastRunAt`, which is liveness-blind.
+  heartbeatAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled])
+  /// The stale-lease predicate the claim rides.
+  @@index([runState, heartbeatAt])
+}
+
+/// WARP-2837 — whether a pass is executing right now. Explicit, not derived
+/// from a nullable timestamp: `claimedAt IS NOT NULL` cannot tell a live run
+/// from a crashed one, and that distinction is the whole point of the lease.
+enum BrainPassRunState {
+  idle
+  running
+}
+
+/// WARP-2838 (ADR-051 §9) — the owner's consent to the brain, as a row.
+///
+/// The corpus pass reads the business's own documents THROUGH THE MODEL, so
+/// switching the brain on is a consent decision, not a tunable. Until this
+/// table the only switch was `BRAIN_ENABLED` in the environment: read in one
+/// place, written nowhere, absent from every deployment file — behind a
+/// `/brief` empty state that told the owner to "turn the brain on" while
+/// nothing in the product could. Same shape as WARP-2733, which fixed it for
+/// auto-filing by giving the off state its own door.
+///
+/// SINGLETON by primary key, the `AutoFilingSetting` shape. A MISSING row means
+/// nobody has consented and the resolver answers off. The row is never created
+/// by a read: a consent record that exists because something looked at it is
+/// not consent.
+///
+/// AN OPERATOR-SET `BRAIN_ENABLED` STILL WINS, in both directions, and this
+/// table does not try to represent that — the environment is not state the box
+/// owns. `brain-switch.service.ts` resolves the two, and refuses the write
+/// rather than storing a value that would not be read.
+model BrainSetting {
+  id String @id @default("singleton")
+
+  enabled Boolean @default(false)
+
+  /// Who turned it on, server-stamped from the session — never from the body.
+  /// Plain String and no FK, matching `AutoFilingSetting.enabledById`: the
+  /// record of who consented has to outlive the account that gave it, and an
+  /// FK with `SetNull` under the biconditional CHECK below would make deleting
+  /// that user fail inside a statement naming a table nobody touched.
+  enabledById String?
+  enabledAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
@@ -610,8 +1070,8 @@ model UserInvite {
   // acceptedAt/revokedAt, never deleted) — so an invitee's intended access
   // can never silently degrade to the bare tier and role deletion stays an
   // explicit service-layer flow ("reassign first", T3).
-  accessRoleId     String?
-  accessRole       AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId String?
+  accessRole   AccessRole? @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
 
   @@index([token])
   @@index([expiresAt])
@@ -789,18 +1249,18 @@ model ResetJob {
 // --- Camera / Frigate NVR ---
 
 model Camera {
-  id             String                   @id @default(uuid())
-  name           String                   @unique
+  id             String   @id @default(uuid())
+  name           String   @unique
   displayName    String
   manufacturer   String?
   model          String?
   ipAddress      String
   macAddress     String?
-  enabled        Boolean                  @default(true)
-  autoDiscovered Boolean                  @default(false)
-  lastSeen       DateTime                 @default(now())
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
+  enabled        Boolean  @default(true)
+  autoDiscovered Boolean  @default(false)
+  lastSeen       DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   // WARP-1851 — storage allocation.
   //
@@ -835,9 +1295,9 @@ model Camera {
   /// Frigate config the moment a budget is set.
   retentionCeiling   Json?
 
-  notifications  CameraNotificationPref[]
-  groupMembers   CameraGroupMember[]
-  accessGrants   CameraAccessGrant[]
+  notifications CameraNotificationPref[]
+  groupMembers  CameraGroupMember[]
+  accessGrants  CameraAccessGrant[]
 }
 
 /// WARP-1962 — who may see THIS camera.
@@ -864,7 +1324,7 @@ model CameraAccessGrant {
   /// seed or migration-created grant doesn't have to invent an actor.
   grantedBy String?
 
-  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  camera Camera @relation(fields: [cameraId], references: [id], onDelete: Cascade)
 
   @@unique([userId, cameraId])
   @@index([userId])
@@ -1004,8 +1464,28 @@ model FileContentChunk {
   path        String // Human-readable path for display
   chunkIdx    Int // 0-based chunk index within the file
   text        String // Raw text of this chunk
-  // pgvector column — 384 dims for all-MiniLM-L6-v2.
+  // pgvector column — 384 dims for bge-small-en-v1.5 (WARP-2196; the
+  // pre-WARP-2196 all-MiniLM-L6-v2 was also 384, which is why the swap
+  // needed a re-embed rather than a column change — see
+  // docs/RAG_RE_EMBED_RUNBOOK.md).
   // Prisma doesn't support vector natively; use Unsupported + raw SQL.
+  //
+  // WARP-2193 — the ANN index on this column is RAW SQL ONLY:
+  // "FileContentChunk_embedding_hnsw_idx", USING hnsw (embedding
+  // vector_cosine_ops), created in
+  // 20260826120000_warp_2193_hnsw_vector_index. It cannot be declared below
+  // with @@index, because Prisma has no way to express an index on an
+  // Unsupported() column.
+  //
+  // Which means: `prisma migrate dev` reads it as DRIFT and will emit a
+  // `DROP INDEX "FileContentChunk_embedding_hnsw_idx";` at the top of the
+  // next generated migration, whatever that migration is about. DELETE THAT
+  // LINE. This exact drift already ate the index once —
+  // 20260425220000_add_camera_audit_snapshot_tables opens with a generated
+  // drop of the IVFFlat index this replaced, nothing recreated it, and the
+  // vector arm ran on sequential scans for four months without a single
+  // failing test. src/__tests__/vector-index-migration.guard.test.ts replays
+  // the migration chain so it cannot happen silently a third time.
   embedding   Unsupported("vector(384)")
   indexedAt   DateTime                   @default(now())
   source      FileContentSource          @default(nextcloud)
@@ -1075,8 +1555,98 @@ model FileIndexStatus {
   /// permanent. NULL = written before the column existed (treated as gen 1).
   extractorCapability String?
 
+  /// ADR-048 (WARP-2729) — the filing ledger. These five columns make this row
+  /// the queue: the durable row that already says "new content exists" carries
+  /// its own claim, exactly as WARP-2587 put `notifyStatus` on the activity
+  /// tables instead of adding an event table.
+  ///
+  /// 🔴 EVERY COLUMN HERE IS NULLABLE OR CARRIES A POSTGRES DEFAULT, and that is
+  /// load-bearing rather than incidental. `services/file-indexer/db.py`
+  /// `set_index_status` INSERTs this row naming its columns explicitly, so a
+  /// column it never writes is filled by Postgres — no Python change, and no
+  /// coupling between a Prisma migration and a file-indexer image release (an
+  /// unknown column there kills ALL indexing, not just filing). Prisma's
+  /// CLIENT-side defaults (`@default(uuid())`, `@updatedAt`) emit no DB default
+  /// at all, so a NOT NULL column of that shape would break the Python INSERT —
+  /// silently, because `watcher.py _set_status` swallows every DB exception at
+  /// `logger.debug`.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractReason    ExtractReason?
+
+  /// Terminal marker. A CHECK ties this to a terminal `extractStatus`, so a row
+  /// can never sit forever-pending with a terminal status or vice versa.
+  extractedAt DateTime?
+
+  /// 🔴 The watermark the last extraction CONSUMED — not when it ran.
+  ///
+  /// `updatedAt` above is bumped by `set_index_status` on EVERY upsert, so
+  /// `extractedFromUpdatedAt < updatedAt` is the re-index signal, computed
+  /// entirely orchestrator-side. It is a separate column from `extractedAt`
+  /// deliberately: writing `now()` there would overtake a bump that landed
+  /// WHILE the worker held the claim, and that file could then never re-arm.
+  /// The worker snapshots `updatedAt` at claim time and writes THAT value here.
+  extractedFromUpdatedAt DateTime?
+
+  /// Cheap content fingerprint (chunk count + hash of the first and last chunk
+  /// text), compared before any model call. `updatedAt` is bumped by a TOUCH,
+  /// not a change — `on_modified` fires on metadata-only events and the ON
+  /// CONFLICT arm has no `WHERE`/`IS DISTINCT FROM` — so a `chown -R`, a restic
+  /// restore, a desktop resync or an `occ files:scan` would otherwise re-extract
+  /// the whole corpus. Unchanged fingerprint ⇒ `done/unchanged`, no LLM call.
+  extractFingerprint String?
+
   @@id([userId, path])
   @@index([userId, status])
+  @@index([extractStatus, updatedAt])
+}
+
+/// ADR-048 — the filing claim state machine. Explicit enum, never derived from
+/// a NULL (CLAUDE.md), and `not_needed` is a real terminal so a row is never
+/// silently skipped into a forever-pending state — the `TeamChatMeetingReminder
+/// Status { pending | sent | not_needed }` shape WARP-2587 proved.
+enum ExtractStatus {
+  pending
+  running
+  done
+  skipped
+  failed
+  not_needed
+}
+
+/// Why a source reached a terminal state. An enum, never free text: a failure
+/// class must be groupable and renderable, and free text is where filenames
+/// (which are PHI, WARP-1983) leak into a column nobody screens.
+enum ExtractReason {
+  /// The classifier returned verdict RECORD. Terminal before any extraction.
+  phi_record
+  /// The path or filename tripped the deterministic denylist. The LLM was
+  /// never called at all.
+  phi_path
+  not_business
+  too_large
+  bad_json
+  model_unreachable
+  /// The active model resolved to a non-local provider. Unattended work over
+  /// stored documents is local, full stop — there is no owner opt-in.
+  cloud_model_refused
+  owner_unavailable
+  out_of_scope
+  ignored_by_you
+  stale_claim
+  /// Pre-dates the owner enabling filing. Set by the slice-1 backfill so first
+  /// boot does not extract a three-year history overnight. NOT sticky.
+  backlog
+  /// The content fingerprint was unchanged since the last extraction.
+  unchanged
+  /// WARP-2730 — indexed, but with no readable body: the extractor chain
+  /// produced nothing, or every chunk was header. Nothing to retry.
+  no_text
+  /// WARP-2730 — at least one chunk is WARP-233 `sensitive` and holds a `dcv1:`
+  /// blob rather than text. Extracting from ciphertext would produce confident
+  /// nonsense.
+  encrypted_content
 }
 
 enum FileIndexState {
@@ -1405,6 +1975,11 @@ model Note {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this note. The CRM never
+  /// copies the body; deleting the note nulls the reference and leaves the
+  /// fact that the interaction happened intact.
+  crmActivities CrmActivity[]
+
   // Home reads "this user's pinned notes, newest first"; the notes surface
   // reads "this user's notes, pinned first, newest first". One index serves
   // both.
@@ -1455,6 +2030,10 @@ model CalendarEvent {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this event (a meeting on
+  /// a deal). The CRM stores a caption, never a copy.
+  crmActivities CrmActivity[]
+
   @@unique([sourceId, externalUid]) // a given upstream event appears at most once locally
   @@index([userId, startsAt])
   @@index([userId, source])
@@ -1464,21 +2043,27 @@ model CalendarEvent {
 // fetches each one on its own interval and upserts events into CalendarEvent
 // keyed by externalUid.
 model CalendarSource {
-  id              String    @id @default(uuid())
-  userId          String
-  name            String // "Personal iCloud"
-  url             String // CalDAV calendar URL OR public ICS URL
+  id               String    @id @default(uuid())
+  userId           String
+  name             String // "Personal iCloud"
+  url              String // CalDAV calendar URL OR public ICS URL
   // basic|none. CalDAV usually basic. ICS feeds usually none.
-  authMode        String    @default("basic")
-  username        String?
+  authMode         String    @default("basic")
+  username         String?
   // Encrypted with the same aes-256-gcm key as DeviceClient.ncAppPassword.
   // Format: iv||tag||ciphertext, base64-encoded. Never returned to clients.
-  passwordEnc     String?
-  syncIntervalSec Int       @default(900) // 15 minutes default
-  lastSyncAt      DateTime?
-  lastSyncError   String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  passwordEnc      String?
+  syncIntervalSec  Int       @default(900) // 15 minutes default
+  // WARP-2022 — owner/admin opt-in to a CalDAV server inside the boundary
+  // (a self-hosted Nextcloud/Radicale on the box's own LAN is a first-class
+  // use case on this appliance). An EXPLICIT column, never an exemption
+  // inferred from the URL, and never settable by a lower role. Skips the
+  // private-address rules ONLY: the scheme and userinfo rules still apply.
+  allowPrivateHost Boolean   @default(false)
+  lastSyncAt       DateTime?
+  lastSyncError    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([userId])
 }
@@ -1665,20 +2250,44 @@ model PendingOverlayEnrollment {
   @@index([wgPublicKey])
 }
 
+/// WARP-2587 — the notification vocabulary, as an enum rather than a comment.
+///
+/// These four labels were already the whole vocabulary: notifications.service
+/// declared them as a TS union, routes/notifications.ts as a zod enum, and
+/// tools-core's send-notification handler hardcodes 'ai'. The COLUMN was a
+/// free String with the list in a `//` comment above it — exactly the
+/// string-soup ContextPin's docstring cites CLAUDE.md's no-guessing rule
+/// against, and one raw insert away from a fifth label nothing renders.
+///
+/// Lowercase labels on purpose: they are the WIRE contract. The MQTT toast
+/// payload, the dashboard's NotificationToaster union and the POST
+/// /notifications/send body all carry these strings, so renaming a label is a
+/// dashboard change and a mobile change, not a migration.
+///
+/// Adding a label later is NOT free: `ALTER TYPE ... ADD VALUE` cannot be used
+/// in the same transaction that adds it, so it needs its own migration ahead
+/// of any migration that writes it (see baseline entry 1 in
+/// schema-drift-baseline.sql for the ToolRunStatus instance of exactly this).
+enum NotificationKind {
+  reminder
+  event
+  system
+  ai
+}
+
 // Append-only log of every notification dispatched. Powers the in-app
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {
-  id          String    @id @default(cuid())
+  id          String           @id @default(cuid())
   userId      String
-  // "reminder" | "event" | "system" | "ai"
-  kind        String
+  kind        NotificationKind
   title       String
   body        String?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
   error       String?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
 }
@@ -2129,10 +2738,20 @@ model User {
   // SetNull/Cascade): deleting an in-use role is blocked server-side
   // ("reassign first") and the DB backs that up — a role delete must never
   // silently strip or downgrade a person's assignment.
-  accessRoleId          String?
-  accessRole            AccessRole?            @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  accessRoleId     String?
+  accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
-  accessExceptions      UserAccessException[]
+  accessExceptions UserAccessException[]
+  // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
+  // owning side — removing a person must not delete the business's findings.
+  // WARP-2748: findings ASSIGNED to this person (SetNull — removing someone
+  // must not delete the business's findings).
+  brainFindings      BrainFinding[]
+  // WARP-2752: personal-scope rows this person OWNS. Distinct relations, and
+  // distinct delete behaviour: an owned row is Cascade because `ownerId` is an
+  // access-control key, where an assignment is mere provenance.
+  brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
+  brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
 
   @@index([role])
   @@index([accessRoleId])
@@ -2967,8 +3586,38 @@ model EmailMessage {
   receivedAt DateTime
   createdAt  DateTime     @default(now())
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this message. The CRM
+  /// stores the subject line as a caption and never a copy of the body, so
+  /// mail retention stays governed by the mail surface alone.
+  crmActivities CrmActivity[]
+
+  /// ADR-048 — filing proposals derived from this message. `onDelete: SetNull`
+  /// on the far side, and deliberately not covered by any CHECK there: this
+  /// model's own `accountId` is `onDelete: Cascade`, so a CHECK requiring the
+  /// pointer would make deleting an email account impossible once one proposal
+  /// existed.
+  ingestProposals IngestProposal[]
+
+  /// ADR-048 (WARP-2729) — the same filing ledger as `FileIndexStatus`.
+  ///
+  /// NO route change is needed: `prisma.emailMessage.create` on the 201 branch
+  /// of `POST /api/email/:accountId/messages-ingest` takes the default, and the
+  /// P2002 branch returns `duplicate: true` before any create, so a redelivery
+  /// never re-arms.
+  ///
+  /// There is deliberately no `extractedFromUpdatedAt` or fingerprint here:
+  /// this model has no `updatedAt` and is immutable after create, so there is
+  /// no email re-arm. An extractor-version bump is a bounded, explicit owner
+  /// action, not an automatic one.
+  extractStatus    ExtractStatus  @default(pending)
+  extractClaimedAt DateTime?
+  extractAttempts  Int            @default(0)
+  extractedAt      DateTime?
+  extractReason    ExtractReason?
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
+  @@index([extractStatus, receivedAt])
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3169,6 +3818,13 @@ model ToolSchedule {
   specId     String
   spec       ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
   rrule      String
+  /// WARP-2665 — IANA timezone the rrule's wall-clock time is interpreted in,
+  /// matching SceneSchedule.timezone (KAN-6). Without it a routine scheduled
+  /// for "07:00" fires at 07:00 UTC and drifts an hour at every DST boundary.
+  /// Added with the write path (WARP-2665) rather than after it, so no row
+  /// ever gets created under the UTC-only reading. Defaults to "UTC", which
+  /// keeps nextFireFromRrule's UTC fast-path unchanged.
+  timezone   String   @default("UTC")
   nextFireAt DateTime
   enabled    Boolean  @default(true)
   createdAt  DateTime @default(now())
@@ -3200,6 +3856,145 @@ enum ToolRunStatus {
   ok
   failed
   cancelled
+}
+
+/// WARP-2177 — a durable, background agent run (epic WARP-2176).
+///
+/// Everything a chat turn does inside one HTTP request, moved into a row that
+/// outlives the request, the browser tab and the container. The agent loop
+/// (`llm-agent.service.ts`) is not rewritten: `agent-run-worker.service.ts`
+/// claims a row, resumes the loop from the checkpoint below, and writes the
+/// outcome back. Design: `docs/agent-runs-design.md`.
+///
+/// `status` is an explicit enum, never derived from `endedAt IS NULL` — the
+/// CLAUDE.md "no guessing state" rule, same as `ToolRun`.
+///
+/// CHECKPOINT. `iteration` is the next loop iteration to execute and
+/// `messages` is the complete conversation at the top of that iteration. That
+/// is the loop's natural boundary: at the top of an iteration the array is a
+/// valid conversation (every `tool_calls` has its `role: "tool"` replies), so
+/// it can be handed back to `runAgent()` verbatim.
+///
+/// REPLAY GUARD. `trace` records every dispatched tool call — written BEFORE
+/// dispatch (`tool_call_id`, tool, args, iteration) and completed with the
+/// wire result after. A run resumed mid-iteration feeds a completed call's
+/// stored result back to the model instead of re-dispatching it, so a
+/// redeploy can never re-send a notification the run already sent.
+///
+/// LEASE. `claimedBy` / `claimedAt` / `heartbeatAt`. A `running` row whose
+/// heartbeat is older than `AGENT_RUN_RECLAIM_AFTER_MS` is re-queued with
+/// `attempts + 1`; past `AGENT_RUN_MAX_ATTEMPTS` it is failed with an error
+/// naming the count, so a crashing worker cannot wedge a run into infinite
+/// retry. Every executor write is fenced on `claimedBy`, so the zombie of a
+/// reclaimed run cannot clobber its successor.
+///
+/// `deadlineAt` is the wall-clock ceiling, stamped at first claim. A column
+/// rather than `startedAt + constant` so a config change cannot move the
+/// goalposts of a run already in flight. `maxIter` alone does not bound a run
+/// whose model calls are slow.
+model AgentRun {
+  id                 String                   @id @default(uuid())
+  /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
+  /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
+  /// run cannot outlive a role change with stale reach.
+  userId             String
+  /// The chat conversation that started the run, when one did.
+  sessionId          String?
+  goal               String
+  model              String
+  status             AgentRunStatus           @default(queued)
+  /// Not before. Delay and backoff without a second queue.
+  runAfter           DateTime                 @default(now())
+  claimedBy          String?
+  claimedAt          DateTime?
+  heartbeatAt        DateTime?
+  startedAt          DateTime?
+  endedAt            DateTime?
+  deadlineAt         DateTime?
+  attempts           Int                      @default(0)
+  maxIter            Int
+  iteration          Int                      @default(0)
+  messages           Json?
+  trace              Json?
+  /// The final assistant answer on `succeeded`.
+  result             String?
+  /// The loop's own `stop_reason` for the terminal segment.
+  stopReason         String?
+  error              String?
+  /// WARP-2179 — the parked Tier-2 call, while `status = awaiting_confirmation`.
+  /// Explicit columns, not a blob: the call is bound the way the interceptor
+  /// binds its token — tool name + `confirmationBindingHash(tool, args)` — so
+  /// what the human approves is exactly what will be redeemed, and nothing
+  /// else can be smuggled through the park. No token is stored: the
+  /// interceptor's own token is minted at resume, seconds after the human
+  /// decided, and redeemed in the same breath. `parkedAt` is what the
+  /// deadline is extended by on resume, so a day parked is not a day spent.
+  pendingTool        String?
+  pendingBindingHash String?
+  pendingArgs        Json?
+  pendingToolCallId  String?
+  parkedAt           DateTime?
+  pendingDecision    AgentRunPendingDecision?
+  pendingDecidedAt   DateTime?
+  pendingDecidedBy   String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  // Claim scan: `status = queued AND runAfter <= now()`.
+  @@index([status, runAfter])
+  // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
+  @@index([status, heartbeatAt])
+  // "My runs", newest first — the list route in WARP-2180.
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([sessionId])
+}
+
+/// WARP-2177 — AgentRun lifecycle. Non-terminal: `queued` (claimable),
+/// `running` (leased by a worker), `awaiting_confirmation` (parked on a
+/// Tier-2 call — WARP-2179; unused until it lands). Terminal: `succeeded`,
+/// `failed`, `cancelled`. Explicit, like `ToolRunStatus`: a row that was not
+/// transitioned to a terminal state must never read as a finished run.
+enum AgentRunStatus {
+  queued
+  running
+  awaiting_confirmation
+  succeeded
+  failed
+  cancelled
+}
+
+/// WARP-2180 — a recurring background run: the same RRULE vocabulary as
+/// `ToolSchedule` / `SceneSchedule`, fired by the agent-run-schedule ticker
+/// on the ONE sanctioned clock (`cronRuntime.scheduleInterval`, its own lock
+/// key). Each fire enqueues an `AgentRun` attributed to `userId`, whose reach
+/// is re-resolved at claim — a schedule cannot outlive its creator's role.
+/// `timezone` is the IANA zone the rrule's wall clock is read in (KAN-6).
+model AgentRunSchedule {
+  id          String    @id @default(uuid())
+  userId      String
+  goal        String
+  model       String
+  maxIter     Int
+  rrule       String
+  timezone    String    @default("UTC")
+  nextFireAt  DateTime
+  enabled     Boolean   @default(true)
+  lastFiredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // The ticker's scan: `enabled AND nextFireAt <= now()`.
+  @@index([enabled, nextFireAt])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+/// WARP-2179 — the human's decision on a parked Tier-2 call. Absent while
+/// parked; set by the confirm/deny route, consumed by the worker on resume.
+/// `approved` redeems the call once; `denied` is fed back to the model as a
+/// tool result so it can adapt or finish.
+enum AgentRunPendingDecision {
+  approved
+  denied
 }
 
 /// WARP-474 — Phase G2. Smart-home scene definition.
@@ -3528,6 +4323,15 @@ enum ModuleId {
   managed_switch
   /// WARP-1683 — Team chat (member-to-member Messages surface).
   team_chat
+  /// WARP-2018 — Contacts (the one address book, CardDAV/Graph-fed or local).
+  contacts
+  /// WARP-2117 — CRM (companies, deals, pipeline, timeline), nested inside
+  /// the Projects surface.
+  crm
+  /// WARP-2581 — invoices and bills landed from a cloud ledger. Its own
+  /// module because a box that keeps its books elsewhere should have no
+  /// /money surface at all, rather than an empty one.
+  money
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -3833,26 +4637,34 @@ model PmWorkspace {
 /// first commits and never observes/reuses the same number (WARP-885 —
 /// documents the existing enforcement; no schema change needed for this one).
 model PmProject {
-  id          String      @id @default(uuid())
-  workspaceId String
-  workspace   PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name        String
-  identifier  String
-  description String?
-  icon        String?
-  color       String?
-  leadId      String?
-  seqCounter  Int         @default(0)
-  sortOrder   Int         @default(0)
+  id           String      @id @default(uuid())
+  workspaceId  String
+  workspace    PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name         String
+  identifier   String
+  description  String?
+  icon         String?
+  color        String?
+  leadId       String?
+  /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
+  /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
+  /// one must never delete work, and a project with no department reads as
+  /// unassigned rather than as an error. A work item may override this per item
+  /// (`PmWorkItem.departmentId`). This is a DIMENSION, not a boundary — PM is
+  /// household-shared and every role still reads every project.
+  departmentId String?
+  department   Department? @relation("PmProjectDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
+  seqCounter   Int         @default(0)
+  sortOrder    Int         @default(0)
   /// Canonical "is archived" signal (WARP-884) — explicit column, not
   /// derived from `archivedAt IS NOT NULL`. `archivedAt` remains the audit
   /// timestamp of when it was archived (null when un-archived, mirroring the
   /// prior derivation's semantics).
-  isArchived  Boolean     @default(false)
-  archivedAt  DateTime?
-  createdById String?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @default(now()) @updatedAt
+  isArchived   Boolean     @default(false)
+  archivedAt   DateTime?
+  createdById  String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   states     PmState[]
   labels     PmLabel[]
@@ -3861,8 +4673,40 @@ model PmProject {
   modules    PmModule[]
   properties PmCustomProperty[]
 
+  /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
+  /// the link is on the deal so deleting the project leaves the commercial
+  /// record intact (SetNull, not Cascade).
+  crmDeals CrmDeal[]
+
+  /// WARP-2562 (ADR-044) — the customer this project is FOR.
+  ///
+  /// WARP-2117 gave the DEAL a project ("a won deal becomes the job that
+  /// delivers it"). This is the other direction, and it is not the same edge:
+  /// plenty of work for a customer never came through a deal at all — a
+  /// warranty callout, a second phase, anything begun before the CRM was
+  /// switched on. Reading the customer off `crmDeals` would leave those
+  /// projects unattributed.
+  ///
+  /// NULL is the common case and is not a gap: internal projects have no
+  /// customer, and on a home box that is most of them.
+  ///
+  /// SetNull, not Cascade — deleting a customer must not delete the work
+  /// delivered for them. The job happened.
+  companyId String?
+  company   CrmCompany?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// WARP-2585 — files related to this job. Cascade, unlike `crmDeals`: a link
+  /// is a pointer with no independent meaning, where a deal is a commercial
+  /// record that outlives the project.
+  fileLinks EntityLink[]
+
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
+  /// WARP-845: an unindexed ON DELETE SET NULL FK makes the parent delete a
+  /// sequential scan of this table. Five such columns already shipped
+  /// unindexed on the CRM side; not repeating it here.
+  @@index([departmentId])
+  /// "This customer's projects" is the customer record's own query.
+  @@index([companyId, isArchived])
 }
 
 /// Workflow state group — the kanban-column semantics. Explicit enum (no
@@ -3961,6 +4805,13 @@ model PmWorkItem {
   children        PmWorkItem[] @relation("PmSubIssues")
   cycleId         String?
   cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  /// ADR-045 §5.3 — the department that owns THIS item, OVERRIDING its
+  /// project's when set. Null means "inherit the project's", which is also
+  /// null-tolerant, so "nobody owns this" stays representable at both levels.
+  /// SetNull for the same reason as the project's: deleting a department must
+  /// never delete work, and must never be the reason work goes invisible.
+  departmentId    String?
+  department      Department?  @relation("PmWorkItemDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
@@ -3985,15 +4836,116 @@ model PmWorkItem {
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
 
+  /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
+  /// raised off a customer conversation).
+  crmActivities CrmActivity[]
+
+  /// WARP-2586 (ADR-045 slice G) — the cross-project edge, from both sides.
+  /// TWO back-relations for ONE table because Prisma cannot disambiguate two
+  /// edges from the same model to the same model without named relations.
+  /// `relationsFrom` and `relationsTo` are a STORAGE view, not a semantic one:
+  /// for the symmetric kinds (RELATES, DUPLICATES) the row is stored once in
+  /// canonical id order and neither end leads, so read them through
+  /// pm-relations.service's `listRelationsFor`, which matches on either end
+  /// and reports an explicit `direction`. Reading only `relationsFrom` shows
+  /// half the graph.
+  relationsFrom PmWorkItemRelation[] @relation("PmRelationFrom")
+  relationsTo   PmWorkItemRelation[] @relation("PmRelationTo")
+
+  /// WARP-2585 — files in /files RELATED to this work item. Not the same thing
+  /// as `attachments` above and not a replacement for it: a `PmAttachment` is a
+  /// COPY of the bytes on the orchestrator's own volume, an `EntityLink` is a
+  /// pointer at a file that lives in /files and stays there.
+  fileLinks EntityLink[]
+
   @@unique([projectId, sequenceId])
   @@index([projectId, stateId, sortOrder])
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
   @@index([cycleId])
   @@index([stateId])
+  /// WARP-845 — the ON DELETE SET NULL scan index.
+  @@index([departmentId])
+  /// ADR-045 §5.3 — the board's department filter is "this project's items,
+  /// owned by department X". Neither `[departmentId]` above nor
+  /// `[projectId, stateId, sortOrder]` can serve it, so the filter gets its own
+  /// composite. Two columns only: the unfiltered board still orders off the
+  /// state index.
+  @@index([projectId, departmentId])
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
+/// Edge kind between two work items (WARP-2586, ADR-045 slice G).
+///
+/// UPPERCASE, matching CrmStageKind / CrmActivityKind rather than the
+/// lowercase Pm* enums. Deliberate, and flagged so it reads as a decision:
+/// these three values are quoted verbatim inside a raw-SQL CHECK constraint
+/// (`PmWorkItemRelation_symmetric_canonical_order`) and in the service's
+/// symmetric-kind set, and SCREAMING_CASE reads unambiguously as a wire enum
+/// in both places.
+///
+/// BLOCKS is DIRECTIONAL — "A blocks B" and "B blocks A" are different claims,
+/// and together a deadlock the service refuses on write.
+/// RELATES and DUPLICATES are SYMMETRIC — one fact, therefore one row.
+enum PmRelationKind {
+  BLOCKS
+  RELATES
+  DUPLICATES
+}
+
+/// A link between two work items, which — unlike every other PM grouping — may
+/// SPAN PROJECTS (WARP-2586, ADR-045 slice G).
+///
+/// PmModule and PmCycle both carry a projectId, so an epic and a sprint stop at
+/// the project boundary. PmWorkItem.parentId can physically cross one but is
+/// not allowed to: parenting is CONTAINMENT, and as of the WARP-2586 migration
+/// a database trigger (`pmworkitem_parent_same_project`) holds it inside one
+/// project — the application layer has enforced the same rule on every write
+/// path since ADR-026 P2, and the dashboard's `useSubIssues` fetches children
+/// through a project-scoped list, so an off-project child would never render.
+/// This table is the other half of that decision: containment stays local,
+/// REFERENCE crosses freely.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — both live in raw migration
+/// SQL (see 20260904140100_warp_2586_pm_work_item_relation) and are proven
+/// against a real Postgres in `pm-work-item-relation.pg.test.ts`:
+///
+///   * `PmWorkItemRelation_no_self_edge` — CHECK ("fromId" <> "toId").
+///   * `PmWorkItemRelation_symmetric_canonical_order` —
+///     CHECK ("kind" = 'BLOCKS' OR "fromId" COLLATE "C" < "toId" COLLATE "C").
+///     A symmetric relation is stored ONCE, smaller id first. Two rows for one
+///     symmetric fact is how an edge becomes un-deletable: the drawer removes
+///     the row it rendered, the mirror survives, and the relation is back on
+///     refresh. The COLLATE "C" makes Postgres text `<` agree with the
+///     service's JavaScript `<` on a cluster with any collation.
+///
+/// Both ends Cascade rather than SetNull: an edge with one end missing is not
+/// a weaker edge, it is not an edge. `pm.service.deleteWorkItem` writes a
+/// `relation_removed` activity row on the SURVIVING end before the delete, so
+/// the cascade is always preceded by an explainable entry in that item's own
+/// history — the discipline WARP-885 established for parentId's SET NULL.
+model PmWorkItemRelation {
+  id          String         @id @default(uuid())
+  fromId      String
+  from        PmWorkItem     @relation("PmRelationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId        String
+  to          PmWorkItem     @relation("PmRelationTo", fields: [toId], references: [id], onDelete: Cascade)
+  kind        PmRelationKind
+  /// A User.id string, not an FK — the same convention every other PM
+  /// attribution column follows (see the note at the head of this section).
+  createdById String?
+  createdAt   DateTime       @default(now())
+
+  @@unique([fromId, toId, kind])
+  /// BOTH directions are indexed, with `kind` second on each. The forward
+  /// index serves the bounded BLOCKS cycle walk (one query per level,
+  /// `kind = 'BLOCKS' AND fromId IN (...)`); the reverse index serves the
+  /// incoming half of the work-item read. Postgres does not auto-index a
+  /// foreign key column, and an unindexed FK is the WARP-845 hazard.
+  @@index([fromId, kind])
+  @@index([toId, kind])
+}
+
 model PmWorkItemAssignee {
   id         String     @id @default(uuid())
   workItemId String
@@ -4190,23 +5142,58 @@ enum PmActivityVerb {
   /// so module assignments are audited from day one once that path lands.
   module_added
   module_removed
+  /// WARP-2586: emitted on BOTH ends when a PmWorkItemRelation is created or
+  /// removed — each item's own timeline has to explain what happened to it,
+  /// and for a symmetric relation there is only ONE row, so a single activity
+  /// entry would leave the other end's history silent. Also emitted on the
+  /// SURVIVING end by deleteWorkItem before the DB cascade takes the edge,
+  /// mirroring what parent_removed does for orphaned sub-issues.
+  relation_added
+  relation_removed
+}
+
+/// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.
+///
+/// An EXPLICIT enum, not a nullable `notifiedAt` claimed on IS NULL. A
+/// two-state timestamp cannot express "considered and correctly declined", so
+/// every row the sweep legitimately passes over — an `updated` verb, a CRM
+/// NOTE, an assignment whose only recipient is the person who made it — would
+/// sit at NULL forever and be rescanned every 60s for the life of the row.
+/// `not_needed` makes "skipped" a decision somebody wrote down. Copies
+/// TeamChatMeetingReminderStatus, which solved the same problem for the
+/// meeting sweep.
+enum NotifyStatus {
+  pending
+  sent
+  not_needed
 }
 
 /// Append-only activity/history feed for a work item. `actorId` null = system /
 /// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
+///
+/// WARP-2587: this table is ALSO the notification queue. There is no separate
+/// event table because there does not need to be one — these rows are already
+/// written inside the same transaction as the mutation they describe, and
+/// already carry the actor and the diff. `notifyStatus` is the claim;
+/// `notifiedAt` is an audit timestamp pinned to it by
+/// `PmActivity_notifiedAt_matches_status`, a CHECK in the migration (Prisma
+/// cannot express it — the CrmActivity_subject_exactly_one precedent).
 model PmActivity {
-  id         String         @id @default(uuid())
-  workItemId String
-  workItem   PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
-  actorId    String?
-  verb       PmActivityVerb
-  field      String?
-  oldValue   String?
-  newValue   String?
-  createdAt  DateTime       @default(now())
+  id           String         @id @default(uuid())
+  workItemId   String
+  workItem     PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  actorId      String?
+  verb         PmActivityVerb
+  field        String?
+  oldValue     String?
+  newValue     String?
+  notifyStatus NotifyStatus   @default(pending)
+  notifiedAt   DateTime?
+  createdAt    DateTime       @default(now())
 
   @@index([workItemId, createdAt])
+  @@index([notifyStatus, createdAt])
 }
 
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations
@@ -4306,14 +5293,55 @@ model DeviceUpdate {
 /// Connection status for an ERP integration. Explicit lifecycle (brief §12):
 /// NOT_CONFIGURED → PROVISIONING → CONNECTED, with DEGRADED (transient sync
 /// failure, §15), DRIFT_LOCKED (schema fingerprint mismatch froze writes,
-/// invariant 9), ERROR (unrecoverable), and DISABLED (operator turned it off).
+/// invariant 9), NEEDS_RECONNECT (the customer's credential died and only a
+/// person pasting a new one fixes it), ERROR (unrecoverable), and DISABLED
+/// (operator turned it off).
+///
+/// NEEDS_RECONNECT is the member ADR-041 §5 names as mandatory and ADR-042 §6
+/// makes load-bearing for customer-supplied credentials. It MUST stay
+/// distinguishable from NOT_CONFIGURED and from DISABLED for the same reason
+/// `M365ConnectionState.NEEDS_RECONNECT` must stay distinguishable from
+/// DISCONNECTED: all three look identical to a "does a credential decrypt?"
+/// check and mean opposite things to the person reading the dashboard.
 enum IntegrationStatus {
+  /// No connection has ever been configured for this provider. The default.
   NOT_CONFIGURED
+  /// A credential is present and the connection is being established. A row
+  /// may NOT rest here after a completed probe — see `connect()`.
   PROVISIONING
+  /// Usable. The last probe against the vendor succeeded.
   CONNECTED
+  /// Usable, and ONE dataset is refused. The credential is valid, the
+  /// handshake succeeded, and everything else reads — the vendor withholds a
+  /// single resource because of the account's PLAN or the app's granted
+  /// SCOPES. A Basic-plan Shopify store reads orders, products and inventory
+  /// and withholds only customer identities; a Mailchimp account on a plan
+  /// without a resource is otherwise entirely healthy.
+  ///
+  /// It is NOT ERROR, and that is the whole reason it exists: ERROR renders as
+  /// "Can't connect" and sends the owner to repair a connection with nothing
+  /// wrong with it, while hiding the one thing they CAN act on — the plan or
+  /// the scope grant, both of which live in the vendor's console. It is not
+  /// NEEDS_RECONNECT either: a new key changes nothing.
+  ///
+  /// Sync keeps running (`POLLABLE_CONNECTION_STATUSES`) — withholding one
+  /// dataset is not a reason to stop reading the others.
+  CAPABILITY_LIMITED
+  /// Transient sync failure (brief §15). A health signal, not a request for
+  /// human action — nobody needs to go and paste anything.
   DEGRADED
+  /// The schema fingerprint changed and writes are frozen (invariant 9).
   DRIFT_LOCKED
+  /// The stored credential no longer works: the customer revoked it in their
+  /// own vendor console, rotated it, or removed the admin who created it.
+  /// This is NOT an error — ADR-041 calls it routine — and reconnecting DOES
+  /// fix it, which is exactly what separates it from ERROR. Sync pauses;
+  /// already-synced data is untouched. The owner is asked to paste a new key.
+  NEEDS_RECONNECT
+  /// Something reconnecting will not fix — the configuration is wrong, the
+  /// vendor rejects the integration itself, the track is unbuildable.
   ERROR
+  /// The operator turned this connection off deliberately.
   DISABLED
 }
 
@@ -4395,20 +5423,229 @@ model IntegrationConnection {
   /// the connection at the next refresh.
   providerTokensEnc String?
 
+  /// WARP-2549 — what this connection landed. RESTRICT on the far side, so a
+  /// delete here fails loudly rather than taking a customer's records with it.
+  landedContacts  Contact[]
+  landedCompanies CrmCompany[]
+  landedDeals     CrmDeal[]
+  landedPipeline  CrmPipeline?
+
+  /// WARP-2581 — the invoices and bills this connection landed.
+  documents ErpDocument[]
+
+  /// WARP-2562 — the parties linked to records in THIS connection's upstream.
+  /// Required for the WARP-2461 purge walker to answer "what did this
+  /// connection land", which it cannot do from the provider name alone when
+  /// two connections share one.
+  partyLinks PartyLink[]
+
   @@index([provider, status])
+}
+
+/// Sync state for one ERP / cloud-connector cursor (WARP-2218), modelled
+/// member-for-member on `M365SyncState` because the poller shape is the same:
+/// claim a due cursor, run one read, release it into an explicit outcome.
+///
+/// Explicit column, never inferred from whether `watermark` happens to be
+/// null — IDLE-with-no-watermark (never synced) and RESYNC_REQUIRED (the
+/// vendor rejected the position we held, re-enumerate) both have a null
+/// watermark and mean opposite things to whoever is reading the dashboard.
+enum ErpSyncState {
+  /// Never run, or finished cleanly and waiting for its next tick.
+  IDLE
+  /// A run is in progress. Guards against two ticks overlapping on one cursor
+  /// — the claim flips IDLE/BACKOFF/RESYNC_REQUIRED to this conditionally, so
+  /// a second tick's conditional update matches zero rows and skips.
+  SYNCING
+  /// Throttled or wobbling. `nextAttemptAt` says when to try again, and is set
+  /// from `sync-policy.ts` `computeBackoffMs` — which obeys `Retry-After`
+  /// exactly when the vendor sends one.
+  BACKOFF
+  /// The vendor will not honour the position we held (a dead page token, a
+  /// cursor aged out, a 410). The next run re-enumerates from scratch.
+  /// A normal transition, not a failure: it does not count toward the failure
+  /// streak and is not delayed by backoff, because delaying it only leaves
+  /// the owner's data stale for longer.
+  RESYNC_REQUIRED
+  /// Broken in a way retrying will not fix. Needs a person to look.
+  FAILED
 }
 
 /// Incremental-sync watermark per (connection, entity). `watermark` is an
 /// EXPLICIT string column (a discovered timestamp / rowversion, brief §10.2)
 /// — the cursor position is never inferred from the absence of a row.
+///
+/// WARP-2218 gave this model its first writers. `state` is the explicit
+/// lifecycle column; the poller reads it, never a null check.
 model ErpSyncCursor {
-  id           String   @id @default(cuid())
+  id           String @id @default(cuid())
   connectionId String
   entity       String
-  watermark    String
-  updatedAt    DateTime @updatedAt
+
+  /// The vendor-side position the next incremental read resumes from.
+  ///
+  /// NULL means **never synced** — nothing has been read for this
+  /// (connection, entity) yet, so the next run enumerates from the beginning.
+  /// That is NOT the same thing as `state = RESYNC_REQUIRED`, which means a
+  /// position existed and the vendor stopped honouring it. Both show a null
+  /// watermark; only `state` distinguishes them, which is exactly why `state`
+  /// is a column and not a derivation.
+  watermark String?
+
+  /// Explicit lifecycle. Never derived from `watermark IS NULL`.
+  state ErpSyncState @default(IDLE)
+
+  /// Consecutive failed runs, feeding `computeBackoffMs`'s exponent. Reset to
+  /// 0 by a success and by a RESYNC_REQUIRED, which is not a failure.
+  consecutiveFailures Int @default(0)
+
+  /// When this cursor may next be claimed. NULL = claimable now.
+  nextAttemptAt DateTime?
+
+  /// Last successful incremental run. Distinct from `lastSweepAt`.
+  lastSyncedAt DateTime?
+
+  /// Last completed full reconciliation sweep. Persisted so a restart does not
+  /// re-trigger the expensive re-enumeration immediately — the sweep is the
+  /// half that can trip a vendor rate limit.
+  lastSweepAt DateTime?
+
+  /// The vendor's grant is dead (revoked in their console, credential
+  /// rotated, consent withdrawn) and only a person pasting a new credential
+  /// fixes it. ADR-041 treats this as ROUTINE, so it is its own explicit
+  /// column rather than an ERROR status: a reconnect-needed connection must
+  /// stay distinguishable from both "never configured" and "broken", exactly
+  /// as `M365ConnectionState.NEEDS_RECONNECT` is at :4990-5012.
+  needsReconnect Boolean @default(false)
+
+  /// Operator-facing reason for BACKOFF / FAILED. Must never carry a token,
+  /// an API key, a page cursor or raw bearer material — same prohibition
+  /// `M365ConnectionState.lastError` carries. Redacted on the way in.
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([connectionId, entity])
+  /// The scheduler's "what is due now" query.
+  @@index([state, nextAttemptAt])
+  @@index([connectionId])
+}
+
+/// What one reconciliation sweep found for one (connection, entity)
+/// (WARP-2463). An EXPLICIT enum, and the row is written on EVERY sweep —
+/// including a clean one — so "no drift" is a stored fact rather than the
+/// absence of a row. Absence must never be the signal: a sweep that never
+/// ran and a sweep that found nothing are opposite answers to "is the
+/// incremental path trustworthy for this vendor", and only a row can tell
+/// them apart.
+///
+/// `reconcile.ts` emits TWO independent drift classes and both can fire on
+/// the same pass, so the co-occurrence is enumerated as its own member
+/// rather than left to a nullable second column. One column fully determines
+/// what the sweep found; there is no pair of fields a reader has to combine
+/// (and no combination a reader can get wrong).
+enum ErpDriftClassification {
+  /// The full re-enumeration found nothing the incremental read had missed,
+  /// and its high-water mark was not ahead. The incremental path was
+  /// trustworthy for this entity on this pass — the signal that justifies
+  /// lengthening the sweep cadence, and the reason a zero-drift sweep still
+  /// writes a row.
+  NONE
+  /// Records the full read returned that the incremental read did not, with
+  /// a marker STRICTLY AFTER the watermark. The vendor's own filter said
+  /// nothing had changed and a full read disagreed — the HubSpot (eventually
+  /// consistent Search) and Stripe (no guaranteed event ordering) class.
+  MISSED_NEWER
+  /// The full read's high-water mark is ahead of the incremental read's: the
+  /// incremental path is running behind the account and every subsequent tick
+  /// inherits the gap. The Xero class, where `UpdatedDateUTC` does not move on
+  /// a DueDate / SentToContact / contact-balance change.
+  WATERMARK_BEHIND
+  /// Both of the above on the same pass. Enumerated explicitly because the
+  /// model stores ONE row per (connection, entity) per sweep, so a single
+  /// column has to be able to say "both" — and because dropping either half
+  /// would misreport the diagnosis, which is the whole product of this table.
+  MISSED_NEWER_AND_WATERMARK_BEHIND
+}
+
+/// One reconciliation sweep's finding for one (connection, entity)
+/// (WARP-2463).
+///
+/// WARP-2218 built the sweep and the drift report it emits, but the report
+/// reached only a log line and an ActivityRow scope. Log retention on the box
+/// is not designed as a data store, so the one question the sweep exists to
+/// answer — *has the incremental path been trustworthy for this vendor, and
+/// is it getting better or worse* — had no queryable answer. This model is
+/// that answer.
+///
+/// ## Counts and timestamps ONLY
+///
+/// The same PHI-free rule the audit scope obeys, and here it is structural
+/// rather than a convention: there is no column a record identifier, a
+/// customer name, an amount or an email could land in. `watermarkAt` and
+/// `earliestMissedAt` are `DateTime`, NOT the vendor's raw marker string —
+/// a vendor whose ordering key is the record id (Stripe cursors are object
+/// ids) would otherwise put an invoice number in this table through a column
+/// that looks like a timestamp. A marker that is not a real timestamp is
+/// stored as NULL, which loses nothing an operator was going to read anyway.
+///
+/// This table is a diagnostics artefact. A diagnostics artefact full of
+/// invoice numbers is a customer-content export wearing a different label.
+model ErpDriftRecord {
+  id String @id @default(cuid())
+
+  /// The `IntegrationConnection` this sweep covered. A plain column, matching
+  /// `ErpSyncCursor.connectionId` — no Prisma relation, so no foreign key and
+  /// no back-relation churn on `IntegrationConnection`.
+  connectionId String
+
+  /// Vendor key (`xero`, `stripe`, ...). Denormalised deliberately: the
+  /// question this table exists to answer is asked PER VENDOR ("has the
+  /// incremental path been trustworthy for Xero this month"), and a vendor key
+  /// is a product identifier, not customer content.
+  provider String
+
+  /// Canonical dataset name (`invoice`, `bill`) — never a record id.
+  entity String
+
+  /// When the sweep ran. Every row one sweep writes shares this instant, which
+  /// is what makes "was that whole sweep clean" a groupable question.
+  sweepAt DateTime
+
+  /// Explicit outcome. No default: every writer states what it found, so a row
+  /// can never mean "nobody set this".
+  classification ErpDriftClassification
+
+  /// Records the full read returned that the incremental read did not, with a
+  /// marker after the watermark. 0 on a clean sweep, and that 0 is the point.
+  missedCount Int @default(0)
+
+  /// Rows the full re-enumeration returned. The DENOMINATOR: 3 missed out of
+  /// 4 and 3 missed out of 40,000 are not the same health signal, and
+  /// `missedCount` alone cannot tell them apart.
+  fullCount Int @default(0)
+
+  /// Rows the incremental read returned in the same pass.
+  incrementalCount Int @default(0)
+
+  /// The position the incremental read was issued FROM, as a timestamp.
+  /// NULL when the cursor had never synced, or when the vendor's marker is not
+  /// a timestamp at all — see the PHI note above.
+  watermarkAt DateTime?
+
+  /// Oldest marker among the missed records. Answers "how far back did the gap
+  /// start", which is the forensic question when an owner reports the
+  /// assistant did not know about something. NULL when nothing was missed.
+  earliestMissedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// The endpoint's query: one connection, most recent first, over a window.
+  @@index([connectionId, sweepAt])
+  /// The retention trim's query, and the only one that scans across
+  /// connections.
+  @@index([sweepAt])
 }
 
 /// Read-model cache row (brief §10.2). A convenience/uptime layer, NEVER the
@@ -4425,6 +5662,306 @@ model ErpEntityCache {
   @@unique([connectionId, entity, sourceKey])
   @@index([connectionId, entity])
 }
+
+/// What a document is: money owed TO the business, or money owed BY it.
+///
+/// Two kinds rather than two tables, because every column below is the same on
+/// both sides and only the counterparty's role differs — and because the
+/// question the owner asks ("what is overdue") crosses both.
+/// WARP-2739 (ADR-049 §4.1) — who wrote this document.
+///
+/// Mirrors `CrmRecordOrigin`, the pattern the CRM already proved, with one
+/// deliberate difference in vocabulary: the CRM's non-local value is `EXTERNAL`
+/// and carries "uneditable, archive-only, overwritten by the next landing
+/// tick". Here the value is `LANDED` and means exactly the same thing — the
+/// vendor owns the row — but the CRM's enum is not reused, because a shared
+/// enum across two tables with different lifecycles is how one table's widening
+/// becomes the other's migration.
+enum ErpDocumentOrigin {
+  /// A copy of what a vendor's server decided. `land-money.ts` owns it, the
+  /// vendor is the system of record, and the box may never edit it.
+  LANDED
+  /// The box's own document. Nothing outside this appliance has ever seen it,
+  /// and a person can correct it.
+  LOCAL
+}
+
+/// WARP-2739 (ADR-049 §4.1) — WHAT the document is.
+///
+/// 🔴 This enum used to be `RECEIVABLE | PAYABLE`, WHICH IS A DIRECTION, NOT A
+/// KIND. A quote and an invoice are both receivable; a credit note is
+/// receivable and negative; a receipt is receivable and already settled. The
+/// old pair could not tell any of those apart, so a native invoice had nowhere
+/// to live that a quote did not also occupy.
+///
+/// Direction is now DERIVED from kind (`money.service.ts`), which is the only
+/// place it was ever needed and the only place it stays correct as kinds are
+/// added.
+enum ErpDocumentKind {
+  /// An offer. Becomes an INVOICE by COPY, never by reference (§4.3).
+  QUOTE
+  ORDER
+  /// Money owed to the business.
+  INVOICE
+  /// Money owed by the business — the half WARP-1991 records as having had no
+  /// data source anywhere in the product.
+  BILL
+  /// Receivable and negative.
+  CREDIT_NOTE
+  RECEIPT
+}
+
+/// WARP-2739 (ADR-049 §4.2) — where a LOCAL document is in its life.
+///
+/// 🔴 ONE column with a per-kind allowed-transition map, not one enum per kind.
+/// Five enums are five things to keep in sync and a `switch` in every read
+/// path; the map lives in `document-status.ts` and is asserted cell by cell.
+///
+/// 🔴 NULL on every LANDED row, and the CHECK enforces it. A vendor's own
+/// status word is carried verbatim in `vendorStatus` and is NOT mapped onto
+/// these values: every vendor spells this differently, and folding five
+/// vocabularies into fourteen values would decide, silently, that "Voided" and
+/// "Paid" mean something this box chose for them.
+enum ErpDocumentStatus {
+  /// Every kind starts here.
+  DRAFT
+
+  // QUOTE: DRAFT -> SENT -> ACCEPTED | DECLINED | EXPIRED
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+
+  // ORDER: DRAFT -> CONFIRMED -> FULFILLED | CANCELLED
+  CONFIRMED
+  FULFILLED
+  CANCELLED
+
+  // INVOICE / BILL: DRAFT -> SENT -> PART_PAID -> PAID | VOID | WRITTEN_OFF
+  PART_PAID
+  PAID
+  VOID
+  WRITTEN_OFF
+
+  // CREDIT_NOTE: DRAFT -> ISSUED -> APPLIED
+  ISSUED
+  APPLIED
+}
+
+/// WARP-2581 — an invoice or bill, landed from a CLOUD ACCOUNTING connection.
+///
+/// The first money this box keeps. Until now the only money in the product was
+/// one live-read accounts-receivable number on /reports, which vanished the
+/// moment the vendor's server was off, because nothing was stored.
+///
+/// 🔴 CLOUD ACCOUNTING TRACKS ONLY. A LAN practice-management track that
+/// declares `invoice` must never land here: its receivables are a patient
+/// ledger, and PHI on this box is read-through behind the ERP router's gate
+/// (ADR-044 §3). `land-money.ts` refuses a non-cloud provider, and the refusal
+/// is a test, not a comment.
+///
+/// 🔴 `amountMinor` and `balanceMinor` are DIFFERENT NUMBERS. An invoice
+/// part-paid still carries its original amount; summing amounts where you
+/// meant balances overstates receivables. Every surface says which it is.
+///
+/// Provenance is NOT NULL here, unlike the CRM tables: every row in this table
+/// is landed by definition, so there is no locally typed shape to allow for.
+model ErpDocument {
+  id String @id @default(uuid())
+
+  /// WARP-2739 — LANDED or LOCAL, and the CHECK below makes the three
+  /// provenance columns follow from it.
+  ///
+  /// Defaults to LANDED because every row that existed when this column was
+  /// added was landed by definition, and a default of LOCAL would have made
+  /// the migration rewrite history.
+  origin ErpDocumentOrigin @default(LANDED)
+
+  /// The connection that landed it. NULL on a LOCAL row — nothing outside this
+  /// box has ever seen it.
+  ///
+  /// 🔴 A LOCAL ROW MAY NOT BORROW A CONNECTION, and the CHECK refuses it. A
+  /// document with a connection is vendor-owned, which on the CRM side means
+  /// uneditable, archive-only, and overwritten by the next landing tick. A
+  /// document a person has to be able to correct cannot be that.
+  ///
+  /// RESTRICT for the same reason the CRM tables use it — nothing deletes an
+  /// `IntegrationConnection` today, and if something starts, this fails loudly
+  /// rather than silently dropping a business's ledger.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  /// Vendor key, denormalised so a row can be displayed without a join.
+  /// Derived from `connection.provider` on write, never accepted from a caller.
+  externalSystem String?
+  /// The vendor's own id for this document. Scoped to the CONNECTION: two
+  /// QuickBooks companies both number their invoices from 1.
+  externalId     String?
+
+  /// WARP-2737 — the number printed ON the document, for a LOCAL row.
+  ///
+  /// 🔴 NOT `externalId`, and the distinction is load-bearing. `externalId` is
+  /// the VENDOR's identifier and is NULL on every local row by the provenance
+  /// CHECK; reusing it for a number this box read off a PDF would put a value
+  /// no vendor ever issued into the column the reconcile key is built from.
+  ///
+  /// Nullable because a document can arrive without one — a quote often has
+  /// none until it is sent — and because nothing on this box ISSUES numbers
+  /// yet. Sequence allocation is a decision about a business's books, not a
+  /// detail for a filing slice.
+  documentNumber String?
+
+  kind ErpDocumentKind
+
+  issuedAt DateTime?
+  dueAt    DateTime?
+
+  /// The vendor's id for the customer or supplier. Opaque, and NOT a foreign
+  /// key: the counterparty may not have landed, may never land (a supplier is
+  /// not a CRM customer), and must not block the document.
+  counterpartyExternalId String?
+  /// The landed customer, when one matches. SetNull: losing the customer must
+  /// not lose the invoice.
+  companyId              String?
+  company                CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// The counterparty's name as the vendor gave it, so a document reads
+  /// correctly even when nothing matched.
+  counterpartyName       String?
+
+  /// 🔴 EXACT DECIMALS, not minor units — and the difference is forced, not
+  /// preferred.
+  ///
+  /// `CrmDeal` holds minor units because a deal's currency is always known, so
+  /// its exponent is known. A ledger document's is NOT: `invoice` and `bill`
+  /// are named in `SINGLE_CURRENCY_LEDGER_DATASETS`, exempt from the
+  /// money-needs-a-currency rule because a QuickBooks company file has ONE
+  /// home currency and its export carries no per-row currency column to map.
+  /// Minor units cannot be computed without an exponent, and guessing 2 is
+  /// wrong by a factor of 100 on a yen ledger.
+  ///
+  /// `NUMERIC(20,6)` holds any vendor decimal exactly, sums exactly in
+  /// Postgres, and crosses the API as a STRING — `Number()` would round above
+  /// 2^53 exactly as it does for the CRM.
+  amount  Decimal? @db.Decimal(20, 6)
+  /// What remains UNPAID. Not the same number as `amount` — an invoice
+  /// part-paid still carries its original amount, and summing amounts where
+  /// you meant balances overstates receivables.
+  balance Decimal? @db.Decimal(20, 6)
+
+  /// The vendor's currency when it names one per row, and NULL when the
+  /// ledger's own home currency is the only answer — which is the ordinary
+  /// case today.
+  ///
+  /// 🔴 A NULL here is why a total may only be computed PER CONNECTION. One
+  /// ledger is one currency by construction; two ledgers are not, and adding
+  /// them would produce a confident wrong number. Unknown behaves exactly like
+  /// mixed: the total is withheld.
+  currency String?
+
+  /// The vendor's own status word, carried verbatim. Not an enum: every vendor
+  /// spells this differently and mapping five vocabularies onto three values
+  /// would decide, silently, that "Voided" and "Paid" are the same thing.
+  ///
+  /// WARP-2739 renamed this from `status` so the box's own lifecycle could take
+  /// that name. The two are mutually exclusive by origin, and the CHECK says
+  /// so: a LANDED row has a vendor word and no lifecycle, a LOCAL row has a
+  /// lifecycle and no vendor word. Keeping one column for both would mean a
+  /// query for "my unpaid invoices" silently matching the string "Paid".
+  vendorStatus String?
+
+  /// WARP-2739 — the box's own lifecycle, for LOCAL rows only.
+  ///
+  /// 🔴 Maintained ONLY by `moveDocumentStatus`, which writes the transition
+  /// and its timeline entry inside one `$transaction`. `moveDealStage`
+  /// established that rule and `updateDeal` routes stage changes through it
+  /// precisely so a PATCH cannot skip the timeline; a guard test asserts no
+  /// other writer sets this column.
+  status ErpDocumentStatus?
+
+  /// When the VENDOR last changed it — never presented as "up to date".
+  /// Xero's `UpdatedDateUTC` does not fire on a due-date edit, a
+  /// send-to-contact, or a contact-balance change (WARP-2383).
+  vendorUpdatedAt DateTime?
+
+  /// When this box last read it. The only freshness claim the surface may make.
+  lastReadAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The reconcile key, for LANDED rows. Postgres treats NULLs as distinct, so
+  /// this constrains nothing on a LOCAL row — which is right: a LOCAL document
+  /// has no vendor id to be unique about.
+  @@unique([connectionId, kind, externalId])
+  @@index([connectionId, kind, dueAt])
+  @@index([companyId])
+  @@index([kind, dueAt])
+  /// "The quotes I have out", "the invoices I have not sent". A LOCAL-document
+  /// list is always filtered by all three.
+  @@index([origin, kind, status])
+}
+
+/// WARP-2751 (ADR-051) — the TIME AXIS for money. `ErpDocument` holds one row
+/// per document carrying only its LATEST state, because `land-money.ts`
+/// overwrites `amount`/`balance`/`vendorStatus` in place on every sync tick.
+/// Yesterday is destroyed 96 times a day. Ageing, DSO drift, "our overdue
+/// balance has doubled since June", "which customers slowed down" are all
+/// structurally unanswerable against that, however good the model is.
+///
+/// Append-only, one row per subject per DAY.
+///
+/// 🔴 WHY A SNAPSHOT AND NOT AN AUDIT LOG. An audit log answers "what changed";
+/// this answers "what was it worth on this date", which is the shape every
+/// trend question has and the shape a `GROUP BY capturedOn` serves cheaply.
+/// `ErpAuditLog` already exists and does not do this.
+///
+/// 🔴 NO `workspaceId`, despite the ticket proposing one. This schema has no
+/// tenancy concept — `workspaceId` appears on `PmProject` alone, and inventing
+/// a second, unenforced one here would be a column every future query has to
+/// remember to filter and no constraint would ever check. `subjectId` is a
+/// uuid and globally unique, so the unique key below is complete without it.
+model MoneySnapshot {
+  id String @id @default(uuid())
+
+  /// The DAY this value was true. `@db.Date`, not a timestamp: the grain IS
+  /// one day, and storing a time would let two rows for the same day differ
+  /// and defeat the unique key that makes the 15-minute cadence idempotent.
+  capturedOn DateTime @db.Date
+
+  /// What was measured. A string rather than an enum because the next two
+  /// subjects (`crm_deal`, `pipeline`) are not landed yet and an enum whose
+  /// members arrive one migration at a time buys nothing over a documented
+  /// vocabulary.
+  subjectType String
+  /// The subject's own id. NOT a foreign key: a snapshot must survive the
+  /// document it describes, or the series ends the moment a vendor deletes an
+  /// invoice — which is exactly the history worth keeping.
+  subjectId   String
+
+  /// The same shape `ErpDocument` carries, so the series and the live row are
+  /// directly comparable. `Decimal(20,6)` and NOT minor units, for the reason
+  /// `ErpDocument.amount` gives: a ledger's exponent is unknowable when its
+  /// currency is null, and guessing 2 is wrong by 100x on a yen ledger.
+  amount   Decimal? @db.Decimal(20, 6)
+  balance  Decimal? @db.Decimal(20, 6)
+  currency String?
+  /// The vendor's own word, carried verbatim — see `ErpDocument.vendorStatus`.
+  /// Free text, because five vendors spell this five ways.
+  status   String?
+
+  createdAt DateTime @default(now())
+
+  /// The idempotency key. A document synced twelve times in one day must
+  /// produce ONE row, and this is what makes the upsert converge on the day's
+  /// last-seen value instead of appending ninety-six near-duplicates.
+  @@unique([capturedOn, subjectType, subjectId])
+  /// "The 90-day series for this document" — the query the whole table exists
+  /// to serve, and the one the retention downsample scans.
+  @@index([subjectType, subjectId, capturedOn])
+  /// Retention sweeps by date across all subjects.
+  @@index([capturedOn])
+}
+
 
 /// Lifecycle of a staged write in the outbox → confirm → apply → verify
 /// pipeline (brief §11.1). Explicit enum; a write advances through these
@@ -4446,6 +5983,285 @@ enum WriteStatus {
 /// confirms (invariant 1, §11.2). `command` is a registered command NAME
 /// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
 /// reversible commands; `discrepancy` records a VERIFY-step mismatch.
+// ============================================================================
+// ADR-048 - auto-filing (WARP-2727 / WARP-2729)
+//
+// Three tables: what the box PROPOSED, what the owner CORRECTED, and what the
+// owner CONSENTED to. The queue itself is not here - it is the claim columns on
+// `FileIndexStatus` and `EmailMessage`, because those rows already say "new
+// content exists" and a shadow queue would be a second source of truth.
+//
+// EVERY ACTOR COLUMN BELOW IS A PLAIN `String`, NOT AN FK, and that is a
+// decision rather than an omission. Two of them sit inside NOT-NULL CHECKs, and
+// an `onDelete: SetNull` FK under such a CHECK makes the row UN-DELETABLE: the
+// SetNull fires inside the same statement that the CHECK then rejects, so the
+// parent delete fails. That trap is live here twice over - `EmailMessage.
+// accountId` is `onDelete: Cascade`, so a `DELETE /api/email/accounts` would
+// cascade into every email proposal - and the house pattern already avoids it:
+// `ErpWriteRequest.requestedBy`, `ToolSpec.ownerId` and `PmComment.createdById`
+// are all bare strings. These columns are an AUDIT of who consented or decided,
+// and that fact stays true after the user row is gone. A dangling id is caught
+// by the worker's per-tick `resolveAttributedToolAccess`, which fails closed and
+// pauses filing with "the person who turned this on is no longer active" -
+// which is the designed behaviour, not a degradation.
+// ============================================================================
+
+enum IngestSourceKind {
+  FILE
+  EMAIL
+}
+
+enum IngestProposalKind {
+  /// Attach a file to a record that already exists. Reversible, additive.
+  LINK_FILE
+  /// Put an inbound email on an existing customer's timeline.
+  LOG_EMAIL_ACTIVITY
+  /// Set `PmProject.companyId` where it is currently NULL. Never overwrites.
+  SET_PROJECT_CUSTOMER
+  CREATE_CUSTOMER
+  CREATE_PROJECT
+  /// Never auto-applies, in any mode, on any vertical: a person is where PHI
+  /// lives on a practice box.
+  CREATE_CONTACT
+  /// Several candidates matched; a human picks. Never auto-applies.
+  MATCH_REVIEW
+  /// Held until the ADR-049 section 4 `ErpDocument` widening (WARP-2739). Money
+  /// is never auto-applied even after that.
+  CREATE_MONEY_DOC
+}
+
+enum IngestProposalStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  /// The owner said "not the same" - recorded as a FilingDecision too, so the
+  /// pair is never offered again.
+  NOT_SAME
+  EXPIRED
+  UNDONE
+}
+
+/// What the POLICY TABLE (`services/filing/policy.ts`) decided, evaluated in
+/// code and never by the model. `NEVER` is unappliable even by a human, and a
+/// CHECK enforces that rather than a branch.
+enum FilingPolicyClass {
+  AUTO
+  REVIEW
+  NEVER
+}
+
+enum PhiVerdict {
+  CLEAN
+  /// A vendor invoice that names patients - the document a dental practice
+  /// actually receives every week. Company and money survive; every person
+  /// entity and every verbatim quote is dropped, and confidence is capped
+  /// below every auto floor so it can never apply unattended.
+  MENTIONS
+  /// Terminal. No extraction pass, no proposal, no evidence stored.
+  RECORD
+}
+
+enum IngestMatchKind {
+  EMAIL
+  DOMAIN
+  NAME
+  NONE
+}
+
+model IngestProposal {
+  id String @id @default(uuid())
+
+  sourceKind IngestSourceKind
+
+  /// The durable source identity, `file:<ncFileId>` or `email:<uuid>`. TEXT and
+  /// NOT NULL on purpose: it is what the dedupe key is scoped by, and unlike the
+  /// two optional pointers below it survives the source row being deleted, so
+  /// no CHECK here can ever be broken by a cascade.
+  sourceRef String
+
+  /// Convenience pointers, deliberately NOT covered by any CHECK. See the block
+  /// comment above: `emailMessageId` is SetNull under a Cascade parent, so a
+  /// CHECK requiring it would make deleting an email account impossible.
+  ncFileId       Int?
+  emailMessageId String?
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+
+  kind         IngestProposalKind
+  status       IngestProposalStatus @default(PENDING)
+  policyClass  FilingPolicyClass
+  /// Rendered in words on the review card: "Not applied automatically because
+  /// the sender uses a personal email address."
+  policyReason String?
+
+  confidence Int
+  phiVerdict PhiVerdict
+  matchKind  IngestMatchKind
+
+  /// The proposed fields, validated by a zod `.strict()` per-kind allow-list
+  /// that has no `dob`/`chart`/`insurance`/`treatment` member anywhere - the
+  /// model has nowhere to put PHI, which is a structural control rather than a
+  /// prompt rule.
+  payload Json
+
+  /// Verbatim quotes proving each extracted field, each verified to be a real
+  /// substring of the text actually sent. NULLED in the same transaction as a
+  /// reject / not-same / PHI skip, and 30 days after an apply.
+  evidence Json?
+
+  extractorVersion String
+  dedupeKey        String
+
+  requestedById String
+  /// Who decided, and when. Required for every decided status INCLUDING
+  /// UNDONE — an undone proposal was applied by somebody first, and undoing
+  /// it does not unmake that.
+  decidedById   String?
+  decidedAt     DateTime?
+  appliedAt     DateTime?
+  autoApplied   Boolean   @default(false)
+  undoneById    String?
+  undoneAt      DateTime?
+  /// "delete" or "archive" - which branch the undo took, per the landed-purge
+  /// rule (a row that acquired a human note is archived, never deleted).
+  undoMode      String?
+
+  /// Back-pointers to what applying this actually created. The "Created by
+  /// Droplet" chip reads `origin === 'EXTRACTED'`, never `createdById IS NULL`
+  /// - state is never derived from a NULL.
+  createdCompanyId    String?
+  createdContactId    String?
+  createdProjectId    String?
+  createdEntityLinkId String?
+  createdActivityId   String?
+
+  /// WARP-2737 — the money document this proposal created, if it created one.
+  ///
+  /// A plain `String?` with NO foreign key, exactly like its four siblings and
+  /// for the same reason: undo reverses ONLY through these back-pointers and
+  /// never searches for a row that "looks like" what it made. An FK would add
+  /// nothing to that and would drag the SetNull-under-a-CHECK trap in with it.
+  createdErpDocumentId String?
+
+  /// A child proposal (e.g. LINK_FILE against a customer this run also
+  /// proposes creating) that cannot apply until its parent does.
+  dependsOnProposalId String?
+
+  /// What applying this actually produced. Named relations because the plain
+  /// `createdCompanyId` / `createdContactId` columns above are audit strings
+  /// with no FK — only the row's own `proposalId` back-pointer is referential,
+  /// so a reader can always ask a record "did Droplet file you?" without a
+  /// join through this table.
+  companiesFiled CrmCompany[] @relation("CompanyFiledByProposal")
+  contactsFiled  Contact[]    @relation("ContactFiledByProposal")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Re-extraction of the same source at the same extractor version must not
+  /// mint a second proposal for the same thing.
+  @@unique([sourceRef, kind, dedupeKey, extractorVersion])
+  @@index([status, createdAt])
+  @@index([sourceRef])
+  @@index([ncFileId])
+  @@index([emailMessageId])
+  @@index([dependsOnProposalId])
+}
+
+enum IngestKeyKind {
+  EMAIL_ADDRESS
+  EMAIL_DOMAIN
+  NAME
+  NC_FOLDER
+}
+
+enum FilingDecisionKind {
+  /// "Not this customer" - never offer this pair again.
+  NOT_SAME
+  /// "Mail from @northgatedental.com always files under Northgate Dental."
+  ALWAYS_HERE
+  /// "Ignore anything from this sender or folder."
+  IGNORE_SOURCE
+}
+
+/// The correction memory, and the reason auto mode survives week two: a
+/// correction made once is never made twice, and the owner can READ and REVOKE
+/// what they taught it. Consulted BEFORE the matcher searches.
+model FilingDecision {
+  id       String             @id @default(uuid())
+  keyKind  IngestKeyKind
+  /// Lowercased on write.
+  keyValue String
+  verdict  FilingDecisionKind
+
+  /// Required for NOT_SAME and ALWAYS_HERE, forbidden for IGNORE_SOURCE - a
+  /// CHECK, because a rule pointing at no customer is not a rule.
+  companyId String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  @@index([keyKind, keyValue])
+}
+
+enum AutoFilingMode {
+  off
+  /// Everything waits for a click.
+  propose
+  /// Owner-promoted classes apply unattended, within caps.
+  auto
+}
+
+enum AutoFilingLevel {
+  /// Default: attach files, log email on existing customers, set a project's
+  /// customer. Never creates.
+  links_only
+  also_create
+}
+
+enum AutoFilingVertical {
+  general
+  /// ASKED at enable time, never derived at read time. A LAN dental connector
+  /// only pre-fills the answer - a heuristic must not silently decide a PHI
+  /// posture.
+  healthcare
+}
+
+/// Consent as a ROW with constraints, not a settings blob: the record proving a
+/// human authorised unattended CRM writes must be one the database refuses to
+/// leave half-filled.
+model AutoFilingSetting {
+  id String @id @default("singleton")
+
+  mode     AutoFilingMode     @default(off)
+  level    AutoFilingLevel    @default(links_only)
+  vertical AutoFilingVertical @default(general)
+
+  /// Who turned it on, server-stamped. Plain String, no FK - see the block
+  /// comment at the top of this section.
+  enabledById String?
+  /// Bounds the ledger: a source older than this is retired `not_needed/
+  /// backlog` rather than claimed, so enabling filing never files three years
+  /// of history overnight.
+  enabledAt   DateTime?
+
+  folders      Json?
+  pathDenylist Json?
+  sources      Json?
+
+  hourlyApplyCap Int @default(50)
+  dailyCreateCap Int @default(10)
+  digestHour     Int @default(8)
+
+  /// `mode = 'auto'` is refused by a CHECK until an extraction-eval run has
+  /// recorded a pass on THIS box's model (WARP-2732). The canary is auto mode's
+  /// own merge condition, so it is a database invariant rather than a promise.
+  canaryPassedAt DateTime?
+  canaryModel    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model ErpWriteRequest {
   id           String      @id @default(cuid())
   connectionId String
@@ -4467,36 +6283,61 @@ model ErpWriteRequest {
 /// teams are nested one level under a department parent. Household is the
 /// legacy system department adopted from WS-5.
 model Department {
-  id              String                 @id @default(uuid())
-  name            String                 @unique // display + groupfolder mount_point
-  slug            String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
-  parentId        String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
-  parent          Department?            @relation("DeptHierarchy", fields: [parentId], references: [id])
-  teams           Department[]           @relation("DeptHierarchy")
-  description     String?
-  kind            DepartmentKind         @default(DEPARTMENT)
-  state           ProvisionState         @default(pending)
-  provisionError  String?
+  id                String                 @id @default(uuid())
+  name              String                 @unique // display + groupfolder mount_point
+  slug              String                 @unique // lowercase-dash; NC groups dept-<slug>{,-ro}; teams: dept-<deptslug>-<teamslug>
+  parentId          String? // TEAM → its DEPARTMENT; null for HOUSEHOLD/DEPARTMENT (2026-07-11 amendment)
+  /// WARP-2634: `onDelete: Restrict` is declared explicitly to match what
+  /// 20260711000000_warp_1255_departments actually created. Prisma's implicit
+  /// default for an optional relation is SetNull, so leaving it off made the
+  /// datamodel promise a behaviour no migrated box has ever had. Nothing
+  /// row-deletes a Department today — `DELETE /api/departments/:id` archives
+  /// (sets `archivedAt`) — so this declaration changes no behaviour; it stops
+  /// the datamodel lying. Whether RESTRICT or SetNull is the RIGHT product
+  /// behaviour for deleting a parent department is a separate product call.
+  parent            Department?            @relation("DeptHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  teams             Department[]           @relation("DeptHierarchy")
+  description       String?
+  kind              DepartmentKind         @default(DEPARTMENT)
+  state             ProvisionState         @default(pending)
+  provisionError    String?
   /// WARP-1651: when this row FIRST failed to converge, or null while it is
   /// converging normally. The durable clock the reconciler bounds the
   /// re-verify state with — `updatedAt` cannot serve, because
   /// provisionDepartment rewrites `state` on every retry and so refreshes it
   /// each tick. Stamped once per failure episode, cleared on convergence.
   nonConvergedSince DateTime?
-  ncGroupRw       String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
-  ncGroupRo       String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
-  ncGroupfolderId Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
-  quotaBytes      BigInt? // null = unlimited; pushed via gfSetQuota
-  aclVersion      Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
-  createdBy       String // local User.id
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
-  archivedAt      DateTime?
-  memberships     DepartmentMembership[]
-  shares          DepartmentShare[]
-  inviteGrants    UserInviteDepartment[]
+  ncGroupRw         String?                @unique // "dept-<slug>"; household: legacy householdGroupName()
+  ncGroupRo         String?                @unique // "dept-<slug>-ro"; null for kind=HOUSEHOLD
+  ncGroupfolderId   Int?                   @unique // discovered via gfListFolders; NEVER a sentinel key
+  quotaBytes        BigInt? // null = unlimited; pushed via gfSetQuota
+  aclVersion        Int                    @default(0) // bumped in-tx on EVERY membership/state mutation
+  createdBy         String // local User.id
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  archivedAt        DateTime?
+  memberships       DepartmentMembership[]
+  shares            DepartmentShare[]
+  inviteGrants      UserInviteDepartment[]
+  /// WARP-2717 — the WORK this department owns. Back-relations only: this
+  /// model stays a Nextcloud groupfolder and knows nothing about PM. Nothing on
+  /// the storage side (provisioner, reconciler, membership service) reads
+  /// these, and nothing in PM reads `state`/`provisionError`/`quotaBytes` — the
+  /// two halves share a row and nothing else.
+  pmProjects        PmProject[]            @relation("PmProjectDepartment")
+  pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
+  // WARP-2748 (ADR-051): department-scoped brain rows. Cascade on the owning
+  // side — a digest naming a deleted department would fall through the
+  // membership test, so an access key must never dangle.
+  brainDigests      BrainDigest[]
+  brainFindings     BrainFinding[]
 
   @@index([state])
+  /// WARP-2634: declared to match `Department_parentId_idx`, which
+  /// 20260711000000_warp_1255_departments has always created. Postgres does
+  /// not auto-index FK columns and the reconciler reads teams by parentId, so
+  /// the index is doing real work — the datamodel was the side that was wrong.
+  @@index([parentId])
 }
 
 /// WARP-1255: department membership — explicit access rights for a user in a
@@ -4571,18 +6412,18 @@ model UserUsagePolicy {
 /// transaction (T3), so every ADR-004 `requireRole` floor keeps working
 /// unchanged and the per-axis grant rows below can only NARROW within it.
 model AccessRole {
-  id          String  @id @default(uuid())
-  name        String
-  slug        String  @unique
-  description String?
+  id                 String   @id @default(uuid())
+  name               String
+  slug               String   @unique
+  description        String?
   // CHECK: admin|family|guest — never owner/service. Enforced in the service
   // layer + zod (T3 role-mutation-guard), deliberately NOT a DB check
   // constraint; the column stays the plain Role enum.
-  startingPoint Role
+  startingPoint      Role
   // active | archived. Stays a String default "active" (the ADR-032 §2 spec
   // shape); the two-value lifecycle is service-managed and archived roles
   // keep their rows (the design's archive-don't-delete affordance).
-  state         String @default("active")
+  state              String   @default("active")
   // axis c — usage DEFAULTS for people in this role; a person's
   // UserUsagePolicy row overrides per person. Null = box default.
   storageQuotaBytes  BigInt?
@@ -5148,4 +6989,1008 @@ model M365DeltaCursor {
   /// The scheduler's claim query: "what is due now".
   @@index([state, nextAttemptAt])
   @@index([userId])
+}
+
+// ============================================================================
+// Contacts — WARP-2018 (carddav-3)
+//
+// The ONE contact entity on the box. WARP-2117 makes this the CRM's person
+// record rather than inventing a second one: the box must not end up with a
+// CardDAV contact, a Graph contact and a CRM contact that are three rows for
+// one human. A CardDAV address book is a SOURCE that fills this table
+// (`AddressBookSource`); so is Microsoft Graph; so is a person typed in by
+// hand. `origin` says which, explicitly.
+//
+// Modelled on `IntegrationConnection`/`IntegrationStatus`, NOT on
+// `CalendarSource` — that one derives health from `lastSyncError IS NULL`,
+// which is the WARP-218 pattern this repo forbids.
+// ============================================================================
+
+/// Lifecycle of one address-book source. Explicit column; never derived from
+/// the nullability of `lastSyncError` or `collectionUrl`.
+enum AddressBookStatus {
+  /// No source has been configured. The default.
+  NOT_CONFIGURED
+  /// Credentials accepted, discovery in flight. A row may not rest here after
+  /// a completed verify.
+  VERIFYING
+  /// Usable — the last sync against the server succeeded.
+  CONNECTED
+  /// Transient sync failure. A health signal, not a request for human action.
+  DEGRADED
+  /// The stored credential no longer works. Split from DEGRADED deliberately:
+  /// it needs operator action and must BACK OFF rather than retry into an
+  /// account lockout.
+  AUTH_FAILED
+  /// The server answered, but not with something we can read (no addressbook
+  /// collection, or a vCard version we do not support). Retrying will not fix
+  /// it and neither will new credentials.
+  UNSUPPORTED_SERVER
+  /// The operator turned this source off deliberately.
+  DISABLED
+}
+
+/// What the server actually negotiated — persisted so the dashboard reports
+/// the real mechanism rather than the one we intended.
+enum AddressBookSyncMode {
+  SYNC_COLLECTION
+  ETAG_DIFF
+  FULL_PULL
+}
+
+/// Where a contact row came from. Explicit, because "has an externalUid" is
+/// exactly the derive-state-from-NULL shape the repo forbids — and because a
+/// locally-authored contact that later gets matched to a synced one must not
+/// silently change class.
+enum ContactOrigin {
+  /// Typed into Droplet. Droplet owns it; no sync will overwrite it.
+  LOCAL
+  /// Pulled from a source (CardDAV, Graph, a CRM connector). The source owns
+  /// the synced fields.
+  EXTERNAL
+  /// ADR-048 — derived by Droplet from a document or an email. Editable like
+  /// LOCAL; see `CrmRecordOrigin.EXTRACTED`.
+  EXTRACTED
+}
+
+model AddressBookSource {
+  id String @id @default(uuid())
+
+  /// Owner of this address book. Delegated auth: a source can never expose
+  /// data its owner could not read at the server.
+  userId String
+  name   String
+
+  /// What the operator pasted. Kept verbatim so a failed discovery can be
+  /// diagnosed against the input rather than against our rewrite of it.
+  serverUrl String
+
+  /// Resolved by discovery. NULL until a verify succeeds — which is a FACT
+  /// about discovery, not the source's lifecycle state (see `status`).
+  collectionUrl String?
+
+  authMode String  @default("basic")
+  username String?
+
+  /// aes-256-gcm blob (encryption.service `encryptSecret`), same key and
+  /// format as `CalendarSource.passwordEnc` and `DeviceClient.ncAppPassword`.
+  /// Never returned by any route, never logged.
+  passwordEnc String?
+
+  status AddressBookStatus @default(NOT_CONFIGURED)
+
+  /// Named vocabulary explaining a non-CONNECTED `status` to a human:
+  /// `vcard_version_unsupported`, `no_addressbook_collection`,
+  /// `off_lan_denied`, `credentials_rejected`. A closed set, unlike
+  /// `lastSyncError`.
+  statusReason String?
+
+  syncMode        AddressBookSyncMode @default(FULL_PULL)
+  syncToken       String?
+  ctag            String?
+  syncIntervalSec Int                 @default(900)
+  lastSyncAt      DateTime?
+
+  /// DIAGNOSTIC DETAIL ONLY — never the state. Read `status` for that.
+  lastSyncError String?
+
+  /// A CardDAV server off the LAN is an egress decision the owner has to make
+  /// deliberately; the default is no.
+  offLanAllowed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contacts Contact[]
+
+  @@index([userId, status])
+}
+
+model Contact {
+  id String @id @default(uuid())
+
+  /// ADR-048 - see `CrmCompany.proposalId`. Not in any CHECK.
+  proposalId String?
+  proposal   IngestProposal? @relation("ContactFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
+
+  userId String
+
+  /// The source that owns this row, when it has one. Schema-level cascade
+  /// (NOT a hand-rolled `$transaction` sweep like `calendar.service.ts` does)
+  /// so deleting a source in a live DB cannot leave orphans behind.
+  sourceId String?
+  source   AddressBookSource? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  origin ContactOrigin @default(LOCAL)
+
+  // --- Provenance (WARP-2117) ---------------------------------------------
+  // Free TEXT, mirroring `IntegrationConnection.provider`: a new upstream
+  // needs no migration. `externalSystem` names the vendor ("m365",
+  // "salesforce", "hubspot", "carddav"); `externalId` is that vendor's id.
+
+  /// Vendor key of the upstream that owns this row. NULL for LOCAL rows.
+  externalSystem String?
+
+  /// Stable id in the upstream system — the reconcile key that stops two
+  /// connectors from each creating their own copy of one person.
+  externalId   String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId String?
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  /// CardDAV's own identity/versioning triple.
+  externalUid  String?
+  href         String?
+  etag         String?
+  vcardVersion String?
+
+  displayName  String
+  givenName    String?
+  familyName   String?
+  organization String?
+  jobTitle     String?
+  note         String?
+
+  /// String, NOT DateTime. RFC 6350 §4.3.1 permits partial dates — a birthday
+  /// of `--0423` (April 23rd, year unknown) has no Date representation, and
+  /// coercing it invents a year.
+  birthday String?
+
+  photoStorageKey String? @unique
+  photoMimeType   String?
+  photoSizeBytes  Int?
+
+  /// Bounded at 64 KB by the write path.
+  rawVcard String?
+
+  /// WARP-2554 — the same explicit archive pair `CrmCompany` and `CrmDeal`
+  /// carry, and for a reason `Contact` needs more than either of them:
+  /// a row whose `origin` is EXTERNAL cannot be edited or deleted (the source
+  /// owns its fields, and a delete would simply be undone by the next sync),
+  /// so without this there is NO action a human can take to get a synced
+  /// person off their screen. Archiving is that action — it is the owner's
+  /// decision, it survives a re-sync, and it does not fight the source.
+  ///
+  /// Explicit boolean, never derived from `archivedAt IS NOT NULL` (WARP-884).
+  /// `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emails        ContactEmail[]
+  phones        ContactPhone[]
+  companyLinks  CrmCompanyContact[]
+  dealLinks     CrmDealContact[]
+  crmActivities CrmActivity[]
+  /// WARP-2562 (ADR-044) — this person's records in upstream systems.
+  /// Distinct from `externalSystem`/`externalId` above, which say where this
+  /// ROW came from. See the PartyLink model for why those are not the same
+  /// question.
+  partyLinks    PartyLink[]
+  /// WARP-2585 — files related to this person (an ID scan, a signed form).
+  fileLinks     EntityLink[]
+
+  /// Same idempotency-key shape as `CalendarEvent` — one row per (source,
+  /// upstream id), so a re-sync updates rather than duplicates.
+  @@unique([sourceId, externalUid])
+  /// The cross-connector reconcile key.
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([userId, displayName])
+  @@index([userId, origin])
+  /// The default listing is "this person's contacts, unarchived, by name".
+  @@index([userId, isArchived])
+  @@index([proposalId])
+}
+
+model ContactEmail {
+  id        String  @id @default(uuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  address String
+
+  /// Indexed lowercase form — the join key to `EmailMessage.fromAddr` and the
+  /// cross-book dedupe key. Derived on write, never read from user input.
+  addressLower String
+
+  label     String?
+  isPrimary Boolean @default(false)
+
+  @@index([contactId])
+  @@index([addressLower])
+}
+
+model ContactPhone {
+  id        String  @id @default(uuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// `tel:` scheme stripped on write.
+  number    String
+  label     String?
+  isPrimary Boolean @default(false)
+
+  @@index([contactId])
+}
+
+// ============================================================================
+// CRM — WARP-2117
+//
+// Built, not adopted: every mature open-source CRM is AGPL-3 on purpose and
+// shipping the appliance is conveyance, so copyleft attaches (see WARP-2113 /
+// ADR-041 for the licence argument). Structure informed by Atomic CRM
+// (Marmelab, MIT) as a reference model; zero AGPL-derived code.
+//
+// This is deliberately THIN. It owns companies, deals, a configurable
+// pipeline and a timeline — and it reuses the box's existing primitives for
+// everything else: `Contact` above for people, `Note` / `EmailMessage` /
+// `CalendarEvent` / `PmWorkItem` for timeline content, the files+RAG path for
+// attachments, and `PmProject` for the work that delivers a won deal.
+// ============================================================================
+
+/// Where a CRM row came from. Explicit for the same reason `ContactOrigin` is.
+enum CrmRecordOrigin {
+  LOCAL
+  EXTERNAL
+  /// ADR-048 — created by Droplet from a document or an email, then applied by
+  /// a human (or by an owner-promoted auto-apply class). Behaves like LOCAL:
+  /// the shipped `*_provenance_complete` CHECK's first arm carries NO origin
+  /// predicate, so an EXTRACTED row with all-NULL provenance already passes,
+  /// and the edit/delete guards key on `EXTERNAL` — so a person can correct an
+  /// EXTRACTED draft freely, which is the whole point of not landing it as
+  /// EXTERNAL under a fabricated connection.
+  EXTRACTED
+}
+
+/// What reaching a stage MEANS. An explicit outcome class, never inferred from
+/// a stage's position, its name, or the absence of a `closedAt` — a pipeline's
+/// stages are owner-configurable, so position and name carry no guarantees.
+enum CrmStageKind {
+  OPEN
+  WON
+  LOST
+}
+
+/// Which record a timeline entry hangs off. Exactly one of the three id
+/// columns on `CrmActivity` is non-NULL, enforced by a CHECK constraint in the
+/// migration (Prisma cannot express it).
+enum CrmActivitySubject {
+  COMPANY
+  CONTACT
+  DEAL
+}
+
+/// The timeline vocabulary. `NOTE` / `EMAIL` / `MEETING` / `TASK` carry a
+/// reference to the record that already holds the content; `STAGE_CHANGE`,
+/// `CREATED` and `SYNCED` are audit events the CRM itself writes.
+enum CrmActivityKind {
+  NOTE
+  EMAIL
+  CALL
+  MEETING
+  TASK
+  STAGE_CHANGE
+  CREATED
+  SYNCED
+}
+
+model CrmCompany {
+  id String @id @default(uuid())
+
+  /// ADR-048 - the proposal that created this row, when Droplet filed it.
+  /// Deliberately NOT referenced by any CHECK: it is `onDelete: SetNull`, and
+  /// a SetNull FK inside a NOT-NULL CHECK makes the row un-deletable and the
+  /// purge walker un-runnable.
+  proposalId String?
+  proposal   IngestProposal? @relation("CompanyFiledByProposal", fields: [proposalId], references: [id], onDelete: SetNull)
+
+  name String
+
+  /// Primary web domain, lowercased on write. The natural dedupe key when a
+  /// connector and a human both create the same account.
+  domain String?
+
+  industry String?
+  phone    String?
+  website  String?
+
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  region       String?
+  postalCode   String?
+  country      String?
+
+  note String?
+
+  /// The person accountable for this account. A `User.id`, kept as a plain
+  /// column (the house style for cross-surface owner references — cf.
+  /// `PmProject.leadId`).
+  ownerId String?
+
+  origin         CrmRecordOrigin        @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId   String?
+  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
+  /// (WARP-884). `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contactLinks CrmCompanyContact[]
+  deals        CrmDeal[]
+  activities   CrmActivity[]
+  /// WARP-2562 (ADR-044) — the work delivered for this customer, and this
+  /// customer's records in upstream systems. With `deals` and `contactLinks`
+  /// these are the four things the customer record reads.
+  projects     PmProject[]
+  partyLinks   PartyLink[]
+
+  /// WARP-2581 — money owed by or to this customer, when a document matched.
+  documents ErpDocument[]
+  /// WARP-2585 — files in /files that BELONG to this customer. Pointers, not
+  /// copies; deleting the company deletes the links and none of the files.
+  fileLinks EntityLink[]
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([name])
+  @@index([domain])
+  @@index([ownerId, isArchived])
+  @@index([proposalId])
+}
+
+/// WARP-2562 (ADR-044) — how a link came to exist. An explicit column, never
+/// inferred from `confidence IS NULL`: the same rule that made `origin` and
+/// `isArchived` real columns under WARP-884, and for the same reason — a
+/// reader must not have to work out which flavour of null they are holding.
+enum PartyLinkOrigin {
+  /// A human said these are the same customer.
+  MANUAL
+  /// A matcher proposed it and someone accepted. Carries a `confidence`.
+  MATCHED
+  /// Asserted by an upstream that already knew the correspondence.
+  IMPORTED
+}
+
+/// Joins a party this box owns — a `Contact` or a `CrmCompany` — to a record
+/// in an upstream system, WITHOUT copying that record in.
+///
+/// The ERP stays the system of record. This row is a POINTER: a provider key
+/// and an opaque id, holding no PHI of its own. Detail is fetched live through
+/// the existing connector, under the existing PHI gate.
+///
+/// 🔴 Why this is not `Contact.externalSystem` / `externalId`, which already
+/// exist and already carry a provider and an id:
+///
+/// That pair is `@@unique` ON THE PARTY, so it models PROVENANCE — one
+/// upstream owns this row, and a re-sync updates rather than duplicates. It
+/// cannot model CORRESPONDENCE: this person is a HubSpot contact AND patient
+/// #4471 in Eaglesoft AND customer cus_9f2 in Stripe. A customer is routinely
+/// all three. Overloading the pair would force a choice of which connector
+/// "owns" a customer, which is the wrong question — and the wrong answer would
+/// be re-litigated by every connector added after it.
+///
+/// 🔴 ADR-044 §3 — a row here is created ONLY by an explicit act: a human
+/// links a customer, or a proposed match is accepted. ERP patients are never
+/// projected into `Contact` (PHI spill: the address book has no `canViewPhi`
+/// gate, is reachable by `family`, and is readable by the local model through
+/// the `contacts` tool domain). Do not add a sync that writes these in bulk
+/// without re-reading that section.
+model PartyLink {
+  id String @id @default(uuid())
+
+  /// Exactly one of the two is set. Prisma cannot express an XOR, so the real
+  /// guard is the CHECK constraint `PartyLink_party_exactly_one` in the
+  /// migration; the service's own check is the friendly error, not the
+  /// invariant. `party-link.pg.test.ts` proves the database half — a mocked
+  /// Prisma cannot, which is why that file carries the `.pg.` infix.
+  contactId String?
+  contact   Contact?    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// 🔴 The CONNECTION the upstream id belongs to — not merely the provider.
+  ///
+  /// A business can connect two HubSpot portals, and `externalSystem` alone
+  /// cannot tell them apart. Two consequences, both real:
+  ///
+  ///   • HubSpot object ids are PORTAL-scoped, so portal A's object `123` and
+  ///     portal B's object `123` are different records that collide under a
+  ///     `(externalSystem, externalId)` unique. The second portal's link is
+  ///     refused as "already linked" to someone else's customer.
+  ///   • WARP-2461's purge walker is NOT WRITTEN YET, and this column is what
+  ///     will let it be written correctly: it must key on `connectionId`,
+  ///     because scoping a purge by PROVIDER would destroy the sibling
+  ///     connection's data. A link table with no `connectionId` could not be
+  ///     purged correctly at all — disconnecting one portal would take the
+  ///     other's links with it. Whoever writes that walker should pin this
+  ///     with a mutation test, the way `crm-activity-cascade.pg.test.ts`
+  ///     already pins the cascade it will have to reckon with.
+  ///
+  /// `Restrict`, not `Cascade`: a connection row is never deleted (disconnect
+  /// flips it to DISABLED and purges its secrets in place), so this can only
+  /// fire if something new starts deleting them — and when that happens the
+  /// landed links must be purged deliberately, not swept away by a foreign
+  /// key. Cascade here would silently delete a human's confirmed matches.
+  connectionId String
+  connection   IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  /// Verbatim `IntegrationConnection.provider` — free TEXT, deliberately not
+  /// an enum or a catalog id. `eaglesoft-api` and `quickbooks-online` are
+  /// provider keys, not catalog ids, and typing this as a `ConnectorId` is the
+  /// lie that broke the hub's join in WARP-2291. A new upstream needs no
+  /// migration, exactly as `IntegrationConnection.provider` intends.
+  ///
+  /// DERIVED from `connection.provider` on write, never accepted from the
+  /// caller. It is denormalised so a link can be read and displayed without a
+  /// join; taking it from the request body instead would let a link claim a
+  /// provider its own connection contradicts, and nothing downstream could
+  /// tell which half was true.
+  externalSystem String
+  /// The upstream's own key — an Eaglesoft chart number, a Stripe customer id.
+  externalId     String
+
+  linkedBy   PartyLinkOrigin @default(MANUAL)
+  /// 0-100, and only meaningful for `MATCHED`. A confidence on a link a human
+  /// made by hand is a number nobody computed.
+  confidence Int?
+
+  /// WARP-884 shape. Unlinking is reversible and auditable rather than a hard
+  /// delete — "these were never the same customer" is a claim worth keeping.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  /// 🔴 One LIVE upstream claim per record — and the unique that enforces it
+  /// is NOT on this model. It is a PARTIAL index and Prisma has no datamodel
+  /// syntax for one, so it lives in
+  /// `20260903010000_warp_2562_party_link_archive_scope`:
+  ///
+  ///     CREATE UNIQUE INDEX "PartyLink_connectionId_externalId_active_key"
+  ///       ON "PartyLink" ("connectionId", "externalId")
+  ///       WHERE "isArchived" = false;
+  ///
+  /// Two LIVE links to the same record — even from different parties — is a
+  /// contradiction, not a second opinion, and surfaces as a 409. Two ARCHIVED
+  /// ones are a history: an archived row is the record that a claim was
+  /// WITHDRAWN, and an index that kept asserting over withdrawn rows made
+  /// archiving a trap. It held the record forever, so the correct party could
+  /// never be linked and the only recovery restored the wrong link.
+  ///
+  /// Scoped by CONNECTION, not by provider: "the same record" means the same
+  /// id in the same portal. Under the old `(externalSystem, externalId)` key a
+  /// second HubSpot portal's object `123` was a contradiction with the first
+  /// portal's object `123`, which is two different customers.
+  ///
+  /// Consequence worth knowing before you re-add `@@unique` here: without a
+  /// compound unique on the model there is no
+  /// `partyLink.findUnique({ where: { connectionId_externalId } })`, and that
+  /// is the point. That call cannot mention `isArchived`, so it cannot ask the
+  /// question the index now answers. `party-link.service.ts` uses `findFirst`
+  /// with an explicit `isArchived: false`.
+  @@index([contactId])
+  @@index([companyId])
+  /// The purge walker's index (WARP-2461): "everything this connection landed".
+  @@index([connectionId])
+}
+
+/// Company↔Contact as a link table rather than a foreign key on `Contact`:
+/// people change jobs, and a person can legitimately be reachable at two
+/// organizations at once. Deleting either side deletes only the link.
+model CrmCompanyContact {
+  id String @id @default(uuid())
+
+  companyId String
+  company   CrmCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// Role at THIS company, which may differ from the contact's own jobTitle.
+  title     String?
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, contactId])
+  @@index([contactId])
+}
+
+/// A named pipeline. Owner-configurable and plural from day one, because a
+/// business that sells two things sells them through two processes.
+model CrmPipeline {
+  id String @id @default(uuid())
+
+  name String
+
+  /// Exactly one pipeline is the default new deals land in. Enforced by a
+  /// partial unique index in the migration.
+  /// WARP-2549 — the connection whose deals land into this pipeline, when it is
+  /// a synced one. UNIQUE: a connection gets exactly one pipeline, created on
+  /// its first landed deal.
+  ///
+  /// A vendor's stages are not the owner's stages. Landing HubSpot deals into
+  /// the owner's own pipeline would either invent a mapping between two sets of
+  /// stage names nobody reconciled, or dump every synced deal into whichever
+  /// stage happened to sort first. A pipeline of its own keeps the owner's
+  /// board theirs and makes the purge scope obvious.
+  connectionId String?                @unique
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  isDefault Boolean @default(false)
+
+  sortOrder Int @default(0)
+
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stages CrmPipelineStage[]
+  deals  CrmDeal[]
+
+  @@index([isArchived, sortOrder])
+}
+
+model CrmPipelineStage {
+  id String @id @default(uuid())
+
+  pipelineId String
+  pipeline   CrmPipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  name String
+
+  /// Explicit ordering column. The board renders by this, never by insertion
+  /// order or by name.
+  sortOrder Int
+
+  /// What landing here means for the deal. Owner-configurable stage NAMES,
+  /// fixed outcome SEMANTICS.
+  kind        CrmStageKind @default(OPEN)
+  /// WARP-2549 — the vendor's own value for this stage (HubSpot `dealstage`),
+  /// on a synced pipeline. The reconcile key: stage NAMES are owner-editable
+  /// and re-landing must not create a second stage because someone renamed one.
+  externalKey String?
+
+  /// Optional forecast weighting, 0-100. Advisory only — nothing derives an
+  /// outcome from it.
+  probability Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deals CrmDeal[]
+
+  @@unique([pipelineId, sortOrder])
+  @@unique([pipelineId, externalKey])
+  @@index([pipelineId, kind])
+}
+
+model CrmDeal {
+  id String @id @default(uuid())
+
+  title String
+
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  pipelineId String
+  pipeline   CrmPipeline @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
+
+  stageId String
+  stage   CrmPipelineStage @relation(fields: [stageId], references: [id], onDelete: Restrict)
+
+  /// Minor units (cents), never a float — money in a binary fraction is how
+  /// pipelines stop adding up.
+  amountMinor BigInt?
+
+  /// ISO-4217. NULL only when `amountMinor` is NULL.
+  currency String?
+
+  expectedCloseOn DateTime?
+
+  /// Audit timestamp of when the deal reached a WON/LOST stage. The OUTCOME
+  /// lives in `stage.kind`; this is only when it happened.
+  closedAt DateTime?
+
+  /// Free-text reason, typically for a LOST deal.
+  closeReason String?
+
+  ownerId String?
+
+  /// WARP-2117: a won deal becomes the job that delivers it. SetNull because
+  /// deleting the project must not delete the commercial record of the sale.
+  projectId String?
+  project   PmProject? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  origin         CrmRecordOrigin        @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+  /// WARP-2549 — WHICH connection landed this row. NOT NULL is impossible here
+  /// (a locally typed row has no connection), but a landed row without one is
+  /// forbidden by the `*_provenance_complete` CHECK below.
+  ///
+  /// 🔴 The vendor's id is scoped to the CONNECTION, not to the vendor. Two
+  /// HubSpot portals both serve an object `123` and they are unrelated
+  /// customers; keying provenance on `(externalSystem, externalId)` refused the
+  /// second one forever as "already linked". WARP-2461's purge walker also keys
+  /// on this column, and its own mutation test proves that scoping a purge by
+  /// PROVIDER destroys the sibling connection's data.
+  ///
+  /// RESTRICT, deliberately not CASCADE: nothing deletes an
+  /// `IntegrationConnection` today (`disconnect()` flips it to DISABLED and
+  /// purges in place), so this fires only if something new starts deleting
+  /// them — at which point the landed rows must be purged deliberately, by a
+  /// walker that knows to keep what a human wrote against them.
+  connectionId   String?
+  connection     IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contactLinks CrmDealContact[]
+  activities   CrmActivity[]
+  /// WARP-2585 — the quote, the contract, the signed order for THIS deal.
+  fileLinks    EntityLink[]
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([pipelineId, stageId])
+  @@index([stageId])
+  @@index([companyId])
+  @@index([ownerId, isArchived])
+  @@index([expectedCloseOn])
+  // WARP-2577 — `projectId` is ON DELETE SET NULL and Postgres does not
+  // auto-index a foreign key column, so deleting a project had to seq-scan
+  // this table to find the deals it must null. Same hazard WARP-845 documents
+  // and indexes on its own relation; this one was missed.
+  @@index([projectId])
+}
+
+model CrmDealContact {
+  id String @id @default(uuid())
+
+  dealId String
+  deal   CrmDeal @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  /// Their part in THIS deal — "economic buyer", "champion", "blocker".
+  role String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([dealId, contactId])
+  @@index([contactId])
+}
+
+/// The timeline unit, and the thing the local model reads when asked about a
+/// customer. It REFERENCES the record that holds the content rather than
+/// copying it — a note stays one note, an email stays one email.
+model CrmActivity {
+  id String @id @default(uuid())
+
+  /// Which of the three subject columns below is populated. Explicit, so a
+  /// query can filter without three IS-NULL tests, and so the CHECK constraint
+  /// has something to check against.
+  subjectType CrmActivitySubject
+
+  /// 🔴 WARP-2554 — READ THIS BEFORE WRITING ANY PURGE OR DELETE.
+  ///
+  /// All three subject relations are `onDelete: Cascade`, and they have to be:
+  /// `CrmActivity_subject_exactly_one` forbids an orphan, so a subject column
+  /// cannot be SetNull. The cascade is the only coherent behaviour.
+  ///
+  /// The consequence is NOT obvious and is the thing to know: deleting a
+  /// subject destroys EVERY activity attached to it — including ones a human
+  /// typed, whose own `origin` is LOCAL. So a purge written as
+  /// `deleteMany({ where: { origin: "EXTERNAL" } })` on this table reads as
+  /// though it spares the owner's notes and does not: deleting the synced
+  /// parent has already taken them.
+  ///
+  /// If a purge must preserve locally-authored activity, it has to re-parent
+  /// or export it BEFORE deleting the subject.
+  /// `apps/orchestrator/src/__tests__/crm-activity-cascade.pg.test.ts` pins this
+  /// for all three subject types against real Postgres, so the behaviour is met
+  /// as an assertion rather than discovered in production. (The `.pg.` infix is
+  /// load-bearing: a mocked Prisma cannot prove a database cascade, so the suite
+  /// is RUN_PG_INTEGRATION-gated and runs in CI's pg-integration lane.)
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  dealId String?
+  deal   CrmDeal? @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  kind CrmActivityKind
+
+  /// One line for the timeline. For a referenced record this is a caption
+  /// (subject line, meeting title) — never a copy of the body.
+  summary String
+
+  /// Who did it. A `User.id`, or NULL when the box itself wrote the row.
+  actorId String?
+
+  /// When it HAPPENED (an email's sent time), which is not when the row was
+  /// written (`createdAt`).
+  occurredAt DateTime @default(now())
+
+  // --- References to the primitives that already hold the content ----------
+  // All nullable, all SetNull: deleting the underlying note or email must not
+  // erase the fact that the interaction happened, and must not leave a
+  // dangling id behind either.
+
+  noteId String?
+  note   Note?   @relation(fields: [noteId], references: [id], onDelete: SetNull)
+
+  emailMessageId String?
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+
+  calendarEventId String?
+  calendarEvent   CalendarEvent? @relation(fields: [calendarEventId], references: [id], onDelete: SetNull)
+
+  workItemId String?
+  workItem   PmWorkItem? @relation(fields: [workItemId], references: [id], onDelete: SetNull)
+
+  // --- STAGE_CHANGE detail -------------------------------------------------
+
+  fromStageId String?
+  toStageId   String?
+
+  origin         CrmRecordOrigin @default(LOCAL)
+  externalSystem String?
+  externalId     String?
+
+  /// WARP-2587 — the notify claim (see PmActivity for why it is an enum and
+  /// not an IS-NULL over `notifiedAt`). Only a STAGE_CHANGE whose destination
+  /// stage has kind WON or LOST is ever notified; every other row reaches
+  /// `not_needed` on its first sweep, so a connector backfill of 10,000
+  /// SYNCED rows drains to terminal instead of being rescanned forever.
+  notifyStatus NotifyStatus @default(pending)
+  notifiedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([externalSystem, externalId])
+  @@index([dealId, occurredAt])
+  @@index([companyId, occurredAt])
+  @@index([contactId, occurredAt])
+  @@index([kind, occurredAt])
+  // WARP-2577 — the four reference columns are ON DELETE SET NULL, and
+  // Postgres does not auto-index a foreign key. Unindexed, deleting one note,
+  // email, calendar event or work item seq-scanned this whole table to find
+  // the rows to null — on the timeline table, which is the largest one here.
+  // The subject columns above are already covered by their composite indexes;
+  // these four were not covered by anything.
+  @@index([noteId])
+  @@index([emailMessageId])
+  @@index([calendarEventId])
+  @@index([workItemId])
+  /// createdAt, NOT occurredAt — unlike every index above it. `occurredAt` is
+  /// when the interaction HAPPENED and is caller-supplied: a connector
+  /// backdates it and a MEETING can carry a future one, and a sweep gated on a
+  /// future occurredAt would leave that row pending forever. `createdAt` is
+  /// the row-write clock and is monotone.
+  @@index([notifyStatus, createdAt])
+}
+
+// ============================================================================
+// WARP-2585 (ADR-045 slice 6) — a file belongs to a business record.
+// ============================================================================
+
+/// Which record a file link hangs off. Exactly one of the five id columns on
+/// `EntityLink` is non-NULL, and this names WHICH — an explicit discriminator,
+/// never five IS-NULL tests (CLAUDE.md "No guessing, ever"). Agreement between
+/// the two is enforced by a CHECK constraint in the migration; Prisma cannot
+/// express it. Mirrors `CrmActivitySubject`.
+enum EntityLinkSubject {
+  COMPANY
+  CONTACT
+  DEAL
+  PROJECT
+  WORK_ITEM
+}
+
+/// WHY this file is attached — a closed vocabulary the customer record groups
+/// documents by, and the thing an extractor classifies into. Explicit, never
+/// guessed from a filename or a MIME type.
+enum EntityLinkRole {
+  CONTRACT
+  INVOICE
+  QUOTE
+  SCAN
+  CORRESPONDENCE
+  OTHER
+}
+
+/// HOW the link was made. `MANUAL` is a human's act and carries no confidence —
+/// a score on a link somebody made by hand is a number nobody computed.
+/// `SUGGESTED` (a matcher proposed it) and `EXTRACTED` (a document extractor
+/// found the reference) both require one, so a review queue can rank and
+/// threshold. The all-or-nothing pairing is a CHECK in the migration, the same
+/// shape as `CrmDeal_amount_needs_currency`.
+enum EntityLinkOrigin {
+  MANUAL
+  SUGGESTED
+  EXTRACTED
+}
+
+/// A file in /files, related to a business record.
+///
+/// NOT an upload. `PmAttachment` COPIES bytes onto a work item under its own
+/// `storageKey @unique`; this is a POINTER and the two coexist. A link grants
+/// no byte access — /files re-runs its own gate on every read.
+///
+/// Keyed on `ncFileId` (oc:fileid, resolved via `ncGetFileId`) because
+/// `FileComment`'s docstring already adjudicated the three incompatible file
+/// identities this box ships: oc:fileid SURVIVES a rename/move and
+/// `FileCitation.filePath` does not. `fileName`/`filePath`/`fileSpace` are a
+/// DISPLAY CACHE only (the `TeamChatMessage.sharedFile*` precedent), so a link
+/// whose file was later deleted in Nextcloud renders as a name a human can act
+/// on instead of a bare integer.
+///
+/// THERE IS NO FK TO `File`, AND THERE CANNOT BE. The registry is deliberately
+/// incomplete — `upsertFileRegistryEntry` never throws, and an absent row is a
+/// supported state every metadata route branches on — so an FK would reject a
+/// link to any unregistered file, which is most of them. A dangling link is a
+/// state this table tolerates and the UI shows. No column pretends to track it:
+/// a `fileState` nothing maintains is a column that always lies.
+///
+/// IDOR: `createdById` is the LOCAL `User.id` UUID (`req.user.id`), NEVER the
+/// Nextcloud username. FileComment records the real bug from storing one and
+/// filtering on the other. Here it is PROVENANCE ONLY and gates nothing — the
+/// `FileTag.addedByUserId` posture, because a link is business-shared like
+/// every other CRM row.
+///
+/// VISIBILITY is the question a link raises that a comment does not: the row
+/// carries a file NAME, so an unfiltered listing tells a reader that a file
+/// they cannot open exists. `entity-link.service.ts` drops rows whose file is
+/// registered to a department the viewer cannot read, using the same
+/// registry+space composition `routes/files.ts` and `routes/team-chat.ts` run.
+///
+/// Uniqueness is FIVE PARTIAL unique indexes in the migration, one per subject
+/// column — deliberately NOT a compound `@@unique` over all five. Four of the
+/// five are NULL on every row and NULL never equals NULL, so a compound index
+/// would reject nothing and P2002 would never fire. Because Prisma cannot
+/// address a partial index, the write path is updateMany-then-create with a
+/// P2002 retry.
+model EntityLink {
+  id String @id @default(uuid())
+
+  /// oc:fileid — survives rename/move. Resolve via `ncGetFileId`.
+  ncFileId Int
+
+  /// Display cache, refreshed on every re-link. Derived from `filePath`
+  /// server-side, never accepted as client prose.
+  fileName String
+  filePath String
+
+  /// WARP-1898 — the Files space `filePath` is relative to ("personal" |
+  /// "shared" | "dept:<uuid>"). Without it a reader's link falls through to
+  /// /files' silent personal-space default and resolves the LINKER's path
+  /// inside the READER's namespace. Registry-derived where a row exists.
+  fileSpace String
+
+  /// Which of the five columns below is populated. Explicit, so a query can
+  /// filter without five IS-NULL tests and the CHECK has something to check.
+  subjectType EntityLinkSubject
+
+  /// All five Cascade, and they have to be: `EntityLink_subject_exactly_one`
+  /// forbids an orphan, so a subject column cannot be SetNull. Deleting the
+  /// record deletes its links — it does NOT delete the files.
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  dealId String?
+  deal   CrmDeal? @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  projectId String?
+  project   PmProject? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  workItemId String?
+  workItem   PmWorkItem? @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+
+  role     EntityLinkRole   @default(OTHER)
+  linkedBy EntityLinkOrigin @default(MANUAL)
+
+  /// 0–100, and meaningful ONLY when `linkedBy` is not MANUAL. Integer, not a
+  /// float, mirroring `CrmPipelineStage.probability`.
+  confidence Int?
+
+  note String?
+
+  /// Explicit archive flag — never derived from `archivedAt IS NOT NULL`
+  /// (WARP-884). `archivedAt` is the audit timestamp only.
+  isArchived Boolean   @default(false)
+  archivedAt DateTime?
+
+  /// LOCAL `User.id` UUID. Provenance; it does NOT gate reads.
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// The subject column LEADS each composite, so one index serves both the
+  /// CASCADE delete (Postgres does not index an FK for you — WARP-845, and
+  /// `crm.service.ts` shipped five unindexed) and the "unarchived documents on
+  /// this record" listing.
+  @@index([ncFileId])
+  @@index([companyId, isArchived])
+  @@index([contactId, isArchived])
+  @@index([dealId, isArchived])
+  @@index([projectId, isArchived])
+  @@index([workItemId, isArchived])
 }

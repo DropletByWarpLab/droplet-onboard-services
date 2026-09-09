@@ -36,17 +36,20 @@ import { routeMapFingerprint, type EaglesoftApiRouteMap } from "../src/api-route
 // outside `tsconfig`'s `src/` rootDir; it is test-only scaffolding.
 import { startMockEaglesoftApi } from "../harness/eaglesoft-api/mock-server.mjs";
 // @ts-expect-error -- see above.
-import { opensslAvailable } from "../harness/eaglesoft-api/certs.mjs";
+import { liveBoxSkipReason, announceLiveBoxSkip } from "../harness/eaglesoft-api/preflight.mjs";
 
-/** The harness mints its own CA with the `openssl` CLI (Node has no X.509
- *  signing API). Rather than silently losing this coverage where openssl is
- *  missing, the suite skips locally but FAILS in CI — a green run that proved
- *  nothing is worse than a red one. */
-const HAS_OPENSSL = opensslAvailable();
+/** What this machine lacks for the live box — the `openssl` CLI the harness
+ *  mints its own CA with (Node has no X.509 signing API), or a Node whose
+ *  built-in fetch takes the CA-trusting undici dispatcher (WARP-2611) — or
+ *  `null` when it can run the suite. Rather than silently losing this coverage,
+ *  or sitting red on every clean checkout, the suite skips with the reason
+ *  locally and FAILS in CI — a green run that proved nothing is worse than a
+ *  red one, and so is a red one nobody reads. */
+const SKIP_REASON: string | null = liveBoxSkipReason();
 
-it("CI has the openssl CLI the live-box suite needs", () => {
-  if (!process.env.CI) return; // local dev without openssl: the skip below is fine
-  expect(HAS_OPENSSL, "openssl is required in CI or the live-box suite skips silently").toBe(true);
+it("CI runs the live-box suite rather than skipping it", () => {
+  if (!process.env.CI) return; // local dev without the prerequisites: the skip below is fine
+  expect(SKIP_REASON, "the live-box suite would skip in CI and prove nothing").toBeNull();
 });
 
 interface MockBox {
@@ -65,7 +68,9 @@ interface MockBox {
   close(): Promise<void>;
 }
 
-describe.skipIf(!HAS_OPENSSL)("EaglesoftApiConnector — live dummy box", () => {
+announceLiveBoxSkip("EaglesoftApiConnector — live dummy box", SKIP_REASON);
+
+describe.skipIf(SKIP_REASON !== null)("EaglesoftApiConnector — live dummy box", () => {
   let box: MockBox;
   let agent: Agent;
 
@@ -173,6 +178,11 @@ describe.skipIf(!HAS_OPENSSL)("EaglesoftApiConnector — live dummy box", () => 
       const c = makeConnector({}, { dispatcher: undefined });
       const err = await c.connect().catch((e: Error) => e);
       expect(err).toBeInstanceOf(ConnectorBlockedError);
+      // `connect()` resolves to `void`, so the `.catch` union is `void | Error`
+      // and `expect(...).toBeInstanceOf` narrows nothing for the compiler. The
+      // guard is what makes `.message` below legal — and it fails loudly if
+      // `connect()` ever stops rejecting.
+      if (!(err instanceof Error)) throw new Error("expected connect() to reject");
       expect(err.message).toContain(API_TRACK_REMEDIATION);
       expect(err.message).not.toContain("SAP SQL Anywhere client");
       // ...while the SQL track keeps its own, unchanged text.

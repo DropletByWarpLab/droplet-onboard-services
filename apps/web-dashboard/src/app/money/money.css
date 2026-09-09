@@ -1,0 +1,276 @@
+/* /money — WARP-2581. Tokens only; no literal colours.
+   Sourced from globals.css (production), never from the stale handoff copy
+   whose --color-label-secondary is 0.6 and fails WCAG AA. */
+
+.money-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* ── header band ─────────────────────────────────────────────────────────── */
+
+.money-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 28px;
+  padding: 20px 22px;
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-primary);
+}
+
+.money-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
+}
+
+.money-stat__label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-label-secondary);
+}
+
+.money-stat__figure {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  line-height: 1.15;
+  color: var(--color-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The first figure only, per the brief: display face at hero scale. */
+.money-stat--hero .money-stat__figure {
+  font-family: var(--font-display, var(--font-mono));
+  font-size: 34px;
+}
+
+.money-stat__sub {
+  font-size: 12px;
+  color: var(--color-label-secondary);
+}
+
+.money-stat--alert .money-stat__figure,
+.money-stat--alert .money-stat__sub {
+  color: var(--color-system-orange);
+}
+
+/* Withheld: the currency list stands where the number would be. */
+.money-stat__withheld {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  color: var(--color-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.money-band__read {
+  margin-left: auto;
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-label-secondary);
+  white-space: nowrap;
+}
+
+.money-band__read--stale {
+  color: var(--color-system-orange);
+}
+
+/* ── ledger ──────────────────────────────────────────────────────────────── */
+
+.money-filter {
+  display: flex;
+  gap: 6px;
+}
+
+.money-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-primary);
+}
+
+.money-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.money-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-label-secondary);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-separator);
+  white-space: nowrap;
+}
+
+.money-table td {
+  padding: 0 12px;
+  height: 52px;
+  border-bottom: 1px solid var(--color-separator);
+  color: var(--color-label-primary);
+  white-space: nowrap;
+}
+
+.money-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* The accent wash comes from the shell scope's `--brand-subtle`, not the
+   pre-DESIGN.md accent-subtle token: reports.css names that swap as THE
+   migration, and scripts/check-dashboard-classes.sh (rule legacy-token)
+   fails the build on the legacy one. Colour is near-identical -- the dark
+   value is byte-identical -- so this is a token fix, not a redesign. */
+.money-table tbody tr:hover {
+  background: var(--brand-subtle);
+}
+
+.money-cell--num {
+  font-family: var(--font-mono);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.money-cell--mono {
+  font-family: var(--font-mono);
+}
+
+.money-cell--balance {
+  font-family: var(--font-mono);
+  text-align: right;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.money-cell--overdue {
+  color: var(--color-system-orange);
+}
+
+.money-dir {
+  color: var(--color-label-secondary);
+  display: inline-flex;
+}
+
+/* ── status chips ────────────────────────────────────────────────────────── */
+
+.money-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  background: var(--color-surface-secondary);
+  color: var(--color-label-secondary);
+  white-space: nowrap;
+}
+
+.money-chip--paid {
+  color: var(--color-system-green);
+}
+
+.money-chip--overdue {
+  color: var(--color-system-orange);
+}
+
+.money-chip--void {
+  color: var(--color-label-tertiary);
+  text-decoration: line-through;
+}
+
+.money-source {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-label-secondary);
+}
+
+/* ── states ──────────────────────────────────────────────────────────────── */
+
+.money-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 56px 24px;
+  text-align: center;
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-primary);
+}
+
+.money-empty__icon {
+  color: var(--color-label-tertiary);
+}
+
+.money-empty__title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-label-primary);
+}
+
+.money-empty__body {
+  font-size: 13px;
+  color: var(--color-label-secondary);
+  max-width: 42ch;
+}
+
+.money-skeleton {
+  height: 52px;
+  border-bottom: 1px solid var(--color-separator);
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-secondary) 25%,
+    var(--color-surface-primary) 50%,
+    var(--color-surface-secondary) 75%
+  );
+  background-size: 400% 100%;
+  animation: money-shimmer 1.4s ease-in-out infinite;
+}
+
+.money-skeleton--figure {
+  height: 30px;
+  width: 140px;
+  border-bottom: none;
+  border-radius: 6px;
+}
+
+@keyframes money-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+/* A shimmer is decoration; a person who asked for less motion gets none. */
+@media (prefers-reduced-motion: reduce) {
+  .money-skeleton {
+    animation: none;
+  }
+}
+
+/* ── mobile ──────────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .money-band {
+    gap: 16px;
+  }
+
+  .money-band__read {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .money-stat--hero .money-stat__figure {
+    font-size: 28px;
+  }
+}

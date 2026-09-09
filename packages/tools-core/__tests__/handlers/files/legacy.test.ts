@@ -8,6 +8,7 @@
 // path traversal, base64 strictness, root refusal) carry over unchanged.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { getTool } from "../../../src/index.js";
 import type { ToolContext } from "../../../src/types.js";
@@ -20,8 +21,8 @@ interface CtxOpts {
   ncToken?: string;
   embedText?: ToolContext["embedText"];
   searchHybrid?: ToolContext["searchHybrid"];
-  ncPost?: ReturnType<typeof vi.fn>;
-  ncDelete?: ReturnType<typeof vi.fn>;
+  ncPost?: Mock;
+  ncDelete?: Mock;
   prisma?: ToolContext["prisma"];
 }
 
@@ -41,6 +42,7 @@ function makeCtx(opts: CtxOpts = {}) {
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     },
     matter: {} as ToolContext["matter"],
     embedText: opts.embedText,
@@ -106,7 +108,6 @@ describe("validateNcPath via tools", () => {
     "/Notes/%2E%2E/admin/x",
     "/Notes/%252e%252e/admin/x",
     "/Notes/..\\admin",
-    "/Notes/%zz",
   ]) {
     it(`write_file rejects malformed path ${JSON.stringify(bad)}`, async () => {
       const { ctx, ncPost } = makeCtx();
@@ -123,6 +124,15 @@ describe("validateNcPath via tools", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toBe("path too long");
     expect(ncPost).not.toHaveBeenCalled();
+  });
+
+  // PR #1985 review: a malformed percent escape is a literal, not an error.
+  it("write_file accepts a path holding a bare % as written", async () => {
+    const { ctx, ncPost } = makeCtx();
+    const res = await runTool("write_file", { path: "/Reports/50% Off.md", content: "x" }, ctx);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.data as { written: string }).written).toBe("/Reports/50% Off.md");
+    expect(ncPost).toHaveBeenCalledTimes(1);
   });
 
   it("write_file accepts a relative-looking path by prepending '/'", async () => {

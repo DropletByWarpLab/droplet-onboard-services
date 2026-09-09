@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Building2, FolderLock, FolderPlus, ShieldOff, Users as UsersIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { fetchAdminFilesUsage, listDepartments } from "@/lib/api";
 import type { AdminFilesUsageResponse, Department } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -73,7 +74,7 @@ function initials(name: string): string {
 export default function AdminFilesPage() {
   const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
-  const isAdminTier = !authLoading && (user?.role === "owner" || user?.role === "admin");
+  const isAdminTier = isAdminRole(user?.role);
 
   const [usage, setUsage] = useState<AdminFilesUsageResponse | null>(null);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -226,7 +227,26 @@ export default function AdminFilesPage() {
     router.push(`/files?space=${encodeURIComponent(`dept:${departmentId}`)}`);
   }
 
-  if (!authLoading && !isAdminTier) {
+  // Hydration branch. Without it this page rendered its real chrome — the
+  // "Company files" heading, the subtitle and the upload control — to
+  // whoever asked, for as long as the auth probe was in flight, and only
+  // then swapped in the denial. Its three siblings under /admin have always
+  // shown a neutral "Loading…" here.
+  if (authLoading) {
+    return (
+      <ShellPage icon={<FolderLock size={15} />} label="Company files" title="Company files">
+        <div
+          className="card"
+          aria-busy="true"
+          style={{ textAlign: "center", padding: 48, color: "var(--text-muted)" }}
+        >
+          Loading…
+        </div>
+      </ShellPage>
+    );
+  }
+
+  if (!isAdminTier) {
     return (
       <ShellPage icon={<FolderLock size={15} />} label="Company files" title="Company files">
         <div className="card">

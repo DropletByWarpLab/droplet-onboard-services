@@ -43,8 +43,22 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "list_drives",
+  // WARP-2098: this handler returns the orchestrator body VERBATIM, so the
+  // route's new `totals` and `system_disk` keys reach the model with no code
+  // change here. The description must therefore name them — otherwise the model
+  // sees an unexplained disk object and can mistake the box's install disk for
+  // a data drive it may offer to erase or add to a pool.
+  //
+  // EVERY CHARACTER HERE IS BUDGETED. Tool descriptions are part of the chat
+  // system block, and base-prompt-budget.test.ts caps the full pool at 60,000
+  // chars. On stage that pool sat at 59,987 — THIRTEEN chars of headroom — so
+  // naming the two new fields at any comfortable length blew the gate, and the
+  // rest of this description had to be compressed to pay for them (308 -> 259
+  // chars, net -49). If you add words here, run
+  // `vitest run src/services/base-prompt-budget.test.ts` in apps/orchestrator
+  // BEFORE pushing, and expect to have to take words out somewhere.
   description:
-    "List every data drive mounted under /mnt on the device — NVMe partitions plus any hot-plugged USB drives. Returns device, mount point, label, total/used/free bytes. A drive whose filesystem lives on a storage pool (mdadm array) carries pool: \"<mdN>\" naming its array; pool is null for a standalone drive.",
+    "Data drives under /mnt: device, mount, label, total/used/free bytes. A pooled drive carries pool:\"<mdN>\", null if standalone. `totals` sums only these drives, never pool capacity. `system_disk` is the box's install disk, not a drive: never erase or pool it.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -37,12 +37,15 @@
  *     the flip is meant to be an `.env` edit the operator makes deliberately.
  *     `planEnvAdvisories` below REPORTS what those values would become; it
  *     never writes the file.
- *   - Embeddings. `EMBEDDING_MODEL` defaults to `all-MiniLM-L6-v2`
- *     (`services/file-indexer/config.py:47`) and is served by ai-gateway's own
- *     sentence-transformers, not by Ollama (`providers/embeddings.py:18`). DMR
- *     never serves it, so no pgvector row needs re-embedding. This is the
- *     single largest thing that is NOT in the blast radius, and it is worth
- *     stating explicitly.
+ *   - Embeddings. `EMBEDDING_MODEL` defaults to `bge-small-en-v1.5`
+ *     (`services/file-indexer/config.py`, WARP-2196; it was `all-MiniLM-L6-v2`
+ *     before) and is served by ai-gateway's own sentence-transformers, not by
+ *     Ollama (`providers/embeddings.py`). DMR never serves it, so no pgvector
+ *     row needs re-embedding FOR AN OLLAMA/DMR FLIP. This is the single
+ *     largest thing that is NOT in the blast radius, and it is worth stating
+ *     explicitly. Changing the EMBEDDER itself is a different operation
+ *     entirely and does require a full re-embed — see
+ *     docs/RAG_RE_EMBED_RUNBOOK.md.
  */
 import type { PrismaClient } from "@prisma/client";
 import { ACTIVE_CHAT_MODEL_KEY } from "./active-model.service.js";

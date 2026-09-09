@@ -198,6 +198,67 @@ export interface SearchByVectorParams {
   filenameContains?: string;
 }
 
+/**
+ * WARP-2524 — HNSW search-time wiring, PORTED from the orchestrator's
+ * WARP-2193 fix. These constants and `hnswEfSearchFor` are this file's copy
+ * of `apps/orchestrator/src/services/file-search.service.ts`'s (same
+ * lockstep rule as SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY below — see the
+ * WARP-2196 note there): the orchestrator's `searchByVector` sizes
+ * `hnsw.ef_search` off the caller's row budget, while this copy kept running
+ * the graph walk at pgvector's DEFAULT ef_search of 40 with `searchHybrid`
+ * asking for `perArmK` (100) rows per arm — the walk had nowhere to hold
+ * more than 40 of them, so the `search_content` tool's vector arm silently
+ * returned fewer, worse candidates than it requested. If either side's
+ * numbers move, move both.
+ *
+ * `ef_search` is the size of the dynamic candidate list pgvector's HNSW walk
+ * keeps as it descends the graph; recall collapses when it is smaller than
+ * the number of rows the query asks for. The floor matches the arm's default
+ * budget (100), the overscan opens the list ABOVE the requested count
+ * (recall at `2k` is materially better than at the `k` minimum), and the
+ * ceiling is pgvector's own hard limit on the GUC.
+ */
+export const HNSW_EF_SEARCH_FLOOR = 100;
+export const HNSW_EF_SEARCH_OVERSCAN = 2;
+export const HNSW_EF_SEARCH_CEILING = 1000;
+
+/**
+ * WARP-2524 — size `hnsw.ef_search` off the caller's own row budget rather
+ * than hardcoding it (`limit` IS `perArmK` when the caller is
+ * `searchHybrid`). Total function on purpose: the result is interpolated
+ * into SQL (see `searchByVector`), so it must be incapable of returning
+ * anything but an integer inside pgvector's range, for any input — the clamp
+ * wraps the MULTIPLY so an absurd `limit` overflowing to Infinity is caught
+ * too. Byte-for-byte the orchestrator's WARP-2193 helper.
+ */
+export function hnswEfSearchFor(limit: number): number {
+  const wanted = Number.isFinite(limit)
+    ? Math.trunc(limit) * HNSW_EF_SEARCH_OVERSCAN
+    : HNSW_EF_SEARCH_FLOOR;
+  return Math.min(HNSW_EF_SEARCH_CEILING, Math.max(HNSW_EF_SEARCH_FLOOR, wanted));
+}
+
+/**
+ * WARP-2524 — the transaction the vector arm's SELECT runs in. It exists
+ * ONLY to give `SET LOCAL` a scope (Postgres treats `SET LOCAL` outside a
+ * transaction block as a no-op — it warns and moves on), which is why no
+ * isolation level is named: with a single read statement, READ COMMITTED and
+ * REPEATABLE READ take the same snapshot. The explicit timeouts raise
+ * Prisma's interactive-transaction defaults (maxWait 2s, timeout 5s) so the
+ * cap is not the binding constraint on a large corpus. Same values as the
+ * orchestrator's VECTOR_SEARCH_TX — lockstep.
+ */
+const VECTOR_SEARCH_TX = {
+  maxWait: 5_000,
+  timeout: 30_000,
+} as const;
+
+/** The slice of an interactive-transaction client this module uses. */
+interface VectorTxClient {
+  $executeRawUnsafe: (sql: string, ...params: unknown[]) => Promise<number>;
+  $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
+}
+
 export async function searchByVector(
   prisma: PrismaClient,
   params: SearchByVectorParams,
@@ -244,11 +305,32 @@ export async function searchByVector(
     ORDER BY embedding <=> '${vec}'::vector
     LIMIT $${limitParam}
   `;
+  // WARP-2524 — the SELECT runs INSIDE an interactive transaction, and it has
+  // to (ported from the orchestrator's WARP-2193 fix; see the lockstep note
+  // on the constants above). Postgres treats `SET LOCAL` outside a
+  // transaction block as a no-op: issued on the top-level client the
+  // statement would be accepted, discarded, and the graph walk would keep
+  // running at pgvector's default ef_search of 40 — the fix would read as
+  // landed and do nothing.
+  //
+  // SET LOCAL rather than SET, so the setting dies with the transaction and
+  // cannot leak onto the next borrower of this pooled connection.
+  //
+  // `efSearch` is interpolated because a GUC name/value is not a bindable
+  // parameter position; `hnswEfSearchFor` is total and returns an integer in
+  // [100, 1000] for every input, so nothing else can reach this string.
+  const efSearch = hnswEfSearchFor(params.limit);
   const rows = await (
     prisma as unknown as {
-      $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
+      $transaction: <T>(
+        fn: (tx: VectorTxClient) => Promise<T>,
+        opts?: { maxWait?: number; timeout?: number },
+      ) => Promise<T>;
     }
-  ).$queryRawUnsafe(sql, ...args);
+  ).$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+    return tx.$queryRawUnsafe(sql, ...args);
+  }, VECTOR_SEARCH_TX);
 
   const hits = rows
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
@@ -517,7 +599,22 @@ export async function rerankPassages(
 
 export const SEARCH_HYBRID_DEFAULT_PER_ARM_K = 100;
 export const SEARCH_HYBRID_DEFAULT_LIMIT = 10;
-export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.3;
+/**
+ * WARP-2196 — 0.3 -> 0.65, recalibrated for bge-small-en-v1.5.
+ *
+ * This file is the deliberate mirror of
+ * `apps/orchestrator/src/services/file-search.service.ts` (see the WARP-1637
+ * note on `ScoreKind` there), and this constant is the LLM tool path's copy
+ * of the same cosine floor. It has to move in lockstep: leaving it at 0.3
+ * would fix the dashboard's search while the agent's `search_content` kept
+ * shipping a floor that, under bge, rejects nothing at all — the lowest score
+ * across every measured pair is +0.344.
+ *
+ * Derivation and the full score distributions:
+ * `apps/orchestrator/src/services/similarity-floors.test.ts` and
+ * docs/RAG_RE_EMBED_RUNBOOK.md §8.
+ */
+export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.65;
 
 export interface SearchHybridRerankOption {
   redis: RedisLike;

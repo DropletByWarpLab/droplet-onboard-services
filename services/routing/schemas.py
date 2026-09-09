@@ -623,6 +623,24 @@ class ApTestSeedRequest(BaseModel):
     clients: Optional[list[dict]] = None
 
 
+class DiscoveryTestSeedRequest(BaseModel):
+    """Test-only payload to inject an mDNS record into the mock router.
+
+    WARP-2019 (scan-3), the `_test_seed` sibling of `ApTestSeedRequest`. Real
+    discovery is multicast; this is how scan-4's scanner poller gets driven
+    without an eSCL device on the wire. `service` is validated against the
+    same allowlist the read endpoint uses — the seam must not be able to
+    create a record shape production could never produce. 404 when
+    `router_instance` isn't a MockRouter.
+    """
+
+    service: str = Field(..., max_length=64)
+    hostname: str = Field(..., min_length=1, max_length=255)
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    last_ip: Optional[str] = None
+    txt: Optional[dict[str, str]] = None
+
+
 class ApBandSteeringRequest(BaseModel):
     """Toggle the external AP's band-steering master switch (WARP-1703).
 

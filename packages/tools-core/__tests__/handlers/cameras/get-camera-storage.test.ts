@@ -12,10 +12,11 @@
  * purge invisible for its whole life.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getCameraStorage from "../../../src/handlers/cameras/get-camera-storage.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

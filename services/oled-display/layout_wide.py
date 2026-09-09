@@ -249,14 +249,14 @@ COLUMNS = 12
 #     more. So surplus height becomes band D: a second row carrying data the
 #     compact tier has to drop on the floor — the alerts you can otherwise
 #     only reach by tapping the chrome badge, the degraded services past the
-#     third, the MEM/DISK trend hiding behind two bare percentages, and the
+#     third, the MEM/SYSTEM trend hiding behind two bare percentages, and the
 #     LAN client count, which the bridge already streams and which until now
 #     was rendered nowhere at all.
 #
 # Nothing in band D is invented to fill space. A block with no data says so.
 REF_BAND_B_TOP = 67    # band_b_top on the 1424x280 reference panel
 REF_ROW_H = 166        # authored primary row: eyebrow at 67 down to the
-                       # deepest glyph, health's 24px MEM/DISK/TEMP/GPU
+                       # deepest glyph, health's 24px MEM/SYSTEM/TEMP/GPU
                        # numerals drawn at y=202
 EXTRA_GAP = 20         # rule + breathing room between the primary row and D
 EXTRA_ROW_H = 24       # one band-D list row
@@ -863,8 +863,14 @@ def _cell_health(disp, draw, v: dict) -> None:
                      fill=d.V3_SPARK_FILL)
         draw.line(pts, fill=d.V3_ACCENT, width=2, joint="curve")
 
+    # WARP-2668: the third gauge is `psutil.disk_usage("/")` — the filesystem
+    # the box is INSTALLED on, which is not the storage the owner bought. Under
+    # its old "DISK" eyebrow it sat two cells away from a STORAGE meter that
+    # had never received data, so the only storage-shaped number on the glass
+    # was the wrong disk. "SYSTEM" names what it measures; C4's STORAGE cell
+    # carries the data drives. Do not merge or cross-fill the two.
     cols = (("MEM", _num(v.get("mem"), "%")),
-            ("DISK", _num(v.get("disk"), "%")),
+            ("SYSTEM", _num(v.get("disk"), "%")),
             ("TEMP", _num(v.get("temp"), "°")),
             ("GPU", _num(v.get("gpu"), "%")))
     cw = w / 4
@@ -973,6 +979,17 @@ def _cell_netstore(disp, draw, v: dict) -> None:
     draw.rectangle([x, g.by(120), x + w, g.by(120)], fill=d.V3_SEP)
 
     _eyebrow(draw, "STORAGE", x, g.by(130))
+    # WARP-2668 — the owner's DATA drives, from the orchestrator's os_disk-
+    # filtered total via display.fetch_storage(). Until that pump existed this
+    # read a key the vitals dict never carried, so the meter and the byte row
+    # below were dead code on every box ever shipped.
+    #
+    # `cap is None` is the em dash and it stays that way for every unknown:
+    # not polled yet, orchestrator down, bridge down, no data drives. The
+    # tempting fallback — `v["disk"]`, which is right there and always
+    # populated — is the INSTALL disk, and printing it here is the defect
+    # WARP-2098 was filed to remove. update_storage() is what guarantees
+    # `used` is a float whenever `cap` is, so the format below cannot raise.
     used, cap = store.get("used_tb"), store.get("total_tb")
     d._v3_text(draw, "—" if cap is None else f"{used:.1f} / {cap:.1f} TB",
                x, g.by(144), font=d._get_font(20, weight="bold"),
@@ -1005,7 +1022,7 @@ def _cell_netstore(disp, draw, v: dict) -> None:
 # under the primary row for a whole second one. Every block here shows data
 # the box ALREADY streams and the compact panel has to drop: the alert list
 # you can otherwise only reach by tapping the chrome badge, the degraded
-# services past the third, the MEM/DISK trend hiding behind two bare
+# services past the third, the MEM/SYSTEM trend hiding behind two bare
 # percentages, and lan_clients - fed by the bridge and, until now, rendered on
 # no screen at all.
 #
@@ -1090,11 +1107,15 @@ def _extra_activity(disp, draw, v: dict) -> None:
 
 
 def _extra_trends(disp, draw, v: dict) -> None:
-    """MEM and DISK over the same window as the CPU spark above them.
+    """MEM and SYSTEM over the same window as the CPU spark above them.
 
     The primary row prints both as bare percentages, which cannot answer the
     question you walked to the rack holding: is this climbing, or has it been
-    sitting there all week?"""
+    sitting there all week?
+
+    SYSTEM is the install filesystem, same series as the primary row's third
+    gauge (WARP-2668) — the buffer keeps its `sparks_disk` name because that is
+    what `update_stats` feeds; only the eyebrow changed."""
     d = _d()
     g = geom()
     x, w = g.cells["health"]
@@ -1105,7 +1126,7 @@ def _extra_trends(disp, draw, v: dict) -> None:
     h = max(12, min(30, g.extra_bot - head - 18))
     for i, (label, buf, cur) in enumerate((
             ("MEM", v.get("sparks_mem"), v.get("mem")),
-            ("DISK", v.get("sparks_disk"), v.get("disk")))):
+            ("SYSTEM", v.get("sparks_disk"), v.get("disk")))):
         sx = x + i * (half + 24)
         _eyebrow(draw, label, sx, head)
         d._v3_text(draw, _num(cur, "%"), sx + half, head - 4,

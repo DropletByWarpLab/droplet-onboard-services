@@ -21,6 +21,10 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
+// WARP-2821 — the sentinel-assembly rule the assistant runs. Asserted against
+// here rather than re-spelled, so this route and `resolveChunkOwnerIds` cannot
+// answer the same question differently.
+import { deptCorpusKeys } from "@droplet/tools-core";
 
 vi.mock("../config.js", () => ({
   config: {
@@ -675,6 +679,33 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     const params = searchByLexicalSpy.mock.calls[0][1];
     expect(params.additionalUserIds).toEqual(["__dept_fin-uuid__"]);
+  });
+
+  // WARP-2821 — the assistant asks this same question behind `search_content`,
+  // and once answered it differently: it emitted no sentinel at all, so every
+  // shared document this page listed was invisible to it. One function now
+  // assembles the sentinel list — `deptCorpusKeys` — and this asserts the
+  // ROUTE's output against that function rather than against hand-written
+  // strings. A third case added to the helper (or the legacy `__household__`
+  // form retired after a reindex) reds here the moment this call site stops
+  // calling it and starts typing the rule out again.
+  it("assembles the corpus with deptCorpusKeys — byte for byte, order included", async () => {
+    const depts = [
+      // Both branches of the rule in one list: the HOUSEHOLD dual-sentinel and
+      // a plain department, in an order the assertion is sensitive to.
+      { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 3 },
+      { id: "fin-uuid", kind: "DEPARTMENT", aclVersion: 2 },
+    ];
+    departmentFindManyMock.mockResolvedValueOnce(depts);
+    searchByLexicalSpy.mockResolvedValueOnce([]);
+
+    await request(app).get("/api/files/search/content?q=parity&mode=keyword");
+
+    const params = searchByLexicalSpy.mock.calls[0][1];
+    // The caller's own corpus stays FIRST and separate ($1 binding); every
+    // sentinel after it is the shared helper's answer, unaltered.
+    expect(params.userId).toBe("dev");
+    expect(params.additionalUserIds).toEqual(deptCorpusKeys(depts));
   });
 
   it("degrades to the personal corpus when the department lookup fails (never a new failure mode)", async () => {

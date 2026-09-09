@@ -84,10 +84,27 @@ vi.mock("../services/llm-agent.service.js", () => ({
 import { createLlmRouter } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
 import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
 import { PERSONA_PRESETS } from "../services/persona-presets.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — this file's persona fixture was always right; its BUSINESS one
+// did not exist at all (no `workspace`/`businessProfile` delegate), so the
+// business composer threw on both happy-path cases and the route's fail-open
+// ate it. The guard below is what makes the difference between "the fixture
+// is wrong" and a silent green run; the one case that WANTS a persona
+// fail-open declares it explicitly.
+const composers = guardComposerFailOpen();
 
 function createPrismaMock() {
   return {
+    // WARP-2652 — the business half of the pair. Kept here rather than in the
+    // persona row below because this file owns the persona contract and
+    // builds that row itself on purpose.
+    ...promptBlockPrismaDelegates(),
     // The persona singleton the route reads fresh each request.
     assistantPersona: {
       findUnique: vi.fn(async () => ({
@@ -154,6 +171,9 @@ describe("POST /api/llm/chat — persona block injection (§7.2)", () => {
     // selected preset's fragment.
     expect(sys).toContain(PERSONA_BLOCK_PREFIX);
     expect(sys).toContain(PERSONA_PRESETS.founder);
+    // WARP-2652 — and the business block, which never composed here at all
+    // (no `workspace`/`businessProfile` delegate) and so was never checked.
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
 
     // Positioning: identity → persona → tool guidance.
     const idIdx = sys.indexOf("You are Droplet");
@@ -165,6 +185,10 @@ describe("POST /api/llm/chat — persona block injection (§7.2)", () => {
   });
 
   it("fail-opens to no persona block when the singleton read throws", async () => {
+    // WARP-2652 — the ONE deliberate persona fail-open in this file: the case
+    // drives the throw itself, two lines below, and the absence of the block
+    // is the assertion. Opt this case out of the guard and nothing else.
+    composers.expectFailOpen("persona");
     const prisma = createPrismaMock();
     prisma.assistantPersona.findUnique.mockRejectedValueOnce(
       new Error("db down"),

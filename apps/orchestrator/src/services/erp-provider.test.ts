@@ -4,8 +4,11 @@
  * these assertions are offline.
  */
 import { describe, it, expect } from "vitest";
+import { ConnectorBlockedError } from "@droplet/erp-connector";
+import { mcpProviderIds } from "@droplet/shared-types";
 import {
   connectorForProvider,
+  isConnectionProvider,
   isKnownErpProvider,
   EAGLESOFT_PROVIDER,
   EAGLESOFT_API_PROVIDER,
@@ -39,9 +42,46 @@ describe("erp-provider dual-track factory", () => {
     expect(c.provider).toBe("eaglesoft-api");
   });
 
-  it("falls back to the SQL connector for an unknown provider (never a surprise transport)", () => {
-    const c = connectorForProvider({ provider: "mystery", host: "10.0.0.5" });
-    expect(c.provider).toBe("eaglesoft");
+  it("REFUSES an unknown provider instead of falling back to SQL (WARP-2217)", () => {
+    // This used to return an EaglesoftConnector, on the reasoning that a stray
+    // value must not reach a surprise transport. The fallback WAS the surprise
+    // transport: a row naming anything unrecognised got a SQL Anywhere
+    // connector aimed at that row's `host`, and reported its failure as an
+    // Eaglesoft failure. Absence is never a silent success.
+    //
+    // Mutation: make `connectorForProvider` return `undefined` (or restore the
+    // SQL fallback) for a miss and this goes red.
+    expect(() => connectorForProvider({ provider: "mystery", host: "10.0.0.5" })).toThrow(
+      ConnectorBlockedError,
+    );
+    expect(() => connectorForProvider({ provider: "mystery", host: "10.0.0.5" })).toThrow(
+      /unknown ERP provider "mystery"/,
+    );
+  });
+
+  it("refuses the empty provider and a catalog-only placeholder for the same reason", () => {
+    // `opendental` HAS a descriptor — it is a hub card with no shipped
+    // transport. Having a descriptor must not make it buildable, or a
+    // placeholder becomes a connectable integration by accident.
+    expect(() => connectorForProvider({ provider: "", host: "h" })).toThrow(ConnectorBlockedError);
+    expect(() => connectorForProvider({ provider: "opendental", host: "h" })).toThrow(
+      ConnectorBlockedError,
+    );
+    expect(isKnownErpProvider("opendental")).toBe(false);
+  });
+
+  it("degrades a refusal to ERP_NOT_CONNECTED rather than a fault", () => {
+    // ConnectorBlockedError specifically, not a bare Error: both call sites
+    // already map it to "this integration isn't connected", so a row written by
+    // an older or newer build shows the owner something actionable instead of a
+    // 500.
+    try {
+      connectorForProvider({ provider: "mystery", host: "10.0.0.5" });
+      expect.unreachable("connectorForProvider must throw for an unknown provider");
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("CONNECTOR_BLOCKED");
+      expect((err as { remediation?: string }).remediation).toBeTruthy();
+    }
   });
 });
 
@@ -84,5 +124,39 @@ describe("erp-provider export-drop track (WARP-1964)", () => {
     // a folder reports that rather than reporting a connection failure.
     const c = connectorForProvider({ provider: "eaglesoft-export", host: "" });
     await expect(c.connect()).rejects.toThrow(/CONNECTOR_BLOCKED|blocked/i);
+  });
+});
+
+/**
+ * WARP-2659 — two predicates, one track apart.
+ *
+ * `isKnownErpProvider` is "can this factory build a connector" and gates
+ * `connect()`, `test()` and the write toggle. `isConnectionProvider` is "can
+ * this key hold a connection row" and gates `disconnect()`. The `mcp` track is
+ * the whole difference: a row, a credential, no connector.
+ */
+describe("erp-provider connection-row providers (WARP-2659)", () => {
+  it("admits the mcp track as a connection provider while still refusing it a connector", () => {
+    expect(mcpProviderIds().length).toBeGreaterThan(0);
+    for (const id of mcpProviderIds()) {
+      expect(isConnectionProvider(id), `${id} holds a row`).toBe(true);
+      // Mutation: collapse the two predicates → red here, and the write
+      // toggle would admit a track ADR-043 §3 forbids writing through.
+      expect(isKnownErpProvider(id), `${id} has no connector`).toBe(false);
+    }
+  });
+
+  it("agrees with isKnownErpProvider on every other key", () => {
+    for (const id of KNOWN_ERP_PROVIDERS) {
+      expect(isConnectionProvider(id), id).toBe(true);
+    }
+    for (const id of ["eaglesoft-export", "generic-export"]) {
+      expect(isConnectionProvider(id), id).toBe(isKnownErpProvider(id));
+      expect(isConnectionProvider(id), id).toBe(true);
+    }
+    // Catalog placeholders, a profile-less export key, and a stranger: no row.
+    for (const id of ["dentrix", "opendental", "nosuchpms-export", "mystery"]) {
+      expect(isConnectionProvider(id), id).toBe(false);
+    }
   });
 });

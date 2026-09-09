@@ -14,7 +14,7 @@ export function BrightnessSlider({
   onBrightnessChange,
 }: BrightnessSliderProps) {
   const [localPct, setLocalPct] = useState(brightness);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

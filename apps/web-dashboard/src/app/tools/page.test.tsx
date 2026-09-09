@@ -10,7 +10,14 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { PENDING_COMPOSER_KEY, type ToolCatalogEntry, type PendingComposerPayload } from "@/lib/types";
+import {
+  PENDING_COMPOSER_KEY,
+  type ToolCatalogEntry,
+  // WARP-2582 — PendingComposerPayload became a union (tool | pin). The
+  // /tools surface only ever writes the TOOL variant, so these assertions
+  // name it directly instead of narrowing a union they cannot produce.
+  type PendingComposerToolPayload,
+} from "@/lib/types";
 
 const useToolCatalogMock = vi.fn();
 vi.mock("@/lib/hooks/useToolCatalog", () => ({
@@ -206,7 +213,7 @@ describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
 
     const raw = window.sessionStorage.getItem(PENDING_COMPOSER_KEY);
     expect(raw).not.toBeNull();
-    const payload = JSON.parse(raw!) as PendingComposerPayload;
+    const payload = JSON.parse(raw!) as PendingComposerToolPayload;
     expect(payload.kind).toBe("tool");
     expect(payload.toolName).toBe("block_network_device");
     expect(payload.label).toBe("Block network device");
@@ -230,7 +237,7 @@ describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
     );
     const payload = JSON.parse(
       window.sessionStorage.getItem(PENDING_COMPOSER_KEY)!,
-    ) as PendingComposerPayload;
+    ) as PendingComposerToolPayload;
     expect(payload.toolName).toBe("list_network_devices");
     expect(payload.requiresWrite).toBe(false);
     expect(payload.requiresConfirmation).toBe(false);

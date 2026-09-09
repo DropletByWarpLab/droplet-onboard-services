@@ -1,10 +1,10 @@
 /**
  * Client-app download catalog — parsing + schema validation.
  *
- * The box ships the Droplet client apps (Windows installer, Android APK,
- * iOS build) *inside the appliance image*, staged under
- * `DROPLET_APP_DOWNLOADS_DIR` alongside a `catalog.json` that names every
- * asset and pins its sha256. This module is the parser half of that
+ * The box serves the Droplet client apps (Windows installer, Android APK,
+ * iOS build) from `DROPLET_APP_DOWNLOADS_DIR`, where an operator staged
+ * them alongside a `catalog.json` that names every asset and pins its
+ * sha256. This module is the parser half of that
  * contract: pure, no I/O, no process state — it turns untrusted bytes
  * into a typed `AppCatalog` or an exact `failureReason`.
  *
@@ -12,12 +12,12 @@
  * are one contract and change together.
  *
  * WHY A DIGEST AND NOT A SIGNATURE (read before "hardening" this):
- * the artifacts are baked into the appliance image, so the image IS the
- * trust root — they are not fetched from anywhere at runtime. What the
- * box still owes the customer is proof that the bytes it hands over are
- * the bytes that shipped, so `store.ts` re-hashes every asset against the
- * digest pinned here and refuses to serve on mismatch. That gate is real
- * and it works today.
+ * the artifacts are placed on the box by an operator, so that stage IS
+ * the trust root — they are not fetched from anywhere at runtime. What
+ * the box still owes the customer is proof that the bytes it hands over
+ * are the bytes that were staged, so `store.ts` re-hashes every asset
+ * against the digest pinned here and refuses to serve on mismatch. That
+ * gate is real and it works today.
  *
  * A cosign signature over the catalog is supported on top of that
  * (`store.ts`, `requireSignature`), but it is deliberately NOT the load-

@@ -5,12 +5,13 @@
  * deliberately consolidated onto `complete_reminder` / `list_reminders`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import setTimer from "../../../src/handlers/reminders/set-timer.js";
 import type { ToolContext } from "../../../src/types.js";
 
 const NOW = new Date("2026-07-19T12:00:00Z");
 
-function ctxWith(create: ReturnType<typeof vi.fn>, userId?: string): ToolContext {
+function ctxWith(create: Mock, userId?: string): ToolContext {
   return {
     prisma: { reminder: { create } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],
@@ -21,7 +22,7 @@ function ctxWith(create: ReturnType<typeof vi.fn>, userId?: string): ToolContext
 }
 
 /** prisma.reminder.create mock that echoes the row it was given. */
-function echoCreate(): ReturnType<typeof vi.fn> {
+function echoCreate(): Mock {
   return vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
     Promise.resolve({ id: "t1", ...data }),
   );

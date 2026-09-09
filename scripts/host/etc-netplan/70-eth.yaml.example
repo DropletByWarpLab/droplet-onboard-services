@@ -53,6 +53,18 @@ network:
       addresses:
         - 192.168.10.1/24
       dhcp4: false
+      # WARP-2208: a member-less bridge NEVER gets carrier, so it can never
+      # reach `degraded` -- and netplan puts every non-optional interface into
+      # systemd-networkd-wait-online's -i list. Without this, that unit times
+      # out after 120s on EVERY boot and sits permanently failed, which trains
+      # everyone to ignore `systemctl --failed` (the highest-signal command on
+      # the box). `optional: true` makes netplan omit it from the wait list.
+      #
+      # br-lan above is declared the same way and escapes only because
+      # droplet-openwrt-attach enslaves veth-dap into it at boot -- an implicit
+      # dependency, not a guarantee. Do not read its health as proof this
+      # pattern is safe.
+      optional: true
       parameters:
         stp: false
         forward-delay: 0

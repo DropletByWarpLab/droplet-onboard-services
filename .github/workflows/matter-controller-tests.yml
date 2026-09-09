@@ -49,5 +49,11 @@ jobs:
       - name: Type-check @droplet/matter-controller
         run: npm run -w @droplet/matter-controller build
 
+      # WARP-2617: the build above excludes `__tests__`; this is the step
+      # that typechecks the 6 test files — mirrors ci.yml's
+      # matter-controller leg.
+      - name: Typecheck @droplet/matter-controller tests (tsconfig.test.json)
+        run: npm run -w @droplet/matter-controller typecheck:tests
+
       - name: Run @droplet/matter-controller vitest
         run: npm run -w @droplet/matter-controller test

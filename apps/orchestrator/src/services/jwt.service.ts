@@ -73,9 +73,21 @@ const SESSION_SET_PREFIX = "jwt:sessions:";
 const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest", "service"] as const;
 
 /**
- * Derive a role from a Nextcloud group list.
- * Single source of truth — used at login and in the Nextcloud OCS fallback.
- * See ADR-004 §4 for the mapping.
+ * Derive a role from a Nextcloud group list. See ADR-004 §4 for the mapping.
+ *
+ * A HINT, NOT AN AUTHORITY (WARP-1636). Every group this reads is one that
+ * a Nextcloud instance administrator can grant themselves — including the
+ * literal `"admin"` group below, which is Nextcloud's OWN built-in
+ * instance-administrator group and which `buildNcGroups`
+ * (routes/auth-groups.ts) hands to every owner/admin-tier Droplet user. A
+ * session minted straight from this function therefore lets anyone who can
+ * reach Nextcloud's user-management UI hand themselves `owner`, the one
+ * tier ADR-032 §3 states bypasses layer 2 entirely.
+ *
+ * So: never mint a session from this return value directly. Go through
+ * `resolveNcSessionRole` below, which caps it at the role Droplet's own
+ * store holds for that person. The docstring this replaces called it "the
+ * single source of truth"; the store is, and that was the bug.
  */
 export function roleFromGroups(groups: string[]): Role {
   if (groups.includes("admin")) return "owner";
@@ -116,6 +128,51 @@ export const ROLE_RANK: Record<Role, number> = {
  */
 export function roleOutranks(a: Role, b: Role): boolean {
   return ROLE_RANK[a] > ROLE_RANK[b];
+}
+
+/**
+ * WARP-1636 — the single funnel every NEXTCLOUD-authenticated session mint
+ * runs through. Returns the role to mint at, given the holder's Nextcloud
+ * groups and the role Droplet's own `User.role` column holds for them.
+ *
+ * The rail, in one sentence: **Nextcloud group membership may confirm or
+ * narrow a session, never raise it.** `storedRole` is the ceiling.
+ *
+ * Why this exists rather than the bare `roleFromGroups` the OCS fallback
+ * used to call (all verified on `main` before the fix):
+ *
+ *   • `buildNcGroups` provisions every owner/admin-tier Droplet user into
+ *     Nextcloud's BUILT-IN `admin` group — they are full NC instance
+ *     administrators, not members of some Droplet-scoped group.
+ *   • `roleFromGroups(["admin"])` returned `owner`.
+ *   • So a contractor holding a deliberately-NARROWED Admin-based custom
+ *     role (ADR-032 / RBAC v2 — `User.role = "admin"`, `files` withheld)
+ *     could authenticate against Nextcloud with the same password (the
+ *     Droplet password IS the Nextcloud password) and come back holding an
+ *     `owner` orchestrator session: the one tier ADR-032 §3 says bypasses
+ *     layer 2 entirely. Full privilege escalation out of a role that was
+ *     narrowed on purpose, and the dashboard's own 404 on
+ *     `GET /api/files/spaces` proved layer 2 was doing its job — the
+ *     bypass came in around it.
+ *
+ * DIRECTIONAL, and that is the whole safety property: the cap removes
+ * authority the store does not back and adds none. A real owner keeps
+ * `owner` (their stored role IS `owner`); an operator who stripped
+ * someone's NC role groups still narrows them, because the group-derived
+ * role is honoured whenever it is the LOWER of the two.
+ *
+ * Expressed with `roleOutranks` on purpose — the rank ladder is already
+ * the codebase's one answer to "may this role stand in for that one"
+ * (invite/create rank caps, rail 3 in role-mutation-guard.service.ts). A
+ * second, parallel notion of privilege ordering is exactly the drift the
+ * WARP-1526 consolidation removed.
+ */
+export function resolveNcSessionRole(
+  ncGroups: string[],
+  storedRole: Role,
+): Role {
+  const derived = roleFromGroups(ncGroups);
+  return roleOutranks(derived, storedRole) ? storedRole : derived;
 }
 
 /**

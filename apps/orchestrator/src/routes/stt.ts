@@ -55,7 +55,14 @@ export function createSttRouter(): Router {
           res.status(400).json({ error: "empty_audio" });
           return;
         }
-        const rate = Number.parseInt(String(req.query.rate ?? "16000"), 10);
+        // CodeQL js/type-confusion-through-parameter-tampering: `?rate=a&rate=b`
+        // arrives as an array — only a single string (or absence) is a rate.
+        const rawRate = req.query.rate;
+        if (rawRate !== undefined && typeof rawRate !== "string") {
+          res.status(400).json({ error: "invalid_rate" });
+          return;
+        }
+        const rate = Number.parseInt(rawRate ?? "16000", 10);
         if (!Number.isFinite(rate) || rate < 8000 || rate > 48000) {
           res.status(400).json({ error: "invalid_rate" });
           return;

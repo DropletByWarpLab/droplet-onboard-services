@@ -1,0 +1,291 @@
+{
+  "format": 1,
+  "provenance": "Recorded 2026-09-02 from the tool surface advertised by an OAuth-connected Atlassian Rovo MCP client. NOT a probe of the API-token path: Warp Lab holds no Atlassian credential. Compass tools are present and JSM/Bitbucket tools are absent, which corroborates the auth-mode matrix rather than contradicting it. A tool absent from this file is DENIED at dispatch (REMOTE_TOOL_NOT_CLASSIFIED), so the missing rows cost capability, not safety.",
+  "toolCount": 40,
+  "v1ReadToolCount": 26,
+  "authModes": {
+    "jira": [
+      "api-token",
+      "oauth"
+    ],
+    "confluence": [
+      "api-token",
+      "oauth"
+    ],
+    "compass": [
+      "oauth"
+    ],
+    "jsm": [
+      "api-token"
+    ],
+    "bitbucket": [
+      "api-token"
+    ],
+    "teamwork-graph": [
+      "api-token",
+      "oauth"
+    ],
+    "platform": [
+      "api-token",
+      "oauth"
+    ]
+  },
+  "tools": [
+    {
+      "name": "addCommentToJiraIssue",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3 — no remote write before WARP-2321's deny tier."
+    },
+    {
+      "name": "addTeamworkGraphContext",
+      "product": "teamwork-graph",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "addWorklogToJiraIssue",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "atlassianUserInfo",
+      "product": "platform",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "createCompassComponent",
+      "product": "compass",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "createCompassComponentRelationship",
+      "product": "compass",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "createCompassCustomFieldDefinition",
+      "product": "compass",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3. Changes a site-wide schema."
+    },
+    {
+      "name": "createConfluenceFooterComment",
+      "product": "confluence",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "createConfluenceInlineComment",
+      "product": "confluence",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "createConfluencePage",
+      "product": "confluence",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3. Creates, never replaces — not destructive."
+    },
+    {
+      "name": "createIssueLink",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "createJiraIssue",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3."
+    },
+    {
+      "name": "editJiraIssue",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "Field-level update, not whole-issue replacement, so it is a write and not destructive — unlike its Confluence counterpart."
+    },
+    {
+      "name": "fetch",
+      "product": "platform",
+      "grade": "read",
+      "v1": "allowed",
+      "note": "Resolves an Atlassian URL to the object behind it. A read of the customer's own tenant — it is not a general web fetch, and cannot reach a host outside Atlassian."
+    },
+    {
+      "name": "getAccessibleAtlassianResources",
+      "product": "platform",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getCompassComponent",
+      "product": "compass",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getCompassComponents",
+      "product": "compass",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getCompassCustomFieldDefinitions",
+      "product": "compass",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluenceCommentChildren",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluencePage",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluencePageDescendants",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluencePageFooterComments",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluencePageInlineComments",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getConfluenceSpaces",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getIssueLinkTypes",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getJiraIssue",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getJiraIssueRemoteIssueLinks",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getJiraIssueTypeMetaWithFields",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getJiraProjectIssueTypesMetadata",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getPagesInConfluenceSpace",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getTeamworkGraphContext",
+      "product": "teamwork-graph",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getTeamworkGraphObject",
+      "product": "teamwork-graph",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getTransitionsForJiraIssue",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "getVisibleJiraProjects",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "lookupJiraAccountId",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "search",
+      "product": "platform",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "searchConfluenceUsingCql",
+      "product": "confluence",
+      "grade": "read",
+      "v1": "allowed"
+    },
+    {
+      "name": "searchJiraIssuesUsingJql",
+      "product": "jira",
+      "grade": "read",
+      "v1": "allowed",
+      "note": "Upstream #221: caps at 5 nodes and reports the page complete. The bridge's TruncatedResultError guard is what stops that rendering as a total."
+    },
+    {
+      "name": "transitionJiraIssue",
+      "product": "jira",
+      "grade": "write",
+      "v1": "blocked-write",
+      "note": "ADR-043 §3. A transition can fire automation the box cannot see."
+    },
+    {
+      "name": "updateConfluencePage",
+      "product": "confluence",
+      "grade": "destructive",
+      "v1": "excluded",
+      "note": "WHOLE-BODY REPLACEMENT (upstream #210/#217/#60): a partial payload destroys the rest of the page, and Confluence records it as a normal successful edit. Excluded from v1 — see CONFLUENCE_UPDATE_TOOL."
+    }
+  ]
+}

@@ -50,8 +50,12 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
+      // WARP-2580 — `list_recent_files` was named here and is in
+      // EXCLUDED_FROM_CHAT_TOOLS, so on every chat turn this core tool pointed
+      // the model at a third source it could not call. The two that remain are
+      // both in CORE_TOOL_NAMES, so this sentence is now true on every turn.
       description:
-        "Full path of the document to read, as reported by search_content, list_files, or list_recent_files.",
+        "Full path of the document to read, as reported by search_content or list_files.",
     },
     start_chunk: {
       type: "integer",

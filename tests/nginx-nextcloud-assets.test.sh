@@ -115,7 +115,8 @@ for prefix in "${ASSET_PREFIXES[@]}"; do
 
   # ── Semgrep suppressions (the CI gate is DIFF-SCOPED) ──
   #
-  # `semgrep.yml` scans with `--baseline-commit <merge-base>`, so the identical
+  # The semgrep leg (`ci.yml`, WARP-2481) scans with `--baseline-commit
+  # <merge-base>`, so the identical
   # patterns in the pre-existing legs are INVISIBLE to it while these new lines
   # are not. "The leg above does the same thing and is fine" is therefore not
   # evidence — every new leg needs its own annotation, in the house style:

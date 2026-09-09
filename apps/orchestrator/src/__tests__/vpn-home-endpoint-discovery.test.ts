@@ -226,9 +226,18 @@ describe("pickHomeEndpoint precedence (env/summary > bridge > null)", () => {
     ).toBe("192.168.1.87");
   });
 
-  it("falls back to the bridge when the summary itself is unavailable (null)", () => {
+  it("falls back to the bridge when a READ summary carried no WAN (null)", () => {
+    // summaryOk defaults true: the summary was read, it simply had no WAN --
+    // the single-box shape, where the host owns the uplink and the bridge is
+    // the right answer. WARP-2183 made this distinct from an unreadable
+    // summary; see the describe block below.
     expect(
-      pickHomeEndpoint({ envFallback: "", summary: null, bridgeIp: "192.168.1.87" }),
+      pickHomeEndpoint({
+        envFallback: "",
+        summary: null,
+        bridgeIp: "192.168.1.87",
+        summaryOk: true,
+      }),
     ).toBe("192.168.1.87");
   });
 
@@ -246,5 +255,64 @@ describe("pickHomeEndpoint precedence (env/summary > bridge > null)", () => {
         bridgeIp: "127.0.0.1",
       }),
     ).toBeNull();
+  });
+});
+
+/**
+ * WARP-2183 -- an UNREADABLE summary must not fall through to the box's own
+ * uplink IP.
+ *
+ * The bridge reports the BOX's egress source address. That is the home endpoint
+ * only when the box owns the WAN. Behind an edge router the very same probe
+ * returns a router-LAN address (192.168.9.195 on the lab fabric) which no
+ * home-mode peer -- sitting upstream of the router on the household LAN -- can
+ * reach. Minting it produces a conf that never handshakes, with no error at any
+ * layer.
+ *
+ * Before this, a throw from fetchNetworkSummary and a genuine wan.present:false
+ * both reached the picker as `summary === null`, so a transient routing fault on
+ * an edge-router box silently produced that wrong conf. `summaryOk: false` now
+ * separates the two and prefers an honest null (the route renders its 503).
+ */
+describe("pickHomeEndpoint refuses the host-uplink guess when the shape is unknown", () => {
+  it("returns null instead of the bridge IP when the summary was unreadable", () => {
+    expect(
+      pickHomeEndpoint({
+        envFallback: "",
+        summary: null,
+        bridgeIp: "192.168.9.195",
+        summaryOk: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("still honours an explicit operator override when the summary was unreadable", () => {
+    // WIREGUARD_HOME_ENDPOINT_HOST is a deliberate pin, not a guess -- an
+    // unreadable summary must not discard it.
+    expect(
+      pickHomeEndpoint({
+        envFallback: "192.168.1.9",
+        summary: null,
+        bridgeIp: "192.168.9.195",
+        summaryOk: false,
+      }),
+    ).toBe("192.168.1.9");
+  });
+
+  it("still returns a summary WAN IP when one was read", () => {
+    expect(
+      pickHomeEndpoint({
+        envFallback: "",
+        summary: summaryWithWan({ "ipv4-address": [{ address: "192.168.1.50", mask: 24 }] }),
+        bridgeIp: "192.168.9.195",
+        summaryOk: true,
+      }),
+    ).toBe("192.168.1.50");
+  });
+
+  it("omitting summaryOk keeps the pre-WARP-2183 behaviour (bridge wins)", () => {
+    expect(
+      pickHomeEndpoint({ envFallback: "", summary: null, bridgeIp: "192.168.1.87" }),
+    ).toBe("192.168.1.87");
   });
 });

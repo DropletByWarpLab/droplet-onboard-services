@@ -8,11 +8,12 @@
  * confirmation — mail leaves the LAN.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import emailSend from "../../../src/handlers/email/send.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(opts: {
-  post?: ReturnType<typeof vi.fn>;
+  post?: Mock;
   role?: Role;
   userId?: string;
 }): ToolContext {
@@ -38,7 +39,7 @@ function ctxWith(opts: {
   };
 }
 
-function okPost(): ReturnType<typeof vi.fn> {
+function okPost(): Mock {
   return vi.fn().mockResolvedValue(
     new Response(
       JSON.stringify({
@@ -51,7 +52,7 @@ function okPost(): ReturnType<typeof vi.fn> {
   );
 }
 
-function postWithStatus(status: number): ReturnType<typeof vi.fn> {
+function postWithStatus(status: number): Mock {
   return vi.fn().mockResolvedValue(new Response("{}", { status }));
 }
 

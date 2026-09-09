@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listReminders from "../../../src/handlers/reminders/list-reminders.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(findMany: ReturnType<typeof vi.fn>, userId = "alice"): ToolContext {
+function ctxWith(findMany: Mock, userId = "alice"): ToolContext {
   return {
     prisma: { reminder: { findMany } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

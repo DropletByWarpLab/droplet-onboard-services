@@ -43,12 +43,44 @@ AI_GATEWAY_GRPC_URL = os.environ.get("AI_GATEWAY_GRPC_URL", "localhost:50051")
 # which travels inside restic snapshots (see column_crypto.py).
 DOC_KEK_PATH = os.environ.get("DOC_KEK_PATH", "/data/secrets/doc-kek.key")
 
-# Embedding model (must match the pgvector column dimension — 384 for MiniLM)
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+# Embedding model. Must be a key of embedding_models.EMBEDDING_MODELS — the
+# registry carries the Hub repo, the context window and the output width, none
+# of which are derivable from the id.
+#
+# WARP-2196: was `all-MiniLM-L6-v2`, whose `max_seq_length` is 256 while
+# CHUNK_SIZE_TOKENS is 512 — the embedder dropped the back half of every
+# full-size chunk. `bge-small-en-v1.5` is MIT, has a 512-token window and the
+# same 384 dimensions, so `FileContentChunk.embedding` stays `vector(384)` and
+# its index is untouched.
+#
+# Changing this value REQUIRES a full corpus re-embed — vectors from two
+# different models are not comparable even at equal width. That is NOT
+# automatic and no migration performs it: `corpus_state.py` compares this
+# value against the model recorded for the existing corpus at startup and
+# REFUSES to write new chunks when they disagree, so a box that skips the
+# re-embed stops indexing loudly instead of silently mixing vector spaces.
+# Recovery is `scripts/rag-re-embed.sh`; full procedure in
+# docs/RAG_RE_EMBED_RUNBOOK.md.
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-small-en-v1.5")
 
-# Chunking params
+# Chunking params. CHUNK_SIZE_TOKENS is the WHOLE per-chunk embedder budget —
+# body text plus the WARP-435 contextual header — not the body alone.
 CHUNK_SIZE_TOKENS = int(os.environ.get("CHUNK_SIZE_TOKENS", "512"))
 CHUNK_OVERLAP_RATIO = float(os.environ.get("CHUNK_OVERLAP_RATIO", "0.2"))
+
+# WARP-2191: tokens reserved out of CHUNK_SIZE_TOKENS for the contextual
+# header `format_chunk_with_header` prepends AFTER splitting. Without the
+# reservation the header is pure overrun — the splitter has already spent the
+# full budget on body text by the time the header is added.
+#
+# 64 is measured, not guessed. Header token counts under the bge tokenizer
+# across 905 realistic (filename, section_path) pairs — every `docs/**.md`
+# filename crossed with 1-4 levels of its own real headings, plus the eval
+# fixture filenames: median 37, p90 57, p95 64, p99 77, max 142. 64 leaves
+# every header in 95% of that corpus intact and costs 12.5% of the window;
+# deeper breadcrumbs lose their trailing entries (see
+# `format_chunk_with_header`), never their document name.
+CHUNK_HEADER_BUDGET_TOKENS = int(os.environ.get("CHUNK_HEADER_BUDGET_TOKENS", "64"))
 
 # Max texts per EmbedText RPC. The ai-gateway caps a single request at
 # MAX_BATCH_SIZE (providers/embeddings.py, 256) to bound peak memory on

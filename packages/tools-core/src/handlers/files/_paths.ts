@@ -23,25 +23,42 @@ export function validateNcPath(input: unknown): ValidatedPath {
   if (typeof input !== "string") return { ok: false, error: "path must be a string" };
   if (input.length === 0) return { ok: false, error: "path is required" };
   if (input.length > MAX_PATH_LEN) return { ok: false, error: "path too long" };
-  if (input.includes("\0")) return { ok: false, error: "null byte in path" };
 
-  // Iteratively percent-decode until a fixed point. Sabre/DAV (Nextcloud's
-  // WebDAV layer) decodes percent escapes before resolving paths, so a
-  // literal '%2e%2e' segment would slip past a naive '..' check and only
-  // get treated as traversal once the server decoded it.
+  // Traversal is checked on every form a downstream decoder could reach.
+  // Sabre/DAV (Nextcloud's WebDAV layer) percent-decodes before resolving a
+  // path, and it decodes LENIENTLY — PHP's rawurldecode turns each
+  // well-formed "%XX" into its byte and leaves a bare "%" alone — so
+  // "/Notes/%2e%2e/%zz" reaches it as "/Notes/../%zz". The guard has to be
+  // at least as willing to decode as the server is. Refusing the whole path
+  // on the first malformed escape (what this did until PR #1985) rejected
+  // "50% Off Report.pdf"; merely stopping at that escape would have let the
+  // "%2e%2e" beside it through. Iterated to a fixed point so a
+  // double-encoded "%252e%252e" is caught too.
+  const forms = [input];
+  for (let i = 0; i < 4; i++) {
+    const next = decodePercentLeniently(forms[forms.length - 1]);
+    if (next === forms[forms.length - 1]) break;
+    forms.push(next);
+  }
+
+  // The path itself is decoded STRICTLY, and only as far as it stays
+  // well-formed: from the first malformed escape on, the string is taken as
+  // written. A bare "%" is a filename character, not an encoding error.
   let decoded = input;
   for (let i = 0; i < 4 && decoded.includes("%"); i++) {
     let next: string;
     try {
       next = decodeURIComponent(decoded);
     } catch {
-      return { ok: false, error: "malformed percent-encoding in path" };
+      break;
     }
     if (next === decoded) break;
     decoded = next;
   }
-  if (decoded.includes("\0")) return { ok: false, error: "null byte in path" };
-  for (const candidate of [input, decoded]) {
+  if ([...forms, decoded].some((f) => f.includes("\0"))) {
+    return { ok: false, error: "null byte in path" };
+  }
+  for (const candidate of [...forms, decoded]) {
     if (candidate.split(/[\\/]/).some((seg) => seg === "..")) {
       return { ok: false, error: "path traversal not allowed" };
     }
@@ -62,4 +79,16 @@ export function validateNcPath(input: unknown): ValidatedPath {
     return { ok: false, error: "empty path segment" };
   }
   return { ok: true, path: trimmed, trailingSlash: trimmed !== normalized };
+}
+
+/**
+ * PHP `rawurldecode` semantics, which is what Sabre/DAV applies: each
+ * well-formed "%XX" becomes its byte, anything else is left untouched. Only
+ * the ASCII bytes matter to the traversal guard (".", "/" and the backslash)
+ * and a byte-wise view is exact for those; a multi-byte UTF-8 sequence comes
+ * out as mojibake here, which is why this form is only ever COMPARED and
+ * never used as the path.
+ */
+function decodePercentLeniently(s: string): string {
+  return s.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
 }

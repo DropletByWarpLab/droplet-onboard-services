@@ -251,9 +251,83 @@ type BusinessProfileDelegate = Pick<
 type BusinessProfileCapablePrisma = { businessProfile: BusinessProfileDelegate };
 
 /**
+ * WARP-2653 — a business-profile row reached `composeBusinessBlock` without
+ * the fields the composer reads.
+ *
+ * The message names the MODEL and the offending FIELD and never the field's
+ * VALUE: every validated column is owner-authored free text destined for the
+ * system prompt, and the only consumer of this error is the route's fail-open
+ * `console.warn` (rule 19 — nothing captured from a row is ever logged).
+ */
+export class BusinessProfileRowInvalidError extends Error {
+  /** The offending column, or `null` when the row itself is not an object. */
+  readonly field: string | null;
+
+  constructor(field: string | null, problem: string) {
+    super(
+      `BusinessProfile row invalid: ${
+        field === null ? problem : `field "${field}" ${problem}`
+      }`,
+    );
+    this.name = "BusinessProfileRowInvalidError";
+    this.field = field;
+  }
+}
+
+/**
+ * Exactly the fields `composeBusinessBlock` reads — the summary plus the six
+ * structured fields, and deliberately no more. `onboardingState`,
+ * `reviewNudgeState`, the timestamps and the provenance columns ride along
+ * unchecked: the composer never reads them, so a surprise there must not cost
+ * a user their answer.
+ */
+type BusinessComposerFields = Pick<
+  BusinessProfileRow,
+  "summary" | (typeof STRUCTURED_FIELDS)[number]["key"]
+>;
+
+/** The validated set, in composition order: summary first, then the six. */
+const COMPOSER_FIELD_KEYS: ReadonlyArray<keyof BusinessComposerFields> = [
+  "summary",
+  ...STRUCTURED_FIELDS.map((f) => f.key),
+];
+
+/**
+ * Validate a row Prisma handed back at the create-on-first-read boundary.
+ *
+ * Static typing does not cover this seam: `create` can resolve to `undefined`
+ * (a bare test double), a partial `select` can drop a column, a rename or a
+ * Prisma extension can change the shape — and the composer reads the result
+ * unguarded. Before WARP-2653 the getter laundered the row through a double
+ * type cast, so every one of those became a `TypeError` inside the route's
+ * fail-open, which logs "business-profile load failed" and ships a prompt with
+ * no business context. The fail-open stays; what changes is that the failure
+ * now names its field instead of arriving as a property-of-undefined read.
+ */
+function assertBusinessComposerFields(
+  row: unknown,
+): asserts row is BusinessComposerFields {
+  if (typeof row !== "object" || row === null) {
+    throw new BusinessProfileRowInvalidError(
+      null,
+      `expected a row object, got ${row === null ? "null" : typeof row}`,
+    );
+  }
+  const r = row as Record<string, unknown>;
+  for (const key of COMPOSER_FIELD_KEYS) {
+    if (typeof r[key] !== "string")
+      throw new BusinessProfileRowInvalidError(key, "is not a string");
+  }
+}
+
+/**
  * Read the business-profile singleton, creating it with schema defaults on
  * first read. Mirrors `getPersona` — a missing row means a fresh box, so we
  * materialise it rather than forcing every caller to handle null.
+ *
+ * Both branches are validated (WARP-2653): the created row is exactly as
+ * unverified as the loaded one — it is whatever the client resolved with, not
+ * a shape this function built.
  */
 export async function getBusinessProfile(
   prisma: BusinessProfileCapablePrisma,
@@ -261,11 +335,15 @@ export async function getBusinessProfile(
   const existing = await prisma.businessProfile.findUnique({
     where: { id: BUSINESS_PROFILE_SINGLETON_ID },
   });
-  if (existing) return existing as unknown as BusinessProfileRow;
+  if (existing) {
+    assertBusinessComposerFields(existing);
+    return existing;
+  }
   const created = await prisma.businessProfile.create({
     data: { id: BUSINESS_PROFILE_SINGLETON_ID },
   });
-  return created as unknown as BusinessProfileRow;
+  assertBusinessComposerFields(created);
+  return created;
 }
 
 /** Fields a PATCH/commit may change. `onboardingState` is deliberately NOT
@@ -306,12 +384,15 @@ export async function updateBusinessProfile(
   prisma: BusinessProfileCapablePrisma,
   patch: BusinessProfileUpdate,
 ): Promise<BusinessProfileRow> {
-  const row = await prisma.businessProfile.upsert({
+  // No cast: the generated `BusinessProfile` already satisfies
+  // `BusinessProfileRow` (its enum columns are the same string-literal unions
+  // as the local `*Name` aliases). The double cast this replaced bought
+  // nothing but the silence WARP-2653 is about.
+  return prisma.businessProfile.upsert({
     where: { id: BUSINESS_PROFILE_SINGLETON_ID },
     create: { id: BUSINESS_PROFILE_SINGLETON_ID, ...patch },
     update: { ...patch, reviewNudgeState: "none" },
   });
-  return row as unknown as BusinessProfileRow;
 }
 
 /**

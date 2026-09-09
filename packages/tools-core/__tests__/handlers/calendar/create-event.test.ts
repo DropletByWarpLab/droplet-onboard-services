@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import createEvent from "../../../src/handlers/calendar/create-event.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(create: ReturnType<typeof vi.fn>, userId?: string): ToolContext {
+function ctxWith(create: Mock, userId?: string): ToolContext {
   return {
     prisma: { calendarEvent: { create } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

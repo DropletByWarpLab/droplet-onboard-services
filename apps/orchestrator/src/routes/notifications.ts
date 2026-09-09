@@ -10,7 +10,11 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { sendNotification, listRecentNotifications } from "../services/notifications.service.js";
+import {
+  sendNotification,
+  listRecentNotifications,
+  type NotificationKind,
+} from "../services/notifications.service.js";
 
 function getUser(req: Request): string {
   const username = req.user?.username;
@@ -20,8 +24,21 @@ function getUser(req: Request): string {
   return username;
 }
 
+// WARP-2587 — one vocabulary, checked in BOTH directions at compile time. The
+// `satisfies` catches a label here that the enum does not have; `_KindsCover`
+// catches a label the enum HAS that is missing here (which `satisfies` alone
+// cannot see, and which would silently 400 a legitimate kind).
+const NOTIFICATION_KINDS = [
+  "reminder",
+  "event",
+  "system",
+  "ai",
+] as const satisfies readonly NotificationKind[];
+type _KindsCover = NotificationKind extends (typeof NOTIFICATION_KINDS)[number] ? true : never;
+const _kindsAreExhaustive: _KindsCover = true;
+
 const sendSchema = z.object({
-  kind: z.enum(["reminder", "event", "system", "ai"]).default("system"),
+  kind: z.enum(NOTIFICATION_KINDS).default("system"),
   title: z.string().min(1).max(500),
   body: z.string().max(2000).optional(),
 });

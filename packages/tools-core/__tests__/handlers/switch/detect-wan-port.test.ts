@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import detectWanPort from "../../../src/handlers/switch/detect-wan-port.js";
 import type { ToolContext } from "../../../src/types.js";
 
 // WARP-1462: dispatches through `ctx.http.orchestrator`
 // (`POST /api/switch/wan/detect`), never the bearer-less `ctx.http.switchSvc`.
-function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithPost(post: Mock): ToolContext {
   return {
     http: {
       orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },

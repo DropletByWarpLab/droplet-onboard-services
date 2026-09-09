@@ -8,6 +8,7 @@
  * window, and the input schema is `additionalProperties:false`.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import businessProfileGet from "../../../src/handlers/business/profile-get.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -34,7 +35,7 @@ const RESTRICTED_FIELD_SENTINELS = [
 ];
 
 function ctxWith(
-  findUnique: ReturnType<typeof vi.fn>,
+  findUnique: Mock,
   role?: ToolContext["role"],
 ): ToolContext {
   return {

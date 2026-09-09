@@ -1,4 +1,10 @@
 import { z } from "zod";
+// WARP-2825 — the daily-retention horizon lives next to the downsample that
+// enforces it, and every reader that must sit inside it imports the same
+// constant. `money-snapshot.service.ts` has exactly one import of its own and
+// it is a `import type`, so this adds NOTHING to config.ts's runtime module
+// graph — the concern the `resolveAgentIterLimits` note below is about.
+import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -51,6 +57,43 @@ export function resolveAgentIterLimits(
     return { defaultIter: capIter, capIter };
   }
   return { defaultIter, capIter };
+}
+
+/**
+ * WARP-2177 — the durable-run worker's knobs, resolved once.
+ *
+ * The one relation that must hold: the reclaim threshold is at least two
+ * heartbeats. A threshold below that reclaims a HEALTHY run on a single missed
+ * beat (a GC pause, a busy event loop), which re-runs work and — before the
+ * replay guard catches it — could re-dispatch a tool. Clamped up with a
+ * warning rather than rejected at boot, for the same reason the iteration
+ * limits clamp: a misconfigured knob should degrade to a safe value, not take
+ * the orchestrator down.
+ */
+export function resolveAgentRunLimits(
+  raw: {
+    concurrency: number;
+    tickMs: number;
+    heartbeatMs: number;
+    reclaimAfterMs: number;
+    maxAttempts: number;
+    maxWallMs: number;
+  },
+  warn: (msg: string) => void = (msg) => {
+    void import("./lib/logger.js").then(({ createLogger }) =>
+      createLogger("config").warn(msg),
+    );
+  },
+): typeof raw {
+  const floor = raw.heartbeatMs * 2;
+  if (raw.reclaimAfterMs < floor) {
+    warn(
+      `config: AGENT_RUN_RECLAIM_AFTER_MS (${raw.reclaimAfterMs}) is below ` +
+        `2 × AGENT_RUN_HEARTBEAT_MS (${floor}); clamping to ${floor}`,
+    );
+    return { ...raw, reclaimAfterMs: floor };
+  }
+  return raw;
 }
 
 // WARP-580 (part 2) — device/service secrets a PRODUCTION boot must carry
@@ -163,6 +206,110 @@ const envSchema = z.object({
   // costs nothing on easy turns. Only hard rows use the depth.
   AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
   AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  // WARP-2177 — durable agent runs (epic WARP-2176). The worker in
+  // agent-run-worker.service.ts reads the RESOLVED block (config.agentRuns),
+  // never these raw values, so the reclaim/heartbeat relation below is
+  // enforced in exactly one place.
+  //
+  // CONCURRENCY defaults to 1 on purpose: a background run is an unattended
+  // GPU spender and interactive chat shares the same model. Raising it is a
+  // measured interactive-latency decision, not a guess.
+  AGENT_RUN_CONCURRENCY: z.coerce.number().int().positive().default(1),
+  // How often the worker scans for claimable / stale rows.
+  AGENT_RUN_TICK_MS: z.coerce.number().int().positive().default(5_000),
+  // The lease heartbeat. Timer-driven and INDEPENDENT of iteration length,
+  // so a run parked in a slow model call still beats — which is what lets the
+  // reclaim threshold be derived from the heartbeat rather than from a guess
+  // at how long an iteration takes.
+  AGENT_RUN_HEARTBEAT_MS: z.coerce.number().int().positive().default(15_000),
+  // A `running` row whose heartbeat is older than this is reclaimed. Must be
+  // at least 2× the heartbeat (resolveAgentRunLimits clamps it up, loudly):
+  // one missed beat is a GC pause, not a dead worker.
+  AGENT_RUN_RECLAIM_AFTER_MS: z.coerce.number().int().positive().default(60_000),
+  // Reclaims a run may survive before it is failed for good.
+  AGENT_RUN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  // Wall-clock ceiling per run, stamped into `deadlineAt` at first claim.
+  // The epic sizes agentic work at 5–40 minutes.
+  AGENT_RUN_MAX_WALL_MS: z.coerce.number().int().positive().default(40 * 60_000),
+  // WARP-2749 — a run's iteration cap, SEPARATE from the chat cap.
+  // AGENT_MAX_ITER_CAP bounds an interactive turn, where a person is waiting
+  // and ten model calls is a latency budget. A run has a wall clock instead
+  // (AGENT_RUN_MAX_WALL_MS) and nobody waiting, so it gets its own cap. The
+  // loop honours it through `AgentDeps.maxIterCap`, which only in-process
+  // callers can set — /api/llm/chat never does, so chat is byte-identical.
+  AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
+  // WARP-2178 — characters of ONE tool result the model is fed per call
+  // (tool-result-bounding.ts). 8000 is the value the loop has always used and
+  // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
+  // cap are calibrated against, so it is the CEILING here: lowering it makes
+  // every in-loop guard more conservative, raising it would need the budget
+  // rail re-derived. The floor keeps a page useful. Pick the value from the
+  // measured per-tool result-size distribution (`agent_tool_result_size`
+  // debug lines), not by feel.
+  AGENT_TOOL_RESULT_CAP_CHARS: z.coerce.number().int().min(1000).max(8000).default(8000),
+  // WARP-2749 (ADR-051) — the brain passes.
+  //
+  // BRAIN_DETECTOR_TICK_MS drives the DETERMINISTIC pass. It makes no model
+  // call, so it is cheap and can run often; hourly is a compromise between
+  // "an overdue invoice is noticed the same day" and "nothing is gained by
+  // re-querying the same rows every minute".
+  BRAIN_DETECTOR_TICK_MS: z.coerce.number().int().positive().default(60 * 60_000),
+  // BRAIN_CORPUS_TICK_MS drives the LLM pass, and its floor is the reason it
+  // is a separate knob. The box runs ONE inference at a time
+  // (scheduler max_concurrent=1) with no turn-level timeout, so this pass
+  // COMPETES WITH INTERACTIVE CHAT for the only slot. Hourly, ten units a
+  // tick, is ~240 documents/day — deliberately slow. Raising it does not make
+  // the brain smarter, it makes chat feel broken at night.
+  BRAIN_CORPUS_TICK_MS: z.coerce.number().int().min(60_000).default(60 * 60_000),
+  // Documents digested per corpus tick. Bounded so one tick is a predictable
+  // slice of the inference slot rather than an open-ended sweep.
+  BRAIN_CORPUS_UNITS_PER_RUN: z.coerce.number().int().min(1).max(100).default(10),
+  // WARP-2850 — how long after boot the DETECTOR pass runs once.
+  //
+  // Only the detector pass gets a boot run, and only after a delay. It makes
+  // no model call, so it never touches the box's single inference slot; the
+  // delay is for the rest of the stack, which at t=0 is still coming up. The
+  // corpus pass deliberately has NO boot run — see brain-pass-runner.ts and
+  // ADR-051 §9.9: it reads a person's documents through the model, and
+  // "enabled the feature" must not mean "and it started reading, seconds
+  // later, before you could disable that pass".
+  //
+  // 0 disables the boot run outright, which is the explicit off state rather
+  // than a sentinel guessed from a missing value.
+  BRAIN_BOOT_DELAY_MS: z.coerce.number().int().min(0).finite().default(30_000),
+  // WARP-2850 — how soon a MANUALLY triggered corpus pass may re-fire.
+  //
+  // Not about concurrency, which the lease already answers: a caller who
+  // re-fires the instant a run ENDS holds the only inference slot at ~100%,
+  // and each of those inferences is queued ahead of whatever the person in
+  // the chat window asks next. Measured from `BrainPass.lastRunAt`, so it is
+  // durable across restarts and also refuses a manual run moments after a
+  // scheduled tick — when the pass has nothing new to read anyway.
+  //
+  // The detector pass is exempt: bounded indexed SQL, no model call.
+  BRAIN_MANUAL_MIN_INTERVAL_MS: z.coerce.number().int().min(0).finite().default(5 * 60_000),
+  // Master switch OVERRIDE. OFF by default: the corpus pass reads the user's
+  // documents and writes derived rows, which is a capability someone opts into
+  // (see ADR-051 §9 and WARP-2753), not one that appears on upgrade.
+  //
+  // WARP-2838 — SETTING THIS PINS THE BOX. Leave it unset and the owner's
+  // `BrainSetting` row decides, which is how a box is meant to be run: the
+  // consent is recorded with an actor and a timestamp, in the product, where
+  // the person giving it can read what they are agreeing to. Set it and the
+  // environment wins in both directions, `PUT /api/brain/settings` answers 409,
+  // and the dashboard says the box is pinned rather than offering a control
+  // that does nothing. It exists for fleet policy — a box that must not read
+  // documents regardless of who asks — not as the ordinary way in.
+  // EXPLICIT string->bool, the DROPLET_AP_EASYMESH_ENABLED idiom above.
+  // z.coerce.boolean() runs Boolean(...), so the non-empty string "false"
+  // becomes TRUE — an operator writing BRAIN_ENABLED=false to opt OUT of the
+  // corpus pass reading their documents would have switched it ON. This file
+  // already documents that trap two hundred lines up; the first draft of this
+  // line walked into it anyway.
+  BRAIN_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // WARP-1479 — include a bounded 500-char excerpt of the RAW model
   // completion in the blank-answer diagnostics. Off by default: that raw
   // text can quote corpus content (the model was mid-answer about the
@@ -704,6 +851,36 @@ const envSchema = z.object({
   // .int() rejects sub-day floats and .finite() rejects Infinity.
   DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // WARP-2463: retention window (days) for ErpDriftRecord — the reconciliation
+  // sweep's stored drift report. Its own 03:30 cron leg trims rows older than
+  // this. 90 days mirrors the audit window and is the shortest horizon that
+  // still answers the question the table exists for: "has the incremental path
+  // been trustworthy for this vendor THIS MONTH, and was it better last
+  // month" needs two months of history to have a second month to compare to.
+  // Set 0 to disable the trim entirely — the explicit "keep forever" stance,
+  // NOT a sentinel: 0 parses here and trimErpDriftRecords treats <= 0 as skip
+  // (defense in depth). A negative window is nonsensical input, so the schema
+  // rejects it at startup rather than silently treating it as disable.
+  DROPLET_ERP_DRIFT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
+  // WARP-2751 — how long `MoneySnapshot` keeps DAILY rows before the tail is
+  // downsampled to one row per month. NOT a delete-older-than: beyond this
+  // window the month's closing value survives, so "how has our overdue balance
+  // moved over two years" still answers while the row count stops growing
+  // daily forever.
+  //
+  // 90 days matches the drift window above and is the shortest horizon that
+  // leaves a quarter-over-quarter ageing question answerable at daily grain.
+  // Set 0 for the explicit "keep every daily row forever" stance — 0 parses
+  // here and trimMoneySnapshots treats <= 0 as skip (defense in depth). A
+  // negative window is nonsensical input, so the schema rejects it at startup.
+  DROPLET_MONEY_SNAPSHOT_DAILY_DAYS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .finite()
+    .default(MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT),
+
   // ── WARP-538: OTA update agent (WARP-534 epic) ──
   // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
   //   polls for cosign-signed OTA release manifests. Default is the
@@ -853,6 +1030,20 @@ const envSchema = z.object({
   // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
   FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
 
+  // --- Email indexer (WARP-2734 mailbox provisioning) ---
+  //
+  // The hop that lets an owner connect a mailbox at all. `services/email-indexer`
+  // owns the Fernet key at /data/secrets/email.key and the IMAP client, so it
+  // is the only process that can verify a mailbox and produce a `passwordEnc`;
+  // this orchestrator owns the `EmailAccount` row. Mounting the key here
+  // instead would put a new secret and a hand-rolled Fernet encoder into the
+  // process that already holds every other credential, to save one mesh hop.
+  //
+  // Defaulted like FILE_INDEXER_URL rather than left empty: the service is
+  // compose-internal, and a box that has the `email` profile has it at this
+  // name. A box that does not simply never reaches the route.
+  EMAIL_INDEXER_URL: z.string().default("http://email-indexer:8086"),
+
   // --- ERP direct-SQL bridge (WARP-1106) ---
   // Compose-internal base URL of services/erp-sql-bridge, the unixODBC +
   // pyodbc sidecar that reaches a practice's SAP SQL Anywhere database (there
@@ -868,6 +1059,22 @@ const envSchema = z.object({
   // for a network problem that isn't there. The REST track (`eaglesoft-api`)
   // ignores this entirely.
   ERP_SQL_BRIDGE_URL: z.string().default(""),
+
+  // WARP-2590 — the bridge's service bearer, minted per box by
+  // scripts/lib/secrets.sh and wired to BOTH ends via ${SERVICE_TOKEN_ERP_BRIDGE}.
+  //
+  // Read the `.env` name directly and do NOT re-declare it in compose as a
+  // `${VAR}` substitution: that resolves against docker/.env — a different,
+  // untracked file — and because `environment:` outranks `env_file:` the empty
+  // result SHADOWS the real value. That exact mistake blanked
+  // SERVICE_TOKEN_RAG_EVAL and 401'd 15 consecutive nightly eval runs.
+  //
+  // Empty is a legitimate state on a box with no ERP deployed (the bridge is
+  // profile-gated to "erp"), and it degrades the same honest way an empty
+  // ERP_SQL_BRIDGE_URL does: the connector keeps its blocked I/O boundary.
+  // Against a bridge that IS running, an empty token means 401 on every call —
+  // loudly, rather than looking like the practice's server is down.
+  SERVICE_TOKEN_ERP_BRIDGE: z.string().default(""),
 
   // --- ERP export-drop track (WARP-1964) ---
   // ERP_EXPORT_DROP_ROOT — the directory the practice's own PMS report exports
@@ -903,6 +1110,19 @@ const envSchema = z.object({
   // when unset the /api/web routes fail CLOSED with 502 rather than call
   // the fetcher unauthenticated.
   WEB_FETCH_SERVICE_TOKEN: z.string().default(""),
+
+  // --- Document rendering (WARP-2211) ---
+  // DOC_RENDER_URL — compose-internal base URL of services/doc-render, the
+  // stateless .pdf/.docx/.xlsx writer behind POST /api/files/render. It holds
+  // no credentials and makes no egress; this route is its only caller.
+  DOC_RENDER_URL: z.string().default("http://doc-render:8020"),
+  // DOC_RENDER_SERVICE_TOKEN — outbound bearer for /api/files/render →
+  // doc-render. Minted by scripts/lib/secrets.sh (generate_env on a fresh
+  // install, migrate_env backfill on an existing box), so unlike
+  // WEB_FETCH_SERVICE_TOKEN this is populated without a hand edit. When it IS
+  // empty the route fails CLOSED with 502 rather than calling the renderer
+  // unauthenticated — and doc-render itself 503s, so both ends refuse.
+  DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
@@ -992,6 +1212,35 @@ const envSchema = z.object({
   // To rotate: change the value here AND in mcp-server's compose
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
+
+  // REMOTE_MCP_SERVER_ALLOWLIST — WARP-2418 / ADR-043. Comma-separated ids of
+  // the OUTBOUND MCP servers an operator has enabled on this box (e.g.
+  // "atlassian"). EMPTY BY DEFAULT and empty means "no remote server may
+  // attach", so a box that has never been configured advertises nothing
+  // remote and can dial nothing remote.
+  //
+  // Empty is not merely the safe default, it is the only correct one today:
+  // ADR-043's Consequences record that the full LOCAL registry already
+  // exceeds the shipping context window, so an unopted-in remote catalog
+  // would degrade every turn (per-turn selection, WARP-2348, is what gates
+  // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
+  // OffLanChannelKey in ADR-043 §4, which is a schema change and a separate
+  // ticket. This variable says which servers MAY exist; the channel says
+  // whether any session may run.
+  REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
+
+  // MCP_BRIDGE_URL — WARP-2627 / ADR-043 §5. Compose-internal base URL of the
+  // services/mcp-bridge container, which is the ONLY component allowed to open
+  // a session to a remote MCP server. The orchestrator reaches it through the
+  // gate -> audit front in `remote-mcp-gateway.service.ts`, the same shape
+  // `routes/web.ts` puts in front of web-fetch.
+  MCP_BRIDGE_URL: z.string().default("http://mcp-bridge:9096"),
+  // MCP_BRIDGE_SERVICE_TOKEN — outbound bearer for that hop. Minted by
+  // scripts/lib/secrets.sh (generate_env on a fresh install, migrate_env
+  // backfill on an existing box). When EMPTY the gateway refuses WITHOUT
+  // dialling and mcp-bridge 503s every non-/health route — both ends fail
+  // closed, the doc-render posture.
+  MCP_BRIDGE_SERVICE_TOKEN: z.string().default(""),
 
   // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
   // presents on POST /api/email/_ingest/* and PATCH
@@ -1132,11 +1381,44 @@ const envSchema = z.object({
 // then the schema default, rather than parsing as an empty URL.
 const firstNonEmpty = (...vals: (string | undefined)[]): string | undefined =>
   vals.find((v) => v !== undefined && v.trim() !== "");
+/**
+ * WARP-2838 — did the OPERATOR pin the brain switch, as distinct from what it
+ * is pinned to?
+ *
+ * `BRAIN_ENABLED`'s schema entry has `.default("0")`, which collapses "unset"
+ * and "0" into the same boolean. The owner-facing switch has to tell them
+ * apart: unset means the `BrainSetting` row decides, set means the environment
+ * does and the dashboard says so rather than offering a control whose effect
+ * the next redeploy would silently undo.
+ *
+ * 🔴 AN EMPTY VALUE IS UNSET, NOT A PIN. `BRAIN_ENABLED=` in a `.env`, or
+ * `${BRAIN_ENABLED:-}` interpolated by a compose file, is a defined-but-empty
+ * string — the same trap `DROPLET_OTA_RELEASES_URL` documents below. Reading it
+ * as "the operator pinned it off" would remove the owner's switch from a box
+ * nobody meant to pin, with nothing on screen able to explain why. Exported and
+ * tested for that reason: `!== undefined` is the obvious simplification and it
+ * is wrong.
+ */
+export function resolveBrainPin(raw: string | undefined): boolean {
+  return (raw ?? "").trim().length > 0;
+}
+
 const envForParse: NodeJS.ProcessEnv = {
   ...process.env,
   DEVICE_BRIDGE_URL: firstNonEmpty(
     process.env.DEVICE_BRIDGE_URL,
     process.env.BRIDGE_URL,
+  ),
+  // WARP-2758 — same rescue, and this key needs it most: it is the schema's
+  // ONLY `.url()`, so a bare `DROPLET_OTA_RELEASES_URL=` is a defined-but-empty
+  // value that `.default()` never replaces and `.url()` rejects, killing the
+  // hard `.parse()` below and the whole boot. The key is documented as an
+  // operator knob for fleet-agent (services/fleet-agent/README.md), whose
+  // config.py:157 treats blank as "use the canonical publisher" — and the
+  // orchestrator inherits the same root `.env` via `env_file:`. Without this,
+  // one blank line in `.env` bricks the orchestrator and not fleet-agent.
+  DROPLET_OTA_RELEASES_URL: firstNonEmpty(
+    process.env.DROPLET_OTA_RELEASES_URL,
   ),
 };
 
@@ -1238,5 +1520,28 @@ export const config = {
     parsed.AGENT_MAX_ITER_DEFAULT,
     parsed.AGENT_MAX_ITER_CAP,
   ),
+  // WARP-2749 (ADR-051) — brain pass cadence. See the env docs above; the
+  // corpus tick is the one that shares the box's single inference slot.
+  brain: {
+    enabled: parsed.BRAIN_ENABLED,
+    enabledPinnedByOperator: resolveBrainPin(process.env.BRAIN_ENABLED),
+    detectorTickMs: parsed.BRAIN_DETECTOR_TICK_MS,
+    corpusTickMs: parsed.BRAIN_CORPUS_TICK_MS,
+    corpusUnitsPerRun: parsed.BRAIN_CORPUS_UNITS_PER_RUN,
+    bootDelayMs: parsed.BRAIN_BOOT_DELAY_MS,
+    manualMinIntervalMs: parsed.BRAIN_MANUAL_MIN_INTERVAL_MS,
+  },
+  // WARP-2177 — see resolveAgentRunLimits.
+  agentRuns: {
+    ...resolveAgentRunLimits({
+      concurrency: parsed.AGENT_RUN_CONCURRENCY,
+      tickMs: parsed.AGENT_RUN_TICK_MS,
+      heartbeatMs: parsed.AGENT_RUN_HEARTBEAT_MS,
+      reclaimAfterMs: parsed.AGENT_RUN_RECLAIM_AFTER_MS,
+      maxAttempts: parsed.AGENT_RUN_MAX_ATTEMPTS,
+      maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
+    }),
+    maxIter: parsed.AGENT_RUN_MAX_ITER,
+  },
 };
 export type Config = typeof config;

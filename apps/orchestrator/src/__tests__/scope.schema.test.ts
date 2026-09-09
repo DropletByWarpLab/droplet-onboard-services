@@ -22,13 +22,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import * as path from "node:path";
-
-const SCHEMA_PATH = path.resolve(
-  process.cwd(),
-  "prisma",
-  "schema.prisma",
-);
+import { SCHEMA_PATH } from "./helpers/test-paths.js";
 
 function readSchema(): string {
   return readFileSync(SCHEMA_PATH, "utf-8");

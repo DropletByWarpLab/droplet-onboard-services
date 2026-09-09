@@ -30,6 +30,8 @@ import { EmailCitation } from "./EmailCitation";
 import { ArchiveCitation } from "./ArchiveCitation";
 import { FileCitation } from "./FileCitation";
 
+import type { JSX } from "react";
+
 /**
  * The minimum hit shape every citation viewer can consume. Call sites
  * (dashboard / chat) project their richer per-API hit shape down to

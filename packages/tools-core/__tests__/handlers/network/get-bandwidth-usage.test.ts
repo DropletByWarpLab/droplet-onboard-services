@@ -6,10 +6,11 @@
  * Tier-1 read — no writes, no confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getBandwidthUsage from "../../../src/handlers/network/get-bandwidth-usage.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -54,7 +55,7 @@ const THROUGHPUT = {
 function routedGet(opts?: {
   summaryStatus?: number;
   throughputStatus?: number;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   return vi.fn().mockImplementation(async (path: string) => {
     if (path === "/api/network/summary") {
       return new Response(JSON.stringify(SUMMARY), {

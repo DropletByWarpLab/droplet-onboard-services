@@ -9,6 +9,7 @@
 
 import { Stethoscope, Lock, PlugZap, ShieldCheck } from "lucide-react";
 import type { IntegrationConnection } from "@/lib/erp-types";
+import { disconnectedCredentialView } from "@/lib/credential-purge";
 import { writeModeOf } from "@/lib/erp-types";
 import { syncedAgo } from "@/lib/erp-format";
 
@@ -51,6 +52,14 @@ function Subline({ c }: { c: IntegrationConnection }) {
   if (c.status === "NOT_CONFIGURED") {
     return <>Connect Droplet to your Eaglesoft server to see your schedule and patients here.</>;
   }
+  // WARP-2483 — a deliberately disconnected connection is not a connection
+  // that broke, and "Droplet can't read Eaglesoft right now" reads as a fault.
+  // When the box told us what happened to the credential, say that instead.
+  const disconnected = disconnectedCredentialView(
+    c.status === "DISABLED",
+    c.credentialsPurged,
+  );
+  if (disconnected) return <>{disconnected.line}</>;
   return <>{c.reason ?? "Droplet can't read Eaglesoft right now."}</>;
 }
 
@@ -70,6 +79,23 @@ export function ConnectionHero({
     connection.status === "DEGRADED" ||
     connection.status === "DRIFT_LOCKED" ||
     connection.status === "ERROR";
+  /**
+   * WARP-2483 — disconnected, and the box says the credential is STILL stored.
+   *
+   * This is where the hub tile's "Remove credential" action lands, so the
+   * action has to exist here: Disconnect lives in `ManageSheet`, which is what
+   * `onManage` opens. Without this branch the hero offered only "Connect
+   * Eaglesoft" and an owner who asked to finish removing a key arrived at a
+   * button that stores a second one.
+   *
+   * The purged case deliberately does NOT get it — there is nothing left to
+   * remove, and setup is the only thing left to do.
+   */
+  const credentialRetained =
+    disconnectedCredentialView(
+      connection.status === "DISABLED",
+      connection.credentialsPurged,
+    )?.purged === false;
 
   return (
     <div className="card" style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
@@ -113,6 +139,10 @@ export function ConnectionHero({
         {isConnected ? (
           <button type="button" className="btn" onClick={onManage}>
             <ShieldCheck size={15} /> Manage
+          </button>
+        ) : credentialRetained ? (
+          <button type="button" className="btn primary" onClick={onManage}>
+            <ShieldCheck size={15} /> Remove credential
           </button>
         ) : isTrouble ? (
           <button type="button" className="btn primary" onClick={onConnect}>

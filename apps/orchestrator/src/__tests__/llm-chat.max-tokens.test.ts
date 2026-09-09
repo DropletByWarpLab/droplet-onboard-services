@@ -88,8 +88,21 @@ vi.mock("../services/llm-agent.service.js", () => ({
 
 import { createLlmRouter } from "../routes/llm.js";
 
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — see the helper's header: without these three delegates both
+// block composers threw on every turn and the route's fail-open swallowed it.
+guardComposerFailOpen();
+
 function createPrismaMock() {
   return {
+    // WARP-2652 — persona + business + workspace, absent here until now.
+    ...promptBlockPrismaDelegates(),
     memoryFact: { findMany: vi.fn(async () => []) },
     brainMemoryItem: { findMany: vi.fn(async () => []) },
     fileContentChunk: { findMany: vi.fn(async () => []) },
@@ -122,6 +135,37 @@ beforeEach(() => {
     trace: [],
     iterations: 1,
     stop_reason: "model_done",
+  });
+});
+
+
+/** WARP-2652 — the assembled base prompt the route handed the agent loop. */
+function systemPromptText(): string {
+  expect(mockRunAgent).toHaveBeenCalled();
+  const req = mockRunAgent.mock.calls.at(-1)![1] as {
+    messages: { role: string; content: unknown }[];
+  };
+  const sys = req.messages[0]!;
+  expect(sys.role).toBe("system");
+  return typeof sys.content === "string" ? sys.content : "";
+}
+
+// WARP-2652 — the fixture floor. Not a test of the persona or business
+// feature (llm-chat.persona-block.test.ts / llm-chat.business-block.test.ts
+// own those); it is the statement that the turns measured in the rest of this
+// file run against the prompt the product assembles, blocks included.
+describe("POST /api/llm/chat — the prompt blocks this suite assumes (fixture floor)", () => {
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "m1", messages: [{ role: "user", content: "hello" }] });
+
+    expect(res.status).toBe(200);
+    const sys = systemPromptText();
+    expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
   });
 });
 

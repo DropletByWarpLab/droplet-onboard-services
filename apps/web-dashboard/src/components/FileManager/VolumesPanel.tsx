@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { HardDrive, Layers } from "lucide-react";
+import { Cpu, HardDrive, Layers } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
 import { Meter } from "@/components/shell/primitives";
-import type { DriveInfo, PoolInfo } from "@/lib/types";
+import type { DriveInfo, PoolInfo, SystemDiskInfo } from "@/lib/types";
 // WARP-1337: ONE shared display-name chain (displayName → label → GUID-guarded
 // mount tail) — this panel used to skip `displayName` entirely and rendered a
 // pool's raw fs-UUID mount tail as the tile title.
@@ -18,21 +18,14 @@ import {
   driveContentsHref,
   driveDisplayName,
   drivePoolName,
+  formatBytes,
   isPoolBackedDevice,
   poolBackingDrive,
+  usagePctOf,
 } from "./drive-display";
 
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const value = bytes / Math.pow(1024, i);
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
-}
-
 function pct(d: DriveInfo): number {
-  if (!d.size_bytes) return 0;
-  return Math.max(0, Math.min(100, (d.used_bytes / d.size_bytes) * 100));
+  return usagePctOf(d.used_bytes, d.size_bytes);
 }
 
 // Design Storage meter: the fill turns amber past 80% and red past 95%,
@@ -99,6 +92,76 @@ function VolumeTile({
 }
 
 /**
+ * WARP-2098 — the Droplet's own install disk, as a tile on the Files screen.
+ *
+ * The tiles beside it are volumes you can open: each is a stretched link into
+ * the Nextcloud-backed browser at the path the automounter registered. This one
+ * is NOT. The system disk has no files_external registration, so a deep link
+ * would be dead — the absence of the link is the affordance, and it is why this
+ * is a separate component rather than a VolumeTile with a flag.
+ *
+ * It belongs on this screen because this is what the owner reads as "my
+ * drives", and until now the appliance's own disk was invisible here while
+ * being the disk Nextcloud actually writes uploads to.
+ */
+function SystemVolumeTile({ system }: { system: SystemDiskInfo }) {
+  // Branch on the bridge's explicit state, never on the nulls: "partial" and
+  // "unavailable" both carry null usage and are different things to say. No
+  // meter for either — no fake 0%, and no undercount dressed as a total.
+  const measured = system.measurement === "complete";
+  const p = measured ? usagePctOf(system.used_bytes ?? 0, system.size_bytes) : 0;
+  return (
+    <div role="listitem" className="card relative">
+      <div className="card-h">
+        <span className="ci">
+          <Cpu size={15} />
+        </span>
+        <span className="ct" title="System drive">
+          System drive
+        </span>
+        <span className="cm">
+          {measured
+            ? `${formatBytes(system.free_bytes ?? 0)} free`
+            : system.measurement === "partial"
+              ? "Partly unreadable"
+              : "Usage unavailable"}
+        </span>
+      </div>
+
+      {measured && (
+        <>
+          <Meter pct={p} kind={meterKind(p)} />
+          <div
+            className="flex items-center justify-between tabular-nums"
+            style={{
+              marginTop: "10px",
+              fontFamily: "var(--font-mono)",
+              fontSize: "12px",
+              color: "var(--text-muted)",
+            }}
+          >
+            <span style={{ color: "var(--text)" }}>
+              {formatBytes(system.used_bytes ?? 0)}
+            </span>
+            <span>of {formatBytes(system.size_bytes)}</span>
+          </div>
+        </>
+      )}
+
+      <p
+        style={{
+          marginTop: "10px",
+          fontSize: "12px",
+          color: "var(--text-muted)",
+        }}
+      >
+        The Droplet&rsquo;s own disk — separate from your storage.
+      </p>
+    </div>
+  );
+}
+
+/**
  * WARP-1876 — column count capped at the tile count.
  *
  * The grid was a flat `sm:grid-cols-2 xl:grid-cols-3`, so a box with a
@@ -118,7 +181,7 @@ function volumeGridColumns(tileCount: number): string {
 }
 
 export function VolumesPanel() {
-  const { drives, isLoading, bridgeError } = useDrives();
+  const { drives, systemDisk, isLoading, bridgeError } = useDrives();
   // WARP-1339: pools feed the join only — a pool with no mounted md
   // filesystem has nothing browsable (and no honest bytes) to show on the
   // Files screen, so it stays a Storage-page concern.
@@ -138,7 +201,11 @@ export function VolumesPanel() {
     );
   }
 
-  if (bridgeError || drives.length === 0) {
+  // WARP-2098: a box with no data drives yet still has an install disk, and on
+  // that box the system tile is the ONLY honest thing this panel can say — so
+  // the panel no longer disappears when `drives` is empty. A bridge error still
+  // hides everything: with no snapshot there is nothing trustworthy to render.
+  if (bridgeError || (drives.length === 0 && !systemDisk)) {
     return null;
   }
 
@@ -161,7 +228,9 @@ export function VolumesPanel() {
 
   return (
     <div
-      className={`grid ${volumeGridColumns(pooled.length + standalone.length)} gap-3 mb-4`}
+      className={`grid ${volumeGridColumns(
+        pooled.length + standalone.length + (systemDisk ? 1 : 0),
+      )} gap-3 mb-4`}
       role="list"
       aria-label="Storage volumes"
     >
@@ -187,6 +256,9 @@ export function VolumesPanel() {
           drive={d}
         />
       ))}
+      {/* LAST, always: the owner's own storage leads, the appliance's disk
+          follows. Omitted entirely when the bridge doesn't report it. */}
+      {systemDisk && <SystemVolumeTile system={systemDisk} />}
     </div>
   );
 }

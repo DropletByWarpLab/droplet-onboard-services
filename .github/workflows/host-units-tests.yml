@@ -4,24 +4,49 @@ name: host-units-tests
 # box's refresh restarts containers only. Pure shell tests drive the detector +
 # refresher against a PATH-stubbed systemctl and a fixture tree with controlled
 # mtimes (no root, no systemd, no box), plus a shellcheck pass over the script.
+#
+# WARP-2575 — droplet-host-net.service joins the same job rather than getting a
+# workflow of its own: it is the same class of artefact (a host unit installed
+# by single-box.sh), and a second workflow would be a second check name that
+# only some PRs report, which is how a required check becomes a merge deadlock
+# in this repo. The job name `host-units` is a branch-protection contract —
+# extend the steps, never rename the job.
+#
+# WARP-2574 — and the last suite here reconciles scripts/host/MANIFEST against
+# install_single_box_host_integration. That one is not just a test of the
+# auditor: it is the gate that stops a host artefact from being added to the
+# installer without the box ever learning to check for it. `scripts/host/**` is
+# the path filter for exactly that reason — a new artefact changes that tree,
+# and the job must run and fail on the PR that adds it. It subsumes the
+# per-file scripts/host entries this filter used to list one by one.
 
 on:
   pull_request:
     paths:
-      - "scripts/host/droplet-host-units.sh"
-      - "scripts/host/etc-systemd-system/droplet-host-units.service"
+      - "scripts/host/**"
       - "scripts/lib/single-box.sh"
       - "scripts/setup.sh"
       - "tests/droplet-host-units.test.sh"
+      - "tests/droplet-host-net-unit.test.sh"
+      - "tests/host-artefacts.test.sh"
+      # WARP-2647: the log-bundle collector's suite ran in no workflow.
+      # `scripts/host/**` above already fires this lane for the collector
+      # itself; this line is so an edit to the guard also fires it.
+      - "tests/collect-logs.test.sh"
       - ".github/workflows/host-units-tests.yml"
   push:
     branches: [main]
     paths:
-      - "scripts/host/droplet-host-units.sh"
-      - "scripts/host/etc-systemd-system/droplet-host-units.service"
+      - "scripts/host/**"
       - "scripts/lib/single-box.sh"
       - "scripts/setup.sh"
       - "tests/droplet-host-units.test.sh"
+      - "tests/droplet-host-net-unit.test.sh"
+      - "tests/host-artefacts.test.sh"
+      # WARP-2647: the log-bundle collector's suite ran in no workflow.
+      # `scripts/host/**` above already fires this lane for the collector
+      # itself; this line is so an edit to the guard also fires it.
+      - "tests/collect-logs.test.sh"
       - ".github/workflows/host-units-tests.yml"
   workflow_dispatch:
 
@@ -63,3 +88,49 @@ jobs:
           fi
       - name: Run droplet-host-units shell tests
         run: bash tests/droplet-host-units.test.sh
+      - name: Validate the host-net unit file
+        # WARP-2575: same parse gate, same two-line allowlist, applied to the
+        # unit that carries the br-lan condition. `systemd-analyze verify`
+        # does NOT evaluate ConditionPathExists — it only parses — so this is
+        # green on a runner that has no br-lan, which is the point: it catches
+        # a malformed directive, and tests/droplet-host-net-unit.test.sh below
+        # catches a directive that parses but no longer bounds the restarts.
+        run: |
+          out="$(systemd-analyze verify \
+            scripts/host/etc-systemd-system/droplet-host-net.service 2>&1 || true)"
+          printf '%s\n' "$out"
+          unexpected="$(printf '%s\n' "$out" \
+            | grep -v 'is not executable: No such file or directory' \
+            | grep -v 'Proceeding anyway' \
+            | grep -v '^$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::systemd-analyze verify reported a unit-file problem:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+      - name: Run droplet-host-net unit-invariant tests
+        run: bash tests/droplet-host-net-unit.test.sh
+      - name: Run host-artefact reconciliation tests
+        # WARP-2574. Two jobs in one suite: it exercises `droplet-host-units
+        # audit` against fixture filesystems (including a replay of the exact
+        # 2026-08-31 bench-box state), AND reconciles scripts/host/MANIFEST
+        # against install_single_box_host_integration in both directions. The
+        # second is the gate: a host artefact added to the installer without a
+        # manifest row fails here, on the PR that adds it, rather than being
+        # discovered months later on a box that never installed it.
+        run: bash tests/host-artefacts.test.sh
+
+      # WARP-2647: WARP-823's collector suite ran in NO workflow.
+      # scripts/host/droplet-collect-logs.sh is the host executor behind the
+      # device-bridge's auth-gated GET /logs/bundle, and eight of its eighteen
+      # assertions are the REDACTION guarantee — bearer tokens, JWT_SECRET, DB
+      # and Redis URL passwords, PEM bodies and richdocuments tokens must not
+      # survive into the bundle a customer is asked to send in. Docker-free:
+      # DROPLET_LOGS_FIXTURE_DIR makes the collector read fixture text instead
+      # of shelling docker/journalctl. ~0.3 s.
+      #
+      # ubuntu-latest matters here: the collector's redaction uses GNU `sed`
+      # `c\` syntax, which BSD sed (a dev Mac) rejects outright — so this suite
+      # can only pass on Linux, and CI is the only place it will ever be true.
+      - name: Run log-bundle collector redaction tests
+        run: bash tests/collect-logs.test.sh

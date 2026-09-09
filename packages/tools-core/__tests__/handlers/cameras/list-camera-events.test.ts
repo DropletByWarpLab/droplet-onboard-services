@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listCameraEvents from "../../../src/handlers/cameras/list-camera-events.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -9,8 +10,8 @@ import type { ToolContext } from "../../../src/types.js";
 // so the mocks below target ctx.http.orchestrator and the camera-discovery
 // client must never be touched.
 function ctxWith(
-  orchestratorGet: ReturnType<typeof vi.fn>,
-  camerasGet: ReturnType<typeof vi.fn> = vi.fn(),
+  orchestratorGet: Mock,
+  camerasGet: Mock = vi.fn(),
 ): ToolContext {
   return {
     http: {
@@ -72,6 +73,7 @@ describe("list_camera_events", () => {
     const get = vi.fn().mockResolvedValue(new Response("{}", { status: 502 }));
     const r = await listCameraEvents.handler({}, ctxWith(get));
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("EVENTS_FAILED");
   });
 });

@@ -12,7 +12,7 @@ the value is interpolated into .env). It must reject anything that isn't a
 lowercase slug of [a-z0-9-], 3-40 chars, no leading/trailing/double hyphen,
 and never the `d-<16 hex>` opaque per-device lookalike — BEFORE writing
 anything. The upsert must be idempotent (a second identical write yields a
-byte-identical env file) and replace-in-place (mktemp+mv, other keys survive).
+byte-identical env file) and replace-in-place (via the canonical _upsert_env_kv, other keys survive).
 
 We drive it via subprocess. The env-file path is redirected to a tmp file via
 DROPLET_BOX_NAME_ENV_FILE so we never touch a real .env. Skipped automatically
@@ -188,7 +188,7 @@ def test_rejects_missing_arg(tmp_path):
 
 def test_rejection_leaves_existing_env_untouched(tmp_path):
     # A junk name against a pre-existing .env must leave it byte-identical —
-    # the mktemp+mv replace path is never reached on a validation failure.
+    # the _upsert_env_kv write path is never reached on a validation failure.
     env_file = tmp_path / ".env"
     original = "DROPLET_BOX_NAME=old-name\nPOSTGRES_PASSWORD=keepme\n"
     env_file.write_text(original, encoding="utf-8")
@@ -203,3 +203,68 @@ def test_accepts_boundary_lengths(tmp_path):
     assert _run("abc", env_file3).returncode == 0
     env_file40 = tmp_path / "env40"
     assert _run("a" * 40, env_file40).returncode == 0
+
+
+# --------------------------------------------------------------------------
+# WARP-2537 — the write must go THROUGH a symlinked .env, literally
+# --------------------------------------------------------------------------
+
+# Symlink creation and sed/shell metacharacters in .env values are POSIX-shaped;
+# on a Windows checkout these would error in the fixture, not exercise the
+# script.
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX-only fixture")
+
+
+@posix_only
+def test_env_symlink_survives_the_rewrite(tmp_path):
+    """After relocate_secrets_to_data has run, the repo .env is a SYMLINK into
+    the encrypted /data. The old tmp+mv rewrite unlinked it and dropped a
+    plaintext secrets file on the unencrypted boot disk (the WARP-232
+    regression class, closed for droplet-set-nvr-media.sh by WARP-2522). The
+    write must land THROUGH the link — the link survives and the bytes change
+    at the link's REAL target."""
+    real = tmp_path / "data" / "secrets.env"
+    real.parent.mkdir()
+    real.write_text(
+        "DEVICE_SECRET_KEY=keepme\nDROPLET_BOX_NAME=old-name\n", encoding="utf-8"
+    )
+    link = tmp_path / ".env"
+    link.symlink_to(real)
+
+    proc = _run("new-name", link)
+    assert proc.returncode == 0, proc.stderr
+    assert link.is_symlink(), "the .env symlink was replaced by a plain file"
+    assert os.readlink(link) == str(real)
+    body = real.read_text(encoding="utf-8")
+    assert "DROPLET_BOX_NAME=new-name\n" in body
+    assert "DEVICE_SECRET_KEY=keepme\n" in body
+    assert "old-name" not in body
+
+
+@posix_only
+def test_neighbouring_values_and_comments_survive_byte_exact(tmp_path):
+    """The slug validator makes a metacharacter-bearing NAME unreachable, so the
+    reachable literal-safety surface is the rest of the file: every other line
+    — values carrying &, |, $, backslashes, quotes and spaces, plus plain
+    comments — must pass through the rewrite byte-exact, neither re-interpreted
+    nor dropped."""
+    env_file = tmp_path / ".env"
+    hostile = (
+        "# a plain comment line\n"
+        "POSTGRES_PASSWORD=p@ss&word|with$dollars\n"
+        'NEXTCLOUD_ADMIN=he said "hi" \\ then left\n'
+        "SPACED=value with spaces\n"
+        "DROPLET_BOX_NAME=old-name\n"
+        "# trailing comment\n"
+    )
+    env_file.write_text(hostile, encoding="utf-8")
+
+    proc = _run("new-name", env_file)
+    assert proc.returncode == 0, proc.stderr
+    body = env_file.read_text(encoding="utf-8")
+    for line in hostile.splitlines():
+        if line.startswith("DROPLET_BOX_NAME="):
+            continue
+        assert line + "\n" in body, f"line mangled or dropped: {line!r}"
+    assert "DROPLET_BOX_NAME=new-name\n" in body
+    assert body.count("DROPLET_BOX_NAME=") == 1

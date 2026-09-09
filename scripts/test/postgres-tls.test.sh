@@ -17,6 +17,12 @@
 # unreachable, tests 1-3 SKIP (reported, non-fatal) so the static guard still
 # runs on a dev box without a daemon; the live run is in the PR's deferred
 # stack-verification section.
+#
+# ci: developer-only — pulls pgvector/pgvector:pg16 (~450 MB) and boots the
+# database once per case. The Docker-free case 4 (every DATABASE_URL producer
+# pins sslmode=require) is the half worth gating on every PR and is the
+# natural follow-up; wiring the whole suite would put a multi-minute image
+# pull on a large share of PRs under the $100/month cap (WARP-2647).
 # =============================================================================
 set -uo pipefail
 

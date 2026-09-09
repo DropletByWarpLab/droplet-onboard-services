@@ -24,7 +24,7 @@ export function CoverControls({ device, onCommand }: CoverControlsProps) {
   const positionPct = lift != null ? Math.round(100 - lift / 100) : undefined;
 
   const [localPct, setLocalPct] = useState(positionPct ?? 50);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleSlider = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

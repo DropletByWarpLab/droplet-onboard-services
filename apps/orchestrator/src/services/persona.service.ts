@@ -107,11 +107,91 @@ type PersonaDelegate = Pick<
 type PersonaCapablePrisma = { assistantPersona: PersonaDelegate };
 
 /**
+ * WARP-2653 — a persona row reached `composePersonaBlock` without the fields
+ * the composer reads.
+ *
+ * The message names the MODEL and the offending FIELD and never the field's
+ * VALUE: `customInstructions` is owner-authored free text, the row can hold
+ * anything an out-of-band writer put there, and the only consumer of this
+ * error is the route's fail-open `console.warn` (rule 19 — nothing captured
+ * from a row is ever logged).
+ */
+export class PersonaRowInvalidError extends Error {
+  /** The offending column, or `null` when the row itself is not an object. */
+  readonly field: string | null;
+
+  constructor(field: string | null, problem: string) {
+    super(
+      `AssistantPersona row invalid: ${
+        field === null ? problem : `field "${field}" ${problem}`
+      }`,
+    );
+    this.name = "PersonaRowInvalidError";
+    this.field = field;
+  }
+}
+
+const VERBOSITY_NAMES = Object.keys(VERBOSITY_LINE) as PersonaVerbosityName[];
+
+/**
+ * Exactly the fields `composePersonaBlock` reads — the whole validated set,
+ * and deliberately no more. `id`/`updatedBy`/`updatedAt` ride along unchecked
+ * because nothing in the prompt path reads them, and a surprise in a column
+ * the prompt never sees must not cost a user their answer.
+ */
+type PersonaComposerFields = Pick<
+  PersonaRow,
+  "preset" | "verbosity" | "useFirstNames" | "customInstructions"
+>;
+
+/**
+ * Validate a row Prisma handed back at the create-on-first-read boundary.
+ *
+ * Static typing does not cover this seam: `create` can resolve to `undefined`
+ * (a bare test double), a partial `select` can drop a column, a rename or a
+ * Prisma extension can change the shape — and the composers read the result
+ * unguarded. Before WARP-2653 the getters laundered the row through a double
+ * type cast, so every one of those became a `TypeError` inside the route's
+ * fail-open, which logs "persona load failed" and ships a prompt with no
+ * persona block. The fail-open stays; what changes is that the failure now
+ * names its field instead of arriving as a property-of-undefined read.
+ */
+function assertPersonaComposerFields(
+  row: unknown,
+): asserts row is PersonaComposerFields {
+  if (typeof row !== "object" || row === null) {
+    throw new PersonaRowInvalidError(
+      null,
+      `expected a row object, got ${row === null ? "null" : typeof row}`,
+    );
+  }
+  const r = row as Record<string, unknown>;
+  if (typeof r.preset !== "string" || !Object.hasOwn(PERSONA_PRESETS, r.preset))
+    throw new PersonaRowInvalidError("preset", "is not a known persona preset");
+  if (
+    typeof r.verbosity !== "string" ||
+    !Object.hasOwn(VERBOSITY_LINE, r.verbosity)
+  )
+    throw new PersonaRowInvalidError(
+      "verbosity",
+      `is not one of ${VERBOSITY_NAMES.join("/")}`,
+    );
+  if (typeof r.useFirstNames !== "boolean")
+    throw new PersonaRowInvalidError("useFirstNames", "is not a boolean");
+  if (typeof r.customInstructions !== "string")
+    throw new PersonaRowInvalidError("customInstructions", "is not a string");
+}
+
+/**
  * Read the persona singleton, creating it with schema defaults on first
  * read. The row is a true singleton (id="singleton"); a missing row means
  * a fresh box that has never had the migration seed applied (or a
  * create-default-on-read path in tests), so we materialise it rather than
  * returning null and forcing every caller to handle absence.
+ *
+ * Both branches are validated (WARP-2653): the created row is exactly as
+ * unverified as the loaded one — it is whatever the client resolved with, not
+ * a shape this function built.
  */
 export async function getPersona(
   prisma: PersonaCapablePrisma,
@@ -119,11 +199,15 @@ export async function getPersona(
   const existing = await prisma.assistantPersona.findUnique({
     where: { id: PERSONA_SINGLETON_ID },
   });
-  if (existing) return existing as unknown as PersonaRow;
+  if (existing) {
+    assertPersonaComposerFields(existing);
+    return existing;
+  }
   const created = await prisma.assistantPersona.create({
     data: { id: PERSONA_SINGLETON_ID },
   });
-  return created as unknown as PersonaRow;
+  assertPersonaComposerFields(created);
+  return created;
 }
 
 /** Fields a PATCH may change (id/updatedAt are managed). */
@@ -146,10 +230,13 @@ export async function updatePersona(
   prisma: PersonaCapablePrisma,
   patch: PersonaUpdate,
 ): Promise<PersonaRow> {
-  const row = await prisma.assistantPersona.upsert({
+  // No cast: the generated `AssistantPersona` already satisfies `PersonaRow`
+  // (`PersonaPreset`/`PersonaVerbosity` are the same string-literal unions as
+  // `PersonaPresetName`/`PersonaVerbosityName`). The double cast this
+  // replaced bought nothing but the silence WARP-2653 is about.
+  return prisma.assistantPersona.upsert({
     where: { id: PERSONA_SINGLETON_ID },
     create: { id: PERSONA_SINGLETON_ID, ...patch },
     update: patch,
   });
-  return row as unknown as PersonaRow;
 }

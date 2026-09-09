@@ -67,7 +67,7 @@ export const QUICKBOOKS_DESKTOP_PROVIDER = "quickbooks-desktop";
 
 /** The datasets a QuickBooks company file carries. No appointments — saying so
  *  is a capability, not a failure (see `assertDatasetsServed`). */
-export const QBD_DATASETS: readonly string[] = ["invoice", "bill", "ap_summary"];
+export const QBD_DATASETS: readonly DatasetName[] = ["invoice", "bill", "ap_summary"];
 
 export const QBD_TRACK_REMEDIATION =
   "needs the QuickBooks Web Connector installed on the machine running QuickBooks " +
@@ -473,7 +473,7 @@ export class QuickBooksDesktopConnector implements Connector {
     return QBD_DATASETS.map((dataset) => ({
       name: dataset,
       owner: "qbd",
-      columns: CANONICAL_COLUMNS[dataset as DatasetName].map((name) => ({ name, type: "text" })),
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 

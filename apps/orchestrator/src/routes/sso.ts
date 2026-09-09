@@ -50,6 +50,7 @@ import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js"
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 import { createLogger } from "../lib/logger.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("sso-oidc-route");
 
@@ -313,7 +314,11 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Begin SSO: redirect to the IdP authorize URL ──
-  router.post("/sso/oidc/authorize", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — `authRateLimit` (20/min/IP) on both
+  // halves of the public SSO flow: /authorize persists a login-state row per
+  // hit, /callback does the code exchange + session mint (a credential path,
+  // same posture as /auth/login).
+  router.post("/sso/oidc/authorize", authRateLimit, async (req, res, next) => {
     try {
       const parsed = authorizeSchema.safeParse(req.body);
       if (!parsed.success || !isSsoProvider(parsed.data.provider)) {
@@ -368,7 +373,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Finish SSO: validate, link/create the local user, issue session ──
-  router.get("/sso/oidc/callback", async (req, res, next) => {
+  router.get("/sso/oidc/callback", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });

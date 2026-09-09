@@ -45,6 +45,21 @@ MOUNT="${DROPLET_MOUNT_BIN:-mount}"
 CRYPTSETUP="$(droplet_tpm_cryptsetup)"
 CRYPTENROLL="$(droplet_tpm_cryptenroll)"
 SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
+APT_GET="${DROPLET_APT_GET_BIN:-apt-get}"
+
+# TPM2 userspace packages systemd-cryptenroll dlopens at runtime (WARP-2101).
+# Ubuntu 24.04 (noble) names — keep in sync with the autoinstall seed
+# (scripts/image/autoinstall/user-data packages:).
+TSS2_PKGS="libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-rc0t64"
+
+# WARP-2100: hard bound (seconds) on each unlock attempt. droplet-firstboot
+# runs this script unattended; an attach that queues an ask-password prompt
+# otherwise blocks forever (see _attach_unlock). The hermetic harness shrinks
+# this; scripts/lib/luks.sh forwards it across the sudo boundary.
+UNLOCK_TIMEOUT="${DROPLET_LUKS_UNLOCK_TIMEOUT:-30}"
+# Where systemd queues pending ask-password prompts (diagnostic surface only;
+# seam so the harness can point it at a tmp dir).
+ASK_PASSWORD_DIR="${DROPLET_ASK_PASSWORD_DIR:-/run/systemd/ask-password}"
 
 # LV_DEV / MAPPER_DEV are the production LVM/dm paths; the hermetic harness
 # overrides them (DROPLET_LUKS_LV_DEV / DROPLET_LUKS_MAPPER_DEV) to point at tmp
@@ -75,6 +90,50 @@ _require_tpm() {
   exit 2
 }
 
+# _require_tpm2_userspace — FRESH-provision-path preflight (WARP-2101).
+# The seed shipped no tss2 userspace, so on a healthy-TPM box the first
+# cryptenroll call died "TPM2 support is not installed" AFTER luksFormat and
+# BEFORE any keyslot enroll — under set -e that strands a LUKS2 container with
+# ZERO usable keyslots (the exact state the finding-5 re-run branch refuses).
+# So: verify systemd-cryptenroll can actually drive the TPM (not just that
+# /dev/tpm0 exists), self-heal via apt (the backup.sh restic pattern — this
+# script already runs as root), and if STILL unusable abort loudly BEFORE
+# anything is created. Never called on the existing-container re-run path,
+# so an already-provisioned box can never be bricked by this gate.
+_require_tpm2_userspace() {
+  if droplet_tpm_userspace_ok; then
+    return 0
+  fi
+  log "TPM2 userspace (tss2 libraries) missing — systemd-cryptenroll cannot drive the TPM."
+  log "Attempting self-install: $TSS2_PKGS"
+  if command -v "$APT_GET" >/dev/null 2>&1; then
+    # Unattended first boot races apt-daily/unattended-upgrades for
+    # /var/lib/dpkg/lock-frontend (apt's default Lock::Timeout is 0 = fail
+    # immediately), and the seed image can carry stale/absent apt indexes —
+    # so refresh the indexes up front and wait up to 60s for the dpkg lock on
+    # EVERY apt call, or a transient lock fluke fails this function (exit 2
+    # below) and ships a box with no encryption-at-rest. Every call stays
+    # best-effort (|| true): the authoritative gate is the userspace re-check
+    # below, which still hard-fails when the tss2 stack is genuinely missing.
+    "$APT_GET" -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086  # TSS2_PKGS is a deliberate word-split list
+    DEBIAN_FRONTEND=noninteractive "$APT_GET" -o DPkg::Lock::Timeout=60 install -y $TSS2_PKGS \
+      || { "$APT_GET" -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || true
+           # shellcheck disable=SC2086
+           DEBIAN_FRONTEND=noninteractive "$APT_GET" -o DPkg::Lock::Timeout=60 install -y $TSS2_PKGS || true; }
+  fi
+  if droplet_tpm_userspace_ok; then
+    log "TPM2 userspace installed — continuing"
+    return 0
+  fi
+  err "TPM2 userspace is NOT usable (systemd-cryptenroll --tpm2-device=list fails)"
+  err "even though ${DROPLET_TPM_DEVICE:-/dev/tpm0} exists. Refusing BEFORE luksFormat:"
+  err "proceeding would abort mid-provision and strand a LUKS container with ZERO"
+  err "usable keyslots. No LV or container was created. Fix and re-run:"
+  err "  apt-get install -y $TSS2_PKGS && droplet-luks-provision.sh provision"
+  exit 2
+}
+
 _mapper_active() {
   # Prefer findmnt on the mount target (test-observable); fall back to the node.
   if findmnt -n -o SOURCE "$DATA_MOUNT" >/dev/null 2>&1; then return 0; fi
@@ -90,6 +149,50 @@ _mapper_active() {
 _unlock_verified() {
   if "$CRYPTSETUP" status "$MAPPER" >/dev/null 2>&1; then return 0; fi
   [ -e "$MAPPER_DEV" ]
+}
+
+# _attach_unlock — WARP-2100: try the TPM attach, then the plain-keyslot open,
+# without EVER blocking on an interactive prompt. droplet-firstboot hung
+# forever here: a failed TPM unseal made systemd-cryptsetup queue an
+# ask-password prompt no one on a headless appliance can answer. Three guards,
+# all needed:
+#   headless=true,tries=1  crypttab-style options in the attach OPTIONS
+#                          argument (same slot as tpm2-device=auto):
+#                          headless= stops the ask-password agent prompt being
+#                          queued at all — the agent protocol is socket-based
+#                          (/run/systemd/ask-password), so closing stdin alone
+#                          would NOT stop it;
+#   timeout                hard outer bound, in case a prompt still slips
+#                          through (an older systemd warns on unknown crypttab
+#                          options and continues);
+#   </dev/null             the bare `cryptsetup open` fallback reads the
+#                          passphrase from stdin — give it EOF instead of the
+#                          inherited firstboot console.
+# A failed/timed-out unlock still falls through (|| true) exactly as before:
+# the callers (_unlock_verified refusal / blkid+mkfs) decide what an un-opened
+# mapper means.
+_attach_unlock() {
+  timeout "$UNLOCK_TIMEOUT" "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - \
+      tpm2-device=auto,headless=true,tries=1 </dev/null 2>/dev/null \
+    || timeout "$UNLOCK_TIMEOUT" "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" \
+      </dev/null 2>/dev/null \
+    || true
+}
+
+# _report_pending_prompts — WARP-2100 diagnostic: after a failed unlock,
+# surface any ask-password prompt left queued (the smoking gun for "the unlock
+# wanted a passphrase nobody on a headless appliance can type").
+_report_pending_prompts() {
+  local pending
+  pending="$(ls "$ASK_PASSWORD_DIR" 2>/dev/null | tr '\n' ' ' || true)"
+  case "$pending" in
+    *[![:space:]]*)
+      err "pending systemd ask-password prompt(s) queued: $pending"
+      err "— the unlock asked for an interactive passphrase; this box is"
+      err "headless, so nothing can answer it (inspect with"
+      err "systemd-tty-ask-password-agent --list). (WARP-2100)"
+      ;;
+  esac
 }
 
 _has_free_extents() {
@@ -135,9 +238,9 @@ cmd_provision() {
   # for a container we can't open, so /data just stays absent → docker gate).
   if [ -e "$LV_DEV" ] && "$CRYPTSETUP" isLuks "$LV_DEV" 2>/dev/null; then
     log "existing LUKS container at $LV_DEV — opening (no re-format)"
-    "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - tpm2-device=auto 2>/dev/null \
-      || "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" 2>/dev/null || true
+    _attach_unlock
     if ! _unlock_verified; then
+      _report_pending_prompts
       err "existing LUKS container at $LV_DEV has NO working unlock path — it"
       err "did not open via the TPM token or any keyslot. This is the classic"
       err "power-cut-mid-provision state (luksFormat completed but no keyslot"
@@ -160,6 +263,14 @@ cmd_provision() {
     exit 2
   fi
 
+  # WARP-2101: the TPM enroll below needs a working tss2 USERSPACE, not just
+  # /dev/tpm0. Gate BEFORE creating anything (self-heals via apt; hard exit 2
+  # otherwise). Skipped when no TPM is present — the ALLOW_NO_TPM dev path
+  # never calls cryptenroll with --tpm2-device.
+  if droplet_tpm_present; then
+    _require_tpm2_userspace
+  fi
+
   mkdir -p "$RUNTIME_DIR"; chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
   local keyfile="$RUNTIME_DIR/.luks-key.$$"
   # Temp install keyfile lives in the tmpfs runtime dir only; removed below.
@@ -172,12 +283,23 @@ cmd_provision() {
   "$CRYPTSETUP" luksFormat --type luks2 --pbkdf argon2id --batch-mode \
     --key-file "$keyfile" "$LV_DEV"
 
+  # WARP-2101: enroll the RECOVERY keyslot FIRST, before the TPM keyslot. Any
+  # abort inside the TPM enroll (userspace regression, TPM wedge, power cut)
+  # then leaves a container whose recovery key already exists and was already
+  # shown — never the zero-keyslot stranded state (the tmpfs install keyfile
+  # is no keyslot that survives a reboot).
+  log "enrolling recovery keyslot — the key is shown ONCE below"
+  local recovery
+  recovery="$("$CRYPTENROLL" --unlock-key-file="$keyfile" --recovery-key "$LV_DEV")"
+  printf '\n=== STORE THIS RECOVERY KEY OFFLINE — IT IS SHOWN ONCE ===\n'
+  printf '%s\n' "$recovery"
+  printf '=== (never written to disk; see docs/security/at-rest-encryption.md) ===\n\n'
+
   # WARP-232 (finding 6): the TPM enroll must be SKIPPED on a TPM-less dev box
   # running with DROPLET_LUKS_ALLOW_NO_TPM=1 — `systemd-cryptenroll
   # --tpm2-device=auto` fails hard with no TPM and (under set -e) would abort
-  # BEFORE the recovery slot is added, stranding a container with only the tmpfs
-  # keyfile that vanishes on reboot. When the flag is set and no TPM is present,
-  # enroll ONLY the recovery key so the dev box still has a durable unlock path.
+  # the provision. When the flag is set and no TPM is present, enroll ONLY the
+  # recovery key (above) so the dev box still has a durable unlock path.
   if droplet_tpm_present; then
     log "enrolling TPM2 keyslot (PCRs $(droplet_tpm_pcrs))"
     "$CRYPTENROLL" --unlock-key-file="$keyfile" --tpm2-device=auto \
@@ -187,20 +309,12 @@ cmd_provision() {
     log "  The data partition is NOT TPM-sealed; only the recovery key unlocks it."
   fi
 
-  log "enrolling recovery keyslot — the key is shown ONCE below"
-  local recovery
-  recovery="$("$CRYPTENROLL" --unlock-key-file="$keyfile" --recovery-key "$LV_DEV")"
-  printf '\n=== STORE THIS RECOVERY KEY OFFLINE — IT IS SHOWN ONCE ===\n'
-  printf '%s\n' "$recovery"
-  printf '=== (never written to disk; see docs/security/at-rest-encryption.md) ===\n\n'
-
   log "removing the temporary install keyslot"
   "$CRYPTSETUP" luksRemoveKey "$LV_DEV" "$keyfile"
   rm -f "$keyfile"
 
   log "opening $MAPPER and formatting the filesystem"
-  "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - tpm2-device=auto 2>/dev/null \
-    || "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" 2>/dev/null || true
+  _attach_unlock
   if ! blkid -o value -s TYPE "$MAPPER_DEV" 2>/dev/null | grep -q ext4; then
     "$MKFS" -L droplet-data "$MAPPER_DEV"
   fi
@@ -219,8 +333,10 @@ _mount_and_wire() {
   # crypttab: auto-unlock via the TPM2 header token. `nofail` so a PCR mismatch
   # (TPM refuses to release the key) does NOT fail the cryptsetup unit hard and
   # cascade into local-fs.target; the device-timeout bounds the wait.
+  # `headless=true` (WARP-2100) so a failed unseal at boot NEVER queues an
+  # ask-password passphrase prompt on a box with no console operator.
   _append_if_absent "$CRYPTTAB" "$MAPPER" \
-    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard,nofail,x-systemd.device-timeout=30s"
+    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard,nofail,headless=true,x-systemd.device-timeout=30s"
   # fstab: mount /data with `nofail` + a bounded device timeout. `nofail` is the
   # crux of finding 3: WITHOUT it, a locked /data (PCR mismatch on a headless
   # box) makes the mount a HARD requirement of local-fs.target → local-fs fails

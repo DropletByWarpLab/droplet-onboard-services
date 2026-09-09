@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import searchEvents from "../../../src/handlers/calendar/search-events.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(findMany: ReturnType<typeof vi.fn>, userId?: string): ToolContext {
+function ctxWith(findMany: Mock, userId?: string): ToolContext {
   return {
     prisma: { calendarEvent: { findMany } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

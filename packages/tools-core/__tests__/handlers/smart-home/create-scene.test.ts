@@ -5,6 +5,7 @@
  * route's exact createSceneSchema wire shape on the confirmed hop.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import createScene from "../../../src/handlers/smart-home/create-scene.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -24,8 +25,8 @@ const GROUPED = {
 };
 
 function ctxWith(
-  post: ReturnType<typeof vi.fn>,
-  listDevices: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(GROUPED),
+  post: Mock,
+  listDevices: Mock = vi.fn().mockResolvedValue(GROUPED),
 ): ToolContext {
   return {
     http: {

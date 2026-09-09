@@ -185,6 +185,14 @@ the path; omit it to start a new conversation. The body is OpenAI-style:
 `messages` is the full turn array (`role` ∈ `system|user|assistant|tool`,
 plus `content`), and `stream: true` selects the SSE response below.
 
+**Do not replay tool results.** `role: "tool"` and `tool_call_id` are accepted
+on the wire and then **discarded** before the turn runs (WARP-2849). There is
+no client-side way to carry a previous turn's tool output back into the model's
+context today — the schema has never declared the assistant `tool_calls` a tool
+result answers, so anything you send is an orphan the ai-gateway rejects
+outright. Send `system` / `user` / `assistant` text only. When the server does
+discard something it says so, on the two headers below.
+
 Streaming uses SSE (`Content-Type: text/event-stream`). Native clients
 should use a streaming HTTP client (URLSession `bytes(for:)` on iOS,
 OkHttp streaming on Android) to render token-by-token.
@@ -201,6 +209,19 @@ On success, every chat turn returns two response headers the client must read:
 Both headers are set on streaming **and** non-streaming responses. They are
 omitted only for ephemeral turns (`ephemeral: true`, e.g. the setup-wizard
 sample prompt), which are not persisted.
+
+Two further headers appear **only** on a turn where the server discarded part of
+your request (WARP-2849). They are set as a pair, on streaming and
+non-streaming alike, including ephemeral turns:
+
+- `X-Tool-Replay-Dropped-Messages: <n>` — `role: "tool"` messages removed.
+- `X-Tool-Replay-Stripped-Tool-Call-Ids: <n>` — `tool_call_id` fields removed
+  from messages of any other role.
+
+Their **presence** is the signal: on an ordinary turn neither appears, so a
+client can treat "header present" as "the model did not see everything I sent"
+and surface or log it. Without them the turn is an ordinary `200` whose answer
+silently ignores the tool output you supplied.
 
 ### LLM extras — shipped routes the early drafts omitted (XR-03)
 
@@ -551,7 +572,21 @@ types on the same stream — render or ignore as needed:
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
 | `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
+| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 — the answer claims a completed action the tool trace does not support. At most once per turn, immediately BEFORE `done`, and only when the check does not pass. `status` is `"unsupported"` (the turn dispatched nothing) or `"contradicted"` (every call to some tool failed). See the note below |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
+
+**`tool_use_validation` is ADVISORY, not a retraction.** By the time it is
+emitted the answer has already reached the client as `content_delta` frames, so
+it cannot un-send anything. Render it *beside* the answer — "this may not have
+actually happened" — never as a correction of what was already shown, and never
+by mutating or hiding the delivered text. Ignoring the frame is valid and
+matches pre-WARP-2544 behaviour; it is additive and breaks no existing client.
+
+It exists because the tools on this product are physical (cameras, locks,
+network rules, power), so a model sentence claiming an action that never
+succeeded is a safety and trust problem rather than a cosmetic one. `claims`
+carries the model's own sentences that triggered it (capped at 160 chars each)
+and `tools` names the tools whose calls all failed.
 
 Native clients should detect end-of-stream on `event: done` /
 `stop_reason` (the v1 clients keyed on `finishReason`, which never arrives,

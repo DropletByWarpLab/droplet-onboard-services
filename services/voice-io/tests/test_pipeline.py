@@ -34,6 +34,7 @@ from typing import Any, Optional
 import numpy as np
 import pytest
 
+from voice import audio_io, pipeline as pipeline_module
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
     DEFAULT_FLATLINE_DBFS,
@@ -56,6 +57,7 @@ from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
+    WAKE_SAMPLE_RATE,
     DisabledWakeWordDetector,
     MockWakeWordDetector,
     WakeEvent,
@@ -3421,3 +3423,318 @@ class TestStopReportsTheJoin:
         assert pipe.stop(timeout=5.0) is True
         assert pipe.running is False
         assert pipe.status().state == "idle"
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-2213 — capture-rate negotiation.
+#
+# The wake path used to open the mic at a hardcoded WAKE_SAMPLE_RATE
+# (16 kHz). Most capture hardware does not offer 16 kHz: the appliance's
+# onboard ALC897 advertises {44100, 48000, 96000} and the ReSpeaker
+# XVF3800's USB interface runs at 48 kHz. On such a device every open
+# failed with PortAudio -9997, so the self-heal loop reopened forever and
+# the box was permanently deaf while reporting a tidy 'no_mic'.
+# ────────────────────────────────────────────────────────────────────
+
+class _RateAwareStream:
+    """InputStream stub that hands back blocks of the size it was opened
+    with, so a resampling pipeline is exercised for real."""
+
+    def __init__(self, blocksize, channels, sessions, shutdown_event):
+        self.blocksize = blocksize
+        self.channels = channels
+        self._remaining = sessions
+        self._shutdown = shutdown_event
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n):
+        assert n == self.blocksize, (
+            f"read({n}) but stream opened with blocksize={self.blocksize}"
+        )
+        if self._remaining <= 0:
+            self._shutdown.set()
+            return np.zeros((n, self.channels), dtype=np.int16), False
+        self._remaining -= 1
+        # A ramp rather than zeros so the resampler has real signal to
+        # chew on — silence would hide an amplitude or dtype bug.
+        ramp = (np.arange(n) % 64).astype(np.int16) * 200
+        return np.tile(ramp.reshape(-1, 1), (1, self.channels)), False
+
+
+class _RateAwareSoundDevice:
+    """Fake sd whose check_input_settings accepts ONLY `supported` rates —
+    modelling a real codec's advertised rate list."""
+
+    class PortAudioError(Exception):
+        pass
+
+    def __init__(self, supported, shutdown_event, channels=1, sessions=3):
+        self.supported = set(supported)
+        self._shutdown = shutdown_event
+        self._channels = channels
+        self._sessions = sessions
+        self.opened_with: dict = {}
+        self.checked: list = []
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": self._channels}
+
+    def check_input_settings(self, device=None, samplerate=None,
+                             channels=None, dtype=None):
+        self.checked.append(samplerate)
+        if samplerate not in self.supported:
+            raise self.PortAudioError(
+                f"Invalid sample rate [PaErrorCode -9997] ({samplerate})",
+            )
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        self.opened_with = dict(kwargs)
+        if kwargs["samplerate"] not in self.supported:
+            raise self.PortAudioError(
+                "Error opening InputStream: Invalid sample rate "
+                "[PaErrorCode -9997]",
+            )
+        return _RateAwareStream(
+            kwargs["blocksize"], kwargs["channels"],
+            self._sessions, self._shutdown,
+        )
+
+    def _terminate(self):
+        pass
+
+    def _initialize(self):
+        pass
+
+
+def _run_rate_pipeline(fake_sd, detector, shutdown_event):
+    pipe = WakePipeline(
+        detector=detector,
+        input_device_index=3,
+        threshold=0.99,
+        sd_module=fake_sd,
+        recover_backoff_initial_s=0.0,
+        recover_backoff_max_s=0.0,
+    )
+    pipe._shutdown = shutdown_event
+    pipe._loop()
+    return pipe
+
+
+class TestCaptureRateNegotiation:
+    def test_device_supporting_16k_opens_at_16k_unresampled(self):
+        """A 16 kHz-capable mic (the ReSpeaker USB 4-Mic Array) must keep
+        the original zero-resample path — 16 kHz is probed FIRST."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({16000, 48000}, ev)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert sd.opened_with["samplerate"] == 16000
+        assert sd.opened_with["blocksize"] == WAKE_FRAME_SAMPLES
+        assert sd.checked[0] == 16000, "16 kHz must be probed first"
+
+    def test_48k_only_device_opens_at_48k_and_downsamples(self):
+        """THE REGRESSION THIS FIXES — the ALC897 / XVF3800 case. 16 kHz is
+        refused, so the stream opens at 48 kHz reading 3840-sample blocks,
+        and the detector still sees exactly 1280-sample 16 kHz frames."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({44100, 48000, 96000}, ev)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert sd.opened_with["samplerate"] == 48000
+        assert sd.opened_with["blocksize"] == WAKE_FRAME_SAMPLES * 3
+        assert det.frames, "detector received no frames"
+        for f in det.frames:
+            assert f.shape == (WAKE_FRAME_SAMPLES,), (
+                f"detector got {f.shape}, expected ({WAKE_FRAME_SAMPLES},) "
+                "— the resampled frame length must be exact"
+            )
+            assert f.dtype == np.int16
+
+    def test_44k1_only_device_still_yields_exact_frames(self):
+        """44100 is not an integer multiple of 16000, but 1280*44100/16000
+        is still exactly 3528 — so frames stay exact with no carry buffer."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({44100}, ev)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert sd.opened_with["samplerate"] == 44100
+        assert sd.opened_with["blocksize"] == 3528
+        for f in det.frames:
+            assert f.shape == (WAKE_FRAME_SAMPLES,)
+
+    def test_stereo_48k_array_downmixes_then_resamples(self):
+        """The ReSpeaker XVF3800 shape: 2-channel capture, 48 kHz only."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({48000}, ev, channels=2)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert sd.opened_with["channels"] == 2
+        assert sd.opened_with["samplerate"] == 48000
+        for f in det.frames:
+            assert f.shape == (WAKE_FRAME_SAMPLES,), (
+                "a 2ch 48 kHz array must still yield mono 16 kHz frames"
+            )
+
+    def test_device_accepting_no_candidate_rate_parks_in_no_mic(self):
+        """A device that accepts nothing is a recoverable park, not a
+        crash — a re-plug may well present a usable rate."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({22050}, ev)  # in no candidate list
+        det = _FrameRecordingDetector()
+        pipe = WakePipeline(
+            detector=det, input_device_index=3, threshold=0.99,
+            sd_module=sd, recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = ev
+        pipe._reresolve_input_device = lambda *a, **k: ev.set()  # type: ignore
+        pipe._loop()
+        assert pipe.status().state == "no_mic"
+        assert not det.frames
+
+    def test_binding_without_check_input_settings_uses_16k(self):
+        """The fake sd the rest of this suite injects exposes no
+        check_input_settings — those callers must keep the old behaviour
+        rather than hit a probe the fake cannot answer."""
+        ev = threading.Event()
+        sd = _FakeSoundDevice([_silence_frame()] * 2, ev)
+        det = _FrameRecordingDetector()
+        pipe = WakePipeline(
+            detector=det, input_device_index=7, threshold=0.99, sd_module=sd,
+        )
+        pipe._shutdown = ev
+        pipe._loop()
+        assert sd.opened_with["samplerate"] == 16000
+        assert sd.opened_with["blocksize"] == WAKE_FRAME_SAMPLES
+
+
+class TestRecoverFailureLogDeduplication:
+    """A permanently-absent mic emitted ~690 identical WARNING lines an
+    hour, rotating the 10 MB container log roughly daily and destroying
+    the diagnostic history of everything else in it. The retry CADENCE is
+    deliberately unchanged — only the logging is de-duplicated."""
+
+    def _pipe(self):
+        return WakePipeline(
+            detector=MockWakeWordDetector(), input_device_index=None,
+            threshold=0.5,
+        )
+
+    def test_identical_reason_warns_once_then_stays_quiet(self, caplog):
+        import logging as _logging
+        pipe = self._pipe()
+        err = OSError("Invalid sample rate [PaErrorCode -9997]")
+        with caplog.at_level(_logging.WARNING, logger="voice.pipeline"):
+            for _ in range(50):
+                pipe._note_recover_failure(err)
+        warns = [
+            r for r in caplog.records
+            if r.levelno == _logging.WARNING
+            and "recoverable audio-device error" in r.getMessage()
+        ]
+        assert len(warns) == 1, (
+            f"50 identical failures produced {len(warns)} WARNING lines; "
+            "expected exactly 1"
+        )
+
+    def test_changed_reason_warns_again(self, caplog):
+        import logging as _logging
+        pipe = self._pipe()
+        with caplog.at_level(_logging.WARNING, logger="voice.pipeline"):
+            pipe._note_recover_failure(OSError("rate rejected"))
+            pipe._note_recover_failure(OSError("rate rejected"))
+            pipe._note_recover_failure(OSError("device disconnected"))
+        warns = [
+            r for r in caplog.records
+            if r.levelno == _logging.WARNING
+            and "recoverable audio-device error" in r.getMessage()
+        ]
+        assert len(warns) == 2, "a NEW failure reason must warn again"
+
+    def test_persistent_failure_is_restated_periodically(self, caplog):
+        import logging as _logging
+        pipe = self._pipe()
+        err = OSError("still no mic")
+        with caplog.at_level(_logging.INFO, logger="voice.pipeline"):
+            for _ in range(pipe._RECOVER_RESTATE_EVERY + 1):
+                pipe._note_recover_failure(err)
+        restates = [
+            r for r in caplog.records if "unresolved after" in r.getMessage()
+        ]
+        assert len(restates) == 1, (
+            "a long-running identical failure must be restated so it does "
+            "not become invisible forever"
+        )
+        assert restates[0].levelno == _logging.WARNING, (
+            "the restatement carries the ONLY signal that a dead mic is "
+            "still dead — alerting keyed on level=WARNING must still see "
+            "it, so throttling it must not also demote it"
+        )
+
+
+class TestCaptureRateCandidatesAreShared:
+    """One tuple, one home. The wake loop and the one-shot record() paths
+    negotiating against DIFFERENT candidate lists is a silent desync: a
+    rate added for the ReSpeaker in one file would leave the other still
+    refusing the device."""
+
+    def test_pipeline_reuses_the_audio_io_tuple(self):
+        assert (
+            pipeline_module.CAPTURE_RATE_CANDIDATES
+            is audio_io.CAPTURE_RATE_CANDIDATES
+        )
+
+    def test_every_candidate_divides_a_wake_frame_exactly(self):
+        """The wake loop reads WAKE_FRAME_SAMPLES * rate / WAKE_SAMPLE_RATE
+        samples per block and resamples that to exactly one 1280-sample
+        frame — no carry buffer. A candidate that does not divide evenly
+        would introduce drift, and the tuple now lives in a module that
+        knows nothing about WAKE_FRAME_SAMPLES."""
+        for rate in audio_io.CAPTURE_RATE_CANDIDATES:
+            assert (WAKE_FRAME_SAMPLES * rate) % WAKE_SAMPLE_RATE == 0, (
+                f"{rate} Hz does not yield a whole number of "
+                f"{WAKE_SAMPLE_RATE} Hz frames"
+            )
+
+
+class TestResamplerBuiltOncePerStreamOpen:
+    """resample_int16 re-derives the ratio and re-designs a Kaiser FIR on
+    every call. In the wake loop that is once per ~80 ms block, forever,
+    on exactly the non-16 kHz hardware this path exists to serve. The rate
+    pair is fixed for the life of a capture session."""
+
+    def test_filter_is_not_redesigned_on_every_frame(self, monkeypatch):
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({48000}, ev, sessions=6)
+        det = _FrameRecordingDetector()
+        builds: list = []
+        real = pipeline_module.make_int16_resampler
+
+        def _counting(src_rate, dst_rate):
+            builds.append((src_rate, dst_rate))
+            return real(src_rate, dst_rate)
+
+        monkeypatch.setattr(
+            pipeline_module, "make_int16_resampler", _counting,
+        )
+        _run_rate_pipeline(sd, det, ev)
+        assert len(det.frames) >= 6, "the loop must have read real frames"
+        assert builds == [(48000, WAKE_SAMPLE_RATE)], (
+            f"expected ONE resampler build per stream-open, got {builds}"
+        )
+
+    def test_resampled_frames_match_the_uncached_helper(self):
+        """Caching the filter must not change a single sample."""
+        ev = threading.Event()
+        sd = _RateAwareSoundDevice({48000}, ev, sessions=2)
+        det = _FrameRecordingDetector()
+        _run_rate_pipeline(sd, det, ev)
+        assert det.frames
+        raw = (np.arange(WAKE_FRAME_SAMPLES * 3) % 64).astype(np.int16) * 200
+        expected = audio_io.resample_int16(raw, 48000, WAKE_SAMPLE_RATE)
+        assert np.array_equal(det.frames[0], expected)

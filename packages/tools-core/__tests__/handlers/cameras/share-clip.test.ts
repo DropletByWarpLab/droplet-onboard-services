@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import shareClip from "../../../src/handlers/cameras/share-clip.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -15,9 +16,9 @@ import type { ToolContext } from "../../../src/types.js";
  * service has no share endpoint at all.
  */
 function ctxWith(
-  orchestratorPost: ReturnType<typeof vi.fn>,
+  orchestratorPost: Mock,
   userId?: string,
-): { ctx: ToolContext; camerasPost: ReturnType<typeof vi.fn> } {
+): { ctx: ToolContext; camerasPost: Mock } {
   const camerasPost = vi.fn();
   const ctx: ToolContext = {
     http: {
@@ -109,6 +110,7 @@ describe("share_clip", () => {
     const { ctx } = ctxWith(post, "alice");
     const r = await shareClip.handler({ nc_path: "/Clips/front/x.mp4" }, ctx);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("confirmation_required");
     // No signed URL anywhere in the result.
     expect(JSON.stringify(r)).not.toContain("/api/cameras/clips/share/");
@@ -137,6 +139,7 @@ describe("share_clip", () => {
     const { ctx } = ctxWith(post, "alice");
     const r = await shareClip.handler({ nc_path: "/x.mp4" }, ctx);
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.status).toBe("error");
   });
 });

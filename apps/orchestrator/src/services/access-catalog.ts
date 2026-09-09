@@ -109,6 +109,31 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-2117. Same ladder as `projects`, which it lives inside: `act` is
+  // logging a call and moving a deal, `manage` is editing the pipeline itself.
+  // Both floored at `family` — a pipeline is business-sensitive, so the guest
+  // tier gets read-only or nothing.
+  crm: [
+    { level: "view" },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "family" },
+  ],
+  // WARP-2581. Money is READ-ONLY on this box — the vendor stays the system of
+  // record — so there is no `act` level to offer: there is no action. `manage`
+  // is floored at `admin` because the only management verb in reach is
+  // connecting or disconnecting the ledger itself, which is credential work.
+  money: [
+    { level: "view", minTier: "family" },
+    { level: "manage", minTier: "admin" },
+  ],
+  // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
+  // live (carddav-4), which is a credential-handling action; editing one's own
+  // contacts is `act`.
+  contacts: [
+    { level: "view" },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "family" },
+  ],
   voice: [
     { level: "view" },
     { level: "act" }, // un-floored — guests may talk to the assistant
@@ -283,7 +308,17 @@ export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<strin
 }
 
 /** Tool domains a role may write grant rows for — the catalog union minus
- *  `erp` (connector reach is the connectors axis, never a tool grant). */
+ *  `erp` (connector reach is the connectors axis, never a tool grant).
+ *
+ *  Derived, not listed, so a domain the catalog adds is grantable the same
+ *  day — `business` (ADR-045) included, which is where every PM and CRM tool
+ *  now lives. The dashboard's row table
+ *  (apps/web-dashboard/src/lib/access.ts TOOL_DOMAIN_GROUPS) is the
+ *  hand-kept half of that pair and has to move with it: WARP-2583's review
+ *  found `business` filed under the System row there while the Projects row
+ *  still wrote a grant for the emptied `pm`. Note `business` is UNCLAIMED
+ *  (no module owns it), which is precisely why the grant axis has to hold it:
+ *  the module filter passes it unconditionally. */
 export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter(
   (d) => d !== "erp",
 );
@@ -294,6 +329,25 @@ export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter
  * (routes/llm.ts narrowAllowedToolsForRole — owner/admin keep everything,
  * family/guest lose every `requiresWrite` tool). A domain whose every tool
  * is a write tool is unreachable for the family/guest tiers.
+ *
+ * AN EMPTY DOMAIN IS UNREACHABLE TOO, and that is a DIFFERENT statement this
+ * function cannot tell apart from the one above: it adds a domain only on
+ * FINDING a non-write tool in it, so a domain holding no tools at all reads
+ * as "every tool here writes" when the truth is "no tool here yet". Today
+ * that is `crm` and `pm` — ADR-045 slices C and D moved every CRM and PM tool
+ * into `business`, and catalog.ts keeps the two declared but empty as the
+ * landing slots for a remote catalog (HubSpot, Atlassian).
+ *
+ * WARP-2760/2761 resolved the collision that produced — five role templates
+ * granting `crm` — by dropping those grants, NOT by returning empty domains
+ * from here. This is a live term in the effective-access intersection
+ * (effective-access.service.ts `reachable ∩ featureDomains ∩ granted`), so
+ * widening it would leave family and guest holding a standing grant on every
+ * toolless domain, and the FIRST tool a remote catalog registers into one may
+ * be a write — the exact case this filter exists to catch. Deciding otherwise
+ * is a change to the write filter and belongs in its own ticket;
+ * `access-catalog.test.ts` pins the current answer so it cannot be reversed
+ * by accident.
  */
 export function tierReachableDomains(tier: Role): Set<string> {
   if (tier === "owner" || tier === "admin") {

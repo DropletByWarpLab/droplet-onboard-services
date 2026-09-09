@@ -68,6 +68,11 @@ vi.mock("@/components/projects/usePm", () => ({
     key: null,
   }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), users: [] }),
+  // WARP-2717 — the department filter reads this. Undefined is the honest
+  // stub: the real hook returns `data?.departments`, so "not loaded yet" and
+  // "this box has no departments" are the same shape, and the page has to
+  // render the workspace either way. That is what this suite asserts.
+  useDepartments: () => ({ departments: undefined }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));

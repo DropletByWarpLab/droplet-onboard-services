@@ -38,9 +38,11 @@ import {
 } from "../services/brain-memory.service.js";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import { inlinePreviewContentType } from "../lib/file-content.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { publishRunOne } from "../services/transcription-bus.service.js";
 import { createLogger } from "../lib/logger.js";
+import { standardRateLimit } from "../middleware/rate-limit.js";
 
 // WARP-218 — per-item rolling-hour retry cap for /transcribe-now.
 const TRANSCRIBE_NOW_RETRY_WINDOW_MS = 60 * 60 * 1000;
@@ -554,7 +556,9 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
   // ── GET /api/files/brain/:itemId/download ──
   // Stream the original bytes of a single item. RBAC + zip-slip
   // defense match the export route.
-  router.get("/files/brain/:itemId/download", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — owner-scoped read that streams from
+  // local disk; the standard per-IP preset is enough (no polling caller).
+  router.get("/files/brain/:itemId/download", standardRateLimit, async (req, res, next) => {
     try {
       const userId = getUserId(req);
       if (!userId) {
@@ -579,10 +583,55 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         res.status(404).json({ error: "not_found" });
         return;
       }
-      res.writeHead(200, {
-        "Content-Type": item.mimeType ?? "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${item.filename.replace(/"/g, "")}"`,
-      });
+      // WARP-2207: `?disposition=inline` flips this route from "save to disk"
+      // to "render in place", so the chat file rail can show an attachment
+      // instead of only offering to download it. Without it, feeding this URL
+      // to an <object>/<img>/<video> makes the browser honour the attachment
+      // header by DOWNLOADING — the same trap WARP-1919 fixed on
+      // /api/files/download, which this branch mirrors.
+      //
+      // Inline is granted ONLY through `inlinePreviewContentType()`, the same
+      // safelist that route uses. A brain item is arbitrary user-uploaded
+      // content: `text/html` and `image/svg+xml` execute script, so rendering
+      // one inline on the dashboard origin would be stored XSS against the
+      // session cookie. The type is derived from the FILENAME, never from
+      // `item.mimeType` — that column is attacker-influenced at upload time,
+      // so trusting it here would let a row claiming application/pdf on an
+      // .html file through. Off-safelist still downloads, exactly as before:
+      // the affordance degrades, the invariant does not.
+      const inlineType =
+        req.query.disposition === "inline"
+          ? inlinePreviewContentType(item.filename)
+          : null;
+      // RFC 6266 quoted-string: strip what would break out of the quoted
+      // filename parameter.
+      const dispositionFilename = item.filename.replace(/[\\"]/g, "");
+
+      if (inlineType) {
+        res.setHeader(
+          "Content-Disposition",
+          `inline; filename="${dispositionFilename}"`,
+        );
+        res.setHeader("Content-Type", inlineType);
+        // `nosniff` stops a browser re-interpreting safelisted bytes as
+        // markup; the `sandbox` CSP strips scripting/same-origin from the
+        // rendered document even if a future edit widens the safelist.
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        // application/pdf is EXEMPT from sandbox: Chromium's PDF viewer is
+        // plugin-backed and renders blank inside a sandboxed document — the
+        // regression WARP-1919 exists to fix. Safe, because PDF is not
+        // same-origin-scriptable and the safelist already excludes every
+        // scriptable type.
+        if (inlineType !== "application/pdf") {
+          res.setHeader("Content-Security-Policy", "sandbox");
+        }
+        res.status(200);
+      } else {
+        res.writeHead(200, {
+          "Content-Type": item.mimeType ?? "application/octet-stream",
+          "Content-Disposition": `attachment; filename="${dispositionFilename}"`,
+        });
+      }
       createReadStream(item.storagePath).pipe(res);
     } catch (e) {
       next(e);

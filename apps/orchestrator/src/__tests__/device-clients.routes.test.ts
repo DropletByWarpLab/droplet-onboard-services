@@ -395,3 +395,26 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(mockPrisma.pairingCode.findUnique).not.toHaveBeenCalled();
   });
 });
+
+// CodeQL js/biased-cryptographic-random: the pairing code is drawn with
+// crypto.randomInt over the alphabet. Length and charset (no 0/O/1/I) must
+// stay exactly what pairing clients and the claim schema expect.
+describe("POST /api/devices/pair — code alphabet", () => {
+  it("mints 6-char codes drawn only from the unambiguous alphabet", async () => {
+    const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    mockCacheGet.mockResolvedValue(null);
+    mockPrisma.pairingCode.create.mockResolvedValue({});
+    const seen = new Set<string>();
+    for (let i = 0; i < 25; i++) {
+      const res = await request(makeApp())
+        .post("/api/devices/pair")
+        .send({ deviceName: `Charset ${i}`, deviceType: "desktop", platform: "macos" });
+      expect(res.status).toBe(200);
+      const code = res.body.code as string;
+      expect(code).toHaveLength(6);
+      for (const ch of code) expect(ALPHABET).toContain(ch);
+      seen.add(code);
+    }
+    expect(seen.size).toBeGreaterThan(1);
+  });
+});

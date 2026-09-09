@@ -83,6 +83,9 @@ import {
   countLiveSessions,
   revokeAllSessions,
   checkSession,
+  listUserSessions,
+  idleLimitSecondsForRole,
+  absoluteLimitSeconds,
 } from "../services/session.service.js";
 import {
   storeNcToken,
@@ -129,6 +132,11 @@ import {
 } from "@droplet/auth-policy";
 import { createLogger } from "../lib/logger.js";
 import { browserMarkerHeader } from "../lib/browser-context.js";
+import {
+  authRateLimit,
+  sensitiveRateLimit,
+  standardRateLimit,
+} from "../middleware/rate-limit.js";
 
 /** WARP-456: caller IP for auth audit rows. Uses Express's proxy-aware
  *  `req.ip` — `trust proxy` is set in app.ts, so behind the nginx gateway
@@ -695,7 +703,12 @@ export function createPublicAuthRouter(
   });
 
   // ── Initial setup: create the first admin user ──
-  router.post("/auth/setup", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — `authRateLimit` (20/min/IP) is the
+  // outer per-IP ceiling on every credential-verifying handler in this file;
+  // the Redis lockouts (`ratelimit:login:*`, change-password lock) stay the
+  // account-level source of truth. Token issuance gets `sensitiveRateLimit`,
+  // cheap redirects / logout get `standardRateLimit`.
+  router.post("/auth/setup", authRateLimit, async (req, res, next) => {
     try {
       const parsed = setupSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -955,7 +968,7 @@ export function createPublicAuthRouter(
   // argon2id hash (password.service), and only then provision/refresh the
   // downstream Nextcloud session for WebDAV. Nextcloud no longer
   // authenticates — it's a downstream-provisioned account.
-  router.post("/auth/login", async (req, res, next) => {
+  router.post("/auth/login", authRateLimit, async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1401,7 +1414,7 @@ export function createPublicAuthRouter(
   });
 
   // ── OAuth2: Redirect to Nextcloud authorization ──
-  router.get("/auth/authorize", async (req, res) => {
+  router.get("/auth/authorize", standardRateLimit, async (req, res) => {
     if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
       res.status(400).json({ error: "OAuth2 is not configured. Set AUTH_MODE=oauth2 and provide OAUTH2_CLIENT_ID." });
       return;
@@ -1424,7 +1437,7 @@ export function createPublicAuthRouter(
   });
 
   // ── OAuth2: Handle callback ──
-  router.get("/auth/callback", async (req, res, next) => {
+  router.get("/auth/callback", authRateLimit, async (req, res, next) => {
     try {
       if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
         res.status(400).json({ error: "OAuth2 is not configured" });
@@ -1499,7 +1512,7 @@ export function createPublicAuthRouter(
   });
 
   // ── Refresh: exchange refresh token for new access token ──
-  router.post("/auth/refresh", async (req, res, next) => {
+  router.post("/auth/refresh", sensitiveRateLimit, async (req, res, next) => {
     try {
       // ADR-008: native clients (iOS / Android / Tauri Win) POST the
       // refresh token in the JSON body since they can't read httpOnly
@@ -1820,7 +1833,7 @@ export function createPublicAuthRouter(
     }
   });
 
-  router.post("/auth/invites/accept/:token", async (req, res, next) => {
+  router.post("/auth/invites/accept/:token", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(404).json({ error: "Invite not found" });
@@ -1890,13 +1903,19 @@ export function createPublicAuthRouter(
       // can never disagree with the User.role written below).
       // WARP-171: the invite role is now the canonical Role enum (was
       // a free-form String). The mapping below preserves the
-      // pre-WARP-171 wire contract — "admin" invitee still lands in
-      // the Nextcloud "admin" group, which roleFromGroups() turns
-      // back into the "owner" session role on first login. The new
-      // enum values get explicit mappings so future invites can ask
-      // for them without ambiguity. `family` (formerly "user") is
-      // the empty-groups default so a regular household member lands
-      // in Nextcloud's default group set.
+      // pre-WARP-171 wire contract — an "admin" invitee still lands in
+      // the Nextcloud "admin" group. The new enum values get explicit
+      // mappings so future invites can ask for them without ambiguity.
+      // `family` (formerly "user") is the empty-groups default so a
+      // regular household member lands in Nextcloud's default group set.
+      //
+      // This comment used to add "…which roleFromGroups() turns back into
+      // the owner session role on first login". Twice wrong now, and both
+      // corrections matter: WARP-1051 made the session role the canonical
+      // invite role (see the auto-login block below), and WARP-1636 capped
+      // the Nextcloud OCS fallback at the holder's stored User.role — so
+      // membership of NC's built-in `admin` group no longer decides ANY
+      // session's tier. It is provisioning only. See ADR-032 §7.1.
       //
       // WARP-883: ADDITIONALLY add the household group so the shared
       // "Household" group folder (groupfolders) mounts into the invitee's
@@ -2276,7 +2295,7 @@ export function createProtectedAuthRouter(
   // (ADR-013): the built-in argon2id hash is the auth source of truth, so the
   // change lands on `User.passwordHash` directly. Nextcloud is mirrored
   // downstream for WebDAV but is NOT consulted for the gate.
-  router.post("/auth/change-password", async (req, res, next) => {
+  router.post("/auth/change-password", authRateLimit, async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2528,7 +2547,7 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", async (req, res, next) => {
+  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2704,7 +2723,7 @@ export function createProtectedAuthRouter(
   });
 
   // ── Logout: denylist refresh token + clear cookies ──
-  router.post("/auth/logout", async (req, res, next) => {
+  router.post("/auth/logout", standardRateLimit, async (req, res, next) => {
     try {
       // Denylist the JWT refresh token so it can't be reused
       const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
@@ -3481,6 +3500,65 @@ export function createProtectedAuthRouter(
     },
   );
 
+  // ── Who is signed in (owner/admin) ──
+  // WARP-2820. Revocation has existed since WARP-116 and nothing in the
+  // product could tell an operator whether there was anything to revoke —
+  // "has the person who left actually been cut off" had no answer short of
+  // reading Redis by hand.
+  //
+  // ONE call for the whole box rather than one per person: the roster is
+  // already a single query, and N round trips from the browser would make the
+  // page's cost grow with the company.
+  //
+  // A person whose sessions cannot be read reports `sessions: null`, NOT an
+  // empty list. An operator must never be shown "nobody is signed in" by a
+  // cache outage — the same rule /admin's overview tiles follow when a probe
+  // fails. The sid is deliberately not returned: it identifies a session
+  // without being needed to end one, and revocation here is per person.
+  router.get("/auth/sessions", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      if (!prisma) {
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
+      }
+      const users = await prisma.user.findMany({
+        select: { id: true, username: true, displayName: true, role: true },
+        orderBy: { username: "asc" },
+      });
+      const rows = await Promise.all(
+        users.map(async (u) => {
+          const sessions = await listUserSessions(u.id);
+          return {
+            username: u.username,
+            displayName: u.displayName,
+            role: u.role,
+            // null = could not read, distinct from [] = signed out everywhere.
+            sessions:
+              sessions === null
+                ? null
+                : sessions.map((sn) => ({
+                    role: sn.role,
+                    createdAt: sn.createdAt,
+                    lastSeenAt: sn.lastSeenAt,
+                    // The deadlines are computed HERE, from the session's own
+                    // role, because they are policy the box owns — a dashboard
+                    // that recomputed them would drift the moment the limits
+                    // are made configurable.
+                    idleDeadline: sn.lastSeenAt + idleLimitSecondsForRole(sn.role),
+                    absoluteDeadline: sn.createdAt + absoluteLimitSeconds(),
+                  })),
+          };
+        }),
+      );
+      res.json({ users: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Revoke all sessions for a user (admin only) ──
   // WARP-116: the explicit, opt-in "revoke now" path. v1 RBAC propagates a
   // role/account change at the next access-token refresh (≤15 min); this
@@ -3503,10 +3581,33 @@ export function createProtectedAuthRouter(
           });
           return;
         }
-        const row = await prisma.user.findUnique({
-          where: { nextcloudUsername: req.params.username },
-          select: { id: true },
-        });
+        // WARP-2820 — the Nextcloud mapping key FIRST, then the local login
+        // handle. Resolving only `nextcloudUsername` missed every SCIM- and
+        // SSO-provisioned account: `provisionUser` and the SSO just-in-time
+        // create both seed `username` from the email and never write the
+        // mapping key, which the schema leaves nullable with no default.
+        // Those accounts mint ordinary sessions keyed on `User.id`, so
+        // GET /auth/sessions lists them as genuinely live while every
+        // "Sign out everywhere" on them 404'd USER_NOT_FOUND — silently, and
+        // for exactly the population an offboarding admin comes here to cut
+        // off. The read and the revoke have to be able to name the same row.
+        //
+        // Two ORDERED findUniques, not one `findFirst({ OR: [...] })`: both
+        // columns are @unique, and keeping the mapping key ahead of the login
+        // handle means no call that resolved before this change can resolve
+        // to a different row after it. An OR would leave the winner to row
+        // order. Every path that writes `nextcloudUsername` writes the same
+        // value into `username`, so the second lookup only ever runs for rows
+        // that never had a mapping key at all.
+        const row =
+          (await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          })) ??
+          (await prisma.user.findUnique({
+            where: { username: req.params.username },
+            select: { id: true },
+          }));
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;

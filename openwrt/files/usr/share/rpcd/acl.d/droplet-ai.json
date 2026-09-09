@@ -15,7 +15,8 @@
         "session": ["access", "list"],
         "hostapd.*": ["get_clients", "get_status"],
         "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices", "getDHCPLeases", "getHostHints"],
-        "umdns": ["browse", "update"]
+        "umdns": ["browse", "update"],
+        "wireguard": ["status"]
       },
       "uci": ["network", "wireless", "dhcp", "firewall", "system"],
       "file": {
@@ -32,7 +33,6 @@
         "service": ["set", "delete", "signal", "event"],
         "session": ["login", "destroy"],
         "hostapd.*": ["del_client"],
-        "wireguard": ["*"],
         "file": ["exec"]
       },
       "file": {

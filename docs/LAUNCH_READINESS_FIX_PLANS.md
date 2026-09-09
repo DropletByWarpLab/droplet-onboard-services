@@ -627,37 +627,74 @@ webhook signature to verify and the fix plan no longer applies. The
 
 **Files.** `apps/orchestrator/scripts/migrate-and-start.sh (new)`, `apps/orchestrator/Dockerfile (line 153 CMD + install postgresql-client 16 + COPY script)`, `docker/docker-compose.yml (snapshot volume mount for orchestrator)`, `scripts/factory-reset.sh (wipe snapshot volume on reset)`, `scripts/README.md (document boot sequence + manual recovery command)`, `apps/orchestrator test suite (new integration test for lock + recovery, wired into test:orchestrator)`
 
-## WARP-574 — Re-enable CI: restore PR/push triggers on test workflows and gate merges to main with a required check
+## WARP-574 — Re-enable CI: restore PR/push triggers on test workflows and gate merges to main with a required check — ⛔ SUPERSEDED
 
 **Area:** release · **Severity:** critical · **Effort:** M
+
+> **⛔ SUPERSEDED — DO NOT EXECUTE THIS PLAN. Retired under WARP-2504.**
+>
+> **Steps 2–4 below instruct restoring `pull_request:` triggers on the
+> per-service `*-tests.yml` workflows. Do not do that.** PR #1204 (2026-07-21)
+> deliberately retired those triggers: the 13 workflows that exactly mirror a
+> `ci.yml` leg are now **push-to-main canaries** and keep `push` +
+> `workflow_dispatch` only. Re-adding `pull_request:` re-arms the spend this
+> repo removed, against a **$100/month org cap — and when that cap is hit,
+> nothing merges org-wide.** See [`docs/ci-cost-budget.md`](ci-cost-budget.md)
+> and the standing rule in `CLAUDE.md`: *never re-add `pull_request:` triggers
+> to per-service `*-tests.yml` (they are push-to-main canaries)*.
+>
+> **What actually shipped**, and why the rest of the plan is stale:
+>
+> | Plan step | Outcome |
+> | --- | --- |
+> | (1) restore `pull_request:` on all 16 workflows | **Rejected (#1204).** `ci.yml` gained a path-aware `detect` job instead. The 13 mirror workflows (ai-gateway, camera-discovery, device-identity-svc, email-indexer, file-indexer, fleet-agent, matter-controller, mcp-server, ops-console, routing, switch, voice-io, web-dashboard) stay push-to-main canaries — verified: zero `pull_request:` triggers among them. `ci-coverage`, `security-tests`, `setup-tests`, `schemas-tests`, `orchestrator-tests` and `test-fips` *do* run on PRs today. |
+> | (2)(5) make `ci-coverage` the single stable required check | **Superseded.** `ci-coverage.yml` was restored unfiltered (WARP-970, 2026-07-11), but the required-context role went to **`ci-summary`**, `ci.yml`'s always-reporting fan-in. `ci-coverage` is advisory — see [`docs/ci-required-checks.md`](ci-required-checks.md). |
+> | (3)(6) guard against a future bulk-disable | **Shipped** — `scripts/check-ci-coverage.sh`, run by `ci-coverage.yml`. |
+> | (8) document the required-check setting | **Shipped elsewhere.** [`docs/ci-required-checks.md`](ci-required-checks.md) is the ruleset ↔ workflow inventory; no `.github/branch-protection.md` was ever added. |
+>
+> The three required contexts today are `ci-summary`, `egress-gate` and
+> `title carries a WARP key` — nothing else. A check blocks a merge only if it
+> is a `ci-summary` leg or is itself a required context
+> ([the one-line rule](ci-required-checks.md#the-one-line-rule)).
+>
+> **The plan text below is struck — quoted as historical record only.** The
+> "Root cause" paragraph is still accurate and worth reading; everything from
+> "Recommended fix" down is a 2026-era proposal that was answered differently,
+> and is not a to-do list.
 
 
 **Root cause.** CI was deliberately and uniformly disabled by commit 110efe7 "ci: temporarily disable test workflows pending Actions minutes (#220)". That commit replaced the push/pull_request triggers in 16 workflows with a workflow_dispatch-only stub plus the banner "Temporarily disabled: manual-only until GitHub Actions testing minutes are restored. Restore the pull_request/push triggers from git history." (e.g. orchestrator-tests.yml:11-14, ci-coverage.yml:15-18, security-tests.yml, file-indexer-tests.yml:5-8, web-dashboard/mcp-server/routing/switch/voice-io/camera-discovery/ai-gateway/device-identity/setup-e2e/setup-tests/test-fips). The job bodies are intact and correct — only the on: trigger was stubbed. Only docker-build.yml, rag-eval-tests.yml, schemas-tests.yml, refresh-oui.yml (cron) still fire automatically; rag-tests.yml is also dispatch-only. The result is that a ~1300-test suite gates nothing and regressions land on main undetected (docs/compliance-progress.md:14 already records WARP-227's "9 failing rag-tests on main, silently broken since WARP-218 went workflow_dispatch-only"). Critically, ci-coverage.yml — the meta-guard that fails if any service lacks a test workflow — was itself disabled, so the safety net that would catch this is also off. There is no committed branch-protection / required-check config forcing green before merge. The "temporary" disable has now persisted across ~100 commits.
 
 
-**Recommended fix.** Restore the automatic triggers that commit 110efe7 stripped, then make a single always-on aggregating job a required status check on main so merges fail-closed until CI is green — mirroring the repo's existing fail-closed boundary-guard idiom (requireScope mount guards in apps/orchestrator/src/app.ts, ServiceAuthMiddleware in services/switch/main.py). Concretely: (1) In each disabled workflow, replace the workflow_dispatch-only stub and its banner with the path-filtered pull_request + push:{branches:[main]} triggers, keeping workflow_dispatch as well — use the still-live schemas-tests.yml (lines 8-27) and docker-build.yml as the exact pattern to copy, and point each workflow's paths: at its own service dir (e.g. orchestrator-tests at apps/orchestrator/** + the workspace packages it builds; file-indexer-tests at services/file-indexer/**). The job bodies are already correct and need no changes. (2) Re-enable ci-coverage.yml the same way but with NO path filter (its own comment at lines 4-5 says it must fire on every PR so a new service can't dodge the filter) — this becomes the stable, always-present required check. (3) Add scripts/check-ci-coverage.sh-style guard as a test (below) so a future bulk-disable is itself caught by CI. (4) Document in CONTRIBUTING.md / a new .github/branch-protection.md that the repo admin must set ci-coverage's job as a required status check and require PRs to main. Path filters keep Actions-minute spend low (only changed services run); the unconditional ci-coverage job guarantees a required check is always reported so docs-only PRs still go green instead of hanging. Sequence this expecting first-PR red: the already-known failing tests (WARP-227 rag-tests) will surface immediately — fix or quarantine them rather than re-disabling CI.
-
-**Implementation steps.**
-1. Confirm the canonical trigger pattern from the workflows commit 110efe7 left enabled: .github/workflows/schemas-tests.yml:8-27 (pull_request + push:{branches:[main]} both path-filtered, workflow_dispatch optional) and docker-build.yml:7-30. These are the templates.
-2. For each disabled TS workflow (.github/workflows/orchestrator-tests.yml, web-dashboard-tests.yml, mcp-server-tests.yml, device-identity-svc-tests.yml): delete the 'Temporarily disabled' banner + lone workflow_dispatch under on:, and insert pull_request:{paths:[...]} + push:{branches:[main],paths:[...]} + workflow_dispatch. Set paths to that app/service dir plus package.json/package-lock.json (orchestrator must also list the workspace packages it builds: packages/tools-core, services/mcp-server, fips-selftest). Leave the existing job/steps untouched.
-3. For each disabled Python workflow (.github/workflows/ai-gateway-tests.yml, file-indexer-tests.yml, routing-tests.yml, switch-tests.yml, camera-discovery-tests.yml, voice-io-tests.yml): same trigger restoration, paths pointed at services/<name>/**. Job bodies are already correct.
-4. Restore .github/workflows/security-tests.yml, setup-e2e.yml, setup-tests.yml, test-fips.yml triggers. security-tests and ci-coverage should run on ALL PRs with no path filter (security is cross-cutting); setup-e2e/setup-tests path-filter on scripts/** + docker/** + .github/workflows.
-5. Re-enable .github/workflows/ci-coverage.yml with pull_request:{} + push:{branches:[main]} and intentionally NO paths filter (per its own header comment lines 4-5). This job (runs scripts/check-ci-coverage.sh) becomes the single stable required check.
-6. Add an automated regression guard so CI catches its own disabling: extend scripts/check-ci-coverage.sh (or add a small test) to assert no workflow under .github/workflows is workflow_dispatch-only when it owns a tests/ dir, and that the 'Temporarily disabled' banner string is absent. Wire it into the ci-coverage job.
-7. Validate every workflow parses: run actionlint (or a yaml.safe_load loop) over .github/workflows/*.yml; confirm zero parse errors and that each restored file has a top-level pull_request trigger.
-8. Document the required-check setting: add .github/branch-protection.md (or a CONTRIBUTING.md section) telling the admin to mark the ci-coverage job a Required status check on main and enable 'Require a pull request before merging'. Note this is a one-time GitHub setting outside the repo.
-9. Open the change on a branch (not main); on the resulting PR verify the restored workflows actually execute and report. Expect WARP-227's failing rag-tests to surface — fix or quarantine, then have the admin enable branch protection.
-
-**Acceptance criteria.**
-- No file in .github/workflows/*.yml contains the string 'Temporarily disabled: manual-only until GitHub Actions testing minutes are restored'.
-- orchestrator-tests, web-dashboard-tests, mcp-server-tests, device-identity-svc-tests, ai-gateway-tests, file-indexer-tests, routing-tests, switch-tests, camera-discovery-tests, voice-io-tests, security-tests, setup-e2e, setup-tests, test-fips, and ci-coverage each declare a pull_request trigger again (verified by grep / actionlint).
-- ci-coverage.yml fires on every pull_request and push to main with NO path filter, and its job is observed running on the PR that introduces this change.
-- Every workflow still parses cleanly under actionlint with zero errors and all existing job bodies are unchanged from before the disable.
-- scripts/check-ci-coverage.sh (or an added test) fails if any service-owning workflow is reverted to workflow_dispatch-only or the disable banner reappears.
-- A deliberately broken orchestrator test causes the orchestrator-tests workflow to go red on a PR, and with branch protection on, that red blocks merge to main.
-- CONTRIBUTING.md or .github/branch-protection.md documents the required-status-check + require-PR settings for main.
-
-**Test strategy.** Add a self-guarding test so 'CI silently disabled' can never recur undetected: extend scripts/check-ci-coverage.sh (already invoked by ci-coverage.yml) to (a) glob .github/workflows/*.yml, (b) assert the disable banner string is absent everywhere, and (c) assert that every workflow whose name matches *-tests and that owns a tests/ dir declares a pull_request trigger (not workflow_dispatch-only). Optionally run actionlint in the ci-coverage job to catch malformed YAML. The live proof is the PR itself: the restored ci-coverage job must execute and report on that PR. Then a deliberate red-PR (break one orchestrator test) confirms the gate blocks merge once the admin marks ci-coverage a required check. This is the regression test that makes CI gate its own configuration.
+> ---
+>
+> **↓ SUPERSEDED PLAN TEXT — historical record, not instructions. ↓**
+>
+> **Recommended fix.** Restore the automatic triggers that commit 110efe7 stripped, then make a single always-on aggregating job a required status check on main so merges fail-closed until CI is green — mirroring the repo's existing fail-closed boundary-guard idiom (requireScope mount guards in apps/orchestrator/src/app.ts, ServiceAuthMiddleware in services/switch/main.py). Concretely: (1) In each disabled workflow, replace the workflow_dispatch-only stub and its banner with the path-filtered pull_request + push:{branches:[main]} triggers, keeping workflow_dispatch as well — use the still-live schemas-tests.yml (lines 8-27) and docker-build.yml as the exact pattern to copy, and point each workflow's paths: at its own service dir (e.g. orchestrator-tests at apps/orchestrator/** + the workspace packages it builds; file-indexer-tests at services/file-indexer/**). The job bodies are already correct and need no changes. (2) Re-enable ci-coverage.yml the same way but with NO path filter (its own comment at lines 4-5 says it must fire on every PR so a new service can't dodge the filter) — this becomes the stable, always-present required check. (3) Add scripts/check-ci-coverage.sh-style guard as a test (below) so a future bulk-disable is itself caught by CI. (4) Document in CONTRIBUTING.md / a new .github/branch-protection.md that the repo admin must set ci-coverage's job as a required status check and require PRs to main. Path filters keep Actions-minute spend low (only changed services run); the unconditional ci-coverage job guarantees a required check is always reported so docs-only PRs still go green instead of hanging. Sequence this expecting first-PR red: the already-known failing tests (WARP-227 rag-tests) will surface immediately — fix or quarantine them rather than re-disabling CI.
+>
+> **Implementation steps.**
+> 1. Confirm the canonical trigger pattern from the workflows commit 110efe7 left enabled: .github/workflows/schemas-tests.yml:8-27 (pull_request + push:{branches:[main]} both path-filtered, workflow_dispatch optional) and docker-build.yml:7-30. These are the templates.
+> 2. For each disabled TS workflow (.github/workflows/orchestrator-tests.yml, web-dashboard-tests.yml, mcp-server-tests.yml, device-identity-svc-tests.yml): delete the 'Temporarily disabled' banner + lone workflow_dispatch under on:, and insert pull_request:{paths:[...]} + push:{branches:[main],paths:[...]} + workflow_dispatch. Set paths to that app/service dir plus package.json/package-lock.json (orchestrator must also list the workspace packages it builds: packages/tools-core, services/mcp-server, fips-selftest). Leave the existing job/steps untouched.
+> 3. For each disabled Python workflow (.github/workflows/ai-gateway-tests.yml, file-indexer-tests.yml, routing-tests.yml, switch-tests.yml, camera-discovery-tests.yml, voice-io-tests.yml): same trigger restoration, paths pointed at services/<name>/**. Job bodies are already correct.
+> 4. Restore .github/workflows/security-tests.yml, setup-e2e.yml, setup-tests.yml, test-fips.yml triggers. security-tests and ci-coverage should run on ALL PRs with no path filter (security is cross-cutting); setup-e2e/setup-tests path-filter on scripts/** + docker/** + .github/workflows.
+> 5. Re-enable .github/workflows/ci-coverage.yml with pull_request:{} + push:{branches:[main]} and intentionally NO paths filter (per its own header comment lines 4-5). This job (runs scripts/check-ci-coverage.sh) becomes the single stable required check.
+> 6. Add an automated regression guard so CI catches its own disabling: extend scripts/check-ci-coverage.sh (or add a small test) to assert no workflow under .github/workflows is workflow_dispatch-only when it owns a tests/ dir, and that the 'Temporarily disabled' banner string is absent. Wire it into the ci-coverage job.
+> 7. Validate every workflow parses: run actionlint (or a yaml.safe_load loop) over .github/workflows/*.yml; confirm zero parse errors and that each restored file has a top-level pull_request trigger.
+> 8. Document the required-check setting: add .github/branch-protection.md (or a CONTRIBUTING.md section) telling the admin to mark the ci-coverage job a Required status check on main and enable 'Require a pull request before merging'. Note this is a one-time GitHub setting outside the repo.
+> 9. Open the change on a branch (not main); on the resulting PR verify the restored workflows actually execute and report. Expect WARP-227's failing rag-tests to surface — fix or quarantine, then have the admin enable branch protection.
+>
+> **Acceptance criteria.**
+> - No file in .github/workflows/*.yml contains the string 'Temporarily disabled: manual-only until GitHub Actions testing minutes are restored'.
+> - orchestrator-tests, web-dashboard-tests, mcp-server-tests, device-identity-svc-tests, ai-gateway-tests, file-indexer-tests, routing-tests, switch-tests, camera-discovery-tests, voice-io-tests, security-tests, setup-e2e, setup-tests, test-fips, and ci-coverage each declare a pull_request trigger again (verified by grep / actionlint).
+> - ci-coverage.yml fires on every pull_request and push to main with NO path filter, and its job is observed running on the PR that introduces this change.
+> - Every workflow still parses cleanly under actionlint with zero errors and all existing job bodies are unchanged from before the disable.
+> - scripts/check-ci-coverage.sh (or an added test) fails if any service-owning workflow is reverted to workflow_dispatch-only or the disable banner reappears.
+> - A deliberately broken orchestrator test causes the orchestrator-tests workflow to go red on a PR, and with branch protection on, that red blocks merge to main.
+> - CONTRIBUTING.md or .github/branch-protection.md documents the required-status-check + require-PR settings for main.
+>
+> **Test strategy.** Add a self-guarding test so 'CI silently disabled' can never recur undetected: extend scripts/check-ci-coverage.sh (already invoked by ci-coverage.yml) to (a) glob .github/workflows/*.yml, (b) assert the disable banner string is absent everywhere, and (c) assert that every workflow whose name matches *-tests and that owns a tests/ dir declares a pull_request trigger (not workflow_dispatch-only). Optionally run actionlint in the ci-coverage job to catch malformed YAML. The live proof is the PR itself: the restored ci-coverage job must execute and report on that PR. Then a deliberate red-PR (break one orchestrator test) confirms the gate blocks merge once the admin marks ci-coverage a required check. This is the regression test that makes CI gate its own configuration.
+>
+> **↑ END SUPERSEDED PLAN TEXT ↑**
 
 ## WARP-576 — Add App Router error boundaries + harden HEALTH_COPY lookup in web-dashboard
 

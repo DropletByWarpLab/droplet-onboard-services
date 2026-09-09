@@ -7,10 +7,11 @@
  * Tier-1 read — no writes, no confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getWeather from "../../../src/handlers/data/get-weather.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -69,7 +70,7 @@ const WEATHER_PAYLOAD = {
 function jsonGet(
   body: unknown,
   status = 200,
-): ReturnType<typeof vi.fn> {
+): Mock {
   // Fresh Response per call — a Response body can only be read once.
   return vi
     .fn()

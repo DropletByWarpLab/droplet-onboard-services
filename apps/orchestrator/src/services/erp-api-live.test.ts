@@ -29,7 +29,9 @@ vi.mock("../config.js", () => ({
 // @ts-expect-error -- plain ESM JS test harness, outside any tsconfig rootDir.
 import { startMockEaglesoftApi } from "../../../../services/erp-connector/harness/eaglesoft-api/mock-server.mjs";
 // @ts-expect-error -- see above.
-import { ensureCerts, opensslAvailable } from "../../../../services/erp-connector/harness/eaglesoft-api/certs.mjs";
+import { ensureCerts } from "../../../../services/erp-connector/harness/eaglesoft-api/certs.mjs";
+// @ts-expect-error -- see above.
+import { liveBoxSkipReason, announceLiveBoxSkip } from "../../../../services/erp-connector/harness/eaglesoft-api/preflight.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,18 +44,23 @@ import {
   EAGLESOFT_API_PROVIDER,
 } from "./erp-provider.js";
 
-/** The harness mints its CA with the openssl CLI. Skip locally without it, but
+/** What this machine lacks for the live box — the `openssl` CLI the harness
+ *  mints its CA with, or a Node whose built-in fetch takes the CA-trusting
+ *  undici dispatcher (WARP-2611) — or `null` when it can run the suite. Skip
+ *  explicitly with the reason rather than sit red on every clean checkout, but
  *  fail in CI rather than lose the coverage silently. */
-const HAS_OPENSSL = opensslAvailable();
+const SKIP_REASON: string | null = liveBoxSkipReason();
 
-it("CI has the openssl CLI this live-box suite needs", () => {
+it("CI runs this live-box suite rather than skipping it", () => {
   if (!process.env.CI) return;
-  expect(HAS_OPENSSL, "openssl is required in CI or the live ERP suite skips silently").toBe(true);
+  expect(SKIP_REASON, "the live ERP suite would skip in CI and prove nothing").toBeNull();
 });
 
 const OWNER = { id: "u-owner", role: "owner" };
 
-describe.skipIf(!HAS_OPENSSL)("erp.service — live Eaglesoft REST box", () => {
+announceLiveBoxSkip("erp.service — live Eaglesoft REST box", SKIP_REASON);
+
+describe.skipIf(SKIP_REASON !== null)("erp.service — live Eaglesoft REST box", () => {
   let box: any;
 
   beforeAll(async () => {

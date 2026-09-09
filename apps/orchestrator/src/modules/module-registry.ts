@@ -197,6 +197,60 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator
   },
   {
+    id: "crm", label: "CRM",
+    description: "Customers, deals and the sales pipeline.",
+    category: "workspace", routePrefixes: ["/api/crm"],
+    // WARP-2558 (ADR-044) — the CRM has a door of its own. It shipped with
+    // `navHrefs: []` because WARP-2545 rendered it as sub-tabs on /projects,
+    // and naming that href here would have hidden the PM surface whenever CRM
+    // was off. /customers is the CRM's own route, so the entry is honest and
+    // the nav gate now has something to hide.
+    navHrefs: ["/customers"],
+    // WARP-2546 — claimed in the same change that adds the handlers, which is
+    // what the registry's `unknown domain` invariant enforces: a domain the
+    // tools-core catalog cannot resolve is a gate pointing at nothing.
+    toolDomains: ["crm"], core: false, defaultEnabled: false,
+    // WARP-2558 — `requires: "projects"` is DELIBERATELY absent now.
+    //
+    // The bar for that field is "the child has no reachable surface of its own
+    // without the parent" (see ModuleDef.requires). That was true only while
+    // the CRM borrowed another module's page; with /customers it is false. A
+    // dental box wants Customers and no PM at all, and the old edge made that
+    // shape unrepresentable — turning Projects off took the customer list with
+    // it. Do not restore it without also taking /customers away.
+    available: () => true, // native to the orchestrator
+  },
+  {
+    id: "money", label: "Money",
+    description: "Invoices and bills landed from a connected ledger.",
+    category: "workspace", routePrefixes: ["/api/money"],
+    navHrefs: ["/money"],
+    // WARP-2581 — NO tool domain claimed. `money_list_open_documents` is
+    // excluded from the chat pool while `base-prompt-budget.test.ts` sits 59
+    // characters under its 60,000 tripwire (WARP-2547 owns that decision), and
+    // the registry's `unknown domain` invariant is about a gate pointing at
+    // nothing — a domain claimed here for a tool the model can never be
+    // offered would be exactly that.
+    toolDomains: [], core: false, defaultEnabled: false,
+    // No `requires`. The bar is "the child has no reachable surface of its own
+    // without the parent" — /money reads landed documents and needs neither the
+    // CRM nor Projects to be on. A box that does its books in QuickBooks and
+    // keeps no customer list is a supported shape.
+    available: () => true, // native to the orchestrator
+  },
+  {
+    id: "contacts", label: "Contacts",
+    description: "The address book — people entered here or synced from an address-book source.",
+    category: "workspace", routePrefixes: ["/api/contacts"],
+    // No surface yet; WARP-2038 adds /contacts and its nav entry. Same shape as
+    // `docs` above, which also carries none.
+    navHrefs: [],
+    // WARP-2038 owns the `contacts` tool domain; not claimed until it exists,
+    // so the registry never names a domain the tool catalog cannot resolve.
+    toolDomains: [], core: false, defaultEnabled: false,
+    available: () => true, // native to the orchestrator
+  },
+  {
     id: "voice", label: "Voice",
     description: "Hands-free voice assistant (speech in / speech out).",
     category: "operations", routePrefixes: ["/api/voice", "/api/stt"], navHrefs: ["/voice"],

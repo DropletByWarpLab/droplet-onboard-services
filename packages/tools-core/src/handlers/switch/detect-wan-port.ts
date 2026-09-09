@@ -37,7 +37,15 @@ const tool: Tool = {
     "Auto-detect which switch port is the WAN uplink to the router. Checks SFP ports first, then copper ports with active links. Mutates persisted state.",
   inputSchema,
   requiresWrite: true,
-  requiresConfirmation: false,
+  // WARP-2472 — was `false`, which contradicted the route: POST
+  // /api/switch/wan/detect evaluates `switch_wan_detect` as Tier 2
+  // (config/network-safety-rules.ts) and answers 202. A Tier-2 write whose
+  // tool descriptor claims no confirmation is needed is the flag lying, and
+  // it kept the tool out of every enumeration that derives from the flag.
+  requiresConfirmation: true,
+  // The route's existing Tier-2 gate is the single prompt, and always was —
+  // the interceptor never gated this tool because the flag was false.
+  confirmationOwner: "route",
   handler,
 };
 

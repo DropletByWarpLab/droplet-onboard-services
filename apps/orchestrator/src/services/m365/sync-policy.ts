@@ -60,6 +60,27 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Failures the sync engine raises on its OWN side of the wire — no Graph
+ * status, no errno. They are named here so the engine and this classifier
+ * agree by construction rather than by string coincidence.
+ *
+ * Both are retryable, and deliberately so. The page handler failing means the
+ * page was READ but not STORED, so the run must repeat from the last good
+ * `deltaLink` — which is exactly what a backoff does and exactly what `FATAL`
+ * would prevent: a FAILED cursor is never claimed again. A token that could
+ * not be produced for a reason that is not an auth verdict (a database read
+ * that failed, a cache the box could not decrypt this second) is the same
+ * shape: park, wait, try again — the auth service has already moved the
+ * connection to NEEDS_RECONNECT itself whenever the reason IS an auth verdict.
+ */
+export const HANDLER_FAILED_CODE = "HANDLER_FAILED";
+export const TOKEN_UNAVAILABLE_CODE = "TOKEN_UNAVAILABLE";
+const LOCAL_RETRY_CODES: ReadonlySet<string> = new Set([
+  HANDLER_FAILED_CODE,
+  TOKEN_UNAVAILABLE_CODE,
+]);
+
+/**
  * Decide how to recover from a failed delta call.
  *
  * `AUTH` is deliberately distinct from `FATAL`: a dead grant is a property of
@@ -75,6 +96,7 @@ export function classifySyncFailure(err: SyncFailureLike): SyncFailureKind {
   if (status === 410) return "RESYNC_REQUIRED";
 
   if (code && TRANSIENT_CODES.has(code)) return "TRANSIENT";
+  if (code && LOCAL_RETRY_CODES.has(code)) return "TRANSIENT";
   if (status === 429) return "TRANSIENT";
   if (typeof status === "number" && status >= 500 && status <= 599) return "TRANSIENT";
 

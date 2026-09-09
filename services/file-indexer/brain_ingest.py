@@ -648,6 +648,14 @@ def reindex_one(nc_file_id: str) -> dict:
     # Reuse the autocommit conn just for the item lookup (read-only).
     from db import get_conn as _get_conn
 
+    # WARP-2196: this path opens its OWN connection and INSERTs directly, so
+    # it bypasses db.upsert_chunk's gate. Same guard, applied explicitly —
+    # an admin re-index must not be a way to slip vectors from a second
+    # embedding model into the corpus. See corpus_state.py.
+    from corpus_state import raise_if_write_blocked  # noqa: PLC0415
+
+    raise_if_write_blocked()
+
     info = fetch_item(_get_conn(), item_id=nc_file_id)
     if info is None:
         raise ValueError(f"reindex_one: BrainMemoryItem {nc_file_id} not found")

@@ -45,7 +45,7 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import type {
-  AuthenticatorTransportFuture,
+  AuthenticatorTransport,
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
@@ -65,6 +65,7 @@ import { deriveWebAuthnRp } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 import { browserMarkerHeader } from "../lib/browser-context.js";
+import { authRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("webauthn-routes");
 
@@ -87,17 +88,26 @@ const verifyBodySchema = z.object({
 });
 
 /** CSV (stored) -> transports array (the library's shape). */
-function parseTransports(csv: string | null): AuthenticatorTransportFuture[] | undefined {
+function parseTransports(csv: string | null): AuthenticatorTransport[] | undefined {
   if (!csv) return undefined;
   const list = csv
     .split(",")
     .map((t) => t.trim())
-    .filter(Boolean) as AuthenticatorTransportFuture[];
+    .filter(Boolean) as AuthenticatorTransport[];
   return list.length > 0 ? list : undefined;
 }
 
-/** transports array (the library's shape) -> CSV (stored). */
-function serializeTransports(transports: AuthenticatorTransportFuture[] | undefined): string | null {
+/**
+ * transports array -> CSV (stored).
+ *
+ * Deliberately takes `readonly string[]`, not `AuthenticatorTransport[]`: from
+ * v14 the *verification result's* `credential.transports` is `string[]`, because
+ * it is whatever the authenticator actually sent rather than a value we chose.
+ * This helper only joins to CSV, so the narrower type bought nothing and the
+ * wire shape is the honest one here. `parseTransports` stays strict -- its
+ * output IS handed back to the library.
+ */
+function serializeTransports(transports: readonly string[] | undefined): string | null {
   return transports && transports.length > 0 ? transports.join(",") : null;
 }
 
@@ -180,7 +190,11 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   const router = Router();
 
   // ── Registration: generate creation options ──
-  router.post("/auth/webauthn/register/options", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — `authRateLimit` (20/min/IP) on all four
+  // WebAuthn handlers: attestation / assertion verification is CPU-bound and
+  // the authenticate pair is a session-issuing path (same posture as
+  // /auth/login).
+  router.post("/auth/webauthn/register/options", authRateLimit, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string; username: string; displayName: string } }).user;
       if (!user) {
@@ -226,7 +240,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Registration: verify attestation + store the credential ──
-  router.post("/auth/webauthn/register/verify", async (req, res, next) => {
+  router.post("/auth/webauthn/register/verify", authRateLimit, async (req, res, next) => {
     try {
       const user = (req as unknown as { user?: { id: string } }).user;
       if (!user) {
@@ -320,7 +334,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   const router = Router();
 
   // ── Authentication: generate assertion options ──
-  router.post("/auth/webauthn/authenticate/options", async (req, res, next) => {
+  router.post("/auth/webauthn/authenticate/options", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(503).json({ error: "Directory unavailable" });
@@ -346,7 +360,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   });
 
   // ── Authentication: verify assertion + issue the session ──
-  router.post("/auth/webauthn/authenticate/verify", async (req, res, next) => {
+  router.post("/auth/webauthn/authenticate/verify", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(503).json({ error: "Directory unavailable" });

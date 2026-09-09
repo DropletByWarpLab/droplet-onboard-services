@@ -102,7 +102,7 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-import { createFilesRouter } from "../routes/files.js";
+import { createFilesRouter, stripBase64Padding } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
 import * as registry from "../services/file-registry.service.js";
 
@@ -310,5 +310,64 @@ describe("WARP-1460 — the human MULTIPART path is unchanged", () => {
       "hello.txt",
       expect.any(Buffer),
     );
+  });
+});
+
+// CodeQL js/polynomial-redos — the strict-base64 round-trip check in
+// POST /files/upload used to strip trailing padding with `/=+$/`, which is
+// quadratic on a long run of `=` (unanchored on the left, so the engine
+// restarts the `=+` run from every offset before failing at `$`).
+// `stripBase64Padding` is the linear replacement; these pin that it accepts
+// and rejects exactly what the regex did, and that a pathological body is
+// answered promptly.
+describe("CodeQL js/polynomial-redos — strict base64 padding strip", () => {
+  it("stripBase64Padding returns exactly what `/=+$/` returned", () => {
+    const cases = [
+      "", "=", "==", "===", "abc", "abc=", "abc==", "a=b", "a=b=", "=a", "==a==",
+      "aGk=", "aGVsbG8gd29ybGQ=", "\n", "= =", "=".repeat(64),
+    ];
+    for (const c of cases) {
+      expect(stripBase64Padding(c)).toBe(c.replace(/=+$/, ""));
+    }
+  });
+
+  it("stripBase64Padding is linear on a 200k-char run of '='", () => {
+    const input = "=".repeat(200_000) + "a";
+    const t0 = performance.now();
+    expect(stripBase64Padding(input)).toBe(input);
+    expect(stripBase64Padding("=".repeat(200_000))).toBe("");
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
+
+  it("padded base64 still round-trips → 200 (accept surface unchanged)", async () => {
+    const res = await request(buildApp(MCP))
+      .post("/api/files/upload")
+      .set("X-Nextcloud-Token", "nct-user-cred")
+      .set("X-Nextcloud-User", "alice")
+      // "hi" → "aGk=" — one padding char, the case the strip exists for.
+      .send({ dir: "/", filename: "hi.txt", contentBase64: "aGk=" });
+
+    expect(res.status).toBe(200);
+    expect(ncUploadFile).toHaveBeenCalledWith(
+      "nct-user-cred",
+      "alice",
+      "/",
+      "hi.txt",
+      Buffer.from("hi", "utf8"),
+    );
+  });
+
+  it("a 5,000-char run of '=' followed by junk → 400 fast, no upload", async () => {
+    const t0 = performance.now();
+    const res = await request(buildApp(MCP))
+      .post("/api/files/upload")
+      .set("X-Nextcloud-Token", "nct-user-cred")
+      .set("X-Nextcloud-User", "alice")
+      .send({ dir: "/", filename: "x.bin", contentBase64: "=".repeat(5000) + "a" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/base64/i);
+    expect(ncUploadFile).not.toHaveBeenCalled();
+    expect(performance.now() - t0).toBeLessThan(1000);
   });
 });

@@ -18,6 +18,17 @@ import type { FileSpace, FileSpaceId } from "@/lib/types";
 // at RENDER SITES ONLY. Grouping and parent lookups below (`teamsByParent`,
 // `claimedParentNames`) keep keying off RAW server names — the data contract.
 import { spaceRenderName } from "@/lib/space-attribution";
+// WARP-1548 — which rows a viewer sees, whether any control renders at all,
+// and how a right is labelled. Lifted out of this file when the places rail
+// (`components/nav/FilesLibrariesNav.tsx`) became a second consumer: two
+// verbatim copies of the same filter is how a row list and a render gate
+// start disagreeing.
+import {
+  isActiveState,
+  isVisibleNonActive,
+  rightLabel,
+  spaceSwitcherVisible,
+} from "@/lib/space-rows";
 
 interface SpaceSwitcherProps {
   spaces: FileSpace[];
@@ -52,12 +63,6 @@ const RIGHT_ICON: Record<string, LucideIcon> = {
   manager: KeyRound,
 };
 
-const RIGHT_LABEL: Record<string, string> = {
-  reader: "Reader",
-  contributor: "Contributor",
-  manager: "Manager",
-};
-
 /**
  * Rights are a neutral, text-first chip (design brief §1) — never the
  * `--role-*` ramp. Right glyphs render in the tertiary label color, never a
@@ -65,7 +70,7 @@ const RIGHT_LABEL: Record<string, string> = {
  */
 function RightChip({ right }: { right: string }) {
   const Icon = RIGHT_ICON[right];
-  const label = RIGHT_LABEL[right] ?? right;
+  const label = rightLabel(right);
   return (
     <span className="inline-flex items-center gap-1.5 h-5 px-2 rounded-full border border-separator bg-surface-tertiary type-caption-1 text-label-secondary flex-none">
       {Icon && (
@@ -77,42 +82,6 @@ function RightChip({ right }: { right: string }) {
 }
 
 const PINNED_IDS = new Set<FileSpaceId>(["personal", "shared"]);
-
-/** A space with no state (personal) or an explicit "active" state. */
-function isActiveState(space: FileSpace): boolean {
-  return !space.state || space.state === "active";
-}
-
-/**
- * WARP-1267 — which non-active rows this viewer may see. Provisioning rows
- * are visible to whoever the server already scoped the row to (a member
- * with a right, or an admin); failed rows are owner/admin-only — loud
- * see-all, never silent absence, but never leaked to a plain member either
- * (brief §2). Mirrors the server-side filter; kept here as defense in depth.
- */
-function isVisibleNonActive(space: FileSpace, isOwnerOrAdmin: boolean): boolean {
-  if (space.state === "provisioning") return true;
-  if (space.state === "failed") return isOwnerOrAdmin;
-  return false;
-}
-
-/**
- * WARP-1910 — whether the switcher renders at all for this viewer: at least
- * two visible spaces (active ones, plus the provisioning/failed rows this
- * viewer may see). Exported because the Files page keys off it too — the
- * breadcrumb bar's lone root crumb is suppressed only while the switcher is
- * actually on screen. Single source of truth: the component's own
- * nothing-to-switch-between early return uses this same predicate.
- */
-export function spaceSwitcherVisible(
-  spaces: FileSpace[],
-  isOwnerOrAdmin = false
-): boolean {
-  const visible = spaces.filter(
-    (s) => isActiveState(s) || isVisibleNonActive(s, isOwnerOrAdmin)
-  );
-  return visible.length >= 2;
-}
 
 /**
  * WARP-883 (ADR-027 WS-5) — segmented control to switch between the user's

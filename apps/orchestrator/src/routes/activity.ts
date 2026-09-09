@@ -17,7 +17,8 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import { getActivitySigner } from "../services/activity.singleton.js";
+import { getActivitySigner, recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { verifyActivityChainCoalesced } from "../services/audit-verify.service.js";
 import {
   hashSignature,
@@ -26,6 +27,7 @@ import {
   type ActivityRowContent,
   type ActivitySeverityName,
 } from "../services/audit-signing.service.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
@@ -231,6 +233,10 @@ export function createActivityRouter(prisma: PrismaClient): Router {
   // repeated re-verify clicks against a damaged table.
   router.get(
     "/activity/verify",
+    // CodeQL js/missing-rate-limiting — the walk is O(rows) even when
+    // coalesced (WARP-1027 only dedupes *concurrent* callers); a per-IP
+    // ceiling stops one admin session from re-running it back to back.
+    sensitiveRateLimit,
     requireOwnerOrAdmin,
     async (_req, res, next) => {
       try {
@@ -349,6 +355,7 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         // predictable.
         const PAGE = 200;
         let cursor: bigint | undefined;
+        let exported = 0;
         for (;;) {
           const page = await prisma.activityRow.findMany({
             where: cursor
@@ -358,6 +365,7 @@ export function createActivityRouter(prisma: PrismaClient): Router {
             take: PAGE,
           });
           if (page.length === 0) break;
+          exported += page.length;
           for (const r of page) {
             const out = {
               id: r.id.toString(),
@@ -381,6 +389,29 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         }
 
         res.end();
+
+        // Taking the whole signed chain off the box left no trace in it.
+        // Recorded AFTER res.end() on purpose: the download must never wait
+        // on the append lock, the same ordering logs.ts uses for the
+        // diagnostics bundle. Detached and fail-soft — `recordActivity`
+        // swallows its own failures, and an export that already streamed
+        // must not be reported as a 500 because the row did not land.
+        void recordActivity({
+          kind: "system",
+          severity: "warn",
+          sourceIcon: "download",
+          what: "Audit bundle exported",
+          sub: `${exported} row(s)${kind ? ` · ${kind}` : ""}`,
+          actor: actorFromRequest(req),
+          refs: {
+            rowCount: exported,
+            filter: { kind, actorType, actorId, from, to, q },
+            includedSigningKey: publicKey !== null,
+          },
+        }).catch(() => {
+          // recordActivity already logs and swallows; this only stops a
+          // detached rejection from becoming an unhandled one.
+        });
       } catch (err) {
         next(err);
       }

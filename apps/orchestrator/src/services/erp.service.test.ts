@@ -13,13 +13,36 @@
  *  • an audit row on every read AND every write transition.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { createErpService } from "./erp.service.js";
+import { createErpService, CAPABILITY_LIMITED_CODES } from "./erp.service.js";
+import {
+  INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE,
+  integrationStatusForHealthFailure,
+} from "./cloud-connection-state.js";
 import {
   ConnectorBlockedError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
   AscendAuthorizationError,
   UnsafeBaseUrlError,
+  // WARP-2610 — the other four shipped tracks' error classes. They exist so
+  // the classification table below can be keyed on the class a REAL connector
+  // throws rather than on a hand-written stub carrying the right code.
+  UnsafeAscendBaseUrlError,
+  UnsafeStripeBaseUrlError,
+  UnsafeHubspotBaseUrlError,
+  UnsafeMailchimpBaseUrlError,
+  StripeQuotaExhaustedError,
+  StripeReauthorizationRequiredError,
+  StripeAccessPolicyError,
+  InvalidStripeCredentialError,
+  HubSpotQuotaExhaustedError,
+  HubSpotReauthorizationRequiredError,
+  HubSpotSuperAdminRevokedError,
+  HubSpotCapabilityUnavailableError,
+  HubSpotSearchRateLimitedError,
+  MailchimpReauthorizationRequiredError,
+  MailchimpCapabilityMissingError,
+  MailchimpTimeoutError,
 } from "@droplet/erp-connector";
 
 type ConnRow = {
@@ -756,5 +779,588 @@ describe("erp.service — export-drop row selection (WARP-1964)", () => {
     const result = await svc.getArSummary(OWNER_USER);
     expect(result.connected).toBe(false);
     expect(result.reason).toBe("NOT_CONFIGURED");
+  });
+});
+
+/**
+ * WARP-2610 — both read-path classifiers key on the connector error's `code`.
+ *
+ * ## What was wrong
+ *
+ * `cloudReasonFor` named QuickBooks Online's two classes and Dentrix Ascend's
+ * one; `reasonForConnectorError` named QuickBooks Online's and Dentrix's unsafe
+ * base-URL classes. Every other vendor exports its OWN class for the same
+ * meaning — a package cannot export five `UnsafeBaseUrlError`s — so a HubSpot,
+ * Mailchimp, Stripe or Shopify reauth, quota or refused host fell through to
+ * `connected: false, reason: "ERROR"`. Two hand-maintained per-vendor lists in
+ * one file, both silently four vendors behind.
+ *
+ * Worse, the capability class had no rendering at all. A Basic-plan Shopify
+ * store reads orders, products and inventory perfectly and withholds only
+ * customer identities; a Mailchimp account on a plan without a resource is
+ * otherwise entirely healthy. Both read as a BROKEN connection, sending the
+ * owner to fix a credential with nothing wrong with it.
+ *
+ * ## What this table pins
+ *
+ * One row per shipped connector error class: the `code` it carries, and the
+ * state the service must render for it. It asserts the code too, so a vendor
+ * renaming one is caught here rather than by a silent reclassification into
+ * ERROR — which is the exact failure mode being fixed.
+ */
+describe("erp.service — connector errors classify by code, not by class (WARP-2610)", () => {
+  /**
+   * PR #1945's Shopify errors, mirrored locally.
+   *
+   * The connector is not on `stage` yet, so importing the real classes would
+   * not compile. What is asserted is the CONTRACT the classifier keys on — the
+   * `code` string and the `dataset` field — copied verbatim from
+   * `services/erp-connector/src/shopify/connector.ts` on
+   * `origin/feat/warp-2296-shopify-connector` (`ShopifyScopeMissingError`,
+   * `ShopifyProtectedDataDeniedError`, `ShopifyReauthorizationRequiredError`,
+   * `UnsafeShopifyBaseUrlError`). When #1945 merges these become plain imports;
+   * if its codes changed in review, this table goes red, which is the point.
+   */
+  class ShopifyScopeMissing extends Error {
+    readonly code = "SCOPE_MISSING";
+    constructor(readonly dataset: string) {
+      super(`the Shopify app is not granted read_customers, which "${dataset}" needs`);
+    }
+  }
+  class ShopifyProtectedDataDenied extends Error {
+    readonly code = "PROTECTED_CUSTOMER_DATA_DENIED";
+    constructor(readonly shape: string) {
+      super(`Shopify withheld protected customer data (${shape}); apply for approval`);
+    }
+  }
+  class ShopifyReauth extends Error {
+    readonly code = "REAUTHORIZE_REQUIRED";
+  }
+  class UnsafeShopifyBaseUrl extends Error {
+    readonly code = "UNSAFE_BASE_URL";
+  }
+
+  type Row = {
+    /** Which connector the class belongs to — the axis that must NOT matter. */
+    vendor: string;
+    make: () => Error;
+    code: string;
+    connected: boolean;
+    reason: string;
+  };
+
+  /** Read-path (`runReadOrBlocked`) — the error is thrown by `runRead`. */
+  const READ_PATH: readonly Row[] = [
+    // ── capability: the connection works, ONE dataset is refused ────────────
+    {
+      vendor: "mailchimp",
+      make: () => new MailchimpCapabilityMissingError("lists", "plan does not include it"),
+      code: "CAPABILITY_MISSING",
+      connected: true,
+      reason: "CAPABILITY_LIMITED",
+    },
+    {
+      vendor: "hubspot",
+      make: () => new HubSpotCapabilityUnavailableError("quotes", "Sales Hub Professional"),
+      code: "CAPABILITY_NOT_AVAILABLE",
+      connected: true,
+      reason: "CAPABILITY_LIMITED",
+    },
+    {
+      vendor: "shopify (#1945)",
+      make: () => new ShopifyScopeMissing("customer"),
+      code: "SCOPE_MISSING",
+      connected: true,
+      reason: "CAPABILITY_LIMITED",
+    },
+    {
+      vendor: "shopify (#1945)",
+      make: () => new ShopifyProtectedDataDenied("silent_redaction"),
+      code: "PROTECTED_CUSTOMER_DATA_DENIED",
+      connected: true,
+      reason: "CAPABILITY_LIMITED",
+    },
+
+    // ── the grant is dead: only a person re-consenting fixes it ─────────────
+    {
+      vendor: "quickbooks-online",
+      make: () => new ReauthorizationRequiredError("refresh token expired"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      vendor: "dentrix-ascend",
+      make: () => new AscendAuthorizationError("vendor enablement withdrawn"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      vendor: "stripe",
+      make: () => new StripeReauthorizationRequiredError("key revoked"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      vendor: "hubspot",
+      make: () => new HubSpotReauthorizationRequiredError("token deleted"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      vendor: "mailchimp",
+      make: () => new MailchimpReauthorizationRequiredError("key disabled"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      vendor: "shopify (#1945)",
+      make: () => new ShopifyReauth("client credentials revoked"),
+      code: "REAUTHORIZE_REQUIRED",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+    {
+      // The private app's creator lost super admin. `cloud-connection-state`
+      // already calls this NEEDS_RECONNECT; one vocabulary across both
+      // classifiers means it must be REAUTHORIZE_REQUIRED here too.
+      vendor: "hubspot",
+      make: () => new HubSpotSuperAdminRevokedError("every call refused"),
+      code: "USER_DOES_NOT_HAVE_PERMISSIONS",
+      connected: true,
+      reason: "REAUTHORIZE_REQUIRED",
+    },
+
+    // ── metered allowance spent: resolves itself, no user action ────────────
+    {
+      vendor: "quickbooks-online",
+      make: () => new QuotaExhaustedError(500, 500),
+      code: "QUOTA_EXHAUSTED",
+      connected: true,
+      reason: "QUOTA_EXHAUSTED",
+    },
+    {
+      vendor: "stripe",
+      make: () => new StripeQuotaExhaustedError(100, 100),
+      code: "QUOTA_EXHAUSTED",
+      connected: true,
+      reason: "QUOTA_EXHAUSTED",
+    },
+    {
+      vendor: "hubspot",
+      make: () => new HubSpotQuotaExhaustedError("daily pool spent"),
+      code: "QUOTA_EXHAUSTED",
+      connected: true,
+      reason: "QUOTA_EXHAUSTED",
+    },
+
+    // ── nothing is wired ───────────────────────────────────────────────────
+    {
+      vendor: "any",
+      make: () => new ConnectorBlockedError("runRead"),
+      code: "CONNECTOR_BLOCKED",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+
+    // ── UNCHANGED by this ticket: still the generic ERROR branch ────────────
+    // Listed so a later widening of the capability set is a deliberate edit to
+    // this table rather than a silent reclassification.
+    {
+      vendor: "stripe",
+      make: () => new StripeAccessPolicyError("address refused"),
+      code: "STRIPE_ACCESS_POLICY",
+      connected: false,
+      reason: "ERROR",
+    },
+    {
+      vendor: "mailchimp",
+      make: () => new MailchimpTimeoutError("get_audience_members", 120_000),
+      code: "REQUEST_TIMEOUT",
+      connected: false,
+      reason: "ERROR",
+    },
+    {
+      vendor: "hubspot",
+      make: () => new HubSpotSearchRateLimitedError(5, "429 persisted"),
+      code: "SEARCH_RATE_LIMITED",
+      connected: false,
+      reason: "ERROR",
+    },
+    {
+      vendor: "stripe",
+      make: () => new InvalidStripeCredentialError("publishable_key"),
+      code: "INVALID_STRIPE_CREDENTIAL",
+      connected: false,
+      reason: "ERROR",
+    },
+  ];
+
+  /** Construction path (`reasonForConnectorError`) — the error is thrown by
+   *  the connector FACTORY, before anything is dialled. */
+  const CONSTRUCT_PATH: readonly Row[] = [
+    {
+      vendor: "quickbooks-online",
+      make: () => new UnsafeBaseUrlError("not an allowed Intuit host"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "dentrix-ascend",
+      make: () => new UnsafeAscendBaseUrlError("not an allowed Ascend host"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "stripe",
+      make: () => new UnsafeStripeBaseUrlError("not api.stripe.com"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "hubspot",
+      make: () => new UnsafeHubspotBaseUrlError("not api.hubapi.com"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "mailchimp",
+      make: () => new UnsafeMailchimpBaseUrlError("datacenter host mismatch"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "shopify (#1945)",
+      make: () => new UnsafeShopifyBaseUrl("not a *.myshopify.com host"),
+      code: "UNSAFE_BASE_URL",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+    {
+      vendor: "any",
+      make: () => new ConnectorBlockedError("construct (no Organization-ID)"),
+      code: "CONNECTOR_BLOCKED",
+      connected: false,
+      reason: "ERP_NOT_CONNECTED",
+    },
+  ];
+
+  function serviceThatReadsWith(err: Error) {
+    const mock = makePrismaMock({});
+    return createErpService(
+      mock.prisma,
+      {
+        connectorFor: () =>
+          makeBlockedConnector({
+            // CONNECTED session — the whole point of the non-fault states is
+            // that the handshake succeeded and the READ still stopped.
+            connect: vi.fn(async () => {}),
+            runRead: vi.fn(async () => {
+              throw err;
+            }),
+          }) as never,
+      },
+    );
+  }
+
+  function serviceThatFailsToBuildWith(err: Error) {
+    const mock = makePrismaMock({});
+    return createErpService(mock.prisma, {
+      connectorFor: () => {
+        throw err;
+      },
+    });
+  }
+
+  /** As above, over a CONNECTED cloud row, so `queryDataset` resolves one.
+   *  Its lookup is `provider: { in: [...] }`, which `makePrismaMock` — written
+   *  for the single-provider Eaglesoft lookups — does not answer. */
+  function cloudServiceThatReadsWith(err: Error) {
+    const row = {
+      id: "conn-cloud",
+      provider: "mailchimp",
+      status: "CONNECTED",
+      writeEnabled: false,
+      schemaHash: null,
+    };
+    const prisma = {
+      integrationConnection: {
+        findFirst: vi.fn(async ({ where }: any) => {
+          const p = where.provider;
+          const matches = typeof p === "string" ? p === row.provider : p?.in?.includes(row.provider);
+          if (!matches) return null;
+          if (where.status !== undefined && where.status !== row.status) return null;
+          return { ...row };
+        }),
+      },
+      erpAuditLog: { create: vi.fn(async () => ({})) },
+    } as never;
+    return createErpService(prisma, {
+      connectorFor: () =>
+        makeBlockedConnector({
+          provider: "mailchimp",
+          connect: vi.fn(async () => {}),
+          runRead: vi.fn(async () => {
+            throw err;
+          }),
+        }) as never,
+    });
+  }
+
+  describe("read path", () => {
+    it.each(READ_PATH)(
+      "$vendor $code → connected=$connected reason=$reason",
+      async ({ make, code, connected, reason }) => {
+        const err = make();
+        // The classifier's ONLY input. Asserted so a vendor renaming its code
+        // fails here instead of quietly falling back to ERROR.
+        expect((err as { code?: string }).code).toBe(code);
+        const res = await serviceThatReadsWith(err).getArSummary(OWNER);
+        expect(res.connected).toBe(connected);
+        expect(res.reason).toBe(reason);
+      },
+    );
+
+    it.each(READ_PATH)("$vendor $code never renders as an empty success", async ({ make }) => {
+      // ADR-041's hard rule. `rows: []` with no reason reads as "you have no
+      // contacts", which is a confident false statement about the business.
+      const res = await cloudServiceThatReadsWith(make()).queryDataset(
+        { dataset: "audience_member", params: {} },
+        OWNER,
+      );
+      expect(res.rows).toEqual([]);
+      expect(res.reason).toBeDefined();
+    });
+  });
+
+  describe("construction path", () => {
+    it.each(CONSTRUCT_PATH)(
+      "$vendor $code → connected=$connected reason=$reason",
+      async ({ make, code, connected, reason }) => {
+        const err = make();
+        expect((err as { code?: string }).code).toBe(code);
+        const res = await serviceThatFailsToBuildWith(err).getArSummary(OWNER);
+        expect(res.connected).toBe(connected);
+        expect(res.reason).toBe(reason);
+      },
+    );
+
+    it("an error carrying no code at all is still contained as ERROR", async () => {
+      // Keying on `code` must not turn an unclassifiable failure into a
+      // healthy-looking one. There is no input to either classifier that
+      // produces `connected: true` without a recognised code.
+      const res = await serviceThatFailsToBuildWith(new TypeError("boom")).getArSummary(OWNER);
+      expect(res.connected).toBe(false);
+      expect(res.reason).toBe("ERROR");
+    });
+  });
+
+  describe("CAPABILITY_LIMITED carries what the owner can act on", () => {
+    it("names the withheld dataset and the connector's own remediation", async () => {
+      const res = await cloudServiceThatReadsWith(
+        new MailchimpCapabilityMissingError("lists", "the Free plan does not include it"),
+      ).queryDataset({ dataset: "audience_member", params: {} }, OWNER);
+
+      expect(res.reason).toBe("CAPABILITY_LIMITED");
+      expect(res.capability?.dataset).toBe("lists");
+      // The connector's text, not copy composed here: this service must never
+      // author vendor remediation.
+      expect(res.capability?.remediation).toBe(
+        new MailchimpCapabilityMissingError("lists", "the Free plan does not include it").message,
+      );
+    });
+
+    it("takes Shopify's `dataset` field where Mailchimp/HubSpot use `resource`", async () => {
+      const res = await serviceThatReadsWith(new ShopifyScopeMissing("customer")).getArSummary(
+        OWNER,
+      );
+      expect(res.capability?.dataset).toBe("customer");
+    });
+
+    it("falls back to the refused READ name when the error names no resource", async () => {
+      const res = await serviceThatReadsWith(
+        new ShopifyProtectedDataDenied("vendor_error"),
+      ).getArSummary(OWNER);
+      // Never an empty string — the caller always has something to render.
+      expect(res.capability?.dataset).toBe("get_ar_summary");
+      expect(res.capability?.remediation).toContain("protected customer data");
+    });
+
+    it("is absent for every other reason", async () => {
+      const quota = await serviceThatReadsWith(new QuotaExhaustedError(1, 1)).getArSummary(OWNER);
+      expect(quota.capability).toBeUndefined();
+      const blocked = await serviceThatReadsWith(
+        new ConnectorBlockedError("runRead"),
+      ).getArSummary(OWNER);
+      expect(blocked.capability).toBeUndefined();
+    });
+
+    it("is DISTINCT from every other state — the three renderings never collapse", async () => {
+      const capability = await serviceThatReadsWith(
+        new MailchimpCapabilityMissingError("lists", "plan"),
+      ).getArSummary(OWNER);
+      const quota = await serviceThatReadsWith(new QuotaExhaustedError(1, 1)).getArSummary(OWNER);
+      const reauth = await serviceThatReadsWith(
+        new ReauthorizationRequiredError("expired"),
+      ).getArSummary(OWNER);
+      const broken = await serviceThatReadsWith(new TypeError("boom")).getArSummary(OWNER);
+
+      expect(new Set([capability.reason, quota.reason, reauth.reason, broken.reason]).size).toBe(4);
+      // The half that is the bug: a refused dataset is NOT a broken connection.
+      expect(capability.connected).toBe(true);
+      expect(broken.connected).toBe(false);
+    });
+  });
+
+  /**
+   * A code that names an `Object.prototype` member is NOT a classification.
+   *
+   * Keying on `code` replaced an `instanceof` chain, and it brought one hazard
+   * the chain did not have: a bare index into an object LITERAL walks the
+   * prototype chain, so `READ_REASON_BY_CODE["constructor"]` answers with
+   * `Object` — truthy, and not a reason. The read then returns
+   * `connected: true` with a non-string `reason`, and `JSON.stringify` DROPS a
+   * function value outright, so the wire body an owner's browser receives is
+   * `{ connected: true, rows: [] }` with no reason at all.
+   *
+   * That is precisely the empty success ADR-041 forbids and this ticket exists
+   * to prevent, reachable by a connector whose error carries one of five
+   * ordinary-looking strings. The sibling `CAPABILITY_LIMITED_CODES` is a
+   * `Set` and has never had the hole; this table is asserted to match it.
+   *
+   * Asserted at BOTH layers on purpose: the service return value, and the
+   * serialised body, because the second is where the reason disappears and the
+   * first alone would pass on `__proto__` (an object survives stringify).
+   */
+  describe("a code inherited from Object.prototype is not a reason", () => {
+    /** Every member a bare `obj[key]` lookup can reach without the object
+     *  declaring it. `__proto__` resolves to an OBJECT rather than a function,
+     *  which is why the wire-level assertion below checks the type rather than
+     *  merely the key's presence. */
+    const INHERITED = [
+      "constructor",
+      "toString",
+      "valueOf",
+      "hasOwnProperty",
+      "isPrototypeOf",
+      "__proto__",
+    ] as const;
+
+    /** Shaped exactly like every ADR-041 connector error the classifier reads:
+     *  an `Error` with a string `code`. Only the STRING is unusual. */
+    function connectorErrorWithCode(code: string): Error {
+      const err = new Error(`the connector refused the read (${code})`);
+      Object.defineProperty(err, "code", { value: code, enumerable: true });
+      return err;
+    }
+
+    it.each(INHERITED)(
+      "code=%s is contained as a typed failure, never a truthy prototype member",
+      async (code) => {
+        const err = connectorErrorWithCode(code);
+        // The classifier's only input really is the string under test.
+        expect((err as { code?: unknown }).code).toBe(code);
+
+        const res = await serviceThatReadsWith(err).getArSummary(OWNER);
+
+        // Unrecognised is unrecognised: the safe default at the bottom of the
+        // classifier, the same one a `TypeError` takes.
+        expect(res.connected).toBe(false);
+        expect(res.reason).toBe("ERROR");
+        // Belt and braces — a non-string reason is the defect's signature.
+        expect(typeof res.reason).toBe("string");
+      },
+    );
+
+    it.each(INHERITED)(
+      "code=%s cannot reach the wire as a success with no reason",
+      async (code) => {
+        const res = await cloudServiceThatReadsWith(
+          connectorErrorWithCode(code),
+        ).queryDataset({ dataset: "audience_member", params: {} }, OWNER);
+
+        // What `routes/erp.ts` actually sends. A function-valued reason is
+        // silently dropped here, which is how the empty success is minted.
+        const wire = JSON.parse(JSON.stringify(res)) as {
+          connected: boolean;
+          reason?: unknown;
+          rows: unknown[];
+        };
+
+        expect(wire.rows).toEqual([]);
+        expect(typeof wire.reason).toBe("string");
+        expect(wire.reason).toBe("ERROR");
+        expect(wire.connected).toBe(false);
+      },
+    );
+  });
+
+  /**
+   * The read classifier and the persisted-status classifier must not disagree
+   * about the capability class (WARP-2610 + WARP-2623).
+   *
+   * These are two different KINDS of answer — the `reason` on a read, and the
+   * `IntegrationStatus` stored on the row — and they are consumed by two
+   * different surfaces at the same moment. When they disagreed, a Mailchimp
+   * account on a plan without a resource drew a red "Can't connect" tile in the
+   * integrations hub while the assistant, reading the same connection through
+   * `queryDataset`, reported it healthy and said only the plan withheld the
+   * dataset. Both were rendered from the same vendor error, and the owner had
+   * no way to tell which was lying.
+   *
+   * Asserted against the EXPORTED set rather than a second list written here,
+   * so a fifth capability code added to one classifier and not the other is a
+   * red test rather than a divergence that reaches a customer.
+   */
+  describe("the capability class means the same thing to both classifiers", () => {
+    it.each([...CAPABILITY_LIMITED_CODES])(
+      "%s is capability-class on the read path AND on the persisted status",
+      async (code) => {
+        const err = new Error(`the vendor withheld the dataset (${code})`);
+        Object.defineProperty(err, "code", { value: code, enumerable: true });
+
+        const read = await serviceThatReadsWith(err).getArSummary(OWNER);
+        // The connection WORKS; one dataset is refused.
+        expect(read.connected).toBe(true);
+        expect(read.reason).toBe("CAPABILITY_LIMITED");
+
+        // ...and the row the hub renders says the same thing. `ERROR` here is
+        // the defect: it draws "Can't connect" over a working connection and
+        // stops sync, which also stops the datasets that DO read.
+        expect(integrationStatusForHealthFailure(err)).toBe("CAPABILITY_LIMITED");
+        expect(integrationStatusForHealthFailure(err)).not.toBe("ERROR");
+      },
+    );
+
+    it("neither classifier holds a capability code the other does not", () => {
+      const persisted = Object.entries(INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE)
+        .filter(([, status]) => status === "CAPABILITY_LIMITED")
+        .map(([code]) => code)
+        .sort();
+
+      // Set equality in BOTH directions. A code added to the read path alone
+      // renders a healthy read over a red tile; a code added to the status
+      // table alone renders a calm tile over a read that says ERROR.
+      expect(persisted).toEqual([...CAPABILITY_LIMITED_CODES].sort());
+    });
+
+    it("the docstring's claim is the tested one: no capability code is ERROR", () => {
+      // `erp.service.ts` claims "one vocabulary across both classifiers". This
+      // is that sentence as an assertion — before #1960 it was false for
+      // exactly this code class, and it was false in the direction that shows a
+      // customer two contradictory answers at once.
+      for (const code of CAPABILITY_LIMITED_CODES) {
+        expect(INTEGRATION_STATUS_BY_HEALTH_FAILURE_CODE[code]).toBe("CAPABILITY_LIMITED");
+      }
+    });
   });
 });

@@ -200,3 +200,17 @@ describe("DEVICE_SECRET handling", () => {
     expect(verifyShareUrl(tokenA)).toBeNull();
   });
 });
+
+// CodeQL js/polynomial-redos: the base64url pad strip is bounded (`={1,2}$`)
+// — base64 of a Buffer never carries more than two `=`. Every payload
+// length mod 3 (0, 1, 2 pads) must still come out pad-free and verify.
+describe("signShareUrl — base64url encoding", () => {
+  it("emits pad-free base64url for every padding class and round-trips", async () => {
+    const { signShareUrl, verifyShareUrl } = await importSigner();
+    for (const ncPath of ["/a.mp4", "/ab.mp4", "/abc.mp4", "/abcd.mp4", "/abcde.mp4"]) {
+      const token = signShareUrl("alice", ncPath, 600);
+      expect(token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+      expect(verifyShareUrl(token)?.ncPath).toBe(ncPath);
+    }
+  });
+});

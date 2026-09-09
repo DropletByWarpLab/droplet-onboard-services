@@ -5,12 +5,13 @@
 #
 # Prefer adding tests over exempting. Exempt only when the code is pure
 # hardware glue or generated assets that can't be exercised off-device.
-
-# Hardware display service + PyPortal firmware. display.py drives an SPI
-# TFT through a vendored pygame renderer and USB-serial to the PyPortal's
-# CircuitPython firmware; both require physical hardware to meaningfully
-# exercise. The logic-only bits (color palette, frame throttling) are
-# small enough that unit tests would mostly be mocking the serial layer.
-# Revisit when the renderer grows enough non-hardware logic to justify a
-# test surface.
-services/oled-display
+#
+# There are currently NO exemptions. `services/oled-display` was the only
+# entry and was removed in WARP-2685: its suite has run in CI since
+# WARP-1640/1641 (.github/workflows/oled-display-panel-tests.yml, the whole
+# tests/ directory bar one disk-layout-coupled file). The entry survived only
+# because the checker resolved workflows by filename and could not see the
+# `-panel-` infix; it now matches on the workflow's actual `paths:` filter.
+#
+# Before adding an entry here, check that the service really has no workflow —
+# not merely no workflow named `<name>-tests.yml`.

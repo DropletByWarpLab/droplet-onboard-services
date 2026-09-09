@@ -7,6 +7,7 @@ import {
   fetchConversation,
   getBrainMemoryItems,
   runSceneConfirmed,
+  resolveToolConfirmation,
   truncateConversation,
   setMessageFeedback,
 } from "../api";
@@ -237,10 +238,25 @@ interface ToolResultEvent extends SSEEventBase {
    * `run_scene`). The chip renders an "Approve & run" button that re-POSTs with
    * this single-use token.
    */
+  /**
+   * WARP-2469 — `kind: "tool_confirmation"` is a WARP-2305 interceptor
+   * challenge and carries a `challengeId` with NO token. Optional
+   * `confirmationToken` so both shapes share one type; read it only
+   * after checking `kind`.
+   */
   confirmation?: {
     kind: string;
     sceneId?: string;
-    confirmationToken: string;
+    confirmationToken?: string;
+    challengeId?: string;
+    tool?: string;
+    status?: string;
+    expiresAt?: number;
+    summary?: {
+      tool: string;
+      fields: { key: string; kind: string; detail: string; value?: boolean }[];
+      truncatedFields: number;
+    };
   };
 }
 
@@ -1405,7 +1421,11 @@ export function useChat(options: UseChatOptions = {}) {
         !call ||
         !confirmation ||
         confirmation.kind !== "scene_run" ||
-        !confirmation.sceneId
+        !confirmation.sceneId ||
+        // WARP-2469 made `confirmationToken` optional on the shared handle
+        // type, because an interceptor challenge carries a `challengeId`
+        // instead. A `scene_run` without one cannot be completed here.
+        !confirmation.confirmationToken
       ) {
         return;
       }
@@ -1451,6 +1471,119 @@ export function useChat(options: UseChatOptions = {}) {
       }
     },
     [],
+  );
+
+  /**
+   * WARP-2469: approve or decline a WARP-2305 interceptor challenge from
+   * chat.
+   *
+   * The client holds only the opaque `challengeId` — the interceptor's
+   * token never reaches the browser, so this is not "echo the secret
+   * back" the way `approveScene` is. `POST /api/llm/confirm/:id` is
+   * role-gated, records the decision, and (on approve) makes the token
+   * claimable by the agent loop.
+   *
+   * ON APPROVE we then send a short continuation turn. The model is what
+   * re-issues a refused call, and it only does so if the conversation
+   * continues; without this the user would approve and then have to
+   * prompt again themselves, which reads as the approval not having
+   * worked. The loop attaches the token when — and only when — the model
+   * re-issues the SAME tool with the SAME arguments.
+   *
+   * ON DENY nothing is re-sent. The user said no; asking the model to
+   * carry on would invite it straight back to the same call.
+   */
+  const decideToolConfirmation = useCallback(
+    async (
+      messageId: string,
+      toolCallId: string,
+      decision: "approve" | "deny",
+      model: string,
+      systemPrompt?: string,
+      provider?: string,
+    ) => {
+      const snapshot = messagesRef.current;
+      const call = snapshot
+        .find((m) => m.id === messageId)
+        ?.toolCalls?.find((c) => c.id === toolCallId);
+      const challengeId = call?.confirmation?.challengeId;
+      if (!call || !challengeId) return;
+      // Idle-only: a decision already in flight or already made is final.
+      if (call.confirmState) return;
+
+      const patchCall = (patch: Partial<ChatToolCall>) =>
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id !== messageId
+              ? m
+              : {
+                  ...m,
+                  toolCalls: m.toolCalls?.map((c) =>
+                    c.id === toolCallId ? { ...c, ...patch } : c,
+                  ),
+                },
+          ),
+        );
+
+      patchCall({ confirmState: "running" });
+      try {
+        const outcome = await resolveToolConfirmation(challengeId, decision);
+        if (outcome.status === "denied") {
+          patchCall({ confirmState: "denied" });
+          return;
+        }
+        patchCall({ confirmState: "ran" });
+        await sendMessage(
+          "I approved that — go ahead.",
+          model,
+          systemPrompt,
+          provider,
+        );
+      } catch (e) {
+        // 410 is specifically "the challenge outlived its TTL", which the
+        // prompt renders as expired with a re-request rather than as a
+        // failure the user should retry against a dead challenge.
+        const status = (e as { status?: number }).status;
+        patchCall({
+          confirmState: status === 410 ? "expired" : "failed",
+          ...(status === 410
+            ? {}
+            : {
+                message:
+                  e instanceof Error ? e.message : "Couldn't record your decision.",
+              }),
+        });
+      }
+    },
+    [sendMessage],
+  );
+
+  /**
+   * WARP-2469: re-ask after an approval expired. Re-sends the user prompt
+   * that drove the turn, which mints a fresh challenge — the expired one
+   * can never be revived, by design.
+   */
+  const rerequestApproval = useCallback(
+    async (
+      messageId: string,
+      model: string,
+      systemPrompt?: string,
+      provider?: string,
+    ) => {
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      // The prompt that produced this assistant turn is the nearest
+      // preceding user message.
+      for (let i = idx - 1; i >= 0; i--) {
+        const m = snapshot[i];
+        if (m.role === "user") {
+          await sendMessage(m.content, model, systemPrompt, provider);
+          return;
+        }
+      }
+    },
+    [sendMessage],
   );
 
   /**
@@ -1805,6 +1938,8 @@ export function useChat(options: UseChatOptions = {}) {
     editMessage,
     rateMessage,
     approveScene,
+    decideToolConfirmation,
+    rerequestApproval,
     clearMessages,
     attachments,
     /** WARP-859 — every attachment on this conversation (for SessionHeader);

@@ -15,6 +15,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import type { ToolConfirmationHandle } from "../types/sse-events.js";
 
 /**
  * Title length cap. Titles auto-generate from the first user message; we
@@ -22,6 +23,15 @@ import { Prisma } from "@prisma/client";
  * prompt twice (the message itself is the source of truth).
  */
 const TITLE_MAX_LEN = 64;
+
+/**
+ * WARP-1921 — how many of the most recent assistant rows `getConversationToolNames`
+ * reads for cross-turn tool continuity. Exported (WARP-2643) so a test can pin the
+ * boundary against the shipped value instead of restating `50`: a test carrying its
+ * own literal keeps passing when the window changes, which is the one thing a
+ * boundary test must not do.
+ */
+export const CONTINUITY_TRACE_ROW_LIMIT = 50;
 
 export interface PersistedToolCall {
   id: string;
@@ -41,11 +51,14 @@ export interface PersistedToolCall {
    * its TTL, and a consumed/expired token is rejected with 403 by
    * `approveScene`, so replay-on-reload is safe. (review #497)
    */
-  confirmation?: {
-    kind: string;
-    sceneId?: string;
-    confirmationToken: string;
-  };
+  /**
+   * WARP-2469 — the same shape the wire uses (`ToolConfirmationHandle`),
+   * so a persisted chip and a live one can never disagree. An interceptor
+   * challenge (`kind: "tool_confirmation"`) persists its `challengeId`
+   * and no token: reloading a conversation restores an approvable prompt
+   * whose authority still lives entirely in the orchestrator.
+   */
+  confirmation?: ToolConfirmationHandle;
 }
 
 export interface PersistedMessageInput {
@@ -217,7 +230,7 @@ export class ChatPersistenceService {
       orderBy: { createdAt: "desc" },
       // A conversation only has so many distinct domains; the most recent
       // turns are the ones continuity is for. Bounds the read on a long thread.
-      take: 50,
+      take: CONTINUITY_TRACE_ROW_LIMIT,
     });
     const names = new Set<string>();
     for (const row of rows) {

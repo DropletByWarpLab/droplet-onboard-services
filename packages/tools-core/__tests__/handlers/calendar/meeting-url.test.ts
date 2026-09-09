@@ -18,6 +18,7 @@
  * invent one. So list_events and search_calendar_events project it too.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import createEvent from "../../../src/handlers/calendar/create-event.js";
 import listEvents from "../../../src/handlers/calendar/list-events.js";
 import searchEvents from "../../../src/handlers/calendar/search-events.js";
@@ -40,7 +41,7 @@ const HOSTILE = [
   "the kitchen",
 ];
 
-function createCtx(create: ReturnType<typeof vi.fn>): ToolContext {
+function createCtx(create: Mock): ToolContext {
   return {
     prisma: { calendarEvent: { create } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],
@@ -50,7 +51,7 @@ function createCtx(create: ReturnType<typeof vi.fn>): ToolContext {
   };
 }
 
-function updateCtx(update: ReturnType<typeof vi.fn>): ToolContext {
+function updateCtx(update: Mock): ToolContext {
   const findUnique = vi.fn().mockResolvedValue({
     userId: "alice",
     source: "local",
@@ -70,7 +71,8 @@ function updateCtx(update: ReturnType<typeof vi.fn>): ToolContext {
 
 describe("create_event — meeting_url", () => {
   it("advertises meeting_url on the tool schema so the model can reach it", () => {
-    const props = createEvent.inputSchema.properties as Record<string, unknown>;
+    const props = (createEvent.inputSchema as { properties: Record<string, unknown> })
+      .properties;
     expect(props.meeting_url).toBeDefined();
   });
 
@@ -140,7 +142,8 @@ describe("create_event — meeting_url", () => {
 
 describe("update_event — meeting_url", () => {
   it("advertises meeting_url on the tool schema", () => {
-    const props = updateEvent.inputSchema.properties as Record<string, unknown>;
+    const props = (updateEvent.inputSchema as { properties: Record<string, unknown> })
+      .properties;
     expect(props.meeting_url).toBeDefined();
   });
 
@@ -186,7 +189,7 @@ describe("update_event — meeting_url", () => {
 
 // ── the read tier ────────────────────────────────────────────────────
 
-function readCtx(findMany: ReturnType<typeof vi.fn>): ToolContext {
+function readCtx(findMany: Mock): ToolContext {
   return {
     prisma: { calendarEvent: { findMany } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

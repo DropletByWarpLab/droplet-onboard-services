@@ -50,6 +50,7 @@ import { useModelsPage } from "@/lib/hooks/useModelsPage";
 import { useModelsCatalog } from "@/lib/hooks/useModelsCatalog";
 import { useModelPull } from "@/lib/hooks/useModelPull";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { KpiStrip } from "@/components/models/KpiStrip";
 import { LocalModelCard } from "@/components/models/LocalModelCard";
 import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
@@ -63,10 +64,6 @@ const SUB =
 
 /** Owner/admin can change the active model; everyone else sees it read-only.
  *  Mirrors the orchestrator's requireRole("owner","admin") on the write. */
-function isAdminRole(role?: string): boolean {
-  return role === "owner" || role === "admin";
-}
-
 export default function ModelsPage() {
   const { data, error, isLoading, refresh } = useModelsPage();
   const catalog = useModelsCatalog();

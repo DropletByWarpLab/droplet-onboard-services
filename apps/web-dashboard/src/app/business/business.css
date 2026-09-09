@@ -1,0 +1,212 @@
+/* ============================================================
+   WARP-2561 (ADR-044 slice 3) — the Planning bento.
+
+   Scoped under `.droplet-business`, inside `.droplet-shell` (ShellPage), and
+   drawing only on the indigo shell scope: `--surface`, `--text`,
+   `--text-muted`, `--card-bg`, `--card-bd`, `--brand`, `--brand-subtle`,
+   `--radius-card`, `--ease`. No new tokens are defined here.
+
+   Deliberately NOT sharing `reports.css`. The grid is nearly the same, and
+   extracting it would be a refactor of a shipped surface to serve a new one —
+   a change to /reports, in a ticket that is not about /reports. If a third
+   bento page appears, that is the moment to lift the primitive out, with both
+   existing callers there to keep it honest.
+
+   Note `--brand-subtle` for the accent wash, NOT the legacy pre-DESIGN.md
+   accent token: `scripts/check-dashboard-classes.sh` greps raw text, comments
+   included, and fails the build on it — so this note does not spell it.
+   ============================================================ */
+
+.droplet-business {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Grid ───────────────────────────────────────────────────
+   Twelve columns, collapsing to six then two. Source order IS reading
+   order and is preserved at every width — the single-column stack must
+   follow the same sequence, so nothing is re-ordered for mobile. */
+.bz-bento {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-auto-rows: minmax(132px, auto);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.bz-bento > [data-span="6x2"] { grid-column: span 6; grid-row: span 2; }
+.bz-bento > [data-span="4x2"] { grid-column: span 4; grid-row: span 2; }
+.bz-bento > [data-span="12x1"] { grid-column: span 12; grid-row: span 1; }
+
+@media (max-width: 1279px) {
+  .bz-bento {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+  }
+  .bz-bento > [data-span="6x2"],
+  .bz-bento > [data-span="4x2"],
+  .bz-bento > [data-span="12x1"] { grid-column: span 6; }
+}
+
+@media (max-width: 767px) {
+  .bz-bento {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .bz-bento > [data-span="6x2"],
+  .bz-bento > [data-span="4x2"],
+  .bz-bento > [data-span="12x1"] { grid-column: span 2; }
+}
+
+/* ── Tile chrome ────────────────────────────────────────────
+   Identical on every tile, which is where the page's coherence comes
+   from: the tiles differ in content and in nothing else. */
+.bz-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  background: var(--card-bg);
+}
+
+.bz-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--text-muted);
+}
+
+.bz-tile-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+}
+
+.bz-tile-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* ── States ─────────────────────────────────────────────────
+   Four, and only four. `.bz-fail` reads as text rather than as an alarm:
+   a source that did not answer is a thing to try again, not an error the
+   operator caused. */
+.bz-skel {
+  height: 56px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  opacity: 0.7;
+}
+
+.bz-empty,
+.bz-fail {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── Rows ───────────────────────────────────────────────────
+   Key on the left, figure on the right, so a column of figures lines up
+   and can be read down without tracking across. */
+.bz-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bz-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.bz-row-k {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bz-row-v {
+  flex: none;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.bz-row-money {
+  color: var(--text);
+}
+
+.bz-row-muted {
+  opacity: 0.7;
+}
+
+.bz-row-more a {
+  color: var(--brand);
+  text-decoration: none;
+  font-size: 12.5px;
+}
+
+.bz-row-more a:hover {
+  text-decoration: underline;
+}
+
+/* ── Stats ──────────────────────────────────────────────────
+   Tabular numerals so the figures do not shuffle sideways between polls. */
+.bz-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.bz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bz-stat-n {
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.bz-stat-time {
+  font-size: 20px;
+}
+
+.bz-stat-l {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Ask tile ───────────────────────────────────────────────*/
+.bz-ask {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.bz-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}

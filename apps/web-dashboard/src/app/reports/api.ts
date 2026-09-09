@@ -9,6 +9,8 @@
  * `lib/api.ts` and the Folders tile imports it from there.
  */
 
+import type { IntegrationStatus as IntegrationStatusName } from "@droplet/shared-types";
+
 import { authFetch } from "@/lib/auth";
 import type { ActivityListResponse } from "@/components/audit/types";
 import type { DateRange } from "./date-scope";
@@ -116,16 +118,16 @@ export async function fetchActivityRange(
 // before that the hub list carried no timestamp at all and the only way to
 // get one was the provider-specific /api/integrations/eaglesoft route.
 
-/** The seven explicit lifecycle states. A provider with no row reports
- *  NOT_CONFIGURED — it is never absent-meaning-off. */
-export type IntegrationStatusName =
-  | "NOT_CONFIGURED"
-  | "PROVISIONING"
-  | "CONNECTED"
-  | "DEGRADED"
-  | "DRIFT_LOCKED"
-  | "ERROR"
-  | "DISABLED";
+/**
+ * The nine explicit lifecycle states. A provider with no row reports
+ * NOT_CONFIGURED — it is never absent-meaning-off.
+ *
+ * WARP-2639 — the definition moved to `@droplet/shared-types`
+ * (`integration-status.ts`) and is re-exported here under the name this module
+ * already used, so `connectors.ts`'s two total `Record`s and every other
+ * `from "./api"` import are unchanged.
+ */
+export type { IntegrationStatusName };
 
 export interface IntegrationSummary {
   provider: string;
@@ -168,6 +170,9 @@ export interface RunTraceEntry {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /** WARP-2670 — the name this step's result was published under, when it
+   *  was given one. Mirrors the orchestrator's `RunStepTrace.as`. */
+  as?: string;
 }
 
 export interface ToolRunRow {

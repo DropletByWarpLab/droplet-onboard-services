@@ -52,7 +52,26 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     # GWV-009: mirror the Rerank allowlist for EmbedText — an arbitrary model
     # name would be handed to SentenceTransformer, which downloads any HF repo
     # (unbounded egress + disk/memory), and mixed dimensions could corrupt pgvector.
-    _EMBED_SUPPORTED_MODELS = frozenset({"", "all-MiniLM-L6-v2"})
+    #
+    # WARP-2196: `""` is the proto default ("caller expressed no preference")
+    # and resolves to providers.embeddings.DEFAULT_MODEL.
+    #
+    # Written out literally rather than derived from
+    # `providers.embeddings.SUPPORTED_MODELS`: that module is imported LAZILY
+    # inside EmbedText (so a gateway without sentence-transformers still
+    # serves chat), and a module-level import here would both undo that and
+    # break the test stubs that replace `providers.embeddings`. The two lists
+    # are held in agreement by
+    # tests/test_embed_model_allowlist.py::test_allowlist_cannot_drift_from_the_provider_resolver
+    # instead — adding a model in one place and not the other fails CI.
+    #
+    # `all-MiniLM-L6-v2` was REMOVED, not joined by bge. Both are 384-dim, so
+    # pgvector accepts either into `FileContentChunk.embedding` and the
+    # dimension check that normally catches a wrong model passes — while
+    # cosine distance across the two spaces is meaningless. Keeping both
+    # allowed would make undetectable corpus poisoning a supported config,
+    # precisely while the corpus is mid-re-embed. See providers/embeddings.py.
+    _EMBED_SUPPORTED_MODELS = frozenset({"", "bge-small-en-v1.5"})
 
     def __init__(self, provider_router: ProviderRouter, scheduler: InferenceScheduler):
         self._router = provider_router

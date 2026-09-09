@@ -49,7 +49,34 @@
 # header above the sentinel is preserved). Run it, then READ THE DIFF and
 # write down what changed and why before committing.
 #
-# Exit 0 when the drift matches the baseline, 1 otherwise.
+# WITH AND WITHOUT A SHADOW DATABASE (WARP-2615, WARP-2634)
+# ---------------------------------------------------------
+# The whole gate is `migrate diff` against a real pgvector Postgres, so with no
+# SHADOW_DATABASE_URL there is nothing to compare and the script cannot answer
+# the question at all. What it does about that depends on WHERE it is running,
+# because the two callers want opposite things:
+#
+#   * In CI ($CI or $GITHUB_ACTIONS set) a missing shadow URL is a FAILURE,
+#     never a skip. CI is the only place this gate ever runs, so a silent skip
+#     there would retire the gate while leaving a green check behind — exactly
+#     the failure mode it exists to prevent. Exit 1, same class as real drift.
+#     The workflow step that sets SHADOW_DATABASE_URL is
+#     `.github/workflows/orchestrator-tests.yml` → "Gate schema.prisma vs
+#     migration-set drift"; if that env block is dropped or the shadow DB step
+#     is removed, this is the message that says so.
+#
+#   * Locally it is a SKIP with the reason printed, because most developers
+#     have no pgvector Postgres and no local caller runs this script. Exit 2 —
+#     WARP-2615's code, kept deliberately: "did not run" stays distinguishable
+#     from both "ran, clean" (0) and "ran, drifted" (1), and it stays non-zero
+#     so no future caller can mistake a skip for a pass.
+#
+# EXIT CODES
+# ----------
+#   0  ran; drift matches the documented baseline (or --update succeeded)
+#   1  ran; drift does NOT match the baseline — or the shadow DB was missing
+#      in CI, or `prisma migrate diff` itself failed
+#   2  did not run: no SHADOW_DATABASE_URL outside CI (skip), or bad arguments
 
 set -euo pipefail
 
@@ -65,8 +92,22 @@ case "${1:-}" in
   *) echo "usage: $0 [--update]" >&2; exit 2 ;;
 esac
 
+# See "WITH AND WITHOUT A SHADOW DATABASE" in the header. CI fails; local skips.
 if [ -z "${SHADOW_DATABASE_URL:-}" ]; then
-  echo "FAIL  SHADOW_DATABASE_URL is unset — see the usage block in $0" >&2
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "FAIL  SHADOW_DATABASE_URL is unset, and this is CI." >&2
+    echo "" >&2
+    echo "  The drift gate must never be skipped in CI — a skip here retires the" >&2
+    echo "  gate and leaves a green check behind. Restore the shadow database in" >&2
+    echo "  .github/workflows/orchestrator-tests.yml: the 'Create drift shadow" >&2
+    echo "  database' step, and the SHADOW_DATABASE_URL env block on the 'Gate" >&2
+    echo "  schema.prisma vs migration-set drift' step that runs this script." >&2
+    exit 1
+  fi
+  echo "  SKIP  schema-drift gate did not run: SHADOW_DATABASE_URL is unset and" >&2
+  echo "        this is not CI. The gate needs a real, EMPTY pgvector Postgres to" >&2
+  echo "        replay the migration set into — see the usage block in $0." >&2
+  echo "        This is a skip, not a pass: nothing was compared." >&2
   exit 2
 fi
 

@@ -52,6 +52,14 @@ const roleFromGroups = vi.fn().mockReturnValue("family");
 vi.mock("../services/jwt.service.js", () => ({
   verifyAccessToken: (...args: unknown[]) => verifyAccessToken(...args),
   roleFromGroups: (...args: unknown[]) => roleFromGroups(...args),
+  // WARP-1636 — the OCS fallback mints through this funnel (groups CAPPED
+  // at the local row's User.role). This suite is about `req.user.id`
+  // normalisation, so the stub keeps the pre-cap behaviour and lets each
+  // test drive the role via `roleFromGroups` as before. The cap itself is
+  // pinned against the REAL module in auth.ocs-role-cap.test.ts — mocking
+  // it here would make this file green with the cap deleted, which is
+  // precisely why that suite does not mock jwt.service at all.
+  resolveNcSessionRole: (groups: unknown) => roleFromGroups(groups),
   ACCESS_TOKEN_TTL_SECONDS: 900,
   REFRESH_TOKEN_TTL_SECONDS: 60 * 60 * 24 * 30,
 }));

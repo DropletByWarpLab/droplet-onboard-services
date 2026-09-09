@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import jwt from "jsonwebtoken";
+import type { SignOptions } from "jsonwebtoken";
 import { verifyJwt } from "../src/auth/jwt.js";
 
 const SECRET = "test-secret";
@@ -7,7 +8,15 @@ const SECRET = "test-secret";
 // Helper — every test mints orchestrator-shaped access tokens. The
 // `type: "access"` claim is required after WARP-103 reviewer follow-up
 // (matches `apps/orchestrator/src/services/jwt.service.ts`).
-function signAccess(payload: Record<string, unknown>, secret = SECRET, expiresIn = "5m"): string {
+// `expiresIn` is typed from `SignOptions`, not inferred as `string`: the
+// library narrows it to `number | StringValue` (a `${number}${unit}` template
+// union), and a bare `string` does not satisfy it. Inference gave `string`
+// here and nothing caught it while `__tests__` was excluded from `tsc`.
+function signAccess(
+  payload: Record<string, unknown>,
+  secret = SECRET,
+  expiresIn: SignOptions["expiresIn"] = "5m",
+): string {
   return jwt.sign({ type: "access", ...payload }, secret, { expiresIn });
 }
 

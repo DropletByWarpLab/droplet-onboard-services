@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listDiscoveredCameras from "../../../src/handlers/cameras/list-discovered-cameras.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -9,7 +10,7 @@ import type { ToolContext } from "../../../src/types.js";
  * while camera-discovery held a live pending list. It now reads the orchestrator's
  * merged candidate list, the same one the dashboard renders.
  */
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },

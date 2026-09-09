@@ -338,6 +338,9 @@ export async function recordSafely(
 }
 
 // Prisma's namespace is imported at the top of the file (alongside the
-// type-only PrismaClient) for runtime use of `Prisma.DbNull`. Tests that
-// mock `@prisma/client` need to expose `Prisma.DbNull` in their stub.
+// type-only PrismaClient) for runtime use of `Prisma.DbNull`. The shared test
+// setup (`src/__tests__/setup.ts`) exports the three JSON-null sentinels as
+// distinct objects, so a suite mocking `@prisma/client` gets a value that
+// compares by identity rather than an `undefined` that silently matches
+// everything (WARP-2484).
 export type { Prisma };

@@ -16,6 +16,47 @@ import {
   type SearchHit,
 } from "./file-search.service.js";
 
+/**
+ * WARP-2193 — a prisma fake that can serve the vector arm.
+ *
+ * `searchByVector` now runs its SELECT inside an interactive transaction, so
+ * its `SET LOCAL hnsw.ef_search` is scoped rather than silently discarded.
+ * Two consequences for the fakes in this file:
+ *
+ *  1. Anything that reaches the vector arm needs `$transaction`. This fake
+ *     hands back ITSELF as the transaction client, so every existing
+ *     assertion against `$queryRawUnsafe.mock.calls` keeps working. The
+ *     "did the SET LOCAL and the SELECT really share one transaction"
+ *     question is pinned properly in src/__tests__/file-search.service.test.ts,
+ *     which is where it belongs; this file is about fusion and reranking.
+ *
+ *  2. The two hybrid arms no longer reach `$queryRawUnsafe` in a fixed
+ *     order: the vector arm awaits its SET LOCAL first, which yields, and
+ *     the lexical arm's query lands before it. Fakes that answered "first
+ *     call = vector, second call = lexical" were pinning a scheduling
+ *     accident. They now dispatch on SQL SHAPE, which is what they meant and
+ *     is order-independent.
+ */
+function fakePrisma(
+  respond: (sql: string, ...args: unknown[]) => unknown[] | Promise<unknown[]>,
+) {
+  const client: Record<string, unknown> = {
+    $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) =>
+      respond(sql, ...args),
+    ),
+    $executeRawUnsafe: vi.fn(async () => 0),
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn(client),
+    ),
+  };
+  return client as never;
+}
+
+/** The vector arm's SQL is the only shape carrying a `::vector` literal. */
+function isVectorArm(sql: string): boolean {
+  return sql.includes("::vector");
+}
+
 function hit(
   source: "nextcloud" | "brain",
   path: string,
@@ -225,12 +266,7 @@ describe("searchHybrid (BM25 + RRF, pre-reranker)", () => {
         score: 0.5,
       },
     ];
-    const prisma = {
-      $queryRawUnsafe: vi
-        .fn()
-        .mockImplementationOnce(async () => vectorRows)
-        .mockImplementationOnce(async () => lexicalRows),
-    } as never;
+    const prisma = fakePrisma((sql) => (isVectorArm(sql) ? vectorRows : lexicalRows));
     const hits = await searchHybrid(prisma, {
       userId: "alice",
       vector: new Array(384).fill(0.01),
@@ -248,33 +284,32 @@ describe("searchHybrid (BM25 + RRF, pre-reranker)", () => {
   });
 
   it("respects limit smaller than fused result count", async () => {
-    const prisma = {
-      $queryRawUnsafe: vi
-        .fn()
-        .mockResolvedValueOnce([
-          {
-            source: "nextcloud",
-            path: "/a.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "",
-            score: 0.9,
-          },
-          {
-            source: "nextcloud",
-            path: "/b.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "",
-            score: 0.8,
-          },
-        ])
-        .mockResolvedValueOnce([]),
-    } as never;
+    const prisma = fakePrisma((sql) =>
+      isVectorArm(sql)
+        ? [
+            {
+              source: "nextcloud",
+              path: "/a.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "",
+              score: 0.9,
+            },
+            {
+              source: "nextcloud",
+              path: "/b.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "",
+              score: 0.8,
+            },
+          ]
+        : [],
+    );
     const hits = await searchHybrid(prisma, {
       userId: "alice",
       vector: new Array(384).fill(0.01),
@@ -422,46 +457,43 @@ describe("rerankPassages", () => {
 
 describe("searchHybrid with reranker", () => {
   it("reranks fused candidates and returns top-K", async () => {
-    const prisma = {
-      $queryRawUnsafe: vi
-        .fn()
-        // vector arm
-        .mockResolvedValueOnce([
-          {
-            source: "nextcloud",
-            path: "/a.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "alpha",
-            score: 0.9,
-          },
-          {
-            source: "nextcloud",
-            path: "/b.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "beta",
-            score: 0.8,
-          },
-        ])
-        // lexical arm
-        .mockResolvedValueOnce([
-          {
-            source: "nextcloud",
-            path: "/c.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "gamma",
-            score: 0.7,
-          },
-        ]),
-    } as never;
+    const prisma = fakePrisma((sql) =>
+      isVectorArm(sql)
+        ? [
+            {
+              source: "nextcloud",
+              path: "/a.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "alpha",
+              score: 0.9,
+            },
+            {
+              source: "nextcloud",
+              path: "/b.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "beta",
+              score: 0.8,
+            },
+          ]
+        : [
+            {
+              source: "nextcloud",
+              path: "/c.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "gamma",
+              score: 0.7,
+            },
+          ],
+    );
     const redis = makeMockRedis();
     // RRF: /a in vector arm at rank 0 (score 1/60), /b at rank 1 (1/61),
     // /c in lexical arm at rank 0 (1/60). Tied 1/60 between /a and /c;
@@ -485,23 +517,22 @@ describe("searchHybrid with reranker", () => {
   });
 
   it("falls back to RRF top-K when reranker errors", async () => {
-    const prisma = {
-      $queryRawUnsafe: vi
-        .fn()
-        .mockResolvedValueOnce([
-          {
-            source: "nextcloud",
-            path: "/a.pdf",
-            chunkIdx: 0,
-            pageNumber: null,
-            brainItemId: null,
-            metadata: null,
-            snippet: "",
-            score: 0.9,
-          },
-        ])
-        .mockResolvedValueOnce([]),
-    } as never;
+    const prisma = fakePrisma((sql) =>
+      isVectorArm(sql)
+        ? [
+            {
+              source: "nextcloud",
+              path: "/a.pdf",
+              chunkIdx: 0,
+              pageNumber: null,
+              brainItemId: null,
+              metadata: null,
+              snippet: "",
+              score: 0.9,
+            },
+          ]
+        : [],
+    );
     const redis = makeMockRedis();
     const reranker = {
       rerank: vi.fn(async () => {
@@ -576,12 +607,10 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
 
   it("averages HyDE passage embedding with raw query vector before vector arm", async () => {
     const captured: { sql: string; args: unknown[] }[] = [];
-    const prisma = {
-      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
-        captured.push({ sql, args });
-        return [];
-      }),
-    } as never;
+    const prisma = fakePrisma((sql, ...args) => {
+      captured.push({ sql, args });
+      return [];
+    });
 
     await searchHybrid(prisma, {
       userId: "u1",
@@ -598,12 +627,10 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
 
   it("silently drops HyDE term when its length differs from raw vector", async () => {
     const captured: { sql: string; args: unknown[] }[] = [];
-    const prisma = {
-      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
-        captured.push({ sql, args });
-        return [];
-      }),
-    } as never;
+    const prisma = fakePrisma((sql, ...args) => {
+      captured.push({ sql, args });
+      return [];
+    });
     await searchHybrid(prisma, {
       userId: "u1",
       vector: [1, 0, 0, 0, 0],
@@ -617,15 +644,13 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
   it("fans out vector arms across raw + extra queries and RRF-fuses them first", async () => {
     // 3 vector arms (raw + 2 extras) + 1 lexical arm → 4 $queryRawUnsafe calls.
     // Match by SQL shape (vector arms include '::vector', lexical does not).
-    const prisma = {
-      $queryRawUnsafe: vi.fn(async (sql: string) => {
-        if (!sql.includes("::vector")) return []; // lexical arm
-        if (sql.includes("[1,0,0]")) return [mkRow("doc-a", 0)];
-        if (sql.includes("[0,1,0]")) return [mkRow("doc-b", 1)];
-        if (sql.includes("[0,0,1]")) return [mkRow("doc-c", 2)];
-        return [];
-      }),
-    } as never;
+    const prisma = fakePrisma((sql) => {
+      if (!isVectorArm(sql)) return []; // lexical arm
+      if (sql.includes("[1,0,0]")) return [mkRow("doc-a", 0)];
+      if (sql.includes("[0,1,0]")) return [mkRow("doc-b", 1)];
+      if (sql.includes("[0,0,1]")) return [mkRow("doc-c", 2)];
+      return [];
+    });
 
     const out = await searchHybrid(prisma, {
       userId: "u1",
@@ -648,12 +673,10 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
 
   it("applies filenameContains to both arms' SQL with parameterised LIKE", async () => {
     const captured: { sql: string; args: unknown[] }[] = [];
-    const prisma = {
-      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
-        captured.push({ sql, args });
-        return [];
-      }),
-    } as never;
+    const prisma = fakePrisma((sql, ...args) => {
+      captured.push({ sql, args });
+      return [];
+    });
     await searchHybrid(prisma, {
       userId: "u1",
       vector: [1, 0, 0],
@@ -669,12 +692,9 @@ describe("searchHybrid with queryEnhancement (WARP-437)", () => {
   });
 
   it("no-enhancement path is equivalent to single vector + single lexical arm", async () => {
-    const prisma = {
-      $queryRawUnsafe: vi
-        .fn()
-        .mockResolvedValueOnce([mkRow("a", 0)])
-        .mockResolvedValueOnce([mkRow("b", 0)]),
-    } as never;
+    const prisma = fakePrisma((sql) =>
+      isVectorArm(sql) ? [mkRow("a", 0)] : [mkRow("b", 0)],
+    );
     const out = await searchHybrid(prisma, {
       userId: "u1",
       vector: [1, 0, 0],
@@ -713,9 +733,18 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
   function mockPrisma() {
     const deks: DekRow[] = [];
     const chunkRows: unknown[] = [];
-    return {
+    // WARP-2193: searchByVector runs its SELECT inside an interactive
+    // transaction (so its `SET LOCAL hnsw.ef_search` is not a no-op), so the
+    // fake has to hand back a transaction client. It hands back ITSELF —
+    // this suite is about decrypt-on-read, not about transaction scoping,
+    // which src/__tests__/file-search.service.test.ts pins properly.
+    const client: Record<string, unknown> = {
       __chunkRows: chunkRows,
       $queryRawUnsafe: vi.fn(async () => chunkRows),
+      $executeRawUnsafe: vi.fn(async () => 0),
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn(client),
+      ),
       documentEncryptionKey: {
         findFirst: async ({ where: { keyId } }: any) =>
           deks.filter((r) => r.keyId === keyId).sort((a, b) => b.version - a.version)[0] ??
@@ -733,7 +762,10 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
           }
         },
       },
-    } as unknown as import("@prisma/client").PrismaClient & { __chunkRows: unknown[] };
+    };
+    return client as unknown as import("@prisma/client").PrismaClient & {
+      __chunkRows: unknown[];
+    };
   }
 
   function encRow(itemId: string, blob: string) {
@@ -796,12 +828,18 @@ describe("WARP-242 decrypt-on-read + crypto-shred", () => {
   });
 
   it("plaintext rows pass through without touching the DEK table", async () => {
-    const prisma = {
+    const bare: Record<string, unknown> = {
       $queryRawUnsafe: vi.fn(async () => [
         { ...encRow("x", "plain snippet"), brainItemId: null, source: "nextcloud" },
       ]),
+      $executeRawUnsafe: vi.fn(async () => 0),
+      // WARP-2193: the vector SELECT runs inside an interactive transaction.
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn(bare),
+      ),
       // No documentEncryptionKey table at all — must not be needed.
-    } as never;
+    };
+    const prisma = bare as never;
     const hits = await searchByVector(prisma, {
       userId: "u1",
       vector: [1, 0, 0],

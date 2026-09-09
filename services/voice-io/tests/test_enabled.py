@@ -3,9 +3,12 @@ endpoint, `status.enabled`, and the boot gate.
 
 Contract pinned here:
 
-  - the flag survives restarts and reads as ON for every shape the
-    reader can't trust (absent / corrupt / unreadable / non-boolean), so
-    a box upgrading into this change keeps listening exactly as before;
+  - the flag survives restarts; an ABSENT flag reads as ON, so a box
+    upgrading into this change keeps listening exactly as before, but
+    every present-but-unreadable shape (corrupt / empty / undecodable /
+    non-boolean / EACCES / EIO / stale mount) reads as OFF — a kill
+    switch fails CLOSED, and a storage fault must never re-arm the mic
+    (WARP-1620);
   - POST /voice/enabled persists BEFORE it touches the pipeline, is
     idempotent both directions, and never needs working audio hardware —
     a pipeline that can't start still answers 200 `{"enabled": true}`;
@@ -27,10 +30,13 @@ Contract pinned here:
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -88,25 +94,119 @@ class TestVoiceEnabledStore:
         VoiceEnabledStore().save(True)
         assert VoiceEnabledStore().load() is True
 
-    def test_corrupt_file_reads_enabled(self, flag_path):
+    def test_a_readable_flag_carries_no_fault(self, flag_path):
+        # The two paths we can read with confidence — absent, and a real
+        # boolean — are the ONLY ones that report `fault is None`. Every
+        # assertion below keys off that, so pin it here.
+        assert VoiceEnabledStore().read().fault is None
+        VoiceEnabledStore().save(False)
+        state = VoiceEnabledStore().read()
+        assert (state.enabled, state.fault) == (False, None)
+
+    # ── WARP-1620: present-but-unreadable must fail CLOSED ──
+    #
+    # `load()` used to answer True for EVERY shape it could not read.
+    # Absent → enabled is a deliberate back-compat default and stays
+    # (above): a box upgrading into WARP-1599 has no flag file and must
+    # keep listening. But the file only ever EXISTS because an admin
+    # wrote it, and an OSError reading it is not evidence they changed
+    # their mind. The box this ships on has a documented root-filesystem
+    # failure history (WARP-1501): /data remounting read-only, or an I/O
+    # error on the flag, would flip `load()` back to True and the next
+    # container restart would re-arm the microphone in someone's home
+    # with nobody having touched the switch.
+    #
+    # For a kill switch the asymmetry is the whole point: a state we
+    # cannot positively read as "voice enabled" means voice stays OFF.
+
+    def test_corrupt_file_reads_disabled(self, flag_path):
         flag_path.write_text("{not json", encoding="utf-8")
-        assert VoiceEnabledStore().load() is True
+        state = VoiceEnabledStore().read()
+        assert state.enabled is False
+        assert state.fault is not None
+        assert VoiceEnabledStore().load() is False
 
-    def test_non_object_json_reads_enabled(self, flag_path):
+    def test_empty_file_reads_disabled(self, flag_path):
+        # The exact residue of a truncated write: save() fsyncs before the
+        # rename precisely so this shape can't appear, but a failing disk
+        # can still hand it back on read.
+        flag_path.write_text("", encoding="utf-8")
+        assert VoiceEnabledStore().load() is False
+
+    def test_non_object_json_reads_disabled(self, flag_path):
         flag_path.write_text("[false]", encoding="utf-8")
-        assert VoiceEnabledStore().load() is True
+        assert VoiceEnabledStore().load() is False
 
-    def test_non_boolean_flag_reads_enabled(self, flag_path):
+    def test_non_boolean_flag_reads_disabled(self, flag_path):
         # A hand-edited "false" string is not evidence of an admin's
-        # intent — never guess a kill switch into the off position.
+        # intent either — and "not evidence of intent" resolves to OFF,
+        # not to ON. The wire agrees: POST /voice/enabled 422s the same
+        # value (test_rejects_a_non_boolean_body).
         flag_path.write_text('{"enabled": "false"}', encoding="utf-8")
-        assert VoiceEnabledStore().load() is True
+        assert VoiceEnabledStore().load() is False
 
-    def test_unreadable_path_reads_enabled(self, tmp_path, monkeypatch):
+    def test_unreadable_path_reads_disabled(self, tmp_path, monkeypatch):
+        # IsADirectoryError — a real filesystem OSError, no mocking.
         directory = tmp_path / "not-a-file.json"
         directory.mkdir()
         monkeypatch.setenv("VOICE_ENABLED_PATH", str(directory))
+        assert VoiceEnabledStore().load() is False
+
+    def test_undecodable_bytes_read_disabled(self, flag_path):
+        # Binary garbage where JSON should be. This one did not merely
+        # fail open — `read_text` raises UnicodeDecodeError, which is a
+        # ValueError and NOT an OSError, so it escaped `load()` entirely:
+        # a 500 out of the capture guard and an unhandled exception out
+        # of the startup hook.
+        flag_path.write_bytes(b"\xff\xfe\x00garbage")
+        assert VoiceEnabledStore().load() is False
+
+    @pytest.mark.parametrize(
+        ("exc", "label"),
+        [
+            (PermissionError(errno.EACCES, "Permission denied"), "EACCES"),
+            (OSError(errno.EIO, "Input/output error"), "I/O error"),
+            (OSError(errno.ESTALE, "Stale file handle"), "stale mount"),
+            (OSError(errno.EROFS, "Read-only file system"), "read-only remount"),
+        ],
+    )
+    def test_an_os_error_reads_disabled(self, flag_path, monkeypatch, exc, label):
+        # The WARP-1501 family, deterministically: every way the volume
+        # can fail out from under a flag an admin already wrote.
+        flag_path.write_text('{"enabled": false}', encoding="utf-8")
+
+        def _raise(*_args, **_kwargs):
+            raise exc
+
+        monkeypatch.setattr(Path, "read_text", _raise)
+        state = VoiceEnabledStore().read()
+        assert state.enabled is False, f"{label} must not re-arm the mic"
+        assert state.fault is not None
+
+    def test_a_chmod_000_flag_reads_disabled(self, flag_path):
+        # The same EACCES against the real filesystem rather than a
+        # patched read_text. Root ignores the mode bits, and Windows has
+        # no POSIX permissions — CI runs neither, so skip there.
+        flag_path.write_text('{"enabled": true}', encoding="utf-8")
+        if os.name != "posix" or os.geteuid() == 0:
+            pytest.skip("POSIX mode bits are not enforced for this user")
+        flag_path.chmod(0o000)
+        try:
+            assert VoiceEnabledStore().load() is False
+        finally:
+            flag_path.chmod(0o600)
+
+    def test_a_fault_survives_into_every_reader(self, flag_path):
+        # The three call sites that gate the mic all go through load().
+        # An admin's real "off" and a fault both end at False — that is
+        # the point — so this pins that a fault is never LOUDER than off
+        # and never quieter than it either.
+        flag_path.write_text("{not json", encoding="utf-8")
+        assert VoiceEnabledStore().load() is False
+        # ...and the legitimate enable path is untouched by all of it.
+        VoiceEnabledStore().save(True)
         assert VoiceEnabledStore().load() is True
+        assert VoiceEnabledStore().read().fault is None
 
     def test_save_creates_missing_parent_directories(self, tmp_path, monkeypatch):
         # First write on a freshly-created named volume.
@@ -660,6 +760,22 @@ class TestCaptureEndpointsRefuseWhileOff:
         assert resp.status_code == 409
         assert "switched off" in resp.json()["detail"]
 
+    def test_an_unreadable_flag_refuses_too(self, client, capture_env, flag_path):
+        # WARP-1620 — the other half of "no audio is captured": these
+        # paths open the mic on their own, so a flag the box cannot read
+        # has to close them as firmly as an admin's explicit off, and the
+        # refusal has to say a fault caused it rather than blaming an
+        # admin who never touched the switch.
+        assert client.post("/audio/echo-check").status_code == 200
+        flag_path.write_text("{not json", encoding="utf-8")
+        resp = client.post("/audio/echo-check")
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "switched off" in detail
+        assert "could not be read" in detail
+        # Refused before the mic was opened, exactly like the admin path.
+        assert capture_env["echo"] == 1
+
     def test_the_capture_lock_is_not_held_by_a_refusal(self, client, capture_env):
         # The guard runs before the lock is taken, so a run of refusals
         # can't leave the box permanently "busy" once voice comes back.
@@ -713,6 +829,29 @@ class TestStatusEnabledField:
         assert body["enabled"] is True
         assert body["state"] == "listening"
 
+    def test_an_unreadable_flag_reports_off_and_says_why(self, client, flag_path):
+        # WARP-1620 — failing closed is necessary but not sufficient: a
+        # box that goes silent has to say it went silent because of a
+        # FAULT, not leave the owner believing they switched it off. The
+        # box IS off (safe, and `state` stays in its existing vocabulary
+        # so no client needs a new case), and `error_message` carries the
+        # reason onto the wire.
+        flag_path.write_text("{not json", encoding="utf-8")
+        body = client.get("/voice/status").json()
+        assert body["enabled"] is False
+        assert body["state"] == "off"
+        assert body["error_message"] is not None
+        assert "voice-enabled" in body["error_message"]
+
+    def test_an_admin_off_carries_no_error_message(self, client):
+        # The mirror: a deliberate silence is not a fault, and must not
+        # light up a fault string on the /voice page.
+        VoiceEnabledStore().save(False)
+        body = client.get("/voice/status").json()
+        assert body["enabled"] is False
+        assert body["state"] == "off"
+        assert body["error_message"] is None
+
     def test_health_stays_ok_when_voice_is_switched_off(self, client, monkeypatch):
         # A deliberately-silent box is healthy. /health degrades to 503
         # on "no_mic" (a fault), and Docker's HEALTHCHECK restarts on
@@ -743,6 +882,19 @@ class TestBootGate:
         monkeypatch.setattr(main, "_build_and_start_pipeline", lambda: calls.append(1))
         asyncio.run(main.startup())
         assert calls == [1]
+
+    def test_startup_skips_the_pipeline_when_the_flag_is_unreadable(
+        self, flag_path, monkeypatch,
+    ):
+        # WARP-1620, the reported scenario end to end: the admin switched
+        # voice off, /data later went bad, and the container restarted.
+        # This boot is the moment the box used to re-arm its own mic.
+        flag_path.write_bytes(b"\xff\xfe\x00garbage")
+        calls: list[int] = []
+        monkeypatch.setattr(main, "_build_and_start_pipeline", lambda: calls.append(1))
+        asyncio.run(main.startup())
+        assert calls == []
+        assert main._pipeline is None
 
     def test_a_box_switched_off_boots_silent(self, client, monkeypatch):
         # The whole point of persisting: the switch outlives the process.

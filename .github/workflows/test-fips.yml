@@ -1,53 +1,80 @@
 name: test-fips
 
-# FIPS 140-3 static lint (scripts/test-fips.sh). Mirrors the security-tests
-# workflow's shape — fast, no Docker, runs on every PR touching source/config
-# directories.
+# FIPS 140-3 HEAVYWEIGHT proofs only: the WARP-316 deliberate-sabotage build
+# and the WARP-317 full-stack activation smoke test. Both compile/build real
+# images, so both are gated twice — by this workflow's `paths:` below and
+# again by each job's own dorny filter.
 #
-# WARP-229: PR-BLOCKING. After commits 3-11 landed the allowlist registry
-# (docs/security/fips-exceptions.md), the brain_ingest MD5 → SHA-256 fix,
-# and the camera-discovery + routing + fips-selftest escape annotations,
-# the lint reports zero violations against `main`. From this point forward
-# any PR that introduces a non-FIPS algorithm without a registered
-# `fips:allowed: <reason-id>` escape fails CI.
+# ── THE STATIC LINT IS NO LONGER HERE (WARP-2481) ─────────────────────────
+# `scripts/test-fips.sh` and the three Docker-free harness checks moved to
+# `.github/workflows/ci.yml`, job `fips` (check name `fips / static lint`).
 #
-# To register a new exception: add an entry under `exceptions:` in
-# `docs/security/fips-exceptions.md` and reference it from source via a
-# `fips:allowed: <id>` comment within ±2 lines. Code review is the
-# enforcement gate for new entries; the rationale + annual-review owner
-# must be documented.
+# WHY: this file's old header claimed the lint was "PR-BLOCKING". It was not.
+# The job went red and the merge went through anyway, because `fips-lint` was
+# never a required status check — and a job in a PATH-FILTERED workflow can
+# never become one: on a PR outside the filter it never reports, and GitHub
+# hangs the PR on "Expected — waiting for status" forever (the WARP-2172
+# trap, docs/ci-required-checks.md). Demonstrated on PR #1815 (2026-08-28):
+# `fips-lint` red with 3 violations, `semgrep` red, `CodeQL` red — and
+# `ci-summary`, `egress-gate` and `title carries a WARP key`, the only three
+# required contexts, all green. One approval would have merged it.
+#
+# As a leg of ci.yml the lint's verdict is aggregated by `ci-summary`, which
+# IS required by both the Stage (20877684) and Main (14884851) rulesets. That
+# is what makes "PR-blocking" true by construction rather than aspirational,
+# and it needed no ruleset change and no new required context.
+#
+# The two jobs below are deliberately NOT merge-blocking — they are
+# *capability* proofs (docs/security/fips-ci-gate-required.md). The required
+# build-time gate is docker-build.yml's `docker-build ok` fan-in.
+#
+# ── PATHS (WARP-2481) ─────────────────────────────────────────────────────
+# The lists below are now exactly the UNION of the two jobs' own dorny
+# filters. They used to be a much broader superset (apps/**, services/**,
+# packages/**, scripts/**, docker/**) inherited from the lint that no longer
+# lives here, which meant both jobs spun up a runner, checked out, evaluated
+# their filter and did nothing on ~91% of PRs and 271 of 293 monthly main
+# pushes — ~2 billable minutes each time, since GitHub rounds every job up to
+# the minute. Every path that can make a job's inner filter true is still
+# listed, so no run that did real work is lost. See docs/ci-cost-budget.md.
 
+# NOTE: the two lists below are duplicated on purpose. GitHub Actions does
+# not support YAML anchors/aliases in workflow files, so they cannot be
+# factored out — keep them byte-identical to each other AND to the `fips:`
+# filter inside both jobs.
 on:
   pull_request:
     paths:
-      - "apps/**"
-      - "services/**"
-      - "packages/**"
-      - "scripts/**"
-      - "docker/**"
-      - "docs/security/fips-exceptions.md"
-      - "docs/security/fips-allowed-algorithms.md"
-      - "tests/fips-sabotage.test.sh"
-      - "tests/fips-sabotage-logic.test.sh"
-      - "tests/nginx-fips.test.sh"
-      - "tests/fips-stack-logic.test.sh"
+      - "scripts/setup.sh"
+      - "scripts/lib/secrets.sh"
+      - "scripts/lib/compose.sh"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.test.override.yml"
+      - "docker/fips/**"
+      - "docker/openssl-fips.cnf"
+      - "docker/nginx/**"
+      - "services/_shared/fips_selftest.py"
+      - "packages/fips-selftest/**"
+      - "services/device-identity-svc/**"
       - "tests/integration/fips-stack.test.sh"
+      - "tests/fips-sabotage.test.sh"
       - ".github/workflows/test-fips.yml"
   push:
     branches: [main]
     paths:
-      - "apps/**"
-      - "services/**"
-      - "packages/**"
-      - "scripts/**"
-      - "docker/**"
-      - "docs/security/fips-exceptions.md"
-      - "docs/security/fips-allowed-algorithms.md"
-      - "tests/fips-sabotage.test.sh"
-      - "tests/fips-sabotage-logic.test.sh"
-      - "tests/nginx-fips.test.sh"
-      - "tests/fips-stack-logic.test.sh"
+      - "scripts/setup.sh"
+      - "scripts/lib/secrets.sh"
+      - "scripts/lib/compose.sh"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.test.override.yml"
+      - "docker/fips/**"
+      - "docker/openssl-fips.cnf"
+      - "docker/nginx/**"
+      - "services/_shared/fips_selftest.py"
+      - "packages/fips-selftest/**"
+      - "services/device-identity-svc/**"
       - "tests/integration/fips-stack.test.sh"
+      - "tests/fips-sabotage.test.sh"
       - ".github/workflows/test-fips.yml"
   workflow_dispatch:
 
@@ -56,59 +83,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # WARP-229 static SOURCE lint — distinct from the BUILD-TIME provider gate in
-  # docker-build.yml (install-fips-provider.sh KATs + positive/negative probes,
-  # required-to-merge via the `docker-build ok` fan-in check). This job greps
-  # source for non-FIPS algorithms; it does NOT build images or check runtime
-  # enforcement. See scripts/test-fips.sh header for the lint-vs-gate split.
-  fips-lint:
-    runs-on: ubuntu-latest
-    # A hung test must fail the job fast, not burn the 6h default runner
-    # allocation. Pure static lint (no Docker, no pip/apt builds) — 15 min is
-    # a wide ceiling for a sub-minute suite.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Run lint script's own unit tests
-        run: ./tests/test-fips-script/run.sh
-
-      - name: Run FIPS static lint (PR-blocking)
-        run: ./scripts/test-fips.sh
-
-      - name: Validate the FIPS-capable nginx gateway artifacts (WARP-1021)
-        # Docker-free: cipher-profile posture, entrypoint profile selection,
-        # compose + CI wiring. The image's own build-time self-test (provider
-        # KATs + nginx -t on both profiles) runs in docker-build.yml's
-        # gateway matrix leg.
-        run: bash tests/nginx-fips.test.sh
-
-      - name: Validate the sabotage-proof harness (Docker-free logic checks)
-        # WARP-316: asserts tests/fips-sabotage.test.sh encodes a real sabotage
-        # (build → install → rm fips.so → assert provider gone) and skips
-        # cleanly without Docker. The Docker build itself runs in fips-sabotage.
-        run: bash tests/fips-sabotage-logic.test.sh
-
-      - name: Validate the FIPS stack harness (Docker-free logic checks)
-        # WARP-317: asserts tests/integration/fips-stack.test.sh encodes the
-        # real activation flow + assertions, that the compose file pins the
-        # FIPS boot gate OFF for non-provider images, and that the operator
-        # docs exist. The stack boot itself runs in the fips-stack job.
-        run: bash tests/fips-stack-logic.test.sh
-
   # WARP-316 deliberate-sabotage proof: builds one throwaway image, installs the
   # validated provider for real, deletes fips.so, and asserts the FIPS provider
   # can no longer load — demonstrating the build-time gate is NOT a no-op. This
   # is the runtime-*capability* counterpart to docker-build.yml's PRESENT gate;
   # it does not gate merges by itself (docker-build.yml owns the required check).
   #
-  # CI budget optimization (2026-07): like fips-stack below, the OpenSSL
-  # FIPS-module compile is additionally gated on the FIPS option paths —
-  # this workflow's trigger list is broad (apps/**, services/**, …) and the
-  # sabotage proof ran its multi-minute throwaway build on every ordinary
-  # app PR (~1,400 runs/month). The Docker-free logic check of the harness
-  # (tests/fips-sabotage-logic.test.sh) still runs unconditionally in
-  # fips-lint above.
+  # CI budget optimization (2026-07): the OpenSSL FIPS-module compile is
+  # gated on the FIPS option paths, because this workflow's trigger list used
+  # to be broad (apps/**, services/**, …) and the sabotage proof ran its
+  # multi-minute throwaway build on every ordinary app PR (~1,400 runs/month).
+  # WARP-2481 narrowed the workflow `paths:` to the same option paths, so the
+  # filter below is now a belt-and-braces second gate rather than the only
+  # one — keep it: it is what still protects the build on `workflow_dispatch`
+  # and against any future re-widening of the trigger.
+  # The Docker-free logic check of this harness
+  # (tests/fips-sabotage-logic.test.sh) runs unconditionally in ci.yml's
+  # `fips / static lint` leg.
   fips-sabotage:
     runs-on: ubuntu-latest
     # Compiles the OpenSSL FIPS module in a throwaway build (minutes cold).
@@ -154,10 +145,10 @@ jobs:
   # fips_self_test lines, FIPS-restricted edge TLS (WARP-1021), live API
   # endpoints, in-container MD5 refusal, and no crash-loops on the images
   # that don't ship the provider. Heavy (builds the app images), so it is
-  # additionally gated on the FIPS *option paths* below — this workflow's
-  # trigger list is broad (apps/**, services/**, …) and ordinary app PRs
-  # must not pay a stack boot. Like fips-sabotage, it does not gate merges
-  # by itself. Docker-free logic checks for the harness run in fips-lint.
+  # gated on the FIPS *option paths* below as well as by the workflow's own
+  # `paths:` — ordinary app PRs must not pay a stack boot. Like fips-sabotage,
+  # it does not gate merges by itself. Docker-free logic checks for this
+  # harness run in ci.yml's `fips / static lint` leg.
   fips-stack:
     runs-on: ubuntu-latest
     # Full image-set build (GHCR layer cache warm ≈ 15-25 min; ai-gateway is

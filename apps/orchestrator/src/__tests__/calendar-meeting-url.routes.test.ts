@@ -267,4 +267,19 @@ describe("GET /calendar/publish/:user.ics — meetingUrl", () => {
     expect(res.status).toBe(200);
     expect(res.text).not.toContain("URL:");
   });
+
+  // CodeQL js/type-confusion-through-parameter-tampering: `?token=a&token=b`
+  // reaches Express as an array. Only a single string is ever compared —
+  // an array must be refused up front, never length-checked or Buffer'd.
+  it("403s a repeated ?token= (array) even when every element is the real token", async () => {
+    const stub = makeStub([seedRow()]);
+    const real = tokenFor("alice");
+    const res = await request(buildPublicApp(stub))
+      .get("/api/calendar/publish/alice.ics")
+      .query(`token=${real}&token=${real}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "invalid_token" });
+    expect(stub.calendarEvent.findMany).not.toHaveBeenCalled();
+  });
 });

@@ -11,8 +11,10 @@ mount-gated omission.
 Same harness as test_device_bridge_pools.py: load device-bridge.py fresh via
 importlib with a seeded env, and monkeypatch at the `_lsblk_disks_json` /
 `_os_disk` boundary so no real lsblk/findmnt on the host is ever touched.
-NOTE (WARP-996 class): these pytests run in NO CI workflow — verify locally
-with Python 3.12.
+NOTE: this suite DOES run in CI — .github/workflows/oled-display-panel-tests.yml
+runs the whole tests/ directory on every PR touching services/oled-display
+(WARP-1641 widened it from an explicit file list). The older note here said the
+opposite, which was true when it was written and has not been since.
 """
 
 from __future__ import annotations
@@ -314,3 +316,4 @@ def test_automount_rule_matches_whole_disk_nodes():
             f"udev KERNEL match must include whole-disk pattern {pattern!r} "
             "or an adopted whole-disk filesystem never remounts after reboot"
         )
+

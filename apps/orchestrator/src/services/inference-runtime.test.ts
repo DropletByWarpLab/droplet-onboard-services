@@ -13,17 +13,43 @@
  *      it.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+
+// The repo's logger-mock idiom (see llm-agent.context-budget-warning.test.ts).
+// `logger` here is pino, so spying on `console.warn` sees nothing.
+const logged = vi.hoisted(() => [] as string[]);
+vi.mock("../lib/logger.js", () => {
+  // Both call shapes flow through: `warn(msg)` and `warn(obj, msg)`.
+  const push = (...args: unknown[]) => {
+    logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+  const stub = {
+    warn: push,
+    debug: () => {},
+    info: () => {},
+    error: () => {},
+    trace: () => {},
+    fatal: () => {},
+    silent: () => {},
+    child: () => stub,
+  };
+  return { createLogger: () => stub };
+});
+
 import {
+  DEFAULT_RUNTIME_URL,
   inferenceRuntime,
   inferenceRuntimeUrl,
   isDmrRuntime,
   modelRepositoryKey,
   normalizeModelReference,
   parseHumanSizeBytes,
+  resetRuntimeUrlWarnsForTests,
 } from "./inference-runtime.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  resetRuntimeUrlWarnsForTests();
+  logged.length = 0;
 });
 
 describe("inferenceRuntime()", () => {
@@ -71,6 +97,96 @@ describe("inferenceRuntimeUrl()", () => {
 
   it("strips trailing slashes so callers can concatenate a path", () => {
     vi.stubEnv("INFERENCE_RUNTIME_URL", "http://model-runner:12434//");
+    expect(inferenceRuntimeUrl()).toBe("http://model-runner:12434");
+  });
+
+  // ── WARP-2857 ────────────────────────────────────────────────────────────
+  // `OLLAMA_URL` is in the .env of every deployed box. If the fallback
+  // regresses, the box silently starts dialling DEFAULT_RUNTIME_URL — a
+  // host-installed Ollama that does not exist on the appliance.
+
+  it("falls back to the dev default only when NOTHING is configured", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "");
+    vi.stubEnv("OLLAMA_URL", "");
+    expect(inferenceRuntimeUrl()).toBe(DEFAULT_RUNTIME_URL);
+  });
+
+  it("does not let a blank canonical value shadow a working legacy one", () => {
+    // The compose `${VAR:-}` trap: a declared-but-unset variable arrives as "",
+    // not as absent. If "" won, every un-migrated box would lose its endpoint.
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "   ");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+  });
+
+  it("warns ONCE when only the deprecated name is set", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+
+    // Read on every metrics probe and every page load — once per process, or
+    // the log becomes unreadable and the warning stops being a warning.
+    expect(logged.filter((l) => l.includes("DEPRECATED"))).toHaveLength(1);
+    // Actionable: both names, so the operator knows which line to edit.
+    expect(logged[0]).toContain("OLLAMA_URL");
+    expect(logged[0]).toContain("INFERENCE_RUNTIME_URL");
+  });
+
+  it("stays silent when both names agree — the migration-window steady state", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    // Compose writes the canonical name while every field .env still carries
+    // the legacy one. Warning here would fire on every healthy box.
+    expect(logged).toEqual([]);
+  });
+
+  it("treats a trailing-slash-only difference as AGREEMENT, not a split", () => {
+    // The two names are written by different hands: compose emits the bare
+    // origin, a pasted or hand-edited .env line often carries the slash.
+    // These address the identical endpoint, so warning here would tell the
+    // operator to delete a line that is not actually wrong — a false positive
+    // in the one signal this resolver exists to give honestly.
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434/");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(logged.filter((l) => l.includes("DISAGREE"))).toEqual([]);
+  });
+
+  it("normalizes the canonical side too — slash on either name still agrees", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434///");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(logged.filter((l) => l.includes("DISAGREE"))).toEqual([]);
+  });
+
+  it("warns when the two names DISAGREE, and the canonical still wins", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
+    vi.stubEnv("OLLAMA_URL", "http://droplet-ollama:11434");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+
+    const split = logged.filter((l) => l.includes("DISAGREE"));
+    expect(split).toHaveLength(1);
+    // Both values named, so the reader can see WHICH pair split.
+    expect(split[0]).toContain("http://dmr:12434");
+    expect(split[0]).toContain("http://droplet-ollama:11434");
+  });
+
+  it("reads the env on every call, not once at import", () => {
+    // This is the property that let model-readiness / model-metrics /
+    // model-benchmark drop their own module-level captures and share this
+    // resolver. If it ever regresses to a captured constant, those three
+    // silently stop seeing INFERENCE_RUNTIME_URL again.
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://model-runner:12434");
     expect(inferenceRuntimeUrl()).toBe("http://model-runner:12434");
   });
 });

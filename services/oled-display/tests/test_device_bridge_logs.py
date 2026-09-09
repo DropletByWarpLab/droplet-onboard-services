@@ -171,3 +171,40 @@ def test_logs_bundle_accepts_correct_token(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     h = _FakeHandler(bridge, {"X-Droplet-Auth": "pytest-bridge-token"})
     assert h._authed() is True
+
+
+# ---------------------------------------------------------------------------
+# CodeQL py/command-line-injection (#65): the service filter comes off the query
+# string and is handed to the host script as argv. Explicit ASCII allow-list.
+# ---------------------------------------------------------------------------
+
+def _capture_run(monkeypatch, bridge):
+    captured = {}
+
+    def fake_run(cmd, timeout=15):
+        captured["cmd"] = cmd
+        return 0, json.dumps({"services": []}), ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    return captured
+
+
+@pytest.mark.parametrize("good", ["orchestrator", "ai-gateway", "file_indexer", "_x", "A1"])
+def test_collect_logs_keeps_a_well_formed_service_filter(monkeypatch, good):
+    bridge = _load_bridge(monkeypatch)
+    captured = _capture_run(monkeypatch, bridge)
+    bridge.collect_logs(24, good)
+    assert captured["cmd"][2] == good
+
+
+@pytest.mark.parametrize("bad", [
+    "--orchestrator", "-x", "ünïcode", "orchestrator;reboot", "svc name",
+    "a/b", "a" * 65, "", None, 7,
+])
+def test_collect_logs_drops_an_out_of_shape_service_filter(monkeypatch, bad):
+    """Anything outside [A-Za-z0-9_][A-Za-z0-9_-]{0,63} becomes "" — the script
+    reads that as "all services" — and never reaches argv."""
+    bridge = _load_bridge(monkeypatch)
+    captured = _capture_run(monkeypatch, bridge)
+    bridge.collect_logs(24, bad)
+    assert captured["cmd"][2] == ""

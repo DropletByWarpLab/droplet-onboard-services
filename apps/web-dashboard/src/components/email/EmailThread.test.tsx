@@ -157,10 +157,12 @@ describe("EmailThread", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /confirm.*send|send.*now/i }),
     );
-    await waitFor(() =>
-      expect(screen.getByText(/leaves your Droplet/i)).toBeInTheDocument(),
-    );
-    expect(screen.getByText(/off-LAN allowlist/i)).toBeInTheDocument();
+    // Wait on the off-LAN copy itself. "leaves your Droplet" is ALSO in the
+    // confirm step, which stays on screen while the send is in flight, so a
+    // wait on that phrase resolves before the 451 result has landed and the
+    // next line reads the sending state (CI red on the WARP-2098 branch).
+    const notice = await screen.findByText(/off-LAN allowlist/i);
+    expect(notice).toHaveTextContent(/leaves your Droplet/i);
   });
 
   it("surfaces a thrown send error as a calm message", async () => {

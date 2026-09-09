@@ -62,10 +62,20 @@ runs in the ordinary package test run (and therefore in the existing
 npm run -w @droplet/erp-connector test
 ```
 
-It needs the `openssl` CLI, because the harness mints its own CA so TLS
-verification can stay **on** (Node has no X.509 signing API). Without openssl
-the suite skips locally — and **fails in CI**, so the coverage can never go
-missing silently.
+Two prerequisites, both probed by `preflight.mjs` (WARP-2611):
+
+- the `openssl` CLI, because the harness mints its own CA so TLS verification
+  can stay **on** (Node has no X.509 signing API);
+- **Node 20** — the version `.nvmrc`, `engines.node` and every CI `setup-node`
+  pin. The connector reaches this box by handing an `undici` `Agent` carrying
+  the harness CA to the built-in `fetch`, and from Node 22 on the built-in
+  undici rejects an undici@6 dispatcher outright (`UND_ERR_INVALID_ARG: invalid
+  onError method`). Every request then fails as a bare `fetch failed`, which
+  reads exactly like an unreachable box.
+
+Missing either, the suites **skip with the reason printed** — never red on a
+clean checkout — and **fail in CI**, where both hold, so the coverage can never
+go missing silently.
 
 ### As a long-lived box — Docker
 

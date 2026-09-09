@@ -17,6 +17,7 @@ import { describe, it, expect } from "vitest";
 import {
   driveDisplayName,
   drivePoolName,
+  formatBytes,
   isMachineTail,
   isPoolBackedDevice,
   poolBackingDrive,
@@ -405,5 +406,21 @@ describe("volumeCrumbLabel — GUID never the location label (WARP-1338 UX revie
   it("returns undefined for a human folder segment — real folder names render raw", () => {
     expect(volumeCrumbLabel("Documents", [], [])).toBeUndefined();
     expect(volumeCrumbLabel("Documents", [poolDrive], [])).toBeUndefined();
+  });
+});
+
+describe("formatBytes (WARP-2098 — one formatter for the Storage and Files screens)", () => {
+  // DrivesPanel's fmtBytes and VolumesPanel's formatBytes were two private
+  // copies; the second drifted (no unit clamp) and rendered "1.0 undefined" at
+  // a pebibyte. One export, tested once.
+  it("renders binary units, one decimal under 10", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(512 * 1024 ** 3)).toBe("512 GB");
+  });
+
+  it("clamps the unit at TB so a petabyte pool never renders 'undefined'", () => {
+    expect(formatBytes(2 ** 50)).toBe("1024 TB");
+    expect(formatBytes(2 ** 51)).toBe("2048 TB");
   });
 });

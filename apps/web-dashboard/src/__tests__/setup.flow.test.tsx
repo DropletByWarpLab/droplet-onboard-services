@@ -25,7 +25,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 // API stubs. setupAdmin + loginUser must resolve so the page advances to
-// `internet`; fetchDuckDnsStatus returns "unconfigured" so the wizard's
+// `internet`; fetchBoxName returns an unnamed box so the wizard's
 // Internet step renders its form (and its "Skip for now" button) without
 // reaching the network; fetchMatterDevices keeps the discovery polling
 // loop quiet.
@@ -55,7 +55,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   // WARP-817 — WifiStep reads the host topology on mount to decide its
   // default disclosure state; null (best-effort) leaves the collapsed default.
   getNetworkTopology: vi.fn(async () => null),
@@ -74,7 +73,6 @@ vi.mock("@/lib/api", () => ({
   // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
   // reads) the saved name; null = the pre-existing no-name baseline.
   fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
   // so the flow test doesn't have to click anything on that step.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -211,7 +209,7 @@ describe("setup flow → done state", () => {
 
     // Onboarding-Flow redesign — the single Internet step is now two: `wifi`
     // then `address`. Skip both to reach `discovery`. The Wi-Fi step has no
-    // async mount load; the Address step's fetchDuckDnsStatus effect resolves
+    // async mount load; the Address step's fetchBoxName effect resolves
     // before its skip link is queried (the skip link is always rendered).
     await act(async () => {
       await Promise.resolve();

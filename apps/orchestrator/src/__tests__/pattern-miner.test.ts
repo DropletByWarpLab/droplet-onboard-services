@@ -29,6 +29,8 @@ function createPrismaMock(args: {
     name: string;
     description: string | null;
     status: string;
+    writes: boolean;
+    reversible: boolean;
     stepCount: number;
   }> = [];
   return {
@@ -73,6 +75,8 @@ function createPrismaMock(args: {
             name: string;
             description: string | null;
             status: string;
+            writes: boolean;
+            reversible: boolean;
             steps: {
               create: Array<{ idx: number; kind: string; args: unknown }>;
             };
@@ -83,6 +87,8 @@ function createPrismaMock(args: {
             name: data.name,
             description: data.description,
             status: data.status,
+            writes: data.writes,
+            reversible: data.reversible,
             stepCount: data.steps.create.length,
           });
           existingSlugs.add(data.slug);
@@ -212,6 +218,45 @@ describe("WARP-464 — mineToolCallPatterns", () => {
     );
     // 1 valid name → sequence too short for any 2-gram → no patterns.
     expect(result.inserted).toBe(0);
+  });
+
+  // WARP-2665 — the miner is a spec CREATION path, and it is the only one
+  // that does not derive `writes` from the steps it is writing. Both routes
+  // in tools.ts classify from `WRITE_TOOLS`; hardcoding `false` here mints a
+  // row whose safety flag its own steps contradict. Promotion now repairs it
+  // (tools.ts PATCH), but a row should not need repairing to be true, and
+  // anything reading a `suggested` row before promotion — the Suggested
+  // tab's safety chip, a future schedule-from-suggestion — reads the lie.
+  it("derives writes:true when the mined sequence calls a requiresWrite tool", async () => {
+    const seq = ["list_recent_files", "send_notification"];
+    const prisma = createPrismaMock({ rows: rowsFor([...seq, ...seq, ...seq]) });
+    await mineToolCallPatterns(prisma as any, new Date("2026-05-27T12:00:00Z"));
+    const withWriteTool = prisma.createdSpecs.filter((s) =>
+      s.name.includes("send_notification"),
+    );
+    expect(withWriteTool.length).toBeGreaterThan(0);
+    for (const spec of withWriteTool) expect(spec.writes).toBe(true);
+  });
+
+  it("leaves writes:false when every mined tool is read-only", async () => {
+    const seq = ["list_recent_files", "search_files"];
+    const prisma = createPrismaMock({ rows: rowsFor([...seq, ...seq, ...seq]) });
+    await mineToolCallPatterns(prisma as any, new Date("2026-05-27T12:00:00Z"));
+    expect(prisma.createdSpecs.length).toBeGreaterThan(0);
+    for (const spec of prisma.createdSpecs) expect(spec.writes).toBe(false);
+  });
+
+  // An unrecognised name cannot be classified, so it must not be treated as
+  // read-only by default — but it also is not a WRITE_TOOLS member, so the
+  // derivation reads false. Pinned so the posture is a decision, not an
+  // accident: unknown names come from a tool that was REMOVED from the
+  // registry, and a removed tool dispatches nothing.
+  it("an unregistered tool name is not a write tool", async () => {
+    const seq = ["no_such_tool_xyz", "another_ghost_tool"];
+    const prisma = createPrismaMock({ rows: rowsFor([...seq, ...seq, ...seq]) });
+    await mineToolCallPatterns(prisma as any, new Date("2026-05-27T12:00:00Z"));
+    expect(prisma.createdSpecs.length).toBeGreaterThan(0);
+    for (const spec of prisma.createdSpecs) expect(spec.writes).toBe(false);
   });
 
   it("respects an already-promoted spec (any status) — won't re-suggest", async () => {

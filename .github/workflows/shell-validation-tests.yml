@@ -6,8 +6,12 @@ name: shell-validation-tests
 # deliberately conftest-free home with NO service-module import at collection
 # time — so these security guards run independently of any service's import
 # health (they previously sat under services/oled-display/tests/, whose
-# conftest imports the display module at collection, and ran in no workflow
-# at all: oled-display is ci-coverage-exempt as hardware-only).
+# conftest imports the display module at collection, and at that time ran in
+# no workflow at all — oled-display was then ci-coverage-exempt).
+#
+# The import-health reason still stands and is the reason they stay here. The
+# "runs in no workflow" half does NOT: WARP-1640/1641 gave oled-display's
+# tests/ a workflow, and WARP-2685 retired the exemption.
 #
 # Bare python3 + pytest only: the suites drive bash in subprocesses and need
 # no service dependencies. Keep it that way — a requirements.txt appearing
@@ -21,8 +25,11 @@ on:
       - "scripts/test/pytest/**"
       # WARP-1639: the panel-console suite here also covers device-bridge's
       # POST /panel/console and the polkit grant behind it. Both live under
-      # services/oled-display, which is ci-coverage-exempt and runs in no
-      # workflow — so without these two paths a bridge-only change would sail
+      # services/oled-display — and while that service now HAS a workflow
+      # (oled-display-panel-tests.yml, WARP-1640/1641; its ci-coverage
+      # exemption was retired in WARP-2685), that workflow runs only
+      # services/oled-display/tests/. The suite guarding device-bridge lives
+      # HERE, so without these two paths a bridge-only change would still sail
       # past the tests that guard it.
       - "services/oled-display/device-bridge.py"
       - "services/oled-display/50-droplet-device-bridge.rules"
@@ -42,8 +49,11 @@ on:
       - "scripts/test/pytest/**"
       # WARP-1639: the panel-console suite here also covers device-bridge's
       # POST /panel/console and the polkit grant behind it. Both live under
-      # services/oled-display, which is ci-coverage-exempt and runs in no
-      # workflow — so without these two paths a bridge-only change would sail
+      # services/oled-display — and while that service now HAS a workflow
+      # (oled-display-panel-tests.yml, WARP-1640/1641; its ci-coverage
+      # exemption was retired in WARP-2685), that workflow runs only
+      # services/oled-display/tests/. The suite guarding device-bridge lives
+      # HERE, so without these two paths a bridge-only change would still sail
       # past the tests that guard it.
       - "services/oled-display/device-bridge.py"
       - "services/oled-display/50-droplet-device-bridge.rules"

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setPortPoe from "../../../src/handlers/switch/set-port-poe.js";
 import type { ToolContext } from "../../../src/types.js";
 
 // WARP-1462: dispatches through `ctx.http.orchestrator`
 // (`POST /api/switch/poe/:port/enable|disable`), never the bearer-less
 // `ctx.http.switchSvc` the switch service 403s.
-function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithPost(post: Mock): ToolContext {
   return {
     http: {
       orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },

@@ -8,6 +8,7 @@
  * alphabetically behind three healthy ones is a connector nobody notices.
  */
 import { describe, it, expect } from "vitest";
+import { INTEGRATION_STATUSES, type IntegrationStatus } from "@droplet/shared-types";
 import {
   PILL,
   providerMark,
@@ -17,28 +18,79 @@ import {
   statusWeight,
 } from "@/app/reports/connectors";
 import type { IntegrationStatusName } from "@/app/reports/api";
+import type { IntegrationStatus as ErpIntegrationStatus } from "@/lib/erp-types";
 
 const ALL: IntegrationStatusName[] = [
   "NOT_CONFIGURED",
   "PROVISIONING",
   "CONNECTED",
+  "CAPABILITY_LIMITED",
   "DEGRADED",
   "DRIFT_LOCKED",
+  "NEEDS_RECONNECT",
   "ERROR",
   "DISABLED",
 ];
 
 const NOW = new Date("2026-08-14T09:41:00.000Z");
 
-describe("PILL — all seven statuses stay distinct", () => {
+/**
+ * WARP-2639 — the dashboard half of the one-definition gate.
+ *
+ * The Prisma-parity half lives in the orchestrator
+ * (`apps/orchestrator/src/__tests__/integration-status.schema.test.ts`), which
+ * is the only workspace holding `schema.prisma`. It cannot reach these two
+ * modules, and they were the pair with nothing comparing them at all — the
+ * WARP-2458 gate imported the two ORCHESTRATOR copies and only claimed to
+ * cover four.
+ *
+ * `tsc` makes the two dashboard surfaces agree for free now that both
+ * re-export the shared union. What it cannot object to is somebody
+ * re-declaring a local union that HAPPENS to match on the day it is written:
+ * `PILL`/`WEIGHT` would still be total, every suite would stay green, and the
+ * copy would then drift the next time Prisma grows a member — which is the
+ * WARP-2517 defect (`PILL[status]` `undefined` on the reports page) reshipped.
+ */
+describe("IntegrationStatus — one definition, re-exported (WARP-2639)", () => {
+  it("keeps both dashboard names assignable to the shared union, both ways", () => {
+    // Mutation: give `app/reports/api.ts` or `lib/erp-types.ts` its own
+    // `export type … =` again, with any member difference → `tsc --noEmit` red
+    // here. (`vitest` alone would not notice: esbuild strips types.)
+    const reports: IntegrationStatusName = "CAPABILITY_LIMITED" as IntegrationStatus;
+    const erp: ErpIntegrationStatus = "CAPABILITY_LIMITED" as IntegrationStatus;
+    const backToShared: IntegrationStatus = "CAPABILITY_LIMITED" as IntegrationStatusName;
+    const across: IntegrationStatusName = "CAPABILITY_LIMITED" as ErpIntegrationStatus;
+    expect([reports, erp, backToShared, across]).toEqual(
+      Array(4).fill("CAPABILITY_LIMITED"),
+    );
+  });
+
+  it("renders a pill for every member of the shared list", () => {
+    // The direction that ships a broken page: Prisma and the shared list grow
+    // a member, and this surface never learns to draw it. `PILL` is a total
+    // `Record` so `tsc` catches it too — this states it as a runtime failure
+    // as well, because a reader of a red suite should see WHICH status has no
+    // pill rather than only a TS2741. Mutation: delete a `PILL` entry → red.
+    // Deliberately NOT cast: if the shared union and `PILL`'s key type ever
+    // stop being the same type, this index is a compile error, and that is the
+    // finding.
+    const missing = INTEGRATION_STATUSES.filter((s) => PILL[s] === undefined);
+    expect(missing).toEqual([]);
+  });
+});
+
+describe("PILL — all nine statuses stay distinct", () => {
   it("covers every status", () => {
     for (const s of ALL) expect(PILL[s]).toBeDefined();
-    expect(Object.keys(PILL)).toHaveLength(7);
+    // WARP-2458 added the eighth, WARP-2623 the ninth. Mutation: add a member
+    // to the union and not to PILL → red, because `Record<IntegrationStatusName,
+    // …>` and this count disagree.
+    expect(Object.keys(PILL)).toHaveLength(9);
   });
 
   it("gives each status its own label — none collapsed into another", () => {
     const labels = ALL.map((s) => PILL[s].label);
-    expect(new Set(labels).size).toBe(7);
+    expect(new Set(labels).size).toBe(9);
   });
 
   it("uses the brief's exact copy", () => {
@@ -49,6 +101,13 @@ describe("PILL — all seven statuses stay distinct", () => {
     expect(PILL.PROVISIONING.label).toBe("Setting up");
     expect(PILL.DISABLED.label).toBe("Turned off");
     expect(PILL.NOT_CONFIGURED.label).toBe("Not connected");
+    // Names the ACTION, not the symptom: the one thing the owner can do
+    // about a revoked credential is go and paste a new one.
+    expect(PILL.NEEDS_RECONNECT.label).toBe("Paste a new key");
+    // WARP-2623 — the connection WORKS. Mutation: reuse "Can't connect" here
+    // → red, and a syncing Basic-plan store is drawn as a broken one.
+    expect(PILL.CAPABILITY_LIMITED.label).toBe("Connected · limited");
+    expect(PILL.CAPABILITY_LIMITED.tone).not.toBe("bad");
   });
 
   it("pairs every pill with an icon — status is never colour alone", () => {
@@ -57,8 +116,11 @@ describe("PILL — all seven statuses stay distinct", () => {
 });
 
 describe("statusWeight — problems first", () => {
-  it("orders the three problem states ahead of everything healthy", () => {
-    const problems = ["ERROR", "DRIFT_LOCKED", "DEGRADED"] as const;
+  it("orders the four problem states ahead of everything healthy", () => {
+    // NEEDS_RECONNECT joins the problems (WARP-2458): a revoked credential is
+    // something the owner must act on, so burying it below CONNECTED rows is
+    // exactly the "hunt for the broken one" this ordering exists to prevent.
+    const problems = ["ERROR", "DRIFT_LOCKED", "NEEDS_RECONNECT", "DEGRADED"] as const;
     const rest = ["CONNECTED", "PROVISIONING", "DISABLED", "NOT_CONFIGURED"] as const;
     for (const p of problems) {
       for (const r of rest) {
@@ -70,6 +132,19 @@ describe("statusWeight — problems first", () => {
   it("puts ERROR ahead of every other problem", () => {
     expect(statusWeight("ERROR")).toBeLessThan(statusWeight("DRIFT_LOCKED"));
     expect(statusWeight("ERROR")).toBeLessThan(statusWeight("DEGRADED"));
+    expect(statusWeight("ERROR")).toBeLessThan(statusWeight("NEEDS_RECONNECT"));
+    // A throttle clears itself; a revoked credential waits for a person. The
+    // one that needs a human sorts first. Mutation: swap the two weights → red.
+    expect(statusWeight("NEEDS_RECONNECT")).toBeLessThan(statusWeight("DEGRADED"));
+  });
+
+  it("sorts CAPABILITY_LIMITED below the problems and above CONNECTED", () => {
+    // WARP-2623 — it is not a problem (nothing is broken and no retry helps),
+    // but it is the one healthy state still carrying a fact the owner has not
+    // seen. Mutation: give it CONNECTED's weight → the second assertion goes
+    // red and a limited connector hides among the fully healthy ones.
+    expect(statusWeight("DEGRADED")).toBeLessThan(statusWeight("CAPABILITY_LIMITED"));
+    expect(statusWeight("CAPABILITY_LIMITED")).toBeLessThan(statusWeight("CONNECTED"));
   });
 
   it("sorts an unknown status WITH the problems, not last", () => {

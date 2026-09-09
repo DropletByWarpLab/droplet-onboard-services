@@ -55,8 +55,28 @@ granted only the one enabled write capability — a column-scoped UPDATE on
 `appointment`'s four mutable scheduling columns.
 `services/erp-connector/sql/provision.sql` is the script that establishes this.
 
-The route guards sit on top of that so a caller bug fails immediately and by
-name. Two independent properties, checked in this order on **every** route:
+On top of that, outermost first:
+
+**The statement allowlist** (WARP-2540, `allowlist.py` +
+`statement_manifest.json`). `/read/{name}` and `/write/{name}` refuse any
+statement that is not, shape-for-shape, what the registries emit for that
+`{name}`: the incoming SQL is normalized (double-quoted identifiers masked to
+`<id>`, whitespace collapsed) and must equal a shipped skeleton exactly. An
+unknown name is `UNKNOWN_STATEMENT`, a reshaped statement is
+`STATEMENT_MISMATCH` — both HTTP 400, refused before a connection is acquired.
+Identifier *names* stay free (the schema map resolves them per practice, the
+server checks they exist); the statement's *shape* may not vary by one
+character, which is what makes an injected predicate, UNION, comment, second
+statement, or changed verb structurally impossible. The manifest is pinned to
+the registries by
+`services/erp-connector/__tests__/statement-manifest-sync.test.ts`; a
+missing/malformed manifest stops the service at import rather than starting it
+half-guarded. `/introspect` is not allowlisted — its catalog SQL is a
+dialect-injection seam (the live lane introspects Postgres) and the route is
+confined to SELECTs on the read identity by the guards below.
+
+The route guards then make a caller bug fail immediately and by name. Two
+independent properties, checked in this order on **every** route:
 
 1. **Exactly one statement** (`NOT_A_SINGLE_STATEMENT`). Unconditional, and
    deliberately independent of statement kind — an earlier revision folded this
@@ -71,14 +91,45 @@ name. Two independent properties, checked in this order on **every** route:
 `tests/test_live_bridge.py::TestGrantsAreTheRealBoundary` proves the grant half
 against a live server, bypassing the routes entirely.
 
+## Authentication (WARP-2590)
+
+Every route except `GET /health` requires the service bearer:
+
+```
+Authorization: Bearer $SERVICE_TOKEN_ERP_BRIDGE
+```
+
+`scripts/lib/secrets.sh` mints it per box and backfills it on upgrade; both
+ends read it from `.env` via `env_file`. Do **not** re-declare it in
+`docker-compose.yml` as a `${VAR}` substitution — that resolves against
+`docker/.env` (a different, untracked file) and, because `environment:`
+outranks `env_file:`, shadows the real value with `""`.
+
+It fails **closed**. With no token configured, every gated route answers
+`503 BRIDGE_NOT_PROVISIONED` and never touches the practice's database.
+That is deliberately unlike `services/inference-manager`, whose empty token
+means permissive: its worst case is an unauthenticated model pull, and this
+service's is a connection to a system of record holding `droplet_ro` /
+`droplet_rw`.
+
+This gate answers **who may ask**. It stacks on the two that were already
+here and replaces neither: `allowlist.py` decides *which statement* may run,
+and the database grant decides *what it may touch*. The gap it closes is the
+target — `target.host` is caller-supplied, so before it existed any container
+on the compose network could aim the bridge at a server it controlled and
+collect the practice's ODBC credentials from the connection attempt.
+
+`/health` stays open because the compose healthcheck cannot hold a secret. It
+reports reachability only — never a credential, never a row.
+
 ## API
 
-| Route | Identity | Notes |
-|---|---|---|
-| `GET /health` | read | `SELECT 1` + pool state. Returns `ok:false` with a reason when the practice's DB is unreachable — a running bridge is not a working one |
-| `POST /read/{name}` | `droplet_ro` | One already-built SELECT. `{name}` is the registry query name, used for logs/errors only |
-| `POST /write/{name}` | `droplet_rw` | One already-built write, in one transaction. `rowCount: 0` is the optimistic guard missing, **not** an error |
-| `POST /introspect` | read | Runs caller-supplied catalog queries and returns raw rows. Fingerprinting happens in TypeScript, against the same `computeSchemaFingerprint` the drift check uses |
+| Route | Auth | Identity | Notes |
+|---|---|---|---|
+| `GET /health` | none | read | `SELECT 1` + pool state. Returns `ok:false` with a reason when the practice's DB is unreachable — a running bridge is not a working one |
+| `POST /read/{name}` | bearer | `droplet_ro` | One registry-built SELECT. `{name}` is the registry query name — it selects which registered shape the SQL must match, and names the read in logs/errors |
+| `POST /write/{name}` | bearer | `droplet_rw` | One registry-built write, in one transaction. `{name}` selects the registered shape. `rowCount: 0` is the optimistic guard missing, **not** an error |
+| `POST /introspect` | bearer | read | Runs caller-supplied catalog queries and returns raw rows. Fingerprinting happens in TypeScript, against the same `computeSchemaFingerprint` the drift check uses |
 
 ## Enabling the track
 

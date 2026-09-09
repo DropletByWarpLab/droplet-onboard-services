@@ -11,6 +11,15 @@
 # certs minted by the REAL issuance lib (scripts/lib/internal-ca.sh). Needs
 # Docker only; skips (exit 0) when no usable daemon is present so CI lanes
 # without Docker stay green.
+#
+# ci: developer-only — and the self-skip is exactly why. A runner HAS a
+# daemon, so a CI step here would really boot mosquitto; on any lane that did
+# not, the exit-0 skip would report a green step that proved nothing, which is
+# worse than an honest gap. setup-tests.yml lists this file in `paths:` only
+# because mosquitto-conf.test.sh greps its inline staging wrapper — that is a
+# trigger, not a runner. The Docker-free half of WARP-235 (conf/ACL parity,
+# CA issuance) runs at PR time via tests/mosquitto-conf.test.sh and
+# tests/internal-ca.test.sh (WARP-2647).
 # =============================================================================
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

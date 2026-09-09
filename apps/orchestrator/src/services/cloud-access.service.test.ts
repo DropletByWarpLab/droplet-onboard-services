@@ -29,8 +29,8 @@ vi.mock("./ai-gateway.client.js", () => ({
   getModelProvider: (...a: unknown[]) => mockGetModelProvider(...a),
 }));
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   decideCloudTurn,
@@ -47,6 +47,7 @@ import {
   type EffectiveAccessInputs,
 } from "./effective-access.service.js";
 import type { Role } from "./jwt.service.js";
+import { repoPath } from "../__tests__/helpers/test-paths.js";
 
 function role(cloudModelsAllowed: boolean): AccessRoleGrantRows {
   return {
@@ -105,27 +106,13 @@ describe("isLocalProvider", () => {
 // comparing, so a refactor that moves the tables fails loudly rather than
 // vacuously passing on an empty match.
 describe("parity with services/ai-gateway (drift gate)", () => {
-  /**
-   * Resolve a repo-relative path by walking up from the working directory.
-   * `import.meta.url` would be the obvious tool, but the orchestrator's tsc
-   * target is CommonJS and rejects it (TS1470) — and hard-coding a depth
-   * breaks the moment the suite is invoked from the repo root instead of
-   * apps/orchestrator. Throws rather than skipping: a parity test that
-   * quietly stops running is worse than no parity test.
-   */
-  function repoFile(relative: string): string {
-    let dir = process.cwd();
-    for (;;) {
-      const candidate = resolve(dir, relative);
-      if (existsSync(candidate)) return candidate;
-      const parent = dirname(dir);
-      if (parent === dir) throw new Error(`could not locate ${relative} from ${process.cwd()}`);
-      dir = parent;
-    }
-  }
-
-  const ROUTER_PY = repoFile("services/ai-gateway/router.py");
-  const GATING_PY = repoFile("services/ai-gateway/middleware/off_lan_gating.py");
+  // Anchored to this test file, not walked up from the working directory
+  // (WARP-2654): a walk-up does not fail on a wrong cwd, it climbs until SOME
+  // directory matches, so a cwd inside another checkout of this repo made the
+  // ai-gateway parity gate compare against that tree's Python. `repoPath`
+  // uses `__dirname`, not `import.meta.url`, which this CommonJS app rejects.
+  const ROUTER_PY = repoPath("services/ai-gateway/router.py");
+  const GATING_PY = repoPath("services/ai-gateway/middleware/off_lan_gating.py");
 
   /** Parse `PROVIDER_PREFIXES = { "name": [ "a", "b" ], ... }` out of router.py. */
   function parseProviderPrefixes(src: string): Array<[string, string[]]> {

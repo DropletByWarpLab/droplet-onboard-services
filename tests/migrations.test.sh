@@ -26,6 +26,15 @@
 #
 # Linux/CI-only: bash + docker required. On Windows the canonical way to
 # run this is through WSL2 or the project's docker-compose-based CI.
+#
+# ci: developer-only — pulls pgvector/pgvector:pg16 AND node:20-bookworm
+# (~1.5 GB) and boots five ephemeral containers. The fresh-install path is
+# already proven at PR time by orchestrator-tests.yml's `pg-integration` job,
+# which runs the real `prisma migrate deploy` against a live Postgres service
+# and then gates schema drift. What is left unguarded is the UPGRADE half —
+# the WARP-484 journal-rename convergence and the WARP-488 username→UUID
+# backfill — both one-shot historical migrations. Recorded in WARP-2647's PR
+# as a gap rather than paid for on every orchestrator PR.
 # =============================================================================
 set -euo pipefail
 

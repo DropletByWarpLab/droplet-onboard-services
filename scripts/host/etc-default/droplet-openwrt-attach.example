@@ -4,7 +4,15 @@
 # droplet-openwrt-attach.service. Override any of these to customise the
 # POC AP without touching the script body.
 #
+# DROPLET_AP_ONBOARD      — WARP-2054. Whether an on-box AP is attempted AT ALL.
+#                           DEFAULT 0 (off), per the founder rule: the onboard
+#                           radio is never an AP and ships deactivated; Wi-Fi is
+#                           served by the external AP. At 0 the radio is not
+#                           detected, not moved into the container netns, and
+#                           soft-blocked, so EVERY OTHER DROPLET_AP_* KEY BELOW
+#                           IS INERT. Set to 1 only for a dev on-box AP.
 # DROPLET_AP_SSID         — SSID broadcast inside the openwrt container.
+#                           (dev-only; requires DROPLET_AP_ONBOARD=1)
 # DROPLET_AP_PSK          — WPA2-PSK passphrase. PER-DEVICE SECRET, NOT committed
 #                           to the repo. WARP-819: leave this UNSET (or at the
 #                           placeholder below) and droplet-openwrt-attach will
@@ -42,6 +50,9 @@
 # The attach script regenerates /etc/hostapd.conf and /etc/dnsmasq-ap.conf
 # inside the container from these on every run, so changing values here +
 # `systemctl restart droplet-openwrt-attach.service` is enough to apply.
+
+# WARP-2054: off by default. Everything below is inert unless this is 1.
+DROPLET_AP_ONBOARD=0
 
 DROPLET_AP_SSID=Droplet
 # REDACTED — real value lives in /etc/default/droplet-openwrt-attach on the

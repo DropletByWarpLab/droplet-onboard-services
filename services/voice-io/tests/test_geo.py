@@ -257,3 +257,24 @@ class TestFetcherDirect:
     def test_fetcher_returns_none_on_error(self, monkeypatch):
         _install_mock_transport(monkeypatch, lambda r: httpx.Response(503))
         assert _fetch_via_ipapi() is None
+
+    def test_source_label_uses_parsed_hostname_not_substring(self, monkeypatch):
+        # CodeQL py/incomplete-url-substring-sanitization: a lookalike host
+        # that merely CONTAINS "ip-api.com" must not be labelled as it.
+        lookalike = "https://ip-api.com.example.net/json/"
+        monkeypatch.setenv("GEO_URL", lookalike)
+        _install_mock_transport(monkeypatch, lambda r: httpx.Response(200, json={
+            "city": "X", "country": "Y", "timezone": "Asia/Tokyo",
+        }))
+        result = _fetch_via_ipapi()
+        assert result is not None
+        assert result.source == lookalike
+
+    def test_source_label_accepts_subdomain_of_known_host(self, monkeypatch):
+        monkeypatch.setenv("GEO_URL", "https://pro.ip-api.com/json/")
+        _install_mock_transport(monkeypatch, lambda r: httpx.Response(200, json={
+            "city": "X", "country": "Y", "timezone": "Asia/Tokyo",
+        }))
+        result = _fetch_via_ipapi()
+        assert result is not None
+        assert result.source == "ip-api.com"

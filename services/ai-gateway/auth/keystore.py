@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import base64
 import logging
+import re
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -65,12 +66,14 @@ def _assert_device_secret_safe() -> None:
             "key. Set a per-device DEVICE_SECRET (setup.sh generates one) "
             "before booting. Refusing to start."
         )
+    # CodeQL py/clear-text-logging-sensitive-data (rule 19): the dev default
+    # is a public constant, but a log line that says "DEVICE_SECRET" must never
+    # be followed by a secret-shaped value — name the constant, not its contents.
     logger.error(
         "DEVICE_SECRET is unset or equal to the public dev default "
-        "(%r). BYOK API keys will be encrypted under a known, zero-entropy "
-        "key — acceptable only for dev/test. Set a per-device DEVICE_SECRET "
-        "for any real deployment.",
-        _DEV_DEFAULT_SECRET,
+        "(keystore._DEV_DEFAULT_SECRET). BYOK API keys will be encrypted under "
+        "a known, zero-entropy key — acceptable only for dev/test. Set a "
+        "per-device DEVICE_SECRET for any real deployment."
     )
 
 
@@ -106,9 +109,37 @@ def _user_namespace(user_id: str | None) -> str:
     return safe
 
 
+# CodeQL py/path-injection: `provider` arrives straight from the URL
+# (`/ai/keys/{provider}`) and from `ChatRequest.provider`; only `user_id` was
+# sanitised, so `../x` or an absolute segment could have read, written or
+# unlinked an `.enc` outside the namespace. A bad provider is REJECTED rather
+# than collapsed the way `_user_namespace` does — silently remapping the name
+# would store a key the caller can never find again under the name they used.
+_PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _is_valid_provider(provider: object) -> bool:
+    """Whether `provider` is a plain token that can name a key file."""
+    return isinstance(provider, str) and _PROVIDER_RE.match(provider) is not None
+
+
 def _key_path(provider: str, user_id: str | None) -> Path:
-    """Return the on-disk path for a provider key in a user's namespace."""
-    return KEYS_DIR / _user_namespace(user_id) / f"{provider}.enc"
+    """Return the on-disk path for a provider key in a user's namespace.
+
+    Raises ValueError for a provider name that is not a plain token.
+    """
+    if not _is_valid_provider(provider):
+        raise ValueError(f"invalid provider name: {provider!r}")
+    base = os.path.abspath(KEYS_DIR)
+    candidate = os.path.normpath(
+        os.path.join(base, _user_namespace(user_id), f"{provider}.enc")
+    )
+    # Belt-and-braces containment check on the normalised path — the
+    # documented py/path-injection barrier. Both segments are already
+    # token-only, so this only fires if a future caller regresses that.
+    if not candidate.startswith(base + os.sep):
+        raise ValueError(f"invalid key path for provider {provider!r}")
+    return Path(candidate)
 
 
 def _get_or_create_salt() -> bytes:
@@ -155,6 +186,8 @@ async def store_key(provider: str, api_key: str, user_id: str | None = None) -> 
 
 async def get_key(provider: str, user_id: str | None = None) -> str | None:
     """Retrieve and decrypt an API key for a provider in the caller's namespace."""
+    if not _is_valid_provider(provider):
+        return None  # a name that can't be a key file has no key
     key_path = _key_path(provider, user_id)
     if not key_path.exists():
         return None
@@ -170,6 +203,8 @@ async def get_key(provider: str, user_id: str | None = None) -> str | None:
 
 async def delete_key(provider: str, user_id: str | None = None) -> bool:
     """Remove a stored API key from the caller's namespace."""
+    if not _is_valid_provider(provider):
+        return False  # nothing can be stored under a non-token name
     key_path = _key_path(provider, user_id)
     if key_path.exists():
         key_path.unlink()

@@ -28,6 +28,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# WARP-2543 — vendor detection + the shared runtime-token helper.
+# shellcheck source=../lib/gpu.sh
+. "$REPO_ROOT/scripts/lib/gpu.sh"
 cd "$REPO_ROOT"
 
 DMR_URL="${DMR_URL:-http://127.0.0.1:12434}"
@@ -118,13 +121,24 @@ log "NOTE: run this inside a quiet window of the hourly box-refresh (right after
 
 # --- 2. dmr profile + service up ----------------------------------------------
 profiles="$(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV" | tail -1 | cut -d= -f2- || true)"
-case ",$profiles," in
-  *,dmr,*) ok "COMPOSE_PROFILES already contains dmr" ;;
-  *) upsert "$COMPOSE_ENV" COMPOSE_PROFILES "${profiles:+$profiles,}dmr"
-     ok "COMPOSE_PROFILES -> $(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV" | cut -d= -f2-)" ;;
-esac
+# WARP-2543: the DMR token depends on the SILICON, not on the runtime. Blindly
+# appending `dmr` hands an NVIDIA box the ROCm service, whose /dev/kfd + render
+# node still RESOLVE — to a 512 MiB integrated GPU — so it starts, reports
+# healthy, and serves the 20B from CPU at ~8 tok/s. Strip-all-then-add-one via
+# the shared helper in gpu.sh, so this script, single-box.sh and
+# rollback-single-box.sh cannot disagree about the token list.
+_flip_vendor="$(detect_gpu_vendor)"
+_flip_token="$(dmr_profile_for_vendor "$_flip_vendor")"
+[ -n "$_flip_token" ] || die "no usable GPU detected (vendor=$_flip_vendor) — refusing to flip onto CPU inference"
+_flip_new="$(set_runtime_profile_token "$profiles" "$_flip_token")"
+if [ "$_flip_new" = "$profiles" ]; then
+  ok "COMPOSE_PROFILES already carries the ${_flip_vendor} token '${_flip_token}'"
+else
+  upsert "$COMPOSE_ENV" COMPOSE_PROFILES "$_flip_new"
+  ok "COMPOSE_PROFILES -> ${_flip_new} (${_flip_vendor})"
+fi
 
-dc up -d dmr
+dc up -d "$_flip_token"
 for _ in $(seq 1 45); do
   curl -sf --max-time 3 "$DMR_URL/engines/status" >/dev/null 2>&1 && break
   sleep 2

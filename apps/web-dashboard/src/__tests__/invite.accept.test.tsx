@@ -12,7 +12,7 @@
  * research note §5.2) so the post-accept screen renders deterministically.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
 const useReducedMotionMock = vi.fn(() => true);
@@ -36,6 +36,17 @@ vi.mock("@/lib/api", () => ({
 // next/navigation is already mocked in setup.ts; import the page after.
 import InviteAcceptPage from "@/app/invite/[token]/page";
 
+// Next 15 hands the page its `params` as a Promise, which the page reads with
+// React's `use` and so suspends on mount. That first suspension has to happen
+// inside an awaited act(): React 19 parks the retry in the act queue that
+// RTL's synchronous render() opens, and a queue that is never awaited never
+// flushes — the page would show its Suspense fallback forever.
+async function renderPage(token: string) {
+  await act(async () => {
+    render(<InviteAcceptPage params={Promise.resolve({ token })} />);
+  });
+}
+
 describe("InviteAcceptPage", () => {
   beforeEach(() => {
     getInviteMock.mockReset();
@@ -51,7 +62,7 @@ describe("InviteAcceptPage", () => {
     const err = Object.assign(new Error("Invite not found"), { status: 404 });
     getInviteMock.mockRejectedValueOnce(err);
 
-    render(<InviteAcceptPage params={{ token: "deadbeef" }} />);
+    await renderPage("deadbeef");
 
     await waitFor(() => {
       expect(
@@ -66,7 +77,7 @@ describe("InviteAcceptPage", () => {
     const err = Object.assign(new Error("Already used"), { status: 410, code: "USED" });
     getInviteMock.mockRejectedValueOnce(err);
 
-    render(<InviteAcceptPage params={{ token: "abc" }} />);
+    await renderPage("abc");
 
     await waitFor(() => {
       expect(screen.getByText(/already (been )?used/i)).toBeInTheDocument();
@@ -81,7 +92,7 @@ describe("InviteAcceptPage", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(
@@ -103,7 +114,7 @@ describe("InviteAcceptPage", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
@@ -128,7 +139,7 @@ describe("InviteAcceptPage", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
@@ -156,7 +167,7 @@ describe("InviteAcceptPage", () => {
       user: { id: "alice", username: "alice", displayName: "Alice", role: "family" },
     });
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
@@ -184,7 +195,7 @@ describe("InviteAcceptPage", () => {
     const err = Object.assign(new Error("USED"), { status: 410, code: "USED" });
     acceptInviteMock.mockRejectedValueOnce(err);
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
@@ -218,7 +229,7 @@ describe("InviteAcceptPage", () => {
       user: { id: "alice", username: "alice", displayName: "Alice", role: "family" },
     });
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
@@ -245,7 +256,7 @@ describe("InviteAcceptPage", () => {
     });
     acceptInviteMock.mockRejectedValueOnce(new Error("Could not create your account."));
 
-    render(<InviteAcceptPage params={{ token: "valid" }} />);
+    await renderPage("valid");
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),

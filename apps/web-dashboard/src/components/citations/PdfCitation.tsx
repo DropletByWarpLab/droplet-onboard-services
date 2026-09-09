@@ -17,6 +17,8 @@ import type { PdfPageAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";
 import { relevancePct } from "@/lib/relevance";
 
+import type { JSX } from "react";
+
 export interface PdfCitationProps {
   hit: CitationHit;
   anchor: PdfPageAnchor;

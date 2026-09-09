@@ -56,6 +56,7 @@ const ITEM: PmWorkItem = {
   priority: "none",
   parentId: null,
   cycleId: null,
+  department: null,
   assignees: [],
   labels: [],
   startDate: null,

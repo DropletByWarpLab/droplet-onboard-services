@@ -15,9 +15,13 @@ Two properties matter enough to pin:
      recovery path exists to prevent.
 
 Lives in scripts/test/pytest/ rather than services/oled-display/tests/ on
-purpose: oled-display is ci-coverage-exempt as hardware-only and its suite runs
-in NO workflow, so a test placed there would never guard anything. device-bridge
-is stdlib-only, so it imports cleanly in this conftest-free home.
+purpose. The original reason — "oled-display is ci-coverage-exempt and its
+suite runs in NO workflow" — is no longer true: WARP-1640/1641 gave that
+directory a workflow and WARP-2685 retired the exemption. The reason that DOES
+still hold is import health: services/oled-display/tests/conftest.py imports
+the display module at collection time, so a stdlib-only bridge test placed
+there would be hostage to the display module's import health. device-bridge is
+stdlib-only and imports cleanly in this conftest-free home.
 
 Loader mirrors test_device_bridge_mtls.py (hyphenated filename => importlib).
 """

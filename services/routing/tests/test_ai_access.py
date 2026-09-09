@@ -26,13 +26,18 @@ _ACL = {
                 "system": ["board", "info"],
                 "network.interface.*": ["status", "dump"],
                 "uci": ["get"],
+                "wireguard": ["status"],
             },
         },
         "write": {
             "ubus": {
                 "network": ["restart"],
                 "system": ["reboot"],
-                "wireguard": ["*"],
+                # A `["*"]` method list is NOT a shape we ship — WARP-2239 took
+                # the last one off the wireguard object. This synthetic object
+                # keeps the flattener's wildcard handling under test without
+                # putting the banned shape back in front of a reader.
+                "example-object": ["*"],
             },
         },
     }
@@ -49,9 +54,10 @@ class TestParseAclScopes:
         scopes = parse_ai_acl_scopes(_ACL)
         assert "system.board" in scopes["read"]
         assert "network.interface.*.status" in scopes["read"]
+        assert "wireguard.status" in scopes["read"]
         assert "network.restart" in scopes["write"]
         assert "system.reboot" in scopes["write"]
-        assert "wireguard.*" in scopes["write"]
+        assert "example-object.*" in scopes["write"]
 
     def test_empty_acl_yields_empty_scopes(self) -> None:
         scopes = parse_ai_acl_scopes({})
@@ -130,3 +136,62 @@ class TestFallbackAclParity:
         fallback_scopes = parse_ai_acl_scopes(main._AI_ACL_FALLBACK)
         assert sorted(canon_scopes["read"]) == sorted(fallback_scopes["read"])
         assert sorted(canon_scopes["write"]) == sorted(fallback_scopes["write"])
+
+
+# ---------------------------------------------------------------------------
+# 4. WARP-2239: the wireguard grant is read-only `status` in BOTH halves.
+# ---------------------------------------------------------------------------
+
+
+class TestWireguardGrantIsReadOnlyStatus:
+    """The `wireguard` ubus object is granted READ `status`, and nothing else.
+
+    ``rpcd-mod-wireguard`` registers four methods on that object — ``status``,
+    ``genkey``, ``genpsk`` and ``pubkey`` — and rpcd matches the ACL's function
+    list with fnmatch, so the ``["*"]`` this replaced granted all four. The only
+    caller is the SDK's ``live_peers()`` / ``peer_handshakes()``, which invoke
+    exactly ``status``.
+
+    The sibling shell suite (tests/openwrt-rpcd-acl-provisioning.test.sh) guards
+    the committed JSON, but it only runs on `openwrt/**` changes — a widening
+    that touched main.py alone would never trip it. This pins the Python half.
+    """
+
+    @staticmethod
+    def _halves() -> list[tuple[str, dict]]:
+        from pathlib import Path
+
+        import main
+
+        halves: list[tuple[str, dict]] = [("main._AI_ACL_FALLBACK", main._AI_ACL_FALLBACK)]
+        acl_path = (
+            Path(__file__).resolve().parents[3]
+            / "openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json"
+        )
+        if acl_path.exists():
+            halves.append(("canonical ACL", json.loads(acl_path.read_text(encoding="utf-8"))))
+        return halves
+
+    def test_wireguard_is_read_status_and_never_write(self) -> None:
+        for name, acl in self._halves():
+            group = acl["droplet-ai"]
+            assert group["read"]["ubus"].get("wireguard") == ["status"], (
+                f"{name}: wireguard must be granted READ [\"status\"] only"
+            )
+            assert "wireguard" not in group["write"]["ubus"], (
+                f"{name}: wireguard must carry no write-ubus grant"
+            )
+
+    def test_no_scope_grants_a_blanket_method_wildcard(self) -> None:
+        for name, acl in self._halves():
+            for perm, tree in acl["droplet-ai"].items():
+                if perm not in ("read", "write") or not isinstance(tree, dict):
+                    continue
+                for scope, objects in tree.items():
+                    if not isinstance(objects, dict):
+                        continue
+                    for obj, funcs in objects.items():
+                        assert funcs != ["*"], (
+                            f"{name}: {perm}.{scope}.{obj} grants a blanket "
+                            f'["*"] method list'
+                        )

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getSwitchPorts from "../../../src/handlers/switch/get-switch-ports.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -6,7 +7,7 @@ import type { ToolContext } from "../../../src/types.js";
 // (`/api/switch/ports`, service bearer auto-injected), never the bearer-less
 // `ctx.http.switchSvc` that the switch service 403s. `switchSvc` is kept as a
 // spy so the regression assertion below proves it is never touched.
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },

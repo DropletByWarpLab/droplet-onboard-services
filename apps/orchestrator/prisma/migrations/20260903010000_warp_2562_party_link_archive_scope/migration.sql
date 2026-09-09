@@ -1,0 +1,69 @@
+-- WARP-2562 review — archiving a party link must FREE its slot.
+--
+-- Predecessor ON STAGE: 20260901050000_warp_2581_erp_document. The migration
+-- this one AMENDS is the earlier 20260831180000_warp_2562_party_link — the two
+-- are different questions and both are worth pinning. "This migration sorts
+-- last" describes only the day it landed, and the next migration falsifies it.
+--
+-- The stamp is 0903 rather than 0901 because three migrations were still in
+-- flight on unmerged branches when this was written — 20260901041500
+-- (WARP-2549) and 20260901045000 / 20260901050000 (WARP-2581). All three have
+-- since landed on stage, which is exactly why the stamp was chosen this way:
+-- a migration must never end up numbered BEFORE one a box has already applied.
+-- That is the hazard the 20260831180000 header describes from the other side,
+-- and it was a live risk here rather than a hypothetical one.
+--
+-- A SEPARATE migration rather than an edit to
+-- 20260831180000_warp_2562_party_link, deliberately: that one is merged to
+-- `stage` and applied on boxes, and `_prisma_migrations` stores a checksum of
+-- its SQL. Editing it in place turns every box's next `migrate deploy` into a
+-- "migration file has been modified" failure — the fix would break the boxes
+-- it was written for.
+--
+-- ## The defect
+--
+-- `PartyLink_connectionId_externalId_key` covered every row regardless of
+-- `isArchived`, so an archive never gave the upstream record back:
+--
+--   link Contact A to Eaglesoft #4471 → realise it is wrong → archive it →
+--   every later POST /crm/party-links for that same pair, INCLUDING the
+--   correct Contact B, is refused `party_link_already_exists`. Forever.
+--
+-- The only exposed recovery was to un-archive, which restores the WRONG link.
+-- That made `archivePartyLink` a trap rather than an undo, on the one surface
+-- whose whole job is "these two are the same customer" — and the mistake it
+-- cannot forgive is precisely the mistake it exists to let a human make.
+--
+-- ## The rule, stated properly
+--
+-- "One upstream record maps to at most one party" was always about LIVE
+-- claims. An archived row is not a claim; it is the record that a claim was
+-- withdrawn, which WARP-884's archive shape keeps on purpose. Scoping the
+-- index to `isArchived = false` does not weaken the invariant — it stops the
+-- index asserting it over rows that are no longer asserting anything.
+--
+-- Several ARCHIVED links may therefore share one record: two wrong guesses,
+-- both withdrawn, is a history rather than a contradiction.
+--
+-- ## Not representable in schema.prisma
+--
+-- Prisma has no datamodel syntax for a partial index, so the `@@unique` comes
+-- OFF the model and the constraint lives here, in the same way
+-- `PartyLink_party_exactly_one` and `PmState_projectId_isDefault_key` already
+-- do. `prisma migrate diff` does not see predicated indexes, so this adds
+-- nothing to `schema-drift-baseline.sql` — verified, not assumed.
+--
+-- The Prisma client consequence is deliberate and is half the fix: with no
+-- compound unique, `partyLink.findUnique({ where: { connectionId_externalId } })`
+-- stops existing, so the service can no longer ask a question that cannot
+-- mention `isArchived`. It uses `findFirst` with an explicit
+-- `isArchived: false`.
+
+DROP INDEX "PartyLink_connectionId_externalId_key";
+
+-- Named `_active_` rather than `_key`: the suffix Prisma reserves for a
+-- datamodel unique would suggest a reader can find this on the model, and
+-- they cannot.
+CREATE UNIQUE INDEX "PartyLink_connectionId_externalId_active_key"
+  ON "PartyLink" ("connectionId", "externalId")
+  WHERE "isArchived" = false;

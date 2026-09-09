@@ -15,6 +15,7 @@
  * replay correctness) lives in `activity-chain.test.ts` per AC7.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { Prisma } from "@prisma/client";
 import {
   actorFromRequest,
   createActivityRecorder,
@@ -67,26 +68,29 @@ function makePrismaFake(): {
   rows: FakeActivityRow[];
   transactionCount: { count: number };
   queries: string[];
+  rawRefs: unknown[];
 } {
   const rows: FakeActivityRow[] = [];
   const transactionCount = { count: 0 };
   const queries: string[] = [];
+  const rawRefs: unknown[] = [];
   let nextId = 1n;
 
   const prisma: FakePrisma = {
     activityRow: {
       async create({ data }) {
-        // Mirror the recorder's normalisation: `Prisma.DbNull` becomes
-        // a real `null` once it lands in the table.
-        const refs = (data.refs as unknown) === undefined ? null : data.refs;
-        // Detect the Prisma.DbNull sentinel by its toString — the global
-        // Prisma mock doesn't expose the real value.
+        // Keep what the recorder actually handed us, before normalisation —
+        // the WARP-2484 case below asserts on the sentinel itself.
+        rawRefs.push(data.refs);
+        // Mirror the recorder's normalisation: `Prisma.DbNull` becomes a real
+        // `null` once it lands in the table. Since WARP-2484 the shared mock
+        // exports the genuine sentinel object, so this is a plain identity
+        // check — no more sniffing a `_tag` because the mock had no value to
+        // compare against.
         const refsValue =
-          refs &&
-          typeof refs === "object" &&
-          (refs as { _tag?: string })._tag === "Prisma.DbNull"
+          data.refs === Prisma.DbNull
             ? null
-            : (refs as Record<string, unknown> | null);
+            : (data.refs as Record<string, unknown> | null);
         const row: FakeActivityRow = {
           id: nextId++,
           at: data.at as Date,
@@ -122,7 +126,7 @@ function makePrismaFake(): {
       return fn(prisma);
     },
   };
-  return { prisma, rows, transactionCount, queries };
+  return { prisma, rows, transactionCount, queries, rawRefs };
 }
 
 const KEY = Buffer.from("warp-456-test-key-bytes-must-be-long", "utf8");
@@ -224,6 +228,27 @@ describe("activity.service.record", () => {
       'SELECT "signature" FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1',
     );
     expect(q[1]).not.toContain("FOR UPDATE");
+  });
+
+  it("writes Prisma.DbNull, not undefined, when there are no refs (WARP-2484)", async () => {
+    // The recorder deliberately sends the sentinel rather than `undefined`:
+    // Prisma OMITS an undefined field, so the column would keep its default
+    // instead of being set to SQL NULL. This used to be unassertable — the
+    // shared `@prisma/client` mock exported no `DbNull`, so the sentinel and
+    // `undefined` were the same value and every check on it passed vacuously.
+    const row = await recorder.record({
+      kind: "auth",
+      severity: "ok",
+      sourceIcon: "log-in",
+      what: "Alice signed in",
+      actor: { type: "user", id: "11111111-1111-4111-8111-111111111111" },
+    });
+
+    const written = prismaState.rawRefs[0];
+    expect(written).not.toBeUndefined();
+    expect(written).toBe(Prisma.DbNull);
+    // …and the fake normalises it to a real null on the way into the row.
+    expect(row.refs).toBeNull();
   });
 
   it("refs are persisted and covered by the signature", async () => {

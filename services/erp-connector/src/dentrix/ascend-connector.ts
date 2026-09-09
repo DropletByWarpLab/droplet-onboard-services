@@ -204,7 +204,7 @@ export interface DentrixAscendDeps {
 
 /** What a Dentrix Ascend organization carries. Practice management, not
  *  accounting: there are no vendor bills in a dental PMS. */
-export const ASCEND_DATASETS: readonly string[] = PRACTICE_DATASETS;
+export const ASCEND_DATASETS: readonly DatasetName[] = PRACTICE_DATASETS;
 
 export interface AscendStatus {
   state: AscendConnectionState;
@@ -450,7 +450,7 @@ export class DentrixAscendConnector implements Connector {
     return ASCEND_DATASETS.map((dataset) => ({
       name: dataset,
       owner: "ascend",
-      columns: CANONICAL_COLUMNS[dataset as DatasetName].map((name) => ({ name, type: "text" })),
+      columns: CANONICAL_COLUMNS[dataset].map((name) => ({ name, type: "text" })),
     }));
   }
 

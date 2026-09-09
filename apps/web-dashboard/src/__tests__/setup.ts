@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
 // Mock next/navigation
+import React from "react";
 import { vi } from "vitest";
 import { configure } from "@testing-library/react";
 
@@ -47,7 +48,21 @@ vi.mock("next/navigation", () => ({
   useSearchParams: vi.fn(() => new URLSearchParams()),
 }));
 
-// Mock next/link to render a plain <a>
+// Mock next/link to render a plain <a>.
+//
+// WARP-2563 — this used to build a template STRING:
+//
+//   return `<a href="${href}" ...>${children}</a>`;
+//
+// React renders a returned string as text, and JSX children stringify to
+// "[object Object]", so every <Link> in every dashboard test rendered as
+// escaped markup — `&lt;a href="/x"&gt;Label&lt;/a&gt;` — inside its parent.
+// The consequence is quiet and total: `getByText("Label")` never matched,
+// `getByRole("link")` found nothing, and an href could not be asserted at all.
+// Tests that happened to use a substring regex passed anyway, which is why it
+// survived.
+//
+// A real element, so a link is a link.
 vi.mock("next/link", () => ({
   default: ({
     children,
@@ -58,7 +73,7 @@ vi.mock("next/link", () => ({
     href: string;
   }) => {
     // eslint-disable-next-line @next/next/no-html-link-for-pages
-    return `<a href="${href}" ${Object.entries(props).map(([k, v]) => `${k}="${v}"`).join(" ")}>${children}</a>`;
+    return React.createElement("a", { href, ...props }, children);
   },
 }));
 

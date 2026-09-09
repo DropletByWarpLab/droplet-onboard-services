@@ -2231,7 +2231,18 @@ class VPNApi:
         entry per peer that DID handshake (epoch > 0); a peer that exists but
         never handshook is simply absent from the dict, which — since the read
         succeeded — the caller reads as an observed 0 (a real failure). Read-only.
+
+        WARP-2687: the interface-status source below is EMPTY on OpenWrt 25.12 —
+        measured on a live RB5009, ``network.interface.wg0 status`` returns
+        ``data: {}`` with no ``peers`` key at all, so this returned None on every
+        call and the punch telemetry has been silently blind on that release. The
+        ``wireguard`` ubus object reports the same numbers from the kernel, so we
+        prefer it and keep the original read as the fallback for builds that do
+        populate it. Both are permitted reads; neither is ``file.exec``.
         """
+        live = self.live_peers(interface)
+        if live is not None:
+            return {pk: p["last_handshake"] for pk, p in live.items() if p["last_handshake"] > 0}
         try:
             status = self._r._call(f"network.interface.{interface}", "status")
         except Exception:  # noqa: BLE001 — telemetry read, never fatal
@@ -2249,6 +2260,121 @@ class VPNApi:
             if isinstance(pk, str) and isinstance(hs, (int, float)) and hs > 0:
                 out[pk] = int(hs)
         return out
+
+    # ------------------------------------------------------------------
+    # WARP-2686 / WARP-2687 — LIVE kernel state.
+    #
+    # Everything above this line reads uci, which is INTENT. `wg show` is
+    # state, and the two diverge routinely: a `uci.apply` can succeed without
+    # netifd reloading the wireguard peer set, so a peer can be absent from
+    # the config and still hold a live session. Verified on real hardware
+    # 2026-09-03 — a peer that DELETE had just reported `removed: 1` for
+    # completed a fresh handshake and reached the LAN. See
+    # 06-runbooks/wireguard-e2e-verification.md §5 in the engineering handbook.
+    # ------------------------------------------------------------------
+
+    def live_peers(self, interface: str = "wg0") -> Optional[dict[str, dict]]:
+        """Per-peer LIVE kernel state, keyed by public key, or None if unknown.
+
+        Source is the ``wireguard`` ubus object from ``rpcd-mod-wireguard``,
+        which reports the kernel's own view: which peers the interface actually
+        holds, their allowed-ips, and their handshake/transfer counters. This is
+        the only read that can contradict uci, which is exactly why it exists.
+
+        ``None`` means UNKNOWN, and callers MUST NOT read it as "no peers":
+        the object is absent on an image built without ``rpcd-mod-wireguard``,
+        and the call is refused when the ``droplet-ai`` rpcd ACL carries no
+        ``wireguard`` read grant. Both are true of routers flashed before
+        WARP-2183/WARP-2689, so degrading honestly is the common path, not the
+        edge case. An empty dict, by contrast, is a real observation: the
+        interface exists and holds no peers.
+
+        Deliberately NOT ``file.exec``/``wg show`` — the ACL denies file.exec
+        on purpose and verification must never motivate widening that grant
+        (same rule ``peer_handshakes`` documents).
+        """
+        try:
+            status = self._r._call("wireguard", "status")
+        except Exception:  # noqa: BLE001 — absent object / denied ACL / transport
+            return None
+        if not isinstance(status, dict):
+            return None
+        iface = status.get(interface)
+        if not isinstance(iface, dict):
+            # The object ANSWERED and does not list this interface ⇒ the kernel
+            # device is not there, so it is holding no peers. That is a real
+            # observation, not an unknown: `{}` lets a revoke verify correctly
+            # (the peer is definitively not live) while `interface_is_live`
+            # separately reports the device as missing. Returning None here
+            # would throw away a fact we actually have.
+            return {}
+        peers = iface.get("peers")
+        if not isinstance(peers, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for pk, p in peers.items():
+            if not isinstance(pk, str) or not isinstance(p, dict):
+                continue
+            allowed = p.get("allowed_ips")
+            hs = p.get("last_handshake")
+            out[pk] = {
+                "allowed_ips": list(allowed) if isinstance(allowed, list) else [],
+                "last_handshake": int(hs) if isinstance(hs, (int, float)) and hs > 0 else 0,
+                "rx_bytes": int(p.get("rx_bytes") or 0),
+                "tx_bytes": int(p.get("tx_bytes") or 0),
+            }
+        return out
+
+    def interface_is_live(self, interface: str = "wg0") -> Optional[bool]:
+        """Is the KERNEL device present, as opposed to merely configured?
+
+        ``True``/``False`` are observations; ``None`` is unknown. The whole
+        point is the case that motivated WARP-2687: on a router with no
+        wireguard kernel module, ``uci`` carries a perfect ``wg0`` section and
+        ``ip link show wg0`` says the device does not exist. netifd reports the
+        interface as ``proto: "none"`` with error ``NO_DEVICE``, because it
+        falls back to ``none`` for a protocol whose handler it never loaded —
+        so a correct config reads as a missing device, which is precisely what
+        it is.
+        """
+        try:
+            status = self._r._call("wireguard", "status")
+        except Exception:  # noqa: BLE001
+            status = None
+        if isinstance(status, dict):
+            return isinstance(status.get(interface), dict)
+        # Fall back to the always-permitted read. `l3_device` only appears once
+        # netifd has a real device to point at.
+        try:
+            st = self._r._call(f"network.interface.{interface}", "status")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(st, dict):
+            return None
+        proto = st.get("proto")
+        if proto in (None, "", "none"):
+            return False
+        return bool(st.get("up")) and bool(st.get("l3_device"))
+
+    def reload_interface(self, interface: str = "wg0") -> bool:
+        """Make staged peer changes take effect in the kernel. Best-effort.
+
+        ``uci.apply`` commits and nudges ucitrack; on the shapes we ship that
+        is NOT sufficient to reload a wireguard peer set, which is the whole
+        WARP-2686 defect. ``network.interface.<iface> up`` is the ifup the
+        peers actually need, and it is already granted by the droplet-ai ACL
+        (``network.interface.*: ["up", "down"]``) — no ACL change required, so
+        this half of the fix works on every router in the field today.
+
+        Returns True if the call was accepted. That is not proof the reload
+        did what we wanted; only `live_peers` can say that.
+        """
+        try:
+            self._r._call(f"network.interface.{interface}", "up")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vpn: ifup %s failed: %s", interface, exc)
+            return False
 
     def delete_peer(self, interface: str, public_key: str) -> int:
         """Delete every peer section matching `public_key`. Returns the count.
@@ -2707,6 +2833,159 @@ class FabricApi:
 
 
 # ---------------------------------------------------------------------------
+# High-level API: Generic mDNS discovery (WARP-2019, scan-3)
+# ---------------------------------------------------------------------------
+
+# Well-formedness only — the allowlist below is the actual gate. This exists so
+# a caller-supplied `service` can never reach a ubus call as anything but a
+# service type.
+DISCOVERY_SERVICE_RE = re.compile(r"^_[a-z0-9-]{1,30}\._(tcp|udp)$")
+
+# The service types the product actually browses. Deliberately closed: the
+# routing service binds 0.0.0.0 inside a `network_mode: host` container
+# (docker-compose + its Dockerfile) and is gated by mTLS + bearer, NOT by
+# compose network isolation — so an open `?service=` would hand any
+# authenticated caller a general-purpose LAN scanner. `_ipp*` is listed now so
+# the printer workstream inherits discovery; submission is a separate ticket.
+DISCOVERY_SERVICE_ALLOWLIST = frozenset(
+    {
+        "_uscan._tcp",   # eSCL / AirScan / Mopria Scan, cleartext
+        "_uscans._tcp",  # eSCL over TLS
+        "_ipp._tcp",
+        "_ipps._tcp",
+    }
+)
+
+
+def discovery_service_allowed(service_type: str) -> bool:
+    """True when `service_type` is both well-formed and on the allowlist."""
+    return (
+        DISCOVERY_SERVICE_RE.match(service_type) is not None
+        and service_type in DISCOVERY_SERVICE_ALLOWLIST
+    )
+
+
+class DiscoveryApi:
+    """Read-only browse of one NON-Droplet mDNS service type.
+
+    `FabricApi` and `ApApi` own the `_droplet-*._tcp` inventory, and both drop
+    any record lacking a `mac=` TXT key — the MAC is the orchestrator's primary
+    key for a fabric device (ADR-035 §2). Third-party adverts do not carry one:
+    an eSCL scanner announces `rs=` / `ty=` / `uuid=` / `pdl=` / `is=` /
+    `duplex=` and never a MAC, so reusing either parser would return `None` for
+    100% of scanner records. Hence a parser of its own, keyed on `uuid=`, that
+    drops nothing and returns every TXT key verbatim.
+
+    Pure observation — no writes, no lifecycle state. The adopt/decommission
+    state machine lives in the orchestrator (WARP-2027).
+    """
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    def browse_service(self, service_type: str) -> list[dict[str, Any]]:
+        """Parse `umdns browse` into records for one service type.
+
+        Returns one dict per announcement:
+            {
+                "service_type": "_uscan._tcp",
+                "hostname": "BRW001122334455",
+                "uuid": "e3248000-...",     # when the advert carries uuid=
+                "port": 80,                 # when announced
+                "last_ip": "192.168.9.61",  # when announced
+                "txt": {"rs": "eSCL", "ty": "...", ...},  # verbatim, blanks omitted
+            }
+
+        Same tolerance contract as `FabricApi.browse_members`: the WARP-1720
+        duplicate-key hook delivers repeated `txt` as a list and a single TXT
+        record as a bare string — both parse; umdns absent (NOT_FOUND /
+        NO_DATA) degrades to []; only network / auth failures bubble.
+
+        Callers are expected to have passed `service_type` through
+        `discovery_service_allowed` first.
+        """
+        # Ask before reading (WARP-1760) — see `_umdns_query`. Without this a
+        # scanner that reboots never returns to the inventory.
+        _umdns_query(self._r)
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
+
+        services = raw if isinstance(raw, dict) else {}
+        entries = services.get(service_type)
+        if not isinstance(entries, dict):
+            # Nothing of this type in the cache — not an error, just quiet.
+            return []
+
+        records: list[dict[str, Any]] = []
+        for host_key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            record = self._parse_service_record(entry, service_type)
+            record["hostname"] = str(host_key)
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _parse_service_record(
+        entry: dict[str, Any], service_type: str
+    ) -> dict[str, Any]:
+        """Tolerant TXT → record parse. Never returns None.
+
+        The deliberate difference from `_parse_member_txt` / `_parse_droplet_ap_txt`:
+        no mandatory key, so a record is never dropped for what it omits. Blank
+        values are omitted rather than stored as "", so a caller can test
+        presence instead of truthiness.
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, str):
+            # A service with exactly ONE TXT record decodes to a bare string
+            # even with the WARP-1720 hook — it only lists keys that repeat.
+            txt = [txt]
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                key, value = key.strip(), value.strip()
+                if key and value:
+                    kv[key] = value
+        elif isinstance(txt, dict):
+            for raw_key, raw_value in txt.items():
+                key, value = str(raw_key).strip(), str(raw_value).strip()
+                if key and value:
+                    kv[key] = value
+
+        record: dict[str, Any] = {"service_type": service_type, "txt": kv}
+        # `uuid=` is the stable identity for a third-party advert the way `mac=`
+        # is for a fabric one. Promoted so the orchestrator's reconciler
+        # (WARP-2027, `Scanner.esclUuid @unique`) doesn't have to know TXT key
+        # names; still present in `txt`, which is documented as verbatim.
+        if uuid := kv.get("uuid"):
+            record["uuid"] = uuid
+
+        port = entry.get("port")
+        if isinstance(port, int):
+            record["port"] = port
+
+        # Same three-shape ipv4 tolerance as browse_discovered / browse_members:
+        # plain string, {address}/{ip} dict, or the WARP-1720 repeated-field
+        # list (first address wins).
+        ipv4 = entry.get("ipv4")
+        if isinstance(ipv4, list):
+            ipv4 = ipv4[0] if ipv4 else None
+        if isinstance(ipv4, dict):
+            ipv4 = ipv4.get("address") or ipv4.get("ip")
+        if isinstance(ipv4, str) and ipv4:
+            record["last_ip"] = ipv4
+        return record
+
+
+# ---------------------------------------------------------------------------
 # High-level API: File operations
 # ---------------------------------------------------------------------------
 class FileApi:
@@ -2769,6 +3048,7 @@ class DropletRouter:
         self.vpn = VPNApi(self)
         self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
         self.fabric = FabricApi(self)  # WARP-1731: fabric member inventory
+        self.discovery = DiscoveryApi(self)  # WARP-2019: generic mDNS browse
         self.file = FileApi(self)
 
         if auto_login:

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import deleteEvent from "../../../src/handlers/calendar/delete-event.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  findUnique: ReturnType<typeof vi.fn>,
-  delFn: ReturnType<typeof vi.fn>,
+  findUnique: Mock,
+  delFn: Mock,
   userId = "alice",
 ): ToolContext {
   return {

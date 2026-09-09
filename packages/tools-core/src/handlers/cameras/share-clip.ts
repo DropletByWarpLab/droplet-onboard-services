@@ -71,6 +71,12 @@ const tool: Tool = {
   // is a footgun if it fires unattended: the resulting signed URL is
   // unauthenticated for its whole TTL. Require explicit user confirmation.
   requiresConfirmation: true,
+  // WARP-2472 — POST /api/cameras/clips/share evaluates `share_clip` as
+  // Tier 2 and answers 202 with its own token. That route is emphatically the
+  // single gate: it takes a `confirmation_token` inline but 403s the
+  // `_service:mcp` principal on that path by design (cameras.ts:574-578), so
+  // an agent can never redeem its own approval. The interceptor stands down.
+  confirmationOwner: "route",
   handler,
 };
 

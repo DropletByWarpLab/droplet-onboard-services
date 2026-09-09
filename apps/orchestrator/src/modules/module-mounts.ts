@@ -93,6 +93,24 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   "cameras",
   "network",
   "smart_home",
+  // `crm` (WARP-2117) and `money` (WARP-2581) shipped with access ladders in
+  // `access-catalog.ts` and grants offered in the Access panel, but were never
+  // added here — so layer 1 (the box-wide module toggle) applied and layer 2
+  // did not. A custom role narrowed away from the CRM still reached
+  // `/api/crm`, and the panel was advertising a permission the box did not
+  // enforce.
+  //
+  // The role FLOOR was never the gap: both routers carry `requireRole`. What
+  // was missing is the NARROWING, which is the entire reason a custom role
+  // exists. Same omission `files`/`knowledge`/`docs` had before WARP-1585, and
+  // the same fix.
+  //
+  // Safe for the tool paths: `requireFeatureAccess` passes `service`
+  // principals straight through, so `crm_*` and `money_list_open_documents`
+  // keep dispatching as `_service:mcp`. Neither prefix nests inside another,
+  // so `gateScopeFor` returns null for both and no sibling surface is caught.
+  "crm",
+  "money",
 ]);
 
 /**

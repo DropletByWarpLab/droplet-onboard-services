@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { Suspense, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LogOut, MoreHorizontal, X } from "lucide-react";
@@ -11,6 +11,10 @@ import { useAuth } from "@/lib/auth";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+// WARP-1548 — the Files places rail's Libraries group. Lives in its own
+// component because it is the one piece of this nav that is DATA, not
+// config: the libraries come from GET /api/files/spaces at render time.
+import { FilesLibrariesNav } from "./nav/FilesLibrariesNav";
 // The nav definition + its pure gate predicates live beside this component
 // (WARP-1528) so the route guard and the tests can read them without pulling
 // in the chrome. This file owns rendering; nav-config owns what there is to
@@ -425,6 +429,34 @@ export function Sidebar() {
                                 nested
                               />
                             ))}
+                            {/* WARP-1548 — the Libraries group, in the drawer
+                                as well as the desktop aside. The addendum's
+                                §2.2 is explicit that the rail supersedes
+                                `SpaceSwitcher` "at every width — desktop via
+                                the sidebar's Files section, below 900px via
+                                the mobile drawer's Files section", and the
+                                desktop mount lives inside a `hidden lg:flex`
+                                aside. Mounting only there left every phone
+                                user with more than three libraries looking at
+                                the collapsed "Spaces ▾" menu this ticket
+                                exists to remove.
+
+                                `onNavigate` because the drawer is a modal
+                                that does not dismiss itself on navigation —
+                                the same callback every `DrawerLink` beside it
+                                takes. `variant="drawer"` for the 44px rows a
+                                touch surface owes. Suspense for the same
+                                reason as the aside: `useSearchParams` must be
+                                read under a boundary. */}
+                            {entry.item.href === "/files" && (
+                              <Suspense fallback={null}>
+                                <FilesLibrariesNav
+                                  pathname={pathname}
+                                  variant="drawer"
+                                  onNavigate={closeDrawer}
+                                />
+                              </Suspense>
+                            )}
                           </div>
                         </div>
                       );
@@ -625,6 +657,23 @@ function NavLink({
 
       {showChildren && item.children && (
         <div className="ml-7 mt-1 space-y-0.5">
+          {/* WARP-1548 — the Files section's children are the places rail's
+              Quick group; the Libraries group is appended below them. Only
+              Files has one: it is the single surface where "which library"
+              is a question, and the component renders nothing on a Home
+              install (ADR-029 §5, Home mode pixel-identical).
+
+              This is the DESKTOP mount, inside a `hidden lg:flex` aside. The
+              mobile drawer's Files caption group carries the same rail (see
+              the `entry.captionOnly` branch above) — the addendum's §2.2 asks
+              for both, and only both.
+
+              Suspense, and scoped to just this: `useSearchParams` must be read
+              under a boundary (see `app/admin/audit/page.tsx`), and the Sidebar
+              renders on every route — putting the boundary here keeps that
+              requirement out of the global shell. `fallback={null}` because the
+              rail is additive: nothing renders until the space list resolves,
+              and a skeleton in a nav would be noise. */}
           {item.children.map((sub) => {
             const SubIcon = sub.icon;
             const subActive = sub.exact
@@ -650,6 +699,11 @@ function NavLink({
               </Link>
             );
           })}
+          {item.href === "/files" && (
+            <Suspense fallback={null}>
+              <FilesLibrariesNav pathname={pathname} />
+            </Suspense>
+          )}
         </div>
       )}
     </div>

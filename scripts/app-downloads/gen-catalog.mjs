@@ -20,6 +20,13 @@
  *                  disagrees with what would be generated. This is the
  *                  CI/image-build guard against a stale catalog shipping
  *                  next to swapped binaries.
+ *   --require-installer
+ *                  exit non-zero unless at least one platform can actually
+ *                  give a customer something. On its own `--check` passes
+ *                  VACUOUSLY over an empty staging root — a catalog with
+ *                  zero platforms matches itself perfectly — which is the
+ *                  shape that let an empty /downloads page ship green.
+ *                  Composable with or without --check.
  *
  * LAYOUT the staging root is expected to have:
  *
@@ -80,10 +87,11 @@ const CONTENT_TYPES = {
 };
 
 function parseArgs(argv) {
-  const args = { dir: "data/app-downloads", check: false };
+  const args = { dir: "data/app-downloads", check: false, requireInstaller: false };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--check") args.check = true;
+    else if (arg === "--require-installer") args.requireInstaller = true;
     else if (arg === "--dir") {
       i += 1;
       if (!argv[i]) fail("--dir needs a path");
@@ -261,6 +269,28 @@ async function main() {
 
   const catalogPath = path.join(root, "catalog.json");
   const serialized = `${JSON.stringify(catalog, null, 2)}\n`;
+
+  // Deliberately BEFORE the --check comparison. `--check` only asks "does the
+  // catalog match the bytes", and an empty staging root satisfies that
+  // perfectly — nothing on disk, nothing declared, no disagreement. That
+  // vacuous pass is what let boxes ship an empty page with a green gate, so
+  // callers that mean "this release must be able to give a customer
+  // something" pass --require-installer and get told the truth.
+  if (args.requireInstaller) {
+    const usable = platforms.filter((p) => p.primary || p.storeUrl);
+    if (usable.length === 0) {
+      fail(
+        "--require-installer: no platform has an installer or a store URL — " +
+          "this catalog cannot give a customer anything. Stage an artifact " +
+          "(scripts/app-downloads/stage.sh) or declare a storeUrl in platforms.json.",
+      );
+    }
+    process.stdout.write(
+      `gen-catalog: ${usable.length} platform(s) can serve something — ${usable
+        .map((p) => `${p.platform}:${p.primary ? "installer" : "store"}`)
+        .join(", ")}\n`,
+    );
+  }
 
   if (args.check) {
     let existing;

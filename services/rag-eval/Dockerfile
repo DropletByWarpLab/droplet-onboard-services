@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Build context is the monorepo root (see docker-compose.yml service block).
 # All COPY paths below are relative to the repo root.
@@ -49,6 +49,20 @@ COPY tests/retrieval-eval/ragas/goldens.yaml \
 COPY tests/retrieval-eval/ragas/ragas_runner.py \
      /opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py
 
+# WARP-2732 (ADR-048) — the extraction canary: scorer, box-side runner, the
+# 12-fixture corpus and its answer key.
+#
+# 🔴 WITHOUT THESE FOUR COPY LINES THE CANARY IS INVISIBLE TO THE BOX. The
+# appliance runs images, not a repo checkout ("image-first, no repo on
+# appliance"), so a `tests/extraction-eval/` directory that exists only in git
+# is a canary nobody can run — and `auto` mode is gated on running it. A
+# goldens edit that does not rebuild this image measures the OLD corpus while
+# reporting today's date.
+COPY tests/extraction-eval/score.py /opt/rag-eval/tests/extraction-eval/score.py
+COPY tests/extraction-eval/extraction_runner.py /opt/rag-eval/tests/extraction-eval/extraction_runner.py
+COPY tests/extraction-eval/goldens.yaml /opt/rag-eval/tests/extraction-eval/goldens.yaml
+COPY tests/extraction-eval/fixtures /opt/rag-eval/tests/extraction-eval/fixtures
+
 # Service-local Python: scheduler wiring + main + subprocess runner.
 COPY services/rag-eval/*.py /opt/rag-eval/
 
@@ -77,7 +91,7 @@ EXPOSE 8090
 # job absorbs short outages); in-flight HTTP-triggered runs are forgotten on
 # restart (the filesystem is the source of truth for completed runs).
 # GWV-015: probe the real HTTP surface (:8090/health) so a wedged uvicorn or a
-# dead HTTP half is not reported healthy. python:3.11-slim has no curl.
+# dead HTTP half is not reported healthy. python:3.12-slim has no curl.
 # WARP-1061: the shared cert-presenting client replaces the inline plain-HTTP
 # urlopen — a plaintext probe against the DROPLET_INTERNAL_TLS=1 listener
 # would flap this container unhealthy forever; it stays plain HTTP when off.

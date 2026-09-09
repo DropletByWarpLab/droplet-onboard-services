@@ -66,6 +66,32 @@ the human session AND from the `SERVICE_TOKEN_*` `service`-role principals.
 audit + re-activate. Both `/auth/login` AND the SSO callback **fail closed**
 for a `DEACTIVATED` user (wire-indistinguishable from unknown-email at login).
 
+> **Deactivation runs the role-mutation rails (WARP-2016) — a SCIM push can
+> now be REFUSED.** PUT, PATCH and DELETE all funnel through
+> `scim.service.ts` (`setUserActive`/`deactivateUser`), which runs the same
+> disable rails as `POST /auth/users/:username/disable` inside one
+> `SERIALIZABLE` transaction, then the disable post-effects (session
+> revocation + the mandatory `User disabled` audit row). Okta previously
+> could deactivate the sole owner — or the last `ACTIVE` admin — and strand
+> the box with zero operators able to sign in. Refusals render as the SCIM
+> Error envelope with the rail's stable machine-readable code in `scimType`:
+>
+> | Refusal | HTTP | Meaning |
+> |---|---|---|
+> | `OWNER_IMMUTABLE` | 403 | The target is the owner; no directory push may touch the owner's row. |
+> | `LAST_OPERATOR_INVARIANT` | 409 | The target is the last `ACTIVE` owner/admin; deactivating them would leave zero operators. Give someone else an admin role first. |
+> | `CONCURRENT_MUTATION` | 409 | Lost a write race; nothing was applied — the retry converges. |
+>
+> Both refusal statuses are terminal for Okta (no retry wedge); they are
+> logged at warn with the code. Re-deactivating an already-`DEACTIVATED` row
+> stays an idempotent 2xx, and **re-activation is deliberately rail-free** —
+> the sole deactivated admin must always be able to come back.
+>
+> Known residual: `POST /scim/v2/Users` (`provisionUser`) still writes
+> `directoryStatus` on an existing row without the rails when a create
+> payload carries `active:false` for an already-provisioned email. Tracked
+> separately; the three update verbs above are the surface WARP-2016 seals.
+
 ### Role mapping
 
 `scim-role-mapping.service.ts` maps a SCIM group display name → local `Role`

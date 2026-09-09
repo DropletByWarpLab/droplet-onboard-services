@@ -22,7 +22,18 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
+import {
+  DEPARTMENT_SELECT,
+  PM_DEPARTMENT_ERRORS,
+  assertAssignableDepartment,
+  departmentWorkItemWhere,
+  expandDepartmentScope,
+  resolveDepartmentRef,
+  type DepartmentRefRow,
+  type PmDepartmentRef,
+} from "./pm-department.js";
 
 // ── Stable error codes ────────────────────────────────────────────────────────
 // Shared so catch sites import the same string literals the throw sites emit;
@@ -35,10 +46,18 @@ export const PM_ERRORS = {
   WORK_ITEM_NOT_FOUND: "work_item_not_found",
   COMMENT_NOT_FOUND: "comment_not_found",
   IDENTIFIER_TAKEN: "identifier_taken",
+  /** ADR-048 — a project filed under a customer that does not exist. */
+  COMPANY_NOT_FOUND: "company_not_found",
   INVALID_PARENT: "invalid_parent",
   INVALID_STATE: "invalid_state",
   STATE_IS_LAST: "state_is_last",
   STATE_IS_DEFAULT: "state_is_default",
+  /** SERIALIZABLE loser -- nothing was applied, the route answers 409, retry. */
+  CONCURRENT_MUTATION: "concurrent_mutation",
+  // ADR-045 §5.3 — the department dimension's codes live beside its rules in
+  // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
+  // vocabulary to switch on.
+  ...PM_DEPARTMENT_ERRORS,
 } as const;
 
 // ── Default workspace + state set ────────────────────────────────────────────
@@ -71,11 +90,23 @@ const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
+  // ADR-045 §5.3 — the item's OWN department, which overrides its project's.
+  // The project's half is NOT joined per row: every caller already holds the
+  // project (listWorkItems / getWorkItem / createWorkItem / updateWorkItem all
+  // fetch it), so it is passed to `mapWorkItem` instead of costing a join per
+  // card. `searchWorkItems` is the one cross-project reader and adds the join
+  // itself.
+  department: { select: DEPARTMENT_SELECT },
   _count: { select: { comments: true, children: true } },
 } satisfies Prisma.PmWorkItemInclude;
 
+const PROJECT_INCLUDE = {
+  workspace: true,
+  department: { select: DEPARTMENT_SELECT },
+} satisfies Prisma.PmProjectInclude;
+
 type WorkItemRow = Prisma.PmWorkItemGetPayload<{ include: typeof WORK_ITEM_INCLUDE }>;
-type ProjectRow = Prisma.PmProjectGetPayload<{ include: { workspace: true } }>;
+type ProjectRow = Prisma.PmProjectGetPayload<{ include: typeof PROJECT_INCLUDE }>;
 type StateRow = Prisma.PmStateGetPayload<object>;
 type LabelRow = Prisma.PmLabelGetPayload<object>;
 type CommentRow = Prisma.PmCommentGetPayload<object>;
@@ -101,6 +132,14 @@ export interface ApiProject {
   icon: string | null;
   color: string | null;
   leadId: string | null;
+  /** ADR-045 §5.3 — the department that owns this project's work, or null.
+   *  `source` is always `"project"` here; the field is shaped identically to a
+   *  work item's so one dashboard component renders both. */
+  department: PmDepartmentRef | null;
+  /** ADR-048 (WARP-2729) — the customer this project is filed under, or null.
+   *  Exposed as the bare id (like `leadId`) so a `company_id` write is
+   *  confirmable through GET/list; without it the writer is unobservable. */
+  companyId: string | null;
   archived: boolean;
   /** Non-terminal items (backlog + unstarted + started). Present on list. */
   openCount: number;
@@ -159,6 +198,11 @@ export interface ApiWorkItem {
   priority: WorkItemRow["priority"];
   parentId: string | null;
   cycleId: string | null;
+  /** ADR-045 §5.3 — the department that owns this item, ALREADY RESOLVED: the
+   *  item's own overriding its project's, `source` saying which. Null when
+   *  neither level owns it. Deliberately carries no provisioning field — see
+   *  `pm-department.ts` `DEPARTMENT_SELECT`. */
+  department: PmDepartmentRef | null;
   assignees: string[];
   labels: ApiLabel[];
   startDate: string | null;
@@ -198,6 +242,8 @@ function mapProject(row: ProjectRow): ApiProject {
     icon: row.icon,
     color: row.color,
     leadId: row.leadId,
+    department: resolveDepartmentRef(null, row.department),
+    companyId: row.companyId,
     archived: row.isArchived,
     openCount: 0,
     doneCount: 0,
@@ -223,7 +269,15 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(row: WorkItemRow, identifier: string): ApiWorkItem {
+function mapWorkItem(
+  row: WorkItemRow,
+  identifier: string,
+  // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
+  // resolved without joining the project onto every row. Nullable/optional
+  // because the DB-less route suite's Prisma fake does not resolve includes it
+  // was never taught.
+  projectDepartment?: DepartmentRefRow | null,
+): ApiWorkItem {
   return {
     id: row.id,
     projectId: row.projectId,
@@ -236,6 +290,7 @@ function mapWorkItem(row: WorkItemRow, identifier: string): ApiWorkItem {
     priority: row.priority,
     parentId: row.parentId,
     cycleId: row.cycleId,
+    department: resolveDepartmentRef(row.department, projectDepartment),
     assignees: row.assignees.map((a) => a.userId),
     labels: row.labels.map((l) => mapLabel(l.label)),
     startDate: row.startDate ? row.startDate.toISOString() : null,
@@ -282,7 +337,26 @@ function deriveIdentifier(name: string): string {
  *  concurrent mutation opens (between the read and the write) onto the same
  *  typed string error the happy path throws, so the route layer returns the
  *  correct HTTP status instead of leaking a raw 500. */
-function isPrismaCode(err: unknown, code: "P2002" | "P2025" | "P2003"): boolean {
+/** Shared with pm-relations.service.ts -- one Prisma-code predicate, not two copies. */
+/**
+ * ADR-048 — is this P2003 the *company* foreign key?
+ *
+ * `PmProject` carries three FKs a caller can set (company, department, lead), so
+ * mapping any P2003 to `company_not_found` would mislabel a department race as a
+ * customer problem. Prisma names the constraint in `meta.field_name`
+ * (e.g. `PmProject_companyId_fkey`), so match on that and let anything else
+ * surface unchanged.
+ */
+function isCompanyFkViolation(err: unknown): boolean {
+  if (!isPrismaCode(err, "P2003")) return false;
+  const field = (err as { meta?: { field_name?: unknown } }).meta?.field_name;
+  return typeof field === "string" && field.toLowerCase().includes("company");
+}
+
+export function isPrismaCode(
+  err: unknown,
+  code: "P2002" | "P2025" | "P2003" | "P2034",
+): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
@@ -314,10 +388,15 @@ async function writeActivity(
 
 /** Re-fetch a work item with all includes and map it. Throws if it vanished
  *  (shouldn't, inside the same request) — keeps the return type non-null. */
-async function loadWorkItem(db: Db, id: string, identifier: string): Promise<ApiWorkItem> {
+async function loadWorkItem(
+  db: Db,
+  id: string,
+  identifier: string,
+  projectDepartment?: DepartmentRefRow | null,
+): Promise<ApiWorkItem> {
   const row = await db.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
   if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  return mapWorkItem(row, identifier);
+  return mapWorkItem(row, identifier, projectDepartment);
 }
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
@@ -347,16 +426,38 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
 
 export async function listProjects(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; includeArchived?: boolean; perPage?: number } = {},
+  opts: {
+    workspaceSlug?: string;
+    includeArchived?: boolean;
+    perPage?: number;
+    /**
+     * WARP-2719 — an id filters to that department AND its teams; `null`
+     * filters to projects no department owns; `undefined` applies no filter.
+     * The same three-way encoding `listWorkItems` uses.
+     *
+     * 🔴 NO INHERITANCE HERE, and `departmentWorkItemWhere` must not be used.
+     * A work item can borrow its project's department when it has none of its
+     * own; a project has nothing to borrow from. Reaching for the work-item
+     * helper would ask whether the project's own project has a department,
+     * which is not a question.
+     */
+    departmentId?: string | null;
+  } = {},
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.isArchived = false;
+  if (opts.departmentId !== undefined) {
+    where.departmentId =
+      opts.departmentId === null
+        ? null
+        : { in: await expandDepartmentScope(prisma, opts.departmentId) };
+  }
   const take =
     opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
     where,
-    include: { workspace: true },
+    include: PROJECT_INCLUDE,
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
     ...(take !== undefined ? { take } : {}),
   });
@@ -437,10 +538,28 @@ export async function getSummary(
 export async function getProject(prisma: PrismaClient, projectId: string): Promise<ApiProject> {
   const row = await prisma.pmProject.findUnique({
     where: { id: projectId },
-    include: { workspace: true },
+    include: PROJECT_INCLUDE,
   });
   if (!row) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   return mapProject(row);
+}
+
+/**
+ * ADR-048 (WARP-2729) — refuse a project→customer link to a customer that is
+ * not there.
+ *
+ * Existence only. Origin is deliberately NOT checked: linking is additive and
+ * writes nothing to the company, so a project may be filed under a synced
+ * (EXTERNAL) customer exactly as under one somebody typed. The EXTERNAL guards
+ * in `crm.service.ts` exist to stop a caller EDITING a vendor-owned row, which
+ * this does not do.
+ */
+async function assertCompanyExists(prisma: PrismaClient, companyId: string): Promise<void> {
+  const found = await prisma.crmCompany.findUnique({
+    where: { id: companyId },
+    select: { id: true },
+  });
+  if (!found) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
 }
 
 export async function createProject(
@@ -453,8 +572,54 @@ export async function createProject(
     description?: string;
     icon?: string;
     color?: string;
+    /** ADR-045 §5.3 — the department that will own this project's work. */
+    departmentId?: string;
+    /**
+     * ADR-048 (WARP-2729) — the customer this project is FOR.
+     *
+     * The column has existed since WARP-2562 with NO writer anywhere: not here,
+     * not in `updateProject`, not on the route, not in `pm_create_project`, not
+     * in the dashboard. The customer record already READS it
+     * (`customer-record.service.ts` lists projects by `companyId`), so filing a
+     * project under a customer has been half-built the whole time — this is the
+     * missing half.
+     *
+     * Deliberately NOT derived from `CrmDeal.projectId`: deriving drops every
+     * job that never had a deal (a warranty callout, a second phase, work that
+     * predates the CRM being switched on), which is the schema comment's own
+     * stated reason for the column existing.
+     */
+    companyId?: string;
   },
 ): Promise<ApiProject> {
+  // ADR-045 §5.3 — refuse HOUSEHOLD and archive-intent departments, but NOT a
+  // department that is merely pending / provisioning / failed: storage
+  // convergence is not a precondition for owning work.
+  //
+  // 🔴 WARP-2724 — `!== undefined`, not truthiness, and the reason is written
+  // out three lines below this for `companyId`: `department_id: ""` is FALSY,
+  // so a truthy check skipped the guard entirely, and `??` does not coerce ""
+  // either — so the empty string survived to `departmentId: input.departmentId
+  // ?? null` and reached Postgres as an empty FK. A raw P2003 500 on a request
+  // the API had every chance to refuse in words.
+  //
+  // The two columns had the same bug; only one of them had been found. Now
+  // `assertAssignableDepartment` sees the "" and answers `department_not_found`
+  // (→404), which is what the two UPDATE paths in this file already do.
+  if (input.departmentId !== undefined) {
+    await assertAssignableDepartment(prisma, input.departmentId);
+  }
+  // ADR-048 — a project may only be filed under a customer that exists.
+  // Checked here rather than left to the FK so the caller gets
+  // `company_not_found` (→404) instead of a redacted P2003 500 — the exact
+  // defect WARP-2577 fixed on five CRM columns, not re-introduced here.
+  // `!== undefined`, not truthiness: `company_id: ""` is falsy, so a truthy
+  // check skipped the existence probe AND survived the `?? null` write (`??`
+  // does not coerce ""), reaching Postgres as an empty FK — a raw P2003 500.
+  // The zod schemas reject "" at the boundary; this keeps the service honest on
+  // its own, and matches `updateProject`'s shape below.
+  if (input.companyId !== undefined) await assertCompanyExists(prisma, input.companyId);
+
   const workspace = await prisma.pmWorkspace.upsert({
     where: { slug: input.workspaceSlug ?? HOME_WORKSPACE_SLUG },
     create: {
@@ -490,6 +655,8 @@ export async function createProject(
         description: input.description ?? null,
         icon: input.icon ?? null,
         color: input.color ?? null,
+        departmentId: input.departmentId ?? null,
+        companyId: input.companyId ?? null,
         createdById: actorId,
         states: {
           create: DEFAULT_STATES.map((s) => ({
@@ -501,11 +668,17 @@ export async function createProject(
           })),
         },
       },
-      include: { workspace: true },
+      include: PROJECT_INCLUDE,
     });
     return mapProject(created);
   } catch (err) {
     if (isPrismaCode(err, "P2002")) throw new Error(PM_ERRORS.IDENTIFIER_TAKEN);
+    // A company hard-deleted between `assertCompanyExists` and this insert
+    // fails the FK. Companies CAN be hard-deleted (crm.service.ts), unlike
+    // departments, so the race is reachable — surface `company_not_found`
+    // (→404) rather than a redacted 500. Same idiom as the parent-FK race in
+    // `createWorkItem`.
+    if (isCompanyFkViolation(err)) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
     throw err;
   }
 }
@@ -519,6 +692,19 @@ export async function updateProject(
     icon?: string | null;
     color?: string | null;
     leadId?: string | null;
+    /** ADR-045 §5.3 — `undefined` leaves it alone, `null` clears it. */
+    departmentId?: string | null;
+    /**
+     * ADR-048 — the customer. `undefined` leaves it alone, `null` clears it.
+     *
+     * The service is deliberately permissive: a human may re-point a project at
+     * a different customer, because correcting a mistake is the whole reason
+     * the field is editable. The "only fill a NULL, never overwrite" rule is an
+     * AUTO-APPLY policy (WARP-2733's class table), enforced there — a
+     * restriction on what the box may do unattended is not a restriction on
+     * what a person may do.
+     */
+    companyId?: string | null;
     archived?: boolean;
   },
 ): Promise<ApiProject> {
@@ -530,17 +716,55 @@ export async function updateProject(
   if (fields.icon !== undefined) data.icon = fields.icon;
   if (fields.color !== undefined) data.color = fields.color;
   if (fields.leadId !== undefined) data.leadId = fields.leadId;
+  // ADR-045 §5.3. Clearing is deliberately unguarded: a department whose
+  // archive is what prompted the un-routing must not be the thing that blocks
+  // it. Note also what is NOT here — no `kickReconcile()` and no `aclVersion`
+  // bump. Owning a ticket grants no file access, so neither the reconciler nor
+  // the file-search cache has anything to learn from this write.
+  if (fields.departmentId !== undefined) {
+    if (fields.departmentId !== null) {
+      await assertAssignableDepartment(prisma, fields.departmentId);
+    }
+    // connect/disconnect, not a raw `departmentId` scalar: this update goes
+    // through Prisma's CHECKED `PmProjectUpdateInput`, which exposes relations
+    // rather than their foreign keys. Same idiom `state` and `parent` already
+    // use below — reaching for the Unchecked variant instead would work and
+    // would be the one place in this function that does.
+    data.department = fields.departmentId
+      ? { connect: { id: fields.departmentId } }
+      : { disconnect: true };
+  }
+  // ADR-048. Same connect/disconnect idiom as `department` above: this update
+  // goes through Prisma's CHECKED `PmProjectUpdateInput`, which exposes
+  // relations rather than their foreign keys. Clearing is unguarded — removing
+  // a wrong customer must never be blocked by the customer's own state.
+  if (fields.companyId !== undefined) {
+    if (fields.companyId !== null) {
+      await assertCompanyExists(prisma, fields.companyId);
+    }
+    data.company = fields.companyId
+      ? { connect: { id: fields.companyId } }
+      : { disconnect: true };
+  }
   if (fields.archived !== undefined) {
     // isArchived is the canonical signal (WARP-884); archivedAt stays the
     // audit timestamp, written/cleared alongside it so the two never diverge.
     data.isArchived = fields.archived;
     data.archivedAt = fields.archived ? new Date() : null;
   }
-  const updated = await prisma.pmProject.update({
-    where: { id: projectId },
-    data,
-    include: { workspace: true },
-  });
+  // Same FK race as `createProject`: the existence check above and this write
+  // are two round-trips, and the customer can vanish in between.
+  let updated;
+  try {
+    updated = await prisma.pmProject.update({
+      where: { id: projectId },
+      data,
+      include: PROJECT_INCLUDE,
+    });
+  } catch (err) {
+    if (isCompanyFkViolation(err)) throw new Error(PM_ERRORS.COMPANY_NOT_FOUND);
+    throw err;
+  }
   return mapProject(updated);
 }
 
@@ -762,12 +986,19 @@ export async function listWorkItems(
     labelId?: string;
     priority?: ApiWorkItem["priority"];
     parentId?: string | null;
+    /** ADR-045 §5.3 — an id filters to that department AND its teams; `null`
+     *  filters to work no department owns; `undefined` applies no filter.
+     *  Mirrors `parentId`'s explicit three-way encoding directly above. */
+    departmentId?: string | null;
     q?: string;
     perPage?: number;
     page?: number;
   } = {},
 ): Promise<ApiWorkItem[]> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
+  const project = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    include: { department: { select: DEPARTMENT_SELECT } },
+  });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const where: Prisma.PmWorkItemWhereInput = { projectId, isArchived: false };
@@ -777,6 +1008,17 @@ export async function listWorkItems(
   if (filters.parentId !== undefined) where.parentId = filters.parentId;
   if (filters.assignee) where.assignees = { some: { userId: filters.assignee } };
   if (filters.labelId) where.labels = { some: { labelId: filters.labelId } };
+  // ADR-045 §5.3. `where.AND`, NOT `where.OR`: the `?q=` filter below assigns
+  // `where.OR` directly, so putting this there would replace it and turn
+  // "items in Clinical matching 'sterilise'" into "items in Clinical". Prisma
+  // ANDs the two keys together, which is exactly the intent.
+  if (filters.departmentId !== undefined) {
+    const scope =
+      filters.departmentId === null
+        ? null
+        : await expandDepartmentScope(prisma, filters.departmentId);
+    where.AND = [departmentWorkItemWhere(scope)];
+  }
   if (filters.q && filters.q.trim().length > 0) {
     const q = filters.q.trim();
     where.OR = [
@@ -794,41 +1036,82 @@ export async function listWorkItems(
     skip: (page - 1) * perPage,
     take: perPage,
   });
-  return rows.map((r) => mapWorkItem(r, project.identifier));
+  return rows.map((r) => mapWorkItem(r, project.identifier, project.department));
 }
 
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
   const row = await prisma.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
   if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  const project = await prisma.pmProject.findUnique({ where: { id: row.projectId } });
+  const project = await prisma.pmProject.findUnique({
+    where: { id: row.projectId },
+    include: { department: { select: DEPARTMENT_SELECT } },
+  });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
-  return mapWorkItem(row, project.identifier);
+  return mapWorkItem(row, project.identifier, project.department);
 }
 
 /** Workspace-wide free-text search over work-item name + description. Backs the
  *  `pm_search_work_items` MCP tool, which keys on workspace_slug (not project). */
 export async function searchWorkItems(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; q: string; perPage?: number },
+  opts: {
+    workspaceSlug?: string;
+    q: string;
+    perPage?: number;
+    /** WARP-2719 — same three-way encoding as `listWorkItems`, and the same
+     *  override rule: an item's own department wins, and an item with none
+     *  inherits its project's. */
+    departmentId?: string | null;
+  },
 ): Promise<ApiWorkItem[]> {
   const q = opts.q.trim();
-  if (q.length === 0) return [];
+  // 🔴 An empty `q` used to be an unconditional empty list, which was right
+  // while free text was the only filter this reader had. It is now the answer
+  // to "what is Front Desk working on?" — a question with no search term in it
+  // at all — so the short-circuit narrows to "no filter of any kind".
+  if (q.length === 0 && opts.departmentId === undefined) return [];
   const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
-  const where: Prisma.PmWorkItemWhereInput = {
-    isArchived: false,
-    OR: [
+  // 🔴 The free-text `OR` is added CONDITIONALLY, and it did not used to be:
+  // it was an unconditional member of this literal, safe only because the
+  // guard above made an empty `q` unreachable. With that guard relaxed, an
+  // unconditional member would run `contains: ""` — an `ILIKE '%%'` pair — on
+  // every department-only query.
+  const where: Prisma.PmWorkItemWhereInput = { isArchived: false };
+  if (q.length > 0) {
+    where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { descriptionHtml: { contains: q, mode: "insensitive" } },
-    ],
-  };
+    ];
+  }
+  // `where.AND`, never `where.OR` — the free-text filter above owns `OR`, and
+  // `departmentWorkItemWhere` returns a bare-`OR` fragment for exactly this
+  // reason. Writing it to `where.OR` would turn "items in Front Desk matching
+  // X" into "items in Front Desk".
+  if (opts.departmentId !== undefined) {
+    const scope =
+      opts.departmentId === null
+        ? null
+        : await expandDepartmentScope(prisma, opts.departmentId);
+    where.AND = [departmentWorkItemWhere(scope)];
+  }
   if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
   const rows = await prisma.pmWorkItem.findMany({
     where,
-    include: { ...WORK_ITEM_INCLUDE, project: { select: { identifier: true } } },
+    // ADR-045 §5.3 — this is the only reader whose rows span projects, so it
+    // joins the project per row. The whole include is respelled rather than
+    // spread-and-overridden: `{ ...WORK_ITEM_INCLUDE, project: ... }` would be
+    // fine today but a later `project` key inside WORK_ITEM_INCLUDE would be
+    // silently clobbered by the later spread member.
+    include: {
+      ...WORK_ITEM_INCLUDE,
+      project: {
+        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+      },
+    },
     orderBy: { updatedAt: "desc" },
     take: perPage,
   });
-  return rows.map((r) => mapWorkItem(r, r.project.identifier));
+  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
 }
 
 export async function createWorkItem(
@@ -843,13 +1126,15 @@ export async function createWorkItem(
     assignees?: string[];
     labelIds?: string[];
     parentId?: string;
+    /** ADR-045 §5.3 — overrides the project's department for this item. */
+    departmentId?: string;
     startDate?: Date;
     dueDate?: Date;
   },
 ): Promise<ApiWorkItem> {
   const project = await prisma.pmProject.findUnique({
     where: { id: projectId },
-    include: { states: true },
+    include: { states: true, department: { select: DEPARTMENT_SELECT } },
   });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
@@ -881,6 +1166,31 @@ export async function createWorkItem(
     }
   }
 
+  // ADR-045 §5.3 — same shape as the guards above: refuse before the write, not
+  // after. Refuses HOUSEHOLD (it is the unit everyone is already in, so routing
+  // to it is indistinguishable from routing nothing) and archive-intent states.
+  // Does NOT refuse pending / provisioning / failed.
+  // 🔴 WARP-2724 — TWO fixes, and they are separate defects that happened to
+  // sit on one line.
+  //
+  // 1. `!== undefined`, not truthiness. `department_id: ""` is FALSY, so a
+  //    truthy check skipped the guard, and `??` does not coerce "" either — so
+  //    the empty string survived to `departmentId: input.departmentId ?? null`
+  //    and reached Postgres as an empty FK: a raw P2003 500 on a request the
+  //    API could have refused in words. The same bug was on `createProject`,
+  //    three lines under a comment describing it for `companyId`.
+  //
+  // 2. The check MOVED INSIDE the transaction (below). It used to run here,
+  //    before `prisma.$transaction` opened, so a department archived in the
+  //    window between the two was checked in one world and written in another.
+  //    The window is small and the write is the thing that matters, so the
+  //    check now runs against `tx` — same connection, same snapshot, no gap.
+  //
+  // `createProject` keeps its check outside, because it has no transaction to
+  // move into: its own comment records that the identifier loop and the create
+  // are deliberately not one. Narrowing that window is a different change with
+  // a different risk, and is not smuggled in here.
+
   // Landing state: explicit → isDefault → first by sortOrder → none.
   const stateId =
     input.stateId ??
@@ -901,6 +1211,11 @@ export async function createWorkItem(
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
+      // WARP-2724 — inside the tx, against `tx`, so the department that is
+      // checked is the department the row is written against.
+      if (input.departmentId !== undefined) {
+        await assertAssignableDepartment(tx, input.departmentId);
+      }
       // Bump the per-project counter atomically → the work item's number.
       const bumped = await tx.pmProject.update({
         where: { id: projectId },
@@ -920,6 +1235,7 @@ export async function createWorkItem(
           stateId,
           priority: input.priority ?? "none",
           parentId: input.parentId ?? null,
+          departmentId: input.departmentId ?? null,
           createdById: actorId,
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
@@ -935,6 +1251,21 @@ export async function createWorkItem(
         },
       });
       await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      // WARP-2587: a create WITH assignees is an assignment, and `created`
+      // does not say who. One `assigned` row per assignee, so the notify
+      // sweep sees the same shape whether the assignment happened at create
+      // time or in a later PATCH. `actorId` is on the row, so somebody who
+      // creates an item assigned to themselves is never notified about it.
+      for (const userId of input.assignees ?? []) {
+        await writeActivity(tx, {
+          workItemId: item.id,
+          actorId,
+          verb: "assigned",
+          field: "assignees",
+          oldValue: null,
+          newValue: userId,
+        });
+      }
       return item;
     });
   } catch (err) {
@@ -947,7 +1278,7 @@ export async function createWorkItem(
     throw err;
   }
 
-  return loadWorkItem(prisma, created.id, project.identifier);
+  return loadWorkItem(prisma, created.id, project.identifier, project.department);
 }
 
 export async function updateWorkItem(
@@ -964,6 +1295,10 @@ export async function updateWorkItem(
     labelIds?: string[];
     startDate?: Date | null;
     dueDate?: Date | null;
+    /** ADR-045 §5.3 — `undefined` leaves it alone; `null` clears the override
+     *  so the item inherits its project's department again (which may itself
+     *  be none). */
+    departmentId?: string | null;
     sortOrder?: number;
   },
 ): Promise<ApiWorkItem> {
@@ -972,7 +1307,10 @@ export async function updateWorkItem(
     include: { assignees: true, labels: true },
   });
   if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  const project = await prisma.pmProject.findUnique({ where: { id: existing.projectId } });
+  const project = await prisma.pmProject.findUnique({
+    where: { id: existing.projectId },
+    include: { department: { select: DEPARTMENT_SELECT } },
+  });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   // When transitioning into/out of a terminal-group state, sync
@@ -1018,6 +1356,13 @@ export async function updateWorkItem(
     }
   }
 
+  // ADR-045 §5.3 — guard before the transaction, like every check above.
+  // Clearing (null) is deliberately unguarded so an item can always be routed
+  // back out of a department that has since been archived.
+  if (fields.departmentId !== undefined && fields.departmentId !== null) {
+    await assertAssignableDepartment(prisma, fields.departmentId);
+  }
+
   await prisma.$transaction(async (tx) => {
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
@@ -1030,6 +1375,13 @@ export async function updateWorkItem(
     if (fields.startDate !== undefined) data.startDate = fields.startDate;
     if (fields.dueDate !== undefined) data.dueDate = fields.dueDate;
     if (fields.sortOrder !== undefined) data.sortOrder = fields.sortOrder;
+    // connect/disconnect for the same reason as `state` and `parent` below —
+    // the checked UpdateInput exposes the relation, not its foreign key.
+    if (fields.departmentId !== undefined) {
+      data.department = fields.departmentId
+        ? { connect: { id: fields.departmentId } }
+        : { disconnect: true };
+    }
     if (fields.stateId !== undefined) {
       data.state = fields.stateId ? { connect: { id: fields.stateId } } : { disconnect: true };
       if (completedAt !== undefined) data.completedAt = completedAt;
@@ -1069,6 +1421,24 @@ export async function updateWorkItem(
         newValue: fields.stateId,
       });
     }
+    // ADR-045 §5.3 — re-routing work is a decision someone made about who owns
+    // it, so it gets its OWN row rather than disappearing into the generic
+    // `fields` entry below. `PmActivityVerb` has no `department_changed`
+    // member; adding one would be a migration for no gain, so this reuses
+    // `updated` with an explicit `field`, exactly as `priority` does.
+    if (
+      fields.departmentId !== undefined &&
+      fields.departmentId !== existing.departmentId
+    ) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "updated",
+        field: "department",
+        oldValue: existing.departmentId,
+        newValue: fields.departmentId,
+      });
+    }
     if (fields.priority !== undefined && fields.priority !== existing.priority) {
       await writeActivity(tx, {
         workItemId: id,
@@ -1092,21 +1462,72 @@ export async function updateWorkItem(
     };
     const existingAssignees = existing.assignees.map((a) => a.userId);
     const existingLabelIds = existing.labels.map((l) => l.labelId);
+
+    // WARP-2587 — assignee churn gets its OWN verbs. `assigned`,
+    // `unassigned` and `due_date_changed` have been members of
+    // PmActivityVerb since WARP-884 with zero writers anywhere in the repo:
+    // both changes were folded into the `updated`/`fields` bucket below, so
+    // "who is on this" and "when is it due" were unrecoverable from the
+    // history feed and unnotifiable by anything downstream. The identity-PATCH
+    // guard is preserved — `setChanged` still gates the whole block, so
+    // re-sending the same assignee set writes nothing.
+    if (setChanged(fields.assignees, existingAssignees)) {
+      const next = new Set(fields.assignees ?? []);
+      const before = new Set(existingAssignees);
+      for (const userId of next) {
+        if (before.has(userId)) continue;
+        await writeActivity(tx, {
+          workItemId: id,
+          actorId,
+          verb: "assigned",
+          field: "assignees",
+          oldValue: null,
+          newValue: userId,
+        });
+      }
+      for (const userId of before) {
+        if (next.has(userId)) continue;
+        await writeActivity(tx, {
+          workItemId: id,
+          actorId,
+          verb: "unassigned",
+          field: "assignees",
+          oldValue: userId,
+          newValue: null,
+        });
+      }
+    }
+    const dueDateChanged =
+      fields.dueDate !== undefined &&
+      fields.dueDate?.toISOString() !== existing.dueDate?.toISOString();
+    if (dueDateChanged) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "due_date_changed",
+        field: "dueDate",
+        oldValue: existing.dueDate?.toISOString() ?? null,
+        newValue: fields.dueDate?.toISOString() ?? null,
+      });
+    }
+
+    // The residual. `assignees` and `dueDate` are deliberately NOT in this
+    // disjunction any more: they now have verbs that name them, and leaving
+    // them here would write a second, less informative row for the same edit
+    // — which is how the feed gets noisy and how a notifier ends up firing
+    // twice.
     const scalarChanged =
       (fields.name !== undefined && fields.name !== existing.name) ||
       (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
-      (fields.dueDate !== undefined &&
-        fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
       (fields.startDate !== undefined &&
         fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
-      setChanged(fields.assignees, existingAssignees) ||
       setChanged(fields.labelIds, existingLabelIds);
     if (scalarChanged) {
       await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
     }
   });
 
-  return loadWorkItem(prisma, id, project.identifier);
+  return loadWorkItem(prisma, id, project.identifier, project.department);
 }
 
 export async function transitionWorkItem(
@@ -1146,10 +1567,43 @@ export async function deleteWorkItem(
           newValue: null,
         });
       }
+      // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
+      // delete silently erases every blocks/relates/duplicates edge touching
+      // the item — including edges into OTHER projects, whose owners have no
+      // other way to learn the link is gone. Same defect class as the
+      // parent_removed case above, and the same answer: emit the audit row on
+      // the SURVIVING end BEFORE the cascade, in the same transaction, so the
+      // DB behaviour is never the only record. The transaction runs at
+      // SERIALIZABLE (below) so a relation committed between this read and
+      // the delete aborts the delete instead of being cascaded with no row.
+      const relations = await tx.pmWorkItemRelation.findMany({
+        where: { OR: [{ fromId: id }, { toId: id }] },
+        select: { fromId: true, toId: true, kind: true },
+      });
+      if (relations.length > 0) {
+        await tx.pmActivity.createMany({
+          data: relations.map((rel) => {
+            const otherId = rel.fromId === id ? rel.toId : rel.fromId;
+            return {
+              workItemId: otherId,
+              actorId,
+              verb: "relation_removed" as const,
+              field: "relation",
+              oldValue: `${rel.kind}:${id}`,
+              newValue: null,
+            };
+          }),
+        });
+      }
+
       await tx.pmWorkItem.delete({ where: { id } });
-    });
+    }, SERIALIZABLE_TX);
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    // The SERIALIZABLE loser: an edge was committed under us between the audit
+    // read and the delete. Nothing was applied -- the route answers 409 and the
+    // client retries, rather than the cascade eating an edge nobody recorded.
+    if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
 }

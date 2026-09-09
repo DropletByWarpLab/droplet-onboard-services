@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listRecentFiles from "../../../src/handlers/files/list-recent-files.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(get: ReturnType<typeof vi.fn>, ncToken?: string): ToolContext {
+function ctxWith(get: Mock, ncToken?: string): ToolContext {
   return {
     http: {
       nextcloud: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -10,6 +11,7 @@ function ctxWith(get: ReturnType<typeof vi.fn>, ncToken?: string): ToolContext {
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],

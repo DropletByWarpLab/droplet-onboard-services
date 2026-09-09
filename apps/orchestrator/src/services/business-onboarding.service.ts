@@ -47,6 +47,32 @@ export const INTERVIEW_SESSION_TITLE = "Getting to know your business";
 export const WRAP_UP_TURN =
   "That's enough — sum up what you have so far.";
 
+/**
+ * The server-authored OPENING turn, written into the interview session the
+ * moment it is created (§9.2 start) so the walkthrough actually walks.
+ *
+ * Why the server authors it rather than the model: `/llm/chat` refuses a
+ * thread that carries no user turn (`empty_replay`, routes/llm.ts) — a
+ * deliberate guard against replay bugs. So the model CANNOT open a
+ * conversation, and an interview session created empty just sits there
+ * looking like an ordinary blank chat: no question, no `[topic n/7]` marker,
+ * dots stuck on 0 of 7, until the user happens to type something. That is
+ * the whole of the "the walkthrough drops me into a chat" defect.
+ *
+ * Same contract as CLOSING_TURN: verbatim from here, never dependent on the
+ * model reproducing copy. Only the OPENER is fixed — topics 2-7 stay
+ * model-generated under INTERVIEW_CONDUCTOR_BLOCK, which the model reads off
+ * this turn's marker. Copy is the interview transcript's first line in the
+ * design handoff prototype (shared_brain personality-onboarding,
+ * prototype/src-decoded/copy-data.jsx), where Droplet speaks first.
+ *
+ * The marker is part of the string on purpose: the dashboard parses it, so
+ * the progress eyebrow reads `1 of 7` from first paint instead of holding on
+ * an unmarked turn.
+ */
+export const OPENING_TURN =
+  "[topic 1/7] To start — in a sentence or two, what does your business do?";
+
 /** The server-authored closing turn appended on commit success (§9.2 /
  *  design brief §9). Ships verbatim from here — it never depends on the
  *  model reproducing copy. */
@@ -123,6 +149,33 @@ async function readProfile(db: Db) {
 }
 
 /**
+ * Append a SERVER-AUTHORED assistant turn to an interview session.
+ *
+ * The lifecycle writes three of these — the opener on a fresh start (§9.2),
+ * the opener on a self-healed session, and the closing turn on commit — and
+ * they are one shape, not three: copy that ships verbatim from this module
+ * rather than depending on the model to reproduce it, written as an ordinary
+ * ChatMessage so reopening the session simply shows it, and always inside the
+ * caller's transaction so a lost race rolls the turn back with whatever it was
+ * appended to.
+ *
+ * One helper because the contract is the part that moves. An explicit
+ * provenance / system-turn column is the obvious next thing to want here, and
+ * hand-copied call sites drift quietly: the copy string is the only visible
+ * difference between them, so a divergence reads as a wording change rather
+ * than a missed edit (pr-reviewer, #1987).
+ */
+async function appendServerAuthoredTurn(
+  db: Db,
+  sessionId: string,
+  content: string,
+): Promise<void> {
+  await db.chatMessage.create({
+    data: { sessionId, role: "assistant", content },
+  });
+}
+
+/**
  * The llm.ts overlay probe (§9.3): is `conversationId` the live interview?
  * One indexed read; returns the state so the caller can also distinguish
  * in_progress from re_running if it ever needs to.
@@ -177,6 +230,7 @@ export async function startOnboarding(
       const healed = await tx.chatSession.create({
         data: { userId, title: INTERVIEW_SESSION_TITLE },
       });
+      await appendServerAuthoredTurn(tx, healed.id, OPENING_TURN);
       await tx.businessProfile.update({
         where: { id: BUSINESS_PROFILE_SINGLETON_ID },
         data: { interviewChatId: healed.id },
@@ -192,6 +246,10 @@ export async function startOnboarding(
     const session = await tx.chatSession.create({
       data: { userId, title: INTERVIEW_SESSION_TITLE },
     });
+    // The opener goes in with the session, inside the same transaction: a
+    // lost race below rolls BOTH back, so a losing start can never leave a
+    // stray "what does your business do?" in somebody's sidebar.
+    await appendServerAuthoredTurn(tx, session.id, OPENING_TURN);
     const moved = await tx.businessProfile.updateMany({
       where: {
         id: BUSINESS_PROFILE_SINGLETON_ID,
@@ -398,15 +456,8 @@ export async function commitOnboarding(
       });
     }
 
-    // The server-authored closing turn (§9.2) — verbatim copy, appended as
-    // an ordinary assistant message so reopening the session shows it.
-    await tx.chatMessage.create({
-      data: {
-        sessionId: interviewChatId,
-        role: "assistant",
-        content: CLOSING_TURN,
-      },
-    });
+    // The server-authored closing turn (§9.2).
+    await appendServerAuthoredTurn(tx, interviewChatId, CLOSING_TURN);
     await tx.chatSession.update({
       where: { id: interviewChatId },
       data: { updatedAt: new Date() },

@@ -202,8 +202,16 @@ export class ExportDropConnector implements Connector {
    * dropped that report is a freshness question, and `rowsFor` answers it with
    * a blocked error naming the missing report — which an operator can act on,
    * unlike a capability, which they cannot.
+   *
+   * Narrowed to `readonly DatasetName[]` by WARP-2306. This is the one track
+   * whose list is computed rather than written down, so it is the one that had
+   * to narrow rather than be cast: the names come from `DatasetProfile.dataset`,
+   * which operator JSON reaches only through `isDatasetName` in
+   * `parseProfileJson`. An unrecognized dataset in an operator profile is
+   * therefore refused at parse time with the name in the message — never
+   * admitted here and discovered as an empty read.
    */
-  readonly servesDatasets: readonly string[];
+  readonly servesDatasets: readonly DatasetName[];
 
   private readonly profiles: ExportProfile[];
   private readonly now: () => number;

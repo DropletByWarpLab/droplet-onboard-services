@@ -9,12 +9,32 @@
  * boundary the API enforces. All three resolve from ONE secret_ref pointer —
  * never cleartext in code, config, rows, or logs.
  *
- * Transport = Node's global `fetch()` (the repo convention — no axios/got), with
- * an `AbortSignal.timeout` on every call. TLS trust of the Patterson private CA
+ * Transport = `fetch()` (the repo convention — no axios/got), with an
+ * `AbortSignal.timeout` on every call. TLS trust of the Patterson private CA
  * (PdcoTechCA) is supplied by an injected `dispatcher` (an undici Agent the
  * caller builds from the resolved CA cert); this module never disables cert
- * verification and never imports undici, keeping the package dependency-free.
+ * verification.
+ *
+ * WARP-2626 — WHICH fetch is load-bearing, and it is not a style choice.
+ * A `dispatcher` is an undici extension to `RequestInit`, and it is only
+ * honoured by the undici that MINTED it. Node's built-in `fetch` is its own
+ * bundled copy of undici:
+ *
+ *   - Node 20 (`.nvmrc`, `engines.node`, every workflow's `setup-node`) bundles
+ *     undici 6 and accepts an `Agent` from the npm `undici@6` this repo installs.
+ *   - Node >= 22 bundles undici 7, whose handler interface changed, and rejects
+ *     the v6 `Agent` outright with `UND_ERR_INVALID_ARG: invalid onError method`
+ *     before a byte is sent. Every call then surfaces as a bare `fetch failed`,
+ *     which is indistinguishable from an unreachable practice box — the REST
+ *     track reports `connected: false` against a perfectly healthy one.
+ *
+ * So whenever a caller supplies a dispatcher, this module uses the npm
+ * `undici`'s OWN `fetch`: the dispatcher and the fetch consuming it then always
+ * come from the same undici, and the pairing survives any host Node. With no
+ * dispatcher there is nothing to pair and the built-in `fetch` is used as
+ * before. Same rule, same reason as `apps/orchestrator/src/lib/internal-tls.ts`.
  */
+import { fetch as undiciFetch } from "undici";
 import { type AuthRouteSpec, type DiscoveredRoute } from "./api-route-map.js";
 
 /** Credentials resolved from a secret_ref (never persisted on the connector). */
@@ -56,10 +76,15 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export interface ApiTransport {
   /** e.g. "https://eaglesoft.lan:9888" — built from config, never a baked host. */
   baseUrl: string;
-  /** Injected mock in tests; falls back to the global `fetch` per call. */
+  /** Injected mock in tests. Absent → resolved per call by {@link resolveFetch}. */
   fetchImpl?: FetchLike;
   /** undici Agent carrying the PdcoTechCA trust; injected by the caller when a
-   *  CA cert has been resolved. Passed through fetch's `dispatcher` option. */
+   *  CA cert has been resolved. Passed through fetch's `dispatcher` option.
+   *
+   *  Must be an Agent from the npm `undici` package — supplying one switches
+   *  the transport to that same undici's `fetch`, because a dispatcher is only
+   *  honoured by the undici that minted it (WARP-2626). The caller does NOT
+   *  have to pass a matching `fetchImpl`; that pairing is this module's job. */
   dispatcher?: unknown;
   /** Per-call timeout (ms). */
   timeoutMs?: number;
@@ -78,10 +103,27 @@ export function pluck(value: unknown, path: string | undefined): unknown {
   return cur;
 }
 
-/** Resolve the fetch implementation at call time (so a `global.fetch` swap in
- *  tests is honored). */
-function resolveFetch(t: ApiTransport): FetchLike {
+/**
+ * Resolve the fetch implementation at call time (so a `global.fetch` swap in
+ * tests is honored).
+ *
+ * Order, and why (WARP-2626):
+ *   1. An injected `fetchImpl` always wins — that is the test seam, and a
+ *      caller who supplies its own transport owns the pairing.
+ *   2. A `dispatcher` with no injected fetch means the npm `undici`'s own
+ *      `fetch`, because only that undici honours its own Agent. Handing it to
+ *      the runtime's built-in `fetch` is the WARP-2626 defect: it happens to
+ *      work on the pinned Node 20 and throws `UND_ERR_INVALID_ARG` on Node >= 22,
+ *      turning a healthy box into `connected: false`.
+ *   3. No dispatcher, no pairing to preserve — the built-in `fetch`, as before.
+ *
+ * Pinned by `__tests__/api-auth.dispatcher.test.ts` (a real request through a
+ * real dispatcher on whatever Node is installed) and by the import-boundary
+ * guard in `apps/orchestrator/src/__tests__/undici-fetch-pairing.guard.test.ts`.
+ */
+export function resolveFetch(t: ApiTransport): FetchLike {
   if (t.fetchImpl) return t.fetchImpl;
+  if (t.dispatcher) return undiciFetch as unknown as FetchLike;
   const g = (globalThis as { fetch?: FetchLike }).fetch;
   if (!g) throw new EaglesoftApiError("no fetch implementation available");
   return g;

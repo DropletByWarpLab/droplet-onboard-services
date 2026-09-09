@@ -19,6 +19,7 @@ import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
+import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
@@ -218,8 +219,33 @@ export default function SettingsPage() {
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
             owner/admin. The business-profile card (Phase 3) slots into the
-            same group, after the personality card. */}
-        <PersonalityCard />
+            same group, after the personality card — it is headless (no <Sect>
+            of its own), so it is passed as a child and rendered inside the
+            Workspace <section> rather than as a sibling here.
+
+            WARP-2667 — until now it was rendered ~325 lines further down,
+            which put it under the "AI providers" heading and had owners
+            reporting the business walkthrough as living on "the llm page".
+            Both cards gate to owner/admin (PersonalityCard on user.role;
+            BusinessProfileCard on an onboardingState that the GET view
+            returns to owner/admin only), so the child never outlives its
+            heading. */}
+        <PersonalityCard>
+          {/* WARP-1121 — Business profile (design brief §6 Card 2): what
+              Droplet knows about the business + the interview entry points
+              (Run business setup / Re-run onboarding). Renders nothing for
+              roles whose GET view carries no onboardingState. */}
+          <BusinessProfileCard />
+
+          {/* WARP-1906 — premade buildings + conference rooms offered as
+              suggestions in the event form's Location field. Workspace-scoped
+              data (fetchWorkspaceLocations) and headless like the card above,
+              so it belongs to this group too; it was stranded under "AI
+              providers" by the same accident. Self-gates to owner/admin on
+              the same `user.role` expression PersonalityCard uses, and
+              renders nothing for lesser roles. */}
+          <LocationsCard />
+        </PersonalityCard>
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
         <PasskeysSection />
@@ -414,6 +440,10 @@ export default function SettingsPage() {
 
         {/* Outbound email (BUG-11) — SMTP relay for invite delivery. Sits with
             the people/account config since its primary consumer is invites. */}
+        {/* WARP-2734 — the mailbox Droplet READS, above the relay it SENDS
+            through. Two halves of mail that people confuse constantly, so they
+            sit together and each says which it is. */}
+        <EmailAccountCard />
         <EmailChannelSection />
 
         {/* Device Info */}
@@ -539,17 +569,6 @@ export default function SettingsPage() {
             />
           </div>
         </div>
-
-        {/* WARP-1121 — Business profile (design brief §6 Card 2): what
-            Droplet knows about the business + the interview entry points
-            (Run business setup / Re-run onboarding). Renders nothing for
-            roles whose GET view carries no onboardingState. */}
-        <BusinessProfileCard />
-
-        {/* WARP-1906 — premade buildings + conference rooms offered as
-            suggestions in the event form's Location field. Self-gates to
-            owner/admin internally and renders nothing for lesser roles. */}
-        <LocationsCard />
 
         {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
             device actions (reformat/remake storage AND factory reset). The

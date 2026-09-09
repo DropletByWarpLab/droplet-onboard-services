@@ -16,14 +16,14 @@
  *   3. `current` is accepted for every one of the 12 step ids and drives the
  *      compact-header "Step N of total" counter.
  *
- * Source-level (regex) checks are avoided here — they break on Windows under
- * `new URL(import.meta.url).pathname` (see the pre-existing a11y suites). This
- * is a behavioural render test instead.
+ * Mostly behavioural render tests. There is one source-level block at the
+ * bottom, for the one contract a render cannot see — see its header.
  */
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { StepShell, RAIL_LABELS } from "./StepShell";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 
 describe("StepShell aurora rail (PR #384)", () => {
   it("renders a rail row for every wizard step in the page's STEPS source", () => {
@@ -234,5 +234,89 @@ describe("StepShell viewport-lock (WARP-820)", () => {
     expect(
       screen.getByRole("button", { name: /continue/i }),
     ).not.toHaveAttribute("aria-describedby");
+  });
+});
+
+/**
+ * WARP-2654 — the source-level check this file's header used to refuse.
+ *
+ * That header said source-level checks "break on Windows under
+ * `new URL(import.meta.url).pathname`". The hazard is real for `new URL(…)
+ * .pathname` — it yields `/C:/…`, which `path.resolve` doubles into `C:\C:\…`
+ * — and irrelevant here, because nothing has to resolve a path that way. The
+ * path below comes from `__tests__/helpers/test-paths`, anchored to the owning
+ * file. A true fact about one spelling was generalised into "no source-level
+ * checks", and it cost a contract.
+ *
+ * WHAT IT COSTS, precisely. Contract 2 in the header — "the rail order matches
+ * the page's `STEPS` order exactly (DERIVED, not hardcoded), so a future STEPS
+ * edit reflows the rail automatically" — is NOT what the render tests above
+ * check. They render `StepShell`, which imports `STEPS`, and compare the
+ * output against that same `STEPS`. A `StepShell` carrying its own hardcoded
+ * copy of the same fifteen ids in the same order renders identically and
+ * passes every one of them, including "renders the rail rows in the same order
+ * as the page's STEPS array" — and would then silently stop reflowing the day
+ * someone edits `wizard-steps.ts`. Derivation is a property of the source, and
+ * only the source shows it.
+ */
+describe("WARP-2654 — the rail and the page derive from one STEPS array", () => {
+  const SHELL_SRC = readPackageFile("src/components/setup/StepShell.tsx");
+  const PAGE_SRC = readPackageFile("src/app/setup/page.tsx");
+  const WIZARD_STEPS_SRC = readPackageFile("src/components/setup/wizard-steps.ts");
+
+  const IMPORTS_STEPS =
+    /import\s*\{[^}]*\bSTEPS\b[^}]*\}\s*from\s*"@\/components\/setup\/wizard-steps"/;
+
+  /**
+   * Array literals that spell out three or more step ids — i.e. somebody wrote
+   * the order down a second time. Three, not two, so an incidental pair like
+   * `["ai", "voice"]` in a conditional is not a false positive; a forked
+   * ORDER is necessarily most of the list.
+   */
+  function forkedStepLists(src: string): string[] {
+    const ids = new Set<string>(STEPS);
+    return [...src.matchAll(/\[[^[\]]*\]/g)]
+      .map((m) => m[0])
+      .filter(
+        (lit) =>
+          [...lit.matchAll(/"([a-z]+)"/g)].filter((q) => ids.has(q[1])).length >= 3,
+      );
+  }
+
+  it("the detector fires on the one place the order IS written down", () => {
+    // NON-VACUITY. `toEqual([])` is satisfied for free by a regex that matches
+    // nothing, so prove it finds the canonical array before trusting it to
+    // find a duplicate. `wizard-steps.ts` declares `STEPS` and the `Step`
+    // union; both spell the ids out, and both are meant to be there.
+    expect(forkedStepLists(WIZARD_STEPS_SRC).length).toBeGreaterThan(0);
+    expect(WIZARD_STEPS_SRC).toContain("export const STEPS: Step[] = [");
+  });
+
+  it("StepShell renders the rail by mapping the shared STEPS array", () => {
+    // Mutation: replace `STEPS.map(` in StepShell.tsx with a local array of
+    // the same fifteen ids → red here, green in every render test above.
+    expect(SHELL_SRC).toMatch(IMPORTS_STEPS);
+    expect(
+      SHELL_SRC,
+      "the rail must map the imported STEPS, not a list of its own",
+    ).toContain("STEPS.map(");
+    expect(forkedStepLists(SHELL_SRC)).toEqual([]);
+  });
+
+  it("the setup page drives its state machine off the same array", () => {
+    // The header calls it "the page's STEPS order". That is only true while
+    // the page reads the shared list — `app/setup/page.tsx` cannot EXPORT
+    // `STEPS` (Next.js page-export allow-list, see wizard-steps.ts), which is
+    // exactly the pressure that would otherwise push a private copy into it.
+    expect(PAGE_SRC).toMatch(IMPORTS_STEPS);
+    expect(forkedStepLists(PAGE_SRC)).toEqual([]);
+  });
+
+  it("every step in the shared array has a rail label, with no extras", () => {
+    // The render tests prove each label appears; this proves the mapping is
+    // exhaustive and has nothing left over from a removed step. `RAIL_LABELS`
+    // is `Record<Step, …>`, so tsc already forces presence — this catches the
+    // half tsc cannot: a key for an id no longer in `STEPS`.
+    expect(Object.keys(RAIL_LABELS).sort()).toEqual([...STEPS].sort());
   });
 });

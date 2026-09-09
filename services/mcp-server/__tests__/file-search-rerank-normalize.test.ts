@@ -41,8 +41,13 @@ const HITS: SearchHit[] = [hit("/a.md", 0.03), hit("/b.md", 0.016)];
 
 function redisStub(cached: string | null = null) {
   return {
-    get: vi.fn(async () => cached),
-    setex: vi.fn(async () => "OK"),
+    get: vi.fn(async (_key: string) => cached),
+    // The parameters are declared even though the body ignores them: without
+    // them vitest infers `Mock<[], …>`, so `setex.mock.calls[0]` is the empty
+    // tuple and the assertion below had to cast it to a shape it could never
+    // have. Declaring them makes `calls[0]` genuinely `[string, number,
+    // string]` and the cast unnecessary.
+    setex: vi.fn(async (_key: string, _ttlSeconds: number, _payload: string) => "OK"),
   };
 }
 
@@ -110,11 +115,7 @@ describe("rerankPassages score normalization (WARP-1603)", () => {
       redis,
       reranker: rerankerStub([-1, 3.5]),
     });
-    const [, , payload] = redis.setex.mock.calls[0] as [
-      string,
-      number,
-      string,
-    ];
+    const [, , payload] = redis.setex.mock.calls[0];
     // Raw on the wire ⇒ a pre-WARP-1603 cache entry is still readable, and
     // a cache round-trip can never sigmoid twice.
     expect(JSON.parse(payload)).toEqual([-1, 3.5]);

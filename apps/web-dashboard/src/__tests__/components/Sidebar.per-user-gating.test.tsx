@@ -196,7 +196,12 @@ describe("gap (b) — the Integrations item is gated", () => {
     expect(document.querySelector("a[href='/integrations']")).toBeNull();
     // Its child must not be orphaned into the drawer either — the gap-(a) fix
     // is what stops the flattened child outliving its hidden parent.
-    expect(document.querySelector("a[href='/integrations/eaglesoft']")).toBeNull();
+    expect(document.querySelector("a[href='/integrations/credentials']")).toBeNull();
+    // WARP-2560 (ADR-044) — the practice surface is no longer a child of
+    // Integrations; it is /practice in the Business group, carrying the SAME
+    // owner/admin gate. Moving a destination between groups must not widen
+    // who can reach it, and this is where that would show up.
+    expect(document.querySelector("a[href='/practice']")).toBeNull();
   });
 
   it("a guest does NOT", () => {

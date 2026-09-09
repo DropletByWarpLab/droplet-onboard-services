@@ -116,6 +116,64 @@ describe("brain-memory.service", () => {
     ).toBe(false);
   });
 
+  // ── CodeQL js/path-injection (#168–#171) ──
+  // userId / itemId arrive as raw route params; every path constructor must
+  // refuse anything that is not a single, traversal-free segment.
+  describe("path-segment guard", () => {
+    const badIds = ["..", "../bob", "a/b", "a\\b", "", "/etc", "x\0y", "a".repeat(129)];
+
+    it.each(badIds)("pathForItem rejects userId %j", (bad) => {
+      expect(() => svc.pathForItem(bad, "item-1")).toThrow(/invalid userId/);
+    });
+
+    it.each(badIds)("pathForItem rejects itemId %j", (bad) => {
+      expect(() => svc.pathForItem("alice", bad)).toThrow(/invalid itemId/);
+    });
+
+    it("accepts UUIDs and pre-WARP-485 Nextcloud usernames", () => {
+      const uuid = "3f1c2a9e-1b2c-4d5e-8f90-abcdef123456";
+      expect(svc.pathForItem(uuid, uuid)).toBe(join(tmpRoot, uuid, uuid));
+      expect(svc.pathForItem("stefan.cruceru@warp-lab.ai", "x")).toBe(
+        join(tmpRoot, "stefan.cruceru@warp-lab.ai", "x"),
+      );
+      expect(svc.pathForItem("o'brien jr", "x")).toBe(
+        join(tmpRoot, "o'brien jr", "x"),
+      );
+    });
+
+    it("purgeUser refuses traversal and absolute-path probes, leaving siblings intact", async () => {
+      await mkdir(join(tmpRoot, "bob"), { recursive: true });
+      await writeFile(join(tmpRoot, "bob", "keep.txt"), "x");
+
+      await expect(svc.purgeUser("../bob")).rejects.toThrow(/invalid userId/);
+      await expect(svc.purgeUser("..")).rejects.toThrow(/invalid userId/);
+      await expect(svc.purgeUser("/")).rejects.toThrow(/invalid userId/);
+      await expect(svc.purgeUser(tmpRoot)).rejects.toThrow(/invalid userId/);
+
+      expect((await stat(join(tmpRoot, "bob", "keep.txt"))).isFile()).toBe(true);
+      expect((await stat(tmpRoot)).isDirectory()).toBe(true);
+    });
+
+    it("ensureItemDir / writeManifest / purgeItem refuse a traversing itemId", async () => {
+      await mkdir(join(tmpRoot, "bob", "secret"), { recursive: true });
+
+      await expect(svc.ensureItemDir("alice", "../bob/escape")).rejects.toThrow(
+        /invalid itemId/,
+      );
+      await expect(svc.writeManifest("alice", "../bob", { a: 1 })).rejects.toThrow(
+        /invalid itemId/,
+      );
+      await expect(svc.purgeItem("alice", "../bob/secret")).rejects.toThrow(
+        /invalid itemId/,
+      );
+
+      // Nothing was created or removed outside alice's tree.
+      expect((await stat(join(tmpRoot, "bob", "secret"))).isDirectory()).toBe(true);
+      await expect(stat(join(tmpRoot, "alice"))).rejects.toThrow();
+      await expect(stat(join(tmpRoot, "bob", "manifest.json"))).rejects.toThrow();
+    });
+  });
+
   // ── WARP-205 ──
   // purgeUserData drives the cascade-on-user-delete path wired into
   // routes/auth.ts. Run against an in-memory fake prisma to keep the

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listStoragePools from "../../../src/handlers/system/list-storage-pools.js";
 import type { ToolContext } from "../../../src/types.js";
 
 // WARP-1144: list_storage_pools shares list_drives' dispatch path and shared
 // its bug — it must hit the ORCHESTRATOR's /api/storage/pools (the Drives
 // page's source of truth), not the file-indexer.
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

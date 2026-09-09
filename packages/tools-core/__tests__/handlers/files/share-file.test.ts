@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import shareFile from "../../../src/handlers/files/share-file.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  post: ReturnType<typeof vi.fn>,
+  post: Mock,
   opts: { ncToken?: string; userId?: string } = {},
 ): ToolContext {
   return {
