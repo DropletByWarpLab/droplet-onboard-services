@@ -211,6 +211,7 @@
 .brief-checknow-said {
   color: var(--text-muted);
   font-size: 12px;
+}
 
 /* ============================================================
    WARP-2838 — the on switch, and the consent that goes with it.
