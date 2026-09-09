@@ -72,36 +72,42 @@
 #      still cross a major silently. Pinning the Python services properly is the
 #      real fix and remains a decision, not a config tweak. See ENGINEERING.md §3.2.
 #
-#   4. NO `target-branch` — Dependabot targets the repository DEFAULT branch,
-#      which is `main`. Every block used to pin `target-branch: "stage"`
-#      because WARP-1670 refused any PR into `main` whose head was not
-#      `stage`.
+#   4. `target-branch: "stage"` on EVERY block — Dependabot otherwise targets the
+#      repository DEFAULT branch, which is `main`.
 #
-#      🔴 CORRECTED 2026-09-07 (WARP-2824). This comment used to say `stage`
+#      🔴 CORRECTED 2026-09-07 (WARP-2824). An earlier revision claimed `stage`
 #      "was deleted on purpose (WARP-2187)" and that the pin "names a ref that
 #      does not exist". Both are FALSE. `stage` exists, is the branch every
 #      feature PR targets, and is protected by ruleset 20877684 with
-#      `bypass_actors: []` — no org admin can delete it. Nothing here is
-#      blocked by a missing base.
+#      `bypass_actors: []` — no org admin can delete it.
 #
-#      ⚠ The pin itself is a SEPARATE, OPEN question and is deliberately not
-#      changed here, because it is a behaviour change with measured
-#      consequences in both directions:
-#        - Targeting `main` (today) means every dependency batch lands on
-#          `main` and CONFLICTS the stage->main promote in the dependency
-#          manifests. While that promote conflicts it gets zero Actions runs,
-#          and since `ci.yml` is `push: branches: [main]` only, `stage` is
-#          left with no CI reporting of its own. Observed repeatedly.
-#        - Targeting `stage` puts dependency updates through the soak like
-#          everything else, but a base that is force-pushed or deleted
-#          auto-closes every open Dependabot PR against it — which is how the
-#          pin came to be removed in the first place.
-#      Decide it on its own ticket with its own evidence; do not flip it as a
-#      side effect of a docs correction.
+#      ✅ DECIDED 2026-09-08 (WARP-2187). The 2026-09-07 revision left the pin as
+#      an open question and asked for it to be decided on its own ticket rather
+#      than flipped as a side effect of a docs correction. This is that decision,
+#      and this is that ticket. The pin is RESTORED, for the reason that side
+#      measured worst:
+#        - Unpinned (targeting `main`) every dependency batch lands on `main` and
+#          CONFLICTS the stage->main promote in the dependency manifests. While
+#          that promote conflicts it gets ZERO Actions runs, and since `ci.yml` is
+#          `push: branches: [main]` only, `stage` is left with no CI reporting of
+#          its own. That is self-sustaining: on 2026-09-08 eighteen Dependabot PRs
+#          opened against `main` in one day while #1798 sat conflicted, and the
+#          pin that fixes it can only reach `main` THROUGH that promote.
+#        - Pinned, dependency updates go through the soak like everything else.
+#          The known cost is that a base which is force-pushed or deleted
+#          auto-closes every open Dependabot PR against it — which is how the pin
+#          came to be removed originally. `Stage Protection` now blocks both
+#          `deletion` and `non_fast_forward` with an empty bypass list, so that
+#          failure mode is no longer reachable by anyone, admin included.
+#
+#      ⚠ A Dependabot PR born against the wrong base CANNOT be rescued by a
+#      re-run — re-running replays the original event payload and still sees the
+#      old base. Close them and let them re-open against this pin.
 #
 version: 2
 updates:
   - package-ecosystem: npm
+    target-branch: "stage"
     directory: "/"
     schedule:
       interval: weekly
@@ -177,6 +183,7 @@ updates:
     labels: ["dependencies"]
 
   - package-ecosystem: npm
+    target-branch: "stage"
     directory: "/tests"
     schedule:
       interval: weekly
@@ -192,6 +199,7 @@ updates:
   # deliberately NOT here — it has a ceiling none of the others do; see the
   # block after this one.
   - package-ecosystem: pip
+    target-branch: "stage"
     directories:
       - "/services/camera-discovery"
       - "/services/device-identity-svc"
@@ -274,6 +282,7 @@ updates:
   # RECHECK TRIGGER: an optimum-onnx release above 0.1.0 that lifts the
   # transformers ceiling. Delete both entries then and let Dependabot re-raise.
   - package-ecosystem: pip
+    target-branch: "stage"
     directory: "/services/ai-gateway"
     schedule:
       interval: weekly
@@ -303,6 +312,7 @@ updates:
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions
+    target-branch: "stage"
     directory: "/"
     schedule:
       interval: weekly
