@@ -89,6 +89,18 @@ export const LEGACY_RUNTIME_URL_ENV = "OLLAMA_URL";
 /** Unchanged: the Docker Desktop dev fallback this repo has always used. */
 export const DEFAULT_RUNTIME_URL = "http://host.docker.internal:11434";
 
+/**
+ * Trailing slashes carry no meaning in a base URL, and the two names are
+ * routinely written by different hands — compose emits `http://dmr:12434`
+ * while a pasted or hand-edited .env line may carry `http://dmr:12434/`.
+ * Comparing raw strings would call that pair a DISAGREEMENT and tell the
+ * operator to delete a line that points at the identical endpoint. Normalize
+ * BEFORE comparing, not just before returning.
+ */
+function normalizeRuntimeUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
 /** Warn once per process, not once per probe — this is read on every page load. */
 let warnedLegacyRuntimeUrl = false;
 let warnedRuntimeUrlSplit = false;
@@ -121,8 +133,12 @@ export function resetRuntimeUrlWarnsForTests(): void {
  * precisely why the three services could not share this function before.
  */
 export function inferenceRuntimeUrl(): string {
-  const explicit = (process.env[RUNTIME_URL_ENV] ?? "").trim();
-  const legacy = (process.env[LEGACY_RUNTIME_URL_ENV] ?? "").trim();
+  const explicit = normalizeRuntimeUrl(
+    (process.env[RUNTIME_URL_ENV] ?? "").trim(),
+  );
+  const legacy = normalizeRuntimeUrl(
+    (process.env[LEGACY_RUNTIME_URL_ENV] ?? "").trim(),
+  );
 
   if (explicit) {
     // Both names set and DISAGREEING is the only interesting case. Both set and
@@ -141,7 +157,7 @@ export function inferenceRuntimeUrl(): string {
           `two daemons.`,
       );
     }
-    return explicit.replace(/\/+$/, "");
+    return explicit;
   }
 
   if (legacy) {
@@ -155,7 +171,7 @@ export function inferenceRuntimeUrl(): string {
           `the contract. Honoring the deprecated name for now.`,
       );
     }
-    return legacy.replace(/\/+$/, "");
+    return legacy;
   }
 
   return DEFAULT_RUNTIME_URL;

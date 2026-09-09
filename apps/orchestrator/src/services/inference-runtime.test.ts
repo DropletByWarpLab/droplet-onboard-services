@@ -144,6 +144,27 @@ describe("inferenceRuntimeUrl()", () => {
     expect(logged).toEqual([]);
   });
 
+  it("treats a trailing-slash-only difference as AGREEMENT, not a split", () => {
+    // The two names are written by different hands: compose emits the bare
+    // origin, a pasted or hand-edited .env line often carries the slash.
+    // These address the identical endpoint, so warning here would tell the
+    // operator to delete a line that is not actually wrong — a false positive
+    // in the one signal this resolver exists to give honestly.
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434/");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(logged.filter((l) => l.includes("DISAGREE"))).toEqual([]);
+  });
+
+  it("normalizes the canonical side too — slash on either name still agrees", () => {
+    vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434///");
+    vi.stubEnv("OLLAMA_URL", "http://dmr:12434");
+
+    expect(inferenceRuntimeUrl()).toBe("http://dmr:12434");
+    expect(logged.filter((l) => l.includes("DISAGREE"))).toEqual([]);
+  });
+
   it("warns when the two names DISAGREE, and the canonical still wins", () => {
     vi.stubEnv("INFERENCE_RUNTIME_URL", "http://dmr:12434");
     vi.stubEnv("OLLAMA_URL", "http://droplet-ollama:11434");

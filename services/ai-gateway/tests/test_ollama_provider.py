@@ -212,6 +212,28 @@ class TestRuntimeUrlResolution:
         assert resolved == "http://dmr:12434"
         assert self._warnings(caplog) == []
 
+    def test_trailing_slash_only_difference_is_agreement(self, monkeypatch, caplog):
+        """A slash is not a disagreement.
+
+        The two names are written by different hands: compose emits the bare
+        origin, a pasted or hand-edited .env line often carries the trailing
+        slash. They address the identical endpoint, so warning here would tell
+        the operator to delete a line that is not wrong — a false positive in
+        the one signal this resolver exists to give honestly.
+        """
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://dmr:12434", "http://dmr:12434/")
+        assert resolved == "http://dmr:12434"
+        assert self._warnings(caplog) == []
+
+    def test_trailing_slash_on_the_canonical_side_is_also_normalized(
+        self, monkeypatch, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            resolved = self._resolve(monkeypatch, "http://dmr:12434///", "http://dmr:12434")
+        assert resolved == "http://dmr:12434"
+        assert self._warnings(caplog) == []
+
     def test_disagreeing_pair_warns_and_canonical_wins(self, monkeypatch, caplog):
         with caplog.at_level(logging.WARNING):
             resolved = self._resolve(monkeypatch, "http://dmr:12434", "http://droplet-ollama:11434")

@@ -82,8 +82,14 @@ def _resolve_runtime_url() -> str:
     No default changes: "nothing configured" still resolves to the same URL
     this module has always fallen back to.
     """
-    canonical = (os.getenv(_RUNTIME_URL_ENV) or "").strip()
-    legacy = (os.getenv(_LEGACY_RUNTIME_URL_ENV) or "").strip()
+    # Trailing slashes carry no meaning in a base URL, and the two names are
+    # routinely written by different hands — compose emits
+    # ``http://dmr:12434`` while a pasted or hand-edited .env line may carry
+    # ``http://dmr:12434/``. Comparing the raw strings would call that pair a
+    # DISAGREEMENT and tell the operator to delete a line that points at the
+    # identical endpoint. Normalize BEFORE comparing, not just on the way out.
+    canonical = (os.getenv(_RUNTIME_URL_ENV) or "").strip().rstrip("/")
+    legacy = (os.getenv(_LEGACY_RUNTIME_URL_ENV) or "").strip().rstrip("/")
 
     if canonical:
         if legacy and legacy != canonical:
