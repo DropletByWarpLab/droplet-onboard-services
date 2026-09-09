@@ -50,4 +50,4 @@ uvicorn[standard]>=0.52.1
 # requirements.txt (WARP-1406): the osv-nightly resolver scores transitive
 # deps at their minimum resolvable version; these state the real minimums.
 scipy>=1.10.0
-filelock>=3.20.3
+filelock>=3.32.5
