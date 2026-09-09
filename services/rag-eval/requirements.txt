@@ -38,7 +38,7 @@ tzlocal>=5.4.4
 # HTTP to the orchestrator (used by ragas_runner.py's call_search).
 # Already a stdlib option (urllib) but explicit requests is friendlier
 # for timeout + retry semantics if we expand later.
-requests>=2.31
+requests>=2.34.2
 
 # WARP-519: HTTP trigger server. FastAPI + uvicorn host the ad-hoc /run,
 # /bootstrap, and run-listing endpoints the orchestrator proxies to. The
