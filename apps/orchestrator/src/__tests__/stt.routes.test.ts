@@ -27,6 +27,9 @@ const PCM = Buffer.alloc(640);
 
 function makeApp() {
   const app = express();
+  // Mirrors app.ts, which mounts express.json() ahead of the STT router — so
+  // a JSON request reaches the route with req.body already parsed, not raw.
+  app.use(express.json({ type: ["application/json", "application/scim+json"] }));
   app.use("/api", createSttRouter());
   return app;
 }
@@ -70,5 +73,66 @@ describe("POST /api/stt — ?rate= parsing", () => {
       expect(res.body).toEqual({ error: "invalid_rate" });
     }
     expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-2873: express.json() runs first for a JSON content-type, so req.body
+ * can be a string or an array by the time the route sees it. Both must 400
+ * — and CodeQL needs the string/array test to be the guard that says so.
+ */
+describe("POST /api/stt — non-Buffer bodies", () => {
+  function postJson(payload: unknown) {
+    return request(makeApp())
+      .post("/api/stt")
+      .set("Content-Type", "application/json")
+      .send(JSON.stringify(payload));
+  }
+
+  it("400s a string body", async () => {
+    // express.json() is strict (objects/arrays only), so a bare string can
+    // only arrive from another parser — set it directly to pin the route's
+    // own guard rather than whichever middleware produced it.
+    const app = express();
+    app.use((req, _res, next) => {
+      req.body = "not audio";
+      // body-parser's own flag: express.raw() leaves an already-parsed body
+      // alone, which is exactly how express.json() wins in app.ts.
+      (req as unknown as { _body: boolean })._body = true;
+      next();
+    });
+    app.use("/api", createSttRouter());
+    const res = await request(app)
+      .post("/api/stt")
+      .set("Content-Type", "application/octet-stream")
+      .send(PCM);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "empty_audio" });
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+
+  it("400s a JSON array body", async () => {
+    const res = await postJson([1, 2, 3]);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "empty_audio" });
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+
+  it("400s a body shorter than one sample", async () => {
+    const res = await request(makeApp())
+      .post("/api/stt")
+      .set("Content-Type", "application/octet-stream")
+      .send(Buffer.alloc(1));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "empty_audio" });
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+
+  it("still passes a real PCM buffer through to the transcriber", async () => {
+    const res = await post("/api/stt");
+    expect(res.status).toBe(200);
+    expect(mockTranscribe).toHaveBeenCalledWith(
+      expect.objectContaining({ pcm: PCM, rate: 16000 }),
+    );
   });
 });
