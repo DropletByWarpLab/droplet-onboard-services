@@ -10,7 +10,7 @@
  * neither of the gates that protect the records themselves:
  *
  *   1. THE WORKSPACE MODULE GATE. `/api/crm` is gated on the `crm` ModuleId
- *      and `/api/pm/projects` on `projects` (module-registry.ts), both
+ *      and `/api/pm` on `projects` (module-registry.ts), both
  *      `defaultEnabled: false`. `/api/llm` is gated on `chat`. Without this
  *      check a pin created while the CRM was on would keep naming a customer
  *      after an operator turned the CRM off - a module gate bypassed through

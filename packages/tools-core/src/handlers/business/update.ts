@@ -199,7 +199,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       }
     }
   } catch (err) {
-    return businessError(err, entity);
+    return businessError(err);
   }
 }
 

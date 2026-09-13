@@ -589,6 +589,37 @@ describe("a disabled module reads as a switch on the write path too", () => {
     expect(l.message).toContain("CRM");
   });
 
+  it("names Projects — not CRM — for a note on a TASK", async () => {
+    // WARP-2875. `business_create({entity:"note", parent_entity:"task"})`
+    // POSTs to `/api/pm/work-items/:id/comments`, which the Projects toggle
+    // gates — but the module was named from the ENTITY, and "note" is not in
+    // the PM entity list, so the refusal blamed the CRM. An owner with the
+    // CRM ON and Projects OFF would be sent to fix a switch that is already
+    // in the right position. MUTATION: map the module from the entity again
+    // → this reads "CRM".
+    post.mockResolvedValueOnce(res(false, 404, { error: "module_disabled", module: "projects" }));
+    const n = errorOf(
+      await businessCreate.handler(
+        { entity: "note", parent_entity: "task", parent_id: "w1", name: "roof done" },
+        ctx,
+      ),
+    );
+    expect(n.code).toBe("BUSINESS_MODULE_OFF");
+    expect(n.message).toContain("Projects");
+    expect(n.message).not.toContain("CRM");
+  });
+
+  it("still names the CRM for a note on a CUSTOMER — same verb, other store", async () => {
+    post.mockResolvedValueOnce(res(false, 404, { error: "module_disabled", module: "crm" }));
+    const n = errorOf(
+      await businessCreate.handler(
+        { entity: "note", parent_entity: "customer", parent_id: "c1", name: "called back" },
+        ctx,
+      ),
+    );
+    expect(n.message).toContain("CRM");
+  });
+
   it("is ONE mapper, shared with the read path", () => {
     // Two copies of the same function is how the write path lost the branch
     // in the first place.

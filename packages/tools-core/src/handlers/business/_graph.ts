@@ -41,7 +41,7 @@
  * `UNCLAIMED_DOMAINS` lists business alongside system/data/erp. So moving
  * these reads into `business` moves them OUT of the `crm`/`projects` module
  * gate at the TOOL layer. The data is still gated: `requireModuleEnabled`
- * 404s `/api/crm/*` and `/api/pm/projects*` with `{"error":"module_disabled"}`
+ * 404s `/api/crm/*` and `/api/pm/*` with `{"error":"module_disabled"}`
  * when the module is off. What changes is who explains it, so
  * `businessError()` maps that 404 to its own code and a sentence naming the
  * switch. The precedent is `cloud_query_dataset`: advertising a reader that
@@ -528,12 +528,22 @@ export function fail(code: string, message: string): ToolResult {
 }
 
 /**
- * The entities whose routes sit behind the `projects` module gate. Only
- * `/api/pm/projects*` and `/api/crm/*` are `requireModuleEnabled`-guarded
- * (module-registry.ts `routePrefixes`), so the entity is enough to name the
- * switch that is off.
+ * Name the module whose toggle is off from the ROUTE that was refused.
+ *
+ * WARP-2875 — this used to be guessed from the ENTITY, against a set of
+ * `["project", "work_item", "task"]`. That set could not express the verbs
+ * whose entity does not name its store: `business_create({entity:"note",
+ * parent_entity:"task"})` POSTs to `/api/pm/work-items/:id/comments`, and
+ * "note" is not in the set, so a Projects refusal read as a CRM one and sent
+ * the owner to a switch that was already in the right position.
+ *
+ * The route is the only thing that actually knows, because the gate is
+ * mounted on a route prefix (module-registry.ts `routePrefixes`: `projects`
+ * owns `/api/pm`, `crm` owns `/api/crm`). Reading it from `OrchPmError.path`
+ * keeps this correct for every entity added later without touching a list.
  */
-const PROJECTS_MODULE_ENTITIES: ReadonlySet<string> = new Set(["project", "work_item", "task"]);
+const moduleNameForPath = (path: string): string =>
+  path.startsWith("/api/pm") ? "Projects" : "CRM";
 
 /**
  * One error mapping for every `business_*` verb — reads and writes alike.
@@ -552,10 +562,10 @@ const PROJECTS_MODULE_ENTITIES: ReadonlySet<string> = new Set(["project", "work_
  * `amount_needs_currency`, `invalid_state`) and zod's 400s name a fixable
  * mistake and the model can act on it.
  */
-export function businessError(err: unknown, entity: string): ToolResult {
+export function businessError(err: unknown): ToolResult {
   if (err instanceof OrchPmError) {
     if (err.message === "module_disabled") {
-      const mod = PROJECTS_MODULE_ENTITIES.has(entity) ? "Projects" : "CRM";
+      const mod = moduleNameForPath(err.path);
       return fail(
         "BUSINESS_MODULE_OFF",
         `The ${mod} module is switched off on this Droplet, so that record cannot be reached. It can be turned on in Settings.`,

@@ -138,8 +138,41 @@ function appWith(opts: {
   app.get("/api/files/:filePath(*)/editor-session", (_q, res) => { res.json({ hit: "editor" }); });
   app.get("/api/files/:filePath(*)/comments", (_q, res) => { res.json({ hit: "comments" }); });
   app.get("/api/cameras/list", (_q, res) => { res.json({ hit: "cameras" }); });
+  // WARP-2875 — the PM surface, in the shapes routes/pm/{native,relations}.ts
+  // actually serve. `/api/pm/projects*` is only PART of it: work-items,
+  // workspaces, summary, states, labels and relations all sit OUTSIDE that
+  // prefix, and the `projects` module gate has to reach them too.
+  for (const [method, path] of PM_ROUTES) {
+    app[method](path, (_q, res) => { res.json({ hit: "pm" }); });
+  }
   return app;
 }
+
+/**
+ * Every PM route family, by the method the real router registers. WHY the
+ * whole list rather than the one the reviewer named (`/pm/work-items`): the
+ * defect class is "any PM route outside the gated prefix", so a new sibling
+ * added tomorrow is only caught if the test enumerates the surface.
+ */
+const PM_ROUTES = [
+  ["get", "/api/pm/projects"],
+  ["get", "/api/pm/projects/p1/work-items"],
+  ["get", "/api/pm/work-items"],
+  ["get", "/api/pm/work-items/w1"],
+  ["patch", "/api/pm/work-items/w1"],
+  ["delete", "/api/pm/work-items/w1"],
+  ["get", "/api/pm/work-items/w1/comments"],
+  ["post", "/api/pm/work-items/w1/comments"],
+  ["get", "/api/pm/work-items/w1/activity"],
+  ["post", "/api/pm/work-items/w1/transition"],
+  ["get", "/api/pm/work-items/w1/relations"],
+  ["delete", "/api/pm/relations/r1"],
+  ["get", "/api/pm/workspaces"],
+  ["get", "/api/pm/workspaces/default"],
+  ["get", "/api/pm/summary"],
+  ["patch", "/api/pm/states/s1"],
+  ["patch", "/api/pm/labels/l1"],
+] as const satisfies ReadonlyArray<readonly ["get" | "post" | "patch" | "delete", string]>;
 
 const KNOWLEDGE = "/api/files/knowledge/recent";
 const DOCS = "/api/files/docs/status";
@@ -314,6 +347,55 @@ describe("a nested namespace does not annex the enclosing module's data paths", 
     expect((await request(knowledgeOnly).get("/api/files/KNOWLEDGE/Recent")).status).toBe(200);
     const filesOnly = appWith({ features: [["files", "view"]] });
     expect((await request(filesOnly).get("/api/files/knowledge/recent/")).status).toBe(404);
+  });
+});
+
+describe("WARP-2875 — the Projects toggle reaches the WHOLE PM surface", () => {
+  /**
+   * The bug: the registry gated `/api/pm/projects` only, but the native PM
+   * router mounts at `/api` and registers `/pm/work-items`, `/pm/summary`,
+   * `/pm/workspaces`, `/pm/states/:id`, `/pm/labels/:id` and the comment /
+   * activity / transition sub-routes OUTSIDE that prefix (and the relations
+   * router adds more). So an operator who switched Projects off in Settings
+   * kept serving `business_find({entity:"work_item"})`,
+   * `business_update({entity:"task"})` and
+   * `business_create({entity:"note", parent_entity:"task"})` — the module
+   * toggle was a partial lie.
+   *
+   * MUTATION that must fail here: narrow the prefix back to
+   * `/api/pm/projects` and every non-projects row below serves 200.
+   */
+  const send = (app: Express, [method, path]: (typeof PM_ROUTES)[number]) =>
+    request(app)[method](path);
+
+  it.each(PM_ROUTES.map((r) => [`${r[0].toUpperCase()} ${r[1]}`, r] as const))(
+    "%s is 404 module_disabled when Projects is off",
+    async (_label, route) => {
+      const app = appWith({ disabledModules: ["projects"], features: [] });
+      const res = await send(app, route);
+      expect(res.status).toBe(404);
+      // Byte-identical to the body `/api/pm/projects` has always returned —
+      // a caller must not be able to tell which PM route it asked for.
+      expect(res.body).toEqual({ error: "module_disabled", module: "projects" });
+    },
+  );
+
+  it.each(PM_ROUTES.map((r) => [`${r[0].toUpperCase()} ${r[1]}`, r] as const))(
+    "%s still serves when Projects is on",
+    async (_label, route) => {
+      const app = appWith({ features: [] });
+      const res = await send(app, route);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ hit: "pm" });
+    },
+  );
+
+  it("does not widen onto the sibling business modules", async () => {
+    // `/api/crm` and `/api/money` are their OWN toggles and their own §9
+    // grants. Gating them from the Projects switch would be the same class
+    // of bug pointing the other way.
+    const app = appWith({ disabledModules: ["projects"], features: [["cameras", "view"]] });
+    expect((await request(app).get("/api/cameras/list")).status).toBe(200);
   });
 });
 

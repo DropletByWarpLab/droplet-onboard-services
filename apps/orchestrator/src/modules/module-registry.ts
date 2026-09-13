@@ -191,7 +191,17 @@ export const MODULES: readonly ModuleDef[] = [
   {
     id: "projects", label: "Projects",
     description: "Lightweight project / task tracking.",
-    category: "workspace", routePrefixes: ["/api/pm/projects"], navHrefs: ["/projects"],
+    // WARP-2875: the prefix is `/api/pm`, NOT `/api/pm/projects`. The native
+    // PM router (routes/pm/native.ts) and the relations router both mount at
+    // `/api` and register work-items, workspaces, summary, states, labels,
+    // comments, activity, transition and relations OUTSIDE the projects
+    // sub-tree. Gating only `/api/pm/projects` meant switching Projects off
+    // in Settings still served `business_find({entity:"work_item"})`,
+    // `business_update({entity:"task"})` and a note on a task — the toggle
+    // enforced a fraction of the surface it advertises. `/api/pm` is the
+    // whole PM surface and nothing else: `crm` (`/api/crm`) and `money`
+    // (`/api/money`) are disjoint prefixes with their own toggles.
+    category: "workspace", routePrefixes: ["/api/pm"], navHrefs: ["/projects"],
     // WARP-1527: the tools-core domain for the PM suite is "pm".
     toolDomains: ["pm"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator
