@@ -22,11 +22,12 @@
  * and are capped at `SCIM_ROLE_CEILING` — WARP-1568. `provisionUser` never
  * touches `role` at all.
  *
- * DEACTIVATION writes go through the same guard — WARP-2016. PUT, PATCH and
- * DELETE all funnel into `setUserActive`/`deactivateUser`, which run the
- * disable rails (owner-immutability 403, last-operator 409) and the disable
- * post-effects. An Okta push can therefore be REFUSED; the route renders the
- * rail's code in the SCIM Error envelope.
+ * DEACTIVATION writes go through the same guard — WARP-2016. POST (on an
+ * email-matched EXISTING row — WARP-2550), PUT, PATCH and DELETE all funnel
+ * into `setUserActive`/`deactivateUser`, which run the disable rails
+ * (owner-immutability 403, last-operator 409) and the disable post-effects.
+ * An Okta push can therefore be REFUSED; the route renders the rail's code
+ * in the SCIM Error envelope.
  */
 import type { PrismaClient, User } from "@prisma/client";
 import { findUserByEmail, emailWriteData } from "./user-directory.service.js";
@@ -124,20 +125,39 @@ export async function provisionUser(
   // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
   const existing = await findUserByEmail(prisma, parsed.email);
   if (existing) {
-    const user = await prisma.user.update({
-      where: { id: existing.id },
-      data: {
-        displayName: parsed.displayName,
-        directoryStatus: targetStatus,
-        // NB: role is intentionally NOT changed here — an existing
-        // owner/admin keeps their role; group membership (provisionGroup) is
-        // the only thing that elevates, and never via a plain user upsert.
-      },
-    });
+    // WARP-2550 — an email-matched POST is a full replace in everything but
+    // the verb: it carries `active`, so it MUST flip active-state through the
+    // one guarded funnel, exactly like `replaceUser` (PUT). Until this it did
+    // a bare `prisma.user.update` writing `directoryStatus`, which made POST
+    // the fourth active-state verb and the only unrailed one — an Okta push
+    // with active:false whose userName matched the sole owner, or the last
+    // ACTIVE admin, deactivated them with no owner-immutability rail (403),
+    // no last-operator invariant (409), no session revocation and no audit
+    // row: the exact operator lockout WARP-2016 closed on PUT/PATCH/DELETE.
+    //
+    // Reusing `replaceUser` rather than re-deriving the rails here is the
+    // point — the ordering contract (guarded flip FIRST, so a refused call
+    // applies no part of the upsert, displayName included) lives in ONE
+    // place and cannot drift per-verb.
+    const user = await replaceUser(prisma, existing.id, parsed);
+    // A null here means the row we resolved a moment ago was hard-deleted
+    // inside the window. Nothing was applied — the guard's own answer for a
+    // lost race; Okta's retry then converges down the create path.
+    if (!user) throw RoleMutationRefusedError.concurrentMutation();
+    // NB: role is intentionally NOT changed here — an existing owner/admin
+    // keeps their role; group membership (provisionGroup) is the only thing
+    // that elevates, and never via a plain user upsert.
     await ensureOktaLink(prisma, user.id, parsed);
     return { user, created: false };
   }
 
+  // WARP-2550 — a NEW row created with active:false is deliberately NOT
+  // routed through the disable funnel: there is no prior row holding live
+  // access, and the row is minted least-privilege `family`, so rail 1
+  // (owner immutability) has no owner to protect and rail 5 (last operator)
+  // no operator to strand. Create-disabled is a plain create; running the
+  // rails would mean create-then-deactivate, which emits a "User disabled"
+  // audit row for a person who was never enabled.
   const user = await prisma.user.create({
     data: {
       username: usernameSeedFromEmail(parsed.email),
