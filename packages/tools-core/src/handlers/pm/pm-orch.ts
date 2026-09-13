@@ -12,7 +12,7 @@
  * preserved here under their original names so the MCP contract is byte-stable)
  * are mapped from the orchestrator's rich camelCase shapes by the mappers below.
  *
- * Errors: a non-2xx orchestrator response becomes `OrchPmError(message, status)`;
+ * Errors: a non-2xx orchestrator response becomes `OrchPmError(message, status, path)`;
  * handlers map 404 → PM_WORK_ITEM_NOT_FOUND and everything else → PM_API_ERROR,
  * exactly as before. Non-OrchPmError throwables bubble to the agent loop.
  */
@@ -55,7 +55,17 @@ export interface PlaneWorkItem {
 }
 
 export class OrchPmError extends Error {
-  constructor(message: string, readonly status: number) {
+  /**
+   * @param path WARP-2875 — the orchestrator route that failed. Carried
+   *   because `businessError()` has to name the MODULE whose toggle is off,
+   *   and the route is the only thing that actually knows: it used to guess
+   *   from the entity, so `business_create({entity:"note",
+   *   parent_entity:"task"})` — a POST to `/api/pm/work-items/:id/comments` —
+   *   blamed the CRM for a Projects refusal and sent the owner to the wrong
+   *   switch. Set at every throw site so the mapping can never fall back to
+   *   guessing.
+   */
+  constructor(message: string, readonly status: number, readonly path: string) {
     super(message);
     this.name = "OrchPmError";
   }
@@ -151,7 +161,7 @@ export async function callOrch<T = unknown>(
   let timerId: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timerId = setTimeout(() => {
-      reject(new OrchPmError("orchestrator timeout", 504));
+      reject(new OrchPmError("orchestrator timeout", 504, path));
       controller.abort();
     }, ORCH_TIMEOUT_MS);
   });
@@ -177,7 +187,7 @@ export async function callOrch<T = unknown>(
   if (!res.ok) {
     const message =
       typeof json.error === "string" ? json.error : `orchestrator returned ${res.status}`;
-    throw new OrchPmError(message, res.status);
+    throw new OrchPmError(message, res.status, path);
   }
   return json as T;
 }
