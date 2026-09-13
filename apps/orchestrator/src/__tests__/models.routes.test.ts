@@ -1152,3 +1152,82 @@ describe("WARP-1827 — placement surfaced on LocalModelInfo", () => {
     expect(row.placementState).toBeNull();
   });
 });
+
+// ── WARP-2882 — the gateway's `name` is a DISPLAY string ("Gpt-oss 20B F16"),
+//    its `id` is the runtime id. Every probe/write must key on `id`; the
+//    fixtures above set the two equal, which is exactly how this hid. ──
+describe("WARP-2882 — rows carry the runtime id; probes and writes key on it", () => {
+  const listed = {
+    models: [
+      {
+        id: "docker.io/ai/gpt-oss:20B-F16",
+        provider: "local",
+        name: "Gpt-oss 20B F16",
+        context_window: null,
+      },
+    ],
+  };
+
+  it("GET enriches metrics + cached tok/s by id, and exposes id on the row", async () => {
+    listModelsMock.mockResolvedValue(listed);
+    fetchLocalModelMetricsMock.mockResolvedValue(
+      new Map([
+        [
+          "docker.io/ai/gpt-oss:20B-F16",
+          { gbOnDisk: 13.8, gbOnDiskState: "measured", parameterSize: "20.9B", quantization: "F16", loaded: true, vramGb: null, vramState: "unsupported" },
+        ],
+      ]),
+    );
+    const { cacheGet } = await import("../services/cache.service.js");
+    vi.mocked(cacheGet).mockImplementation(async (key: string) =>
+      key === benchCacheKey("docker.io/ai/gpt-oss:20B-F16")
+        ? ({ tokensPerSec: 31.2, measuredAt: "2026-09-13T00:00:00.000Z" } as never)
+        : null,
+    );
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    const row = res.body.local[0];
+    expect(row.id).toBe("docker.io/ai/gpt-oss:20B-F16");
+    expect(row.name).toBe("Gpt-oss 20B F16");
+    expect(row.gbOnDisk).toBe(13.8);
+    expect(row.parameterSize).toBe("20.9B");
+    expect(row.tokensPerSec).toBe(31.2);
+    // The active model resolves against ids, never display names.
+    expect(res.body.activeModel).toBe("docker.io/ai/gpt-oss:20B-F16");
+  });
+
+  it("POST benchmark by display name probes and caches under the id", async () => {
+    listModelsMock.mockResolvedValue(listed);
+    benchmarkModelMock.mockResolvedValue({
+      tokensPerSec: 31.2,
+      evalCount: 96,
+      evalDurationMs: 3077,
+      measuredAt: "2026-09-13T00:00:00.000Z",
+    });
+    const { cacheSet } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post(
+      `/api/models/${encodeURIComponent("Gpt-oss 20B F16")}/benchmark`,
+    );
+    expect(res.status).toBe(200);
+    expect(benchmarkModelMock).toHaveBeenCalledWith("docker.io/ai/gpt-oss:20B-F16");
+    expect(vi.mocked(cacheSet)).toHaveBeenCalledWith(
+      benchCacheKey("docker.io/ai/gpt-oss:20B-F16"),
+      expect.anything(),
+      expect.any(Number),
+    );
+  });
+
+  it("PATCH active by display name persists the id", async () => {
+    listModelsMock.mockResolvedValue(listed);
+    const prisma = createPrismaMock(null);
+    const app = buildApp({ username: "stefan", role: "owner" }, prisma);
+    const res = await request(app)
+      .patch("/api/models/active")
+      .send({ model: "Gpt-oss 20B F16" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeModel: "docker.io/ai/gpt-oss:20B-F16", changed: true });
+    expect(prisma._active()).toBe("docker.io/ai/gpt-oss:20B-F16");
+  });
+});

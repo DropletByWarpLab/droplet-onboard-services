@@ -217,6 +217,22 @@ def static_capabilities(model: str) -> ModelCapabilities | None:
     return None
 
 
+def ollama_context_window_from_show(show: dict) -> int | None:
+    """WARP-2882 — the model's context length from an Ollama `/api/show` body.
+
+    Ollama reports it as ``model_info["<arch>.context_length"]`` (the key is
+    architecture-prefixed: ``gptoss.context_length``, ``llama.context_length``).
+    Docker Model Runner's Ollama-compatible ``/api/show`` has no ``model_info``
+    at all, so it resolves to None there — unknown is reported as unknown,
+    never guessed (WARP-836 honesty contract).
+    """
+    info = show.get("model_info") or {}
+    for key, value in info.items():
+        if key.endswith(".context_length") and isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def ollama_capabilities_from_show(show: dict) -> ModelCapabilities:
     """Map an Ollama `/api/show` response to capabilities.
 

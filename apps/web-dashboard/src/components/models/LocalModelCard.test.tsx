@@ -84,3 +84,17 @@ describe("<LocalModelCard />", () => {
     );
   });
 });
+
+// WARP-2882 — `name` is what the user reads; `id` is what the runtime answers to.
+it("WARP-2882: measures by runtime id when the row carries one", async () => {
+  render(
+    <LocalModelCard
+      model={row({ id: "docker.io/ai/gpt-oss:20B-F16", name: "Gpt-oss 20B F16" })}
+      canManage
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /measure speed/i }));
+  await waitFor(() =>
+    expect(benchmarkModelMock).toHaveBeenCalledWith("docker.io/ai/gpt-oss:20B-F16"),
+  );
+});

@@ -58,6 +58,24 @@ export function localModelIdentifiers(models: ModelInfo[]): Set<string> {
 }
 
 /**
+ * WARP-2882 — resolve a caller-supplied reference (the runtime `id`, or the
+ * gateway's DISPLAY `name` that older dashboards send) to the runtime id of
+ * an installed LOCAL model. Null when nothing local matches. Every write and
+ * daemon probe must use the returned id: the display name ("Gpt-oss 20B F16")
+ * is not a model the runtime knows.
+ */
+export function resolveLocalModelId(
+  models: ModelInfo[],
+  ref: string,
+): string | null {
+  for (const m of models) {
+    if (!isLocalProvider(m.provider)) continue;
+    if (m.id === ref || m.name === ref) return m.id;
+  }
+  return null;
+}
+
+/**
  * Resolve a stored active-model tag against the installed local set.
  *
  * WARP-1511 — resolution-on-read: the `ai.model.chat` row is never

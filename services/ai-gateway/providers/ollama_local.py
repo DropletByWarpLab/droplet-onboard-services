@@ -18,7 +18,11 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
-from capabilities import ollama_capabilities_from_show, static_capabilities
+from capabilities import (
+    ollama_capabilities_from_show,
+    ollama_context_window_from_show,
+    static_capabilities,
+)
 from providers.base import BaseProvider
 from request_context import get_request_id
 from schemas import ChatMessage, ModelCapabilities, ModelInfo
@@ -766,6 +770,8 @@ class OllamaLocalProvider(BaseProvider):
         # else an `/api/show` probe — see _capabilities) and reuse the result
         # across list_models calls.
         self._caps_cache: dict[str, ModelCapabilities | None] = {}
+        # WARP-2882 — context window read off the same `/api/show` probe.
+        self._ctx_cache: dict[str, int | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
         """(Re)build the in-flight semaphore at the requested size."""
@@ -843,6 +849,7 @@ class OllamaLocalProvider(BaseProvider):
             resp.raise_for_status()
             show = resp.json()
             caps = ollama_capabilities_from_show(show)
+            self._ctx_cache[model] = ollama_context_window_from_show(show)
         except Exception as e:  # noqa: BLE001 — probe is best-effort
             logger.debug("ollama /api/show failed for %s: %s", model, e)
         # Gap-filler only. `show is None` = probe failed; a show without
@@ -879,6 +886,9 @@ class OllamaLocalProvider(BaseProvider):
         out: list[ModelInfo] = []
         for m in data.get("models", []):
             name = m["name"]
+            # WARP-2882 — probe first: the same `/api/show` call fills the
+            # context-window cache the field below reads.
+            caps = await self._capabilities(name)
             out.append(
                 ModelInfo(
                     id=name,
@@ -889,8 +899,8 @@ class OllamaLocalProvider(BaseProvider):
                     # Runner served every token.
                     provider="local",
                     name=prettify_model_name(name),
-                    context_window=None,
-                    capabilities=await self._capabilities(name),
+                    context_window=self._ctx_cache.get(name),
+                    capabilities=caps,
                 )
             )
         return out

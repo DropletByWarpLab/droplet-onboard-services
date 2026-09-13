@@ -32,6 +32,11 @@ import {
 } from "./model-benchmark.service.js";
 
 export interface LocalModelInfo {
+  /** WARP-2882 — the RUNTIME id (ModelInfo.id, e.g.
+   *  `docker.io/ai/gpt-oss:20B-F16`). Every daemon probe, cache key and
+   *  write keys on this. `name` below is the gateway's DISPLAY string
+   *  ("Gpt-oss 20B F16") and must never be sent back as a model id. */
+  id: string;
   name: string;
   family: string;
   provider: string;
@@ -207,6 +212,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     const resp = await aiGateway.listModels();
     degraded = resp.degraded_providers?.some(isLocalProvider) ?? false;
     local = resp.models.map((m) => ({
+      id: m.id,
       name: m.name,
       family: inferFamily(m.name),
       provider: m.provider,
@@ -242,7 +248,8 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       if (metrics.size > 0) {
         for (const row of local) {
           if (!isLocalProvider(row.provider)) continue;
-          const m = metricsFor(metrics, row.name);
+          // WARP-2882 — the daemon keys on ids, never on the display name.
+          const m = metricsFor(metrics, row.id);
           if (!m) continue;
           row.gbOnDisk = m.gbOnDisk;
           row.parameterSize = m.parameterSize;
@@ -294,7 +301,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     try {
       for (const row of local) {
         if (!isLocalProvider(row.provider)) continue;
-        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.name));
+        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.id));
         if (bench) {
           row.tokensPerSec = bench.tokensPerSec;
           row.benchmarkedAt = bench.measuredAt;

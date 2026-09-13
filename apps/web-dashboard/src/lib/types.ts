@@ -264,6 +264,11 @@ export interface ModelsResponse {
 
 /** One local LLM served on the box. */
 export interface LocalModelRow {
+  /** WARP-2882 — the runtime id ("docker.io/ai/gpt-oss:20B-F16"): what every
+   *  write and probe sends. Optional only for an orchestrator that predates
+   *  the field; then `name` doubles as the id, exactly as before. */
+  id?: string;
+  /** Display name ("Gpt-oss 20B F16") — for reading, never for sending. */
   name: string;
   family: string;
   provider: string;

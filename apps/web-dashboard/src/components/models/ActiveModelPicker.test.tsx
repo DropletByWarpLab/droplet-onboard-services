@@ -131,3 +131,25 @@ describe("<ActiveModelPicker />", () => {
     );
   });
 });
+
+// WARP-2882 — select and compare on the runtime id, render the display name.
+it("WARP-2882: marks active by id and PATCHes the id, not the display name", async () => {
+  const models = rows(["gpt-oss:20b", "llama3.2:3b"]).map((m, i) => ({
+    ...m,
+    id: i === 0 ? "docker.io/ai/gpt-oss:20B-F16" : "docker.io/ai/llama3.2:3B",
+    name: i === 0 ? "Gpt-oss 20B F16" : "Llama 3.2 3B",
+  }));
+  render(
+    <ActiveModelPicker
+      models={models}
+      activeModel="docker.io/ai/gpt-oss:20B-F16"
+      canManage
+      onChanged={() => {}}
+    />,
+  );
+  expect(screen.getByRole("radio", { name: /gpt-oss 20b f16/i })).toBeChecked();
+  fireEvent.click(screen.getByRole("radio", { name: /llama 3\.2 3b/i }));
+  await waitFor(() =>
+    expect(setActiveModelMock).toHaveBeenCalledWith("docker.io/ai/llama3.2:3B"),
+  );
+});

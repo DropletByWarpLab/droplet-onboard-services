@@ -175,7 +175,8 @@ export function LocalModelCard({
     setMeasuring(true);
     setBenchError(null);
     try {
-      const { tokensPerSec } = await benchmarkModel(model.name);
+      // WARP-2882 — the runtime answers to `id`; `name` is display copy.
+      const { tokensPerSec } = await benchmarkModel(model.id ?? model.name);
       setLocalTps(tokensPerSec);
       onBenchmarked?.();
     } catch (e) {

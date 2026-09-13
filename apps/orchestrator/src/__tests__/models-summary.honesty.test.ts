@@ -43,8 +43,8 @@ import { getModelsPagePayload } from "../services/models-summary.service.js";
 
 const TWO_MODELS = {
   models: [
-    { id: "a", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
-    { id: "b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+    { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+    { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
   ],
 };
 
@@ -56,7 +56,7 @@ beforeEach(() => {
 describe("WARP-1749 — metric state on the wire", () => {
   it("carries `unsupported` through to the payload (a DMR box's VRAM)", async () => {
     listModelsMock.mockResolvedValue({
-      models: [{ id: "a", provider: "ollama", name: "ai/smollm2", context_window: 8192 }],
+      models: [{ id: "ai/smollm2", provider: "ollama", name: "ai/smollm2", context_window: 8192 }],
     });
     fetchLocalModelMetricsMock.mockResolvedValue(
       new Map([
