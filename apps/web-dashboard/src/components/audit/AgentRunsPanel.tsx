@@ -96,11 +96,16 @@ function TraceRow({ entry }: { entry: TraceEntry }) {
           ? "declined"
           : entry.replayOf
             ? "replayed after resume"
-            : entry.text === undefined
-              ? "dispatched…"
-              : entry.isError
-                ? "error"
-                : "ok";
+            : // WARP-2877 — it has no result and never will: the run was
+              // interrupted mid-call and this tool writes, so it was not
+              // repeated. Anything else here would read as "still working".
+              entry.unknownOutcome
+              ? "interrupted — may have run, not repeated"
+              : entry.text === undefined
+                ? "dispatched…"
+                : entry.isError
+                  ? "error"
+                  : "ok";
   return (
     <li className="py-2 border-b last:border-b-0 min-w-0" style={{ borderColor: "var(--border)" }}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[13px]">
