@@ -68,6 +68,8 @@ export interface TraceEntry {
   completedAt?: string;
   replayOf?: string;
   confirmation?: "parked" | "confirmed" | "denied";
+  /** WARP-2877 — dispatched, outcome lost to a restart, not repeated. */
+  unknownOutcome?: true;
 }
 
 export interface AgentRunSummary {

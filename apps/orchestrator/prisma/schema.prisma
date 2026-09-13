@@ -3937,11 +3937,21 @@ model AgentRun {
   pendingDecision    AgentRunPendingDecision?
   pendingDecidedAt   DateTime?
   pendingDecidedBy   String?
+  /// WARP-2877 — the schedule that fired this run, when one did. NULL is the
+  /// ordinary case (a run started from chat), not a missing value: it is the
+  /// FK that is absent, never a status. The ticker's overlap guard reads it —
+  /// a schedule whose previous fire is still active does not fire a second
+  /// one — and `onDelete: SetNull` keeps the history of a deleted schedule's
+  /// runs rather than deleting the runs with it.
+  scheduleId         String?
+  schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
   // Claim scan: `status = queued AND runAfter <= now()`.
   @@index([status, runAfter])
+  // WARP-2877 — the ticker's overlap probe: has this schedule an active run?
+  @@index([scheduleId, status])
   // Reclaim scan: `status = running AND heartbeatAt < now() - threshold`.
   @@index([status, heartbeatAt])
   // "My runs", newest first — the list route in WARP-2180.
@@ -3982,6 +3992,9 @@ model AgentRunSchedule {
   lastFiredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  /// WARP-2877 — the runs this schedule fired. Back-relation only; the guard
+  /// queries `AgentRun` directly.
+  runs        AgentRun[]
 
   // The ticker's scan: `enabled AND nextFireAt <= now()`.
   @@index([enabled, nextFireAt])
