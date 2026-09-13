@@ -822,3 +822,95 @@ describe("<ModelsPage /> placement banner (WARP-1827)", () => {
     expect(screen.queryByText(/running on the CPU|partly on the GPU/i)).toBeNull();
   });
 });
+
+// ── WARP-2883 — the KPI strip's first three tiles are real, not placeholders ──
+//
+// Reported from the bench box: "Unavailable / 1 local model", "card2 · 0 / 0.5
+// GiB" and an empty latency. The tiles now count what the box can answer
+// with, name the hardware with its VRAM, and show a measured round-trip with
+// a quality colour — and still render an honest "—" for anything unmeasured.
+describe("WARP-2883 — KPI strip: model count, GPU hardware, endpoint latency", () => {
+  it("counts local models plus ENABLED cloud providers", () => {
+    ready({
+      cloud: [
+        { provider: "anthropic", enabled: true, hasKey: true, lastUsedAt: null, spendUsd: 0 },
+        { provider: "openai", enabled: false, hasKey: true, lastUsedAt: null, spendUsd: 0 },
+      ],
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText("2 models")).toBeInTheDocument();
+    expect(screen.getByText("1 local model · 1 cloud provider")).toBeInTheDocument();
+  });
+
+  it("a keyed-but-switched-off provider does not count", () => {
+    ready(); // fixture: anthropic hasKey but enabled=false
+    render(<ModelsPage />);
+    expect(screen.getByText("1 model")).toBeInTheDocument();
+    expect(screen.getByText("1 local model · 0 cloud providers")).toBeInTheDocument();
+  });
+
+  it("names the GPU hardware with its VRAM capacity, and VRAM in use separately", () => {
+    ready({
+      gpu: {
+        name: "NVIDIA GeForce RTX 5060 Ti",
+        vramGiB: 15.9,
+        vramUsedGiB: 13.1,
+        utilPct: 97,
+        tempC: 62,
+      },
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText("NVIDIA GeForce RTX 5060 Ti")).toBeInTheDocument();
+    expect(screen.getByText("15.9 GiB")).toBeInTheDocument();
+    expect(screen.getByText("13.1 GiB in use · 62°C · 97% busy")).toBeInTheDocument();
+  });
+
+  it("omits the VRAM capacity when the bridge could not read it — never 0 GiB", () => {
+    ready({
+      gpu: { name: "card1", vramGiB: null, vramUsedGiB: null, utilPct: null, tempC: 40 },
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText("card1")).toBeInTheDocument();
+    expect(screen.queryByText(/0 GiB/)).toBeNull();
+  });
+
+  it.each([
+    [4, "good", "Good"],
+    [640, "fair", "Fair"],
+    [1800, "slow", "Slow"],
+  ])("renders %i ms with the %s quality dot", (ms, quality, label) => {
+    ready({
+      avgLatencyMs: ms,
+      endpointLatencyMs: { local: ms, anthropic: null, openai: null },
+    });
+    const { container } = render(<ModelsPage />);
+    expect(screen.getByText(`${ms} ms`)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`^${label} · local ${ms} ms$`))).toBeInTheDocument();
+    expect(container.querySelector(`.dot[data-quality="${quality}"]`)).not.toBeNull();
+  });
+
+  it("lists every endpoint that answered", () => {
+    ready({
+      avgLatencyMs: 158,
+      endpointLatencyMs: { local: 4, anthropic: 312, openai: null },
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText("Good · local 4 ms · anthropic 312 ms")).toBeInTheDocument();
+  });
+
+  it("says nothing answered when the probe ran and every endpoint was null", () => {
+    ready({
+      avgLatencyMs: 0,
+      endpointLatencyMs: { local: null, anthropic: null, openai: null },
+    });
+    render(<ModelsPage />);
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByText("No inference endpoint answered")).toBeInTheDocument();
+  });
+
+  it("keeps the honest placeholder for an orchestrator that predates the probe", () => {
+    ready(); // no endpointLatencyMs at all
+    render(<ModelsPage />);
+    expect(screen.getByText("Latency isn’t measured yet")).toBeInTheDocument();
+  });
+});

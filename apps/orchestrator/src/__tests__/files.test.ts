@@ -7,6 +7,7 @@ import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),
+  fetchLatency: vi.fn().mockResolvedValue(null),
   chat: vi.fn(),
   saveKey: vi.fn(),
   listKeys: vi.fn().mockResolvedValue([]),

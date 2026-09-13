@@ -3,24 +3,35 @@
 /**
  * WARP-836 — the Models page KPI strip.
  *
- * Four read-only tiles: model-store usage, GPU, average latency, cloud spend.
- * Model-store disk and average latency are still placeholders (no probe
- * exists yet), so those render an honest "Unavailable" rather than a
- * fabricated number. GPU is a real reading as of WARP-1861, and cloud spend
- * is real — $0.00 while no cloud escapes are enabled.
+ * Four read-only tiles: models in use, GPU, average latency, cloud spend.
+ * WARP-2883 made the first three real: the model tile counts what the box
+ * can answer with (local + enabled cloud), the GPU tile names the hardware
+ * and its VRAM, and latency is a measured round-trip per inference endpoint
+ * with a colour-coded quality. Cloud spend is real — $0.00 while no cloud
+ * escapes are enabled. Anything unmeasured still renders an honest "—".
  */
 
+import type { ReactNode } from "react";
 import { Clock, Cloud, Cpu, HardDrive, type LucideIcon } from "lucide-react";
-import type { ModelsGpuInfo, ModelsGpuReason } from "@/lib/types";
+import type {
+  EndpointLatencyMs,
+  ModelsGpuInfo,
+  ModelsGpuReason,
+} from "@/lib/types";
 
 interface KpiStripProps {
   gpu: ModelsGpuInfo | null;
   /** Why `gpu` is null — see `gpuFallbackMeta`. Ignored when `gpu` is set. */
   gpuReason?: ModelsGpuReason;
+  /** Mean round-trip over the enabled endpoints; 0 = nothing answered. */
   avgLatencyMs: number;
+  /** The per-endpoint samples behind `avgLatencyMs`; null = not asked. */
+  latency?: EndpointLatencyMs | null;
   cloudSpendUsd: number;
-  /** Count of local models — used only for the model-store tile's sub-line. */
+  /** Local models installed on the box. */
   localCount: number;
+  /** Cloud providers switched on AND keyed — usable from this box. */
+  cloudCount: number;
 }
 
 /** Format USD with two decimals, e.g. 0 → "$0.00". */
@@ -29,28 +40,53 @@ function usd(n: number): string {
 }
 
 /**
+ * WARP-2883 — latency quality bands for a reachability round-trip (a local
+ * /api/tags or a cloud /v1/models, NOT a generation). A local runtime answers
+ * in single-digit ms; a cloud provider in a few hundred. Anything past a
+ * second means the box is waiting on its network before a single token can
+ * flow, which is what the owner needs to see in red.
+ */
+export type LatencyQuality = "good" | "fair" | "slow";
+export function latencyQuality(ms: number): LatencyQuality {
+  if (ms <= 250) return "good";
+  if (ms <= 1000) return "fair";
+  return "slow";
+}
+const QUALITY_LABEL: Record<LatencyQuality, string> = {
+  good: "Good",
+  fair: "Fair",
+  slow: "Slow",
+};
+const QUALITY_COLOR: Record<LatencyQuality, string> = {
+  good: "var(--color-system-green)",
+  fair: "var(--color-system-orange)",
+  slow: "var(--color-system-red)",
+};
+
+/** "local 4 ms · anthropic 312 ms" — only the endpoints that answered. */
+function latencyBreakdown(latency: EndpointLatencyMs): string {
+  return (["local", "anthropic", "openai"] as const)
+    .filter((k) => typeof latency[k] === "number")
+    .map((k) => `${k} ${latency[k]} ms`)
+    .join(" · ");
+}
+
+/**
  * The GPU tile's sub-line, one entry per counter that could actually be read.
  *
- * VRAM and utilisation are DIFFERENT FACTS and the operator needs both: on
- * the lab box under load the card is 97% busy while VRAM sits at 83%, and
- * "97% used" beside a 15.9 GiB total reads as "15.4 GiB consumed, no room for
- * a second model" — a conclusion the numbers don't support. So compute
- * utilisation is labelled "busy", and the VRAM pair stands on its own.
+ * VRAM in use and utilisation are DIFFERENT FACTS and the operator needs
+ * both: on the lab box under load the card is 97% busy while VRAM sits at
+ * 83%, and "97% used" beside a 15.9 GiB total reads as "15.4 GiB consumed, no
+ * room for a second model" — a conclusion the numbers don't support. So
+ * compute utilisation is labelled "busy", and VRAM in use stands on its own
+ * (the capacity itself sits next to the name, WARP-2883).
  *
  * GiB because the arithmetic behind the number is binary (1024³) — see
  * `bytesToGiB` in the orchestrator's lib/gpu-telemetry.ts.
  */
 function gpuMeta(gpu: ModelsGpuInfo): string {
-  const vram =
-    gpu.vramUsedGiB !== null && gpu.vramGiB !== null
-      ? `${gpu.vramUsedGiB} / ${gpu.vramGiB} GiB`
-      : gpu.vramGiB !== null
-        ? `${gpu.vramGiB} GiB`
-        : gpu.vramUsedGiB !== null
-          ? `${gpu.vramUsedGiB} GiB in use`
-          : null;
   return [
-    vram,
+    gpu.vramUsedGiB !== null ? `${gpu.vramUsedGiB} GiB in use` : null,
     gpu.tempC !== null ? `${gpu.tempC}°C` : null,
     // NOT "idle". `busy_percent` is null for ANY read failure — device-bridge's
     // `_read_sysfs_int` swallows every exception, and a driver that never
@@ -79,30 +115,41 @@ function gpuFallbackMeta(reason: ModelsGpuReason | undefined): string {
   return "GPU reading unavailable";
 }
 
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 export function KpiStrip({
   gpu,
   gpuReason,
   avgLatencyMs,
+  latency = null,
   cloudSpendUsd,
   localCount,
+  cloudCount,
 }: KpiStripProps) {
+  const modelCount = localCount + cloudCount;
+  const measured = avgLatencyMs > 0;
+  const quality = measured ? latencyQuality(avgLatencyMs) : null;
+  const breakdown = latency ? latencyBreakdown(latency) : "";
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      {/* Model store — disk usage isn't reported yet, so the value is honest
-          "Unavailable"; the sub-line states the true, known fact instead. */}
+      {/* Models — what the box can answer with: local models on disk plus
+          each cloud provider that is switched on and keyed (WARP-2883). */}
       <KpiTile
         icon={HardDrive}
         label="Model store"
-        value="Unavailable"
-        valueMuted
-        meta={
-          localCount === 1
-            ? "1 local model on the box"
-            : `${localCount} local models on the box`
-        }
+        value={plural(modelCount, "model")}
+        valueMuted={modelCount === 0}
+        meta={`${plural(localCount, "local model")} · ${plural(cloudCount, "cloud provider")}`}
       />
 
       {/* GPU — live counters via device-bridge (WARP-1861).
+
+          The value is the hardware's marketing name with its VRAM capacity
+          beside it (WARP-2883); the DRM node is the fallback when no source
+          could name the card.
 
           EVERY counter is nullable, and that is the NORMAL case rather than
           a fault: with nothing holding the card the driver runtime-suspends
@@ -120,22 +167,57 @@ export function KpiStrip({
       <KpiTile
         icon={Cpu}
         label="GPU"
-        value={gpu ? gpu.name : "Unavailable"}
+        value={
+          gpu ? (
+            <>
+              <span
+                title={gpu.name}
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  maxWidth: "100%",
+                  display: "inline-block",
+                  verticalAlign: "bottom",
+                }}
+              >
+                {gpu.name}
+              </span>
+              {gpu.vramGiB !== null && <small>{gpu.vramGiB} GiB</small>}
+            </>
+          ) : (
+            "Unavailable"
+          )
+        }
         valueMuted={!gpu}
         meta={gpu ? gpuMeta(gpu) : gpuFallbackMeta(gpuReason)}
       />
 
-      {/* Avg latency — 0 is the placeholder sentinel (no metrics surface yet),
-          so render it as unavailable rather than a misleading "0 s". */}
+      {/* Avg latency — a measured round-trip per enabled inference endpoint
+          (WARP-2883), colour-coded by `latencyQuality`. 0 means nothing
+          answered the probe, rendered as unavailable rather than "0 ms". */}
       <KpiTile
         icon={Clock}
         label="Avg latency"
-        value={avgLatencyMs > 0 ? `${(avgLatencyMs / 1000).toFixed(1)} s` : "—"}
-        valueMuted={avgLatencyMs <= 0}
+        value={measured ? `${avgLatencyMs} ms` : "—"}
+        valueMuted={!measured}
         meta={
-          avgLatencyMs > 0
-            ? "to first token"
-            : "Latency isn’t measured yet"
+          quality ? (
+            <>
+              <span
+                className="dot"
+                data-quality={quality}
+                style={{ background: QUALITY_COLOR[quality] }}
+                aria-hidden
+              />
+              {QUALITY_LABEL[quality]}
+              {breakdown ? ` · ${breakdown}` : ""}
+            </>
+          ) : latency ? (
+            "No inference endpoint answered"
+          ) : (
+            "Latency isn’t measured yet"
+          )
         }
       />
 
@@ -159,8 +241,8 @@ function KpiTile({
 }: {
   icon: LucideIcon;
   label: string;
-  value: string;
-  meta: string;
+  value: ReactNode;
+  meta: ReactNode;
   /** When the value is a placeholder, render it in a quieter weight/colour so
    *  it doesn't read as a real metric. */
   valueMuted?: boolean;

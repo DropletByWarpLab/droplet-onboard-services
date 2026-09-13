@@ -23,12 +23,15 @@ vi.mock("../services/cache.service.js", () => ({
 }));
 
 const listModelsMock = vi.fn();
+const fetchLatencyMock = vi.fn().mockResolvedValue(null);
 // WARP-2871 — the box-wide key listing behind `cloud[].hasKey`. Called with
 // NO user id (shared namespace); the spy records the args so that is pinned.
 const listKeysMock = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
   listKeys: (...a: unknown[]) => listKeysMock(...a),
+  // WARP-2883: the latency probe is best-effort; null = gateway not asked.
+  fetchLatency: () => fetchLatencyMock(),
 }));
 
 // WARP-2871 — the caller's cloud verdict (`cloudAccess.allowedForYou`) is
@@ -1204,6 +1207,7 @@ describe("WARP-2871 — overlayCloudState (pure)", () => {
     gpu: null,
     gpuReason: "unreachable",
     avgLatencyMs: 0,
+    endpointLatencyMs: null,
     cloudSpendUsd: 0,
     degraded: false,
   });

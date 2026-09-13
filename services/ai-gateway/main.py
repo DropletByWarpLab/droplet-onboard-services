@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -296,6 +297,37 @@ async def health():
     if provider_router:
         inference_reachable = await provider_router.local.is_reachable()
     return {"status": "ok", "inference_reachable": inference_reachable}
+
+
+@app.get("/ai/latency")
+async def latency():
+    """WARP-2883: round-trip time to each inference endpoint, in ms.
+
+    `null` for a provider that is unreachable, has no box-wide key, or timed
+    out — never 0, which would read as "instant". Local is the runtime's
+    /api/tags; cloud is an authenticated /v1/models. Neither generates a
+    token. The orchestrator averages whichever of these are ENABLED on the
+    box (it, not the gateway, knows the cloud-escape switch).
+    """
+    if not provider_router:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    # Box-wide (shared) keys — the same namespace model listing uses.
+    await provider_router.refresh_keys(None)
+
+    async def timed(provider) -> int | None:
+        started = time.monotonic()
+        try:
+            ok = await provider.is_reachable()
+        except Exception:
+            ok = False
+        return round((time.monotonic() - started) * 1000) if ok else None
+
+    local_ms, anthropic_ms, openai_ms = await asyncio.gather(
+        timed(provider_router.local),
+        timed(provider_router.anthropic),
+        timed(provider_router.openai),
+    )
+    return {"providers": {"local": local_ms, "anthropic": anthropic_ms, "openai": openai_ms}}
 
 
 @app.get("/ai/readiness")

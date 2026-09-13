@@ -17,6 +17,7 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import type { EndpointLatencyMs } from "../types/index.js";
 import { isLocalProvider } from "./cloud-access.service.js";
 import { bytesToGiB, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
@@ -127,6 +128,9 @@ export interface CloudAccessInfo {
 }
 
 export interface GpuInfo {
+  /** WARP-2883: the hardware's marketing name when the bridge resolved one
+   *  ("NVIDIA GeForce RTX 5060 Ti"); the DRM node ("card1") only as the
+   *  fallback. What the owner bought is what the tile should say. */
   name: string;
   // WARP-1861: EVERY counter is nullable, because the bridge legitimately
   // cannot always read each one and they fail independently. When nothing
@@ -177,7 +181,17 @@ export interface ModelsPagePayload {
   gpu: GpuInfo | null;
   /** Why `gpu` is null. Null when `gpu` is populated. */
   gpuReason: GpuReason | null;
+  /**
+   * WARP-2883 — mean round-trip over the ENABLED inference endpoints (local
+   * runtime + each cloud provider that is switched on and keyed), ms. 0 means
+   * nothing answered the probe; the tile renders that as "—", never "0 ms".
+   * The cached build averages local only; `overlayCloudState` recomputes it
+   * once it knows which cloud providers are enabled.
+   */
   avgLatencyMs: number;
+  /** WARP-2883 — the per-endpoint samples behind `avgLatencyMs`, so the tile
+   *  can list them. Null when the gateway could not be asked at all. */
+  endpointLatencyMs: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /**
    * WARP-1112 — the installed local model the box answers with by default
@@ -368,10 +382,10 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   const gpu: GpuInfo | null =
     telemetry?.available && telemetry.card
       ? {
-          // The DRM node name is what the operator can act on — it is the
-          // same identifier BRIDGE_GPU_CARD pins and the same one that
-          // appears in the flip script's resolver.
-          name: telemetry.card,
+          // WARP-2883: the marketing name when the bridge resolved one; the
+          // DRM node only as the fallback. `card` stays on GET
+          // /api/hardware/gpu for anyone who needs the pinnable identifier.
+          name: telemetry.name ?? telemetry.card,
           vramGiB: bytesToGiB(telemetry.vramTotalBytes),
           vramUsedGiB: bytesToGiB(telemetry.vramUsedBytes),
           // Nullable by design: a runtime-suspended card reports neither,
@@ -386,6 +400,11 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   // bridge that answered gets to have its "no card" repeated as a fact.
   const gpuReason: GpuReason | null =
     gpu !== null ? null : telemetry === null ? "unreachable" : "no_card";
+
+  // WARP-2883 — one round-trip per inference endpoint, measured by the
+  // gateway. Best-effort (null when it could not be asked); re-measured every
+  // time this payload is rebuilt, i.e. behind the route's 30 s cache.
+  const endpointLatencyMs = (await aiGateway.fetchLatency())?.providers ?? null;
 
   return {
     local,
@@ -407,9 +426,10 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // ...and WHY it is null, so the tile can tell "we asked and there is no
     // card" apart from "we never got to ask". See `GpuReason`.
     gpuReason,
-    // Avg latency: requires a metrics aggregation surface that doesn't
-    // exist yet. 0 until ai-gateway exports a /metrics summary.
-    avgLatencyMs: 0,
+    // WARP-2883 — local only here; the route's overlay adds the enabled
+    // cloud endpoints (this object is cached and knows nothing about keys).
+    avgLatencyMs: averageLatencyMs(endpointLatencyMs, []),
+    endpointLatencyMs,
     // Cloud spend: sum over OffLanEgressSample where channel =
     // cloud_model_escape. E2 dependency; placeholder 0.
     cloudSpendUsd: 0,
@@ -436,6 +456,24 @@ export interface CloudEscapeRow {
  *   escapeRow — the OffLanAllowlistChannel row, or null when absent ⇒ OFF.
  *   allowedForYou — the caller's resolved verdict, or null (see the field).
  */
+/**
+ * WARP-2883 — mean of the endpoints that are actually in use: the local
+ * runtime plus each ENABLED cloud provider. An endpoint that did not answer
+ * (null) is left out rather than counted as 0; when nothing answered the
+ * result is 0, which the tile renders as "—".
+ */
+export function averageLatencyMs(
+  latency: EndpointLatencyMs | null,
+  enabledCloud: ReadonlyArray<CloudProviderInfo["provider"]>,
+): number {
+  if (!latency) return 0;
+  const samples = [latency.local, ...enabledCloud.map((p) => latency[p])].filter(
+    (v): v is number => typeof v === "number",
+  );
+  if (samples.length === 0) return 0;
+  return Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+}
+
 export function overlayCloudState(
   payload: ModelsPagePayload,
   state: {
@@ -446,12 +484,18 @@ export function overlayCloudState(
 ): ModelsPagePayload & { cloudAccess: CloudAccessInfo } {
   const escapeEnabled = state.escapeRow?.enabled === true;
   const keySet = state.keys === null ? null : new Set(state.keys);
+  const cloud = payload.cloud.map((row) => {
+    const hasKey = keySet === null ? null : keySet.has(row.provider);
+    return { ...row, hasKey, enabled: escapeEnabled && hasKey === true };
+  });
   return {
     ...payload,
-    cloud: payload.cloud.map((row) => {
-      const hasKey = keySet === null ? null : keySet.has(row.provider);
-      return { ...row, hasKey, enabled: escapeEnabled && hasKey === true };
-    }),
+    cloud,
+    // WARP-2883 — now that enabled is known, average over what is in use.
+    avgLatencyMs: averageLatencyMs(
+      payload.endpointLatencyMs ?? null,
+      cloud.filter((c) => c.enabled).map((c) => c.provider),
+    ),
     cloudAccess: {
       escapeEnabled,
       escapeChangedBy: state.escapeRow?.lastChangedBy ?? null,

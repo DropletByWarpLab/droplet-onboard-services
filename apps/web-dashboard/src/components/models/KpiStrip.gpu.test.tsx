@@ -48,6 +48,7 @@ function renderStrip(
       avgLatencyMs={0}
       cloudSpendUsd={0}
       localCount={1}
+      cloudCount={0}
     />,
   );
 }
@@ -56,8 +57,10 @@ describe("KpiStrip — GPU tile (WARP-1861)", () => {
   it("labels utilisation as busy and shows VRAM as its own fact", () => {
     renderStrip(gpu());
     expect(screen.getByText("card1")).toBeInTheDocument();
+    // WARP-2883: capacity sits beside the name; usage is its own entry.
+    expect(screen.getByText("15.9 GiB")).toBeInTheDocument();
     expect(
-      screen.getByText("13.2 / 15.9 GiB · 62°C · 97% busy"),
+      screen.getByText("13.2 GiB in use · 62°C · 97% busy"),
     ).toBeInTheDocument();
   });
 
@@ -84,9 +87,11 @@ describe("KpiStrip — GPU tile (WARP-1861)", () => {
     expect(screen.queryByText(/No accelerator detected/)).not.toBeInTheDocument();
   });
 
-  it("shows the total alone when usage is unreadable", () => {
+  it("keeps the capacity beside the name when usage is unreadable (WARP-2883)", () => {
     renderStrip(gpu({ vramUsedGiB: null }));
-    expect(screen.getByText("15.9 GiB · 62°C · 97% busy")).toBeInTheDocument();
+    expect(screen.getByText("15.9 GiB")).toBeInTheDocument();
+    expect(screen.getByText("62°C · 97% busy")).toBeInTheDocument();
+    expect(screen.queryByText(/in use/)).not.toBeInTheDocument();
   });
 
   it("declines to report utilisation rather than 0% when nothing is readable", () => {
@@ -94,7 +99,7 @@ describe("KpiStrip — GPU tile (WARP-1861)", () => {
     // EBUSY. 0% would be a measurement nobody took — and neither is "idle".
     renderStrip(gpu({ utilPct: null, tempC: null }));
     expect(
-      screen.getByText("13.2 / 15.9 GiB · utilisation not reported"),
+      screen.getByText("13.2 GiB in use · utilisation not reported"),
     ).toBeInTheDocument();
   });
 
@@ -108,7 +113,7 @@ describe("KpiStrip — GPU tile (WARP-1861)", () => {
     renderStrip(gpu({ utilPct: null }));
     expect(screen.queryByText(/idle/i)).not.toBeInTheDocument();
     expect(
-      screen.getByText("13.2 / 15.9 GiB · 62°C · utilisation not reported"),
+      screen.getByText("13.2 GiB in use · 62°C · utilisation not reported"),
     ).toBeInTheDocument();
   });
 

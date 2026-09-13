@@ -195,8 +195,10 @@ export default function ModelsPage() {
           gpu={gpu}
           gpuReason={gpuReason}
           avgLatencyMs={avgLatencyMs}
+          latency={data.endpointLatencyMs ?? null}
           cloudSpendUsd={cloudSpendUsd}
           localCount={local.length}
+          cloudCount={cloud.filter((c) => c.enabled).length}
         />
 
         {/* WARP-1827 — degraded-placement banner. Same in-flow note idiom as
