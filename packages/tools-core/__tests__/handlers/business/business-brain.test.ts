@@ -83,6 +83,17 @@ describe("business_find entity:finding (WARP-2752)", () => {
     expect(get.mock.calls[0]![0]).toContain("status=dismissed");
   });
 
+  it("clamps the page size like every other entity (WARP-2878)", async () => {
+    // This branch forwarded `a.limit` RAW while every sibling read routes it
+    // through `clampLimit` (1..50). The schema's `maximum` is no backstop: the
+    // ai-gateway's DMR sanitizer strips it for local models, so `limit: 10000`
+    // reached /api/brain/findings and the page it returned would flood the
+    // model's context — the exact thing clampLimit exists to prevent.
+    get.mockResolvedValueOnce(res(true, 200, { findings: [], total: 0 }));
+    await businessFind.handler({ entity: "finding", limit: 10000 }, ctx);
+    expect(get.mock.calls[0]![0]).toContain("limit=50");
+  });
+
   it("keeps money a minor-unit string", async () => {
     get.mockResolvedValueOnce(res(true, 200, { findings: [apiFinding], total: 1 }));
     const out = expectOk(await businessFind.handler({ entity: "finding" }, ctx));
