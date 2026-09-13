@@ -65,9 +65,10 @@ real retrieval:
 # factory reset or volume wipe.
 ./scripts/seed-eval-fixtures.sh
 
-# Then aim the eval at the seeded corpus (recreate, NOT restart —
-# `docker restart` never re-reads env_file):
-#   .env: RAGAS_EVAL_USER=eval-fixtures
+# RAGAS_EVAL_USER=eval-fixtures is already in .env (secrets.sh writes it,
+# WARP-2879); the next scheduled slot sees the corpus fingerprint change
+# and runs. Only if you pointed it at a different user: recreate, NOT
+# restart — `docker restart` never re-reads env_file:
 docker compose -p droplet -f docker/docker-compose.yml --env-file .env \
   up -d --force-recreate --no-deps rag-eval
 ```
