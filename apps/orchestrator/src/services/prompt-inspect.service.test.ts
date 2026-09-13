@@ -168,6 +168,25 @@ describe("🔴 every role-filtered composer is driven by the TARGET", () => {
   });
 });
 
+// ── the consent switch ──────────────────────────────────────────────────────
+
+describe("WARP-2876 — the inspector shows the same brain the chat turn gets", () => {
+  it("reports the brain block ABSENT, not errored, while the brain is switched off", async () => {
+    // `buildBrainBlock` now returns "" whenever the consent switch is off
+    // (the gate lives there, at the choke point both prompt paths share).
+    // What this pins is the half that belongs to the inspector: it must NOT
+    // re-add the block, and it must not dress a consented-away block up as a
+    // failure — an admin reading "errored" would go looking for a broken
+    // database instead of an owner who turned the brain off.
+    mocks.buildBrainBlock.mockResolvedValue("");
+    const r = await inspectPromptForPerson(prisma, { targetUserId: "u1" });
+
+    expect(blockOf(r, "brain").status).toBe("absent");
+    expect(r.erroredBlocks).toEqual([]);
+    expect(r.assembled).not.toContain("BRAIN");
+  });
+});
+
 // ── the unresolved case ─────────────────────────────────────────────────────
 
 describe("🔴 an unresolvable person composes nothing at all", () => {
