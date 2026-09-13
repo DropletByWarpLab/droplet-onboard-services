@@ -9,7 +9,9 @@
  *   4. A detail response that arrives after the person selected another run
  *      is dropped — a stale run's approval prompt never overwrites the
  *      selected run's panel.
- *   5. Recurring runs: the panel lists schedules with a human rule and next
+ *   5. A failed action on a run the person has since left writes neither its
+ *      error nor its busy state into the run they moved to (WARP-2878).
+ *   6. Recurring runs: the panel lists schedules with a human rule and next
  *      fire, adds one from a preset (POST with the preset's RRULE and the
  *      typed time zone), and deletes one.
  */
@@ -53,6 +55,12 @@ const parked: AgentRunSummary = {
     decision: null,
     decidedAt: null,
   },
+};
+
+const parked2: AgentRunSummary = {
+  ...parked,
+  id: "run-3",
+  goal: "water the plants on the roof",
 };
 
 const finished: AgentRunSummary = {
@@ -198,6 +206,53 @@ describe("Background runs panel (WARP-2180)", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByText("Reviewed 12 clips; nothing unusual.")).toBeTruthy();
     expect(screen.queryByText("This run is waiting for your approval")).toBeNull();
+  });
+
+  it("an action that fails after the person moved on leaves the new run alone (WARP-2878)", async () => {
+    // The race `loadDetail` was already guarded against, on the path that was
+    // not: `act` captured `selectedId` by closure, wrote its failure into
+    // `detailError` unconditionally, and held ONE `busy` flag for the whole
+    // panel. Cancel run A, select run B before A's POST settles, let A fail —
+    // and A's error rendered under B while A's `busy` disabled B's buttons.
+    // Same class as c76c1373e: the late write has to prove the run it belongs
+    // to is still the selected one.
+    let rejectCancel!: (e: unknown) => void;
+    authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/agent-runs/schedules")) return okJson({ schedules: [] });
+      if (url === "/api/agent-runs/run-1/cancel") {
+        return new Promise((_resolve, reject) => {
+          rejectCancel = reject;
+        });
+      }
+      const m = /^\/api\/agent-runs\/([^/?]+)$/.exec(url);
+      if (m) {
+        const run = [parked, parked2].find((r) => r.id === decodeURIComponent(m[1]!))!;
+        return okJson({ ...run, trace: [] });
+      }
+      if (url.startsWith("/api/agent-runs")) return okJson({ items: [parked, parked2], nextCursor: null });
+      throw new Error(`unexpected ${url} ${String(init?.method)}`);
+    });
+
+    render(<AgentRunsPanel initialRunId="run-1" />);
+    await screen.findByText("This run is waiting for your approval");
+    fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
+    await waitFor(() => expect(rejectCancel).toBeTruthy());
+
+    // Move to the other run while A's cancel is still in flight.
+    fireEvent.click(screen.getByRole("button", { name: /water the plants/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: /waiting for your approval/i }).textContent).toContain(
+        "water the plants",
+      ),
+    );
+    // B is usable even though A is still working: `busy` is scoped to a run id.
+    expect(screen.getByRole("button", { name: /approve and continue/i })).not.toBeDisabled();
+
+    // A fails, last. Its error belongs to a run nobody is looking at.
+    rejectCancel(new Error("box said no"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/Something went wrong on the box/i)).toBeNull();
+    expect(screen.getByRole("button", { name: /approve and continue/i })).not.toBeDisabled();
   });
 
   it("lists recurring runs, adds one from a preset with the typed time zone, and deletes one", async () => {
