@@ -52,7 +52,12 @@ import pyodbc
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from allowlist import STATEMENT_MISMATCH, UNKNOWN_STATEMENT, check_statement
+from allowlist import (
+    STATEMENT_MISMATCH,
+    UNKNOWN_STATEMENT,
+    check_introspection,
+    check_statement,
+)
 from auth import setup_auth
 from db import (
     BridgeConfigError,
@@ -241,6 +246,26 @@ def _assert_statement_registered(kind: str, name: str, sql: str) -> None:
     )
 
 
+def _assert_introspection_registered(label: str, sql: str) -> None:
+    """WARP-2874 — `/introspect` gets the same first layer as the execute
+    routes. It did not have one: it ran whatever SELECT the wire carried, so a
+    caller holding the service bearer could read anything `droplet_ro` can see
+    through it and never touch the allowlist at all.
+
+    Matched by SHAPE, with no name: the caller chooses the labels (the column
+    pass labels by table name, which is data), so a label can carry no
+    authority. STATEMENT_MISMATCH is the only refusal — there is no name to be
+    unknown."""
+    if check_introspection(sql) is None:
+        return
+    logger.warning("refused introspection query '%s': %s", label, STATEMENT_MISMATCH)
+    raise _fail(
+        400,
+        STATEMENT_MISMATCH,
+        f"introspection query '{label}' is not a registered catalog statement",
+    )
+
+
 def _assert_single_statement(what: str, name: str, sql: str) -> None:
     """Every route runs exactly one statement. A batch is always a caller bug:
     the registries emit one statement per named operation, so more than one
@@ -379,7 +404,8 @@ def apply_write(name: str, req: ExecRequest) -> dict[str, Any]:
 
 @app.post("/introspect")
 def introspect(req: IntrospectRequest) -> dict[str, Any]:
-    """Run the caller-supplied catalog queries and return the raw rows.
+    """Run the caller's catalog queries — from the registered set — and return
+    the raw rows.
 
     The catalog SQL is dialect-specific (SYS.SYSTAB / SYS.SYSTABCOL on SA10+,
     SYSTABLE / SYSCOLUMN on ASA7) and the TypeScript side already knows which
@@ -387,11 +413,21 @@ def introspect(req: IntrospectRequest) -> dict[str, Any]:
     there too, against the same `computeSchemaFingerprint` the drift check uses
     — computing a second hash here would be a second definition of "the schema
     changed".
+
+    "Supplies" no longer means "chooses" (WARP-2874): BOTH dialect families are
+    registered in the manifest, so the caller still picks which one runs, and
+    nothing else runs at all.
     """
-    # Same guard as /read/*, for the same reason: this route also runs on the
-    # read connection, so a non-SELECT here is a caller bug that should fail by
-    # name rather than as a server-side permission error. (The grant is still
-    # what makes it impossible; this makes it obvious.)
+    # WARP-2874. Every query in the batch is checked BEFORE any of them runs:
+    # a registered first query must not buy a connection for the rest.
+    for label, statement in req.queries.items():
+        _assert_introspection_registered(label, statement.sql)
+    # Second layer, same guards as /read/* for the same reason: this route also
+    # runs on the read connection, so a non-SELECT here is a caller bug that
+    # should fail by name rather than as a server-side permission error. (The
+    # grant is still what makes it impossible; this makes it obvious.) Any
+    # statement the allowlist accepts is a single SELECT by construction —
+    # these stay so a manifest bug fails loudly here instead of at the driver.
     for label, statement in req.queries.items():
         _assert_single_statement("introspection query", label, statement.sql)
         if not _is_select(statement.sql):

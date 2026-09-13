@@ -20,8 +20,10 @@
  * (`harness/init/`), including its least-privilege grants. Everything above
  * `pyodbc.connect` is identical either way. What stays unproven until a real
  * install is the SAP connection string and SQL Anywhere's own dialect
- * behaviour; the catalog dialect is therefore injected here rather than
- * assumed (`deps.catalog`), which is the same seam a legacy ASA7 site uses.
+ * behaviour. Since WARP-2874 the lane runs the SHIPPING catalog statements
+ * (the harness defines SQL Anywhere-shaped SYS.* views over the mock schema,
+ * `harness/init/04-sa-catalog.sql`) rather than injecting a Postgres-flavoured
+ * pair — the bridge accepts only the registered ones.
  *
  * Gated on ERP_BRIDGE_LIVE_URL, exported by `scripts/test-erp-sql-bridge.sh`,
  * which boots the database, seeds it, and starts the bridge. Without it the
@@ -45,12 +47,17 @@ const BRIDGE_URL = process.env.ERP_BRIDGE_LIVE_URL;
 const BRIDGE_TOKEN = process.env.SERVICE_TOKEN_ERP_BRIDGE;
 
 /**
- * Postgres-flavoured catalog queries. Shaped to return exactly the columns
- * `introspect()` reads (`table_name` + `owner`, `column_name` + `type`), which
- * is the same contract the SQL Anywhere sets in `introspection.ts` satisfy.
- * The table name binds as `?`, as it does there.
+ * WARP-2874 — this lane used to hand the connector Postgres-flavoured catalog
+ * SQL (`information_schema`), because `/introspect` ran whatever the wire
+ * carried. It no longer does: only the statements in `introspection.ts` are
+ * registered, so the harness answers THOSE — `harness/init/04-sa-catalog.sql`
+ * defines the SYS.SYSTAB / SYS.SYSTABCOL / SYS.SYSUSER / SYS.SYSDOMAIN views
+ * over the mock schema, privilege-filtered the way `information_schema` was.
+ * The lane now introspects with the statements that actually ship.
+ *
+ * An off-registry catalog query is kept only as the refusal case below.
  */
-const PG_CATALOG: CatalogQuerySet = {
+const OFF_REGISTRY_CATALOG: CatalogQuerySet = {
   listTables: `SELECT table_name, table_schema AS owner FROM information_schema.tables
 WHERE table_schema = 'dba' AND table_type = 'BASE TABLE'`,
   listColumns: `SELECT column_name, data_type AS type FROM information_schema.columns
@@ -75,27 +82,37 @@ const makeConnector = (over: ConnectorDeps = {}) =>
   new EaglesoftConnector(CONFIG, {
     bridgeUrl: BRIDGE_URL,
     bridgeAuthToken: BRIDGE_TOKEN,
-    catalog: PG_CATALOG,
     ...over,
   });
 
 /** Raw bridge access for test setup only (reading a guard watermark). The
  *  connector has no read query that exposes `last_modified`, by design — and
- *  since WARP-2540 the bridge itself accepts only registered statement
- *  shapes, so this scaffolding borrows the registered `get_patient` shape
- *  (three columns, one equality predicate) against the appointment table.
- *  Identifier names are free under the allowlist; the shape is not. */
+ *  since WARP-2540 the bridge accepts only registered statement shapes, so
+ *  this scaffolding borrows one: `get_schedule_today` (six columns, a
+ *  half-open window, one ORDER BY) over a window wide enough to hold every
+ *  seeded appointment. Column names are free under the allowlist, so the
+ *  projection can carry `last_modified`; since WARP-2874 the TABLE is not —
+ *  which is why this borrows the one registered read that is already on
+ *  `appointment`, instead of pointing `get_patient` at it. */
 const raw = () => new SqlBridgeClient({ baseUrl: BRIDGE_URL, authToken: BRIDGE_TOKEN });
 
 const VERIFY_APPT_SQL =
-  'SELECT "status", "operatory_id", "last_modified" FROM "dba"."appointment" WHERE "appt_id" = ?';
+  'SELECT "appt_id", "last_modified", "status", "operatory_id", "provider_id", "patient_id" ' +
+  'FROM "dba"."appointment" WHERE "appt_time" >= ? AND "appt_time" < ? ORDER BY "appt_time"';
+const EVERY_APPT: unknown[] = ["2000-01-01T00:00:00", "2100-01-01T00:00:00"];
+
+async function apptRow(apptId: number): Promise<Record<string, unknown>> {
+  const rows = (await raw().runRead("get_schedule_today", {
+    sql: VERIFY_APPT_SQL,
+    params: EVERY_APPT,
+  })) as Record<string, unknown>[];
+  const row = rows.find((r) => Number(r.appt_id) === apptId);
+  if (!row) throw new Error(`appointment ${apptId} not found`);
+  return row;
+}
 
 async function lastModified(apptId: number): Promise<string> {
-  const rows = await raw().runRead("get_patient", {
-    sql: VERIFY_APPT_SQL,
-    params: [apptId],
-  });
-  return String(rows[0].last_modified);
+  return String((await apptRow(apptId)).last_modified);
 }
 
 describe.skipIf(!BRIDGE_URL)("EaglesoftConnector over a live bridge", () => {
@@ -152,20 +169,11 @@ describe.skipIf(!BRIDGE_URL)("EaglesoftConnector over a live bridge", () => {
       expect(b.fingerprint).toBe(a.fingerprint);
     });
 
-    it("produces a different fingerprint for a different schema", async () => {
-      // Introspect the `information_schema` instead: same code path, different
-      // tables, so a fingerprint that ignored content would be caught here.
-      const other = makeConnector({
-        catalog: {
-          listTables: `SELECT table_name, table_schema AS owner FROM information_schema.tables
-WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
-          listColumns: PG_CATALOG.listColumns,
-        },
-      });
-      const subset = await other.introspect();
-      const full = await connector.introspect();
-      expect(subset.fingerprint).not.toBe(full.fingerprint);
-    });
+    // WARP-2874 removed "produces a different fingerprint for a different
+    // schema": it re-proved a PURE property (already covered by
+    // schema-map.test.ts) by introspecting with an ad-hoc catalog query, and
+    // the bridge now runs only the registered pair. The refusal it turned
+    // into lives under "the bridge refuses unregistered statements" below.
   });
 
   describe("named reads execute against real rows", () => {
@@ -238,11 +246,7 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
       });
       expect(result).toEqual({ applied: true, rowCount: 1 });
 
-      const rows = await raw().runRead("get_patient", {
-        sql: VERIFY_APPT_SQL,
-        params: [5002],
-      });
-      expect(rows).toMatchObject([{ status: "confirmed", operatory_id: 2 }]);
+      expect(await apptRow(5002)).toMatchObject({ status: "confirmed", operatory_id: 2 });
     });
 
     it("reports a stale optimistic guard as applied:false, not as an error", async () => {
@@ -255,11 +259,7 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
       });
       expect(result).toEqual({ applied: false, rowCount: 0 });
 
-      const rows = (await raw().runRead("get_patient", {
-        sql: VERIFY_APPT_SQL,
-        params: [5001],
-      })) as Record<string, unknown>[];
-      expect(rows[0].status).not.toBe("cancelled");
+      expect((await apptRow(5001)).status).not.toBe("cancelled");
     });
 
     it("refuses a column outside the allowlist without reaching the database", async () => {
@@ -282,20 +282,43 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
   describe("the bridge refuses unregistered statements (WARP-2540)", () => {
     it("refuses an unknown statement name at the bridge, not the database", async () => {
       await expect(
-        raw().runRead("__not_registered", { sql: VERIFY_APPT_SQL, params: [5001] }),
+        raw().runRead("__not_registered", { sql: VERIFY_APPT_SQL, params: EVERY_APPT }),
       ).rejects.toMatchObject({ code: "UNKNOWN_STATEMENT", status: 400 });
     });
 
     it("refuses a reshaped statement under a registered name", async () => {
       await expect(
-        raw().runRead("get_patient", { sql: `${VERIFY_APPT_SQL} OR 1=1`, params: [5001] }),
+        raw().runRead("get_schedule_today", {
+          sql: `${VERIFY_APPT_SQL} OR 1=1`,
+          params: EVERY_APPT,
+        }),
+      ).rejects.toMatchObject({ code: "STATEMENT_MISMATCH", status: 400 });
+    });
+
+    it("refuses a registry-shaped statement pointed at another table (WARP-2874)", async () => {
+      // `get_patient` and this statement are the same shape — three columns,
+      // one equality predicate — so before the table entered the skeleton the
+      // bridge ran this and logged it as a patient read.
+      await expect(
+        raw().runRead("get_patient", {
+          sql: 'SELECT "appt_id", "status", "reason" FROM "dba"."appointment" WHERE "appt_id" = ?',
+          params: [5001],
+        }),
+      ).rejects.toMatchObject({ code: "STATEMENT_MISMATCH", status: 400 });
+    });
+
+    it("refuses an off-registry catalog query on /introspect (WARP-2874)", async () => {
+      // The route used to run any SELECT the wire carried, which made the
+      // allowlist optional for anything holding the service bearer.
+      await expect(
+        raw().introspect({ tables: { sql: OFF_REGISTRY_CATALOG.listTables, params: [] } }),
       ).rejects.toMatchObject({ code: "STATEMENT_MISMATCH", status: 400 });
     });
   });
 
   describe("honest degradation", () => {
     it("blocks every I/O method when no bridge is configured", async () => {
-      const unwired = new EaglesoftConnector(CONFIG, { catalog: PG_CATALOG });
+      const unwired = new EaglesoftConnector(CONFIG);
       await expect(unwired.connect()).rejects.toBeInstanceOf(ConnectorBlockedError);
       await expect(unwired.health()).rejects.toBeInstanceOf(ConnectorBlockedError);
       await expect(unwired.introspect()).rejects.toBeInstanceOf(ConnectorBlockedError);
@@ -309,7 +332,6 @@ WHERE table_schema = 'dba' AND table_name IN ('patient', 'account')`,
         // Nothing listens here; a bridge container that failed to start looks
         // exactly like this, and must not read as a working integration.
         bridgeUrl: "http://127.0.0.1:9",
-        catalog: PG_CATALOG,
       });
       await expect(orphan.health()).rejects.toBeInstanceOf(ConnectorBlockedError);
     });

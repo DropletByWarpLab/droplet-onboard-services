@@ -5,105 +5,128 @@
     "emitted by the canonical registries in @droplet/erp-connector",
     "(src/read-queries.ts, src/write-commands.ts), normalized by",
     "allowlist.normalize_statement: double-quoted identifiers masked to <id>,",
-    "whitespace collapsed. Identifiers are masked because the registries",
-    "resolve PHYSICAL identifiers through the per-practice introspected schema",
-    "map — the template is the invariant, the names are not.",
+    "whitespace collapsed.",
+    "WARP-2874 — the TABLE of a qualified \"owner\".\"table\" is NOT masked.",
+    "Masking it too made get_open_invoices (invoice) and get_open_bills (bill)",
+    "— and three other groups — normalize alike, so either name admitted the",
+    "other's SQL, and any table droplet_ro can see could be read under a",
+    "registered name. The owner stays masked because it genuinely varies per",
+    "install; the table does not, because resolveTable returns the physical",
+    "name it looked up, which is the registry's own vocabulary.",
+    "WARP-2874 — the introspect section is the catalog SQL of",
+    "src/introspection.ts, both dialect families. /introspect matches on SHAPE",
+    "with no name (the caller labels each query, so a label carries no",
+    "authority); the keys below are for a human reading this file.",
     "Pinned to the registries by",
     "services/erp-connector/__tests__/statement-manifest-sync.test.ts:",
     "edit a registry, re-run that suite, and copy its printed manifest here."
   ],
   "reads": {
     "get_schedule_today": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"appointment\" WHERE <id> >= ? AND <id> < ? ORDER BY <id>"
     ],
     "find_patient": [
-      "SELECT <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id> FROM <id>.\"patient\" WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
     ],
     "get_ar_summary": [
-      "SELECT COUNT(<id>) AS account_count, SUM(<id>) AS total_balance FROM <id>.<id>"
+      "SELECT COUNT(<id>) AS account_count, SUM(<id>) AS total_balance FROM <id>.\"account\""
     ],
     "get_patient": [
-      "SELECT <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ?"
+      "SELECT <id>, <id>, <id> FROM <id>.\"patient\" WHERE <id> = ?"
     ],
     "get_recall_due": [
-      "SELECT <id>, <id>, <id> FROM <id>.<id> ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id> FROM <id>.\"patient\" ORDER BY <id>, <id>"
     ],
     "get_open_invoices": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <> 0 ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"invoice\" WHERE <id> <> 0 ORDER BY <id>, <id>"
     ],
     "get_open_bills": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <> 0 ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"bill\" WHERE <id> <> 0 ORDER BY <id>, <id>"
     ],
     "get_ap_summary": [
-      "SELECT COUNT(<id>) AS vendor_count, SUM(<id>) AS total_balance FROM <id>.<id>"
+      "SELECT COUNT(<id>) AS vendor_count, SUM(<id>) AS total_balance FROM <id>.\"ap_summary\""
     ],
     "get_recent_charges": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"charge\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_refunds": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"refund\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_payouts": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"payout\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_processing_fees": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"balance_transaction\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_subscriptions_by_status": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"subscription\" WHERE <id> = ? ORDER BY <id>, <id>"
     ],
     "find_contact": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"contact\" WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
     ],
     "get_company": [
-      "SELECT <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ?"
+      "SELECT <id>, <id>, <id>, <id> FROM <id>.\"company\" WHERE <id> = ?"
     ],
     "get_deals_by_stage": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"deal\" WHERE <id> = ? ORDER BY <id> DESC, <id>"
     ],
     "get_tickets_by_status": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"ticket\" WHERE <id> = ? ORDER BY <id>, <id>"
     ],
     "get_recent_orders": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"order\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_low_stock_products": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> <= ? ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"product\" WHERE <id> <= ? ORDER BY <id>, <id>"
     ],
     "find_customer": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"customer\" WHERE <id> LIKE ? ESCAPE '\\' ORDER BY <id>, <id>"
     ],
     "get_campaign_performance": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"campaign\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_audiences": [
-      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.<id> ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.\"audience\" ORDER BY <id> DESC, <id>"
     ],
     "get_engagements": [
-      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id> FROM <id>.\"engagement\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_audience_members": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? AND <id> = ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"audience_member\" WHERE <id> = ? AND <id> = ? ORDER BY <id> DESC, <id>"
     ],
     "get_ecommerce_orders": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"ecommerce_order\" WHERE <id> >= ? AND <id> < ? ORDER BY <id> DESC, <id>"
     ],
     "get_bookings": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> >= ? AND <id> < ? ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"booking\" WHERE <id> >= ? AND <id> < ? ORDER BY <id>, <id>"
     ],
     "find_employee": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> LIKE ? ESCAPE '' ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"employee\" WHERE <id> LIKE ? ESCAPE '' ORDER BY <id>, <id>"
     ],
     "get_tasks_by_status": [
-      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.<id> WHERE <id> = ? ORDER BY <id>, <id>"
+      "SELECT <id>, <id>, <id>, <id>, <id>, <id>, <id>, <id> FROM <id>.\"task\" WHERE <id> = ? ORDER BY <id>, <id>"
     ]
   },
   "writes": {
     "reschedule_appointment": [
-      "UPDATE <id>.<id> SET <id> = ? WHERE <id> = ? AND <id> = ?",
-      "UPDATE <id>.<id> SET <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
-      "UPDATE <id>.<id> SET <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
-      "UPDATE <id>.<id> SET <id> = ?, <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?"
+      "UPDATE <id>.\"appointment\" SET <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.\"appointment\" SET <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.\"appointment\" SET <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?",
+      "UPDATE <id>.\"appointment\" SET <id> = ?, <id> = ?, <id> = ?, <id> = ? WHERE <id> = ? AND <id> = ?"
+    ]
+  },
+  "introspect": {
+    "list_tables": [
+      "SELECT t.table_name, u.user_name AS owner FROM SYS.SYSTAB t JOIN SYS.SYSUSER u ON t.creator = u.user_id WHERE t.table_type = 1"
+    ],
+    "list_columns": [
+      "SELECT c.column_name, d.domain_name AS type, c.nulls, c.width, c.scale FROM SYS.SYSTABCOL c JOIN SYS.SYSTAB t ON c.table_id = t.table_id JOIN SYS.SYSDOMAIN d ON c.domain_id = d.domain_id WHERE t.table_name = ? ORDER BY c.column_id"
+    ],
+    "legacy_list_tables": [
+      "SELECT table_name, creator AS owner FROM SYSTABLE WHERE table_type = 'BASE'"
+    ],
+    "legacy_list_columns": [
+      "SELECT column_name, domain_name AS type FROM SYSCOLUMN c JOIN SYSTABLE t ON c.table_id = t.table_id WHERE t.table_name = ? ORDER BY c.column_id"
     ]
   }
 }
