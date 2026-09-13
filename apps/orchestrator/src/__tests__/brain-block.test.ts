@@ -13,11 +13,19 @@
  *             the model will answer "I reviewed all your documents" on the
  *             strength of eight digests
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const visibleScopeFilter = vi.hoisted(() => vi.fn(async () => ({ OR: [{ scope: "personal" }] })));
 vi.mock("../services/brain/brain-digest.service.js", () => ({ visibleScopeFilter }));
 vi.mock("../services/brain/brain-digest.service", () => ({ visibleScopeFilter }));
+
+// WARP-2876 — the consent switch. Mocked here rather than driven through
+// `config` + a `brainSetting` row because `brain-switch.test.ts` already owns
+// which of the two sources decides; what this file owns is that the block
+// OBEYS whatever that resolution answers.
+const isBrainEnabled = vi.hoisted(() => vi.fn(async () => true));
+vi.mock("../services/brain/brain-switch.service.js", () => ({ isBrainEnabled }));
+vi.mock("../services/brain/brain-switch.service", () => ({ isBrainEnabled }));
 
 import {
   buildBrainBlock,
@@ -43,6 +51,74 @@ const finding = {
   impactMinor: 4_000_000n,
   currency: "USD",
 };
+
+beforeEach(() => {
+  isBrainEnabled.mockResolvedValue(true);
+  visibleScopeFilter.mockResolvedValue({ OR: [{ scope: "personal" }] });
+});
+
+/**
+ * WARP-2876 — the consent gate.
+ *
+ * THE DEFECT THIS PINS. `buildBrainBlock` never asked whether the brain was
+ * on. The pass-trigger path did (`index.ts` `preconditions`), so revoking
+ * consent stopped the box WRITING new rows — and left every chat turn still
+ * being handed a system-prompt block built from the rows written before the
+ * revocation. The owner's click stopped the reading and not the telling, which
+ * is the half that reaches the model.
+ *
+ * WHY THE GATE IS IN THIS FUNCTION and not at the two call sites: `routes/llm.ts`
+ * and `prompt-inspect.service.ts` both funnel through here, and a third caller
+ * is the likely shape of the next regression. One guard where they meet.
+ *
+ * 🔴 THIS IS A SERVE GATE, NOT A DELETE. The rows survive, deliberately — see
+ * the service docstring and ADR-051 §9.9.
+ */
+describe("the consent switch (WARP-2876)", () => {
+  it("🔴 serves NOTHING while the brain is off, even with rows sitting there", async () => {
+    isBrainEnabled.mockResolvedValue(false);
+    const prisma = db([finding], [digest]);
+    expect(await buildBrainBlock(prisma, owner)).toBe("");
+  });
+
+  it("🔴 does not even READ the rows while the brain is off", async () => {
+    // Belt and braces: a block assembled and then thrown away still pulled
+    // revoked-consent content into this process. Nothing should be fetched.
+    isBrainEnabled.mockResolvedValue(false);
+    const prisma = db([finding], [digest]) as unknown as Record<
+      string,
+      { findMany: ReturnType<typeof vi.fn> }
+    >;
+    await buildBrainBlock(prisma as never, owner);
+    expect(prisma.brainFinding!.findMany).not.toHaveBeenCalled();
+    expect(prisma.brainDigest!.findMany).not.toHaveBeenCalled();
+    // The scope filter is downstream of the gate, so it must not run either.
+    expect(visibleScopeFilter).not.toHaveBeenCalled();
+  });
+
+  it("sends NO block when the switch itself cannot be read", async () => {
+    // Same posture as the unresolvable-scope case below: an enhancement that
+    // fails OPEN on a consent question serves content nobody has consented to.
+    isBrainEnabled.mockRejectedValueOnce(new Error("db down"));
+    expect(await buildBrainBlock(db([finding], [digest]), owner)).toBe("");
+  });
+
+  it("serves again once the brain is switched back on", async () => {
+    // The off state must be a gate and not a one-way door — the rows were
+    // never deleted, so flipping the switch back restores the block as it was.
+    isBrainEnabled.mockResolvedValue(true);
+    const out = await buildBrainBlock(db([finding], [digest]), owner);
+    expect(out).toContain("net 30");
+    expect(out).toContain("Acme is 90 days past due");
+  });
+
+  it("asks PER CALL, never once — the switch is a row that changes under us", async () => {
+    const prisma = db([finding], [digest]);
+    await buildBrainBlock(prisma, owner);
+    isBrainEnabled.mockResolvedValue(false);
+    expect(await buildBrainBlock(prisma, owner)).toBe("");
+  });
+});
 
 describe("buildBrainBlock (WARP-2752)", () => {
   it("returns EMPTY when there is nothing known", async () => {
