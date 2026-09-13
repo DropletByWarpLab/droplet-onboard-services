@@ -71,12 +71,24 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
+import type { McpCallContext } from "./mcp-client.service.js";
 
 const logger = createLogger("tool-spec-runner");
 
 export interface StepDispatcher {
-  /** Returns the parsed tool result (any JSON shape). Throws on failure. */
-  call(tool: string, args: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Returns the parsed tool result (any JSON shape). Throws on failure.
+   *
+   * `context` is the caller's identity, forwarded to the tool registry the
+   * same way chat forwards it. Without it every per-user tool (calendar,
+   * email, memory) answers AUTH_REQUIRED inside a spec run, which is how the
+   * daily report could never read anything the person had connected.
+   */
+  call(
+    tool: string,
+    args: Record<string, unknown>,
+    context?: McpCallContext,
+  ): Promise<unknown>;
 }
 
 /**
@@ -154,6 +166,11 @@ interface RunArgs {
    * mean "unknown"; pass `DENY_ALL_TOOL_SCOPE`.
    */
   scope?: ToolAccessScope | null;
+  /**
+   * The identity the run's tool calls execute as (username, role, Nextcloud
+   * token). Omitted for a scheduled fire, which has no session to speak of.
+   */
+  callContext?: McpCallContext;
 }
 
 /**
@@ -332,7 +349,7 @@ export function stepOutputName(step: { args: unknown }): string | null {
  */
 function parseCallStep(
   step: { kind: string; args: unknown },
-): { tool: string; args: Record<string, unknown> } | null {
+): { tool: string; args: Record<string, unknown>; optional: boolean } | null {
   if (step.kind !== "call") return null;
   if (typeof step.args !== "object" || step.args === null) return null;
   const a = step.args as Record<string, unknown>;
@@ -341,7 +358,12 @@ function parseCallStep(
     a.args !== undefined && typeof a.args === "object" && a.args !== null
       ? (a.args as Record<string, unknown>)
       : {};
-  return { tool: a.tool, args: inner };
+  // `optional: true` — a failure of THIS step is recorded in the trace and
+  // the walk continues, instead of halting the run. For a report that reads
+  // many sources, one unreadable source is a fact for the narrative, not a
+  // reason to write no narrative at all. Access denials and malformed steps
+  // still halt regardless: those are authoring/authorization problems.
+  return { tool: a.tool, args: inner, optional: a.optional === true };
 }
 
 /**
@@ -549,7 +571,11 @@ export async function runToolSpec(
     }
 
     try {
-      const result = await dispatcher.call(parsed.tool, resolvedArgs);
+      // Arity preserved when there is no context: the ticker, and every
+      // existing dispatcher mock, still see the two-argument call.
+      const result = args.callContext
+        ? await dispatcher.call(parsed.tool, resolvedArgs, args.callContext)
+        : await dispatcher.call(parsed.tool, resolvedArgs);
       const outName = stepOutputName(step);
       trace.push({
         idx: step.idx,
@@ -570,6 +596,13 @@ export async function runToolSpec(
         ok: false,
         error: msg,
       });
+      if (parsed.optional) {
+        // Recorded above as a failed step; a later summarize step renders it
+        // as "COULD NOT BE READ". `prev` is cleared so a `${prev}` reference
+        // in the next step reads null rather than a stale earlier result.
+        prev = null;
+        continue;
+      }
       outcome = {
         status: "failed",
         trace,

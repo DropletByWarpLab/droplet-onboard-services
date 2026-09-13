@@ -211,9 +211,13 @@ export function reportFromRun(run: ToolRunRow): DailyReport | null {
     runId: run.id,
     at: run.endedAt ?? run.startedAt,
     prose: summary.result.trim(),
-    // Every tool that actually ran, in run order. Derived so a spec change
-    // updates the chips without anyone editing the tile.
-    sources: trace.filter((t) => t.tool !== SUMMARIZE_PSEUDO_TOOL).map((t) => t.tool),
+    // Every tool that actually FED the report, in run order. Derived so a
+    // spec change updates the chips without anyone editing the tile. A step
+    // that failed (an unconnected source, an unreadable one) contributed
+    // nothing, so it is not provenance.
+    sources: trace
+      .filter((t) => t.ok && t.tool !== SUMMARIZE_PSEUDO_TOOL)
+      .map((t) => t.tool),
     status: run.status,
   };
 }
