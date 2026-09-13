@@ -80,7 +80,7 @@ directly). `src/sql-bridge-client.ts` is this side of the wire:
 | Method + path | Body | Returns | Notes |
 |---|---|---|---|
 | `GET /health` | — | `{ ok, reason?, lastReadAt, pool }` | `SELECT 1`-class probe (§7.3). `ok:false` when the practice's DB is unreachable — a running bridge is not a working one. The connector adds the drift state, which it owns. |
-| `POST /introspect` | `{ queries, target? }` | `{ results }` | Runs caller-supplied catalog queries. Fingerprinting stays in TypeScript, against the same `computeSchemaFingerprint` the drift check uses (§9.2) — a second hash would be a second definition of "the schema changed". |
+| `POST /introspect` | `{ queries, target? }` | `{ results }` | Runs the registered catalog queries (WARP-2874 — the bridge allowlists these too). Fingerprinting stays in TypeScript, against the same `computeSchemaFingerprint` the drift check uses (§9.2) — a second hash would be a second definition of "the schema changed". |
 | `POST /read/:query` | `{ sql, params, target? }` | `{ rows, rowCount }` | Executes an **already-built** named read as `droplet_ro` (invariant 4). A non-SELECT is refused. |
 | `POST /write/:command` | `{ sql, params, target? }` | `{ rowCount, applied }` | Executes an **already-built** named write in ONE transaction as `droplet_rw` (§11.1 step 3). `rowCount: 0` is the optimistic guard missing, not an error. Gated by write opt-in + confirmation + drift re-check upstream. |
 

@@ -95,7 +95,10 @@ done
 echo "--- applying the mock PattersonPM schema + least-privilege grants ---"
 psql_super() { "$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U "$PG_SUPERUSER" -v ON_ERROR_STOP=1 "$@"; }
 psql_super -d postgres -q -c "CREATE DATABASE $PG_DB"
-for f in 01-schema.sql 02-seed.sql 03-provision.sql; do
+# 04-sa-catalog.sql (WARP-2874): SQL Anywhere-shaped SYS.* views, so the lane
+# introspects with the statements that ship instead of Postgres catalog SQL —
+# which the bridge no longer accepts.
+for f in 01-schema.sql 02-seed.sql 03-provision.sql 04-sa-catalog.sql; do
   psql_super -d "$PG_DB" -q -f "$HARNESS_INIT/$f"
 done
 # 03-provision.sql grants SELECT on the mapped tables but cannot grant CONNECT

@@ -50,6 +50,19 @@ GET_PATIENT_SQL = (
     'FROM "dba"."patient" '
     'WHERE "patient_id" = ?'
 )
+# WARP-2874 — the registered catalog statements, as
+# `erp-connector/src/introspection.ts` emits them (modern family; the harness
+# defines the SYS.* views they read in `harness/init/04-sa-catalog.sql`).
+LIST_TABLES_SQL = """SELECT t.table_name, u.user_name AS owner
+FROM SYS.SYSTAB t
+JOIN SYS.SYSUSER u ON t.creator = u.user_id
+WHERE t.table_type = 1"""
+LIST_COLUMNS_SQL = """SELECT c.column_name, d.domain_name AS type, c.nulls, c.width, c.scale
+FROM SYS.SYSTABCOL c
+JOIN SYS.SYSTAB t ON c.table_id = t.table_id
+JOIN SYS.SYSDOMAIN d ON c.domain_id = d.domain_id
+WHERE t.table_name = ?
+ORDER BY c.column_id"""
 AR_SUMMARY_SQL = (
     'SELECT COUNT("account_id") AS account_count, SUM("balance") AS total_balance '
     'FROM "dba"."account"'
@@ -479,27 +492,29 @@ class TestWrite:
 
 
 class TestIntrospect:
+    """WARP-2874. This route now runs only the registered catalog statements,
+    so the queries below are the real ones from
+    `erp-connector/src/introspection.ts` — answered here by the SQL
+    Anywhere-shaped views `harness/init/04-sa-catalog.sql` defines over the
+    mock schema. Before the fix the lane handed the bridge Postgres
+    `information_schema` SQL, which is exactly the freedom that was the bug."""
+
     def test_runs_every_labelled_query_and_keys_the_results(self, client):
         r = client.post(
             "/introspect",
             json={
                 "queries": {
-                    "tables": {
-                        "sql": "SELECT table_name FROM information_schema.tables "
-                        "WHERE table_schema = ? ORDER BY table_name",
-                        "params": ["dba"],
-                    },
-                    "columns": {
-                        "sql": "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
-                        "params": ["dba", "appointment"],
-                    },
+                    "tables": {"sql": LIST_TABLES_SQL, "params": []},
+                    "appointment": {"sql": LIST_COLUMNS_SQL, "params": ["appointment"]},
                 }
             },
         )
         assert r.status_code == 200
         results = r.json()["results"]
-        assert [t["table_name"] for t in results["tables"]] == [
+        # The read account holds SELECT on exactly these eight (03-provision),
+        # and the catalog views are privilege-filtered — a table `droplet_ro`
+        # cannot read is not part of the schema it introspects.
+        assert sorted(t["table_name"] for t in results["tables"]) == [
             "account",
             "appointment",
             "operatory",
@@ -509,46 +524,75 @@ class TestIntrospect:
             "serv_trans",
             "service",
         ]
-        assert [c["column_name"] for c in results["columns"]][:3] == [
+        assert all(t["owner"] == "dba" for t in results["tables"])
+        assert [c["column_name"] for c in results["appointment"]][:3] == [
             "appt_id",
             "patient_id",
             "provider_id",
         ]
 
-    def test_a_bad_catalog_query_is_a_query_error(self, client):
-        r = client.post("/introspect", json={"queries": {"tables": {"sql": "SELECT * FROM SYS.SYSTAB"}}})
-        assert r.status_code == 502
-        assert r.json()["code"] == "QUERY_FAILED"
-
-    def test_a_non_select_is_refused_on_the_introspect_route_too(self, client):
-        """This route also runs on the read connection, so it carries the same
-        guard — otherwise it would be the one way to hand a write to
-        `droplet_ro` and get a server-side permission error instead of a
-        by-name refusal."""
+    def test_an_unregistered_catalog_query_never_reaches_the_database(self, client):
+        """The hole WARP-2874 closed. This SELECT is valid here — it is what
+        the lane used to introspect with — and it is refused by the allowlist
+        now, with a 400 rather than a 200 full of rows."""
         r = client.post(
             "/introspect",
             json={
                 "queries": {
-                    "tables": {"sql": "SELECT table_name FROM information_schema.tables"},
+                    "tables": {
+                        "sql": "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = ? ORDER BY table_name",
+                        "params": ["dba"],
+                    }
+                }
+            },
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "STATEMENT_MISMATCH"
+
+    def test_reading_a_patient_table_through_introspection_is_refused(self, client):
+        """The exposure in one line: the service bearer could read anything
+        `droplet_ro` can see through this route, allowlist or not."""
+        r = client.post(
+            "/introspect",
+            json={"queries": {"tables": {"sql": "SELECT * FROM dba.patient", "params": []}}},
+        )
+        assert r.status_code == 400
+        assert r.json()["code"] == "STATEMENT_MISMATCH"
+
+    def test_a_non_select_is_refused_on_the_introspect_route_too(self, client):
+        """This route also runs on the read connection, so it carries the same
+        guards — otherwise it would be the one way to hand a write to
+        `droplet_ro` and get a server-side permission error instead of a
+        by-name refusal. Since WARP-2874 the allowlist refuses it first, which
+        is why the code is STATEMENT_MISMATCH and not NOT_A_READ; the
+        kind/batch guards stay behind it as the second layer."""
+        r = client.post(
+            "/introspect",
+            json={
+                "queries": {
+                    "tables": {"sql": LIST_TABLES_SQL},
                     "sneaky": {"sql": "UPDATE dba.appointment SET status = 'x'"},
                 }
             },
         )
         assert r.status_code == 400
-        assert r.json()["code"] == "NOT_A_READ"
+        assert r.json()["code"] == "STATEMENT_MISMATCH"
         assert "sneaky" in r.json()["message"]
 
     def test_a_batch_is_refused_on_the_introspect_route_too(self, client):
         r = client.post(
             "/introspect",
-            json={"queries": {"t": {"sql": "SELECT 1; UPDATE dba.appointment SET status = 'x'"}}},
+            json={"queries": {"t": {"sql": LIST_TABLES_SQL + "; UPDATE dba.appointment SET status = 'x'"}}},
         )
         assert r.status_code == 400
-        assert r.json()["code"] == "NOT_A_SINGLE_STATEMENT"
+        assert r.json()["code"] == "STATEMENT_MISMATCH"
 
     def test_introspection_uses_the_read_identity(self, client, env):
         env(ERP_DB_RO_PASSWORD=None)
-        r = client.post("/introspect", json={"queries": {"t": {"sql": "SELECT 1"}}})
+        r = client.post(
+            "/introspect", json={"queries": {"tables": {"sql": LIST_TABLES_SQL, "params": []}}}
+        )
         assert r.json()["code"] == "NOT_CONFIGURED"
 
 
