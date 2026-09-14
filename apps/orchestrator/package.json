@@ -84,7 +84,7 @@
     "grpc-tools": "^1.13.1",
     "prisma": "^5.14.0",
     "supertest": "^7.0.0",
-    "ts-proto": "^2.12.1",
+    "ts-proto": "^2.12.3",
     "tsx": "^4.23.13",
     "typescript": "^5.4.5",
     "vitest": "^3.2.6",
