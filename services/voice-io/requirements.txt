@@ -1,6 +1,6 @@
 # Runtime deps the running service needs. Test deps live in
 # requirements-dev.txt (matches file-indexer / camera-discovery split).
-sounddevice==0.5.5        # PortAudio binding — preferred over PyAudio for clean shutdown + numpy interop
+sounddevice==0.5.6        # PortAudio binding — preferred over PyAudio for clean shutdown + numpy interop
 # Audio buffer math. On numpy 2.x because scipy 1.18 requires
 # numpy>=2.0,<2.8 — pinning 1.26.4 makes the requirements file
 # unresolvable against the scipy pin below.
