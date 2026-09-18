@@ -1,6 +1,6 @@
 #!/bin/sh
-# droplet-ssh-access — WARP-1984. The privileged half of the dashboard's
-# "Allow SSH" toggle (Network → System).
+# droplet-ssh-access — WARP-1984, WARP-2887. The privileged half of the
+# dashboard's "Allow SSH" toggle (Network → System), and of the login it uses.
 #
 # Runs as root from droplet-ssh-access.service, which is started by
 # droplet-ssh-access.path whenever the orchestrator rewrites the intent file.
@@ -16,13 +16,32 @@
 #   * it is NEVER an EnvironmentFile on the unit. EnvironmentFile loads EVERY
 #     key, so a compromised container could set an unrelated variable and have
 #     this root service act on it — the LPE that PR #551 nearly shipped;
-#   * exactly ONE key is read, by a regex anchored to the whole line, and its
-#     value must match `on` or `off` EXACTLY. Anything else — a missing key, a
-#     second key, a shell metacharacter, a 4 GB file of junk — is refused
-#     without acting. There is no code path from file contents to a command.
+#   * exactly THREE keys are read, each by a regex anchored to the whole line
+#     whose capture group IS the grammar: `on|off` for the access key, a POSIX
+#     portable username for the login key, a `$6$` shadow hash for the hash
+#     key. Anything else — a missing key, a shell metacharacter, a second
+#     value, a 4 GB file of junk — is refused without acting. There is no
+#     code path from file contents to a command.
 #
-# The value is never interpolated into a command either: it selects between
-# two fixed literal branches below.
+# The access value is never interpolated into a command: it selects between
+# two fixed literal branches below. The login values ARE passed to commands
+# (`useradd`, `chpasswd -e`) — as validated ARGUMENTS, never through a shell
+# re-parse, and only after the charset grammar above has run. The sshd
+# configuration this writes is a static block that contains no value from the
+# file at all.
+#
+# ── WHAT THE LOGIN HALF MAY AND MAY NOT TOUCH (WARP-2887) ───────────────────
+#   * it manages accounts in the `droplet-ssh` group ONLY. An existing account
+#     that is not in that group — root, droplet, anything the OS or the
+#     product created — is refused by name, so this file cannot be used to
+#     take over a system user by writing its name into the intent;
+#   * exactly one login is live at a time: every other group member is locked
+#     when a new one is applied, so an old credential does not linger;
+#   * password authentication is enabled for that group and nobody else
+#     (`Match Group droplet-ssh`); every other account stays key-only;
+#   * the login is granted `sudo`, because a troubleshooting session that
+#     cannot read `journalctl` or restart a service is not one. The dashboard
+#     copy says so.
 #
 # ── LAN-ONLY, BY OMISSION AND ON PURPOSE ────────────────────────────────────
 # This script starts and stops sshd. It does NOT touch nftables/iptables, does
@@ -42,6 +61,11 @@ STATE_DIR="${DROPLET_SSH_ACCESS_DIR:-/var/lib/droplet-ssh-access}"
 # comments in docker/docker-compose.yml.
 INTENT_FILE="$STATE_DIR/intent.d/intent"
 STATE_FILE="$STATE_DIR/state"
+# WARP-2887. The group that marks an account as ours to manage, and the main
+# sshd config the Match block is appended to. Overridable for the test
+# harness only.
+SSH_GROUP="droplet-ssh"
+SSHD_CONFIG="${DROPLET_SSHD_CONFIG:-/etc/ssh/sshd_config}"
 
 log() { logger -t droplet-ssh-access "$@" 2>/dev/null || echo "droplet-ssh-access: $*" >&2; }
 
@@ -50,19 +74,36 @@ if [ ! -r "$INTENT_FILE" ]; then
   exit 0
 fi
 
-# Read ONE key. The `{s//\1/p;q}` form quits the moment the anchored line
-# matches, so sed never reads past the value it acts on. The previous
-# `... | head -n1` bounded the MATCHES but not the READING: head can only
-# SIGPIPE sed after a printed line arrives, so this root process could be
-# made to chew through an arbitrarily large container-written file even
-# after finding its value. (A file with NO matching line is still scanned to
-# EOF — and then refused below.) The anchor means a line like
+# Read the keys in ONE bounded pass. The access-key expression ends in `q`, so
+# sed quits the moment that anchored line matches and never reads past it.
+# The previous `... | head -n1` bounded the MATCHES but not the READING: head
+# can only SIGPIPE sed after a printed line arrives, so this root process
+# could be made to chew through an arbitrarily large container-written file
+# even after finding its value. (A file with NO access line is still scanned
+# to EOF — and then refused below.) The anchors mean a line like
 # `DROPLET_SSH_ACCESS=on; rm -rf /` does not match at all rather than
-# matching loosely, and the empty s-regex reuses the address, so there is
-# exactly one pattern to keep correct.
-value="$(sed -n \
-  '/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/{s//\1/p;q;}' \
+# matching loosely, and each empty s-regex reuses its own address, so there
+# is exactly one pattern per key to keep correct.
+#
+# WARP-2887 — the two login keys ride the same pass, and their capture group
+# IS the grammar: a name is `[a-z][a-z0-9_-]*` (length checked below), a hash
+# is `$6$` + 1..16 salt chars + `$` + exactly 86 hash chars, all from the
+# shadow alphabet. A line that does not match the grammar simply does not
+# match, so `DROPLET_SSH_LOGIN_USER=root; rm -rf /` yields nothing at all.
+# They are matched BEFORE the access key because the pass stops there: the
+# orchestrator writes them above it for exactly this reason, and a login key
+# placed below the access key is — by construction — never read.
+parsed="$(sed -n \
+  -e '/^[[:space:]]*DROPLET_SSH_LOGIN_USER[[:space:]]*=[[:space:]]*\([a-z][a-z0-9_-]*\)[[:space:]]*$/{s//user=\1/p;d;}' \
+  -e '\%^[[:space:]]*DROPLET_SSH_LOGIN_HASH[[:space:]]*=[[:space:]]*\(\$6\$[./0-9A-Za-z]\{1,16\}\$[./0-9A-Za-z]\{86\}\)[[:space:]]*$%{s//hash=\1/p;d;}' \
+  -e '/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/{s//access=\1/p;q;}' \
   "$INTENT_FILE" 2>/dev/null)"
+# `parsed` holds at most a handful of `key=validated-value` lines; the first
+# occurrence of each key wins. These reads are over that small string, never
+# over the file again.
+value="$(printf '%s\n' "$parsed" | sed -n 's/^access=//p' | head -n 1)"
+login_user="$(printf '%s\n' "$parsed" | sed -n 's/^user=//p' | head -n 1)"
+login_hash="$(printf '%s\n' "$parsed" | sed -n 's/^hash=//p' | head -n 1)"
 
 # Validate against the two literals. Default branch refuses.
 case "$value" in
@@ -89,6 +130,127 @@ if [ -z "$unit" ]; then
   log "no ssh/sshd unit on this host; cannot apply '$value'"
   exit 0
 fi
+
+# ── WARP-2887: the login ──────────────────────────────────────────────────────
+
+# The one non-static edit this script makes to sshd: a Match block appended to
+# the END of the main config, between sentinels, so it is the last thing sshd
+# parses. Deliberately not a sshd_config.d drop-in: those are Included at the
+# TOP of the Ubuntu config, and a Match block there stays open into the
+# parent file's remaining global directives — the kind of interaction that
+# reads fine in `sshd -t` and misbehaves at login. The block's content is
+# fixed text; no value from the intent file is ever written into it.
+install_sshd_match() {
+  [ -f "$SSHD_CONFIG" ] || { log "no sshd config at $SSHD_CONFIG"; return 1; }
+  if ! grep -q '^# >>> droplet-ssh-access' "$SSHD_CONFIG"; then
+    _tmp="$SSHD_CONFIG.droplet-ssh-access.tmp"
+    cp -p "$SSHD_CONFIG" "$_tmp" || return 1
+    {
+      printf '\n# >>> droplet-ssh-access (WARP-2887) — managed block, do not edit\n'
+      printf '# Password login for the owner-set troubleshooting account only.\n'
+      printf 'Match Group %s\n' "$SSH_GROUP"
+      printf '    PasswordAuthentication yes\n'
+      printf '# <<< droplet-ssh-access\n'
+    } >>"$_tmp" || { rm -f "$_tmp"; return 1; }
+    mv -f "$_tmp" "$SSHD_CONFIG" || return 1
+    # A config sshd refuses is worse than no login: strip the block again so
+    # the next sshd start cannot fail on it.
+    if command -v sshd >/dev/null 2>&1 && ! sshd -t >/dev/null 2>&1; then
+      remove_sshd_match
+      log "sshd rejected the Match block; removed it"
+      return 1
+    fi
+    # Only a running sshd needs to be told; a stopped one reads the file at
+    # its next start (the `on` branch below), and a missing reload is not an
+    # error worth failing the login over.
+    systemctl reload "$unit.service" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+remove_sshd_match() {
+  _tmp="$SSHD_CONFIG.droplet-ssh-access.tmp"
+  sed '/^# >>> droplet-ssh-access/,/^# <<< droplet-ssh-access/d' "$SSHD_CONFIG" >"$_tmp" &&
+    mv -f "$_tmp" "$SSHD_CONFIG"
+}
+
+# Is this account one of ours? True only for a member of $SSH_GROUP — which
+# is the only kind this script ever creates.
+is_managed_account() {
+  id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$SSH_GROUP"
+}
+
+apply_login() {
+  # The grammar above bounds the charset; bound the length here (POSIX
+  # useradd refuses >32 anyway, but refuse it ourselves so the reason is in
+  # OUR log, not useradd's).
+  if [ "${#login_user}" -gt 32 ]; then
+    log "refusing login: username longer than 32 characters"
+    return 1
+  fi
+  # Names this script will never manage, whatever the intent says. The
+  # membership check below would refuse these too (none is in $SSH_GROUP);
+  # naming them keeps the refusal explicit for the two anyone would try.
+  case "$login_user" in
+    root|droplet)
+      log "refusing login: '$login_user' is a system account"
+      return 1
+      ;;
+  esac
+  getent group "$SSH_GROUP" >/dev/null 2>&1 || groupadd "$SSH_GROUP" || return 1
+  if getent passwd "$login_user" >/dev/null 2>&1; then
+    if ! is_managed_account "$login_user"; then
+      log "refusing login: '$login_user' exists and is not a $SSH_GROUP account"
+      return 1
+    fi
+  else
+    useradd -m -s /bin/bash -G "$SSH_GROUP" "$login_user" || return 1
+    log "created login account '$login_user'"
+  fi
+  # Administrative access: a troubleshooting session without it is decorative.
+  usermod -aG sudo "$login_user" || return 1
+  # `chpasswd -e` takes the hash as-is; the value is the validated capture
+  # from the sed above and is never re-parsed by a shell.
+  printf '%s:%s\n' "$login_user" "$login_hash" | chpasswd -e || return 1
+  usermod -U "$login_user" >/dev/null 2>&1 || true
+  # Exactly one live login. Lock every other member of the group so a
+  # superseded credential stops working the moment a new one is set.
+  for _member in $(getent group "$SSH_GROUP" | cut -d: -f4 | tr ',' ' '); do
+    [ "$_member" = "$login_user" ] && continue
+    usermod -L "$_member" >/dev/null 2>&1 && log "locked previous login '$_member'"
+  done
+  install_sshd_match || return 1
+  log "login '$login_user' applied"
+  return 0
+}
+
+login_result=none
+if [ -n "$login_user" ] || [ -n "$login_hash" ]; then
+  # Both keys or neither. One without the other is a malformed request and
+  # is refused rather than half-applied.
+  login_result=refused
+  if [ -n "$login_user" ] && [ -n "$login_hash" ] && apply_login; then
+    login_result=applied
+  else
+    log "refusing login request; leaving accounts untouched"
+  fi
+fi
+
+# What the SYSTEM says the live login is — never what the intent asked for.
+# The first unlocked member of the group (`passwd -S` field 2 is `P` for a
+# usable password). Empty when there is none, or when the tools are absent.
+live_login=""
+if getent group "$SSH_GROUP" >/dev/null 2>&1; then
+  for _member in $(getent group "$SSH_GROUP" | cut -d: -f4 | tr ',' ' '); do
+    _st="$(passwd -S "$_member" 2>/dev/null | cut -d' ' -f2)"
+    if [ "$_st" = "P" ]; then
+      live_login="$_member"
+      break
+    fi
+  done
+fi
+
+# ── WARP-1984: the door ───────────────────────────────────────────────────────
 
 # Two fixed branches — the parsed value chooses between them, it is never part
 # of a command.
@@ -118,5 +280,9 @@ tmp="$STATE_FILE.tmp"
   echo "state=$value"
   echo "changed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "unit=$unit.service"
+  # WARP-2887. `login_user` is the account the system holds a usable password
+  # for (or empty); `login_result` is what happened to THIS run's login keys.
+  echo "login_user=$live_login"
+  echo "login_result=$login_result"
 } >"$tmp"
 mv -f "$tmp" "$STATE_FILE"

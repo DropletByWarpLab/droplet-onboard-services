@@ -36,18 +36,32 @@ vi.mock("../config.js", () => ({ config: configMock }));
 // The service is the host boundary — it writes the intent file a root systemd
 // path unit watches. Mocked so the assertion is "the dispatcher reached the
 // boundary with the right value", which is exactly what was missing.
-vi.mock("../services/ssh-access.service.js", () => ({
-  readSshAccess: vi.fn().mockResolvedValue({
-    enabled: false,
-    status: "applied",
-    changedAt: "2026-08-20T00:00:00Z",
-  }),
-  setSshAccess: vi.fn().mockResolvedValue({
-    enabled: true,
-    status: "pending",
-    changedAt: null,
-  }),
-}));
+vi.mock("../services/ssh-access.service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/ssh-access.service.js")>(
+    "../services/ssh-access.service.js",
+  );
+  return {
+    ...actual, // WARP-2887: the username grammar + reserved names stay real
+    readSshAccess: vi.fn().mockResolvedValue({
+      enabled: false,
+      status: "applied",
+      changedAt: "2026-08-20T00:00:00Z",
+      login: { username: null, status: "none" },
+    }),
+    setSshAccess: vi.fn().mockResolvedValue({
+      enabled: true,
+      status: "pending",
+      changedAt: null,
+      login: { username: null, status: "none" },
+    }),
+    setSshLogin: vi.fn().mockResolvedValue({
+      enabled: false,
+      status: "applied",
+      changedAt: "2026-08-20T00:00:00Z",
+      login: { username: "support", status: "pending" },
+    }),
+  };
+});
 
 import { registerSshRoutes } from "../routes/network-ssh.routes.js";
 import { registerStatusRoutes } from "../routes/network-status.routes.js";
@@ -178,5 +192,89 @@ describe("the minted token round-trips through /api/network/command/confirm", ()
 
     expect(confirm.status).toBe(400);
     expect(sshAccessService.setSshAccess).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-2887 — the login the door uses ──────────────────────────────────────
+//
+// Same pipeline as the toggle, and the same reason for testing it end to end:
+// the property that matters — plaintext never crosses the mint/confirm seam —
+// is only visible when the real safety service sits between the two routes.
+describe("set_ssh_login tier contract", () => {
+  it("is Tier 3 — confirmation required, never AI-triggerable", () => {
+    const c = classifyNetworkCommand("set_ssh_login");
+    expect(c.tier).toBe(3);
+    expect(c.requiresConfirmation).toBe(true);
+  });
+});
+
+describe("POST /api/network/ssh/login", () => {
+  it("mints only: 202 + token, and no write reaches the host", async () => {
+    const res = await request(buildFullApp())
+      .post("/api/network/ssh/login")
+      .send({ username: "support", password: "correct horse battery" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      status: "confirmation_required",
+      operation: "set_ssh_login",
+      tier: 3,
+    });
+    expect(res.body.confirmationToken).toBeTruthy();
+    expect(sshAccessService.setSshLogin).not.toHaveBeenCalled();
+    // The plaintext is not echoed back in any form.
+    expect(JSON.stringify(res.body)).not.toContain("correct horse battery");
+  });
+
+  it.each([
+    ["an uppercase username", { username: "Support", password: "correct horse battery" }],
+    ["a username starting with a digit", { username: "1support", password: "correct horse battery" }],
+    ["a username with a shell metacharacter", { username: "sup;port", password: "correct horse battery" }],
+    ["a 33-character username", { username: "a".repeat(33), password: "correct horse battery" }],
+    ["the root account", { username: "root", password: "correct horse battery" }],
+    ["the droplet account", { username: "droplet", password: "correct horse battery" }],
+    ["a short password", { username: "support", password: "short" }],
+    ["a password with a newline", { username: "support", password: "correct horse\nbattery staple" }],
+    ["a missing password", { username: "support" }],
+  ])("rejects %s before any token exists", async (_label, body) => {
+    const res = await request(buildFullApp()).post("/api/network/ssh/login").send(body);
+    expect(res.status).toBe(400);
+    expect(sshAccessService.setSshLogin).not.toHaveBeenCalled();
+  });
+});
+
+describe("the login token round-trips through /api/network/command/confirm", () => {
+  it("reaches the host with the username and a $6$ hash — never the password", async () => {
+    const app = buildFullApp();
+
+    const mint = await request(app)
+      .post("/api/network/ssh/login")
+      .send({ username: "support", password: "correct horse battery" });
+    expect(mint.status).toBe(202);
+
+    const confirm = await request(app)
+      .post("/api/network/command/confirm")
+      .send({
+        confirmationToken: mint.body.confirmationToken,
+        operation: mint.body.operation,
+      });
+
+    expect(confirm.status).toBe(200);
+    expect(confirm.body).toMatchObject({ status: "ok", operation: "set_ssh_login", confirmed: true });
+    expect(sshAccessService.setSshLogin).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(sshAccessService.setSshLogin).mock.calls[0][0];
+    expect(arg.username).toBe("support");
+    expect(arg.passwordHash).toMatch(/^\$6\$[./0-9A-Za-z]{16}\$[./0-9A-Za-z]{86}$/);
+    expect(JSON.stringify(arg)).not.toContain("correct horse battery");
+  });
+
+  it("a token minted for the toggle cannot be redeemed as a login", async () => {
+    const app = buildFullApp();
+    const mint = await request(app).post("/api/network/ssh").send({ enabled: true });
+    const confirm = await request(app)
+      .post("/api/network/command/confirm")
+      .send({ confirmationToken: mint.body.confirmationToken, operation: "set_ssh_login" });
+    expect(confirm.status).toBe(400);
+    expect(sshAccessService.setSshLogin).not.toHaveBeenCalled();
   });
 });

@@ -348,3 +348,72 @@ describe("the artefacts ship through setup.sh, not by hand (guard rule 20)", () 
     expect(INSTALLER).not.toMatch(/systemctl\s+enable\s+(--now\s+)?droplet-ssh-access\.service/);
   });
 });
+
+describe("the login half (WARP-2887) keeps the same posture", () => {
+  const body = code(SCRIPT);
+
+  it("reads the two login keys in the same single bounded pass, ahead of the access key", () => {
+    expect(body).toMatch(/DROPLET_SSH_LOGIN_USER\[\[:space:\]\]\*=/);
+    expect(body).toMatch(/DROPLET_SSH_LOGIN_HASH\[\[:space:\]\]\*=/);
+    // The capture group IS the grammar: a portable username, a $6$ hash.
+    expect(body).toMatch(/\\\(\[a-z\]\[a-z0-9_-\]\*\\\)/);
+    expect(body).toMatch(/\\\$6\\\$\[\.\/0-9A-Za-z\]\\\{1,16\\\}\\\$\[\.\/0-9A-Za-z\]\\\{86\\\}/);
+    // The pass still quits at the access key — the only `q` — so a
+    // never-ending file cannot hang this root process (the fifo case in
+    // tests/droplet-ssh-access.test.sh), and the login expressions sit
+    // before it in the same sed invocation.
+    expect(body.match(/;q;\}/g)?.length).toBe(1);
+    const user = body.indexOf("s//user=\\1/p;d;");
+    const hash = body.indexOf("s//hash=\\1/p;d;");
+    const access = body.indexOf("s//access=\\1/p;q;");
+    expect(user).toBeGreaterThan(-1);
+    expect(hash).toBeGreaterThan(user);
+    expect(access).toBeGreaterThan(hash);
+    // No second read of the file: every later extraction is over `$parsed`.
+    expect(body.match(/"\$INTENT_FILE"/g)?.length).toBe(2); // the -r test + the one sed
+  });
+
+  it("manages accounts in the droplet-ssh group only and refuses root/droplet by name", () => {
+    expect(body).toMatch(/SSH_GROUP="droplet-ssh"/);
+    expect(body).toMatch(/root\|droplet\)/);
+    expect(body).toMatch(/is_managed_account/);
+    expect(body).toMatch(/useradd -m -s \/bin\/bash -G "\$SSH_GROUP"/);
+  });
+
+  it("hands the hash to chpasswd -e and never to a shell", () => {
+    expect(body).toMatch(/chpasswd -e/);
+    expect(body).not.toMatch(/\beval\b/);
+    expect(body).not.toMatch(/\bpasswd\s+"\$login_user"\s*<</);
+  });
+
+  it("never writes a value from the intent file into the sshd config", () => {
+    // The Match block is fixed text between sentinels; the group name comes
+    // from this script's own constant, not from the file. Read the function
+    // that writes the block and assert no intent-derived variable appears in
+    // it at all.
+    const fn = /install_sshd_match\(\) \{\n([\s\S]*?)\n\}/.exec(body)?.[1];
+    expect(fn).toBeTruthy();
+    expect(fn).toMatch(/Match Group %s/);
+    expect(fn).not.toMatch(/\$login_/);
+    expect(fn).not.toMatch(/\$parsed/);
+  });
+
+  it("validates the sshd config it wrote and backs out on refusal", () => {
+    expect(body).toMatch(/sshd -t/);
+    expect(body).toMatch(/remove_sshd_match/);
+  });
+
+  it("locks every other droplet-ssh member so exactly one login is live", () => {
+    expect(body).toMatch(/usermod -L "\$_member"/);
+  });
+
+  it("reports the login the SYSTEM holds, not the one the intent asked for", () => {
+    expect(body).toMatch(/passwd -S "\$_member"/);
+    expect(body).toMatch(/login_user=\$live_login/);
+    expect(body).not.toMatch(/login_user=\$login_user/);
+  });
+
+  it("still adds no firewall rule (the LAN-only guarantee is unchanged)", () => {
+    expect(body).not.toMatch(/\biptables\b|\bnft\b|\bufw\b|upnp/i);
+  });
+});
