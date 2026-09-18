@@ -54,6 +54,7 @@ import {
   fetchBridgeStunProbe,
 } from "../lib/vpn-home-endpoint.js";
 import { observePlacement } from "../services/overlay-placement.service.js";
+import { resolveVpnLanRouting } from "../lib/vpn-lan.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -783,14 +784,16 @@ export function createVpnRouter(
           });
         }
 
+        // WARP-2692 — LAN facts from the router that terminates the tunnel.
+        const lan = await resolveVpnLanRouting();
         const profile = buildOverlayProfile({
           assignedIp: provisioned.assignedIp,
           serverPublicKey: provisioned.serverPublicKey,
           mode: OVERLAY_PEER_MODE,
-          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
-          awayDns: config.WIREGUARD_DNS,
-          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
-          homeDns: config.WIREGUARD_HOME_DNS,
+          awayAllowedIps: lan.lanCidr,
+          awayDns: lan.dns,
+          homeAllowedIps: lan.homeAllowedIps,
+          homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
           endpointCandidates: await resolveOverlayEndpointCandidates(),
@@ -1217,14 +1220,16 @@ export function createVpnRouter(
         // the client's default route, so the split-horizon FQDN (ADR-023 §3.4)
         // resolves to public NXDOMAIN. buildOverlayProfile owns the selection;
         // the route only supplies both pairs.
+        // WARP-2692 — LAN facts from the router that terminates the tunnel.
+        const lan = await resolveVpnLanRouting();
         const profile = buildOverlayProfile({
           assignedIp: peer.assignedIp,
           serverPublicKey: setup.public_key,
           mode: (peer.mode as VpnPeerMode | undefined) ?? OVERLAY_PEER_MODE,
-          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
-          awayDns: config.WIREGUARD_DNS,
-          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
-          homeDns: config.WIREGUARD_HOME_DNS,
+          awayAllowedIps: lan.lanCidr,
+          awayDns: lan.dns,
+          homeAllowedIps: lan.homeAllowedIps,
+          homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
           endpointCandidates: await resolveOverlayEndpointCandidates(),
@@ -1713,6 +1718,15 @@ export function createVpnRouter(
         serverPublicKey: status.public_key,
         addresses: status.addresses,
         peerCount: status.peer_count,
+        // WARP-2689 — kernel truth beside the uci intent. `configured: true`
+        // above only says the router HOLDS a wg0 section; on a router flashed
+        // without WireGuard (every field RB5009 before edge 4aa8a39) that
+        // section exists, `ip link show wg0` says the device does not, and
+        // nothing on this page used to say so. `false` is an observation the
+        // dashboard must act on (no conf minted here can handshake); `null`
+        // means the router could not say and changes nothing.
+        interfaceLive: status.interface_live ?? null,
+        livePeerCount: status.live_peer_count ?? null,
       });
     } catch (err) {
       // WARP-1283: every other input to this handler already degrades to null,
@@ -1883,6 +1897,25 @@ export function createVpnRouter(
         // First-time only; ignored when the interface already exists.
         address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
       });
+      // WARP-2689 — a 200 from setup is a uci write-back; `interface_live` is
+      // what the kernel says. On a router with no WireGuard support the
+      // section exists and the device does not, and a conf minted now is a QR
+      // the customer scans into a tunnel that can never handshake. Refuse
+      // before allocating an address or minting a router-side key, and say
+      // what is actually wrong. `null` (router cannot say) does not refuse —
+      // that is the common case on older images and the mint worked there.
+      if (setup.interface_live === false) {
+        return res.status(503).json({
+          error:
+            "Your router doesn’t have WireGuard support yet, so a remote-access device can’t be added. Update the router’s software, then try again.",
+          code: "ROUTER_WIREGUARD_UNSUPPORTED",
+        });
+      }
+      // WARP-2692 — the LAN the conf routes is the ROUTER's LAN, read live.
+      // The env pins describe one deployment shape and are written back on
+      // every provision, so a box behind an edge router used to hand out a
+      // conf that handshook and reached nothing.
+      const lan = await resolveVpnLanRouting();
 
       // 2-4. Allocate next free IP, mint the router-side peer with it, and
       //    persist — as one retryable unit. WARP-565: the allocate-then-persist
@@ -1938,15 +1971,15 @@ export function createVpnRouter(
         // Home mode points DNS at the split-horizon resolver so the per-device
         // FQDN resolves over the tunnel (ADR-023 §3.4); away mode keeps the
         // LAN DNS.
-        dns: mode === "home" ? config.WIREGUARD_HOME_DNS : config.WIREGUARD_DNS,
+        dns: mode === "home" ? lan.homeDns : lan.dns,
         serverPublicKey: setup.public_key,
         endpointHost: confEndpointHost,
         listenPort: config.WIREGUARD_LISTEN_PORT,
-        lanCidr: config.WIREGUARD_LAN_CIDR,
+        lanCidr: lan.lanCidr,
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
         mode,
         // Split-tunnel box subnet(s) for home mode; ignored by away mode.
-        homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
+        homeAllowedIps: lan.homeAllowedIps,
       });
 
       // Status display screen QR — surface this peer for ~60 s so a phone

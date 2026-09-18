@@ -1403,6 +1403,14 @@ EOF
   # client can't reach the dashboard or resolve *.lan. Multi-box keeps the
   # config.ts 192.168.50.x defaults (untouched); this override is written ONLY
   # on the single-box path.
+  #
+  # WARP-2692: since apps/orchestrator/src/lib/vpn-lan.ts these two are a
+  # FALLBACK only. The orchestrator derives the conf's LAN from the router that
+  # terminates the tunnel (its `lan` address + mask) at mint time, so a box
+  # whose OPENWRT_HOST is an external edge router hands out THAT router's LAN
+  # (e.g. 192.168.9.0/24) rather than these container-shape values, which used
+  # to produce a tunnel that handshook and reached nothing. They still apply
+  # when the routing service cannot be read, which is why they stay pinned.
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
   # WARP-1947: pin the box's home-facing endpoint IP so a same-network client's
