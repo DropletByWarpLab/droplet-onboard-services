@@ -33,6 +33,7 @@
 import type { NetworkSummary } from "../types/network.js";
 import { config } from "../config.js";
 import { fetchNetworkSummary } from "../services/openwrt.client.js";
+import { parseIpv4 } from "../services/overlay-placement.service.js";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("vpn-lan");
@@ -61,17 +62,12 @@ function envRouting(): VpnLanRouting {
   };
 }
 
-function parseIpv4(addr: string): number | null {
-  const parts = addr.trim().split(".");
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p)) return null;
-    const o = Number(p);
-    if (o > 255) return null;
-    n = (n << 8) | o;
-  }
-  return n >>> 0;
+/** Packed big-endian u32, or null — on the same octet validator the
+ *  placement observer applies to the same summary. */
+function packIpv4(addr: string): number | null {
+  const o = parseIpv4(addr);
+  if (!o) return null;
+  return ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
 }
 
 function formatIpv4(n: number): string {
@@ -86,7 +82,7 @@ function formatIpv4(n: number): string {
  * link-local).
  */
 export function lanCidrFromAddress(address: string, mask: number): string | null {
-  const n = parseIpv4(address);
+  const n = packIpv4(address);
   if (n === null) return null;
   if (!Number.isInteger(mask) || mask < 8 || mask > 30) return null;
   if (n === 0 || (n >>> 24) === 127 || (n >>> 16) === 0xa9fe) return null;
@@ -118,22 +114,42 @@ export function pickVpnLanRouting(summary: NetworkSummary | null): VpnLanRouting
 }
 
 /**
- * Read the router's LAN and derive the tunnel routing facts. Never throws: a
- * routing-service fault degrades to the env fallback with a warning, so a
- * mint still succeeds on the same terms it always did.
+ * One read of the routing summary, with its outcome kept beside it. A request
+ * that needs the summary for more than one question (the home endpoint AND
+ * the LAN facts) reads it once and hands the result to both — the routing
+ * service is a sidecar round-trip, not a local lookup.
  */
-export async function resolveVpnLanRouting(): Promise<VpnLanRouting> {
-  let summary: NetworkSummary | null = null;
+export interface NetworkSummaryRead {
+  summary: NetworkSummary | null;
+  /** False when the summary could not be read at all — distinct from a summary
+   *  that reports a shape without the interface asked about. */
+  ok: boolean;
+}
+
+export async function readNetworkSummary(): Promise<NetworkSummaryRead> {
   try {
-    summary = await fetchNetworkSummary();
+    return { summary: await fetchNetworkSummary(), ok: true };
   } catch (err) {
-    logger.warn({ err }, "vpn: network summary unavailable — using env LAN routing for the peer conf");
+    logger.warn({ err }, "vpn: network summary unavailable");
+    return { summary: null, ok: false };
   }
+}
+
+/**
+ * Derive the tunnel routing facts from the router's LAN. Never throws: a
+ * routing-service fault degrades to the env fallback with a warning, so a
+ * mint still succeeds on the same terms it always did. Pass a `read` when the
+ * caller already has one; otherwise this performs the read.
+ */
+export async function resolveVpnLanRouting(read?: NetworkSummaryRead): Promise<VpnLanRouting> {
+  const { summary, ok } = read ?? (await readNetworkSummary());
   const routing = pickVpnLanRouting(summary);
-  if (routing.source === "env" && summary) {
+  if (routing.source === "env") {
     logger.warn(
-      { lan: summary.lan },
-      "vpn: router reported no usable LAN address — using env LAN routing for the peer conf",
+      { lan: summary?.lan ?? null, summaryOk: ok },
+      ok
+        ? "vpn: router reported no usable LAN address — using env LAN routing for the peer conf"
+        : "vpn: network summary unavailable — using env LAN routing for the peer conf",
     );
   }
   return routing;
