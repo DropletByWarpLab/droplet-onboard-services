@@ -270,4 +270,31 @@ describe("readSshAccess — login is what the HOST reports", () => {
     writeStateWithLogin("off", "oldlogin", "refused", "2026-09-17T10:05:00Z");
     expect((await readSshAccess()).login).toEqual({ username: "oldlogin", status: "refused" });
   });
+
+  // QA carry-path gaps (WARP-2887 sweep handoff): the "no state file" and
+  // "pre-WARP-2887 state file" branches had no coverage.
+  it("reports `pending` from the no-state-file branch once a login intent is written", async () => {
+    // No state file at all (host has never run). A login we just asked for is
+    // pending, not unknown — the readback's early no-hostState branch.
+    const { setSshLogin, readSshAccess } = await load();
+    expect((await readSshAccess()).login).toEqual({ username: null, status: "unknown" });
+    await setSshLogin({ username: "support", passwordHash: HASH });
+    expect((await readSshAccess()).login).toEqual({ username: null, status: "pending" });
+  });
+
+  it("reports `pending` then `unknown` against a pre-WARP-2887 applier's state", async () => {
+    // A pre-2887 applier writes `state`/`changed_at` with NO login_* lines. A
+    // newer login intent reads as pending; once that old applier rewrites
+    // state (newer mtime, still no login lines) the honest answer is
+    // `unknown` — "this host is too old to set a login" — never a permanent
+    // pending.
+    writeState("off"); // pre-2887 shape: no login_user / login_result
+    const { setSshLogin, readSshAccess } = await load();
+    await new Promise((r) => setTimeout(r, 20));
+    await setSshLogin({ username: "support", passwordHash: HASH });
+    expect((await readSshAccess()).login).toEqual({ username: null, status: "pending" });
+    await new Promise((r) => setTimeout(r, 20));
+    writeState("off", "2026-08-13T11:00:00Z"); // old applier ran again, still no login lines
+    expect((await readSshAccess()).login).toEqual({ username: null, status: "unknown" });
+  });
 });
