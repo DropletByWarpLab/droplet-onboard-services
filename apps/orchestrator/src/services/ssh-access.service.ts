@@ -161,6 +161,13 @@ function parseState(raw: string): HostState | null {
 interface Intent {
   access: SshAccessValue | null;
   loginUser: string | null;
+  /**
+   * The `$6$` hash beside `loginUser`, or null when absent or not a hash we
+   * would have written. Read back so a toggle can re-state a login the host
+   * has not consumed yet (see `setSshAccess`); a value that fails the same
+   * grammar the host checks reads as absent, never as something to carry.
+   */
+  loginHash: string | null;
 }
 
 /** Read the intent we last wrote, or nulls when we have written none. */
@@ -171,9 +178,11 @@ async function readIntent(): Promise<Intent> {
       .exec(raw)?.[1]
       ?.toLowerCase();
     const loginUser = new RegExp(`^[ \\t]*${LOGIN_USER_KEY}[ \\t]*=[ \\t]*(\\S+)[ \\t]*$`, "im").exec(raw)?.[1] ?? null;
-    return { access: access === "on" || access === "off" ? access : null, loginUser };
+    const rawHash = new RegExp(`^[ \\t]*${LOGIN_HASH_KEY}[ \\t]*=[ \\t]*(\\S+)[ \\t]*$`, "im").exec(raw)?.[1] ?? null;
+    const loginHash = rawHash !== null && SHA512_CRYPT_HASH_RE.test(rawHash) ? rawHash : null;
+    return { access: access === "on" || access === "off" ? access : null, loginUser, loginHash };
   } catch {
-    return { access: null, loginUser: null };
+    return { access: null, loginUser: null, loginHash: null };
   }
 }
 
@@ -277,13 +286,33 @@ async function writeIntent(lines: string[]): Promise<void> {
  * host is a separate asynchronous actor and this function deliberately does
  * not wait for it or claim its result.
  *
- * Carries NO login keys: they are one-shot, and the host reads the live
- * login back off the system, so a toggle never needs to re-state it.
+ * Re-states a login the host has NOT applied yet, and drops one the host has
+ * already answered. The file is rewritten whole, so a toggle that carried only
+ * the access key would erase login keys the root path unit had not consumed
+ * yet — owner sets a login, flips the toggle a moment later, and the login is
+ * silently never created. Once the host has answered (applied or refused) the
+ * keys are dropped: the host reads the live login back off the system, and
+ * re-stating a refused one would retry it on every toggle. "Not applied yet"
+ * is the readback's own rule (`login.status === "pending"`), not a second one.
  */
 export async function setSshAccess(enabled: boolean): Promise<SshAccessStatus> {
   const value: SshAccessValue = enabled ? "on" : "off";
-  await writeIntent([`${INTENT_KEY}=${value}`]);
-  logger.info({ value }, "ssh access intent written; awaiting host confirmation");
+  const current = await readSshAccess();
+  const intent = await readIntent();
+  const pendingLogin =
+    current.login.status === "pending" && intent.loginUser !== null && intent.loginHash !== null
+      ? { username: intent.loginUser, hash: intent.loginHash }
+      : null;
+  // ORDER MATTERS — login keys first, access key last; see setSshLogin.
+  await writeIntent(
+    pendingLogin
+      ? [`${LOGIN_USER_KEY}=${pendingLogin.username}`, `${LOGIN_HASH_KEY}=${pendingLogin.hash}`, `${INTENT_KEY}=${value}`]
+      : [`${INTENT_KEY}=${value}`],
+  );
+  logger.info(
+    { value, carriedLogin: pendingLogin !== null },
+    "ssh access intent written; awaiting host confirmation",
+  );
   return readSshAccess();
 }
 

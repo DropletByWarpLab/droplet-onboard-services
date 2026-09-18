@@ -139,6 +139,13 @@ function intentText() {
   return readFileSync(join(dir, "intent.d", "intent"), "utf8");
 }
 
+/** The key lines of the intent file, in file order — comments and blanks dropped. */
+function intentKeys() {
+  return intentText()
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !line.startsWith("#"));
+}
+
 describe("setSshLogin — what crosses the host boundary", () => {
   it("writes the username and the $6$ hash, and re-states the current access value", async () => {
     writeState("on");
@@ -166,12 +173,42 @@ describe("setSshLogin — what crosses the host boundary", () => {
     expect(intentText()).toMatch(/^DROPLET_SSH_ACCESS=on$/m);
   });
 
-  it("a toggle does not carry the login keys — they are one-shot", async () => {
-    writeState("off");
+  it("a toggle re-states a login the host has not applied yet", async () => {
+    // The race: the owner sets a login, then flips the toggle before the root
+    // path unit has consumed the intent. The file is rewritten whole, so a
+    // toggle that wrote only the access key would erase the login keys and
+    // the login would silently never be created — the card settling back to
+    // "no login set" with nothing to say why.
+    writeStateWithLogin("off", "", "none");
+    const { setSshAccess, setSshLogin } = await load();
+    await new Promise((r) => setTimeout(r, 20));
+    await setSshLogin({ username: "support", passwordHash: HASH });
+    const status = await setSshAccess(true);
+    // All three keys, login keys FIRST and the toggle's NEW value last: the
+    // host parses in one bounded pass that stops at the access key
+    // (tests/droplet-ssh-access.test.sh pins that side).
+    expect(intentKeys()).toEqual([
+      "DROPLET_SSH_LOGIN_USER=support",
+      `DROPLET_SSH_LOGIN_HASH=${HASH}`,
+      "DROPLET_SSH_ACCESS=on",
+    ]);
+    expect(status.login.status).toBe("pending");
+  });
+
+  it.each([
+    ["applied", "support"],
+    ["refused", "oldlogin"],
+  ])("a toggle drops login keys the host has already answered (%s)", async (loginResult, liveUser) => {
+    // Once the host has answered, the live login is read back off the system.
+    // Re-stating the keys would retry a refused login on every toggle, and
+    // re-apply an applied one for nothing.
+    writeStateWithLogin("off", "", "none");
     const { setSshAccess, setSshLogin } = await load();
     await setSshLogin({ username: "support", passwordHash: HASH });
-    await setSshAccess(true);
-    expect(intentText()).not.toMatch(/LOGIN/);
+    await new Promise((r) => setTimeout(r, 20));
+    writeStateWithLogin("off", liveUser, loginResult, "2026-09-17T10:05:00Z");
+    await setSshAccess(false);
+    expect(intentKeys()).toEqual(["DROPLET_SSH_ACCESS=off"]);
   });
 
   it.each([
