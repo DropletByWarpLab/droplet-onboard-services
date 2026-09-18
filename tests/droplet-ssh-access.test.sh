@@ -564,9 +564,14 @@ echo "$STATE" | grep -q '^login_user=support$'
 check "replace login: the new account is the live one" $? "state=[$STATE]"
 teardown
 
-# sshd refusing the config: the block is backed out and the login is refused.
+# sshd refusing the config: the block is backed out and the login is refused —
+# and the accounts are left EXACTLY as found. The sshd edit runs before any
+# account mutation for this reason: a refusal that had already created the new
+# account and locked the previous one would report `refused` while the
+# readback named the new, unusable account as the login that "still works".
 setup_login
 touch "$WORK/sshd-refuse"
+echo old >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-old"; printf 'old' >"$WORK/group"; echo P >"$WORK/pwstatus-old"
 run_login_case "DROPLET_SSH_LOGIN_USER=support
 DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
 DROPLET_SSH_ACCESS=off
@@ -577,6 +582,15 @@ grep -q '^UsePAM yes$' "$DROPLET_SSHD_CONFIG"
 check "sshd -t failure: the original config survives intact" $?
 echo "$STATE" | grep -q '^login_result=refused$'
 check "sshd -t failure: reported as refused" $? "state=[$STATE]"
+if echo "$CMDS" | grep -qE '^(useradd|usermod|chpasswd)'; then
+  check "sshd -t failure: no account was created, re-passworded or locked" 1 "cmds=[$CMDS]"
+else
+  check "sshd -t failure: no account was created, re-passworded or locked" 0
+fi
+[ ! -e "$WORK/chpasswd.in" ]
+check "sshd -t failure: chpasswd never ran" $?
+echo "$STATE" | grep -q '^login_user=old$'
+check "sshd -t failure: the previous login is still the live one" $? "state=[$STATE]"
 teardown
 
 echo

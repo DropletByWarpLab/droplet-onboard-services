@@ -4,6 +4,11 @@ import { useState } from "react";
 import useSWR from "swr";
 import { TerminalSquare, AlertTriangle, KeyRound } from "lucide-react";
 import {
+  SSH_LOGIN_PASSWORD_MIN,
+  isValidSshLoginPassword,
+  isValidSshLoginUsername,
+} from "@droplet/shared-types";
+import {
   confirmNetworkCommand,
   fetchSshAccess,
   setSshAccess,
@@ -172,8 +177,11 @@ function SshLoginSection({
   const [error, setError] = useState<string | null>(null);
 
   const loginStatus = login?.status ?? "unknown";
-  const usernameValid = /^[a-z][a-z0-9_-]{2,31}$/.test(username);
-  const passwordValid = password.length >= 12 && password.length <= 128;
+  // One ruleset, shared with the orchestrator route and service via
+  // @droplet/shared-types — the Save button lights up only for input the
+  // server will accept, and a bound changed there changes here.
+  const usernameValid = isValidSshLoginUsername(username);
+  const passwordValid = isValidSshLoginPassword(password);
 
   function summary(): string {
     switch (loginStatus) {
@@ -263,7 +271,7 @@ function SshLoginSection({
             />
           </label>
           <label className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-            Password (at least 12 characters)
+            Password (at least {SSH_LOGIN_PASSWORD_MIN} characters)
             <input
               className="input mt-1"
               type={showPassword ? "text" : "password"}

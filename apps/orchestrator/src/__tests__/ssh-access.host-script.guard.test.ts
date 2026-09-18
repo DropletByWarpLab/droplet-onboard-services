@@ -403,6 +403,19 @@ describe("the login half (WARP-2887) keeps the same posture", () => {
     expect(body).toMatch(/remove_sshd_match/);
   });
 
+  it("writes the sshd block BEFORE it touches any account, so a refusal changes nothing", () => {
+    // Inside apply_login: the one step that can fail after the name checks
+    // (`sshd -t`) must come before useradd / chpasswd / usermod -L. The
+    // reverse order left a refused login with the new account live and the
+    // previous one locked, and the readback naming the wrong account.
+    const fn = /apply_login\(\) \{\n([\s\S]*?)\n\}/.exec(body)?.[1] ?? "";
+    const sshd = fn.indexOf("install_sshd_match");
+    expect(sshd).toBeGreaterThan(-1);
+    for (const mutation of ["useradd ", "chpasswd -e", "usermod -aG", "usermod -L", "usermod -U"]) {
+      expect(fn.indexOf(mutation)).toBeGreaterThan(sshd);
+    }
+  });
+
   it("locks every other droplet-ssh member so exactly one login is live", () => {
     expect(body).toMatch(/usermod -L "\$_member"/);
   });

@@ -46,6 +46,7 @@
  */
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { SSH_LOGIN_RESERVED, SSH_LOGIN_USERNAME_RE } from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
 import { SHA512_CRYPT_HASH_RE } from "../lib/sha512-crypt.js";
 
@@ -86,21 +87,18 @@ const LOGIN_HASH_KEY = "DROPLET_SSH_LOGIN_HASH";
 export type SshAccessValue = "on" | "off";
 
 /**
- * WARP-2887 — the username grammar, identical on both sides of the boundary.
- * Lowercase POSIX portable names, 3..32 chars, no leading digit or dash. The
- * host script re-validates with the same shape; this copy exists so a bad
- * name is refused with a 400 before a token is ever minted.
+ * WARP-2887 — the username grammar and password bounds live in
+ * `@droplet/shared-types` (`ssh-login.ts`) so the dashboard's live validation,
+ * this service and the route cannot drift apart; the host applier mirrors the
+ * username grammar as a sed capture group and the guard test pins it.
+ * Re-exported here so the route and the tests keep one import site.
  */
-export const SSH_LOGIN_USERNAME_RE = /^[a-z][a-z0-9_-]{2,31}$/;
-/**
- * Names the host applier will refuse to manage no matter what: it only ever
- * touches accounts it created (members of `droplet-ssh`), and these are the
- * ones a caller might plausibly try. Mirrored here so the refusal is a clear
- * 400 rather than a silent host-side `refused`.
- */
-export const SSH_LOGIN_RESERVED = new Set(["root", "droplet", "nobody", "sshd", "daemon", "sync"]);
-export const SSH_LOGIN_PASSWORD_MIN = 12;
-export const SSH_LOGIN_PASSWORD_MAX = 128;
+export {
+  SSH_LOGIN_USERNAME_RE,
+  SSH_LOGIN_RESERVED,
+  SSH_LOGIN_PASSWORD_MIN,
+  SSH_LOGIN_PASSWORD_MAX,
+} from "@droplet/shared-types";
 
 export interface SshLoginStatus {
   /** The account the HOST reports as the live login (an unlocked

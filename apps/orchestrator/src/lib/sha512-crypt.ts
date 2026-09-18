@@ -53,12 +53,11 @@ export const SHA512_CRYPT_SALT_RE = /^[./0-9A-Za-z]{1,16}$/;
 export const SHA512_CRYPT_HASH_RE = /^\$6\$rounds=100000\$[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}$/;
 
 function sha512(...parts: Buffer[]): Buffer {
-  // codeql[js/insufficient-password-hash] — shadow(5) `$6$` KDF at
-  // SHA512_CRYPT_ROUNDS; the consumer (chpasswd/PAM) fixes the algorithm.
-  // See the header.
-  const h = createHash("sha512");
-  for (const p of parts) h.update(p);
-  return h.digest();
+  // The suppressions below are the shadow(5) `$6$` KDF at SHA512_CRYPT_ROUNDS;
+  // the consumer (chpasswd/PAM) fixes the algorithm. See the header.
+  const h = createHash("sha512"); // codeql[js/insufficient-password-hash]
+  for (const p of parts) h.update(p); // codeql[js/insufficient-password-hash]
+  return h.digest(); // codeql[js/insufficient-password-hash]
 }
 
 /** Repeat `block` until `len` bytes have been produced (the spec's fill). */

@@ -205,7 +205,17 @@ apply_login() {
       log "refusing login: '$login_user' exists and is not a $SSH_GROUP account"
       return 1
     fi
-  else
+  fi
+  # ORDER MATTERS. The sshd edit is the one step that can still fail after
+  # every name check has passed (`sshd -t` refusing the block), so it runs
+  # FIRST, before any account is created, re-passworded or locked. Doing it
+  # last left a refused login with the new account live and every previous
+  # login locked — and the readback below then named the new, unusable
+  # account as the one that "still works". A refusal must leave the accounts
+  # exactly as it found them. `install_sshd_match` is idempotent, so on every
+  # later run this is a one-line grep.
+  install_sshd_match || return 1
+  if ! getent passwd "$login_user" >/dev/null 2>&1; then
     useradd -m -s /bin/bash -G "$SSH_GROUP" "$login_user" || return 1
     log "created login account '$login_user'"
   fi
@@ -221,7 +231,6 @@ apply_login() {
     [ "$_member" = "$login_user" ] && continue
     usermod -L "$_member" >/dev/null 2>&1 && log "locked previous login '$_member'"
   done
-  install_sshd_match || return 1
   log "login '$login_user' applied"
   return 0
 }
