@@ -1089,3 +1089,42 @@ describe("POST /api/vpn/peers — router LAN + kernel truth (WARP-2692, WARP-268
     expect(res.status).toBe(201);
   });
 });
+
+// The router LAN derivation reads the same summary the home-endpoint discovery
+// already reads. A mint must pay that sidecar round-trip ONCE, not once per
+// question — the read is shared, not repeated.
+describe("POST /api/vpn/peers — reads the routing summary once", () => {
+  function setupHappyPath() {
+    (openwrt.vpnSetup as any).mockResolvedValue({
+      status: "ok",
+      created: false,
+      interface: "wg0",
+      public_key: "SERVERPUB=",
+      listen_port: 51820,
+      addresses: ["10.13.13.1/24"],
+    });
+    (openwrt.createVpnPeer as any).mockResolvedValue({
+      status: "ok",
+      interface: "wg0",
+      public_key: "PEERPUB=",
+      private_key: "PEERPRIV=",
+      allowed_ips: ["10.13.13.2/32"],
+      description: "laptop",
+      persistent_keepalive: 25,
+    });
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      lan: { present: true, "ipv4-address": [{ address: "192.168.9.1", mask: 24 }] },
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.191", mask: 24 }] },
+    });
+  }
+
+  it.each(["home", "away"])("%s mode: exactly one network-summary read", async (mode) => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockClear();
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop", mode });
+    expect(res.status).toBe(201);
+    expect(openwrt.fetchNetworkSummary).toHaveBeenCalledTimes(1);
+  });
+});

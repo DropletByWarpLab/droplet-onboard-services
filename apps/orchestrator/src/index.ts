@@ -107,7 +107,11 @@ import {
   expireIdleOverlayPeers,
   type OverlayConnectDeps,
 } from "./services/overlay-connect.service.js";
-import { allocatePeerIp, parseVpnSubnet } from "./services/vpn.service.js";
+import {
+  allocatePeerIp,
+  OVERLAY_KEEPALIVE_SECONDS,
+  serverAddressFromSubnet,
+} from "./services/vpn.service.js";
 import { reconcileVpnInterface } from "./services/vpn-reconcile.service.js";
 import { bridgeAuthToken } from "./lib/bridge-errors.js";
 import { createScheduleTicker } from "./services/schedule-ticker.js";
@@ -947,10 +951,8 @@ async function main() {
       config: {
         vpnInterface: "wg0",
         listenPort: config.WIREGUARD_LISTEN_PORT,
-        serverAddress: `${parseVpnSubnet(config.WIREGUARD_VPN_SUBNET).serverIp}/${
-          config.WIREGUARD_VPN_SUBNET.split("/")[1] ?? "24"
-        }`,
-        keepaliveSeconds: 25,
+        serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+        keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
       },
       logger: createLogger("vpn-reconcile"),
     };

@@ -107,7 +107,7 @@ export function isPublicIpv4(ip: string): boolean {
   return true;
 }
 
-function parseIpv4(ip: string): [number, number, number, number] | null {
+export function parseIpv4(ip: string): [number, number, number, number] | null {
   const parts = ip.trim().split(".");
   if (parts.length !== 4) return null;
   const nums: number[] = [];
