@@ -956,3 +956,136 @@ describe("DELETE /api/vpn/peers/:id", () => {
     );
   });
 });
+
+// ── WARP-2689 / WARP-2692 — kernel truth on status, and the router's LAN in
+// the conf. Both defects were measured on the house unit 2026-09-03: a router
+// with no WireGuard reported `configured: true`, and a conf that handshook
+// routed the single-box container LAN instead of the router's.
+describe("GET /api/vpn/status — interfaceLive / livePeerCount (WARP-2689)", () => {
+  function configuredStatus(extra: Record<string, unknown>) {
+    (openwrt.vpnStatus as any).mockResolvedValue({
+      interface: "wg0",
+      public_key: "PUBKEY=",
+      listen_port: 51820,
+      addresses: ["10.13.13.1/24"],
+      peer_count: 2,
+      ...extra,
+    });
+  }
+
+  it("surfaces the router's observation that the kernel device is missing", async () => {
+    configuredStatus({ interface_live: false, live_peer_count: null });
+    const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ configured: true, interfaceLive: false, livePeerCount: null });
+  });
+
+  it("carries the live peer count when the router can report it", async () => {
+    configuredStatus({ interface_live: true, live_peer_count: 1 });
+    const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
+    expect(res.body).toMatchObject({ interfaceLive: true, livePeerCount: 1 });
+  });
+
+  it("reports null — not false — when an older routing build says nothing", async () => {
+    configuredStatus({});
+    const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
+    expect(res.body.interfaceLive).toBeNull();
+    expect(res.body.livePeerCount).toBeNull();
+  });
+});
+
+describe("POST /api/vpn/peers — router LAN + kernel truth (WARP-2692, WARP-2689)", () => {
+  function setupHappyPath(setupExtra: Record<string, unknown> = {}) {
+    (openwrt.vpnSetup as any).mockResolvedValue({
+      status: "ok",
+      created: false,
+      interface: "wg0",
+      public_key: "SERVERPUB=",
+      listen_port: 51820,
+      addresses: ["10.13.13.1/24"],
+      ...setupExtra,
+    });
+    (openwrt.createVpnPeer as any).mockResolvedValue({
+      status: "ok",
+      interface: "wg0",
+      public_key: "PEERPUB=",
+      private_key: "PEERPRIV=",
+      allowed_ips: ["10.13.13.2/32"],
+      description: "laptop",
+      persistent_keepalive: 25,
+    });
+  }
+
+  it("routes the ROUTER's LAN, not the env pin, when the summary reports one (edge-router shape)", async () => {
+    setupHappyPath();
+    // The house unit: box behind an RB5009 whose LAN is 192.168.9.0/24, while
+    // env still carries the single-box/multi-box pins.
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      lan: { present: true, "ipv4-address": [{ address: "192.168.9.1", mask: 24 }] },
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.191", mask: 24 }] },
+    });
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop" });
+    expect(res.status).toBe(201);
+    expect(res.body.conf).toContain("AllowedIPs = 192.168.9.0/24, 10.13.13.0/24");
+    expect(res.body.conf).toContain("DNS = 192.168.9.1");
+    expect(res.body.conf).not.toContain("192.168.50.");
+  });
+
+  it("gives a home-mode peer the same router LAN for its split tunnel and resolver", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      lan: { present: true, "ipv4-address": [{ address: "192.168.9.1", mask: 24 }] },
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.191", mask: 24 }] },
+    });
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop", mode: "home" });
+    expect(res.status).toBe(201);
+    expect(res.body.conf).toContain("AllowedIPs = 192.168.9.0/24, 10.13.13.0/24");
+    expect(res.body.conf).toContain("DNS = 192.168.9.1");
+    expect(res.body.conf).not.toContain("192.168.20.");
+  });
+
+  it("falls back to the env pins when the router reports no LAN (unchanged behaviour)", async () => {
+    setupHappyPath();
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: false, "ipv4-address": [] },
+    });
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop" });
+    expect(res.status).toBe(201);
+    expect(res.body.conf).toContain("AllowedIPs = 192.168.50.0/24, 10.13.13.0/24");
+    expect(res.body.conf).toContain("DNS = 192.168.50.1");
+  });
+
+  it("refuses to mint when the router says the kernel device does not exist", async () => {
+    setupHappyPath({ interface_live: false });
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      lan: { present: true, "ipv4-address": [{ address: "192.168.9.1", mask: 24 }] },
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.191", mask: 24 }] },
+    });
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop" });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("ROUTER_WIREGUARD_UNSUPPORTED");
+    // Nothing was minted or persisted: no router-side key, no row, no address.
+    expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
+    expect(prisma.rows).toHaveLength(0);
+  });
+
+  it("still mints when the router cannot say (interface_live absent/null)", async () => {
+    setupHappyPath({ interface_live: null });
+    (openwrt.fetchNetworkSummary as any).mockResolvedValue({
+      wan: { present: false, "ipv4-address": [] },
+    });
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "laptop" });
+    expect(res.status).toBe(201);
+  });
+});

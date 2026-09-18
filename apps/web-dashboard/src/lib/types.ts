@@ -766,6 +766,16 @@ export interface VpnStatusInfo {
    *  at home yet" and show guidance instead of minting a dead config (mirrors
    *  the WARP-993 offLanReachable never-over-promise convention). */
   homeEndpointHost?: string | null;
+  /** WARP-2689: does the router's KERNEL hold the wg0 device, as opposed to
+   *  merely a uci section for it? `false` is an observation — the router has
+   *  no WireGuard support and no conf minted against it can handshake, so the
+   *  page must say so and stop offering to add devices. `null`/absent = the
+   *  router could not say (older routing build, no ubus grant); treat exactly
+   *  like "no information", never like false. */
+  interfaceLive?: boolean | null;
+  /** WARP-2689: peers the kernel actually holds (vs `peerCount`, the uci
+   *  intent). Null when the router cannot say. */
+  livePeerCount?: number | null;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
