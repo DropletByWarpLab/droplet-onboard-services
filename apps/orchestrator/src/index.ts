@@ -948,6 +948,10 @@ async function main() {
           description: string;
         }) => openwrt.installOverlayVpnPeer(p),
       },
+      // WARP-2686 — re-check a row is still active immediately before its peer
+      // is re-installed, so a revoke that lands mid-tick is never resurrected.
+      isStillActive: async (publicKey: string) =>
+        (await prisma.vpnPeer.findFirst({ where: { publicKey, status: "active" }, select: { id: true } })) !== null,
       config: {
         vpnInterface: "wg0",
         listenPort: config.WIREGUARD_LISTEN_PORT,
