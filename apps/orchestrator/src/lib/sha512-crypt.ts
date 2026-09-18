@@ -11,9 +11,21 @@
  * contract we want to depend on), and pulling a dependency for ~80 lines of
  * spec is the wrong trade for the one place a hash is minted.
  *
- * This is Ulrich Drepper's SHA-crypt (2008), SHA-512 variant, default 5000
- * rounds — exactly what `openssl passwd -6` and glibc produce, so the test
- * vectors are checked against those, not against this file's own output.
+ * This is Ulrich Drepper's SHA-crypt (2008), SHA-512 variant — exactly what
+ * glibc `crypt(3)` and `openssl passwd -6` produce, so the test vectors are
+ * checked against those, not against this file's own output.
+ *
+ * ── ON THE CODEQL FINDING (js/insufficient-password-hash) ───────────────────
+ * CodeQL flags any SHA-2 over password-derived data and asks for bcrypt /
+ * scrypt / argon2. Those are the right answer when WE verify the password.
+ * Here we never do: the consumer is the appliance's `chpasswd -e` → shadow →
+ * PAM, and the ONLY formats that stack accepts are the crypt(3) ones. Of
+ * those, `$6$` with a pinned high round count is the strongest that every
+ * Ubuntu we ship verifies without a native library (yescrypt would need one).
+ * So the algorithm is fixed by the consumer, and the knob we do control —
+ * work factor — is pinned at SHA512_CRYPT_ROUNDS (20× the historical 5000
+ * default; ~0.1 s per hash on the box, per login change, never per request).
+ * The suppression below is deliberate and reviewed, not a rule waived.
  *
  * NOT a general password hasher. Do not reach for it for API credentials,
  * tokens or anything the orchestrator verifies itself — argon2 is already in
@@ -21,20 +33,29 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 
+/** The round count every hash we mint carries. Pinned — same grammar on both
+ *  sides of the boundary, so the host applier can match it exactly. */
+export const SHA512_CRYPT_ROUNDS = 100_000;
+/** The format's implicit default; a hash minted at this count carries no
+ *  `rounds=` field (that is how `openssl passwd -6` output looks). */
 const ROUNDS_DEFAULT = 5000;
+const ROUNDS_MIN = 1000;
+const ROUNDS_MAX = 999_999_999;
 const B64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /** The salt alphabet the shadow format allows; 16 chars is the maximum used. */
 export const SHA512_CRYPT_SALT_RE = /^[./0-9A-Za-z]{1,16}$/;
 
 /**
- * The exact shape the host applier accepts (default rounds only — a `rounds=`
- * prefix is deliberately not emitted or accepted, so there is exactly one
- * grammar on both sides of the boundary).
+ * The exact shape the host applier accepts: our pinned round count, then
+ * salt, then 86 hash chars. One grammar on both sides of the boundary.
  */
-export const SHA512_CRYPT_HASH_RE = /^\$6\$[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}$/;
+export const SHA512_CRYPT_HASH_RE = /^\$6\$rounds=100000\$[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}$/;
 
 function sha512(...parts: Buffer[]): Buffer {
+  // codeql[js/insufficient-password-hash] — shadow(5) `$6$` KDF at
+  // SHA512_CRYPT_ROUNDS; the consumer (chpasswd/PAM) fixes the algorithm.
+  // See the header.
   const h = createHash("sha512");
   for (const p of parts) h.update(p);
   return h.digest();
@@ -67,14 +88,23 @@ export function generateSalt(): string {
 }
 
 /**
- * `sha512Crypt(password, salt)` → `$6$<salt>$<86 chars>`.
+ * `sha512Crypt(password, salt, rounds)` → `$6$rounds=N$<salt>$<86 chars>`
+ * (the `rounds=` field is omitted only at the format's 5000 default, matching
+ * glibc and openssl byte for byte).
  *
  * Steps are numbered as in the specification so a reader can follow it
  * line by line; nothing here is clever.
  */
-export function sha512Crypt(password: string, salt: string = generateSalt()): string {
+export function sha512Crypt(
+  password: string,
+  salt: string = generateSalt(),
+  rounds: number = SHA512_CRYPT_ROUNDS,
+): string {
   if (!SHA512_CRYPT_SALT_RE.test(salt)) {
     throw new Error("sha512-crypt: salt must be 1..16 chars of [./0-9A-Za-z]");
+  }
+  if (!Number.isInteger(rounds) || rounds < ROUNDS_MIN || rounds > ROUNDS_MAX) {
+    throw new Error(`sha512-crypt: rounds must be an integer in ${ROUNDS_MIN}..${ROUNDS_MAX}`);
   }
   const pw = Buffer.from(password, "utf8");
   const sl = Buffer.from(salt, "utf8");
@@ -98,7 +128,7 @@ export function sha512Crypt(password: string, salt: string = generateSalt()): st
 
   // 21. The rounds loop.
   let C = A;
-  for (let i = 0; i < ROUNDS_DEFAULT; i++) {
+  for (let i = 0; i < rounds; i++) {
     const parts: Buffer[] = [];
     parts.push(i & 1 ? P : C);
     if (i % 3 !== 0) parts.push(S);
@@ -119,5 +149,6 @@ export function sha512Crypt(password: string, salt: string = generateSalt()): st
   for (const [x, y, z, n] of order) enc += b64From24(C[x], C[y], C[z], n);
   enc += b64From24(0, 0, C[63], 2);
 
-  return `$6$${salt}$${enc}`;
+  const roundsField = rounds === ROUNDS_DEFAULT ? "" : `rounds=${rounds}$`;
+  return `$6$${roundsField}${salt}$${enc}`;
 }

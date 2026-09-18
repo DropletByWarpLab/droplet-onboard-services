@@ -367,7 +367,10 @@ rm -f "$PWNED2"
 # what a text guard cannot: that a hostile or malformed login line is refused
 # without a single account command, that a system account cannot be hijacked
 # by name, and that the sshd edit is the fixed sentinel block and nothing else.
-GOOD_HASH='$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1'
+# glibc crypt(3) of "Hello world!" at the pinned 100000 rounds — the grammar
+# the applier accepts. The 5000-round default form is deliberately refused.
+GOOD_HASH='$6$rounds=100000$saltstring$9s1nPRwOKo4FeNBCK5BUtBm4SG17hIi1AdBjtdwEAoIS.4ckJW8FPR8goM6zZZeHEFTq2BK/BQz3f/G/Yjbkg/'
+WEAK_HASH='$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1'
 
 setup_login() {
   setup
@@ -505,6 +508,9 @@ DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
 " \
   "DROPLET_SSH_LOGIN_USER=support
 DROPLET_SSH_LOGIN_HASH=correct-horse-battery-staple
+" \
+  "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$WEAK_HASH
 " \
   "DROPLET_SSH_LOGIN_USER=support
 DROPLET_SSH_LOGIN_HASH=\$6\$salt\$\$(id)

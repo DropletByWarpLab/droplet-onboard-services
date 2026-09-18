@@ -126,7 +126,7 @@ describe("setSshAccess — writes an intent the host script can parse", () => {
 // and what the dashboard is told is what the HOST reports (never what we
 // wrote). `pending` for the login is read off TIME — the keys are one-shot,
 // so a value comparison cannot tell "applied" from "not yet run".
-const HASH = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+const HASH = "$6$rounds=100000$saltstring$9s1nPRwOKo4FeNBCK5BUtBm4SG17hIi1AdBjtdwEAoIS.4ckJW8FPR8goM6zZZeHEFTq2BK/BQz3f/G/Yjbkg/";
 
 function writeStateWithLogin(value: string, loginUser: string, loginResult: string, changedAt = "2026-09-17T10:00:00Z") {
   writeFileSync(
@@ -179,6 +179,7 @@ describe("setSshLogin — what crosses the host boundary", () => {
     ["a reserved name", "root", HASH],
     ["a name with a metacharacter", "sup;port", HASH],
     ["a non-$6$ hash", "support", "$5$saltstring$notasha512hash"],
+    ["a $6$ hash at the weak 5000-round default", "support", "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"],
     ["a plaintext password where the hash belongs", "support", "correct horse battery"],
   ])("refuses %s without touching the intent file", async (_label, username, passwordHash) => {
     const { setSshLogin } = await load();

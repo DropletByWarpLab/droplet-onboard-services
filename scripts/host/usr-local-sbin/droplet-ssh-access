@@ -87,15 +87,17 @@ fi
 #
 # WARP-2887 — the two login keys ride the same pass, and their capture group
 # IS the grammar: a name is `[a-z][a-z0-9_-]*` (length checked below), a hash
-# is `$6$` + 1..16 salt chars + `$` + exactly 86 hash chars, all from the
-# shadow alphabet. A line that does not match the grammar simply does not
+# is `$6$rounds=100000$` + 1..16 salt chars + `$` + exactly 86 hash chars,
+# all from the shadow alphabet. The round count is pinned to what the
+# orchestrator mints (lib/sha512-crypt.ts) so a weaker hash cannot be slipped
+# in through the file. A line that does not match the grammar simply does not
 # match, so `DROPLET_SSH_LOGIN_USER=root; rm -rf /` yields nothing at all.
 # They are matched BEFORE the access key because the pass stops there: the
 # orchestrator writes them above it for exactly this reason, and a login key
 # placed below the access key is — by construction — never read.
 parsed="$(sed -n \
   -e '/^[[:space:]]*DROPLET_SSH_LOGIN_USER[[:space:]]*=[[:space:]]*\([a-z][a-z0-9_-]*\)[[:space:]]*$/{s//user=\1/p;d;}' \
-  -e '\%^[[:space:]]*DROPLET_SSH_LOGIN_HASH[[:space:]]*=[[:space:]]*\(\$6\$[./0-9A-Za-z]\{1,16\}\$[./0-9A-Za-z]\{86\}\)[[:space:]]*$%{s//hash=\1/p;d;}' \
+  -e '\%^[[:space:]]*DROPLET_SSH_LOGIN_HASH[[:space:]]*=[[:space:]]*\(\$6\$rounds=100000\$[./0-9A-Za-z]\{1,16\}\$[./0-9A-Za-z]\{86\}\)[[:space:]]*$%{s//hash=\1/p;d;}' \
   -e '/^[[:space:]]*DROPLET_SSH_ACCESS[[:space:]]*=[[:space:]]*\([a-z]*\)[[:space:]]*$/{s//access=\1/p;q;}' \
   "$INTENT_FILE" 2>/dev/null)"
 # `parsed` holds at most a handful of `key=validated-value` lines; the first

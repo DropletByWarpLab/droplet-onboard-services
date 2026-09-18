@@ -357,7 +357,7 @@ describe("the login half (WARP-2887) keeps the same posture", () => {
     expect(body).toMatch(/DROPLET_SSH_LOGIN_HASH\[\[:space:\]\]\*=/);
     // The capture group IS the grammar: a portable username, a $6$ hash.
     expect(body).toMatch(/\\\(\[a-z\]\[a-z0-9_-\]\*\\\)/);
-    expect(body).toMatch(/\\\$6\\\$\[\.\/0-9A-Za-z\]\\\{1,16\\\}\\\$\[\.\/0-9A-Za-z\]\\\{86\\\}/);
+    expect(body).toMatch(/\\\$6\\\$rounds=100000\\\$\[\.\/0-9A-Za-z\]\\\{1,16\\\}\\\$\[\.\/0-9A-Za-z\]\\\{86\\\}/);
     // The pass still quits at the access key — the only `q` — so a
     // never-ending file cannot hang this root process (the fifo case in
     // tests/droplet-ssh-access.test.sh), and the login expressions sit

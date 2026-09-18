@@ -264,7 +264,7 @@ describe("the login token round-trips through /api/network/command/confirm", () 
     expect(sshAccessService.setSshLogin).toHaveBeenCalledTimes(1);
     const arg = vi.mocked(sshAccessService.setSshLogin).mock.calls[0][0];
     expect(arg.username).toBe("support");
-    expect(arg.passwordHash).toMatch(/^\$6\$[./0-9A-Za-z]{16}\$[./0-9A-Za-z]{86}$/);
+    expect(arg.passwordHash).toMatch(/^\$6\$rounds=100000\$[./0-9A-Za-z]{16}\$[./0-9A-Za-z]{86}$/);
     expect(JSON.stringify(arg)).not.toContain("correct horse battery");
   });
 
