@@ -430,3 +430,54 @@ describe("the login half (WARP-2887) keeps the same posture", () => {
     expect(body).not.toMatch(/\biptables\b|\bnft\b|\bufw\b|upnp/i);
   });
 });
+
+describe("the login half can actually run under its unit (WARP-2887)", () => {
+  // The DOA finding: ProtectSystem=strict + ProtectHome=yes made /etc and
+  // /home read-only, so every useradd/chpasswd/sshd_config write failed EROFS
+  // and every login save reported "refused" forever. These pin the widening
+  // that lets the login apply — a future re-tightening that re-DOAs the
+  // feature fails here instead of on a customer's box.
+  it("carves /etc and /home read-write so useradd/chpasswd/sshd_config can write", () => {
+    const rw = /^ReadWritePaths=(.*)$/m.exec(code(UNIT))?.[1] ?? "";
+    expect(rw.split(/\s+/)).toEqual(expect.arrayContaining(["/etc", "/home"]));
+  });
+
+  it("turns ProtectHome OFF (it takes precedence over a /home carve-out)", () => {
+    expect(code(UNIT)).toMatch(/^ProtectHome=no$/m);
+    expect(code(UNIT)).not.toMatch(/^ProtectHome=yes$/m);
+  });
+
+  it("keeps ProtectSystem=strict — everything outside the carve-outs stays read-only", () => {
+    expect(code(UNIT)).toMatch(/^ProtectSystem=strict$/m);
+  });
+
+  it("still has no EnvironmentFile and no [Install] section", () => {
+    expect(code(UNIT)).not.toMatch(/EnvironmentFile/i);
+    expect(code(UNIT)).not.toMatch(/\[Install\]/);
+  });
+});
+
+describe("apply_login order + cleanup (WARP-2887 review)", () => {
+  const fn = /apply_login\(\) \{\n([\s\S]*?)\n\}/.exec(SCRIPT)?.[1] ?? "";
+
+  it("sets the password before granting sudo, so a chpasswd failure leaves no passwordless sudo account", () => {
+    const chpasswd = fn.indexOf("chpasswd -e");
+    const sudo = fn.indexOf("usermod -aG sudo");
+    expect(chpasswd).toBeGreaterThan(-1);
+    expect(sudo).toBeGreaterThan(chpasswd);
+  });
+
+  it("removes a just-created account on a later failure (no half-provisioned orphan)", () => {
+    expect(fn).toMatch(/_created=1/);
+    expect(fn).toMatch(/userdel -r/);
+  });
+
+  it("enforces the shared 3..32 length bound, not just useradd's implicit max", () => {
+    expect(fn).toMatch(/-lt 3/);
+    expect(fn).toMatch(/-gt 32/);
+  });
+
+  it("does not report success when a previous login could not be locked", () => {
+    expect(fn).toMatch(/_lock_failed/);
+  });
+});

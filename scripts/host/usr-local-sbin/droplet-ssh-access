@@ -183,11 +183,14 @@ is_managed_account() {
 }
 
 apply_login() {
-  # The grammar above bounds the charset; bound the length here (POSIX
-  # useradd refuses >32 anyway, but refuse it ourselves so the reason is in
-  # OUR log, not useradd's).
-  if [ "${#login_user}" -gt 32 ]; then
-    log "refusing login: username longer than 32 characters"
+  # The sed grammar above bounds the charset and the leading char; bound the
+  # LENGTH here so the applier enforces the same 3..32 the orchestrator and
+  # the dashboard do (packages/shared-types/src/ssh-login.ts) — a container
+  # that bypassed the orchestrator's zod could otherwise write a 2-char name
+  # the product's own rules reject. `useradd` refuses >32 on its own, but the
+  # reason belongs in OUR log, and it has no lower bound at all.
+  if [ "${#login_user}" -lt 3 ] || [ "${#login_user}" -gt 32 ]; then
+    log "refusing login: username must be 3..32 characters"
     return 1
   fi
   # Names this script will never manage, whatever the intent says. The
@@ -215,22 +218,50 @@ apply_login() {
   # exactly as it found them. `install_sshd_match` is idempotent, so on every
   # later run this is a one-line grep.
   install_sshd_match || return 1
+  # Track whether THIS run created the account, so a failure part-way through
+  # can undo it rather than leave a half-provisioned account behind.
+  _created=0
   if ! getent passwd "$login_user" >/dev/null 2>&1; then
     useradd -m -s /bin/bash -G "$SSH_GROUP" "$login_user" || return 1
+    _created=1
     log "created login account '$login_user'"
   fi
-  # Administrative access: a troubleshooting session without it is decorative.
-  usermod -aG sudo "$login_user" || return 1
-  # `chpasswd -e` takes the hash as-is; the value is the validated capture
-  # from the sed above and is never re-parsed by a shell.
-  printf '%s:%s\n' "$login_user" "$login_hash" | chpasswd -e || return 1
+  # Undo a just-created account on any later failure. A pre-existing managed
+  # account is left as-is (we did not create it); we only unwind our own work.
+  _fail() {
+    log "login apply failed at: $1"
+    if [ "$_created" = "1" ]; then
+      userdel -r "$login_user" >/dev/null 2>&1 && log "removed half-provisioned account '$login_user'"
+    fi
+    return 1
+  }
+  # PASSWORD BEFORE PRIVILEGE. Set (and unlock) the password first, so a
+  # chpasswd failure can never leave a passwordless account sitting in `sudo`
+  # + `droplet-ssh` (the WARP-2887 review finding). `chpasswd -e` takes the
+  # hash as-is; the value is the validated capture from the sed above and is
+  # never re-parsed by a shell.
+  printf '%s:%s\n' "$login_user" "$login_hash" | chpasswd -e || { _fail "chpasswd"; return 1; }
   usermod -U "$login_user" >/dev/null 2>&1 || true
+  # Administrative access: a troubleshooting session without it is decorative.
+  usermod -aG sudo "$login_user" || { _fail "usermod -aG sudo"; return 1; }
   # Exactly one live login. Lock every other member of the group so a
-  # superseded credential stops working the moment a new one is set.
+  # superseded credential stops working the moment a new one is set. A lock
+  # that FAILS is not swallowed: leaving two members with usable passwords
+  # breaks the single-credential invariant and would let the readback name a
+  # stale account, so we report the apply as failed (the new password is set,
+  # but we cannot guarantee the old one is dead — the safe answer is "refused",
+  # and the owner retries).
+  _lock_failed=0
   for _member in $(getent group "$SSH_GROUP" | cut -d: -f4 | tr ',' ' '); do
     [ "$_member" = "$login_user" ] && continue
-    usermod -L "$_member" >/dev/null 2>&1 && log "locked previous login '$_member'"
+    if usermod -L "$_member" >/dev/null 2>&1; then
+      log "locked previous login '$_member'"
+    else
+      _lock_failed=1
+      log "WARNING: could not lock previous login '$_member'"
+    fi
   done
+  [ "$_lock_failed" = "0" ] || { log "refusing to report success: a previous login could not be locked"; return 1; }
   log "login '$login_user' applied"
   return 0
 }

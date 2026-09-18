@@ -110,6 +110,24 @@ describe("SshAccessCard — login (WARP-2887)", () => {
     expect(screen.queryByLabelText(/^password/i)).not.toBeInTheDocument();
   });
 
+  it("does not keep the plaintext in state after save — reopening shows an empty field", async () => {
+    // If setPassword("") is dropped, the previous password stays in React
+    // state and reappears (and is revealable via Show password) on reopen.
+    fetchMock.mockResolvedValue(status({ login: { username: "support", status: "set" } }));
+    render(<SshAccessCard />);
+    await openForm();
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: "support" } });
+    fireEvent.change(screen.getByLabelText(/^password/i), { target: { value: "correct horse battery" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save login/i }));
+    });
+    await waitFor(() => expect(setLoginMock).toHaveBeenCalled());
+    // Reopen the form; the password field must be empty and Save disabled.
+    await openForm();
+    expect((screen.getByLabelText(/^password/i) as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: /save login/i })).toBeDisabled();
+  });
+
   it.each([
     ["an uppercase username", "Support", "correct horse battery"],
     ["a username starting with a digit", "1support", "correct horse battery"],

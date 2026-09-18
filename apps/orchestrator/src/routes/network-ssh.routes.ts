@@ -31,15 +31,14 @@
 import type { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { readSshAccess, setSshAccess, setSshLogin } from "../services/ssh-access.service.js";
 import {
-  readSshAccess,
-  setSshAccess,
-  setSshLogin,
+  isValidSshLoginPassword,
+  isValidSshLoginUsername,
   SSH_LOGIN_PASSWORD_MAX,
   SSH_LOGIN_PASSWORD_MIN,
   SSH_LOGIN_RESERVED,
-  SSH_LOGIN_USERNAME_RE,
-} from "../services/ssh-access.service.js";
+} from "@droplet/shared-types";
 import { sha512Crypt } from "../lib/sha512-crypt.js";
 import { requireRole } from "../middleware/auth.js";
 
@@ -113,20 +112,18 @@ export function registerSshRoutes(router: Router, deps: SshRouteDeps): void {
   router.post("/network/ssh/login", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { username, password } = req.body ?? {};
-      if (typeof username !== "string" || !SSH_LOGIN_USERNAME_RE.test(username)) {
+      // The accept/reject decision is the shared predicate's, so the dashboard,
+      // this route and the service cannot drift (WARP-2887 review). The
+      // constants are used only to phrase the human message.
+      if (typeof username !== "string" || !isValidSshLoginUsername(username)) {
+        const reserved = typeof username === "string" && SSH_LOGIN_RESERVED.has(username);
         return res.status(400).json({
-          error: "Username must be 3–32 characters: lowercase letters, digits, `_` or `-`, starting with a letter.",
+          error: reserved
+            ? `“${username}” is a system account and can’t be used for the login.`
+            : "Username must be 3–32 characters: lowercase letters, digits, `_` or `-`, starting with a letter.",
         });
       }
-      if (SSH_LOGIN_RESERVED.has(username)) {
-        return res.status(400).json({ error: `“${username}” is a system account and can’t be used for the login.` });
-      }
-      if (
-        typeof password !== "string" ||
-        password.length < SSH_LOGIN_PASSWORD_MIN ||
-        password.length > SSH_LOGIN_PASSWORD_MAX ||
-        /[\r\n]/.test(password)
-      ) {
+      if (typeof password !== "string" || !isValidSshLoginPassword(password)) {
         return res.status(400).json({
           error: `Password must be ${SSH_LOGIN_PASSWORD_MIN}–${SSH_LOGIN_PASSWORD_MAX} characters.`,
         });

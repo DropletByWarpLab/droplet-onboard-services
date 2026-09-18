@@ -86,6 +86,10 @@ const owner: AuthUser = {
 };
 
 /** Mint route + confirm dispatcher on ONE prisma, with the real safety service. */
+// The most recent app's prisma, so a test can inspect the audit rows the
+// confirm dispatcher wrote (WARP-2887 review: the redaction claim was untested).
+let lastPrisma: PrismaClient;
+
 function buildFullApp(): express.Express {
   const app = express();
   app.use(express.json());
@@ -94,6 +98,7 @@ function buildFullApp(): express.Express {
     next();
   });
   const prisma = createPrismaMock();
+  lastPrisma = prisma;
   const router = express.Router();
   registerSshRoutes(router, { prisma });
   registerStatusRoutes(router, { prisma, networkDeviceService: {} as never });
@@ -275,6 +280,48 @@ describe("the login token round-trips through /api/network/command/confirm", () 
       .post("/api/network/command/confirm")
       .send({ confirmationToken: mint.body.confirmationToken, operation: "set_ssh_login" });
     expect(confirm.status).toBe(400);
+    expect(sshAccessService.setSshLogin).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-2887 review: the PR claims the password/hash never lands in an audit
+// row, but nothing asserted it. If a later change renamed the param off the
+// `password*` key the redactor keys on, the $6$ hash would ride into
+// CommandAuditLog.data — readable by any admin, crackable offline — silently.
+describe("set_ssh_login never writes the hash or the plaintext to an audit row", () => {
+  it("redacts every commandAuditLog row for the login mint+confirm", async () => {
+    const app = buildFullApp();
+    const mint = await request(app)
+      .post("/api/network/ssh/login")
+      .send({ username: "support", password: "correct horse battery" });
+    await request(app)
+      .post("/api/network/command/confirm")
+      .send({ confirmationToken: mint.body.confirmationToken, operation: mint.body.operation });
+
+    const createFn = (lastPrisma as unknown as { commandAuditLog: { create: ReturnType<typeof vi.fn> } })
+      .commandAuditLog.create;
+    expect(createFn).toHaveBeenCalled();
+    const everyRow = JSON.stringify(createFn.mock.calls);
+    // The two things that must never appear: the $6$ shadow hash and the
+    // plaintext. (The salt is random, so match the invariant prefix.)
+    expect(everyRow).not.toMatch(/\$6\$rounds=100000\$/);
+    expect(everyRow).not.toContain("correct horse battery");
+    // And the row that DID carry params redacts the hash to the placeholder.
+    const withParams = createFn.mock.calls
+      .map((c) => c[0]?.data)
+      .filter((d: unknown) => d && typeof d === "object" && "passwordHash" in (d as object));
+    for (const d of withParams) {
+      expect((d as { passwordHash: unknown }).passwordHash).toBe("[REDACTED]");
+    }
+  });
+});
+
+describe("POST /api/network/ssh/login — password bounds (WARP-2887 review)", () => {
+  it("rejects an over-maximum password before any token exists", async () => {
+    const res = await request(buildFullApp())
+      .post("/api/network/ssh/login")
+      .send({ username: "support", password: "x".repeat(129) });
+    expect(res.status).toBe(400);
     expect(sshAccessService.setSshLogin).not.toHaveBeenCalled();
   });
 });

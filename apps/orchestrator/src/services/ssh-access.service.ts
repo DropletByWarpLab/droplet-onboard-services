@@ -46,7 +46,7 @@
  */
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { SSH_LOGIN_RESERVED, SSH_LOGIN_USERNAME_RE } from "@droplet/shared-types";
+import { isValidSshLoginUsername } from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
 import { SHA512_CRYPT_HASH_RE } from "../lib/sha512-crypt.js";
 
@@ -244,17 +244,24 @@ export async function readSshAccess(): Promise<SshAccessStatus> {
  */
 async function loginStatus(hostState: HostState, intent: Intent): Promise<SshLoginStatus> {
   const username = hostState.loginUser ?? null;
+  // Compute freshness once. `intentNewer` = we wrote a login intent AFTER the
+  // host last wrote state, i.e. the host has not applied THIS version of our
+  // intent yet. Login keys are one-shot, so this time test — not a value
+  // comparison — is the only thing that can say "pending".
+  const [intentAt, stateAt] = await Promise.all([mtimeMs(INTENT_PATH), mtimeMs(STATE_PATH)]);
+  const intentNewer =
+    intent.loginUser !== null && intentAt !== null && stateAt !== null && intentAt > stateAt;
+
   if (hostState.loginResult === undefined && hostState.loginUser === undefined) {
-    // A pre-WARP-2887 applier wrote this state file: it knows nothing about
-    // logins, and neither do we.
-    return { username: null, status: intent.loginUser ? "pending" : "unknown" };
+    // A pre-WARP-2887 applier wrote this state file: it reports no login lines
+    // and never will. If our login intent is newer than that state it simply
+    // has not run our version yet → pending; once it rewrites state (it does
+    // so on every run) the intent is no longer newer → `unknown`, the honest
+    // "this box's host script is too old to set a login" — NOT a permanent
+    // "pending" (the WARP-2887 review's pending-forever finding).
+    return { username: null, status: intentNewer ? "pending" : "unknown" };
   }
-  if (intent.loginUser) {
-    const [intentAt, stateAt] = await Promise.all([mtimeMs(INTENT_PATH), mtimeMs(STATE_PATH)]);
-    if (intentAt !== null && stateAt !== null && intentAt > stateAt) {
-      return { username, status: "pending" };
-    }
-  }
+  if (intentNewer) return { username, status: "pending" };
   if (hostState.loginResult === "refused") return { username, status: "refused" };
   return { username, status: username ? "set" : "none" };
 }
@@ -271,7 +278,13 @@ async function writeIntent(lines: string[]): Promise<void> {
 
   await mkdir(dirname(INTENT_PATH), { recursive: true }).catch(() => undefined);
   const tmp = `${INTENT_PATH}.tmp`;
-  await writeFile(tmp, body, { mode: 0o644 });
+  // 0600, not 0644 (WARP-2887 review): the intent carries DROPLET_SSH_LOGIN_HASH,
+  // a $6$ shadow hash of the owner's password — the OS keeps the equivalent
+  // /etc/shadow line at 0640 root:shadow, not world-readable. Both writer
+  // (orchestrator, uid 0) and reader (the root .path applier) are root, so
+  // nothing legitimate needs group/other read; a 0644 file let any local
+  // account on the box lift the hash and brute-force it offline.
+  await writeFile(tmp, body, { mode: 0o600 });
   await rename(tmp, INTENT_PATH);
 }
 
@@ -331,7 +344,7 @@ export async function setSshAccess(enabled: boolean): Promise<SshAccessStatus> {
  */
 export async function setSshLogin(input: { username: string; passwordHash: string }): Promise<SshAccessStatus> {
   const username = input.username;
-  if (!SSH_LOGIN_USERNAME_RE.test(username) || SSH_LOGIN_RESERVED.has(username)) {
+  if (!isValidSshLoginUsername(username)) {
     throw new Error(`ssh login: refusing username ${JSON.stringify(username)}`);
   }
   if (!SHA512_CRYPT_HASH_RE.test(input.passwordHash)) {
