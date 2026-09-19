@@ -299,6 +299,46 @@ describe("optional steps — one unreadable source does not kill the narrative",
     });
   });
 
+  it("leaves a deterministic signal when an optional read failed: activity `warn` + refs.failedSteps", async () => {
+    // Run `ok`, HTTP 200, chip dropped — without this the only trace of a
+    // Nextcloud outage was the model's choice of words.
+    const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
+    const dispatcher: StepDispatcher = {
+      call: vi.fn(async (tool: string) => {
+        if (tool === "list_recent_files") throw new Error("nextcloud returned 503");
+        return { ok: true };
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "n",
+      steps: [optionalStep(0, "get_system_health"), optionalStep(1, "list_recent_files"), summarizeStep(2)],
+      triggeredBy: null,
+      summarizer,
+    });
+    expect(outcome.status).toBe("ok");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        refs: expect.objectContaining({ status: "ok", failedSteps: ["list_recent_files"] }),
+      }),
+    );
+  });
+
+  it("emits no failedSteps and stays `ok` severity when every step succeeded", async () => {
+    const p = fakePrisma();
+    await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [optionalStep(0, "get_system_health")],
+      triggeredBy: null,
+    });
+    const call = recordActivityMock.mock.calls[0][0];
+    expect(call.severity).toBe("ok");
+    expect(call.refs).not.toHaveProperty("failedSteps");
+  });
+
   it("still HALTS on a failed step that is not marked optional", async () => {
     const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
     const dispatcher: StepDispatcher = {

@@ -51,9 +51,31 @@ describe("renderFacts", () => {
     // A narrative that silently drops the step that failed is the exact
     // dishonesty this surface exists to prevent — so the failure has to
     // reach the model as a fact it can report.
-    const out = renderFacts([failed("erp_get_ar_summary", "ERP_NOT_CONNECTED")]);
-    expect(out).toMatch(/COULD NOT BE READ/);
-    expect(out).toMatch(/ERP_NOT_CONNECTED/);
+    const out = renderFacts([failed("get_system_health", "socket hang up")]);
+    expect(out).toBe("- get_system_health: COULD NOT BE READ (socket hang up)");
+  });
+
+  /** The dispatcher throws the MCP error envelope verbatim (app.ts). */
+  const toolError = (code: string, message: string) =>
+    JSON.stringify({ status: "error", error: { code, message } });
+
+  it("maps a not-connected error CODE to NOT CONNECTED mechanically — never left to the model", () => {
+    // ERP_NOT_CONNECTED means the owner never set the source up: not news.
+    // AUTH_REQUIRED is a per-user source with nobody to read it for (a
+    // scheduled run). Both leave the report; the prompt says so in the
+    // same words.
+    expect(renderFacts([failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "ERP not connected yet"))])).toBe(
+      "- erp_get_ar_summary: NOT CONNECTED",
+    );
+    expect(renderFacts([failed("list_events", toolError("AUTH_REQUIRED", "auth_required"))])).toBe(
+      "- list_events: NOT CONNECTED",
+    );
+  });
+
+  it("renders any other error CODE as could-not-read with its message — Nextcloud down is news", () => {
+    expect(
+      renderFacts([failed("list_recent_files", toolError("RECENT_FAILED", "nextcloud returned 503"))]),
+    ).toBe("- list_recent_files: COULD NOT BE READ (nextcloud returned 503)");
   });
 
   it("keeps failures alongside successes rather than filtering them out", () => {

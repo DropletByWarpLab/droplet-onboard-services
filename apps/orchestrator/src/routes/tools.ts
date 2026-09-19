@@ -81,6 +81,8 @@ const callStepSchema = z.object({
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
   as: outputNameSchema,
+  /** A failure of this step is recorded and the walk continues. */
+  optional: z.boolean().optional(),
 });
 
 const summarizeStepSchema = z.object({
@@ -112,7 +114,7 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
   if (s.kind === "summarize") {
     return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
   }
-  return { tool: s.tool, args: s.args ?? {}, ...named };
+  return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
 }
 
 /**
@@ -870,8 +872,16 @@ export function createToolsRouter(
             Number.parseInt(String(req.query.limit ?? "20"), 10) || 20,
           ),
         );
+        // A run executes AS the person who pressed Run, so its trace holds
+        // their calendar titles, meeting links and file paths. The archive is
+        // shared across owner/admin/family, so only the runs this person
+        // triggered — plus the ticker's, which run with no session and hold
+        // no per-user data — may come back. Never the newest run regardless.
         const rows = (await prisma.toolRun.findMany({
-          where: { specId: spec.id },
+          where: {
+            specId: spec.id,
+            triggeredBy: { in: [req.user?.username ?? "", "scheduler"] },
+          },
           orderBy: { startedAt: "desc" },
           take: limit,
         })) as unknown as RunRow[];

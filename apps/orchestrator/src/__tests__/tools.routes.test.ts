@@ -278,11 +278,15 @@ function createPrismaMock(
           where,
           take,
         }: {
-          where: { specId: string };
+          where: { specId: string; triggeredBy?: { in: string[] } };
           orderBy?: unknown;
           take?: number;
         }) => {
-          const rows = runs.filter((r) => r.specId === where.specId);
+          const rows = runs.filter(
+            (r) =>
+              r.specId === where.specId &&
+              (!where.triggeredBy || where.triggeredBy.in.includes(r.triggeredBy ?? "")),
+          );
           const sorted = [...rows].sort(
             (a, b) => b.startedAt.getTime() - a.startedAt.getTime(),
           );
@@ -576,6 +580,37 @@ describe("WARP-462 — Tool spec CRUD", () => {
     ]);
   });
 
+  it("PATCH keeps a step's `optional` flag — otherwise any steps edit silently strips it", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "s1",
+        slug: "x",
+        name: "x",
+        category: null,
+        description: null,
+        version: 1,
+        status: "draft",
+        ownerId: null,
+        share: null,
+        safety: 1,
+        writes: false,
+        reversible: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        steps: [],
+      },
+    ]);
+    const app = buildApp(prisma, noopDispatcher, mkUser("admin"));
+    const res = await request(app)
+      .patch("/api/tools/x")
+      .send({ steps: [{ tool: "get_camera_health", optional: true }, { tool: "list_files" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.steps.map((s: { args: { optional?: boolean } }) => s.args.optional)).toEqual([
+      true,
+      undefined,
+    ]);
+  });
+
   it("family-role PATCH is 403 (admin/owner only on patch)", async () => {
     const prisma = createPrismaMock([
       {
@@ -823,6 +858,38 @@ describe("daily-report — a missing box-provided spec is created, not reported"
       expect.anything(),
       expect.objectContaining({ userId: "romain", userRole: "owner" }),
     );
+  });
+
+  it("GET …/runs never shows one person another person's run — the trace carries their calendar and file names", async () => {
+    // Running the spec AS the caller puts per-user results (event titles,
+    // meeting links, file paths) into ToolRun.trace. The archive is shared
+    // across owner/admin/family, so it must be filtered by who triggered it.
+    const prisma = createPrismaMock([]);
+    const owner = reportApp(prisma);
+    await request(owner).post(`/api/tools/${DAILY_REPORT_SLUG}/runs`);
+    expect((await request(owner).get(`/api/tools/${DAILY_REPORT_SLUG}/runs`)).body.runs).toHaveLength(1);
+
+    const family = express();
+    family.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as Request & { user: AuthUser }).user = mkUser("family", "stefan");
+      next();
+    });
+    family.use("/api", createToolsRouter(prisma as any, dispatcher, summarizer));
+    const res = await request(family).get(`/api/tools/${DAILY_REPORT_SLUG}/runs`);
+    expect(res.status).toBe(200);
+    expect(res.body.runs).toEqual([]);
+  });
+
+  it("GET …/runs still shows scheduler runs to everyone — those carry no per-user data", async () => {
+    const prisma = createPrismaMock([]);
+    const app = reportApp(prisma);
+    await request(app).get(`/api/tools/${DAILY_REPORT_SLUG}/runs`); // seeds the spec
+    const specId = (prisma.toolSpec.create as ReturnType<typeof vi.fn>).mock.results[0].value.id;
+    await prisma.toolRun.create({
+      data: { specId, triggeredBy: "scheduler", endedAt: new Date(), status: "ok", error: null, trace: [] },
+    });
+    const res = await request(app).get(`/api/tools/${DAILY_REPORT_SLUG}/runs`);
+    expect(res.body.runs.map((r: { triggeredBy: string }) => r.triggeredBy)).toEqual(["scheduler"]);
   });
 
   it("any other unknown slug is still a plain 404", async () => {

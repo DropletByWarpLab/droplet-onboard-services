@@ -41,12 +41,43 @@ const TEMPERATURE = 0.3;
  */
 const MAX_RESULT_CHARS = 2_000;
 
+/**
+ * Error codes that mean "this source was never set up", not "this source
+ * broke": ERP with no connector, or a per-user source in a run that has no
+ * person to read it for (a scheduled fire). Decided HERE, by code, so the
+ * model is never the one reading an error message and choosing whether the
+ * owner should hear about it.
+ */
+const NOT_CONNECTED_CODES = new Set(["ERP_NOT_CONNECTED", "AUTH_REQUIRED"]);
+
+/** The dispatcher throws the MCP error envelope verbatim (app.ts); pull the
+ *  code and message back out. Anything else is a plain message. */
+function parseToolError(error: string | undefined): { code?: string; message: string } {
+  if (!error) return { message: "unknown error" };
+  try {
+    const e = (JSON.parse(error) as { error?: { code?: unknown; message?: unknown } }).error;
+    if (e && typeof e === "object") {
+      return {
+        ...(typeof e.code === "string" ? { code: e.code } : {}),
+        message: typeof e.message === "string" ? e.message : error,
+      };
+    }
+  } catch {
+    // not the envelope — a thrown Error's message, used as is
+  }
+  return { message: error };
+}
+
 function renderFact(t: RunStepTrace): string {
   if (!t.ok) {
     // Failures are facts too, and the ones most worth saying out loud. A
     // narrative that silently omits the step that failed is exactly the
-    // dishonesty this surface is built against.
-    return `- ${t.tool}: COULD NOT BE READ (${t.error ?? "unknown error"})`;
+    // dishonesty this surface is built against. The two markers are the
+    // prompt's vocabulary: NOT CONNECTED is left out, COULD NOT BE READ is
+    // said plainly.
+    const { code, message } = parseToolError(t.error);
+    if (code && NOT_CONNECTED_CODES.has(code)) return `- ${t.tool}: NOT CONNECTED`;
+    return `- ${t.tool}: COULD NOT BE READ (${message})`;
   }
   let body: string;
   try {
@@ -78,11 +109,10 @@ const SYSTEM = [
   "Rules you must follow:",
   "- Use ONLY figures that appear in the results. Never estimate, infer, or",
   "  carry a number over from general knowledge.",
-  "- If a result says it could not be read, say so plainly in one clause.",
+  "- If a source is marked COULD NOT BE READ, say so plainly in one clause.",
   "  Do not omit it and do not guess what it would have said.",
-  "- Exception: if it could not be read because that source is not connected,",
-  "  not configured, or not set up on this appliance, leave it out entirely.",
-  "  Something the owner never connected is not news.",
+  "- If a source is marked NOT CONNECTED, leave it out entirely. Something",
+  "  the owner never connected is not news.",
   "- Write prose. No bullet points, no headings, no markdown.",
   "- Second person, plain language, no exclamation marks.",
   "- If there is nothing of note, say that briefly rather than padding.",

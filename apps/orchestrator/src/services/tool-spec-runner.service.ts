@@ -392,8 +392,9 @@ export const DEFAULT_SUMMARY_PROMPT =
   "Write a short briefing, in the second person, from the results above. " +
   "Two to five short paragraphs of prose — no bullet points, no headings. " +
   "Use only figures that appear in the results; never estimate or infer a " +
-  "number. If something could not be read, say so plainly in one clause " +
-  "rather than leaving it out.";
+  "number. If a source is marked COULD NOT BE READ, say so plainly in one " +
+  "clause rather than leaving it out. If a source is marked NOT CONNECTED, " +
+  "leave it out entirely.";
 
 /**
  * WARP-1580 — the tool names a spec's steps will call, in step order.
@@ -613,6 +614,13 @@ export async function runToolSpec(
     }
   }
 
+  // Optional steps that failed. The run is still `ok`, but a report written
+  // around a source that could not be read must leave a signal something
+  // other than the model's wording can act on: `warn` in the feed and the
+  // tool names in refs.
+  const failedSteps =
+    outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
+
   const endedAt = new Date();
   const run = (await prisma.toolRun.create({
     data: {
@@ -631,14 +639,22 @@ export async function runToolSpec(
     // system did exactly what it was told to. Matches the ticker's own
     // skip-gate severity so the two refusal paths read alike in the feed.
     severity:
-      outcome.status === "ok" ? "ok" : outcome.denialCode ? "warn" : "err",
+      outcome.status === "ok"
+        ? failedSteps.length > 0
+          ? "warn"
+          : "ok"
+        : outcome.denialCode
+          ? "warn"
+          : "err",
     sourceIcon: outcome.denialCode ? "shield" : "play",
     // WARP-181: spec runs execute through the tool dispatcher (agent
     // surface); RunArgs carries no user UUID today, so id stays null.
     actor: { type: "ai", id: null },
     what:
       outcome.status === "ok"
-        ? "Spec run completed"
+        ? failedSteps.length > 0
+          ? "Spec run completed with gaps"
+          : "Spec run completed"
         : outcome.denialCode
           ? "Spec run refused (access)"
           : "Spec run failed",
@@ -652,6 +668,8 @@ export async function runToolSpec(
       // WARP-1580 — present only on an access refusal, so the Activity feed
       // distinguishes "your role does not permit this" from "the tool broke".
       ...(outcome.denialCode ? { reason: outcome.denialCode } : {}),
+      // Present only when an optional step failed inside an `ok` run.
+      ...(failedSteps.length > 0 ? { failedSteps } : {}),
     },
   });
 
