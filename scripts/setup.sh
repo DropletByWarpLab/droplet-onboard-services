@@ -39,6 +39,10 @@ SKIP_START=false
 INSTALL_SYSTEMD=false
 REGENERATE_ENV=false
 SYNC_SECRETS_ONLY=false
+# WARP-2574 (delivery half): focused re-run of the host-artefact installer only
+# (no docker, no build, no stack restart). What droplet-host-integration.service
+# and the refresh/deploy path call to install artefacts a checkout pull delivered.
+REAPPLY_HOST_INTEGRATION=false
 VERBOSE=false
 DRY_RUN=false
 # Single-box deployment shape — tri-state. "" = auto-detect; "true" = force on; "false" = force off.
@@ -82,6 +86,14 @@ Options:
                      default modern-crypto posture (TLS 1.3, OpenSSL defaults).
   --regenerate-env   Force-regenerate .env (backs up existing)
   --sync-secrets     Only rewrite Docker secret files from .env, then exit
+  --reapply-host-integration
+                     Re-run ONLY the host-artefact installer from this checkout
+                     (install_single_box_host_integration) + a host-unit refresh
+                     + audit, then exit. No docker, no build, no stack restart.
+                     The box refresh updates the checkout and restarts containers
+                     but never re-runs the installer, so a merged host artefact
+                     reaches zero existing boxes (WARP-2574); this is the heal.
+                     droplet-host-integration.service calls it at boot, audit-gated.
   --verbose          Show full command output
   --dry-run          Show what would be done without executing
   -h, --help         Show this help message
@@ -105,6 +117,7 @@ while [ $# -gt 0 ]; do
     --no-fips)          FIPS_MODE=false; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
     --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
+    --reapply-host-integration) REAPPLY_HOST_INTEGRATION=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
     --dry-run)          DRY_RUN=true; VERBOSE=true; shift ;;
     -h|--help)          usage ;;
@@ -141,6 +154,43 @@ source "$SCRIPT_DIR/lib/single-box.sh"
 source "$SCRIPT_DIR/lib/backup.sh"
 # shellcheck source=lib/luks.sh
 source "$SCRIPT_DIR/lib/luks.sh"
+
+# --- Re-apply host integration short-circuit (WARP-2574 delivery half) -------
+# A focused re-run of the host-artefact installer ONLY — no Docker, no build, no
+# stack restart, no LAN probe. The box refresh updates the git checkout and
+# restarts CONTAINERS but never re-runs install_single_box_host_integration, so a
+# merged host artefact (a new /usr/local/sbin script, a new unit, a changed
+# applier) reached ZERO existing boxes until each was hand-reprovisioned
+# (WARP-2190 + WARP-2192, 2026-08-31). This is the heal that droplet-host-
+# integration.service (and any deploy path, and an operator) invokes.
+#
+# Placed BEFORE single-box detection ON PURPOSE: that path's detect_single_box_mode
+# probes the LAN, which is both wrong and slow for a boot-time reconcile — the
+# reconcile only ever runs on a box that ALREADY carries the (single-box-only)
+# host integration, so single-box is forced true and the installer, being
+# idempotent, re-applies whatever the checkout now declares.
+if [ "$REAPPLY_HOST_INTEGRATION" = "true" ]; then
+  SINGLE_BOX_MODE=true
+  log_info "Re-applying host integration from this checkout (WARP-2574 delivery half)..."
+  install_single_box_host_integration
+  if [ -x /usr/local/sbin/droplet-host-units ]; then
+    # Restart any host unit now running stale CODE (WARP-1829), then verify the
+    # re-apply actually LANDED (WARP-2574) — the same two end-of-provision checks,
+    # minus everything a full provision does that a reconcile deliberately skips.
+    sudo /usr/local/sbin/droplet-host-units refresh \
+      || log_warn "A host unit did not come back after its restart — 'sudo droplet-host-units check'"
+    if sudo /usr/local/sbin/droplet-host-units audit; then
+      log_success "Host integration re-applied and verified against the checkout."
+      exit 0
+    fi
+    # Non-zero so droplet-host-integration.service shows in `systemctl --failed`
+    # and the watchdog keeps reporting the gap until it is fixed.
+    log_error "Host integration re-apply did NOT fully land — see the audit above; inspect: sudo droplet-host-units audit"
+    exit 1
+  fi
+  log_success "Host integration re-applied."
+  exit 0
+fi
 
 # --- Single-box mode resolution ---
 # Either the user forced it via --single-box/--no-single-box, or we auto-detect.

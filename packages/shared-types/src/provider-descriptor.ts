@@ -837,6 +837,28 @@ export function providerConfigNumber(
 }
 
 /**
+ * The prefix every `dynamicEgress.configKey` that names a `providerConfig`
+ * field carries — the DOCUMENTATION shape that mirrors the `config_key` of the
+ * paired `allowed-egress.yaml` entry (Mailchimp's `…providerConfig.datacenter`,
+ * Pipedrive's `…providerConfig.companyDomain`).
+ *
+ * 🔴 WARP-2920 — it is NOT a lookup key. `providerConfigString(cfg, name)`
+ * reads `cfg[name]` by the BARE field name, so a reader that hands it a
+ * `configKey` resolves `undefined` on every row and a dynamic-host connector
+ * refuses every connection at construction, with a green build. A reader
+ * wants the field name the profile declares (`RestBaseUrl.dynamic.configField`);
+ * this constant exists so the guard that pins the two together spells the
+ * convention once.
+ */
+export const PROVIDER_CONFIG_KEY_PREFIX = "IntegrationConnection.providerConfig.";
+
+/** The `dynamicEgress.configKey` a descriptor must carry for a per-account host
+ *  read from `providerConfig.<field>`. */
+export function providerConfigKeyFor(field: string): string {
+  return `${PROVIDER_CONFIG_KEY_PREFIX}${field}`;
+}
+
+/**
  * Validate one field's raw value.
  *
  * Returns `undefined` for anything unusable, which the caller reads as "absent"

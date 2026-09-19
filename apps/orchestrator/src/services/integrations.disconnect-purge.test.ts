@@ -65,6 +65,7 @@ import { createIntegrationsService } from "./integrations.service.js";
 // the provider-scoping assertions without anyone remembering to list it.
 import { KNOWN_ERP_PROVIDERS, EAGLESOFT_PROVIDER } from "./erp-provider.js";
 import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
+import { matchesWhere } from "../__tests__/helpers/integration-connection-where.js";
 import {
   createTransactionSeam,
   expectAllTransactionsAt,
@@ -280,11 +281,27 @@ function stubPrisma(
         return hit ? { ...hit } : null;
       }),
       findMany: vi.fn(async () => rows.map((r) => ({ ...r }))),
+      findUnique: vi.fn(async (args: { where: { id: string } }) => {
+        const hit = rows.find((r) => r.id === args.where.id);
+        return hit ? { ...hit } : null;
+      }),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         const created = { ...connectedRow(), ...data };
         rows.push(created);
         return { ...created };
       }),
+      // WARP-2842 — `connect()` lands a cloud / REST verdict through an
+      // optimistic `updateMany`; EVERY key in `where` must match, as Prisma
+      // does it, or the guard is invisible (`matchesWhere`: a Json
+      // `{ equals }` filter is matched by value).
+      updateMany: vi.fn(
+        async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+          const hit = rows.find((r) => matchesWhere(r, args.where));
+          if (!hit) return { count: 0 };
+          Object.assign(hit, args.data);
+          return { count: 1 };
+        },
+      ),
       /**
        * WARP-2500 — this HONORS `where.id`, for the same reason `findFirst`
        * honors `where.provider`.

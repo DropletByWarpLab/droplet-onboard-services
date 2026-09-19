@@ -41,10 +41,11 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/lib/api.erp", () => ({
   testLanConnection: vi.fn(),
   connectLanProvider: vi.fn(),
+  connectCloudProvider: vi.fn(),
 }));
 
 import { fetchSaasCredentials, saveSaasCredential } from "@/lib/api";
-import { testLanConnection, connectLanProvider } from "@/lib/api.erp";
+import { testLanConnection, connectLanProvider, connectCloudProvider } from "@/lib/api.erp";
 import { ConnectWizard } from "../ConnectWizard";
 import type { ErpScope } from "@/lib/erp-types";
 
@@ -210,6 +211,12 @@ beforeEach(() => {
   vi.mocked(saveSaasCredential).mockReset();
   vi.mocked(testLanConnection).mockReset();
   vi.mocked(connectLanProvider).mockReset();
+  // WARP-2842 — the probe answers CONNECTED unless a case says otherwise, so
+  // every pre-existing "Connected" assertion still means what it did: a save
+  // that landed AND a key the vendor accepted.
+  vi.mocked(connectCloudProvider)
+    .mockReset()
+    .mockResolvedValue({ provider: "fixture", status: "CONNECTED", writeEnabled: false });
 });
 
 afterEach(() => {
@@ -561,6 +568,155 @@ describe("a secret field never leaks its value back into the DOM", () => {
     expect(alert.textContent).toContain("Fixture Payments");
     expect(screen.queryByText("Connected")).toBeNull();
     expect(inputs()[0].value).toBe("fk_test_abc123");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-2842 — a pasted cloud credential is CHECKED, not assumed
+// ---------------------------------------------------------------------------
+
+/**
+ * The hop that was missing. `saveSaasCredential` stores the key and the box
+ * answers PROVISIONING — "stored, not yet checked". The wizard used to land on
+ * the green "Connected" screen at that point, and nothing ever asked the
+ * vendor whether the key worked: the row sat at PROVISIONING for good, and
+ * PROVISIONING is not a status the sync scheduler polls.
+ *
+ * Now the wizard posts `/integrations/:provider/connect` AFTER the save and
+ * renders the VERDICT the box returns. A key the vendor turned down is shown
+ * as exactly that, on the same screen, in the words the hub tile uses.
+ */
+describe("a pasted cloud credential is checked, and the verdict is what is shown", () => {
+  async function pasteAndConnect() {
+    registerProviderDescriptor(PASTE_ONLY);
+    vi.mocked(saveSaasCredential).mockResolvedValue({
+      provider: "fixture-paste",
+      state: "PROVISIONING",
+      hasCredentials: true,
+    } as never);
+    renderWizard("fixture-paste");
+    await screen.findByText("Restricted API key *");
+    fireEvent.change(inputs()[0], { target: { value: "fk_test_" + "abc123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Fixture Payments" }));
+  }
+
+  /**
+   * Mutation: delete the `connectCloudProvider` call after the save → red on
+   * the call count AND on the ordering (there is no second call to order).
+   */
+  it("calls connectCloudProvider for the descriptor AFTER the credential is saved", async () => {
+    await pasteAndConnect();
+
+    await screen.findByText("Connected");
+    expect(connectCloudProvider).toHaveBeenCalledTimes(1);
+    expect(connectCloudProvider).toHaveBeenCalledWith("fixture-paste");
+    // Save first, then check — a probe that ran before the save would probe
+    // whatever key was there before, not the one just pasted.
+    const saveOrder = vi.mocked(saveSaasCredential).mock.invocationCallOrder[0];
+    const probeOrder = vi.mocked(connectCloudProvider).mock.invocationCallOrder[0];
+    expect(probeOrder).toBeGreaterThan(saveOrder);
+  });
+
+  /**
+   * Mutation: render the "Connected" screen regardless of the returned status
+   * → red: the heading below reads "Paste a new key" and never "Connected".
+   */
+  it("shows a rejected key as 'Paste a new key', never as Connected", async () => {
+    vi.mocked(connectCloudProvider).mockResolvedValue({
+      provider: "fixture-paste",
+      status: "NEEDS_RECONNECT",
+      writeEnabled: false,
+    });
+
+    await pasteAndConnect();
+
+    await screen.findByRole("heading", { name: "Paste a new key" });
+    expect(screen.queryByText("Connected")).toBeNull();
+    // The reason, in the owner's words — the same vocabulary the hub tile and
+    // the credentials page use for this state.
+    expect(document.body.textContent).toMatch(/Fixture Payments didn.t accept that key/);
+    // And a way back to the form, because a new key is the fix.
+    expect(screen.getByRole("button", { name: /paste a different key/i })).toBeInTheDocument();
+  });
+
+  it("shows a vendor-side refusal as Can't connect, and points at the vendor's settings", async () => {
+    vi.mocked(connectCloudProvider).mockResolvedValue({
+      provider: "fixture-paste",
+      status: "ERROR",
+      writeEnabled: false,
+    });
+
+    await pasteAndConnect();
+
+    await screen.findByRole("heading", { name: "Can't connect" });
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(document.body.textContent).toMatch(/vendor.s settings/i);
+    // A new key would not fix this, so the form is not offered again.
+    expect(screen.queryByRole("button", { name: /paste a different key/i })).toBeNull();
+  });
+
+  it("shows a limited connection honestly — connected, with one dataset withheld", async () => {
+    vi.mocked(connectCloudProvider).mockResolvedValue({
+      provider: "fixture-paste",
+      status: "CAPABILITY_LIMITED",
+      writeEnabled: false,
+    });
+
+    await pasteAndConnect();
+
+    await screen.findByRole("heading", { name: "Connected · limited" });
+    expect(document.body.textContent).toMatch(/plan or permission change/i);
+  });
+
+  it("'Paste a different key' returns to the form with the secret cleared", async () => {
+    vi.mocked(connectCloudProvider).mockResolvedValue({
+      provider: "fixture-paste",
+      status: "NEEDS_RECONNECT",
+      writeEnabled: false,
+    });
+    await pasteAndConnect();
+    await screen.findByRole("heading", { name: "Paste a new key" });
+
+    fireEvent.click(screen.getByRole("button", { name: /paste a different key/i }));
+
+    await screen.findByText("Restricted API key *");
+    expect(inputs()[0].value).toBe("");
+  });
+
+  /**
+   * A probe that could not be made is an error, not a verdict: the key IS
+   * stored, and the owner is told the check did not happen rather than shown
+   * either outcome.
+   */
+  it("reports a failed check as an error, not as Connected", async () => {
+    vi.mocked(connectCloudProvider).mockRejectedValue(
+      Object.assign(new Error("nope"), { code: "TIMEOUT" }),
+    );
+
+    await pasteAndConnect();
+
+    await screen.findByRole("alert");
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(saveSaasCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refreshes the hub after the check, whatever the verdict", async () => {
+    vi.mocked(connectCloudProvider).mockResolvedValue({
+      provider: "fixture-paste",
+      status: "NEEDS_RECONNECT",
+      writeEnabled: false,
+    });
+    registerProviderDescriptor(PASTE_ONLY);
+    vi.mocked(saveSaasCredential).mockResolvedValue({ hasCredentials: true } as never);
+    const onConnected = vi.fn();
+    render(<ConnectWizard catalogId="fixture-paste" onClose={vi.fn()} onConnected={onConnected} />);
+    await screen.findByText("Restricted API key *");
+    fireEvent.change(inputs()[0], { target: { value: "fk_test_" + "abc123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Fixture Payments" }));
+
+    await screen.findByRole("heading", { name: "Paste a new key" });
+    // The card behind the dialog re-reads and shows the same verdict.
+    expect(onConnected).toHaveBeenCalledTimes(1);
   });
 });
 

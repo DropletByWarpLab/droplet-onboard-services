@@ -36,6 +36,9 @@ on:
       # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
       # RFC1918 coverage that keeps the editor reachable after a DHCP change.
       - "tests/nextcloud-docs-config-converges.test.sh"
+      # WARP-2903: the gateway's docs-discovery leg (relative urlsrc) and the
+      # hook wiring that points Nextcloud at it — the reason the editor loads.
+      - "tests/nginx-docs-discovery.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
@@ -57,6 +60,10 @@ on:
       - "tests/external-edge-router-survives-setup.test.sh"
       - "tests/framebuffer-panel-survives-reset.test.sh"
       - "tests/env-values-with-spaces-survive-sourcing.test.sh"
+      # WARP-2888: droplet must not silently (re)gain a root-equivalent group
+      # other than the load-bearing `docker` one (never `lxd`), and the firstboot
+      # teardown must drop the base-image lxd membership.
+      - "tests/droplet-user-privileged-groups-invariant.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -91,6 +98,9 @@ on:
       # WARP-1973: overwriteprotocol reconcile, connector exclusivity, and the
       # RFC1918 coverage that keeps the editor reachable after a DHCP change.
       - "tests/nextcloud-docs-config-converges.test.sh"
+      # WARP-2903: the gateway's docs-discovery leg (relative urlsrc) and the
+      # hook wiring that points Nextcloud at it — the reason the editor loads.
+      - "tests/nginx-docs-discovery.test.sh"
       # WARP-1865: the dmr profile must survive a setup re-run on a flipped box
       - "tests/dmr-profile-survives-setup.test.sh"
       - "tests/dmr-default-provisioning.test.sh"
@@ -112,6 +122,10 @@ on:
       - "tests/external-edge-router-survives-setup.test.sh"
       - "tests/framebuffer-panel-survives-reset.test.sh"
       - "tests/env-values-with-spaces-survive-sourcing.test.sh"
+      # WARP-2888: droplet must not silently (re)gain a root-equivalent group
+      # other than the load-bearing `docker` one (never `lxd`), and the firstboot
+      # teardown must drop the base-image lxd membership.
+      - "tests/droplet-user-privileged-groups-invariant.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -181,6 +195,16 @@ jobs:
         # exist, forward the prefix unstripped, sit before the catch-all, and
         # that the whole /index.php/ leg stays UNrouted. Pure bash, no Docker.
         run: bash tests/nginx-nextcloud-assets.test.sh
+      - name: Run nginx docs-discovery unit tests
+        # WARP-2903: richdocuments hands the browser Collabora's discovery
+        # urlsrc VERBATIM, so Nextcloud must fetch discovery through the
+        # gateway's :9981 leg, which rewrites the advertised origin to a
+        # path-relative /docs/… (same-origin on every hostname). Asserts the
+        # leg's shape, that 9981 is never published, and that the hook points
+        # wopi_url at it, waits for it, and verifies the urlsrc it yields. The
+        # rewrite itself is exercised for real in the gateway image build
+        # (docker/nginx/Dockerfile self-test). Pure bash, no Docker.
+        run: bash tests/nginx-docs-discovery.test.sh
       - name: Run nginx canonical-host unit tests
         # Warning-free droplet.local: render decisions (authority knob +
         # cert-artifact gates), variant contents, nginx.conf/Dockerfile/
@@ -317,3 +341,11 @@ jobs:
         # WARP-1987: .env is `.`-sourced in four places, so a bare `KEY=a b c`
         # exits 127 and fails the enclosing step — the 2026-08-13 customer wipe.
         run: bash tests/env-values-with-spaces-survive-sourcing.test.sh
+
+      - name: Run droplet privileged-group invariant
+        # WARP-2888: `docker`/`lxd` group membership is root-equivalent, so on a
+        # box where droplet's sudo is locked it — not sudo — is the LPE surface.
+        # Guards that no script adds droplet to a forbidden root-equivalent group
+        # (never lxd), that firstboot drops the unused lxd membership, and that
+        # droplet.service stays the ONLY unit granted the docker group. Pure bash.
+        run: bash tests/droplet-user-privileged-groups-invariant.test.sh

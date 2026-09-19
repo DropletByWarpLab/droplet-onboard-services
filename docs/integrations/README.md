@@ -135,6 +135,8 @@ The state it must never take is `FAILED`, and the reason is that `FAILED` is ter
 
 A connect attempt that can't reach the external system lands in **`PROVISIONING`**, never a fake `CONNECTED`. This is honest degradation — the dashboard shows "connecting / not connected", which is the truth.
 
+For a **cloud or REST track** the transition out of `PROVISIONING` is a two-step contract (WARP-2842). `PATCH /api/integrations/:provider/credentials` seals the pasted credential onto the row and writes `PROVISIONING` — *stored, not yet checked* — and nothing else. `POST /api/integrations/:provider/connect` (empty body, owner/admin, idempotent) then builds the connector **from the row** — `connectionId`, `providerConfig`, and the AAD-bound `providerTokensEnc` via `cloudMaterialFromRow` — probes the vendor, and writes the verdict: `CONNECTED` (+ `lastHealthyAt`) on success, or `NEEDS_RECONNECT` / `DEGRADED` / `CAPABILITY_LIMITED` / `ERROR` per `cloud-connection-state.ts`. The PATCH deliberately does not probe: a credential write and a network call are two consent events, and the credential route's Prisma surface cannot reach the connector. Only `CONNECTED`, `CAPABILITY_LIMITED` and `DEGRADED` are in `POLLABLE_CONNECTION_STATUSES`, so a row that never takes the second step is never synced — which is why the wizard and the credentials page both call it after every save.
+
 ### `WriteStatus` (write-request outbox lifecycle)
 
 ```
@@ -176,7 +178,8 @@ All endpoints are auth-gated; PHI endpoints enforce RBAC and audit.
 |---|---|
 | `GET /api/integrations` | Hub list (all providers + status). No PHI, no secret. |
 | `GET /api/integrations/eaglesoft` | Connection detail + status. |
-| `POST /api/integrations/eaglesoft/connect` | Run / verify provisioning; land `CONNECTED` (or honest `PROVISIONING`). |
+| `POST /api/integrations/eaglesoft/connect` | Run / verify provisioning; land `CONNECTED` (or honest `PROVISIONING`). Deprecated LAN-only alias: a body naming a cloud / REST / MCP track is refused (400). |
+| `POST /api/integrations/:provider/connect` | LAN track: the same, provider from the URL (body: host, port, …). Cloud / REST track: **empty body** — probe the credential already on the row and write the verdict (WARP-2842). |
 | `POST /api/integrations/eaglesoft/test` | Reachability test (no save). |
 | `POST /api/integrations/eaglesoft/write-enable` \| `/write-disable` | The write opt-in / kill-switch. |
 | `GET /api/erp/schedule?date=…` · `/api/erp/patients?query=…` · `/api/erp/patient/:id` · `/api/erp/ar-summary` · `/api/erp/recall-due` | Read surfaces (paginated, audited). |

@@ -145,7 +145,7 @@ autoinstall:
       User=droplet
       WorkingDirectory=/home/droplet/edge-platform
       ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
-      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done && sudo rm -f /etc/sudoers.d/droplet-firstboot"
+      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done; if id -nG droplet 2>/dev/null | grep -qw lxd; then sudo gpasswd -d droplet lxd; fi; sudo rm -f /etc/sudoers.d/droplet-firstboot"
       RemainAfterExit=yes
       TimeoutStartSec=45min
       StandardInput=null
@@ -197,6 +197,13 @@ autoinstall:
     # go through the device-bridge's polkit-routed root units, never sudo. A
     # NOPASSWD: ALL that persisted past first boot would turn the SSH password
     # into a remote root credential (ADR-020 §D6).
+    # WARP-2888: the same firstboot ExecStartPost also drops droplet from the
+    # base-image `lxd` group — unused by Droplet, root-equivalent (a member can
+    # `lxc`-launch a privileged container that bind-mounts the host root) — while
+    # firstboot sudo still exists, before the rm above revokes it. The `docker`
+    # group is deliberately KEPT: droplet.service AND the device-bridge's ADR-023
+    # host wrappers (tls-reload, factory-reset) run `docker compose` as droplet,
+    # so stripping docker requires routing those through root first (ADR-020 §D6).
     - |
       curtin in-target --target=/target -- bash -c 'echo "droplet ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot'
     # WARP-2143: install media boots once — no manual stick-pull. Firmware

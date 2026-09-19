@@ -197,9 +197,15 @@ echo "--- Phase 2: ordering — every asset leg precedes the catch-all ---"
 # and a leg that drifts below the catch-all is a review smell worth catching —
 # but nobody should read this and think it is preventing a routing bug.
 
-CATCHALL_LINE=$(grep -nE '^[[:space:]]*location / \{' "$CONF" | head -1 | cut -d: -f1)
+# The dashboard catch-all is the one in the HTTPS server. nginx.conf carries
+# more than one `server {}` (WARP-2903 added the compose-internal :9981
+# docs-discovery listener above it, with its own `location /` 404), so the
+# FIRST `location /` in the file is no longer the right one — anchor on the
+# `listen 443 ssl;` line and take the first catch-all after it.
+HTTPS_LINE=$(grep -nE '^[[:space:]]*listen 443 ssl;' "$CONF" | head -1 | cut -d: -f1)
+CATCHALL_LINE=$(awk -v start="${HTTPS_LINE:-0}" 'NR > start && /^[[:space:]]*location \/ \{/ { print NR; exit }' "$CONF")
 if [ -n "$CATCHALL_LINE" ]; then
-  pass "found the dashboard catch-all 'location /' at line $CATCHALL_LINE"
+  pass "found the dashboard catch-all 'location /' at line $CATCHALL_LINE (in the :443 server, after line ${HTTPS_LINE:-?})"
 else
   fail "could not find the dashboard catch-all 'location /'"
 fi

@@ -168,7 +168,13 @@ One page, shared by every vendor, rather than five paraphrases that could drift 
 1. **Read what will be read.** The connect screen states, before you paste anything, what the box will read and that the credential is copied onto the box. If that statement does not match what you expected, stop there.
 2. **Paste the credential.** One field for most vendors, two for the ones that issue a client id and a client secret. Droplet checks the shape before it stores anything — a credential of the wrong kind is refused at this point, with the reason, and is not written anywhere.
 3. **Choose what Droplet can see.** The same scope list as Track A, bounded by what you actually granted in the vendor's console. Asking here for something the credential does not permit surfaces as a named error, not as an empty screen.
-4. **Confirm and connect.** Droplet makes its first call. A credential that authenticates but cannot read a resource you asked for is reported as exactly that, naming the permission you need to go and tick.
+4. **Confirm and connect.** Droplet stores the credential, then makes its first call to the vendor with it and shows you the answer on the same screen. Until that call the connection reads *Setting up* — the credential is stored but not yet checked — and the outcome is one of:
+   - **Connected** — the vendor accepted the credential, and Droplet starts reading on its schedule.
+   - **Paste a new key** — the vendor turned the credential down. Check it is current and has read access, then paste it again; nothing else needs to change.
+   - **Can't connect** — the vendor refused for a reason a new credential will not fix, such as an IP access policy or a plan limit. The fix is in the vendor's own settings.
+   - **Connected · limited** — the credential works but one dataset is withheld by the plan or the permissions you granted. Everything else reads.
+
+   The same result shows on the connector's card, and the credentials page ([§3.6](#36-changing-a-credential-later-warp-2275)) re-checks in the same way after every change. A credential that authenticates but cannot read a resource you asked for is reported as exactly that, naming the permission you need to go and tick.
 
 ### 3.6 Changing a credential later (WARP-2275)
 
@@ -180,6 +186,8 @@ The form is generated from what each connector declares it needs, so it shows ex
 
 - **Leave a field blank to keep what is stored.** This is what lets you fix a region or an account id without going to find the original key again. A saved field reads *"Saved — replace to change"* rather than showing a masked value, because there is nothing to mask — the box cannot read it back either.
 - **Clear a field explicitly to remove it.** The connection then reports *Not connected* rather than continuing to claim it works.
+
+Saving is not the same as connecting. After a save the box checks the new credential with the vendor straight away and the state line shows the result — *Connected*, *Credential rejected — replace it*, or *Can't connect — check the vendor's settings* — rather than a bare "Saved". If the check itself could not be made (the box was busy, the vendor unreachable), the page says so and the line stays on *Checking the connection* until you save or check again — nothing retries it on a schedule, because a credential that has not been checked is never read from.
 
 Every save, replacement and clear is written to the audit log with **whether** a credential is set — never the value, a prefix, a length, or a hash. What is stored is encrypted and bound to the connection row it belongs to, so a credential blob copied to another connection fails to decrypt rather than authenticating as the wrong account. The full statement is in [`credential-handling.md`](credential-handling.md).
 
