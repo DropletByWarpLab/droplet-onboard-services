@@ -30,6 +30,23 @@ import pytest
 _BRIDGE_PATH = Path(__file__).resolve().parent.parent / "device-bridge.py"
 
 
+@pytest.fixture(autouse=True)
+def _no_host_gpu_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gpu_snapshot() consults the REAL PATH for nvidia-smi before the patched
+    sysfs (WARP-2883 review): on a host with the binary (the bench box's
+    5060 Ti) the amdgpu fixtures lose to the live card and 6 tests fail while
+    CI, lacking the binary, stays green. Pin "no tools" for every test; the
+    `_with_tools` cases override both attributes with their canned outputs."""
+    import shutil
+    import subprocess
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("subprocess.run reached the host — use _with_tools")
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(subprocess, "run", _forbidden)
+
+
 def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
     monkeypatch.setenv("BRIDGE_AUTH_TOKEN", "pytest-bridge-token")
     for k, v in (env or {}).items():

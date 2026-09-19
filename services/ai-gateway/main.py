@@ -54,6 +54,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
+from middleware.off_lan_gating import get_cloud_model_escape, is_local_provider
 from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
 from middleware.request_id import RequestIdMiddleware
 from models.registry import ModelRegistry
@@ -313,8 +314,15 @@ async def latency():
         raise HTTPException(status_code=503, detail="Service not ready")
     # Box-wide (shared) keys — the same namespace model listing uses.
     await provider_router.refresh_keys(None)
+    # WARP-468 off-LAN gate, applied HERE because this is the component that
+    # dials. A saved key with escape OFF must mean zero connections to the
+    # cloud hosts — the same posture chat enforces in router.py. Read once per
+    # request (cached 30 s by the middleware); fails closed like chat does.
+    escape = await get_cloud_model_escape()
 
-    async def timed(provider) -> int | None:
+    async def timed(name: str, provider) -> int | None:
+        if not escape and not is_local_provider(name):
+            return None
         started = time.monotonic()
         try:
             ok = await provider.is_reachable()
@@ -323,9 +331,9 @@ async def latency():
         return round((time.monotonic() - started) * 1000) if ok else None
 
     local_ms, anthropic_ms, openai_ms = await asyncio.gather(
-        timed(provider_router.local),
-        timed(provider_router.anthropic),
-        timed(provider_router.openai),
+        timed("local", provider_router.local),
+        timed("anthropic", provider_router.anthropic),
+        timed("openai", provider_router.openai),
     )
     return {"providers": {"local": local_ms, "anthropic": anthropic_ms, "openai": openai_ms}}
 

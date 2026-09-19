@@ -3905,6 +3905,15 @@ def _read_sysfs_str(path):
         return None
 
 
+# WARP-2883 — per-tool subprocess budgets for the GPU snapshot. The
+# orchestrator aborts its GET /gpu at BRIDGE_GPU_TIMEOUT_MS = 3_000
+# (apps/orchestrator/src/lib/gpu-telemetry.ts); a stalled nvidia-smi at the
+# old 3 s therefore reported `gpuReason: "unreachable"` for a bridge that was
+# up. nvidia-smi and lspci can both run in one snapshot, so their sum plus
+# the sysfs reads must stay under that window with headroom.
+_GPU_TOOL_TIMEOUT_S = {"nvidia-smi": 1.5, "lspci": 1.0}
+
+
 def _pci_device_name(dev):
     """Marketing name of the PCI device behind a DRM node, or None (WARP-2883).
 
@@ -3932,8 +3941,10 @@ def _pci_device_name(dev):
     if not slot or not lspci:
         return None
     try:
+        # Budget: see _GPU_TOOL_TIMEOUT_S — this runs after nvidia-smi inside
+        # the orchestrator's single 3 s window.
         out = subprocess.run([lspci, "-mm", "-s", slot], capture_output=True,
-                             text=True, timeout=2).stdout
+                             text=True, timeout=_GPU_TOOL_TIMEOUT_S["lspci"]).stdout
         fields = shlex.split(out.strip())
     except Exception:                                                # noqa: BLE001
         return None
@@ -3989,7 +4000,7 @@ def nvidia_snapshot():
     try:
         out = subprocess.run(
             [smi, f"--query-gpu={_NVIDIA_SMI_QUERY}", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=3).stdout
+            capture_output=True, text=True, timeout=_GPU_TOOL_TIMEOUT_S["nvidia-smi"]).stdout
     except Exception:                                                # noqa: BLE001
         return None
     line = next((ln for ln in out.splitlines() if ln.strip()), None)

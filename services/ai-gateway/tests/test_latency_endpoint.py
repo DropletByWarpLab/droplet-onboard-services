@@ -36,10 +36,15 @@ def _router(local_ok=True, anthropic_ok=True, openai_ok=None):
     return router
 
 
+def _escape(enabled: bool):
+    """Pin the off-LAN posture the probe consults (WARP-2883 review)."""
+    return patch("main.get_cloud_model_escape", AsyncMock(return_value=enabled))
+
+
 class TestLatencyEndpoint:
     async def test_reports_ms_per_endpoint_and_null_for_the_rest(self, client):
         router = _router(local_ok=True, anthropic_ok=False, openai_ok=None)
-        with patch("main.provider_router", router):
+        with patch("main.provider_router", router), _escape(True):
             resp = await client.get("/ai/latency")
         assert resp.status_code == 200
         providers = resp.json()["providers"]
@@ -57,9 +62,41 @@ class TestLatencyEndpoint:
             return True
 
         router.local.is_reachable = slow
-        with patch("main.provider_router", router):
+        with patch("main.provider_router", router), _escape(True):
             resp = await client.get("/ai/latency")
         assert resp.json()["providers"]["local"] >= 40
+
+    async def test_escape_off_never_dials_a_cloud_vendor_even_with_a_key(self, client):
+        """Before this endpoint, escape OFF meant zero connections to the cloud
+        hosts. A saved key must not change that: the gate lives in the
+        component that dials, not only on the chat path (router.py)."""
+        router = _router(local_ok=True)
+        router.anthropic = AnthropicCloudProvider(api_key="sk-ant-test")
+        router.openai = OpenAICloudProvider(api_key="sk-test")
+        with respx.mock(assert_all_called=False) as mock:
+            anthropic = mock.get("https://api.anthropic.com/v1/models").mock(
+                return_value=httpx.Response(200, json={"data": []}))
+            openai = mock.get("https://api.openai.com/v1/models").mock(
+                return_value=httpx.Response(200, json={"data": []}))
+            with patch("main.provider_router", router), _escape(False):
+                resp = await client.get("/ai/latency")
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert not anthropic.called
+        assert not openai.called
+        assert providers["anthropic"] is None and providers["openai"] is None
+        assert isinstance(providers["local"], int), "local is never gated"
+
+    async def test_escape_on_dials_a_keyed_cloud_vendor(self, client):
+        router = _router(local_ok=True)
+        router.anthropic = AnthropicCloudProvider(api_key="sk-ant-test")
+        with respx.mock(assert_all_called=False) as mock:
+            anthropic = mock.get("https://api.anthropic.com/v1/models").mock(
+                return_value=httpx.Response(200, json={"data": []}))
+            with patch("main.provider_router", router), _escape(True):
+                resp = await client.get("/ai/latency")
+        assert anthropic.called
+        assert isinstance(resp.json()["providers"]["anthropic"], int)
 
     async def test_503_before_startup(self, client):
         with patch("main.provider_router", None):
