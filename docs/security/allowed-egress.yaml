@@ -1357,6 +1357,67 @@ entries:
     review_by: 2027-09-07
     code_refs: [services/erp-connector/src/rest/vendors/calcom.ts]
 
+  # WARP-2916 — `api.github.com` is ALSO registered above under
+  # `ota-github-releases` (the orchestrator's release-manifest fetch, data
+  # class `none`). This is a separate entry on purpose: a different service,
+  # a different data class, a different credential, and a different reason to
+  # exist — retiring OTA-over-GitHub must not silently un-register the
+  # connector, and vice versa. Same host, two contracts, two rows.
+  # 🔴 WARP-2916 — registered because a JSON PATH IN A FIELD MAP parses as a
+  # hostname. `.id` is a real ICANN TLD (Indonesia), so the WARP-2467 bare-host
+  # pass reads the profile's `project_id: "repository.id"` — the dotted path
+  # to the repository's numeric id on a GitHub issue row — as a destination.
+  # `rest/connector.ts`'s `readPath` docstring already records this trap for
+  # `hosts.0.id`, where bracket syntax (`hosts[0].id`) is the fix; a plain
+  # object key has no bracket spelling, and renaming GitHub's field is not an
+  # option. Same mechanism as `ref-cal-com-brand`: it states the true fact —
+  # this token appears in source as a path, and the box never dials it.
+  - id: ref-github-repository-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [repository.id]
+    purpose: the dotted JSON path `repository.id` in the GitHub REST profile's task field map (the repository's numeric id on an issue row) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-2916
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
+  - id: github-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.github.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GitHub REST API — the project-tracker cloud connector (WARP-2916), on
+      ADR-046's declarative REST track. Read-only, GET only, one dataset:
+      issues (and pull requests, which GitHub's API returns from the same
+      endpoint) across every repository the owner's token can see, with their
+      title, state, assignee and timestamps. Fetched on request and on a
+      scheduled incremental poll under a FINE-GRAINED personal access token
+      the account owner minted in their own GitHub settings (Settings →
+      Developer settings → Personal access tokens → Fine-grained tokens) with
+      Issues: Read-only over repositories they chose; works on GitHub Free;
+      never ambient, off until the owner connects. Paced against GitHub's
+      published 5,000-requests-per-hour PAT ceiling (720 ms), which is the
+      owner's budget and is shared with every other tool on that user. ONE
+      FIXED HOST — GitHub Enterprise Server and GHEC data-residency hosts are
+      NOT served by this profile and would be a separate kind: dynamic entry
+      with their own exact-host guard. Every request also carries a dated
+      `X-GitHub-Api-Version: 2022-11-28` header (an API-version pin, not a
+      destination) and a `User-Agent: droplet-erp-connector`, which GitHub
+      requires. Pagination follows RFC-5988 `Link: rel="next"` URLs taken
+      verbatim from the response and re-checked against this host before
+      each page.
+    ticket: WARP-2916
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

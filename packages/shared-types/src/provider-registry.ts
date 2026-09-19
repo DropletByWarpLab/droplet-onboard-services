@@ -1205,6 +1205,61 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 13,
     },
   },
+  // WARP-2916 — the third REST profile, and the first PROJECT-TRACKER vendor
+  // on the declarative track.
+  {
+    id: "github",
+    displayName: "GitHub",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "GitHub fine-grained personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // 🔴 A `pattern`, unlike Square and Cal.com — because GitHub DOCUMENTS
+        // its token formats ("GitHub's token formats" table on
+        // about-authentication-to-github): `github_pat_` is a fine-grained
+        // PAT, `ghp_` a classic one. The classic shape is refused ON PURPOSE:
+        // its `repo` scope is read AND write over every repository the user
+        // can reach, with no read-only option, while a fine-grained token is
+        // the only shape that can be minted `Issues: Read-only` over a chosen
+        // set of repositories. Same call ADR-042 §4 makes for Stripe's `sk_`.
+        // Pinned by `github-profile.test.ts`.
+        pattern: "^github_pat_",
+        help:
+          "In GitHub: your profile photo → Settings → Developer settings → Personal access tokens → " +
+          "Fine-grained tokens → Generate new token. Pick the repositories to include and grant " +
+          "Issues: Read-only (Pull requests: Read-only too if pull requests should appear). " +
+          "Any plan works, including Free.",
+      },
+    ],
+    // ONE FIXED HOST. GitHub Enterprise Server and GHEC data-residency use
+    // other hosts and are a second profile, not a variable host on this one.
+    egressHosts: ["api.github.com"],
+    // `task` from `GET /issues` — issues AND pull requests, because GitHub's
+    // REST API "considers every pull request an issue" and the track has no
+    // per-row filter. `ticket` is deliberately NOT declared: an issue has no
+    // `contact_id` and is a work item, not a support conversation. See
+    // `rest/vendors/github.ts` for the full list of what is not served.
+    datasets: ["task"],
+    // 5,000 requests per hour for a PAT, documented — and it is the USER's
+    // budget, shared with every other tool authenticating as them.
+    rateLimit: { callCeiling: 5_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "github",
+      name: "GitHub",
+      category: "Project management",
+      description:
+        "Issues and pull requests across every repository your token can see — read from GitHub.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/github",
+      order: 14,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

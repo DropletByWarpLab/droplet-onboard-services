@@ -215,3 +215,60 @@ rest provider has at least one dataset the assistant can ask about.
 in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and would
 silently key dedup on `undefined` for every dataset at once.
 
+
+### Implementation record — 2026-09-18 (WARP-2916, GitHub)
+
+**The third profile, and the first on the track that needed a change to the shared
+connector.** `rest/vendors/github.ts` serves `task` from `GET /issues` — issues AND pull
+requests, because GitHub's API "considers every pull request an issue" and the track has
+no per-row filter; the undocumented `pulls` parameter is deliberately not sent. Static
+host `api.github.com`; `since` (ISO, verified live to be inclusive, and a 422 rather than a
+silent full scan when malformed); RFC-5988 `Link` pagination, which `profile.ts` had
+declared with GitHub as the named vendor since WARP-2707 and which now has its first
+shipped profile; bare-array body (`rowsPath: ""`); pacing at the documented 5,000/h
+(720 ms). `assignee_id` reads `assignees[0].id` rather than the singular `assignee`, which
+the 2026-03-10 API version removes — the profile is correct under both, and the
+`X-GitHub-Api-Version: 2022-11-28` pin is the whole migration when it comes.
+
+**One connector change, admitted under §2's criterion.** GitHub answers rate-limit
+exhaustion with *"a 403 or 429"*, carrying `retry-after` (secondary limits) or
+`x-ratelimit-remaining: 0` (primary). The shared connector read EVERY 403 as "the vendor
+rejected the credential" — evicting the cached token and sending the owner to paste a new
+one for a budget that refills within the hour, and a budget that is the USER's, shared with
+every other tool on that account. `request()` now classifies a 403 carrying either header
+as rate-limited, on the same path a 429 takes, and both raise a `RestRateLimitedError`
+(a `RestVendorError` subclass carrying the raw `Retry-After`). The signals are the vendor's
+own rate-limit vocabulary, not a `provider === "github"` branch. The orchestrator's sync
+loop maps that class to TRANSIENT by `instanceof`, exactly as it maps
+`XeroRateLimitedError` — without which the error's real 403 status would have reached
+`classifySyncFailure` and been read as AUTH, re-creating the "paste a new key" it was
+meant to remove one hop downstream. Pinned in `rest-track.test.ts`,
+`github-profile.test.ts` and `erp-sync.service.test.ts`.
+
+**Two constant-header findings, recorded so they are not re-derived:**
+
+* `Accept` is NOT declared. `request()` spreads `constantHeaders` first and then sets
+  `accept: application/json` unconditionally; Node's `Headers` merges the two
+  case-variant keys, so a profile-level `Accept: application/vnd.github+json` cannot pin
+  GitHub's media type — it can only claim to. GitHub answers 200 `application/json` to the
+  connector's value (verified live).
+* `User-Agent: droplet-erp-connector` IS declared. GitHub refuses a request with no
+  User-Agent (403 text/html, verified live), and the track never set one — every REST
+  vendor so far has worked only because undici sends `User-Agent: node` by default. That
+  runtime-default dependency is now explicit for GitHub and is the obvious candidate for a
+  track-level constant when the next vendor documents the same requirement.
+
+**Datasets NOT served, and why:** `ticket` — an issue is a work item, not a support
+conversation, and `CANONICAL_COLUMNS.ticket` wants a `contact_id` an issue does not have;
+`task` and `ticket` were separated on purpose in WARP-2832. A repository or pull-request
+dataset — no canonical name exists, and `since` is verified ABSENT on `/pulls` and
+`/orgs/{org}/repos`, so neither would have an incremental watermark even if one did.
+GitHub Enterprise Server / GHEC data residency — other hosts, a second `kind: dynamic`
+profile, not a widening.
+
+**Left open, stated rather than guessed:** whether `GET /issues` with `filter=all`
+returns PRIVATE-repository issues for a fine-grained token that has repository access
+but NO Issues permission (the endpoint says no permissions are required; the
+permissions page does not list it). The guide tells the owner to grant `Issues:
+Read-only` regardless, and warns that a token with too little — or an org-owned token
+still pending approval — probes green and reads fewer rows.

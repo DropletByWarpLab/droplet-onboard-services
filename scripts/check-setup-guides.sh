@@ -94,7 +94,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # control, so an undocumented click-path is the connector being unusable.
 # The track they ride on changes nothing about that obligation — ADR-046 §5
 # is explicit that a profile ships only with its guide and its ADR-042 row.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
+# WARP-2916 — `github`, the third REST vendor, for the same reason.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -242,6 +243,23 @@ fact_pins() {
       # there is no host at all, so the guide must not present it as optional.
       printf '%s
 ' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
+      ;;
+    github)
+      # Four facts a customer acts on (WARP-2916), each verified against
+      # GitHub's own pages on 2026-09-18:
+      #  - The box accepts ONLY a fine-grained token, by its documented
+      #    `github_pat_` prefix, and refuses the classic `ghp_` shape — the
+      #    Stripe `sk_` reasoning (ADR-042 §4). A guide that does not name
+      #    both prefixes cannot explain the refusal the customer will hit.
+      #  - `Issues: Read-only` is the one permission to tick. Softening it to
+      #    "read access" loses the exact menu label the customer must find.
+      #  - The 5,000-an-hour allowance is the USER's, shared with every other
+      #    tool on that account; the guide must say the box waits rather than
+      #    reporting a bad token, or the first busy CI hour becomes a support
+      #    call about a credential that is fine.
+      #  - Pull requests come along with issues and cannot be filtered out —
+      #    a copy pass that promised "issues only" would be a false claim.
+      printf '%s\n' 'github_pat_' 'ghp_' 'Issues: Read-only' '5,000' 'pull request'
       ;;
     *)
       : # no pins declared for this provider

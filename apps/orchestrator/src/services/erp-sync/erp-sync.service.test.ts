@@ -20,6 +20,7 @@ import {
   MailchimpCapabilityMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
+  RestRateLimitedError,
 } from "@droplet/erp-connector";
 
 import { MAX_BACKOFF_MS } from "../m365/sync-policy.js";
@@ -1290,6 +1291,67 @@ describe("WARP-2623 — a refused dataset must not park the connection at FAILED
     expect(h.prisma.__cursor("cur-1")!.state).toBe("IDLE");
     expect(h.prisma.__cursor("cur-1")!.consecutiveFailures).toBe(0);
     expect(h.prisma.__cursor("cur-1")!.lastError).toBeNull();
+  });
+});
+
+/**
+ * WARP-2916 — a REST-track rate limit is TRANSIENT, whatever status it wore.
+ *
+ * GitHub answers rate-limit exhaustion with "a 403 or 429". The shared REST
+ * connector now raises `RestRateLimitedError` for both (carrying the vendor's
+ * `retry-after` when it sent one). Without a branch here, that error's real
+ * `status` (403) fell through `asSyncFailure` to `classifySyncFailure`, which
+ * reads 403 as AUTH — `needsReconnect` flipped true and the hub sent the owner
+ * to paste a new token because a CI job elsewhere had spent the hour's budget.
+ * The Xero track has had this branch since WARP-2383; this is the same branch
+ * for the declarative track.
+ */
+describe("WARP-2916 — a rate-limited REST read backs off and keeps the credential", () => {
+  it("parks the cursor CLAIMABLE, never FAILED, and never asks for a new credential — even on a 403", async () => {
+    // MUTATION: drop the `RestRateLimitedError` branch from `asSyncFailure`
+    // → the 403 classifies AUTH → needsReconnect flips true → red.
+    const h = harness({
+      read: async () => {
+        throw new RestRateLimitedError("github", 403, "API rate limit exceeded", "60");
+      },
+    });
+    await runnerFor(h).runIncrementalTick();
+    const cur = h.prisma.__cursor("cur-1")!;
+    expect(cur.state).not.toBe("FAILED");
+    expect(CLAIMABLE_ERP_SYNC_STATES).toContain(cur.state);
+    expect(cur.needsReconnect).toBe(false);
+    // The watermark survives: the next pass is incremental, not a re-scan.
+    expect(cur.watermark).toBe("2026-08-15T00:00:00Z");
+  });
+
+  it("waits exactly the vendor's retry-after when it sent one, and rides the ramp when it did not", async () => {
+    // GitHub's secondary limits carry `retry-after` in seconds; the primary
+    // limit carries only `x-ratelimit-reset`. `computeBackoffMs` honours a
+    // Retry-After exactly and falls back to the jittered exponential ramp.
+    // MUTATION: stop threading `retryAfter` onto the error → the first case
+    // waits the 15–30 s jittered base, not 60 s → red.
+    const withHeader = harness({
+      read: async () => {
+        throw new RestRateLimitedError("github", 403, "", "60");
+      },
+    });
+    await runnerFor(withHeader).runIncrementalTick();
+    const cur = withHeader.prisma.__cursor("cur-1")!;
+    expect(cur.state).toBe("BACKOFF");
+    expect((cur.nextAttemptAt as Date).getTime() - NOW.getTime()).toBe(60_000);
+
+    const without = harness({
+      read: async () => {
+        throw new RestRateLimitedError("github", 429, "");
+      },
+    });
+    await runnerFor(without).runIncrementalTick();
+    const cur2 = without.prisma.__cursor("cur-1")!;
+    expect(cur2.state).toBe("BACKOFF");
+    const waited = (cur2.nextAttemptAt as Date).getTime() - NOW.getTime();
+    expect(waited).toBeGreaterThan(0);
+    expect(waited).toBeLessThanOrEqual(MAX_BACKOFF_MS);
+    expect(cur2.needsReconnect).toBe(false);
   });
 });
 

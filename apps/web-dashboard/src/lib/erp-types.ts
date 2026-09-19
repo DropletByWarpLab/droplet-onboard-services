@@ -67,7 +67,10 @@ export type ConnectorId =
   // onto. Deriving the union from `catalogDescriptors()` would satisfy the
   // cast by deleting the check.
   | "square"
-  | "calcom";
+  | "calcom"
+  // WARP-2916 — GitHub, the third REST-track vendor. Same hand-widening,
+  // same reason.
+  | "github";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

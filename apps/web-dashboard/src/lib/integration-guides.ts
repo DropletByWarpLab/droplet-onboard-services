@@ -52,6 +52,7 @@ import calcom from "../../../../docs/integrations/calcom.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
+import github from "../../../../docs/integrations/github.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import mailchimp from "../../../../docs/integrations/mailchimp.md?raw";
@@ -84,6 +85,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,
+  github,
   hubspot,
   klaviyo,
   mailchimp,

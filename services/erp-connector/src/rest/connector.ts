@@ -134,6 +134,35 @@ export class RestVendorError extends Error {
   }
 }
 
+/**
+ * WARP-2916 — the vendor said "slow down", not "who are you".
+ *
+ * A `RestVendorError` (so every existing `instanceof RestVendorError` path
+ * still holds) that additionally carries the vendor's `Retry-After`, which the
+ * orchestrator's sync loop honours exactly through `retryAfterOf`. Raised for
+ * a 429, and for a 403 that carries a rate-limit header
+ * ({@link isRateLimited403}) — GitHub answers primary and secondary
+ * rate-limit exhaustion with *"a 403 or 429 response"*.
+ *
+ * The class exists because the STATUS alone misleads downstream: the sync
+ * classifier reads a bare 403 as AUTH and flips `needsReconnect`, sending the
+ * owner to paste a new token for a budget that refills within the hour. The
+ * orchestrator maps this class to TRANSIENT by `instanceof`, the way it maps
+ * `XeroRateLimitedError` — a compile-time coupling, not a string match.
+ */
+export class RestRateLimitedError extends RestVendorError {
+  constructor(
+    provider: string,
+    status: number,
+    detail: string,
+    /** The raw `Retry-After` header value (seconds or HTTP-date), if sent. */
+    readonly retryAfter?: string,
+  ) {
+    super(provider, status, detail ? `rate limited: ${detail}` : "rate limited");
+    this.name = "RestRateLimitedError";
+  }
+}
+
 const REST_TRACK_REMEDIATION =
   "check the key you pasted is still valid in the vendor's console, then reconnect this integration from the Integrations page";
 
@@ -359,6 +388,30 @@ export function vendorErrorCode(body: string): string {
     }
   }
   return "";
+}
+
+/**
+ * WARP-2916 — is this 403 the vendor saying "slow down" rather than "who are
+ * you"?
+ *
+ * GitHub is the verified failure that admitted this (ADR-046 §2's bar for a
+ * change to the shared connector): its rate-limit page documents that
+ * exceeding the primary OR a secondary limit answers *"a 403 or 429
+ * response"*, carrying `retry-after` (secondary) or `x-ratelimit-remaining: 0`
+ * (primary). The two signals are the vendor's OWN rate-limit vocabulary — RFC
+ * 9110 `Retry-After`, and the de-facto `X-RateLimit-Remaining` that GitHub,
+ * Shopify and most others send — so this is not a `provider === "github"`
+ * branch, which the track forbids.
+ *
+ * Deliberately NARROW: `x-ratelimit-remaining` must be exactly `0`, because
+ * vendors send that header on EVERY response and a 403 with 4,999 remaining
+ * is not a rate limit. Only a 403 is ever asked; a 401 is a rejected
+ * credential whatever rides on it, and a 429 already takes the vendor-error
+ * path without any help.
+ */
+export function isRateLimited403(headers: Headers): boolean {
+  if (headers.get("retry-after") !== null) return true;
+  return headers.get("x-ratelimit-remaining")?.trim() === "0";
 }
 
 export class RestProfileConnector implements Connector {
@@ -595,9 +648,19 @@ export class RestProfileConnector implements Connector {
       );
     }
 
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401 || (response.status === 403 && !isRateLimited403(response.headers))) {
       // A rejected credential is not an outage. Distinguishing it is what lets
       // the hub say "paste a new key" instead of "can't connect".
+      //
+      // 🔴 WARP-2916 — a 403 that CARRIES A RATE-LIMIT HEADER is not this
+      // branch. GitHub answers primary AND secondary rate-limit exhaustion
+      // with "a 403 or 429", with `retry-after` on the secondary limits and
+      // `x-ratelimit-remaining: 0` on the primary — and the 5,000/h budget is
+      // the USER's, shared with every other tool on that account. Reading
+      // that 403 as a bad key evicted a perfectly good token and told the
+      // owner to paste a new one for a condition that clears itself. Such a
+      // 403 falls through to the plain vendor-error path below, exactly as a
+      // 429 does. See {@link isRateLimited403}.
       //
       // 🔴 EVICT THE CACHE FIRST. `authHeaderValue` resolves once and holds the
       // values for the connector's whole life, so without this line every
@@ -614,6 +677,20 @@ export class RestProfileConnector implements Connector {
       // 401 comes back — which is the honest outcome, not a loop.
       this.credentials = null;
       throw this.blocked(op, `the vendor rejected the credential (${response.status})`);
+    }
+    if (response.status === 429 || response.status === 403) {
+      // A 403 reaching this line IS rate-limited (the branch above took every
+      // other 403). The credential is NOT evicted: it was never the problem,
+      // and re-resolving it on every throttled page would hammer the sealed
+      // store for nothing. Same body discipline as the generic branch below —
+      // the vendor's CODE survives, nothing else does.
+      const detail = await response.text().catch(() => "");
+      throw new RestRateLimitedError(
+        this.provider,
+        response.status,
+        vendorErrorCode(detail),
+        response.headers.get("retry-after") ?? undefined,
+      );
     }
     if (!response.ok) {
       // 🔴 The vendor's BODY does not go in the message.

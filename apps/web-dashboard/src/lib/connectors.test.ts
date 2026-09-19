@@ -186,6 +186,16 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/calcom",
   },
+  {
+    // WARP-2916 — the REST track's third vendor, at catalog.order 14.
+    id: "github",
+    name: "GitHub",
+    category: "Project management",
+    description:
+      "Issues and pull requests across every repository your token can see — read from GitHub.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/github",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -253,6 +263,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "calcom",
       "dentrix",
       "eaglesoft",
+      "github",
       "hubspot",
       "klaviyo",
       "mailchimp",
