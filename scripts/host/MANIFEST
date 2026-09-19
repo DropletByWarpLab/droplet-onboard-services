@@ -24,7 +24,11 @@
 # This table is the expectation half of that reconciliation. `droplet-host-units
 # audit` reads it and compares it against the live filesystem and
 # `systemctl is-enabled`; the `host_artefacts` check on droplet-watchdog.timer
-# reports the result.
+# reports the result. The HEAL is droplet-host-integration.service (WARP-2574
+# delivery half): on the refresh path it re-runs install_single_box_host_
+# integration as root, audit-gated, so a merged artefact reaches EXISTING boxes
+# and not only freshly-provisioned ones — the watchdog stays detect-only because
+# re-provisioning from a 3-minute timer is not a self-heal.
 #
 # ── WHY IT CANNOT ROT ────────────────────────────────────────────────────────
 # A hand-maintained table that drifts from the installer would be WORSE than no
@@ -155,6 +159,15 @@ file  scripts/host/etc-default/droplet-power-restore                         /et
 file  scripts/host/droplet-host-units.sh                                     /usr/local/sbin/droplet-host-units                                    0755  track
 file  scripts/host/etc-systemd-system/droplet-host-units.service             /etc/systemd/system/droplet-host-units.service                        0644  track
 
+# --- host-integration re-apply (WARP-2574 delivery half) ---------------------
+# The HEAL for this very audit: when the refresh moves the checkout ahead of the
+# installed copies, droplet-host-integration.service re-runs the installer as
+# root (audit-gated), so a merged host artefact reaches existing boxes instead of
+# only freshly-provisioned ones. Both artefacts are `track` — this delivery path
+# must itself be delivered, and drift in it means the heal is broken.
+file  scripts/host/usr-local-sbin/droplet-reapply-host-integration           /usr/local/sbin/droplet-reapply-host-integration                      0755  track
+file  scripts/host/etc-systemd-system/droplet-host-integration.service       /etc/systemd/system/droplet-host-integration.service                  0644  track
+
 # --- egress audit collector (WARP-268) ---------------------------------------
 dir   -                                                                      /usr/local/lib/droplet-egress-audit                                   -     present  the collector payload the launcher execs
 file  scripts/host/usr-local-sbin/droplet-egress-audit                       /usr/local/sbin/droplet-egress-audit                                  0755  track
@@ -177,6 +190,7 @@ unit  -  droplet-watchdog.timer                  -  enabled
 unit  -  droplet-power-restore.service           -  enabled
 unit  -  droplet-power-restore.timer             -  enabled
 unit  -  droplet-egress-audit.service            -  enabled
+unit  -  droplet-host-integration.service        -  enabled
 
 # --- deliberately NOT reconciled ---------------------------------------------
 skip  -  /etc/default/droplet-openwrt-attach  -  generated  written by a here-doc from .env, not copied from the repo, and holds the per-box AP PSK — there is no repo source to compare it against

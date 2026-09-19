@@ -181,10 +181,13 @@ cut. `check` reported every unit current throughout, correctly and uselessly:
 there was no unit to enumerate and no process to compare.
 
 The cause is structural, not a one-off. **The box refresh flow updates the git
-checkout and restarts containers; nothing re-runs
+checkout and restarts containers; on its own it does not re-run
 `install_single_box_host_integration`** (`scripts/lib/single-box.sh`, called
-from `setup.sh` only when `SINGLE_BOX_MODE=true`). So any host-unit feature can
-merge, be marked Done, and run on **zero boxes**.
+from `setup.sh` when `SINGLE_BOX_MODE=true`). So a host-unit feature could merge,
+be marked Done, and run on **zero boxes** — until [the delivery half](#the-delivery-half--re-apply-on-refresh-warp-2574)
+below (`droplet-host-integration.service`) began re-running that installer on the
+refresh path. `audit` is now both the standing detector **and** the gate that
+decides whether that re-apply needs to run.
 
 `audit` reconciles from the other direction — from the tree's declared
 expectation to the filesystem:
@@ -237,6 +240,50 @@ structural closure: the blind spot cannot silently re-open.
 ```bash
 bash tests/host-artefacts.test.sh   # auditor behaviour + the manifest guard
 ```
+
+### The delivery half — re-apply on refresh (WARP-2574)
+
+`audit` detects; this **re-applies**. It is the symmetric partner of
+[`droplet-host-units refresh`](#host-unit-refresh-warp-1829) (which restarts host units running stale
+*code*): where that closes the stale-process gap on the refresh path, this
+closes the never-installed / drifted-*artefact* gap on the same path.
+
+**`droplet-host-integration.service`** is a root `oneshot`, ordered
+`Before=droplet.service` and `WantedBy=multi-user.target`. It runs
+`/usr/local/sbin/droplet-reapply-host-integration`, which:
+
+1. runs `droplet-host-units audit` as a **gate** (pure reads). Clean → it exits
+   without touching anything, so on a healthy box every boot is cheap;
+2. on drift/missing (or when the auditor itself is absent — the WARP-2574 state)
+   re-applies via **`setup.sh --reapply-host-integration`** — a focused re-run of
+   `install_single_box_host_integration` only: **no** Docker, **no** build, **no**
+   stack restart, **no** LAN probe;
+3. re-audits to confirm the re-apply landed.
+
+Because it re-runs the **whole** installer — the one CI-reconciled source of
+truth — every `track` artefact is delivered by it at once; there is no second
+install surface to drift from the manifest.
+
+**Why a root systemd unit, and not the watchdog.** The stack bring-up
+(`droplet.service`) runs as `User=droplet, Group=docker`; re-running a host
+installer through that would lean on the docker-group→root path. This unit is
+`User=root` under systemd — a first-class root context that never touches the
+droplet user or the docker group. And it is **not** the `droplet-watchdog.timer`
+`host_artefacts` check: re-running the installer (apt, unit rewrites,
+`daemon-reexec`) from a 3-minute timer is an unattended provision on a live
+appliance, not a self-heal. This runs **once per refresh**, at boot or on demand.
+
+```bash
+systemctl start droplet-host-integration.service        # the one-line refresh hook
+sudo /usr/local/sbin/droplet-reapply-host-integration   # or directly, by an operator
+sudo ./scripts/setup.sh --reapply-host-integration      # or the underlying focused re-run
+```
+
+> **Bootstrapping an already-deployed box.** The unit itself is a host artefact,
+> so a box provisioned before this shipped gains it on its **next**
+> `sudo ./scripts/setup.sh` (or `--reapply-host-integration`) run — after that it
+> is self-healing. A host-artefact-changing ticket is therefore "Done" only once
+> its target boxes have re-applied; see [docs/SINGLE_BOX.md](../../docs/SINGLE_BOX.md).
 
 ### What counts as a source
 

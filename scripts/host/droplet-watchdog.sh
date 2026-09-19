@@ -652,12 +652,15 @@ wd_check_host_unit_staleness() {
 # host-unit feature can merge, be marked Done, and run on zero boxes. This check
 # is what makes the box say so on its own.
 #
-# DETECT-AND-REPORT ONLY, and here that is not a judgement call: the "heal" is
-# `sudo ./scripts/setup.sh`, which apt-installs packages, rewrites unit files,
-# restarts host units and re-enables services. Running that from a 3-minute
-# timer is not a self-heal, it is an unattended provision on a live appliance.
-# The watchdog names the artefacts and the one-line fix; a human or the deploy
-# path applies it.
+# DETECT-AND-REPORT ONLY, and here that is not a judgement call: the "heal"
+# re-runs the installer — apt-installs packages, rewrites unit files, restarts
+# host units and re-enables services. Running that from a 3-minute timer is not a
+# self-heal, it is an unattended provision on a live appliance. The watchdog
+# names the artefacts and the one-line fix; a human or the DEPLOY PATH applies
+# it. That deploy-path applier now exists (WARP-2574 delivery half):
+# droplet-host-integration.service runs the same re-apply as root, ONCE per
+# refresh and audit-gated, off the timer — so this check stays detect-only while
+# the gap it reports still gets closed automatically on the next boot.
 #
 # No deployment shape can be red here for merely being that shape:
 # install_single_box_host_integration is the ONLY installer of
