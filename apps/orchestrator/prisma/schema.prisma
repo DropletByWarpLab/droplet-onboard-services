@@ -2283,6 +2283,13 @@ model NotificationLog {
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — the deep link (a same-origin dashboard path such as
+  // `/admin/audit?run=<id>`) and its small, flat, PHI-free `data`. Both
+  // nullable, no backfill: a notification without a link has none. Validated
+  // by assertNotificationLink / assertNotificationData before every write;
+  // the row is what the native inboxes read back through GET /api/notifications.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
