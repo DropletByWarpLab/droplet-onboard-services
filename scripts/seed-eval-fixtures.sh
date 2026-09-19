@@ -6,9 +6,10 @@
 #
 # Run ON the appliance host (needs docker + the compose stack up):
 #   ./scripts/seed-eval-fixtures.sh
-# Then point the eval at the corpus and recreate rag-eval (env_file gotcha —
-# recreate, NOT `docker restart`):
-#   RAGAS_EVAL_USER=eval-fixtures in .env
+# RAGAS_EVAL_USER=eval-fixtures is written to .env by scripts/lib/secrets.sh
+# (WARP-2879), so nothing else to set: the next scheduled slot sees the
+# corpus fingerprint change and runs. Only if you changed the user, recreate
+# rag-eval (env_file gotcha — recreate, NOT `docker restart`):
 #   docker compose -p droplet -f docker/docker-compose.yml --env-file .env \
 #     up -d --force-recreate --no-deps rag-eval
 #

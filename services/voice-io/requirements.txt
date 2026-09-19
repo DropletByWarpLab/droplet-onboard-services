@@ -1,10 +1,10 @@
 # Runtime deps the running service needs. Test deps live in
 # requirements-dev.txt (matches file-indexer / camera-discovery split).
-sounddevice==0.5.5        # PortAudio binding — preferred over PyAudio for clean shutdown + numpy interop
+sounddevice==0.5.6        # PortAudio binding — preferred over PyAudio for clean shutdown + numpy interop
 # Audio buffer math. On numpy 2.x because scipy 1.18 requires
 # numpy>=2.0,<2.8 — pinning 1.26.4 makes the requirements file
 # unresolvable against the scipy pin below.
-numpy==2.5.2
+numpy==2.5.3
 fastapi==0.141.1          # Control surface
 uvicorn[standard]==0.52.4 # ASGI server for FastAPI
 pydantic==2.13.5           # Schemas
@@ -18,10 +18,10 @@ python-multipart==0.0.32  # FastAPI form-upload support (mic-test endpoint accep
 # Dockerfile installs `openwakeword` with `--no-deps` to skip the tflite-runtime
 # pin in its setup.py, and we ship the ONNX-side deps explicitly here so
 # `pip install -r requirements.txt` from a dev box still works.
-onnxruntime==1.29.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
+onnxruntime==1.30.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
 scipy==1.18.1             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
-huggingface_hub==1.26.1   # First-run download of bundled models (hey_jarvis, alexa, etc.)
-tqdm==4.70.0              # Progress bar during model download
+huggingface_hub==1.31.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
+tqdm==4.70.1              # Progress bar during model download
 pyyaml==6.0.3             # openWakeWord parses model config from YAML
 requests==2.34.2          # huggingface_hub's HTTP layer
 # openwakeword 0.6.0's package __init__ unconditionally imports
@@ -30,7 +30,7 @@ requests==2.34.2          # huggingface_hub's HTTP layer
 # triggers the chain. Without sklearn the runtime falls back to
 # DisabledWakeWordDetector — wake detection silently broken. ~30 MB
 # but unavoidable as long as we're on openwakeword < 0.7.
-scikit-learn==1.9.0
+scikit-learn==1.9.1
 
 # Speaker identification (per-person voiceprints, WARP-1056).
 #

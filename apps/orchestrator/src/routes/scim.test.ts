@@ -523,6 +523,60 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
     });
   });
 
+
+  // WARP-2550: POST is the fourth active-state verb. It carries `active` on
+  // an email-matched EXISTING row, so a refusal must surface in the same
+  // SCIM Error envelope PUT/PATCH/DELETE render — not a 200 that quietly
+  // deactivated the box's last operator.
+  describe("WARP-2550 — POST /Users on an email-matched row runs the same rails", () => {
+    const POST_DEACTIVATE = {
+      schemas: [SCIM_USER_SCHEMA],
+      userName: "boss@acme.test",
+      displayName: "Renamed By Okta",
+      active: false,
+    };
+
+    it("POST active:false matching the sole owner → 403 OWNER_IMMUTABLE; nothing mutated", async () => {
+      const prisma = createPrismaMock([owner(), family()]);
+      const res = await request(buildApp(prisma))
+        .post("/scim/v2/Users").set(...AUTH).send(POST_DEACTIVATE);
+      expectRefusalEnvelope(res, 403, "OWNER_IMMUTABLE");
+      const target = prisma._users.find((u: UserRow) => u.id === "u-owner")!;
+      expect(target.directoryStatus).toBe("ACTIVE");
+      expect(target.displayName).toBe("boss");
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+      // The route's own provisioning row must not claim success either.
+      expect(recordedScim.some((p) => p.what === "SCIM user updated")).toBe(false);
+      expect(recordedScim.some((p) => p.what === "User disabled")).toBe(false);
+    });
+
+    it("POST active:false matching the last ACTIVE admin → 409 LAST_OPERATOR_INVARIANT", async () => {
+      const prisma = createPrismaMock([admin(), family()]);
+      const res = await request(buildApp(prisma))
+        .post("/scim/v2/Users").set(...AUTH)
+        .send({ ...POST_DEACTIVATE, userName: "adm@acme.test" });
+      expectRefusalEnvelope(res, 409, "LAST_OPERATOR_INVARIANT");
+      const target = prisma._users.find((u: UserRow) => u.id === "u-adm")!;
+      expect(target.directoryStatus).toBe("ACTIVE");
+      expect(target.displayName).toBe("adm");
+      expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    });
+
+    it("the rail is NOT unconditional: POST active:false on an ordinary member commits, 200", async () => {
+      const prisma = createPrismaMock([admin(), family()]);
+      const res = await request(buildApp(prisma))
+        .post("/scim/v2/Users").set(...AUTH)
+        .send({ ...POST_DEACTIVATE, userName: "fam@acme.test" });
+      expect(res.status).toBe(200);
+      expect(res.body.active).toBe(false);
+      expect(prisma._users.find((u: UserRow) => u.id === "u-fam")!.directoryStatus).toBe("DEACTIVATED");
+      // Routed through the funnel → rail 6 ran (revocation + disable row).
+      expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-fam");
+      expect(recordedScim.some((p) => p.what === "User disabled")).toBe(true);
+    });
+  });
+
   describe("rail 5 — the last active operator survives every verb (409 LAST_OPERATOR_INVARIANT)", () => {
     it("DELETE targeting the last ACTIVE admin-tier user → 409; row stays ACTIVE", async () => {
       const prisma = createPrismaMock([admin(), family()]);

@@ -125,6 +125,63 @@
   border-radius: 4px;
 }
 
+/* Other installer formats staged for the same platform (the MSI beside
+   the NSIS exe). Secondary by design — one button is THE thing to do —
+   but each row is a real download with its own size and digest. */
+.dl-others {
+  margin-top: 14px;
+}
+
+.dl-others-title {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.dl-others-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.dl-others-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.dl-others-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--brand);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.dl-others-link:hover {
+  text-decoration: underline;
+}
+
+.dl-others-link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dl-others-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
 .dl-note {
   margin: 12px 0 0;
   font-size: 13px;

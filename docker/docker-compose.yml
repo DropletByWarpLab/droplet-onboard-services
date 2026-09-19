@@ -1450,9 +1450,12 @@ services:
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_RAG_EVAL:-}
       # RAGAS_EVAL_USER — whose indexed corpus the eval measures. The runner
       # passes it as ?user= on every search, because the service principal
-      # owns no files of its own. NO default: the operator sets it
-      # deliberately in .env; unset, runs fail fast with eval_user_required
-      # instead of scoring an empty corpus into the baselines.
+      # owns no files of its own. scripts/lib/secrets.sh writes it to .env
+      # (default eval-fixtures, backfilled on upgrade — WARP-2879: it was
+      # hand-set before and every re-image lost it). The corpus gate skips
+      # while that user has 0 chunks, so an unseeded box never scores an
+      # empty corpus; with the key blank the scheduler records one skipped
+      # slot naming it, and ad-hoc runs 400 eval_user_required.
       #
       # WARP-1908: deliberately NOT re-declared here — it arrives via the
       # `env_file: ../.env` above. Re-declaring it as

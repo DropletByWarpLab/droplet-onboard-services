@@ -37,6 +37,7 @@ import math
 import os
 import sys
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -334,6 +335,17 @@ def call_search(
             req, timeout=SEARCH_TIMEOUT_SEC, context=_internal_tls_context()
         ) as resp:
             body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # WARP-2879: "HTTP Error 400: Bad Request" hid eval_user_required for
+        # a month. The orchestrator names the cause in the body — carry it.
+        try:
+            detail = e.read(512).decode("utf-8", "replace").strip()
+        except Exception:  # noqa: BLE001 — a body-less error is still an error
+            detail = ""
+        raise RuntimeError(
+            f"retrieval-eval call failed for {query!r}: {e}"
+            + (f" — {detail}" if detail else "")
+        ) from e
     except Exception as e:
         raise RuntimeError(
             f"retrieval-eval call failed for {query!r}: {e}"

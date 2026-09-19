@@ -107,7 +107,12 @@ import {
   expireIdleOverlayPeers,
   type OverlayConnectDeps,
 } from "./services/overlay-connect.service.js";
-import { allocatePeerIp } from "./services/vpn.service.js";
+import {
+  allocatePeerIp,
+  OVERLAY_KEEPALIVE_SECONDS,
+  serverAddressFromSubnet,
+} from "./services/vpn.service.js";
+import { reconcileVpnInterface } from "./services/vpn-reconcile.service.js";
 import { bridgeAuthToken } from "./lib/bridge-errors.js";
 import { createScheduleTicker } from "./services/schedule-ticker.js";
 import { createFirewallAdapter } from "./services/firewall-adapter.service.js";
@@ -918,6 +923,49 @@ async function main() {
     );
     logger.info(
       "overlay connect agent enabled (HQ long-poll + idle-expiry sweep)",
+    );
+  }
+
+  // WARP-2694 — keep wg0 + its peers in step with the linked devices the
+  // owner has been shown. Interface creation is otherwise lazy (a mint, an
+  // approval, a profile fetch), so a router reflash / factory reset / upgrade
+  // silently dropped every linked device until one of those happened to run.
+  // Gated the same way as every router write above; acts only when active
+  // peer rows exist (see the service header for why that gate is not
+  // optional), and is idempotent, so a 10-minute cadence costs one
+  // /vpn/status-sized read per tick on a healthy box.
+  if (routerSupervisionEnabled) {
+    const vpnReconcileDeps = {
+      prisma,
+      router: {
+        setup: (opts: { listenPort: number; address: string }) => openwrt.vpnSetup(opts),
+        listPeers: (iface: string) => openwrt.listVpnPeers(iface),
+        installPeer: (p: {
+          interface: string;
+          publicKey: string;
+          allowedIps: string[];
+          persistentKeepalive: number;
+          description: string;
+        }) => openwrt.installOverlayVpnPeer(p),
+      },
+      // WARP-2686 — re-check a row is still active immediately before its peer
+      // is re-installed, so a revoke that lands mid-tick is never resurrected.
+      isStillActive: async (publicKey: string) =>
+        (await prisma.vpnPeer.findFirst({ where: { publicKey, status: "active" }, select: { id: true } })) !== null,
+      config: {
+        vpnInterface: "wg0",
+        listenPort: config.WIREGUARD_LISTEN_PORT,
+        serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+        keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+      },
+      logger: createLogger("vpn-reconcile"),
+    };
+    cronRuntime.scheduleInterval(
+      10 * 60_000,
+      async () => {
+        await reconcileVpnInterface(vpnReconcileDeps);
+      },
+      { lockKey: "droplet:vpn-reconcile" },
     );
   }
 

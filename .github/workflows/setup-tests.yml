@@ -125,6 +125,13 @@ concurrency:
   group: setup-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-2873: the job only checks out and runs tests, so read is all the
+# GITHUB_TOKEN needs. Stated explicitly because CodeQL's
+# actions/missing-workflow-permissions flags an unset block — the default is
+# write-heavy, and a new workflow should not inherit that by omission.
+permissions:
+  contents: read
+
 jobs:
   setup-unit:
     runs-on: ubuntu-latest

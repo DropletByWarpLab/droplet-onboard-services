@@ -73,14 +73,19 @@ def _bearer() -> str:
     return ""
 
 
+def eval_user() -> str:
+    """RAGAS_EVAL_USER, stripped; "" when unset or blank."""
+    return (os.environ.get("RAGAS_EVAL_USER") or "").strip()
+
+
 def fetch_fingerprint() -> Optional[str]:
     """Current corpus fingerprint, or None if it could not be determined.
 
     None means "unknown", never "unchanged" — callers must treat it as a
     reason to run.
     """
-    eval_user = (os.environ.get("RAGAS_EVAL_USER") or "").strip()
-    params = f"?user={urllib.parse.quote(eval_user)}" if eval_user else ""
+    user = eval_user()
+    params = f"?user={urllib.parse.quote(user)}" if user else ""
     url = f"{ORCHESTRATOR_URL}/api/admin/retrieval-eval/corpus-fingerprint{params}"
 
     req = urllib.request.Request(url)
@@ -148,6 +153,18 @@ def save(fingerprint: str, run_id: str) -> None:
 def should_run(current: Optional[str], last: Optional[str]) -> tuple[bool, str]:
     """(run?, reason). Pure — the decision, separated from the I/O above so it
     can be exercised without a network or a filesystem."""
+    # WARP-2879: 0 chunks means the eval user exists in config but nothing
+    # is indexed for it — the installer now defaults RAGAS_EVAL_USER to
+    # eval-fixtures before the seed script has run. Scoring nothing would
+    # write an all-zero result and pin the empty corpus as "measured", which
+    # is the outcome the old "no default" rule existed to prevent. Checked
+    # before the disable knob: that knob means "run on a clock, not on
+    # change", not "score an empty corpus".
+    if current is not None and current.split(":")[1:2] == ["0"]:
+        return False, (
+            "eval corpus is empty (0 chunks indexed for RAGAS_EVAL_USER) — "
+            "run scripts/seed-eval-fixtures.sh on the box"
+        )
     if GATE_DISABLED:
         return True, "corpus gate disabled (RAG_EVAL_CORPUS_GATE_DISABLED=1)"
     if current is None:

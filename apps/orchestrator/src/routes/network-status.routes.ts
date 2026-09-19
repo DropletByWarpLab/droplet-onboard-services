@@ -66,7 +66,7 @@ import {
 // executes on the confirm path below and not in the POST handler. It is the
 // one operation on this dispatcher that touches the APPLIANCE rather than the
 // router; see the case for why it has to live here anyway.
-import { setSshAccess } from "../services/ssh-access.service.js";
+import { setSshAccess, setSshLogin } from "../services/ssh-access.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -1010,6 +1010,23 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           // asynchronously (intent file → .path unit → root applier). The
           // dashboard re-reads GET /network/ssh, which reports what the HOST
           // actually did rather than what we asked for.
+          writeResult = { operationId: null };
+          break;
+        }
+        case "set_ssh_login": {
+          // WARP-2887 — the login the SSH door uses. Same host boundary as
+          // set_ssh_access (intent file → .path unit → root applier), same
+          // Tier-3 token. The params carry the shadow HASH the mint route
+          // computed; no plaintext ever reaches this dispatcher.
+          const loginUser = params?.username;
+          const loginHash = params?.passwordHash;
+          if (typeof loginUser !== "string" || typeof loginHash !== "string") {
+            return res.status(400).json({
+              error: "Confirmed set_ssh_login carries no username/passwordHash",
+              code: "TOKEN_PARAMS_INVALID",
+            });
+          }
+          await setSshLogin({ username: loginUser, passwordHash: loginHash });
           writeResult = { operationId: null };
           break;
         }

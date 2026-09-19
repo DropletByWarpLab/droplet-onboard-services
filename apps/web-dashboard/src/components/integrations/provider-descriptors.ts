@@ -195,6 +195,17 @@ export function partyNounFor(catalogId: string): string {
   return PARTY_NOUNS[catalogId] ?? DEFAULT_PARTY_NOUN;
 }
 
+/**
+ * WARP-2880 — whether a catalog id is a MEDICAL vertical: a practice-management
+ * system whose people are patients. Derived from `PARTY_NOUNS` rather than
+ * listed a second time, so a connector cannot say "patient" here and "not
+ * medical" somewhere else. The /practice nav entry is shown only while one of
+ * these is connected (Sidebar → `medicalConnector`).
+ */
+export function isMedicalConnector(catalogId: string): boolean {
+  return partyNounFor(catalogId) === "patient";
+}
+
 function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
   const route = DETAIL_ROUTES[meta.id];
   // WARP-2451: which tiles open the wizard is DERIVED — a card backed by a

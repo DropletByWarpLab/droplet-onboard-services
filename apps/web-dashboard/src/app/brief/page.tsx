@@ -418,7 +418,8 @@ export default function BriefPage() {
             // Said once, above the list, so the list is not read as live.
             <p className="brief-retained">
               The brain is off. These are the findings it had already written —
-              they stay until you delete them, and nothing new is being produced.
+              they stay until you delete them, nothing new is being produced,
+              and the assistant is no longer using them in chat.
             </p>
           ) : null}
           <div className="brief-list">

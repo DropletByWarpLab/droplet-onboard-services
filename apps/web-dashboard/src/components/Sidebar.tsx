@@ -9,6 +9,8 @@ import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
+import { useIntegrations } from "@/lib/hooks/useIntegrations";
+import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
 // WARP-1548 — the Files places rail's Libraries group. Lives in its own
@@ -50,8 +52,17 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const capabilities = useCapabilities();
+  const adminCapabilities = useCapabilities();
   const isModuleOn = useModuleGate();
+  // WARP-2880: /practice is advertised only while a medical integration is
+  // connected. Fetched for owner/admin only — the route 403s everyone else,
+  // and Practice is role-hidden from them anyway.
+  const role = user?.role as AuthRole | undefined;
+  const { connected } = useIntegrations(role === "owner" || role === "admin");
+  const capabilities = {
+    ...adminCapabilities,
+    medicalConnector: connected.some((e) => isMedicalConnector(e.meta.id)),
+  };
   // WARP-1683: resolves nav-config's `badgeKey` names to live counts. The
   // Sidebar owns the polling hook (nav-config stays pure data); the badge
   // reads 0 — and renders nothing — while the module is off or unresolved.

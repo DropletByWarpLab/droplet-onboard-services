@@ -294,3 +294,20 @@ export function renderPeerConf(opts: {
   ];
   return lines.join("\n");
 }
+
+/** WARP-1757 — keepalive for overlay peers, in seconds. Matches the value the
+ *  connect agent installs (overlay-connect.service.ts) so a peer's keepalive
+ *  doesn't change depending on which path last touched it. Shared with the
+ *  WARP-2694 reconciler for the same reason. */
+export const OVERLAY_KEEPALIVE_SECONDS = 25;
+
+/**
+ * Compute the server's CIDR address inside a VPN subnet, e.g.
+ * "10.13.13.0/24" -> "10.13.13.1/24". Used on first-time /vpn/setup;
+ * idempotent calls don't reach this path.
+ */
+export function serverAddressFromSubnet(subnet: string): string {
+  const parsed = parseVpnSubnet(subnet);
+  const mask = subnet.split("/")[1] ?? "24";
+  return `${parsed.serverIp}/${mask}`;
+}
