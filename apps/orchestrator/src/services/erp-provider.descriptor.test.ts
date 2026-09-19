@@ -180,11 +180,18 @@ const REST_PROVIDERS_WARP_2917 = ["gitlab"] as const;
  * story's ids, and a running total is a diff nobody can read.
  */
 const REST_PROVIDERS_WARP_2918 = ["todoist"] as const;
+/**
+ * WARP-2919 — Loyverse, the third declarative REST vendor. A separate constant
+ * rather than an edit to the one above, so the WARP-2707 record stays what it
+ * was and a diff shows the addition as an addition.
+ */
+const REST_PROVIDERS_WARP_2919 = ["loyverse"] as const;
 const REST_PROVIDERS = [
   ...REST_PROVIDERS_WARP_2707,
   ...REST_PROVIDERS_WARP_2916,
   ...REST_PROVIDERS_WARP_2917,
   ...REST_PROVIDERS_WARP_2918,
+  ...REST_PROVIDERS_WARP_2919,
 ] as const;
 
 afterEach(() => {
@@ -392,6 +399,15 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // filter, so every tick is a DECLARED full scan of the owner's active
     // tasks (page size 200), and the assertion above lets it through because
     // a null watermark is honest, not incomplete.
+    // WARP-2919 — Loyverse appears nowhere here EITHER, and that is a
+    // decision about Loyverse, not an inheritance: `customer` and `product`
+    // each have an `ERP_SYNC_ENTITIES` row (Shopify's, WARP-2354), both
+    // Loyverse watermarks are `updated_at_min` — a genuine last-modified
+    // filter on each endpoint (`complete: true`, pinned by
+    // `loyverse-profile.test.ts`) — so scheduling them is right, and the test
+    // above proves neither is scheduled on an incomplete watermark. (`order`
+    // is not served: receipts carry no currency and the REST profile guard
+    // refuses a money dataset without its required column.)
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1112,6 +1128,9 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "gitlab",
       // WARP-2918 — Todoist, at `catalog.order: 16`.
       "todoist",
+      // WARP-2919 — Loyverse, at `catalog.order: 17`, the first point-of-sale
+      // card and the third on the declarative REST track.
+      "loyverse",
     ]);
   });
 

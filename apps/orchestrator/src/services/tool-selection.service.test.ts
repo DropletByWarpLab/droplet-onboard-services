@@ -674,6 +674,11 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       // WARP-2917 — the vendor's name carries the turn even when the sentence
       // uses GitLab's own word (`issue`), which is deliberately unclaimed.
       "which issues are still open in GitLab?",
+      // WARP-2919 — the vendor name, exactly as `shopify` and `square` are.
+      // NOT `receipts?`: that word belongs to the `files` domain ("file this
+      // receipt"), and Loyverse serves no receipts dataset — see the
+      // negative below.
+      "what did Loyverse record yesterday?",
     ])("%s advertises the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).toContain("cloud_query_dataset");
     });
@@ -705,6 +710,10 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "turn the living room lights off",
       // WARP-2916 — bare `issue` stays unclaimed: the household sense.
       "there's an issue with the printer again",
+      // WARP-2919 — `files` owns `receipt`: this is a filing turn, and no
+      // cloud dataset serves receipts (Loyverse's are not read — no per-row
+      // currency). MUTATION: add `receipts?` to the cloud pattern -> red.
+      "file this receipt under expenses",
     ])("%s does NOT advertise the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).not.toContain("cloud_query_dataset");
     });

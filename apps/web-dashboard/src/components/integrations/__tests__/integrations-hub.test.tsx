@@ -608,6 +608,8 @@ describe("entries are the union of the catalog and the response", () => {
       "GitLab",
       // WARP-2918 — the fifth REST vendor, at `catalog.order` 16.
       "Todoist",
+      // WARP-2919 — the sixth REST card, at `catalog.order` 17.
+      "Loyverse",
       // WARP-2659 — the MCP-track card, appended after the catalog cards. It
       // has NO `catalog` block and no `ConnectorId` literal: it is derived
       // from the descriptor's track by `hubCardFor`, which is why it lands
@@ -666,6 +668,8 @@ describe("entries are the union of the catalog and the response", () => {
       "GitLab",
       // WARP-2918 — the fifth REST vendor, at `catalog.order` 16.
       "Todoist",
+      // WARP-2919 — the sixth REST card, at `catalog.order` 17.
+      "Loyverse",
       // WARP-2659 — the MCP-track card, appended after the catalog cards. It
       // has NO `catalog` block and no `ConnectorId` literal: it is derived
       // from the descriptor's track by `hubCardFor`, which is why it lands
@@ -696,14 +700,14 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Seventeen catalog tiles (four original, the five WARP-2214 vendors — Xero
+    // Eighteen catalog tiles (four original, the five WARP-2214 vendors — Xero
     // included — the three wave-1 vendors, the two WARP-2707 REST vendors,
-    // the WARP-2916 GitHub one, the WARP-2917 GitLab one and WARP-2918's
-    // Todoist) absorb four of the rows; the two the catalog knows nothing
-    // about each get their own. WARP-2659 adds the MCP-track tile, which this
-    // fixture reports no row for — it renders from the registry regardless,
-    // which is the point.
-    expect(tiles(container)).toHaveLength(20);
+    // the WARP-2916 GitHub one, the WARP-2917 GitLab one, WARP-2918's
+    // Todoist and the WARP-2919 Loyverse card) absorb four of the rows; the
+    // two the catalog knows nothing about each get their own. WARP-2659 adds
+    // the MCP-track tile, which this fixture reports no row for — it renders
+    // from the registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(21);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -730,6 +734,8 @@ describe("entries are the union of the catalog and the response", () => {
       "GitLab",
       // WARP-2918 — the fifth REST vendor, at `catalog.order` 16.
       "Todoist",
+      // WARP-2919 — the sixth REST card, at `catalog.order` 17.
+      "Loyverse",
       "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",

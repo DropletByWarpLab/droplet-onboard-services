@@ -1487,6 +1487,40 @@ entries:
     review_by: 2027-09-18
     code_refs: [services/erp-connector/src/rest/vendors/todoist.ts]
 
+  - id: loyverse-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.loyverse.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Loyverse POS API v1.0 — the point-of-sale cloud connector (WARP-2919), on
+      ADR-046's declarative REST track. Read-only, GET only, two datasets:
+      customers and catalogue items. NOT receipts: a Loyverse receipt carries
+      no currency (it is per merchant, on the probe), and the track refuses a
+      money dataset without its required currency column. Carries the
+      merchant's customer book and catalogue, fetched on request under a
+      personal access token the account owner minted in their own Loyverse
+      Back Office (Integrations → Access tokens); never ambient, off until
+      the owner connects. The token is UNLIMITED on Loyverse's side
+      (read and write — no read-only kind exists on this path), which is why
+      the track's redirect refusal and exact-host guard matter more here than
+      for a scoped key: the box never writes, but the credential it holds
+      could. Paced against Loyverse's published 300-requests-per-300-seconds
+      per-ACCOUNT ceiling rather than a guessed constant. ONE FIXED HOST, so a
+      plain registered destination whose origin is a whole-string literal the
+      scanner reads directly; the `/v1.0` API version is a PATH on every
+      request, never part of the host. The probe is `GET /v1.0/merchant/`,
+      which returns the merchant profile (business name, currency) and is not
+      stored as business data.
+    ticket: WARP-2919
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/loyverse.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

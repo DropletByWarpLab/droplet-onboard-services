@@ -363,3 +363,72 @@ way.
   personal token — its description speaks of OAuth audiences. If a live token
   gets 401/403 there, the fallback is `/api/v1/projects?limit=1`, a one-line
   `probePath` change.
+---
+
+## Implementation record — 2026-09-18 (WARP-2919, Loyverse)
+
+**Third profile, zero widening — and the first `assertValidRestProfile` rule added by a
+vendor.** Loyverse POS shipped as `rest/vendors/loyverse.ts` with NO new profile field: one
+static host (`api.loyverse.com`, the `/v1.0` version carried on every path because §2's
+static-origin rule refuses a path on the origin), `Authorization: Bearer`, no constant
+header, `GET /v1.0/merchant/` as the probe, `updated_at_min` as a genuine last-modified
+filter on both endpoints (`complete: true`), body `cursor` echoed as query `cursor` with the
+final page OMITTING the key — which the shared connector already treats as end-of-walk —
+and `limit=250` as a constant query parameter (the `cursor` arm has no page size; the spec
+JSON's `pageSize` was a shape artefact and was dropped). Money is already major-unit
+decimals, so no `minor-units`. Custody is model 3: the owner mints a personal access token
+in their own Back Office; the OAuth path (model 2) is not used. Paced at 1 s against the
+published 300-per-300-s per-account ceiling.
+
+* **Datasets shipped: `customer`, `product` (items).** Both were already askable
+  (`CLOUD_DATASET_READS` / `CLOUD_QUERY_DATASETS`), scheduled (`ERP_SYNC_ENTITIES`,
+  Shopify's rows) and in `land.test.ts`'s existing unclassified-debt pin, so §7b needed no
+  edit — and that inheritance is recorded as a decision about Loyverse in
+  `erp-provider.descriptor.test.ts`'s `unscheduled` pin, not left to apply by accident.
+  `product` sends a constant `show_deleted=true` so a deleted item reaches the box as a
+  change instead of quietly stopping.
+* 🔴 **`order` (receipts) is NOT served, and the guard that refuses it is new.**
+  `REQUIRED_CANONICAL.order` names `currency`, and Loyverse carries currency per MERCHANT
+  (`GET /v1.0/merchant/` → `currency.code`), never per row. The track has no per-account
+  constant. An earlier cut of this profile shipped receipts anyway with `currency`
+  undefined, because `assertValidRestProfile` checked `fieldMap ⊆ CANONICAL_COLUMNS` and
+  nothing checked `REQUIRED_CANONICAL ⊆ fieldMap` — so a `cloud_query_dataset` row of
+  `total_amount: 17.52, currency: undefined` reached the model as a dollar-shaped answer for
+  a merchant in Tokyo. The verifier caught it; the fix is two-fold. **(1) The guard:**
+  `assertValidRestProfile` now refuses any dataset that leaves a `REQUIRED_CANONICAL`
+  column unmapped, at module load, naming the column (`rest-track.test.ts` pins the
+  refusal and that Square and Cal.com pass it). **(2) The dataset is dropped**, not
+  hardcoded: `loyverse-profile.test.ts` keeps the researched receipts spec as a constant,
+  pins that the guard refuses it naming `currency` and NOTHING else, and that the same spec
+  with `currency` mapped passes — so the day the track gains a probe-derived per-account
+  constant (§2's admission criterion is met: this is a verified failure, and Brevo's
+  bespoke connector solves the same vendor shape with a second call to the account's
+  display currency) the return is one fieldMap line. That widening is a separate decision,
+  recorded here, not smuggled in behind one vendor.
+* **Datasets NOT served, and why:** `refund` (a Loyverse refund is a receipt with
+  `receipt_type: REFUND` in the SAME list, with no type filter — the track cannot route
+  one endpoint to two datasets by row value; moot while receipts are not read, recorded so
+  the future `order` dataset knows a refund lands with a POSITIVE total);
+  `charge`/`payout` (payments are an array on the receipt, and there is no payout
+  resource); `employee` (behind a paid add-on and HR-shaped — not researched to build
+  depth); `inventory_quantity` on `product` (a second endpoint, `/v1.0/inventory`, per
+  variant per store — a join one spec cannot express).
+* **Two honest consequences of the read semantics, pinned rather than patched:** a
+  NAMED `find_customer` search (a `last_name` prefix) returns zero rows from Loyverse,
+  because Loyverse has one `name` field and the track has no split; and
+  `get_low_stock_products` with a threshold returns zero rows, because
+  `inventory_quantity` is on another endpoint. Both are limitations a reader can find;
+  the wrong fixes (`last_name: "name"`, a fabricated quantity) are the mutations the tests
+  refuse.
+* **Tool selection:** `loyverse` joins the cloud-domain keyword regex as the vendor name,
+  exactly as `shopify` and `square` do. `receipts?` does NOT: the word is already claimed
+  by the `files` domain ("file this receipt"), and no cloud dataset serves receipts; a
+  negative case pins it.
+* **Left UNVERIFIED, deliberately:** the empty-list shape (`absentRowsMeansEmpty` left off
+  so a wrong `rowsPath` fails loudly); whether `/customers` carries the top-level `cursor`
+  its 200 schema omits while the generic Pagination section promises it; and
+  customer-deletion visibility (the YAML contradicts itself — prose says hard delete, the
+  schema carries `deleted_at` and `permanent_deletion_at` — so the reconciliation sweep is
+  the control). The 31-day sales-history gate (402 vs truncation on a free account) is a
+  receipts fact, recorded in the profile header for the day `order` ships.
+

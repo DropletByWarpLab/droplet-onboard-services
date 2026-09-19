@@ -97,7 +97,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # WARP-2916 — `github`, the third REST vendor, for the same reason.
 # WARP-2917 — `gitlab` is the fourth REST-track vendor, same obligation.
 # WARP-2918 — `todoist` is the fifth REST-track vendor; same obligation.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist"
+# WARP-2919 — `loyverse`, the sixth REST-track vendor, for the same reason.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -300,6 +301,21 @@ fact_pins() {
       #    makes the guide promise a history the connector cannot read.
       printf '%s
 ' 'Issue a new API token' 'Copy API token' 'log out of Todoist on all your devices' 'active tasks'
+      ;;
+    loyverse)
+      # Four facts a customer acts on (WARP-2919, ADR-042 §2 row):
+      #  - The token is UNLIMITED, read and write, with no read-only kind on
+      #    this path. Softening that to "an API key" loses the reason the
+      #    guide tells the owner to set an expiry.
+      #  - Receipts are NOT read — a Loyverse receipt carries no currency and
+      #    the box will not store an amount without one. A guide that promises
+      #    sales has described a dataset the connection refuses by name.
+      #  - 300 requests per 300 seconds PER ACCOUNT, shared with every other
+      #    tool on the account — the pacing the guide promises.
+      #  - The Access tokens page in the Back Office is the click-path; a
+      #    guide that sends the owner to the OAuth developer dashboard has
+      #    described the wrong credential.
+      printf '%s\n' 'unlimited access' 'receipts are not among the things this connection reads' '300 requests every 300 seconds' 'Access tokens'
       ;;
     *)
       : # no pins declared for this provider

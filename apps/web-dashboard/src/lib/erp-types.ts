@@ -77,7 +77,10 @@ export type ConnectorId =
   | "gitlab"
   // WARP-2918 — Todoist, the fifth REST-track vendor, and the first task
   // tracker. Same hand-widening, same reason.
-  | "todoist";
+  | "todoist"
+  // WARP-2919 — Loyverse, the sixth declarative REST vendor, and the first
+  // point-of-sale card. Same hand-widening, same reason: the union is the check.
+  | "loyverse";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

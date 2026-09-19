@@ -218,6 +218,15 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/todoist",
   },
+  {
+    // WARP-2919 — the REST track's sixth vendor, at catalog.order 17.
+    id: "loyverse",
+    name: "Loyverse",
+    category: "Point of sale",
+    description: "Customers and catalogue items — read from Loyverse POS.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/loyverse",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -289,6 +298,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "gitlab",
       "hubspot",
       "klaviyo",
+      "loyverse",
       "mailchimp",
       "opendental",
       "pipedrive",

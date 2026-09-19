@@ -478,6 +478,13 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // here with nothing behind them select this reader and then meet an enum
   // that cannot answer, and datasets added to the enum with no words here are
   // never advertised on the turns that want them.
+  // WARP-2919 added `loyverse`, the vendor name, exactly as `shopify` and
+  // `square` are here — and NOT `receipts?`. That word is already claimed by
+  // the `files` domain ("file this receipt"), and Loyverse's receipts are not
+  // served as a dataset (no per-row currency; see `rest/vendors/loyverse.ts`),
+  // so claiming it here would advertise the whole cloud tool set on a filing
+  // turn for a question nothing behind it can answer. The day `order` ships
+  // from Loyverse, the word is a double-claim with `invoices?` as precedent.
   //
   // Bare `appointment` and bare `ticket` are deliberately NOT claimed. The
   // first belongs to the practice track's own tools and the second is already
@@ -495,7 +502,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // deliberately NOT claimed, for `ticket`'s reason: "is there an issue with
   // the printer" is not a tracker question, and the `tasks?|backlog|sprints?`
   // words already carry the tracker-shaped ones.
-  { pattern: /\b(stripe|hubspot|mailchimp|shopify|github|gitlab|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?|pull requests?)\b/i, domains: ["cloud"] },
+  { pattern: /\b(stripe|hubspot|mailchimp|shopify|github|gitlab|storefront|loyverse|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?|pull requests?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.
