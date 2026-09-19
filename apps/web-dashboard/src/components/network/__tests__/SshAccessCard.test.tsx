@@ -112,7 +112,7 @@ describe("SshAccessCard — login (WARP-2887)", () => {
 
   it("does not keep the plaintext in state after save — reopening shows an empty field", async () => {
     // If setPassword("") is dropped, the previous password stays in React
-    // state and reappears (and is revealable via Show password) on reopen.
+    // state and reappears (and is revealable via the show/hide toggle) on reopen.
     fetchMock.mockResolvedValue(status({ login: { username: "support", status: "set" } }));
     render(<SshAccessCard />);
     await openForm();

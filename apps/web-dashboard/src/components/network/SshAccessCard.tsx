@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { TerminalSquare, AlertTriangle, KeyRound } from "lucide-react";
+import { TerminalSquare, AlertTriangle, KeyRound, Eye, EyeOff } from "lucide-react";
 import {
   SSH_LOGIN_PASSWORD_MIN,
   isValidSshLoginPassword,
@@ -250,16 +250,21 @@ function SshLoginSection({
 
       {editing && (
         <form
-          className="mt-3 grid gap-2"
+          className="mt-3 space-y-3"
           onSubmit={(e) => {
             e.preventDefault();
             void onSave();
           }}
         >
-          <label className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-            Username
+          <div>
+            <label
+              htmlFor="ssh-login-username"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
+            >
+              Username
+            </label>
             <input
-              className="input mt-1"
+              id="ssh-login-username"
               type="text"
               autoComplete="off"
               autoCapitalize="none"
@@ -267,28 +272,52 @@ function SshLoginSection({
               value={username}
               onChange={(e) => setUsername(e.target.value.trim())}
               placeholder="support"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               aria-invalid={username !== "" && !usernameValid}
+              disabled={saving}
             />
-          </label>
-          <label className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-            Password (at least {SSH_LOGIN_PASSWORD_MIN} characters)
-            <input
-              className="input mt-1"
-              type={showPassword ? "text" : "password"}
-              autoComplete="new-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              aria-invalid={password !== "" && !passwordValid}
-            />
-          </label>
-          <label className="type-caption-1 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
-            <input
-              type="checkbox"
-              checked={showPassword}
-              onChange={(e) => setShowPassword(e.target.checked)}
-            />
-            Show password
-          </label>
+          </div>
+          <div>
+            <label
+              htmlFor="ssh-login-password"
+              className="type-subheadline text-[color:var(--text-muted)] block mb-1.5"
+            >
+              Password (at least {SSH_LOGIN_PASSWORD_MIN} characters)
+            </label>
+            <div className="relative">
+              <input
+                id="ssh-login-password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                className="w-full px-3 py-2.5 pr-10 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
+                aria-invalid={password !== "" && !passwordValid}
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((s) => !s)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-2 -mr-2 text-[color:var(--text-muted)] transition-colors duration-200 hover:text-[color:var(--text)]"
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
           <div className="flex gap-2 mt-1">
             <button
               type="submit"
