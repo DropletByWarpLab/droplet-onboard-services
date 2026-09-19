@@ -130,6 +130,32 @@ export function connectLanProvider(
 }
 
 /**
+ * WARP-2842 — ask the box to CHECK a pasted cloud / REST credential.
+ *
+ * The same URL {@link connectLanProvider} posts to, with an empty body: the
+ * credential is already on the row (`saveSaasCredential` sealed it there), so
+ * there is nothing for the body to carry, and the orchestrator's cloud body
+ * schema is strict — a LAN-shaped body would be refused. The box probes the
+ * vendor and returns the connection with its VERDICT (`CONNECTED`,
+ * `NEEDS_RECONNECT`, `DEGRADED`, `CAPABILITY_LIMITED`, `ERROR`,
+ * `NOT_CONFIGURED`), which is what the caller renders — never an assumed
+ * "connected". Idempotent: calling it again re-probes.
+ *
+ * Until this existed a pasted key sat at `PROVISIONING` forever — the save
+ * stored it, and nothing ever asked the vendor whether it worked.
+ */
+export function connectCloudProvider(provider: string): Promise<IntegrationConnection> {
+  return apiFetch<IntegrationConnection>(
+    `/api/integrations/${encodeURIComponent(provider)}/connect`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+/**
  * The write kill-switch / opt-in, for ONE provider.
  *
  * WARP-2500 — `provider` is a required parameter and the URL is

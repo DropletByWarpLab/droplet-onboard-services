@@ -38,6 +38,14 @@
  *
  * It never fakes a connection. Every network action hits the real orchestrator
  * endpoints; when one is not wired up yet the wizard says so in words.
+ *
+ * WARP-2842 — and for a cloud / REST track it never ASSUMES one either. Saving
+ * the credential stores it; the box answers PROVISIONING, which means "stored,
+ * not yet checked". The wizard then asks the box to check it
+ * (`connectCloudProvider`) and shows the VERDICT — connected, or the reason it
+ * is not, in the words the hub tile uses. Before this the save alone landed on
+ * the green screen, and a key the vendor had turned down looked identical to
+ * one that worked.
  */
 
 import {
@@ -71,10 +79,11 @@ import {
   type LanProvisioning,
   type ProviderDescriptor,
 } from "@droplet/shared-types";
-import { testLanConnection, connectLanProvider } from "@/lib/api.erp";
+import { testLanConnection, connectLanProvider, connectCloudProvider } from "@/lib/api.erp";
 import { fetchSaasCredentials, saveSaasCredential } from "@/lib/api";
-import type { LanConnectInput } from "@/lib/erp-types";
+import type { IntegrationStatus, LanConnectInput } from "@/lib/erp-types";
 import type { TypedError } from "@/lib/hooks/apiFetch";
+import { statusView } from "./connector-visuals";
 
 /**
  * Save state as a discriminated union, per `DnsServersForm.tsx:46-51`.
@@ -101,6 +110,45 @@ function friendlyConnectError(err: unknown, displayName: string): string {
     return `Setup isn't available on this Droplet yet — the ${displayName} connector is still being wired up.`;
   const msg = (err as Error)?.message;
   return msg || "Something went wrong. Try again.";
+}
+
+/**
+ * WARP-2842 — the tracks whose pasted credential the box PROBES on connect.
+ *
+ * `cloud` and `rest` land PROVISIONING after a save and have a connector the
+ * orchestrator can build from the row; `mcp` lands CONNECTED on the paste
+ * itself (the paste IS the connection for that track) and the connect route
+ * refuses it. Read off the descriptor — the same declaration the orchestrator
+ * branches on — so the browser and the box agree on which providers are
+ * checked by reading ONE field.
+ */
+function isProbedOnConnect(descriptor: ProviderDescriptor): boolean {
+  return descriptor.track === "cloud" || descriptor.track === "rest";
+}
+
+/**
+ * One plain sentence for each verdict the probe can return, addressed to the
+ * owner who just pasted the key. The heading and icon come from `statusView`
+ * — the hub tile's own vocabulary — so the dialog and the card behind it name
+ * one state one way. No jargon: the status names never reach the screen.
+ */
+function verdictCopy(status: IntegrationStatus, name: string): string {
+  switch (status) {
+    case "CONNECTED":
+      return "Droplet is reading your practice now — synced just now.";
+    case "NEEDS_RECONNECT":
+      return `${name} didn't accept that key. Check it's current and has read access, then paste it again.`;
+    case "ERROR":
+      return `${name} refused the connection, and a new key won't change that. Check the vendor's settings — an access policy or plan limit is the usual cause.`;
+    case "DEGRADED":
+      return `The key works, but ${name} isn't answering reliably right now. Droplet will keep trying.`;
+    case "CAPABILITY_LIMITED":
+      return `Droplet is reading ${name}, but one dataset needs a plan or permission change at the vendor.`;
+    case "NOT_CONFIGURED":
+      return `The key is stored, but Droplet couldn't use it to reach ${name}. Try connecting again from the Integrations page.`;
+    default:
+      return `Droplet is still checking this connection. Look at the ${name} card in a moment.`;
+  }
 }
 
 /** The progress rail. Rendered only for a flow with more than one step — a
@@ -178,7 +226,13 @@ function CredentialFlow({
    */
   const [stored, setStored] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<Status>({ kind: "idle" });
-  const [done, setDone] = useState(false);
+  /**
+   * The box's verdict once the credential is saved AND checked, or `null`
+   * while the form is still open. A status rather than a boolean, because
+   * "done" used to mean "saved" and was rendered as "connected" — two
+   * different facts, and the gap between them is this ticket.
+   */
+  const [verdict, setVerdict] = useState<IntegrationStatus | null>(null);
 
   const variant = credentialVariantFor(descriptor, variantId);
   const fields = useMemo(
@@ -245,7 +299,7 @@ function CredentialFlow({
     if (variant) payload[CREDENTIAL_VARIANT_FIELD] = variant.id;
 
     try {
-      await saveSaasCredential(descriptor.id, payload);
+      const saved = await saveSaasCredential(descriptor.id, payload);
       // Drop the typed secrets once the box holds them. Keeping a copy in React
       // state only widens where the plaintext lives, and a second save would
       // resend a value the owner never re-entered.
@@ -260,21 +314,37 @@ function CredentialFlow({
         for (const f of justStored) next[f.name] = true;
         return next;
       });
+      // WARP-2842 — saved is not connected. Ask the box to CHECK the key it
+      // just stored, and show what it says. A track that is not probed (mcp:
+      // the paste is the connection) takes the state the save returned. No
+      // "did this save clear the secret" guard here, unlike the credentials
+      // page: every secret this form declares is required, and an untouched
+      // one is omitted, so a submit never clears anything.
+      const outcome = isProbedOnConnect(descriptor)
+        ? (await connectCloudProvider(descriptor.id)).status
+        : saved.state;
       setStatus({ kind: "idle" });
-      setDone(true);
+      setVerdict(outcome);
+      // The hub re-reads whatever the verdict was: a card that says "paste a
+      // new key" behind a dialog that says the same is the point.
       onConnected?.();
     } catch (err) {
       setStatus({ kind: "error", message: friendlyConnectError(err, descriptor.displayName) });
     }
   }
 
-  if (done) {
+  if (verdict !== null) {
     return (
       <Result
         headingId={headingId}
         displayName={descriptor.displayName}
+        status={verdict}
         note={null}
         onClose={onClose}
+        // A rejected key has one fix, and it is this form. Offered ONLY for
+        // that verdict: for an ERROR a new key changes nothing, and offering
+        // the form would send the owner minting keys until one worked.
+        onRetry={verdict === "NEEDS_RECONNECT" ? () => setVerdict(null) : undefined}
       />
     );
   }
@@ -482,6 +552,7 @@ function LanFlow({
       <Result
         headingId={headingId}
         displayName={name}
+        status="CONNECTED"
         note={enableWrites ? "Writes are on. Droplet will always confirm with you first." : null}
         onClose={onClose}
       />
@@ -821,42 +892,81 @@ function LanFlow({
 
 /** The shared success screen. One rendering for both flows, because the owner
  *  asked the same question of both: is it connected? */
+/**
+ * The closing screen.
+ *
+ * WARP-2842 — it takes the box's VERDICT, not a boolean. `CONNECTED` is the
+ * green screen it always was. Every other status renders the same layout with
+ * the hub tile's own label and icon (`statusView`) and one sentence saying
+ * what to do, so a key the vendor turned down is not dressed as a success.
+ * The LAN flow passes `CONNECTED` unchanged: its verdict is a separate
+ * story, and this screen was already what it showed.
+ */
 function Result({
   headingId,
   displayName,
+  status,
   note,
   onClose,
+  onRetry,
 }: {
   headingId: string;
   displayName: string;
+  status: IntegrationStatus;
   note: string | null;
   onClose: () => void;
+  /** Back to the form — offered only when a different key is the fix. */
+  onRetry?: () => void;
 }) {
+  const ok = status === "CONNECTED";
+  const view = statusView(status);
+  const Icon = ok ? CheckCircle2 : view.icon;
+  // Tinted disc + glyph in the pill's own tone. Three tokens, no new colour:
+  // green for connected, orange for "look at this", red for "can't".
+  const tone =
+    ok || view.kind === "ok"
+      ? "bg-system-green/12 text-system-green"
+      : view.kind === "danger"
+        ? "bg-system-red/12 text-system-red"
+        : "bg-system-orange/12 text-system-orange";
   return (
     <>
       <div className="flex items-center justify-between gap-3 px-6 pt-5 pb-3 border-b border-separator">
         <span />
-        <SafetyChip variant="read-phi" />
+        <SafetyChip variant={ok ? "read-phi" : "setup"} />
       </div>
       <div className="px-6 py-6">
         <div className="text-center py-4">
-          <div className="mx-auto w-16 h-16 rounded-full bg-system-green/12 flex items-center justify-center">
-            <CheckCircle2 size={30} className="text-system-green" />
+          <div className={`mx-auto w-16 h-16 rounded-full flex items-center justify-center ${tone}`}>
+            <Icon size={30} aria-hidden />
           </div>
           <h2
             id={headingId}
             className="type-display text-label-primary mt-4"
             style={{ fontSize: 34 }}
           >
-            Connected
+            {ok ? "Connected" : view.label}
           </h2>
           <p className="type-subheadline text-label-secondary mt-2">
-            Droplet is reading your practice now — synced just now.
+            {verdictCopy(status, displayName)}
           </p>
           {note && <p className="type-footnote text-system-orange mt-3">{note}</p>}
-          <button type="button" className="dp-btn-primary mt-6" onClick={onClose}>
-            Open {displayName} dashboard
-          </button>
+          {ok ? (
+            <button type="button" className="dp-btn-primary mt-6" onClick={onClose}>
+              Open {displayName} dashboard
+            </button>
+          ) : (
+            <div className="mt-6 flex items-center justify-center gap-2">
+              <button type="button" className="type-footnote text-label-secondary px-3" onClick={onClose}>
+                Close
+              </button>
+              {onRetry && (
+                <button type="button" className="dp-btn-primary" onClick={onRetry}>
+                  Paste a different key
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </>

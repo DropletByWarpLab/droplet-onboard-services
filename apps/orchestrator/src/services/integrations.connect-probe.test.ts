@@ -23,6 +23,8 @@ import {
 } from "@droplet/erp-connector";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { matchesWhere } from "../__tests__/helpers/integration-connection-where.js";
+
 import { createIntegrationsService } from "./integrations.service.js";
 
 type Row = Record<string, unknown> & { id: string; provider: string; status: string };
@@ -46,6 +48,9 @@ function makePrismaMock() {
         schemaVersion: null,
         schemaHash: null,
         lastHealthyAt: null,
+        // The credential column, as Prisma returns it on a row created
+        // without one — the verdict guard keys on it.
+        providerTokensEnc: null,
         createdAt: new Date(),
         updatedAt: new Date(),
         ...data,
@@ -57,6 +62,15 @@ function makePrismaMock() {
       const row = { ...rows.get(where.id)!, ...data, updatedAt: new Date() };
       rows.set(where.id, row);
       return { ...row };
+    }),
+    // WARP-2842 — the cloud verdict is an optimistic `updateMany`; every key
+    // in `where` must match, as Prisma does it — a Json `{ equals }` filter
+    // by value (`matchesWhere`).
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      const row = rows.get(where.id);
+      if (!row || !matchesWhere(row, where)) return { count: 0 };
+      rows.set(where.id, { ...row, ...data, updatedAt: new Date() });
+      return { count: 1 };
     }),
   };
   return {
@@ -197,6 +211,45 @@ describe("connect() probes a cloud credential with health()", () => {
     const written = JSON.stringify([...mock.rows.values()]);
     expect(written).not.toContain(secret);
     expect(written).not.toContain("rk_test");
+  });
+});
+
+describe("a connector factory that throws (WARP-2842)", () => {
+  // `connectorFor` used to sit OUTSIDE the try: a factory that threw
+  // synchronously — the QuickBooks factory refuses a row with no realm id
+  // with a ConnectorBlockedError, for one — surfaced as a 500 to the caller
+  // and stranded a row this call had just written to PROVISIONING, which is
+  // unpollable and, on a re-probe of a live row, took a CONNECTED connection
+  // off the schedule. The invariant "a completed connect never leaves
+  // PROVISIONING" has to hold for that path too.
+  // Mutation: move the `connectorFor` call back above the `try` → both cases
+  // throw and the rows stay PROVISIONING → red.
+  it("classifies a blocked factory on a cloud track as NOT_CONFIGURED, not a 500", async () => {
+    const mock = makePrismaMock();
+    const svc = createIntegrationsService(mock.prisma, {
+      connectorFor: () => {
+        throw new ConnectorBlockedError("build", "no realm id on the row");
+      },
+    });
+
+    const detail = await svc.connect({ provider: "stripe", host: "" } as any);
+
+    expect(detail.status).toBe("NOT_CONFIGURED");
+    expect([...mock.rows.values()][0].status).toBe("NOT_CONFIGURED");
+  });
+
+  it("classifies an unexpected factory throw on a cloud track as ERROR", async () => {
+    const mock = makePrismaMock();
+    const svc = createIntegrationsService(mock.prisma, {
+      connectorFor: () => {
+        throw new Error("factory exploded");
+      },
+    });
+
+    const detail = await svc.connect({ provider: "stripe", host: "" } as any);
+
+    expect(detail.status).toBe("ERROR");
+    expect([...mock.rows.values()][0].status).toBe("ERROR");
   });
 });
 

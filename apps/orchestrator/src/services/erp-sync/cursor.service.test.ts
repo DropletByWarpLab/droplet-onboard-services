@@ -209,6 +209,35 @@ describe("claimDueErpCursors", () => {
     expect(await claimDueErpCursors(prisma as never, 10, NOW)).toEqual([]);
     expect(prisma.erpSyncCursor.findMany).not.toHaveBeenCalled();
   });
+
+  /**
+   * WARP-2842 — why the connect route had to exist, stated from the poller's
+   * side. A pasted cloud key lands PROVISIONING, and PROVISIONING is (rightly)
+   * not pollable: nothing has confirmed the key works. So until something
+   * moved the row to CONNECTED, a Stripe row with a perfectly good key was
+   * never enumerated — healthy, green, and never read. The route's probe
+   * writes CONNECTED, and CONNECTED is what this claim enumerates.
+   *
+   * MUTATION: drop "CONNECTED" from POLLABLE_CONNECTION_STATUSES → the second
+   * case goes red. (The first is the fact the whole ticket rests on; it stays
+   * green under that mutation and is here so nobody "fixes" the defect by
+   * polling PROVISIONING rows instead.)
+   */
+  it("never enumerates a PROVISIONING cloud row — a pasted key is not yet a working one", async () => {
+    const prisma = fakePrisma(
+      [cursorRow()],
+      [connRow({ provider: "stripe", status: "PROVISIONING" })],
+    );
+    expect(await claimDueErpCursors(prisma as never, 10, NOW)).toEqual([]);
+  });
+
+  it("enumerates the stripe row once the connect probe has written CONNECTED", async () => {
+    const prisma = fakePrisma(
+      [cursorRow()],
+      [connRow({ provider: "stripe", status: "CONNECTED" })],
+    );
+    expect((await claimDueErpCursors(prisma as never, 10, NOW)).map((c) => c.id)).toEqual(["cur-1"]);
+  });
 });
 
 describe("releaseErpCursorSuccess", () => {
