@@ -267,6 +267,19 @@ export function hasWriteTool(names: ReadonlyArray<string>): boolean {
 }
 
 /**
+ * WARP-2894 — the names in `names` that no compiled tool answers to.
+ *
+ * A routine the model drafts is only as good as the tools it names, and the
+ * model will name tools that do not exist. Catching that at draft time turns
+ * a run-time "unknown tool" three weeks later into a 400 the model can fix
+ * on the next turn. Compiled catalog only, on purpose: the ToolSpec walker
+ * dispatches through the local MCP child, which is exactly this catalog.
+ */
+export function unknownToolsIn(names: ReadonlyArray<string>): string[] {
+  return names.filter((name) => !CATALOG_BY_NAME.has(name));
+}
+
+/**
  * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
  * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
  * the one documented, scoped exception (ADR-004 amendment, approved

@@ -200,6 +200,11 @@ const EXPECTED_TOOL_NAMES = [
   // list is Tier-1. Both in the chat pool: a run is startable from chat.
   "start_agent_run",
   "list_agent_runs",
+  // routines (WARP-2894, ADR-056 §5.1) — draft is Write-tier with NO
+  // confirmation (a draft is inert), list is Tier-1, run is Tier-2.
+  "routine_draft",
+  "routine_list",
+  "routine_run",
 ];
 
 describe("TOOLS registry", () => {
@@ -231,6 +236,15 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
     expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // WARP-2894 — a draft is inert (POST /api/tools cannot set status), so
+    // drafting is a write that needs no confirmation; a person promotes it
+    // on /routines. Running a LIVE routine is real tool calls: Tier-2.
+    expect(TOOLS.get("routine_draft")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("routine_draft")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("routine_list")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("routine_list")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("routine_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("routine_run")?.requiresConfirmation).toBe(true);
     // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
     // gate of its own, so there is no route challenge to stand down for.
     expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();

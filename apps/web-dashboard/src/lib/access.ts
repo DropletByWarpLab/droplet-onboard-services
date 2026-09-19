@@ -1004,8 +1004,8 @@ export function roleToDraft(role: AccessRole): RoleDraft {
  *      group's gating feature is off.
  *   2. `originalToolGrants` carries the template's rows VERBATIM, and that is
  *      the only thing that can carry three of them. TOOL_DOMAIN_GROUPS covers
- *      16 of the 19 grantable domains — `money`, `team_chat` and `agent_runs`
- *      belong to NO group, and `draftToRolePayload` emits an ungrouped domain
+ *      16 of the 20 grantable domains — `money`, `team_chat`, `agent_runs`
+ *      and `routines` (WARP-2894) belong to NO group, and `draftToRolePayload` emits an ungrouped domain
  *      only from this array. blankRoleDraft sets it to [], which would silently
  *      drop a Bookkeeper's `money` tools and an Office Manager's `team_chat`
  *      tools on the way to the wire. (WARP-2760: `crm` was a fourth entry here

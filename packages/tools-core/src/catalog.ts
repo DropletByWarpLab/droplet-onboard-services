@@ -74,7 +74,14 @@ export type ToolDomain =
   // WARP-2180 — durable background runs (epic WARP-2176): start one, list
   // yours. Its own domain so selection can find the pair on a "do this in
   // the background" turn without dragging a whole vertical along.
-  | "agent_runs";
+  | "agent_runs"
+  // WARP-2894 (ADR-056 §5.1) — routines: draft / list / run. Its own domain
+  // rather than a value on the `business` verbs' `entity` enum: a routine is
+  // not a business entity, and that enum is a DMR grammar surface that
+  // should not grow a value for every non-business thing the model can
+  // create. Unclaimed by any module (a routine may touch any surface), so
+  // the grant axis holds it, exactly as `agent_runs`.
+  | "routines";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -265,6 +272,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
   agent_runs: ["start_agent_run", "list_agent_runs"],
+  routines: ["routine_draft", "routine_list", "routine_run"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -492,6 +500,9 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Background runs (WARP-2180)
   start_agent_run: "Hand Droplet a longer task to work on in the background",
   list_agent_runs: "See your background tasks and how they went",
+  routine_draft: "Write down a routine for you to review and turn on",
+  routine_list: "See the routines on this box and whether they are on",
+  routine_run: "Run one of your routines right now",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns
