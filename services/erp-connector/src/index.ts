@@ -733,6 +733,7 @@ export {
 } from "./rest/read-semantics.js";
 export {
   CALCOM_PROVIDER,
+  GITLAB_PROVIDER,
   REST_VENDOR_PROFILES,
   restProfileFor,
   restProviderIds,

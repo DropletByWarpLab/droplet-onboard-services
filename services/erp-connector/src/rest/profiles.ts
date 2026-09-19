@@ -18,6 +18,7 @@
  */
 import { assertValidRestProfile, type RestVendorProfile } from "./profile.js";
 import { CALCOM_PROFILE, CALCOM_PROVIDER } from "./vendors/calcom.js";
+import { GITLAB_PROFILE, GITLAB_PROVIDER } from "./vendors/gitlab.js";
 import { SQUARE_PROFILE, SQUARE_PROVIDER } from "./vendors/square.js";
 
 /**
@@ -27,7 +28,11 @@ import { SQUARE_PROFILE, SQUARE_PROVIDER } from "./vendors/square.js";
  * ordering is `catalog.order` on the descriptor; nothing should read a
  * position here.
  */
-export const REST_VENDOR_PROFILES: readonly RestVendorProfile[] = [CALCOM_PROFILE, SQUARE_PROFILE];
+export const REST_VENDOR_PROFILES: readonly RestVendorProfile[] = [
+  CALCOM_PROFILE,
+  GITLAB_PROFILE,
+  SQUARE_PROFILE,
+];
 
 // Fail the BUILD, not a customer's connection.
 for (const profile of REST_VENDOR_PROFILES) assertValidRestProfile(profile);
@@ -51,4 +56,4 @@ export function restProviderIds(): readonly string[] {
   return REST_VENDOR_PROFILES.map((p) => p.provider);
 }
 
-export { CALCOM_PROVIDER, SQUARE_PROVIDER };
+export { CALCOM_PROVIDER, GITLAB_PROVIDER, SQUARE_PROVIDER };

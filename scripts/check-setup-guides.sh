@@ -94,7 +94,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # control, so an undocumented click-path is the connector being unusable.
 # The track they ride on changes nothing about that obligation — ADR-046 §5
 # is explicit that a profile ships only with its guide and its ADR-042 row.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
+# WARP-2917 — `gitlab` is the third REST-track vendor, same obligation.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom gitlab"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -242,6 +243,26 @@ fact_pins() {
       # there is no host at all, so the guide must not present it as optional.
       printf '%s
 ' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
+      ;;
+    gitlab)
+      # Four facts a customer acts on (WARP-2917), each a way the setup fails
+      # for a reason Droplet cannot fix:
+      #  - `read_api` is the ONE scope to tick on a legacy token. `read_user`
+      #    alone cannot list issues and `api` can write; a guide that names
+      #    neither the scope nor its fine-grained equivalent sends the owner
+      #    to a token that either fails or can do too much.
+      #  - 'Work Item: Read' is the fine-grained permission that covers the
+      #    issues endpoint. Fine-grained tokens can be ENFORCED by a group
+      #    Owner, after which the legacy path stops working, so the guide
+      #    must carry both.
+      #  - `glpat-` is the prefix the owner should expect, named in the help
+      #    rather than enforced by a pattern (the routable-token change is
+      #    why); the guide must say the same thing the connect form does.
+      #  - 365 days is a REQUIRED expiry with no grace period and no
+      #    auto-renewal — like Atlassian, a date the owner must diary, and
+      #    softening it produces a silent outage a year later.
+      printf '%s
+' 'read_api' 'Work Item: Read' 'glpat-' '365 days'
       ;;
     *)
       : # no pins declared for this provider

@@ -186,6 +186,15 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/calcom",
   },
+  {
+    // WARP-2917 — the REST track's third vendor, at catalog.order 14.
+    id: "gitlab",
+    name: "GitLab",
+    category: "Project management",
+    description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/gitlab",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -253,6 +262,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "calcom",
       "dentrix",
       "eaglesoft",
+      "gitlab",
       "hubspot",
       "klaviyo",
       "mailchimp",
@@ -467,6 +477,8 @@ describe("the setup guide travels with the card", () => {
     // The two REST cards WARP-2707 ships…
     expect(covered).toContain("square");
     expect(covered).toContain("calcom");
+    // …the third, WARP-2917…
+    expect(covered).toContain("gitlab");
     // …and a cloud card, so a set that had SWAPPED one track for the other
     // rather than widening would still be caught.
     expect(covered).toContain("stripe");

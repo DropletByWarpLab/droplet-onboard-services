@@ -1357,6 +1357,41 @@ entries:
     review_by: 2027-09-07
     code_refs: [services/erp-connector/src/rest/vendors/calcom.ts]
 
+  - id: gitlab-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [gitlab.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GitLab REST API v4 on gitlab.com — the project-tracker cloud connector
+      (WARP-2917), on ADR-046's declarative REST track. Read-only, GET only,
+      one dataset: issues, as `task` rows — every issue the token's user can
+      see across every project and group they belong to, with its state,
+      assignee and timing. Carries the customer's own tracker, fetched on
+      request under a personal access token the account owner minted in their
+      own GitLab profile (Edit profile → Access → Personal access tokens),
+      scoped read_api (or a fine-grained token with Work Item: Read and User:
+      Read), on any tier including Free; never ambient, off until the owner
+      connects. The token rides in GitLab's own PRIVATE-TOKEN header, never
+      as a query parameter. Paced against the announced Free-tier sustained
+      ceiling (5,000 requests an hour) rather than a guessed constant. ONE
+      FIXED HOST — the API lives under /api/v4 on the product's own host — so
+      a plain registered destination whose origin is a whole-string literal
+      the scanner reads directly. This registration is for gitlab.com ONLY:
+      self-managed GitLab is an arbitrary customer hostname, which is a
+      separate provider needing its own kind: dynamic entry and exact-host
+      guard, never a variable host on this one. Pagination follows the
+      RFC-5988 Link header GitLab returns, and every next-page URL is re-run
+      through the exact-host guard before it is dialled.
+    ticket: WARP-2917
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/gitlab.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

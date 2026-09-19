@@ -160,6 +160,14 @@ const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
  * reporting ERP_NOT_CONNECTED with a green build.
  */
 const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+/**
+ * WARP-2917 — GitLab (gitlab.com hosted), the third declarative REST vendor.
+ * A separate const rather than an edit to the WARP-2707 list, so each wave's
+ * record stays a diff a reader can find. Spread into the same three
+ * assertions the first wave is.
+ */
+const REST_PROVIDERS_WARP_2917 = ["gitlab"] as const;
+const REST_PROVIDERS = [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2917] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -179,7 +187,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...KNOWN_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
-        ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS,
       ]),
     );
   });
@@ -196,7 +204,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...CLOUD_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
-        ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS,
       ]),
     );
   });
@@ -211,7 +219,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
-      ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -219,7 +227,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
-      ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS,
     ]);
   });
 
@@ -272,7 +280,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // Mutation: delete the `if (restProfileFor(provider)) return
     // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
     // the negative loop above stays green.
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of REST_PROVIDERS) {
       const profile = restProfileFor(id);
       expect(profile, `${id} must have a registered REST profile`).toBeDefined();
 
@@ -343,13 +351,17 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // owner's card reads CONNECTED while nothing is stored.
     const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
     const unscheduled: Record<string, string[]> = {};
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of REST_PROVIDERS) {
       const declared = providerDescriptor(id)!.datasets as readonly string[];
       const missing = declared.filter((d) => !syncedEntities.has(d));
       if (missing.length > 0) unscheduled[id] = missing;
     }
     // Square's three money datasets are on-demand by design; Cal.com's
     // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    // GitLab (WARP-2917) declares `task` only, which HAS a row (its
+    // `updated_after` watermark is a complete last-modified filter, so the
+    // poller sees state changes and reassignments) — so GitLab appears
+    // nowhere here either, and a GitLab connection is ticked and swept.
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1064,6 +1076,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // implementation detail into the product.
       "square",
       "calcom",
+      // WARP-2917 — GitLab, at `catalog.order: 14`.
+      "gitlab",
     ]);
   });
 

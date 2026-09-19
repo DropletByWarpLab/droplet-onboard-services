@@ -215,3 +215,36 @@ rest provider has at least one dataset the assistant can ask about.
 in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and would
 silently key dedup on `undefined` for every dataset at once.
 
+### 2026-09-18 — GitLab (WARP-2917), the first vendor on the widened vocabulary
+
+* **GitLab (gitlab.com hosted) — shipped, one dataset: `task` ← `GET /api/v4/issues`.**
+  Every issue the token's user can see, across every project and group. Eight of
+  `task`'s nine columns are filled; `priority` stays `undefined` because GitLab issues
+  carry no priority field (`severity` is incident-only, `weight` is Premium-only effort,
+  `priority::high` is a per-project label convention). The watermark is `updated_after`,
+  a complete last-modified filter, so `task` is polled, swept and read-through (it is
+  `NEVER_LANDED` with a reason, like `booking` and `employee`).
+* **Datasets GitLab could serve and does not, and why:** `ticket` (a GitLab issue has no
+  `contact_id`; Service Desk exposes an author e-mail, which is a contact detail, not an
+  id); `employee` (`/users` is admin-gated beyond the public profile and group membership
+  is a per-group fan-out — one endpoint per dataset); `engagement` (`/events` filters
+  `after` by DATE and by creation time; a candidate for `format: "date"` on its own
+  ticket). Merge requests, pipelines, projects, groups and epics have no canonical name.
+* **Self-managed GitLab is OUT**, and it is the same finding Cal.com's self-hosted edition
+  produced from the other side: an arbitrary customer hostname cannot satisfy the dynamic
+  arm's allowlist, so it is a separate provider, not a variable host.
+* **No profile field was admitted.** Every value the track needs existed: static host,
+  one literal auth header, GET only, `link-header` pagination (offset mode — keyset is
+  documented for `GET /projects/:id/issues` only), `rowsPath: ""`. The `link-header` arm,
+  declared on WARP-2707 for GitHub/GitLab and exercised only by `rest-track.test.ts` until
+  now, has its first shipped profile.
+* **The refutation caught a build-blocking literal, recorded so it is not re-proposed:** the
+  spec's credential `pattern` `^glpat-[A-Za-z0-9_-]+$` rejects every routable token
+  gitlab.com now mints (`glpat-<27..300>.<2>.<9>`, two dots). The descriptor ships with
+  NO pattern, pinned absent by `gitlab-profile.test.ts`, and the prefix moved to the help
+  text. Three cosmetic corrections also applied: `assignees[0].id` over the documented-
+  deprecated singular `assignee`; 720 ms pacing from the 5,000/h sustained Free limit
+  rather than 600 ms from the per-minute burst; and the 50,000 max-offset ceiling does NOT
+  apply to the global `/issues` (only to keyset-capable endpoints), so `REST_MAX_PAGES` is
+  the only ceiling on a first full scan.
+

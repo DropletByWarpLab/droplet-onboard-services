@@ -667,6 +667,9 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "show me the payouts that landed this month",
       "which deals did we win in Q2?",
       "how many subscribers do we have?",
+      // WARP-2917 — the vendor's name carries the turn even when the sentence
+      // uses GitLab's own word (`issue`), which is deliberately unclaimed.
+      "which issues are still open in GitLab?",
     ])("%s advertises the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).toContain("cloud_query_dataset");
     });
@@ -685,6 +688,8 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
     it.each([
       // `pm` owns `ticket` (WARP-2058).
       "is there an open support ticket for the printer?",
+      // WARP-2917 — bare `issue` stays unclaimed: this is not a tracker question.
+      "is there an issue with the printer?",
       // `business` owns `company` and `customers`.
       "what are our opening hours?",
       "which company do we buy the milk from?",

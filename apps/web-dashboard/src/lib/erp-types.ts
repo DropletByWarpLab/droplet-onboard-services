@@ -67,7 +67,11 @@ export type ConnectorId =
   // onto. Deriving the union from `catalogDescriptors()` would satisfy the
   // cast by deleting the check.
   | "square"
-  | "calcom";
+  | "calcom"
+  // WARP-2917 — GitLab, the third declarative REST vendor. Same hand-written
+  // widening, same reason: the union is the check behind the `as ConnectorId`
+  // cast, and deriving it would delete the check.
+  | "gitlab";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 
