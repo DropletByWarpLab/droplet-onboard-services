@@ -127,6 +127,7 @@ import {
   seedOffLanChannels,
 } from "./services/workspace-settings.service.js";
 import { revokePendingOwnerInvites } from "./services/owner-invite-sweep.service.js";
+import { seedDailyReportSpec } from "./services/daily-report-spec.service.js";
 import { createLogger } from "./lib/logger.js";
 
 // One limiter for the process (module scope, not per createApp): tests build
@@ -619,8 +620,8 @@ export function createApp(
   // dispatch the same registry as chat tool calls. The walker halts
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
-    async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
+    async call(tool, args, context) {
+      const result = await mcpClient.callTool(tool, args, context);
       if (result.isError) {
         const detail = result.content?.[0]?.text ?? "tool reported error";
         throw new Error(typeof detail === "string" ? detail : String(detail));
@@ -698,6 +699,15 @@ export function createApp(
       { err },
       "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
     );
+  });
+
+  // The `daily-report` ToolSpec the Reports tile runs. Until now this was
+  // seeded ONLY by `prisma/seed.ts`, which nothing on a box ever executes
+  // (no boot hook, no Dockerfile step, no compose command), so every box in
+  // the field answered "Spec not found". Same insert-or-skip posture as the
+  // seeders above: an operator-edited spec is never overwritten.
+  seedDailyReportSpec(prisma).catch((err) => {
+    seedLogger.warn({ err }, "daily-report spec seeder failed (toolSpec table may be unbootstrapped)");
   });
 
   // WARP-1565: revoke any pending `role="owner"` invite. Rail 7 stopped new
