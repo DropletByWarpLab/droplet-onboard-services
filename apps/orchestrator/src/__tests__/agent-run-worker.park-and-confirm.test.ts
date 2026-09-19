@@ -234,12 +234,35 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     expect(mcp.executed).toHaveLength(0);
     expect(chat).toHaveBeenCalledTimes(1);
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
-    const note = sendNotificationMock.mock.calls[0]![1] as { userId: string; kind: string; title: string; body: string };
-    expect(note.userId).toBe("romain");
+    const note = sendNotificationMock.mock.calls[0]![1] as {
+      userId: string;
+      kind: string;
+      title: string;
+      body: string;
+      url?: string;
+      data?: Record<string, unknown>;
+      tag?: string;
+    };
+    // WARP-2909 — keyed on the USERNAME, never the id (OWNER has distinct values).
+    expect(note.userId).toBe(OWNER.username);
+    expect(note.userId).not.toBe(OWNER.id);
     expect(note.kind).toBe("ai");
     expect(note.title).toContain("delete_file");
     expect(note.body).toContain("tidy up old files");
     expect(note.body).toContain("Nothing has been done yet");
+    // WARP-2909 — the deep link: the run's detail on the Activity surface, a
+    // flat badge hint, and a collapse tag so repeated parks of one run stack.
+    expect(note.url).toBe(`/admin/audit?run=${id}`);
+    expect(note.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true });
+    expect(note.tag).toBe(`agent-run:${id}`);
+    // Never pendingArgs — they can carry customer data — and never anything
+    // that could stand in for the confirm route: no token, no binding hash.
+    expect(Object.keys(note.data!)).not.toContain("pendingArgs");
+    expect(Object.keys(note).filter((k) => /token|hash|confirm/i.test(k))).toEqual([]);
+    expect(Object.keys(note.data!).filter((k) => /token|hash|confirm/i.test(k))).toEqual([]);
+    expect(JSON.stringify(note)).not.toContain("tok-1");
+    expect(JSON.stringify(note)).not.toContain(row.pendingBindingHash);
+    expect([...new URL(note.url!, "http://localhost").searchParams.keys()]).toEqual(["run"]);
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "tool_call",
@@ -310,6 +333,17 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     const titles = sendNotificationMock.mock.calls.map((c) => (c[1] as { title: string }).title);
     expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(1);
     expect(titles.filter((t) => t.startsWith("Background run finished"))).toHaveLength(1);
+    // WARP-2909 — the finished notification links to the same run with the
+    // same tag, carries { agentRunId, status } and NO needsDecision:
+    // `agentRunId` alone never means a decision is pending.
+    const finished = sendNotificationMock.mock.calls
+      .map((c) => c[1] as { userId: string; title: string; url?: string; data?: Record<string, unknown>; tag?: string })
+      .find((n) => n.title.startsWith("Background run finished"))!;
+    expect(finished.userId).toBe(OWNER.username);
+    expect(finished.url).toBe(`/admin/audit?run=${id}`);
+    expect(finished.tag).toBe(`agent-run:${id}`);
+    expect(finished.data).toEqual({ agentRunId: id, status: "succeeded" });
+    expect(finished.data).not.toHaveProperty("needsDecision");
   });
 
   it("deny → resume: the model gets CONFIRMATION_DENIED as a tool result, adapts, and the tool never runs", async () => {

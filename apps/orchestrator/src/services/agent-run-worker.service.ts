@@ -119,6 +119,18 @@ import {
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
+
+/** WARP-2909 — where a run's notifications point: its detail on the Activity
+ *  surface (`/admin/audit?run=<id>` opens the parked approval prompt with
+ *  provenance), and one collapse tag per run so repeated parks and the final
+ *  outcome stack in the tray instead of piling up. The url's only query key
+ *  is `run` — approval never rides on the link. */
+function agentRunNotificationLink(runId: string): { url: string; tag: string } {
+  return {
+    url: `/admin/audit?run=${encodeURIComponent(runId)}`,
+    tag: `agent-run:${runId}`,
+  };
+}
 import { summarizeToolArguments } from "./confirmation-summary.js";
 
 const logger = createLogger("agent-run-worker");
@@ -1357,6 +1369,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         // have written. The trace mark is what tells the two apart, and the
         // person deciding is the one who needs to know.
         const mayHaveRun = trace.some((e) => e.unknownOutcome && e.tool === parkRequest.tool);
+        // WARP-2909 — the notification links to the run. `data` is the flat
+        // badge hint a client may show ("needs your decision") — NEVER
+        // `pendingArgs`, which can carry customer data, and never a token or
+        // a binding hash: approval is redeemed only at
+        // POST /api/agent-runs/:id/confirm, with provenance, and nothing that
+        // could stand in for it exists at park time (docs/agent-runs-design.md §7).
         await sendNotification(prisma, {
           userId: user.username,
           kind: "ai",
@@ -1368,6 +1386,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
               ? ". You approved this before and the run was interrupted mid-call, so it MAY ALREADY " +
                 "have happened — check before approving it again."
               : ". Open the run to approve or deny it. Nothing has been done yet."),
+          ...agentRunNotificationLink(runId),
+          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
@@ -1511,11 +1531,16 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         status === "succeeded"
           ? (notify.result ?? "").slice(0, 300) || "Finished."
           : `Failed: ${(error ?? "unknown error").slice(0, 300)}`;
+      // WARP-2909 — same link and tag as the park notification, so the two
+      // collapse in the tray; `data` names the outcome and carries NO
+      // `needsDecision` — `agentRunId` alone never means a decision is pending.
       await sendNotification(prisma, {
         userId: notify.username,
         kind: "ai",
         title: status === "succeeded" ? `Background run finished: ${goal}` : `Background run failed: ${goal}`,
         body,
+        ...agentRunNotificationLink(runId),
+        data: { agentRunId: runId, status },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });
