@@ -166,7 +166,18 @@ const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
  * readable in a diff; spread everywhere the 2707 list is.
  */
 const REST_PROVIDERS_WARP_2916 = ["github"] as const;
-const REST_PROVIDERS = [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2916] as const;
+/**
+ * WARP-2917 — GitLab (gitlab.com hosted), the third declarative REST vendor.
+ * A separate const rather than an edit to the WARP-2707 list, so each wave's
+ * record stays a diff a reader can find. Spread into the same three
+ * assertions the first wave is.
+ */
+const REST_PROVIDERS_WARP_2917 = ["gitlab"] as const;
+const REST_PROVIDERS = [
+  ...REST_PROVIDERS_WARP_2707,
+  ...REST_PROVIDERS_WARP_2916,
+  ...REST_PROVIDERS_WARP_2917,
+] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -186,8 +197,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...KNOWN_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
-        ...REST_PROVIDERS_WARP_2707,
-        ...REST_PROVIDERS_WARP_2916,
+        ...REST_PROVIDERS,
       ]),
     );
   });
@@ -204,8 +214,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...CLOUD_ERP_PROVIDERS_BEFORE,
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
-        ...REST_PROVIDERS_WARP_2707,
-        ...REST_PROVIDERS_WARP_2916,
+        ...REST_PROVIDERS,
       ]),
     );
   });
@@ -220,8 +229,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(KNOWN_ERP_PROVIDERS.slice(KNOWN_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
-      ...REST_PROVIDERS_WARP_2707,
-      ...REST_PROVIDERS_WARP_2916,
+      ...REST_PROVIDERS,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -229,8 +237,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     expect(CLOUD_ERP_PROVIDERS.slice(CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
-      ...REST_PROVIDERS_WARP_2707,
-      ...REST_PROVIDERS_WARP_2916,
+      ...REST_PROVIDERS,
     ]);
   });
 
@@ -364,6 +371,10 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // GitHub's `task` (WARP-2916) has an `ERP_SYNC_ENTITIES` row keyed on a
     // COMPLETE `since` watermark, so GitHub appears nowhere here either — a
     // GitHub connection is ticked and swept like Cal.com's.
+    // GitLab (WARP-2917) declares `task` only, which HAS a row (its
+    // `updated_after` watermark is a complete last-modified filter, so the
+    // poller sees state changes and reassignments) — so GitLab appears
+    // nowhere here either, and a GitLab connection is ticked and swept.
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1080,6 +1091,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "calcom",
       // WARP-2916 — GitHub, at `catalog.order: 14`.
       "github",
+      // WARP-2917 — GitLab, at `catalog.order: 15`.
+      "gitlab",
     ]);
   });
 

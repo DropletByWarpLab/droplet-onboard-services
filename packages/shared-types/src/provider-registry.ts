@@ -1260,6 +1260,60 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 14,
     },
   },
+  // WARP-2917 — the third REST profile, and the first PROJECT-TRACKER vendor
+  // on the declarative track. gitlab.com hosted ONLY: self-managed GitLab is
+  // an arbitrary customer hostname, which is a separate provider question
+  // (see `rest/vendors/gitlab.ts`), not a variable host on this descriptor.
+  {
+    id: "gitlab",
+    displayName: "GitLab",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "GitLab personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // 🔴 NO `pattern`. The build spec's `^glpat-[A-Za-z0-9_-]+$` rejects
+        // EVERY token gitlab.com mints today: personal access tokens are now
+        // ROUTABLE (`glpat-<27..300>.<2>.<9>`, two dots), and a required field
+        // whose value fails its pattern is treated as absent and rejects the
+        // config. The shape has already drifted once; the prefix is
+        // admin-configurable on self-managed; and the only proof of a token
+        // is GitLab answering `GET /api/v4/user` with it, which `connect()`
+        // does. The prefix lives HERE, in the help, where it guides instead
+        // of refusing. Pinned absent by `gitlab-profile.test.ts`.
+        help:
+          "In GitLab: your avatar (top right) → Edit profile → Access → Personal access tokens → Generate token. " +
+          "Choose Legacy token and tick the read_api scope, or choose Fine-grained token and grant " +
+          "Work Item: Read and User: Read. Starts with glpat-. It expires (365 days by default) — " +
+          "paste a new one here before that date.",
+      },
+    ],
+    egressHosts: ["gitlab.com"],
+    // `task` — every issue the token's user can see, across every project and
+    // group they belong to. GitLab's issue is a work item with a `project_id`
+    // and an assignee, which is exactly what `task` means; it is NOT a
+    // `ticket` (no `contact_id` on the row). `priority` is the one canonical
+    // column left undefined: GitLab issues carry no priority field.
+    datasets: ["task"],
+    // The ANNOUNCED plan-aware Free-tier sustained limit on gitlab.com —
+    // 5,000 requests an hour — which GitLab's rate-limit page says takes
+    // precedence over the per-minute burst figure. One request per 720 ms.
+    rateLimit: { callCeiling: 5_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "gitlab",
+      name: "GitLab",
+      category: "Project management",
+      description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/gitlab",
+      order: 15,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

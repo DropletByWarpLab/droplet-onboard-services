@@ -735,6 +735,7 @@ export {
 export {
   CALCOM_PROVIDER,
   GITHUB_PROVIDER,
+  GITLAB_PROVIDER,
   REST_VENDOR_PROFILES,
   restProfileFor,
   restProviderIds,

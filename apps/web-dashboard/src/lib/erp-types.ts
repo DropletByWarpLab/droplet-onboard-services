@@ -70,7 +70,11 @@ export type ConnectorId =
   | "calcom"
   // WARP-2916 — GitHub, the third REST-track vendor. Same hand-widening,
   // same reason.
-  | "github";
+  | "github"
+  // WARP-2917 — GitLab, the fourth declarative REST vendor. Same hand-written
+  // widening, same reason: the union is the check behind the `as ConnectorId`
+  // cast, and deriving it would delete the check.
+  | "gitlab";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

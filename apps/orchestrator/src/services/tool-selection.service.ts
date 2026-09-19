@@ -489,7 +489,13 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `backlog`) were already claimed by WARP-2832. Bare `issues?` is
   // deliberately NOT claimed: "there's an issue with the printer" is a
   // household sentence, not a question about a repository.
-  { pattern: /\b(stripe|hubspot|mailchimp|shopify|github|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?|pull requests?)\b/i, domains: ["cloud"] },
+  //
+  // WARP-2917 added the vendor name `gitlab` beside the `task` dataset it
+  // serves. Bare `issues?` — GitLab's own word for a work item — is
+  // deliberately NOT claimed, for `ticket`'s reason: "is there an issue with
+  // the printer" is not a tracker question, and the `tasks?|backlog|sprints?`
+  // words already carry the tracker-shaped ones.
+  { pattern: /\b(stripe|hubspot|mailchimp|shopify|github|gitlab|storefront|xero|crm|invoices?|invoicing|bill|bills|billed|billing|suppliers?|vendors?|charges|refunds?|payouts?|revenue|takings|mrr|subscriptions?|pipelines?|deals?|campaigns?|audiences?|subscribers?|orders|skus?|inventory|catalogue|catalog|restock|(low|out of|in) stock|(open|click|bounce) rates?|bookings?|calendar|schedule|staff|employees?|headcount|team members?|who works|tasks?|backlog|sprints?|pull requests?)\b/i, domains: ["cloud"] },
   // `memory usage`, never bare `memory` — that word belongs to the memory
   // domain above ("what do you remember about me"), and claiming it here
   // would drag the system tools into every recall question.
