@@ -489,12 +489,22 @@ export function createToolsRouter(
         if (typeof category === "string" && category.length > 0) {
           where.category = category;
         }
+        // WARP-2894 — schedules ride on the list row (additive). The model's
+        // routine_list needs them to answer "when does this run" without a
+        // call per slug, and the dashboard's list ignores keys it does not
+        // read. Select, not include-all: the row shape is the wire contract.
         const rows = (await prisma.toolSpec.findMany({
           where: where as any,
           orderBy: { updatedAt: "desc" },
-          include: { _count: { select: { steps: true, runs: true } } },
+          include: {
+            _count: { select: { steps: true, runs: true } },
+            schedules: { select: { rrule: true, timezone: true, enabled: true, nextFireAt: true } },
+          },
         })) as unknown as Array<
-          SpecRow & { _count: { steps: number; runs: number } }
+          SpecRow & {
+            _count: { steps: number; runs: number };
+            schedules?: Array<{ rrule: string; timezone: string; enabled: boolean; nextFireAt: Date }>;
+          }
         >;
         res.json({
           specs: rows.map((r) => ({
@@ -514,6 +524,7 @@ export function createToolsRouter(
             updatedAt: r.updatedAt,
             stepCount: r._count.steps,
             runCount: r._count.runs,
+            schedules: r.schedules ?? [],
           })),
         });
       } catch (err) {

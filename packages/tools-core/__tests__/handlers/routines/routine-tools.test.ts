@@ -139,6 +139,9 @@ describe("routine_list (WARP-2894)", () => {
             updatedAt: "2026-09-19T10:00:00.000Z",
             stepCount: 2,
             runCount: 7,
+            schedules: [
+              { rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0", timezone: "America/Los_Angeles", enabled: true, nextFireAt: "2026-09-20T14:00:00.000Z" },
+            ],
           },
         ],
       }),
@@ -147,7 +150,16 @@ describe("routine_list (WARP-2894)", () => {
     expect(res.ok).toBe(true);
     expect((res as { data: { routines: unknown[]; count: number } }).data).toMatchObject({
       count: 1,
-      routines: [{ slug: "daily-files", status: "live", writes: false, steps: 2, runs: 7 }],
+      routines: [
+        {
+          slug: "daily-files",
+          status: "live",
+          writes: false,
+          steps: 2,
+          runs: 7,
+          schedules: [{ rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0", timezone: "America/Los_Angeles", enabled: true }],
+        },
+      ],
     });
     const [path] = get.mock.calls[0] as unknown as [string];
     expect(path).toMatch(/^\/api\/tools\?/);
@@ -235,7 +247,7 @@ describe("routine_run (WARP-2894)", () => {
       { slug: "x" },
       ctxWith({ post: vi.fn(async () => makeResponse(400, { error: "Only live specs can run", status: "draft" })) }),
     );
-    expect(notLive).toMatchObject({ ok: false, error: { code: "NOT_LIVE" } });
+    expect(notLive).toMatchObject({ ok: false, error: { code: "ROUTINE_NOT_LIVE" } });
 
     const confirm = await routineRun.handler(
       { slug: "x" },

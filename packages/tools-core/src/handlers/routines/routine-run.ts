@@ -68,7 +68,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     const err = (await res.json().catch(() => null)) as { error?: string; status?: string } | null;
     if (err?.status && err.status !== "live") {
       return fail(
-        "NOT_LIVE",
+        "ROUTINE_NOT_LIVE",
         `"${slug}" is a ${err.status} routine. Only live routines run; the owner can turn it on from the Routines page.`,
       );
     }

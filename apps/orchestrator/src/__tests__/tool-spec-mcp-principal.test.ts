@@ -150,11 +150,18 @@ function buildApp(prisma: ReturnType<typeof createPrismaMock>, user: AuthUser) {
 beforeEach(() => vi.clearAllMocks());
 
 describe("GET /api/tools as the mcp principal", () => {
-  it("answers for the acting user named by X-Nextcloud-User", async () => {
-    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)]);
+  it("answers for the acting user named by X-Nextcloud-User, schedules on the row", async () => {
+    const spec = liveSpec("daily-files", "list_files", false) as SpecRow & { schedules?: unknown[] };
+    spec.schedules = [{ rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0", timezone: "UTC", enabled: true, nextFireAt: new Date("2026-09-20T07:00:00Z") }];
+    const prisma = createPrismaMock([spec]);
     const res = await request(buildApp(prisma, mcp)).get("/api/tools").set("X-Nextcloud-User", "kid");
     expect(res.status).toBe(200);
     expect(res.body.specs.map((s: { slug: string }) => s.slug)).toEqual(["daily-files"]);
+    // WARP-2894 — the list row carries its schedules (additive), so
+    // routine_list answers "when does this run" without a call per slug.
+    expect(res.body.specs[0].schedules).toEqual([
+      { rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0", timezone: "UTC", enabled: true, nextFireAt: "2026-09-20T07:00:00.000Z" },
+    ]);
   });
 
   it("is 403 with no acting user — never an empty 200", async () => {

@@ -17,8 +17,8 @@ const inputSchema = {
   properties: {
     status: {
       type: "string",
-      enum: [...STATUSES],
-      description: "Only routines in this state. Omit for all. Drafts are yours to promote on the Routines page; only live routines can run.",
+      description:
+        "Only routines in this state: live, draft or suggested. Omit for all. Drafts are promoted on the Routines page; only live routines can run.",
     },
   },
   additionalProperties: false,
@@ -37,6 +37,7 @@ interface SpecRow {
   updatedAt: string;
   stepCount?: number;
   runCount?: number;
+  schedules?: Array<{ rrule: string; timezone: string; enabled: boolean; nextFireAt: string }>;
 }
 
 function fail(code: string, message: string): ToolResult {
@@ -67,6 +68,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     reversible: r.reversible,
     steps: r.stepCount ?? null,
     runs: r.runCount ?? null,
+    schedules: (r.schedules ?? []).map((s) => ({
+      rrule: s.rrule,
+      timezone: s.timezone,
+      enabled: s.enabled,
+      nextFireAt: s.nextFireAt,
+    })),
     updatedAt: r.updatedAt,
   }));
   return { ok: true, data: { routines, count: routines.length } };
@@ -75,7 +82,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const routineList: Tool = {
   name: "routine_list",
   description:
-    "List the routines on this box — sequences of tools that run on a schedule or on demand — with their state (live, draft, suggested), whether they write, and how many steps and runs they have. Use before drafting one, to avoid a duplicate, and before running one, to get its slug.",
+    "List the routines on this box — sequences of tools that run on a schedule or on demand — with their state (live, draft, suggested), whether they write, their schedules, and how many steps and runs they have. Use before drafting one, to avoid a duplicate, and before running one, to get its slug.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

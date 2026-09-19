@@ -35,14 +35,12 @@ const inputSchema = {
     category: { type: "string", description: "Optional grouping word, e.g. front-desk." },
     steps: {
       type: "array",
-      minItems: 1,
-      maxItems: 32,
       description:
-        "Ordered steps. A `call` step runs one tool with its args; a `summarize` step turns what earlier steps gathered into prose. A step may publish its result under `as` and a later step may reference it as ${steps.<as>}.",
+        "1 to 32 ordered steps. A call step runs one tool with its args; a summarize step turns what earlier steps gathered into prose. A step may publish its result under `as` and a later step may reference it as ${steps.<as>}.",
       items: {
         type: "object",
         properties: {
-          kind: { type: "string", enum: ["call", "summarize"], description: "Default call." },
+          kind: { type: "string", description: "call (default) or summarize." },
           tool: { type: "string", description: "For call: the exact tool name, e.g. list_files." },
           args: { type: "object", description: "For call: the tool's arguments." },
           prompt: { type: "string", description: "For summarize: optional framing for the summary." },
