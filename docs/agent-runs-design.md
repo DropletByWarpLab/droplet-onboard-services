@@ -388,9 +388,15 @@ is disabled inside the fire transaction with a `system` activity row
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
-**Dashboard** — `AgentRunsPanel` on `/admin/audit`, the signed activity log,
-which is the Activity surface (`/admin/claude-activity` under the "Activity"
-nav label is the unrelated engineer feed). Not a nav item. List on the left
+**Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056), a
+Workspace nav item after Routines, owner/admin — the roles that may start a
+run. It shipped on `/admin/audit` and was deliberately not a nav item
+(WARP-2180); ADR-056 made the run the unit of every agentic slice that
+follows, so the panel moved to a surface with a door. Above it, the first
+dashboard caller of `POST /api/agent-runs`: a goal field whose copy says what
+a run may do (reads on its own, anything that changes something parks for
+approval, cancel at any time). `/admin/audit?run=<id>` forwards to
+`/workshop?run=<id>`, so the deep link never broke. List on the left
 with state pills; the selected run on the right: goal, state, step count,
 result or error, the trace, and — when parked — the confirm prompt with
 provenance: the run's goal, the tool, the PHI-free argument summary, when it

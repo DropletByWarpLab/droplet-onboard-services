@@ -1,12 +1,16 @@
 "use client";
 /**
- * WARP-2180 — background runs, on the Activity surface.
+ * WARP-2180 — background runs. WARP-2925 — now the heart of `/workshop`.
  *
- * Not a nav item (the nav is under pressure; WARP-1807 moved Knowledge and
- * Context out of it). A list of the person's runs on the left, the selected
- * run on the right: goal, status, step count, the trace, and — when the
- * run is parked on a Tier-2 call — the confirm prompt WITH PROVENANCE: which
- * run asked, what its goal was, the tool and a PHI-free summary of its
+ * Built for the Activity surface and deliberately kept out of the nav (the
+ * nav was under pressure; WARP-1807 had just moved Knowledge and Context out
+ * of it). ADR-056 made the run the unit of every agentic slice that follows —
+ * workshop runs, extensions, toolset drafts all start as one — so the panel
+ * moved to a surface of its own with a door, and `/admin/audit` forwards its
+ * `?run=` deep links here. A list of the person's runs on the left, the
+ * selected run on the right: goal, status, step count, the trace, and — when
+ * the run is parked on a Tier-2 call — the confirm prompt WITH PROVENANCE:
+ * which run asked, what its goal was, the tool and a PHI-free summary of its
  * arguments. A prompt with no provenance is a prompt people click through.
  *
  * ONE component, TWO data sources. A finished run reads its trace once. A
@@ -146,6 +150,12 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
     selectedRef.current = id;
     setSelectedIdState(id);
   }, []);
+  // WARP-2925 — the page above can hand the panel a run to open AFTER mount
+  // (the one it just started). Mirrors the initial prop instead of remounting,
+  // so the list and the schedules are not fetched twice for one click.
+  useEffect(() => {
+    if (initialRunId && initialRunId !== selectedRef.current) setSelectedId(initialRunId);
+  }, [initialRunId, setSelectedId]);
   const [detail, setDetail] = useState<AgentRunDetail | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -335,7 +345,8 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
         <ul className="m-0 p-0 list-none min-w-0" aria-label="Background runs" aria-busy={loading}>
           {!loading && runs.length === 0 && (
             <li className="text-[13px] py-6 text-center" style={{ color: "var(--text-muted)" }}>
-              No background runs yet. Ask in chat to do something &ldquo;in the background&rdquo;.
+              No background runs yet. Give your Droplet a goal above, or ask in chat to do something &ldquo;in the
+              background&rdquo;.
             </li>
           )}
           {runs.map((r) => (

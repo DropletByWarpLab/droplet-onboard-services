@@ -111,6 +111,20 @@ export async function listAgentRuns(params: {
   return (await res.json()) as { items: AgentRunSummary[]; nextCursor: string | null };
 }
 
+// WARP-2925 — the first dashboard caller of POST /api/agent-runs. The route
+// mints the run for the signed-in person (owner/admin — RUN_STARTER_ROLES) and
+// answers `{ id, status: "queued" }`; the worker picks it up on its own. The
+// model is the box's default when omitted, exactly as the chat tool's path.
+export async function startAgentRun(goal: string): Promise<{ id: string; status: AgentRunStatus }> {
+  const res = await authFetch("/api/agent-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ goal }),
+  });
+  if (!res?.ok) throw await readError(res, "Couldn't start this run");
+  return (await res.json()) as { id: string; status: AgentRunStatus };
+}
+
 export async function getAgentRun(id: string): Promise<AgentRunDetail> {
   const res = await authFetch(`/api/agent-runs/${encodeURIComponent(id)}`);
   if (!res?.ok) throw await readError(res, "Couldn't load this run");
