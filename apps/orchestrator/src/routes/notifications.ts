@@ -37,6 +37,12 @@ const NOTIFICATION_KINDS = [
 type _KindsCover = NotificationKind extends (typeof NOTIFICATION_KINDS)[number] ? true : never;
 const _kindsAreExhaustive: _KindsCover = true;
 
+// WARP-2909 — deliberately NO `url`, `data` or `tag` here. This route is where
+// the model's send_notification tool and the manual sender land, and neither
+// may author a deep link: a same-origin path is still a lure if the model can
+// write one. Zod strips the unknown keys, so a body carrying them is a 202
+// whose row has `url: null`. Only trusted in-process callers (the agent-run
+// worker) set a link, straight on DispatchInput.
 const sendSchema = z.object({
   kind: z.enum(NOTIFICATION_KINDS).default("system"),
   title: z.string().min(1).max(500),
