@@ -250,7 +250,17 @@ class ModelInfo(BaseModel):
     id: str
     provider: str
     name: str
+    # The window the provider SERVES. None for every local model: the
+    # deployed window there is an operator setting (OLLAMA_CONTEXT_LENGTH),
+    # not a property of the model, and the orchestrator budgets each turn
+    # against any positive value here (ai-gateway.client.ts
+    # getModelContextWindow). Publishing the trained length would over-budget
+    # a 16k box as 128k — the WARP-854 overflow.
     context_window: int | None = None
+    # WARP-2882 (additive, defaults None): the context length the model was
+    # TRAINED with, read off Ollama's `/api/show` `model_info`. Display only —
+    # the Models page shows it; nothing budgets against it.
+    trained_context_window: int | None = None
     # Additive (defaults None for back-compat): which modalities the model
     # supports. Drives the orchestrator's vision routing + the dashboard badge.
     capabilities: ModelCapabilities | None = None

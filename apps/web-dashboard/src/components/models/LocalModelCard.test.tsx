@@ -84,3 +84,35 @@ describe("<LocalModelCard />", () => {
     );
   });
 });
+
+// WARP-2882 — `name` is what the user reads; `id` is what the runtime answers to.
+it("WARP-2882: measures by runtime id when the row carries one", async () => {
+  render(
+    <LocalModelCard
+      model={row({ id: "docker.io/ai/gpt-oss:20B-F16", name: "Gpt-oss 20B F16" })}
+      canManage
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /measure speed/i }));
+  await waitFor(() =>
+    expect(benchmarkModelMock).toHaveBeenCalledWith("docker.io/ai/gpt-oss:20B-F16"),
+  );
+});
+
+// WARP-2882 review — the card shows the TRAINED length, labelled so, and never
+// turns a served-window guess into a number: local rows carry contextLength
+// null and the number lives on trainedContextLength.
+it("WARP-2882: renders the trained context length, labelled as trained", () => {
+  render(
+    <LocalModelCard
+      model={row({ contextLength: null, trainedContextLength: 131072 })}
+      canManage
+    />,
+  );
+  expect(screen.getByText(/trained ctx 128k/i)).toBeInTheDocument();
+});
+
+it("WARP-2882: an unreported trained length renders a dash, never a guess", () => {
+  render(<LocalModelCard model={row({ contextLength: null })} canManage />);
+  expect(screen.getByText(/trained ctx —/i)).toBeInTheDocument();
+});

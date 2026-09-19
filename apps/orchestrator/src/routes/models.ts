@@ -33,7 +33,6 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
-import { isLocalProvider } from "../services/cloud-access.service.js";
 import {
   getModelsPagePayload,
   type ModelsPagePayload,
@@ -41,8 +40,8 @@ import {
 import {
   ACTIVE_CHAT_MODEL_KEY,
   readActiveChatModel,
-  resolveActiveChatModel,
-  localModelIdentifiers,
+  resolveLocalModelId,
+  resolveStoredChatModel,
 } from "../services/active-model.service.js";
 import {
   benchmarkModel,
@@ -86,28 +85,19 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           }
         }
 
-        // Resolve the active model against what's actually installed (for
-        // local models the row `name` IS the tag). WARP-1511: a blank/stale
-        // setting now falls back to the sole/first installed local model
-        // (see resolveActiveChatModel's doc comment for the full contract)
+        // Resolve the active model against what's actually installed.
+        // WARP-1511: a blank/stale setting falls back to the sole/first
+        // installed local model (see resolveActiveChatModel's doc comment)
         // instead of claiming a permanent phantom-blank active model. When
         // the local list itself can't be trusted (gateway/Ollama listing
-        // degraded), pass `null` so the resolver treats the installed set as
-        // unknown and returns the stored value unresolved rather than
-        // nulling it out — or fabricating a fallback — against an
-        // incomplete list. On-box providers only, same "local never
-        // points off-box"
-        // invariant as localModelIdentifiers.
-        const installed = payload.degraded
-          ? null
-          : new Set(
-              payload.local
-                .filter((m) => isLocalProvider(m.provider))
-                .map((m) => m.name),
-            );
-        const activeModel = resolveActiveChatModel(
+        // degraded), pass `null` so the stored value passes through
+        // unresolved rather than being nulled out — or a fallback fabricated
+        // — against an incomplete list. WARP-2882: the stored row may hold a
+        // legacy display name; `resolveStoredChatModel` maps it to the
+        // runtime id first (the same path `/api/llm/models` uses).
+        const activeModel = resolveStoredChatModel(
           await readActiveChatModel(prisma),
-          installed,
+          payload.degraded ? null : payload.local,
         );
 
         res.json({ ...payload, activeModel });
@@ -138,16 +128,18 @@ export function createModelsRouter(prisma: PrismaClient): Router {
             .status(400)
             .json({ error: "`model` (non-empty string) is required" });
         }
-        const tag = model.trim();
+        const ref = model.trim();
 
         // Validate against the LIVE installed set (source of truth), not the
         // 30s-cached page payload — a write must not be validated against a
         // stale list. If the gateway is unreachable we can't vouch for the
         // set, so refuse rather than persist an unverifiable choice.
-        let installed: Set<string>;
+        // WARP-2882: the caller may send the runtime id or the display name;
+        // what gets PERSISTED is always the runtime id.
+        let tag: string | null;
         try {
           const listed = await aiGateway.listModels();
-          installed = localModelIdentifiers(listed.models);
+          tag = resolveLocalModelId(listed.models, ref);
         } catch (err) {
           logger.warn({ err }, "PATCH /models/active: gateway unreachable");
           return res.status(503).json({
@@ -157,10 +149,10 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           });
         }
 
-        if (!installed.has(tag)) {
+        if (!tag) {
           return res.status(400).json({
             error: "not_installed",
-            detail: `Model "${tag}" isn't installed on this Droplet.`,
+            detail: `Model "${ref}" isn't installed on this Droplet.`,
           });
         }
 
@@ -218,15 +210,17 @@ export function createModelsRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const name = (req.params.name ?? "").trim();
-        if (!name) {
+        const ref = (req.params.name ?? "").trim();
+        if (!ref) {
           return res.status(400).json({ error: "model name is required" });
         }
 
-        let installed: Set<string>;
+        // WARP-2882: resolve id-or-display-name to the runtime id — the
+        // generation request and the cache key both need the id.
+        let name: string | null;
         try {
           const listed = await aiGateway.listModels();
-          installed = localModelIdentifiers(listed.models);
+          name = resolveLocalModelId(listed.models, ref);
         } catch (err) {
           logger.warn({ err }, "POST /models/benchmark: gateway unreachable");
           return res.status(503).json({
@@ -235,10 +229,10 @@ export function createModelsRouter(prisma: PrismaClient): Router {
               "Couldn't reach the AI service to confirm the model is installed. Try again in a moment.",
           });
         }
-        if (!installed.has(name)) {
+        if (!name) {
           return res.status(400).json({
             error: "not_installed",
-            detail: `Model "${name}" isn't installed on this Droplet.`,
+            detail: `Model "${ref}" isn't installed on this Droplet.`,
           });
         }
 

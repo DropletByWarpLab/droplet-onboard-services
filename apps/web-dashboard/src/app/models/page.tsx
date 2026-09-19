@@ -165,8 +165,12 @@ export default function ModelsPage() {
   const misplaced = local.filter(
     (m) => m.placement === "cpu" || m.placement === "partial",
   );
+  // WARP-2882 — `activeModel` is a runtime id; compare on `id` (`name` is
+  // display copy; the fallback covers an orchestrator without the field).
   const bannerModel =
-    misplaced.find((m) => m.name === data.activeModel) ?? misplaced[0] ?? null;
+    misplaced.find((m) => (m.id ?? m.name) === data.activeModel) ??
+    misplaced[0] ??
+    null;
   const statusLabel = degraded
     ? "AI service unreachable"
     : localEmpty
@@ -204,7 +208,7 @@ export default function ModelsPage() {
             role="status"
             style={{ color: "var(--system-orange, #ff9500)", margin: 0 }}
           >
-            {bannerModel.name === data.activeModel
+            {(bannerModel.id ?? bannerModel.name) === data.activeModel
               ? `Your active model ${bannerModel.name}`
               : bannerModel.name}
             {bannerModel.placement === "cpu"

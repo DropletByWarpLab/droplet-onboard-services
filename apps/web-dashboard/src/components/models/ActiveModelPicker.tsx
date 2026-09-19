@@ -46,15 +46,18 @@ export function ActiveModelPicker({
 
   // The model the box effectively answers with: the explicit setting, else
   // the single installed model (chat falls back to it regardless), else none.
+  // WARP-2882 — select/compare on the runtime id; `name` is display copy.
+  // `?? name` keeps an orchestrator that predates `id` working unchanged.
+  const idOf = (m: LocalModelRow) => m.id ?? m.name;
   const effective =
-    activeModel ?? (models.length === 1 ? models[0].name : null);
+    activeModel ?? (models.length === 1 ? idOf(models[0]) : null);
 
-  async function choose(name: string) {
-    if (!canManage || pending || name === effective) return;
-    setPending(name);
+  async function choose(id: string) {
+    if (!canManage || pending || id === effective) return;
+    setPending(id);
     setError(null);
     try {
-      await setActiveModel(name);
+      await setActiveModel(id);
       onChanged();
     } catch (e) {
       setError(
@@ -84,8 +87,8 @@ export function ActiveModelPicker({
         >
           <div className="rows">
             {models.map((m) => {
-              const isActive = m.name === effective;
-              const isPending = pending === m.name;
+              const isActive = idOf(m) === effective;
+              const isPending = pending === idOf(m);
               const interactive = canManage && !isPending;
               // What actually distinguishes one installed model from another:
               // family, size, quantization, context window, and whether it is
@@ -94,8 +97,10 @@ export function ActiveModelPicker({
                 m.family,
                 m.parameterSize,
                 m.quantization,
-                m.contextLength != null
-                  ? `${formatContext(m.contextLength)} context`
+                // WARP-2882 — trained length, display only; the served
+                // window is an operator setting.
+                m.trainedContextLength != null
+                  ? `${formatContext(m.trainedContextLength)} trained context`
                   : null,
                 m.loaded ? "in memory" : null,
               ]
@@ -103,12 +108,12 @@ export function ActiveModelPicker({
                 .join(" · ");
               return (
                 <button
-                  key={m.name}
+                  key={idOf(m)}
                   type="button"
                   role={canManage ? "radio" : undefined}
                   aria-checked={canManage ? isActive : undefined}
                   disabled={!interactive || isActive}
-                  onClick={() => choose(m.name)}
+                  onClick={() => choose(idOf(m))}
                   className="lrow enabled:hover:bg-[var(--inset)] focus-visible:outline-2 focus-visible:outline-[var(--brand)]"
                   style={{
                     width: "100%",
