@@ -1205,6 +1205,63 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 13,
     },
   },
+  // WARP-2919 — the third REST profile, and the first POINT-OF-SALE vendor.
+  {
+    id: "loyverse",
+    displayName: "Loyverse",
+    category: "Point of sale",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "Personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo/Square/Cal.com reason: Loyverse documents
+        // no prefix and no length for a personal access token, so a regex
+        // here would be a guess that refuses valid tokens. Pinned absent by
+        // `loyverse-profile.test.ts`.
+        //
+        // 🔴 The help text carries two facts the owner must read BEFORE
+        // pasting, and both are pinned by test: the token is UNLIMITED (read
+        // and write — there is no read-only scope on this path; the box
+        // narrows itself to reads, the token does not), and expiry is optional
+        // at mint time, so setting one is the owner's only control.
+        help:
+          "In Loyverse: Back Office → Integrations → Access tokens → + Add access token. " +
+          "The token grants unlimited read AND write access to the whole account, so " +
+          "set an expiration date if you can. Droplet reads only.",
+      },
+    ],
+    // ONE FIXED HOST — no region, no merchant subdomain, no self-hosted
+    // option. The `/v1.0` version is a PATH on every request, not part of the
+    // host, so this is a plain registered destination whose origin is a
+    // whole-string literal the egress scanner reads directly.
+    egressHosts: ["api.loyverse.com"],
+    // Customers and items. 🔴 NOT receipts (`order`): Loyverse carries
+    // currency per MERCHANT (on `GET /v1.0/merchant/`), never per row, and
+    // `REQUIRED_CANONICAL.order` names `currency` — a money dataset without it
+    // is refused by the REST profile guard at module load. The dataset returns
+    // the day the track can read a per-account constant off the probe. Reason
+    // recorded in `rest/vendors/loyverse.ts` and ADR-046's implementation
+    // record.
+    datasets: ["customer", "product"],
+    // "300 requests per 300 sec per account", documented. Expressed in the
+    // `ProviderRateLimit` shape as a five-minute period. PER ACCOUNT: every
+    // other integration the merchant runs shares it.
+    rateLimit: { callCeiling: 300, periodMs: 300_000 },
+    catalog: {
+      id: "loyverse",
+      name: "Loyverse",
+      category: "Point of sale",
+      description: "Customers and catalogue items — read from Loyverse POS.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/loyverse",
+      order: 14,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

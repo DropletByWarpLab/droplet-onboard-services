@@ -54,7 +54,7 @@ import {
 } from "../src/rest/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
 import { UnknownWriteCommandError } from "../src/write-commands.js";
-import { CANONICAL_COLUMNS } from "../src/export-drop/profiles.js";
+import { CANONICAL_COLUMNS, REQUIRED_CANONICAL } from "../src/export-drop/profiles.js";
 import { getReadQuery } from "../src/read-queries.js";
 import { REST_VENDOR_PROFILES } from "../src/rest/profiles.js";
 
@@ -247,6 +247,75 @@ describe("profile validation — a malformed profile fails to BUILD, not on firs
         expect(columns, `${profile.provider}.${spec.dataset}`).toBeDefined();
         for (const column of Object.keys(spec.fieldMap)) {
           expect(columns, `${profile.provider}.${spec.dataset}.${column}`).toContain(column);
+        }
+      }
+    }
+  });
+
+  it("🔴 refuses a dataset whose fieldMap leaves a REQUIRED canonical column unmapped", () => {
+    // WARP-2919. `REQUIRED_CANONICAL[dataset]` is the vocabulary's floor: the
+    // identity plus the one column the dataset exists to answer about, and for
+    // every money dataset the `currency` beside the amount — "an amount
+    // without its currency is not a number, it is a rumour". The key check
+    // above proves nothing about coverage: a profile that maps `order_id` and
+    // `total_amount` and simply never mentions `currency` passes it, and
+    // `projectCanonicalRow` writes `undefined` into the required column on
+    // every row of every sync, which reaches the model as `total_amount:
+    // 17.52, currency: undefined` — a dollar-shaped answer for a merchant in
+    // Tokyo. Loyverse's receipts were exactly that profile until the verifier
+    // caught it, and nothing in the build refused it because this loop did
+    // not exist. Decidable from the profile alone, so it is decided here.
+    //
+    // The refusal names the column so the fix is obvious, and it is a
+    // REFUSAL rather than a warning: the honest options are to map the
+    // column, or to not serve the dataset. Shipping it anyway is not one.
+    // Mutation: delete the REQUIRED_CANONICAL loop in `assertValidRestProfile`
+    // -> red; hardcode `currency: "USD"` in the fixture below -> green, which
+    // is the vendor tests' job to refuse (a literal is not a path), not this
+    // one's.
+    expect(REQUIRED_CANONICAL.order).toEqual(["order_id", "total_amount", "currency"]);
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [
+            {
+              dataset: "order",
+              path: "/v1/receipts",
+              watermark: null,
+              pagination: { kind: "cursor", nextCursorPath: "cursor", cursorParam: "cursor" },
+              rowsPath: "receipts",
+              fieldMap: { order_id: "receipt_number", total_amount: "total_money" },
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/dataset "order" does not map "currency", which REQUIRED_CANONICAL\.order names/);
+
+    // A dataset with a one-column floor and the column mapped passes; the
+    // same dataset with the wrong identity mapped does not.
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [{ ...staticProfile().datasets[0]!, dataset: "contact", fieldMap: { contact_id: "id" } }],
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [{ ...staticProfile().datasets[0]!, dataset: "contact", fieldMap: { email: "email" } }],
+        }),
+      ),
+    ).toThrow(/dataset "contact" does not map "contact_id"/);
+  });
+
+  it("🔴 every shipped profile maps EVERY required column — checked against the vocabulary directly", () => {
+    // The independent path to the same claim, exactly as the key check has
+    // one above: read REQUIRED_CANONICAL rather than trust the guard.
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        for (const column of REQUIRED_CANONICAL[spec.dataset]) {
+          expect(Object.keys(spec.fieldMap), `${profile.provider}.${spec.dataset}`).toContain(column);
         }
       }
     }

@@ -54,6 +54,7 @@ import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
+import loyverse from "../../../../docs/integrations/loyverse.md?raw";
 import mailchimp from "../../../../docs/integrations/mailchimp.md?raw";
 import pipedrive from "../../../../docs/integrations/pipedrive.md?raw";
 import readme from "../../../../docs/integrations/README.md?raw";
@@ -86,6 +87,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "export-drop": exportDrop,
   hubspot,
   klaviyo,
+  loyverse,
   mailchimp,
   pipedrive,
   readme,

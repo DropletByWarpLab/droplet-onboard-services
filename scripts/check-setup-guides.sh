@@ -94,7 +94,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # control, so an undocumented click-path is the connector being unusable.
 # The track they ride on changes nothing about that obligation — ADR-046 §5
 # is explicit that a profile ships only with its guide and its ADR-042 row.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
+# WARP-2919 — `loyverse`, the third REST-track vendor, for the same reason.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom loyverse"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -242,6 +243,21 @@ fact_pins() {
       # there is no host at all, so the guide must not present it as optional.
       printf '%s
 ' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
+      ;;
+    loyverse)
+      # Four facts a customer acts on (WARP-2919, ADR-042 §2 row):
+      #  - The token is UNLIMITED, read and write, with no read-only kind on
+      #    this path. Softening that to "an API key" loses the reason the
+      #    guide tells the owner to set an expiry.
+      #  - Receipts are NOT read — a Loyverse receipt carries no currency and
+      #    the box will not store an amount without one. A guide that promises
+      #    sales has described a dataset the connection refuses by name.
+      #  - 300 requests per 300 seconds PER ACCOUNT, shared with every other
+      #    tool on the account — the pacing the guide promises.
+      #  - The Access tokens page in the Back Office is the click-path; a
+      #    guide that sends the owner to the OAuth developer dashboard has
+      #    described the wrong credential.
+      printf '%s\n' 'unlimited access' 'receipts are not among the things this connection reads' '300 requests every 300 seconds' 'Access tokens'
       ;;
     *)
       : # no pins declared for this provider

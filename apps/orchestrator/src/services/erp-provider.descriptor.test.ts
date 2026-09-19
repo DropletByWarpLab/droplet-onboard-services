@@ -160,6 +160,12 @@ const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
  * reporting ERP_NOT_CONNECTED with a green build.
  */
 const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+/**
+ * WARP-2919 — Loyverse, the third declarative REST vendor. A separate constant
+ * rather than an edit to the one above, so the WARP-2707 record stays what it
+ * was and a diff shows the addition as an addition.
+ */
+const REST_PROVIDERS_WARP_2919 = ["loyverse"] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -180,6 +186,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2919,
       ]),
     );
   });
@@ -197,6 +204,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2919,
       ]),
     );
   });
@@ -212,6 +220,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2919,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -220,6 +229,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2919,
     ]);
   });
 
@@ -272,7 +282,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // Mutation: delete the `if (restProfileFor(provider)) return
     // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
     // the negative loop above stays green.
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2919]) {
       const profile = restProfileFor(id);
       expect(profile, `${id} must have a registered REST profile`).toBeDefined();
 
@@ -343,13 +353,22 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // owner's card reads CONNECTED while nothing is stored.
     const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
     const unscheduled: Record<string, string[]> = {};
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2919]) {
       const declared = providerDescriptor(id)!.datasets as readonly string[];
       const missing = declared.filter((d) => !syncedEntities.has(d));
       if (missing.length > 0) unscheduled[id] = missing;
     }
     // Square's three money datasets are on-demand by design; Cal.com's
     // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    // WARP-2919 — Loyverse appears nowhere here EITHER, and that is a
+    // decision about Loyverse, not an inheritance: `customer` and `product`
+    // each have an `ERP_SYNC_ENTITIES` row (Shopify's, WARP-2354), both
+    // Loyverse watermarks are `updated_at_min` — a genuine last-modified
+    // filter on each endpoint (`complete: true`, pinned by
+    // `loyverse-profile.test.ts`) — so scheduling them is right, and the test
+    // above proves neither is scheduled on an incomplete watermark. (`order`
+    // is not served: receipts carry no currency and the REST profile guard
+    // refuses a money dataset without its required column.)
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1064,6 +1083,9 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // implementation detail into the product.
       "square",
       "calcom",
+      // WARP-2919 — Loyverse, at `catalog.order: 14`, the first point-of-sale
+      // card and the third on the declarative REST track.
+      "loyverse",
     ]);
   });
 

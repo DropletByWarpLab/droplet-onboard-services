@@ -124,6 +124,7 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **The scope cannot be changed after you create it.** Picking the wrong one means deleting the key and making a new one. | Klaviyo | [`klaviyo.md`](klaviyo.md) |
 | **The token carries the permissions of the person who made it**, so it stops seeing data if that person's access changes — and it is shared with every other tool that account has connected. | Pipedrive | [`pipedrive.md`](pipedrive.md) |
 | **You run your own copy of the product.** The hosted service and the self-hosted edition (cal.diy) answer different API contracts, so a self-hoster cannot connect at all yet — and nothing on the connect screen would tell them before they made a key. | Cal.com | [`calcom.md`](calcom.md) |
+| **The token you make can *write* to your account** — there is no read-only kind — so set an expiry on it. And **your sales are not read yet**: a Loyverse receipt carries no currency, and the box will not store an amount without one. Customers and items are read; connecting is free. | Loyverse | [`loyverse.md`](loyverse.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -142,12 +143,13 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **Pipedrive** | A personal API token **and** your company domain | [`pipedrive.md`](pipedrive.md) |
 | **Square** | A **production** access token from your own Developer Console application | [`square.md`](square.md) |
 | **Cal.com** | An API key from your own **My Settings → Developer** | [`calcom.md`](calcom.md) |
+| **Loyverse** | A personal access token from your own Back Office, **Integrations → Access tokens** | [`loyverse.md`](loyverse.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
 
-> Atlassian is still the odd one out on expiry: its token **expires** within 365 days, as a hard stop with no grace period and no renewal, which is a date the owner has to diary. Cal.com's key can expire too, but only because the owner chose a date at creation, and Brevo's expires from disuse — both covered in their guides.
+> Atlassian is still the odd one out on expiry: its token **expires** within 365 days, as a hard stop with no grace period and no renewal, which is a date the owner has to diary. Cal.com's key and Loyverse's token can expire too, but only because the owner chose a date at creation, and Brevo's expires from disuse — all covered in their guides.
 
-> **Not every credential in this table is scoped, and the unscoped ones are the majority.** Stripe, Klaviyo and Shopify let you narrow what the credential may do. Atlassian, Mailchimp, Brevo, Pipedrive, Square and Cal.com do not — each carries the full access of whoever created it, so on those *whose* account creates it is the access decision, and there is nothing to tick. Droplet limits itself instead, to reads only, from a list held in the product; each guide says plainly which of the two you are getting.
+> **Not every credential in this table is scoped, and the unscoped ones are the majority.** Stripe, Klaviyo and Shopify let you narrow what the credential may do. Atlassian, Mailchimp, Brevo, Pipedrive, Square, Cal.com and Loyverse do not — each carries the full access of whoever created it (Loyverse says so in as many words: *unlimited*), so on those *whose* account creates it is the access decision, and there is nothing to tick. Droplet limits itself instead, to reads only, from a list held in the product; each guide says plainly which of the two you are getting.
 
 ### 3.4 What Droplet does with your credential
 
