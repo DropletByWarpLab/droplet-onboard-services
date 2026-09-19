@@ -55,6 +55,21 @@ async def _scheduled_run() -> None:
     run_id = runner._utc_stamp()
     loop = asyncio.get_running_loop()
 
+    # WARP-2879 — no eval user, no run. The search route 400s
+    # eval_user_required for the service principal, so without this the
+    # slot burns three requests, trips the WARP-1860 breaker and records a
+    # failed run every hour — the same symptom shipped three times via three
+    # different config gaps. One skipped record naming the setting instead.
+    if not corpus_fingerprint.eval_user():
+        _record_skip(
+            run_id,
+            "RAGAS_EVAL_USER is unset in the rag-eval container — "
+            "scripts/lib/secrets.sh writes RAGAS_EVAL_USER=eval-fixtures to "
+            ".env on install/upgrade; run scripts/seed-eval-fixtures.sh, then "
+            "recreate rag-eval (docker restart does not re-read env_file)",
+        )
+        return
+
     # WARP-1868 — corpus gate, deliberately BEFORE admission.
     #
     # A skip does no work, so it must not occupy the busy flag even briefly:
@@ -71,13 +86,7 @@ async def _scheduled_run() -> None:
     last_fp = await loop.run_in_executor(None, corpus_fingerprint.load_last)
     run_it, reason = corpus_fingerprint.should_run(current_fp, last_fp)
     if not run_it:
-        logger.info("scheduled run SKIPPED — %s", reason)
-        # Record it. An unexplained gap in the run history is
-        # indistinguishable from a missed slot or a dead container, and the
-        # dashboard would have nothing to render but absence.
-        skip_admitted, _ = STORE.try_begin(run_id, kind="run")
-        if skip_admitted:
-            STORE.finish(run_id, RunStatus.SKIPPED, error=reason)
+        _record_skip(run_id, reason)
         return
     logger.info("scheduled run proceeding — %s", reason)
 
@@ -110,6 +119,16 @@ async def _scheduled_run() -> None:
     if current_fp:
         corpus_fingerprint.save(current_fp, run_id)
     logger.info("scheduled RAGAS run complete (run_id=%s)", run_id)
+
+
+def _record_skip(run_id: str, reason: str) -> None:
+    """Log + record a skipped slot. An unexplained gap in the run history is
+    indistinguishable from a missed slot or a dead container, and the
+    dashboard would have nothing to render but absence."""
+    logger.info("scheduled run SKIPPED — %s", reason)
+    skip_admitted, _ = STORE.try_begin(run_id, kind="run")
+    if skip_admitted:
+        STORE.finish(run_id, RunStatus.SKIPPED, error=reason)
 
 
 def build_scheduler() -> AsyncIOScheduler:
