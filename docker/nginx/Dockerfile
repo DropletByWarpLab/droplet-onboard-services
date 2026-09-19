@@ -148,6 +148,61 @@ RUN set -eu; \
     echo "WARP-1686 docs-engine self-test OK — collabora + onlyoffice variants parse"; \
     echo "WARP-1688 full-config self-test OK — /etc/nginx/nginx.conf parses"
 
+# --- WARP-2903 — the docs-discovery leg must REWRITE, not merely parse -------
+# Everything above proves nginx.conf is well-formed. This proves the one leg
+# whose whole job is a body rewrite does it: Nextcloud's richdocuments hands
+# the browser Collabora's discovery `urlsrc` verbatim, so the gateway's
+# :9981 listener must turn `https://docserver:9980/docs/…` into `/docs/…` or
+# the editor iframe targets a host no browser can resolve (see nginx.conf).
+# `nginx -t` cannot see a wrong literal, a missing Accept-Encoding strip
+# (sub_filter is blind to a gzipped body) or a Host header that makes coolwsd
+# advertise some other origin. So: lift the real server block out of
+# nginx.conf, point its upstream at a stub on 127.0.0.1:9980 that echoes the
+# Host and Accept-Encoding it received inside a text/xml body, run nginx for
+# real, and assert on what comes back. A JSON endpoint on the same stub
+# carries the same literal and must come back UNTOUCHED — the rewrite is
+# gated to text/xml so /hosting/capabilities is never mangled.
+RUN set -eu; \
+    awk '/^    server \{/{buf="";cap=1} cap{buf=buf $0 "\n"} /^    \}/{ if (cap && buf ~ /listen 9981;/) printf "%s", buf; cap=0 }' \
+      /etc/nginx/nginx.conf > /tmp/leg.conf; \
+    grep -q 'listen 9981;' /tmp/leg.conf || { echo "WARP-2903: docs-discovery server block not found in nginx.conf" >&2; exit 1; }; \
+    sed -i 's/"docserver:9980"/"127.0.0.1:9980"/' /tmp/leg.conf; \
+    printf '%s\n' \
+      'events{}' \
+      'http {' \
+      '  access_log off;' \
+      '  server {' \
+      '    listen 127.0.0.1:9980;' \
+      '    location /docs/hosting/discovery {' \
+      '      default_type text/xml;' \
+      '      return 200 "<wopi-discovery><action urlsrc=\"https://$http_host/docs/browser/1/cool.html?\"/><action urlsrc=\"https://$http_host/docs/browser/1/cool.html?\"/><action urlsrc=\"http://$http_host/docs/browser/1/cool.html?\"/><enc>[$http_accept_encoding]</enc></wopi-discovery>";' \
+      '    }' \
+      '    location /docs/hosting/capabilities {' \
+      '      default_type application/json;' \
+      '      return 200 "{\"u\":\"https://$http_host/docs\"}";' \
+      '    }' \
+      '  }' \
+      > /tmp/leg-test.conf; \
+    cat /tmp/leg.conf >> /tmp/leg-test.conf; \
+    printf '}\n' >> /tmp/leg-test.conf; \
+    nginx -t -c /tmp/leg-test.conf; \
+    nginx -c /tmp/leg-test.conf -g 'pid /tmp/leg.pid; error_log /tmp/leg.err;'; \
+    for i in $(seq 1 50); do bash -c 'exec 3<>/dev/tcp/127.0.0.1/9981' 2>/dev/null && break; sleep 0.2; done; \
+    req() { bash -c 'exec 3<>/dev/tcp/127.0.0.1/9981; printf "GET %s HTTP/1.0\r\nHost: gateway:9981\r\nAccept-Encoding: gzip\r\n\r\n" "$1" >&3; cat <&3' _ "$1"; }; \
+    disc="$(req /docs/hosting/discovery)"; \
+    caps="$(req /docs/hosting/capabilities)"; \
+    other="$(req /anything-else)"; \
+    nginx -c /tmp/leg-test.conf -g 'pid /tmp/leg.pid; error_log /tmp/leg.err;' -s stop; \
+    rm -f /tmp/leg.conf /tmp/leg-test.conf /tmp/leg.err; \
+    printf '%s' "$disc" | grep -q 'HTTP/1.1 200'                                   || { echo "WARP-2903: discovery via the leg did not return 200"; printf '%s\n' "$disc"; exit 1; }; \
+    [ "$(printf '%s' "$disc" | grep -o 'urlsrc="/docs/browser/1/cool.html?"' | wc -l)" -eq 3 ] \
+                                                                                   || { echo "WARP-2903: urlsrc was NOT rewritten to a path-relative /docs/… (all three: two https, one http — sub_filter_once must be off)"; printf '%s\n' "$disc"; exit 1; }; \
+    printf '%s' "$disc" | grep -q 'docserver:9980'                                  && { echo "WARP-2903: an absolute docserver:9980 origin survived the rewrite"; printf '%s\n' "$disc"; exit 1; }; \
+    printf '%s' "$disc" | grep -q '<enc>\[\]</enc>'                                 || { echo "WARP-2903: Accept-Encoding reached the upstream — a gzipped body would bypass sub_filter"; printf '%s\n' "$disc"; exit 1; }; \
+    printf '%s' "$caps" | grep -q '"u":"https://docserver:9980/docs"'              || { echo "WARP-2903: the application/json capabilities body was altered — the rewrite must be gated to text/xml"; printf '%s\n' "$caps"; exit 1; }; \
+    printf '%s' "$other" | grep -q 'HTTP/1.1 404'                                   || { echo "WARP-2903: the listener answered outside /docs/"; printf '%s\n' "$other"; exit 1; }; \
+    echo "WARP-2903 docs-discovery self-test OK — urlsrc rewritten path-relative, Host pinned, Accept-Encoding stripped, JSON untouched, non-/docs/ 404"
+
 # nginx:1.27-bookworm already EXPOSEs 80/443 and ships the stock entrypoint that
 # runs /docker-entrypoint.d/*.sh before starting nginx — our profile-selector
 # hooks in there. No CMD override needed.

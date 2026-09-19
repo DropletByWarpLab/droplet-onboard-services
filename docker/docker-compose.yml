@@ -82,6 +82,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # nginx.conf also listens on :9981 (WARP-2903 docs-discovery — the leg
+      # Nextcloud fetches Collabora's discovery through). Compose-internal by
+      # design: reachable as gateway:9981 from siblings, NEVER published here.
     environment:
       # WARP-1021: /docker-entrypoint.d/00-fips-profile.sh keys the edge-TLS
       # cipher profile on the single customer knob — 0 (default) → modern
@@ -1036,7 +1039,13 @@ services:
   #     the default off OnlyOffice because its OEM license was the one
   #     remaining GA gate. Listens on :9980 under `net.service_root=/docs`,
   #     so the gateway forwards the ORIGINAL /docs/-prefixed URI (no strip)
-  #     — see docker/nginx/docs-engine.collabora.conf.
+  #     — see docker/nginx/docs-engine.collabora.conf. Nextcloud does NOT
+  #     talk to :9980 directly: its `wopi_url` is the gateway's
+  #     compose-internal docs-discovery leg (http://gateway:9981/docs,
+  #     docker/nginx/nginx.conf), which rewrites the `urlsrc` coolwsd
+  #     advertises to a path-relative /docs/… — richdocuments hands that
+  #     value to the browser verbatim, and an absolute docserver:9980
+  #     origin there was the WARP-2903 dead editor.
   #   * onlyoffice — OnlyOffice DS Community Edition (AGPLv3; an OEM license
   #     is required to ship it at GA). Kept selectable for a future
   #     OEM-licensed SKU. Listens on :80 at its root — the gateway variant
