@@ -58,6 +58,7 @@ Vendor facts have a shelf life — prefixes, plan tiers and scope models change 
 | **Pipedrive** | A personal API token **and** the company domain, which are two halves of one credential | An opaque token in an `x-api-token` header, plus the account's own subdomain | No — but the legacy `?api_token=` query form must be refused: v1-only, and it puts the credential in the customer's own proxy logs | **The token carries its creator's permissions exactly.** Narrowing it needs a dedicated user in a custom permission set, which is a **higher-tier plan feature** — on the entry plan the token is unavoidably full account access | **No.** | 2026-09-03, WARP-2710 |
 | **Square** | A **production** access token from an application the seller created in their own developer console | An opaque token in `Authorization: Bearer`. **No documented prefix or length** — Square publishes neither, so the box refuses an empty value and nothing else | No — but the **Sandbox** token is the confusable one, and it authenticates only against `connect.squareupsandbox.com`, a host this box never dials | **None on the token itself.** Square's own permission model sits on the application, and the box narrows by reading three endpoints and no more | **No.** | 2026-09-07, WARP-2676 |
 | **Cal.com** | An API key from the owner's own developer settings, on any plan including free | An opaque key in `Authorization: Bearer`. 🔴 **Do not pattern-match it:** a hosted live key is `cal_live_…` but a hosted *test* key is `cal_…`, and on a self-hosted install the prefix is the operator-set `API_KEY_PREFIX` and can be anything | No — there is one key shape | **None. The key carries its creator's access.** | **Optional — the owner picks an expiry at creation, or none.** | 2026-09-07, WARP-2828 |
+| **Todoist** | The account's **personal API token**, copied from Settings → Integrations → Developer, on any plan including free | An opaque token in `Authorization: Bearer`. **No documented format** — Todoist's only example is forty hex characters, and an example is not a contract, so the box refuses an empty value and nothing else | No — but the OAuth path (App Management Console, client id + secret) is model 2 and is **not used** | **None. The token is the whole account** — Todoist documents no scope on a personal token and accepts it wherever an endpoint would otherwise demand an OAuth scope; the box narrows itself to one GET endpoint | **No.** But there is exactly ONE token per account and re-issuing it is the only rotation — and Todoist's help article says re-issuing also *logs the owner out of Todoist on all their devices* | 2026-09-18, WARP-2918 |
 
 Two rows carry a hazard the others do not, and both are already ACs on their stories:
 
@@ -99,6 +100,7 @@ Per vendor, the check is:
 | Xero | Path A: client id + secret. Path B: client id with **no** secret field | a Path A config carrying a redirect URI, or a Path B config carrying a secret — these are disjoint variants, not optional fields |
 | Square | any non-empty token | **nothing by shape** — Square documents no prefix and no length, so a regex here would be a guess that refuses valid tokens |
 | Cal.com | any non-empty key | **nothing by shape** — `^cal_(live\|test)_` would reject a valid hosted *test* key (`cal_…`, no second segment) and every self-hosted key, whose prefix is an operator-set env var |
+| Todoist | any non-empty token | **nothing by shape** — Todoist documents no token format; `^[0-9a-f]{40}$` would be a regex anchored on the reference's single example token |
 
 Two limits of this rule, stated so nobody over-reads it:
 
@@ -146,6 +148,7 @@ Three cases. The third is stated rather than left silent, because "nothing needs
 | Atlassian | The customer creates an API token; their org admin enables Rovo MCP | **No** |
 | Square | The seller, in their own Square developer console | **No** |
 | Cal.com | The account owner, in their own Cal.com developer settings | **No** |
+| Todoist | The account owner, in their own Todoist settings (Integrations → Developer) | **No** — Todoist's App Management Console and OAuth exist and are deliberately not used |
 | Eaglesoft · Dentrix · Open Dental · QuickBooks Desktop | **Neither.** A credential inside the customer's own database on their own LAN | **Nothing to register** — no vendor relationship, no console, no app |
 | **Slack** | Per-user OAuth on top of a **workspace-level app** | **Yes — and Slack is the only one.** See below. |
 
@@ -189,6 +192,7 @@ Following ADR-041 §3's precedent — *"each subsequent provider registers its o
 | Mailchimp | `<dc>.api.mailchimp.com` | **`kind: dynamic`** + `config_key` — the host is a function of the credential |
 | Shopify | `<shop>.myshopify.com` | **`kind: dynamic`** + `config_key`; `shopify.dev` as `kind: reference`, since it is a page the merchant's browser visits, never a host the box dials |
 | Xero | `api.xero.com`; `identity.xero.com`, `login.xero.com` | `user-content-on-request` for the API host, `none` for the token hosts — the `m365-graph-api` / `m365-entra-login` pair is the template |
+| Todoist | `api.todoist.com` | `kind: egress`, `data_class: user-content-on-request` — one fixed host, no console host named anywhere in code (registered as `todoist-api`, WARP-2918) |
 
 By **domain, never by IP** (ADR-041 §3). Nothing may be `data_class: ambient-customer-content`, which `docs/SECURITY.md:176-178` bans by name.
 

@@ -94,7 +94,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # control, so an undocumented click-path is the connector being unusable.
 # The track they ride on changes nothing about that obligation — ADR-046 §5
 # is explicit that a profile ships only with its guide and its ADR-042 row.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
+# WARP-2918 — `todoist` is the third REST-track vendor; same obligation.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom todoist"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -242,6 +243,24 @@ fact_pins() {
       # there is no host at all, so the guide must not present it as optional.
       printf '%s
 ' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
+      ;;
+    todoist)
+      # Three facts a customer acts on, each of which a copy pass would
+      # round off into something false (WARP-2918):
+      #  - 'Issue a new API token' is the ONLY rotation and the ONLY
+      #    revocation Todoist offers (there is no delete button), and
+      #    Todoist's own article says it also logs you out on all your
+      #    devices. A guide that softened that to "you may be asked to sign
+      #    in again" would turn a planned rotation into a surprise.
+      #  - 'Copy API token' is the click that yields the credential; there
+      #    is no create form, no name, no expiry, and a guide describing
+      #    one would send the owner looking for a screen that is not there.
+      #  - 'active tasks' — the endpoint reads active tasks ONLY, so a task
+      #    the owner completes vanishes from the feed rather than arriving
+      #    as done. Dropping the word "active" is the exact mutation that
+      #    makes the guide promise a history the connector cannot read.
+      printf '%s
+' 'Issue a new API token' 'Copy API token' 'log out of Todoist on all your devices' 'active tasks'
       ;;
     *)
       : # no pins declared for this provider

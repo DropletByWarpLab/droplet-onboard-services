@@ -737,4 +737,5 @@ export {
   restProfileFor,
   restProviderIds,
   SQUARE_PROVIDER,
+  TODOIST_PROVIDER,
 } from "./rest/profiles.js";

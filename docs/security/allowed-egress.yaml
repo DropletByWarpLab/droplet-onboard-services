@@ -1357,6 +1357,40 @@ entries:
     review_by: 2027-09-07
     code_refs: [services/erp-connector/src/rest/vendors/calcom.ts]
 
+  - id: todoist-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.todoist.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Todoist unified API v1 — the task-tracker cloud connector (WARP-2918),
+      on ADR-046's declarative REST track. Read-only, GET only, one dataset:
+      the owner's ACTIVE tasks with their project, priority, assignee and
+      dates, from a single endpoint. Completed tasks are deliberately not
+      read (their endpoint needs a moving time window the track cannot
+      express), and neither are projects, sections, labels or comments —
+      each omission written out in the profile, so this destination is never
+      asked for them. Carries the owner's own to-do list, fetched on request
+      under a personal API token the account owner copied from their own
+      Todoist settings (Settings → Integrations → Developer → Copy API token),
+      on any plan including the free one; never ambient, never a background
+      crawl beyond the scheduled tick of that one endpoint, and off until the
+      owner connects. ONE FIXED HOST, like Square and Cal.com — no region
+      code, no per-account subdomain, no self-hosted option — so a plain
+      registered destination whose origin is a whole-string literal the
+      scanner reads directly. No version header: v1 is versioned in the path.
+      The endpoint has no last-modified filter, so each read is a declared
+      full scan of active tasks in pages of 200 — a fact about volume, not
+      about destination.
+    ticket: WARP-2918
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/todoist.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

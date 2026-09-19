@@ -61,6 +61,7 @@ import setup from "../../../../docs/integrations/SETUP.md?raw";
 import shopify from "../../../../docs/integrations/shopify.md?raw";
 import square from "../../../../docs/integrations/square.md?raw";
 import stripe from "../../../../docs/integrations/stripe.md?raw";
+import todoist from "../../../../docs/integrations/todoist.md?raw";
 import vendorSetupTemplate from "../../../../docs/integrations/vendor-setup-template.md?raw";
 import xero from "../../../../docs/integrations/xero.md?raw";
 
@@ -93,6 +94,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   shopify,
   square,
   stripe,
+  todoist,
   "vendor-setup-template": vendorSetupTemplate,
   xero,
 };

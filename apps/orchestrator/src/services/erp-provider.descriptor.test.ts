@@ -160,6 +160,13 @@ const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
  * reporting ERP_NOT_CONNECTED with a green build.
  */
 const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+/**
+ * WARP-2918 — the third REST vendor, and the first task tracker. Its own
+ * const rather than an append to the WARP-2707 list, for the reason the
+ * dashboard's `CATALOG_WARP_2707` gives: each block is the record of one
+ * story's ids, and a running total is a diff nobody can read.
+ */
+const REST_PROVIDERS_WARP_2918 = ["todoist"] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -180,6 +187,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2918,
       ]),
     );
   });
@@ -197,6 +205,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2918,
       ]),
     );
   });
@@ -212,6 +221,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2918,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -220,6 +230,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2918,
     ]);
   });
 
@@ -272,7 +283,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // Mutation: delete the `if (restProfileFor(provider)) return
     // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
     // the negative loop above stays green.
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2918]) {
       const profile = restProfileFor(id);
       expect(profile, `${id} must have a registered REST profile`).toBeDefined();
 
@@ -343,13 +354,22 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // owner's card reads CONNECTED while nothing is stored.
     const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
     const unscheduled: Record<string, string[]> = {};
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2918]) {
       const declared = providerDescriptor(id)!.datasets as readonly string[];
       const missing = declared.filter((d) => !syncedEntities.has(d));
       if (missing.length > 0) unscheduled[id] = missing;
     }
     // Square's three money datasets are on-demand by design; Cal.com's
     // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    //
+    // WARP-2918 — Todoist's `task` has a row (`get_tasks_by_status`,
+    // `task_id`, `created_at` / `updated_at`), so Todoist appears nowhere
+    // here either: it is ticked and swept. What is unusual about it is
+    // written in the profile, not in this map — the dataset carries
+    // `watermark: null` because `GET /api/v1/tasks` has no last-modified
+    // filter, so every tick is a DECLARED full scan of the owner's active
+    // tasks (page size 200), and the assertion above lets it through because
+    // a null watermark is honest, not incomplete.
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1064,6 +1084,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // implementation detail into the product.
       "square",
       "calcom",
+      // WARP-2918 — Todoist, at `catalog.order: 14`.
+      "todoist",
     ]);
   });
 
