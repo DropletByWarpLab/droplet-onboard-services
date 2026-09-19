@@ -268,6 +268,22 @@ check "MQTT topic ACL file" \
 check_warn "ROUTING_SERVICE_TOKEN set" \
   bash -c '[ -n "${ROUTING_SERVICE_TOKEN:-}" ]'
 
+# --- Email indexer reachable when it is configured (WARP-2734) ---
+# The defect this closes: `email-indexer` shipped under `profiles: ["full"]`
+# while the Linux default is `linux,display,eval`, so `full` was never among
+# them and the IMAP subsystem has never run on ANY box that shipped. Nothing
+# reported that, because a service absent from a profile is absent from `ps`
+# too — indistinguishable from one that is merely stopped.
+#
+# The invariant, stated as a check rather than as a comment: if this box has a
+# SERVICE_TOKEN_EMAIL, compose must ACTUALLY resolve the container. Reads
+# `config --services`, not `ps`, so it is a fact about the composition rather
+# than about what happens to be running this second.
+if [ -n "${SERVICE_TOKEN_EMAIL:-}" ]; then
+  check_warn "email-indexer in the active compose profiles" \
+    bash -c 'docker compose -f "'"$COMPOSE_FILE"'" --env-file "'"$COMPOSE_ENV_FILE"'" config --services 2>/dev/null | grep -qx email-indexer'
+fi
+
 # =============================================================================
 # Summary
 # =============================================================================

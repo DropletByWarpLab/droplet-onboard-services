@@ -4,7 +4,7 @@
  * Walks a customer through every step end-to-end with realistic
  * (mocked) backend responses:
  *
- *   welcome → account → wifi (skip) → address (save DuckDNS) →
+ *   welcome → account → wifi (skip) → address (name the box) →
  *   storage (rename two drives) → discovery (skip) →
  *   cameras (accept all) → vpn (mint peer, scan, continue) →
  *   ai (ask sample prompt, advance) → done
@@ -46,7 +46,6 @@ const postOrgMock = vi.fn(async () => ({
   reserved_host: "droplet.local/acme",
   next_step: "internet",
 }));
-const setDuckDnsConfigMock = vi.fn();
 const checkBoxNameMock = vi.fn();
 const setBoxNameMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
@@ -92,8 +91,6 @@ vi.mock("@/lib/api", () => ({
   // assert postOrg actually fired with the workspace name + slug.
   postOrg: (...args: Parameters<typeof postOrgMock>) => postOrgMock(...args),
 
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
 
   // WARP-817 — WifiStep reads the host topology on mount to decide its default
   // disclosure state. null (best-effort "couldn't tell") leaves the collapsed
@@ -165,7 +162,7 @@ vi.mock("@/lib/api", () => ({
   fetchVpnStatus: vi.fn(async () => ({
     configured: true,
     endpointConfigured: true,
-    endpointHost: "yourstudio.duckdns.org",
+    endpointHost: "studio.droplet-us.com",
     homeEndpointHost: "192.168.1.87",
     listenPort: 51820,
     peerCount: 0,
@@ -223,7 +220,6 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     setupAdminMock.mockClear();
     loginUserMock.mockClear();
     postOrgMock.mockClear();
-    setDuckDnsConfigMock.mockClear();
     checkBoxNameMock.mockClear();
     setBoxNameMock.mockClear();
     updateDriveLabelMock.mockClear();
@@ -241,13 +237,6 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       expires_at: "2026-06-04T00:00:00.000Z",
     });
 
-    setDuckDnsConfigMock.mockResolvedValue({
-      configured: true,
-      subdomain: "yourstudio",
-      fullDomain: "yourstudio.duckdns.org",
-      enabled: true,
-      tokenSet: true,
-    });
     // WARP-979 — the Secured step checks then persists the chosen box name.
     checkBoxNameMock.mockResolvedValue({
       available: true,

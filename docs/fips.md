@@ -189,6 +189,55 @@ instance initialized second lost, and its first TLS client crashed the boot.
    `sslmode=require`) is this kind — its reconciliation (FIPS-path-scoped
    `sslmode=disable` vs. server-side FIPS ciphers) is owned by that review.
 
+## Failure mode: a VENDOR PROTOCOL mandates a non-approved digest
+
+**Symptom.** With FIPS ON, one feature of an otherwise-healthy integration
+throws `ERR_OSSL_EVP_UNSUPPORTED` (`error:0308010C:digital envelope
+routines::unsupported`) — Node — or `ValueError: unsupported hash type` —
+Python — while every other call in the same service keeps working. Nothing is
+wrong with the provider: it is enforcing exactly as designed. The code asked
+it for an algorithm FIPS does not have.
+
+**The shipped case: Mailchimp subscriber hashing (WARP-2460).** Mailchimp
+addresses a single list member by the **MD5 of the lowercased email address**
+— `GET /3.0/lists/{list_id}/members/{subscriber_hash}`. It is the vendor's
+URL addressing scheme and the API offers no other way to key a member. A
+`node:crypto` MD5 there throws before any request is made, so on a FIPS box
+list and campaign reads would keep working while **every contact read failed**
+— a connector that half-works, with an error that reads like a crypto bug.
+
+**Why that is acceptable, and how it is resolved.** The digest is an
+*identifier*, not a security primitive: it authenticates nothing, protects
+nothing, and is not secret — the same address must always produce the same
+hash, because that is how the URL is formed. Such a use does not need, and
+must not take, a FIPS-approved algorithm — it needs a digest that is simply
+**independent of the provider**. `services/erp-connector/src/mailchimp/md5.ts`
+is an arithmetic RFC 1321 implementation with **no imports at all**; it
+reaches no OpenSSL provider and behaves identically with the knob on or off.
+Registered as `mailchimp-subscriber-hash` in
+[`docs/security/fips-exceptions.md`](security/fips-exceptions.md).
+
+Note the digest is not a privacy control either — MD5 of an email address is
+trivially reversible by dictionary attack — so its output is treated as
+equivalent to the address itself in logs and exports.
+
+**The general rule when you meet this.** Ask *what the digest is for* before
+reaching for a workaround:
+
+- **It secures something** (authentication, signature, integrity, key
+  derivation) → this is a real finding. Move to a FIPS-approved algorithm; see
+  [`docs/security/fips-allowed-algorithms.md`](security/fips-allowed-algorithms.md).
+- **A third-party protocol mandates it and it secures nothing** → implement it
+  independently of the provider (or use a pure-language library), and register
+  the exception. Do **not** reach for `setFips(0)`, a process-wide
+  `OPENSSL_CONF` override, or a second provider: Node exposes no per-call
+  provider selection, so every one of those disables FIPS for the whole
+  process to serve one call.
+- Either way the exception registry is not optional. Note the static lint
+  matches *call sites* (`createHash("md5")`, `hashlib.md5(`), so a hand-rolled
+  implementation matches no pattern and will pass silently — register it
+  anyway, or the next auditor grepping for MD5 will not find it.
+
 ## Scope — which services enforce
 
 | Service | Provider in image | Under `--fips` | Why |
@@ -203,17 +252,42 @@ instance initialized second lost, and its first TLS client crashed the boot.
 | db, nextcloud, broker, frigate, ollama, … (pulled images) | ❌ | untouched | `OPENSSL_CONF` points at a path that does not exist in these images; OpenSSL ignores a missing config file. |
 
 Application-source discipline is enforced separately and always-on:
-`scripts/test-fips.sh` (PR-blocking static lint) fails any PR introducing
+`scripts/test-fips.sh` — run by `ci.yml`'s `fips / static lint` leg, whose
+verdict reaches branch protection through the required `ci-summary` check
+(WARP-2481; before that it ran in `test-fips.yml`, went red, and blocked
+nothing) — fails any PR introducing
 MD5/SHA-1/DES/small-RSA/TLS≤1.1 without a registered exception in
 [`docs/security/fips-exceptions.md`](security/fips-exceptions.md) — so the
 code is FIPS-clean even on boxes running with the knob OFF.
+
+**Naming a forbidden algorithm in a comment is not a violation.** The lint
+drops candidate lines whose first non-blank characters are `//`, `#`, `*`,
+`/*` or `*/` *before* it looks for an escape comment (`_strip_comment_only_lines`,
+WARP-2480), so a file can explain in place why it avoids a primitive without
+claiming a `fips:allowed:` reason-id it does not deserve. The strip is
+line-scoped and never reaches a code line: a prose mention buys no exemption
+for a real call site elsewhere in the file, a code line carrying a trailing
+comment stays a candidate, and `#` is a comment introducer only outside the
+JS/TS family — there it opens a private class field. If you need prose on a
+line that starts with none of those tokens (a `/* … */` continuation, say),
+prefix it with `*`.
 
 ## How CI keeps this honest
 
 | Layer | Where | What breaks the build |
 |---|---|---|
-| Source lint | `test-fips.yml` → `fips-lint` (PR-blocking) | A non-FIPS algorithm in source without a registered escape |
-| Build-time module gate | `docker-build.yml` (required check) | `fips.so` KATs fail, provider won't load, or MD5 survives in any image build |
+| Source lint | `ci.yml` → `fips / static lint`, fanned into the required `ci-summary` (WARP-2481) | A non-FIPS algorithm in source without a registered escape |
+| Build-time module gate | `docker-build.yml` → `docker-build ok` — **advisory**, not a required check (WARP-2172/WARP-2493) | `fips.so` KATs fail, provider won't load, or MD5 survives in any image build |
 | Sabotage proof | `test-fips.yml` → `fips-sabotage` | Removing `fips.so` does *not* break the gate (i.e. the gate is a no-op) |
 | Full-stack activation | `test-fips.yml` → `fips-stack` (gated on FIPS option paths) | The stack fails to boot FIPS-enforcing end-to-end, the edge accepts ChaCha, MD5 works at runtime, or a non-provider service crash-loops |
-| Harness logic | `test-fips.yml` → `fips-lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |
+| Harness logic | `ci.yml` → `fips / static lint` step | `tests/fips-stack-logic.test.sh` — the stack harness or the compose pins regress, even on Docker-less runners |
+
+**"Breaks the build" is not the same as "blocks the merge."** Per the one-line
+rule in [`docs/ci-required-checks.md`](ci-required-checks.md#the-one-line-rule) —
+*a check blocks a merge only if it is a `ci-summary` leg, or is itself a
+required context* — only the two `ci.yml` rows above are merge-blocking. The
+`docker-build.yml` and `test-fips.yml` rows fail their own job and nothing
+else: both workflows are path-filtered, so neither can be a required context
+as written. `docs/security/fips-ci-gate-required.md` explains why the
+build-time gate is genuinely sound and still does not block, and names the two
+routes that would change that.

@@ -640,16 +640,30 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
       # collabora (default) — Nextcloud Office (`richdocuments`) → Collabora
       # CODE. URL split (all overridable for non-standard topologies):
       #   wopi_url          — where NEXTCLOUD reaches the engine server-side
-      #                       (discovery, convert-to). Compose-internal; the
-      #                       :9980/docs suffix matches coolwsd's port +
-      #                       net.service_root (docker-compose.yml).
-      #   public_wopi_url   — where the BROWSER loads the editor from. A
-      #                       RELATIVE "/docs" keeps the editor same-origin
-      #                       with whatever hostname the user browsed in on
-      #                       (FQDN, droplet-ai.local, .lan) — no cross-origin
-      #                       iframe, no cert coupling, works pre-issuance.
-      #                       richdocuments consumes the value verbatim
-      #                       (rtrim only), so a path-relative base is safe.
+      #                       (discovery, convert-to). Points at the gateway's
+      #                       compose-internal docs-discovery listener
+      #                       (docker/nginx/nginx.conf, :9981), NOT at
+      #                       docserver:9980 directly — WARP-2903. That leg
+      #                       rewrites the `urlsrc` coolwsd advertises in
+      #                       /hosting/discovery from https://docserver:9980/…
+      #                       to a PATH-RELATIVE /docs/…, and THAT value is
+      #                       what richdocuments hands the browser's editor
+      #                       form, verbatim. Relative keeps the editor
+      #                       same-origin with whatever hostname the user
+      #                       browsed in on (FQDN, droplet-ai.local, .lan,
+      #                       the LAN IP) — no cross-origin iframe, no cert
+      #                       coupling, works pre-issuance. The /docs suffix
+      #                       matches coolwsd's net.service_root; the leg
+      #                       proxies convert-to and friends unchanged.
+      #   public_wopi_url   — NOT the browser's editor URL, whatever the name
+      #                       suggests: on richdocuments 8.4 it feeds only the
+      #                       CSP/feature-policy allow-list, the admin page and
+      #                       the capabilities blob. A relative "/docs" reduces
+      #                       to no extra CSP domain, leaving frame-src 'self'
+      #                       — exactly right for the same-origin iframe above.
+      #                       (WARP-1686 believed this value WAS the editor
+      #                       origin; the editor was dead for as long as that
+      #                       belief held. WARP-2903 has the measurement.)
       #   wopi_callback_url — where the ENGINE calls back into Nextcloud
       #                       (WOPI CheckFileInfo/GetFile/PutFile). Pinned to
       #                       the compose-internal Nextcloud so the callback
@@ -662,7 +676,7 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
       # No JWT gate here — Collabora's trust model is the aliasgroup
       # allowlist + WOPI proof keys, not a shared HS256 secret.
       if nc_app_install richdocuments; then
-        rd_wopi="${RICHDOCUMENTS_WOPI_URL:-http://docserver:9980/docs}"
+        rd_wopi="${RICHDOCUMENTS_WOPI_URL:-http://gateway:9981/docs}"
         rd_public="${RICHDOCUMENTS_PUBLIC_WOPI_URL:-/docs}"
         rd_callback="${RICHDOCUMENTS_CALLBACK_URL:-http://nextcloud/}"
 
@@ -675,18 +689,41 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
         # so wopi_url has to be set before it. But the command does not only
         # read — on richdocuments 8.4.16 it REWRITES the other two values it
         # thinks it owns: it resets wopi_callback_url to "autodetect" (empty)
-        # and replaces public_wopi_url with the ABSOLUTE discovery host
-        # (`https://docserver:9980`). Both results are wrong here: docserver is
-        # a compose-internal name no browser can resolve, and an autodetected
-        # callback follows the browser's origin instead of the compose-internal
-        # host coolwsd's aliasgroup1 allowlist pins.
+        # and replaces public_wopi_url with the host it parses out of the
+        # discovery urlsrc (`https://docserver:9980` before WARP-2903; empty
+        # now that the docs-discovery leg serves a relative urlsrc). Both are
+        # wrong here: an autodetected callback follows the browser's origin
+        # instead of the compose-internal host coolwsd's aliasgroup1 allowlist
+        # pins, and the CSP allow-list would carry whatever was parsed.
         #
         # Setting all three first and then activating — which is what this did
-        # before — therefore self-defeats: the editor iframe ends up pointed at
-        # https://docserver:9980. Writing the browser-facing pair AFTER
-        # activation is what makes the intended values the ones that survive.
-        # Discovery stays cached from the activation, so nothing is lost.
+        # before — therefore self-defeats. Writing the pair AFTER activation is
+        # what makes the intended values the ones that survive. Discovery stays
+        # cached from the activation, so nothing is lost.
         occ_www config:app:set richdocuments wopi_url --value="$rd_wopi" || true
+
+        # WARP-2903 — wait (bounded) for the engine leg BEFORE activating.
+        # activate-config is `resetCache()` THEN `fetch()`: when the fetch
+        # fails the cache is already gone, and nothing refetches lazily —
+        # only the next boot or richdocuments' hourly ObtainCapabilities job.
+        # Until then every editor open dies at "Could not find urlsrc". And
+        # on a cold stack start the fetch ALWAYS fails: docserver has
+        # `depends_on: nextcloud`, so it is created after this hook is
+        # already running. 40 × 3 s covers coolwsd's cold start with room;
+        # the loop is skipped entirely on the small-box shape (DOCS_ENABLED=0
+        # never reaches this branch). Each probe is `until`-tested, so errexit
+        # cannot fire on a refused connection.
+        rd_tries="${RICHDOCUMENTS_DISCOVERY_TRIES:-40}"
+        rd_n=0
+        until curl -fsS --max-time 5 -o /dev/null "${rd_wopi%/}/hosting/discovery" 2>/dev/null; do
+          rd_n=$((rd_n + 1))
+          if [ "$rd_n" -ge "$rd_tries" ]; then
+            echo "[droplet] WARP-2903: engine discovery not reachable via $rd_wopi after $((rd_tries * 3))s — activating anyway; the editor stays unavailable until the next reconcile" >&2
+            break
+          fi
+          sleep 3
+        done
+
         occ_www richdocuments:activate-config >/dev/null 2>&1 \
           || echo "[droplet] WARP-1686: richdocuments:activate-config failed (engine still starting?) — discovery refreshes on the next reconcile" >&2
         occ_www config:app:set richdocuments public_wopi_url --value="$rd_public" || true
@@ -716,6 +753,39 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
             rd_drift=1
           fi
         done
+
+        # WARP-2903 — the trio can verify and the editor still be dead. The
+        # value that reaches the browser is discovery's `urlsrc`, which
+        # richdocuments 8.4 uses VERBATIM; the trio above logged green on the
+        # bench box for weeks while every editor form targeted
+        # https://docserver:9980. So probe what Nextcloud will actually hand
+        # out: fetch discovery over wopi_url — the same leg the connector
+        # uses — and require a PATH-RELATIVE urlsrc, which only the gateway's
+        # docs-discovery listener produces. Three outcomes, kept distinct:
+        #   * fetch fails     → engine or gateway not up yet. INFO, not drift:
+        #                       on a first boot docserver starts after us, the
+        #                       lazy fetch on first open rides the same leg,
+        #                       and the next boot re-checks.
+        #   * relative urlsrc → the editor will load.
+        #   * absolute urlsrc → DRIFT. The exact WARP-2903 failure; say so.
+        # The `|| true` sits INSIDE the substitution for the same reason as
+        # above: under pipefail an unmatched grep fails the pipeline, and a
+        # failing substitution in an assignment would abort the hook.
+        rd_urlsrc="$( { curl -fsS --max-time 15 "${rd_wopi%/}/hosting/discovery" 2>/dev/null \
+                        | grep -o 'urlsrc="[^"]*cool\.html[^"]*"' | head -1; } 2>/dev/null || true )"
+        case "$rd_urlsrc" in
+          '')
+            echo "[droplet] WARP-2903: discovery not reachable via $rd_wopi yet — urlsrc check deferred (engine or gateway still starting?); the next reconcile re-checks" >&2
+            ;;
+          'urlsrc="/docs/'*)
+            echo "[droplet] WARP-2903: discovery urlsrc is path-relative ($rd_urlsrc) — the editor iframe stays same-origin"
+            ;;
+          *)
+            echo "[droplet] WARP-2903: discovery urlsrc is ABSOLUTE ($rd_urlsrc) — no browser can reach that host; the in-browser editor will NOT load. wopi_url must point at the gateway's docs-discovery leg (http://gateway:9981/docs), not at docserver directly." >&2
+            rd_drift=1
+            ;;
+        esac
+
         if [ "$rd_drift" -eq 0 ]; then
           echo "[droplet] WARP-1686: Nextcloud Office connector configured (richdocuments → Collabora CODE); URL trio verified"
           # WARP-1973 — gated on rd_drift, so a box whose trio did NOT verify
@@ -723,7 +793,7 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
           # known-misconfigured and one that is off.
           disable_other_connector onlyoffice
         else
-          echo "[droplet] WARP-1694: document-engine URL trio did NOT verify — see the lines above. Non-fatal; the next boot re-runs this hook." >&2
+          echo "[droplet] WARP-1694: document-engine URL checks did NOT verify — see the lines above. Non-fatal; the next boot re-runs this hook." >&2
         fi
       else
         echo "nextcloud-init: richdocuments connector install did NOT complete (appstore unreachable?) — leaving it unconfigured; the next boot's idempotent re-run will reconcile it" >&2

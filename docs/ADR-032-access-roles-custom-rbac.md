@@ -210,6 +210,23 @@ A custom role can therefore take an Admin-based person's *Files feature* away �
 
 Operationally this is what WARP-1558 implements: role tier is truth, the reconciler converges membership both directions, and a demoted ex-admin comes **out** of the group on the next tick.
 
+### 7.1 The session plane — a Nextcloud group is not a source of orchestrator authority (WARP-1636)
+
+The §7 table says the byte layer is "reached with the person's **own NC token**". That was true and incomplete: an NC token also reaches the **orchestrator**, through the OCS auth fallback in `middleware/auth.ts`. Until WARP-1636 that fallback derived `req.user.role` from the OCS group list alone — and `buildNcGroups` puts every owner/admin-tier user in Nextcloud's built-in `admin` group, which `roleFromGroups` mapped to `owner`.
+
+So the narrowing §7 promises *at layer 2* was reachable around, not just at the byte layer: a narrowed Admin-based person authenticating against Nextcloud came back with an **`owner`** orchestrator session — the one tier §3 says bypasses layer 2 entirely. Not a byte-layer consequence to accept; a layer-2 bypass.
+
+**Resolution: no Nextcloud-side group may raise an orchestrator session.** The mint runs through `resolveNcSessionRole` (jwt.service.ts), which caps the group-derived role at the holder's stored `User.role`. Groups may confirm or narrow; the store is the ceiling. `roleFromGroups` survives as a hint and is documented as one.
+
+**Known residual — Droplet admins are still Nextcloud instance administrators.** `buildNcGroups` still grants the built-in `admin` group, because the shipped user-administration surface (`GET/POST/PUT/DELETE /api/auth/users`) resolves the **caller's own** Nextcloud app-password via `resolveNcToken` and drives the OCS `provisioning_api` with it — a call that requires instance admin. De-admining without first moving that surface onto the box's service account (or onto NC subadmin scoping) would 997 the People page for every owner and admin.
+
+What that residual still buys an attacker who holds a narrowed `admin` role, stated precisely:
+
+- **Nothing extra at the department-library byte layer.** §7 above already grants admin tier unconditional see-all there via `droplet-admins`. Self-adding to a `dept-*-rw` group in NC's UI reaches nothing they were not already given by design.
+- **Nextcloud instance administration itself** — app/external-storage/encryption settings, and the ability to reset another Nextcloud user's password. The last one is the sharp edge: resetting the **owner's** NC password and then authenticating on the OCS fallback yields an owner session, because the cap resolves against the *owner's* stored role. This is the WARP-1564 vector (rail 1b, `assertTargetNotOtherOwner`) reachable through Nextcloud rather than through `PUT /auth/users/:username`, and the rank cap does not close it — only de-admining does.
+
+Closing it therefore means moving user administration off caller impersonation. Tracked separately; do not re-derive it from `roleFromGroups`.
+
 ## Alternatives considered
 
 - **Extending the `Role` or `Scope` pgEnums** — both migration-gated and TS-duplicated; rows are the ADR-029 precedent. The Scope axis keeps its own WARP-481 journey; this feature reuses its middleware seam, not its enum.

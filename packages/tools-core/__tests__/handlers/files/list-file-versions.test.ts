@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import listFileVersions from "../../../src/handlers/files/list-file-versions.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  get: ReturnType<typeof vi.fn>,
+  get: Mock,
   opts: { ncToken?: string; userId?: string } = {},
 ): ToolContext {
   return {

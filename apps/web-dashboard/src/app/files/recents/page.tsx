@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, CalendarSearch, Clock, X } from "lucide-react";
+import { CalendarSearch, Clock, X } from "lucide-react";
 import { FileListSimple } from "@/components/FileManager/FileListSimple";
 import { filterByDay, formatDayHeading, localDayKey } from "@/lib/recents-day-filter";
 import { useRecents } from "@/lib/hooks/useRecents";
@@ -12,7 +11,6 @@ import { useToast } from "@/components/Toast";
 import { getDownloadUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
-import { ShellPage } from "@/components/shell/ShellPage";
 
 /**
  * Bucket recent files by Today / Yesterday / This week / Earlier.
@@ -86,18 +84,7 @@ export default function RecentsPage() {
   };
 
   return (
-    <ShellPage
-      icon={<Clock size={15} />}
-      label="Recents"
-      title="Recents"
-      sub="Files you've modified recently, grouped by time."
-      actions={
-        <Link href="/files" className="btn ghost" aria-label="Back to files">
-          <ArrowLeft size={15} />
-          Files
-        </Link>
-      }
-    >
+    <>
       {/* WARP-1555: with nothing to group, a single FileListSimple owns all
           three degenerate states — error (with retry), loading, empty — so a
           failed fetch can never masquerade as "No recent files". */}
@@ -215,6 +202,6 @@ export default function RecentsPage() {
           )}
         </>
       )}
-    </ShellPage>
+    </>
   );
 }

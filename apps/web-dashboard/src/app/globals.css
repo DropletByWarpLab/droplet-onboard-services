@@ -262,10 +262,19 @@
    here keeps the fix on-branch and the drift gate green; promoting
    --color-system-orange-text to the canon is a follow-up. Declared unlayered
    (like the red override) so it beats the Tailwind utilities cascade. */
+/* WARP-1548 adds the Files rail's "Setting up…" caption to this rule rather
+   than restating `#a3520a` in a second place — same problem (vivid orange as
+   small text), so it takes the same answer from one declaration. The rail
+   paints on the sidebar material / drawer card rather than the orange tint;
+   both are measured in src/__tests__/files-rail.contrast.test.ts. The
+   compound Tailwind selector stays LAST in each list because
+   `remote-access.orange-contrast.test.ts` pins it followed by its brace. */
+.files-rail-state-provisioning,
 .text-system-orange.bg-system-orange\/10 {
   --color-system-orange-text: #a3520a; /* burnt orange — 5.1:1 on the light tint */
   color: var(--color-system-orange-text);
 }
+.dark .files-rail-state-provisioning,
 .dark .text-system-orange.bg-system-orange\/10 {
   /* Vivid dark orange already clears AA (~7.5:1) on the dark tint — no darkening
      needed; pin to the fill token so the two never drift apart. */
@@ -915,4 +924,94 @@
   textarea {
     font-size: 16px !important;
   }
+}
+
+/* ============================================================
+   WARP-1548 — Files places rail, Libraries group.
+
+   Every colour the rail paints lives here rather than as an inline style on
+   `components/nav/FilesLibrariesNav.tsx`, for two reasons.
+
+   1. SCOPE. The rail's first cut reached for the indigo shell ramp
+      (`--text`, `--text-muted`, `--text-faint`, `--brand`, `--border`,
+      `--surface`). Those custom properties are DESCENDANT-SCOPED to
+      `.droplet-shell` / `.droplet-home` (components/shell/indigo-tokens.css),
+      and the Sidebar renders ABOVE every page scope — `AuthGate` mounts it as
+      a sibling of `<main>`, the same WARP-1079 fact its own comment records.
+      Outside that scope `color: var(--text-muted)` is not a muted colour, it
+      is a declaration the browser throws away; the rail painted inherited
+      black rows with a borderless chip and an active state that never lit.
+      The `:root` / `.dark` contract tokens below are in scope everywhere the
+      rail can mount, including the mobile drawer.
+
+   2. CASCADE. An inline colour cannot be overridden by a `hover:` utility, so
+      the first cut needed `color: … !important` to get hover back. With the
+      resting colour in a rule, hover and the active state are ordinary
+      cascade and the `!important` is gone.
+
+   The design-token ratchet (scripts/check-dashboard-classes.sh, guard 3) is
+   why the component carries class names and not `text-label-*` utilities:
+   globals.css is grandfathered for the legacy token names, a new component
+   file is not.
+
+   Contrast is measured, not asserted: src/__tests__/files-rail.contrast.test.ts
+   computes every pair below against both hosts (the sidebar material and the
+   drawer card) in both themes.
+   ============================================================ */
+
+/* The group caption. `--color-label-secondary` rather than the tertiary the
+   sidebar's other captions use: WARP-611 raised secondary to 0.8 alpha
+   precisely so small text clears AA, and 11px uppercase is still text. The
+   caption reads as a caption from its case, size and tracking. */
+.files-rail-caption {
+  color: var(--color-label-secondary);
+}
+
+.files-rail-row {
+  color: var(--color-label-secondary);
+}
+
+.files-rail-row:hover {
+  color: var(--color-label-primary);
+}
+
+/* Active is driven off `aria-current`, not a second `is-active` class, so the
+   thing screen readers announce and the thing the eye sees cannot disagree.
+
+   `--color-accent-hover` — indigo-600 light / indigo-300 dark — rather than
+   `--color-accent`. Not a hover colour borrowed by accident: it is the exact
+   pair WARP-1581 measured as the AA-safe accent-AS-TEXT ramp (5.01:1 light on
+   the page background, 5.57:1 dark on the worst-case dark surface) when the
+   vivid accent turned out to be 3.56–3.94:1 as a label. Reusing a contract
+   token beats minting `--color-accent-text` a second time. */
+.files-rail-row[aria-current="page"] {
+  color: var(--color-accent-hover);
+  font-weight: 500;
+}
+
+/* A provisioning / failed library is a non-link (fail-closed) but its NAME is
+   still information the viewer needs, so it keeps the row colour and lets the
+   state caption carry the meaning. */
+.files-rail-row[aria-disabled="true"]:hover {
+  color: var(--color-label-secondary);
+}
+
+.files-rail-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* The neutral, text-first rights chip (departments packet §1, D-4) — never the
+   `--role-*` ramp. */
+.files-rail-chip {
+  border: 1px solid var(--color-separator);
+  background: var(--color-surface-tertiary);
+  color: var(--color-label-secondary);
+}
+
+/* "Needs attention" — the WARP-633 red-as-text token, not the vivid fill.
+   `--color-system-red` is ~3.1–3.55:1 as caption text; `-text` is the ≥4.5:1
+   variant the `:root` / `.dark` contract already ships for exactly this. */
+.files-rail-state-failed {
+  color: var(--color-system-red-text);
 }

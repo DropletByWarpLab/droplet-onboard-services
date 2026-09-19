@@ -8,7 +8,17 @@
     "skipLibCheck": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    // WARP-2473: emit .d.ts next to the .js in dist/ so TypeScript consumers
+    // get the REAL signatures. Without this, a deep import of
+    // `@droplet/mcp-server/dist/server.js` is TS7016 ("implicitly has an
+    // 'any' type") and the only way past it was a hand-written ambient shim
+    // that silently drifts from src/. Mirrors apps/orchestrator/tsconfig.json,
+    // which has carried both flags since it was created.
+    // declarationMap ships .d.ts.map so "go to definition" in a consumer
+    // lands on src/*.ts rather than the generated declaration.
+    "declaration": true,
+    "declarationMap": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "__tests__"]

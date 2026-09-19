@@ -137,3 +137,58 @@ describe("WARP-1921 — getConversationToolNames (cross-turn continuity)", () =>
     expect(await svc.getConversationToolNames("nope", "u1")).toEqual([]);
   });
 });
+
+/**
+ * WARP-2484 — the JSON-null sentinel has to survive the `@prisma/client` mock.
+ *
+ * `getConversationToolNames` filters with Prisma's canonical "JSON column is
+ * not SQL NULL" predicate, `{ not: Prisma.DbNull }`. While the shared mock at
+ * `src/__tests__/setup.ts` exported no `DbNull`, `Prisma.DbNull` resolved to
+ * `undefined` under test and the service issued `{ not: undefined }` — which
+ * Prisma treats as no filter at all. Every suite therefore exercised a
+ * DIFFERENT query from the one production runs, and the divergence was
+ * invisible precisely because `undefined === undefined` made the identity
+ * check inside `makePrisma` above vacuously true.
+ *
+ * These assertions are identity-based AND vacuity-guarded. The
+ * `not.toBeUndefined()` line is the one that makes the mutation
+ * `DbNull: undefined` in setup.ts turn this red; without it the mutation
+ * stays green, which is the whole defect being fixed.
+ */
+describe("WARP-2484 — the toolCalls filter carries the real DbNull sentinel", () => {
+  it("passes `{ not: Prisma.DbNull }` by identity, never `{ not: undefined }`", async () => {
+    const { prisma, findMany } = makePrisma([
+      { sessionId: "s1", userId: "u1", role: "assistant", toolCalls: [call("list_cameras")], createdAt: at(1) },
+    ]);
+    const svc = new ChatPersistenceService(prisma as never);
+
+    await svc.getConversationToolNames("s1", "u1");
+
+    const where = findMany.mock.calls[0][0].where as {
+      toolCalls?: { not?: unknown };
+    };
+
+    // The clause must be present at all — dropping it is one regression.
+    expect(where.toolCalls).toBeDefined();
+    // …and its operand must be a real value. `{ not: undefined }` is not a
+    // weaker filter, it is a different query: Prisma omits the clause.
+    expect(where.toolCalls?.not).not.toBeUndefined();
+    // Identity, not shape: DbNull, JsonNull and AnyNull are three distinct
+    // sentinels that mean three different things to Prisma's JSON filters.
+    expect(where.toolCalls?.not).toBe(Prisma.DbNull);
+  });
+
+  it("exposes DbNull, JsonNull and AnyNull as three distinct sentinels", () => {
+    // A mock that aliased all three onto one object (or onto `undefined`)
+    // would let `Prisma.JsonNull` silently stand in for `Prisma.DbNull` — the
+    // write paths in activity.service.ts and routes/cameras.ts rely on the
+    // two being told apart.
+    for (const sentinel of [Prisma.DbNull, Prisma.JsonNull, Prisma.AnyNull]) {
+      expect(sentinel).not.toBeUndefined();
+      expect(sentinel).not.toBeNull();
+    }
+    expect(Prisma.DbNull).not.toBe(Prisma.JsonNull);
+    expect(Prisma.DbNull).not.toBe(Prisma.AnyNull);
+    expect(Prisma.JsonNull).not.toBe(Prisma.AnyNull);
+  });
+});

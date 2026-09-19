@@ -2,8 +2,11 @@
  * /downloads — get the Droplet client app for whatever you're reading
  * this on.
  *
- * The apps ship INSIDE the appliance image and are served by the box
- * itself (GET /api/app-downloads), not fetched from a cloud endpoint.
+ * The apps live ON the box and are served by it (GET /api/app-downloads),
+ * not fetched from a cloud endpoint. They get there by an operator
+ * staging them (scripts/app-downloads/stage.sh) — NOT with the image, so
+ * "no apps staged" is the normal state of a box nobody has staged, and
+ * the copy must not tell a customer to wait for an update.
  * That is the point: a customer on a LAN with no internet can still
  * install the client, and the bytes are re-verified against the digest
  * that shipped before the box hands them over.
@@ -74,8 +77,10 @@ const PLATFORM_ORDER: AppDownloadPlatform[] = [
  * but honest" rather than a blank page.
  */
 const REASON_COPY: Record<string, string> = {
+  not_authenticated:
+    "Your session has expired. Sign in again and this page will load the apps.",
   catalog_missing:
-    "No apps are staged on this box yet. They're built into the appliance image, so the next box update will bring them.",
+    "No apps have been added to this box yet. It only offers apps that were put on it directly, so waiting for an update won't bring them — whoever set the box up needs to add them.",
   catalog_unreadable:
     "The box couldn't read its app catalog. This is a fault on the box, not on your device.",
   malformed_catalog:
@@ -144,7 +149,11 @@ function CopyDigest({ sha256 }: { sha256: string }) {
 /**
  * One platform's card. Four distinct states, because collapsing them
  * would mean lying in at least one:
- *   - a real installer to download
+ *   - a real installer to download — and, when more than one format was
+ *     staged (the MSI beside the NSIS exe), every other one listed beneath
+ *     the button as its own download. gen-catalog pins them all and the
+ *     API serves them all; a package the page never links is a package
+ *     nobody can get (WARP-2889).
  *   - store-distributed (Android / iOS): link out, no fake download
  *   - listed but nothing staged: say so
  *   - not in the catalog at all: say that instead of implying "soon"
@@ -161,9 +170,27 @@ function PlatformCard({
   const label = PLATFORM_LABELS[platform];
   const isMobile = platform === "android" || platform === "ios";
 
+  const installers: AppDownloadAsset[] =
+    entry?.assets.filter((a) => a.kind === "installer") ?? [];
+
+  // The catalog's `primary` is THE download. The schema leaves it optional,
+  // so a catalog that stages installers without naming one must still offer
+  // them: falling back to the first installer beats telling a customer
+  // nothing is here while the API serves the files happily.
   const primary: AppDownloadAsset | undefined = entry?.primary
     ? entry.assets.find((a) => a.name === entry.primary)
-    : undefined;
+    : installers[0];
+
+  // Every other installer format that was staged. Secondary on purpose —
+  // one button is THE thing to do — but each is a real, digest-checked
+  // download of its own.
+  const otherInstallers = installers.filter((a) => a.name !== primary?.name);
+
+  // The catalog named a primary that isn't in its own asset list. Today
+  // that falls through to the muted "nothing staged yet" note, which reads
+  // as a box nobody has set up — when in fact something IS staged and the
+  // catalog is wrong. Different problem, different person to tell.
+  const primaryDangling = Boolean(entry?.primary) && !primary;
 
   // A detached signature over the primary installer, offered as a
   // secondary "verify this yourself" link rather than a second download.
@@ -175,7 +202,9 @@ function PlatformCard({
     <Card
       icon={isMobile ? <Smartphone size={16} /> : <AppWindow size={16} />}
       title={label}
-      meta={entry ? `v${entry.version}` : undefined}
+      // A version chip on a platform that can give you nothing advertises a
+      // release that isn't here. Show it only when there is something to get.
+      meta={entry && (primary || entry.storeUrl) ? `v${entry.version}` : undefined}
       className={recommended ? "dl-card dl-card-rec" : "dl-card"}
     >
       {recommended ? (
@@ -208,6 +237,45 @@ function PlatformCard({
               </div>
             ) : null}
           </dl>
+          {otherInstallers.length > 0 ? (
+            <div className="dl-others">
+              <p className="dl-others-title">Also available for {label}</p>
+              <ul className="dl-others-list">
+                {otherInstallers.map((asset) => (
+                  <li key={asset.name}>
+                    <a className="dl-others-link" href={asset.url} download>
+                      <Download size={13} />
+                      {asset.name}
+                    </a>
+                    <span className="dl-others-meta">
+                      {formatBytes(asset.size)} ·{" "}
+                      <CopyDigest sha256={asset.sha256} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {platform === "windows" ? (
+            // Stated so it stays true whether or not a minisign `.sig` was
+            // staged beside the installer: the warning comes from the
+            // absence of an Authenticode certificate, which no build has.
+            <p className="dl-note">
+              Windows will warn you about an “unknown publisher” when you run
+              this. That is expected — the installer isn’t signed with a
+              commercial code-signing certificate yet. Choose <b>More info</b>{" "}
+              then <b>Run anyway</b>, and compare the SHA-256 above first if
+              you want to be certain.
+            </p>
+          ) : null}
+          {platform === "android" ? (
+            <p className="dl-note">
+              Your phone will ask you to allow installs from this browser
+              before it opens the file. That is expected for an app that
+              doesn’t come from Google Play — allow it once, then open the
+              download.
+            </p>
+          ) : null}
           {signature ? (
             <p className="dl-note">
               <a href={signature.url} download>
@@ -234,10 +302,28 @@ function PlatformCard({
               `The ${label} app is distributed through its app store, so it updates with the rest of your apps.`}
           </p>
         </>
+      ) : primaryDangling ? (
+        <p className="dl-note">
+          This box lists a {label} app but can’t find the file for it, so the
+          download is turned off. That’s a fault on the box — whoever set it
+          up needs to re-stage the installer.
+        </p>
+      ) : isMobile ? (
+        // Store-distributed platforms must never be told to "ask for the
+        // installer". iOS cannot install one from a local device at all, and
+        // Android's is a Play listing that doesn't exist yet — telling a
+        // family member to chase their admin for a file nobody can produce
+        // wastes their time and makes the box look broken.
+        <p className="dl-note dl-note-muted">
+          {entry?.note ??
+            (platform === "ios"
+              ? `The ${label} app isn’t published yet. When it is, it comes from Apple — iPhones and iPads can’t install apps straight from this box.`
+              : `The ${label} app isn’t published yet. When it is, it comes from Google Play, or as a file this box serves you here.`)}
+        </p>
       ) : (
         <p className="dl-note dl-note-muted">
           {entry?.note ??
-            `No ${label} app is staged on this box yet. It ships inside the appliance image, so a box update will bring it.`}
+            `No ${label} app has been added to this box yet. Ask whoever set it up to add the ${label} installer.`}
         </p>
       )}
     </Card>
@@ -323,10 +409,10 @@ export default function DownloadsPage() {
             }
           >
             <p className="dl-note">
-              These installers ship inside your appliance image — nothing is
-              fetched from the internet. Before sending a file, the box
-              re-checks its SHA-256 against the one recorded when the image
-              was built, and refuses to serve it if a single byte differs.
+              These installers live on your box — nothing is fetched from the
+              internet. Before sending a file, the box re-checks its SHA-256
+              against the one recorded when the app was added, and refuses to
+              serve it if a single byte differs.
               {attestation === "signed"
                 ? " The catalog itself carries a verified signature."
                 : ""}

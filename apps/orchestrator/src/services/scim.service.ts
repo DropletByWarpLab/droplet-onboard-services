@@ -21,6 +21,13 @@
  * `role-mutation-guard.service.ts` like every other person-mutation surface,
  * and are capped at `SCIM_ROLE_CEILING` — WARP-1568. `provisionUser` never
  * touches `role` at all.
+ *
+ * DEACTIVATION writes go through the same guard — WARP-2016. POST (on an
+ * email-matched EXISTING row — WARP-2550), PUT, PATCH and DELETE all funnel
+ * into `setUserActive`/`deactivateUser`, which run the disable rails
+ * (owner-immutability 403, last-operator 409) and the disable post-effects.
+ * An Okta push can therefore be REFUSED; the route renders the rail's code
+ * in the SCIM Error envelope.
  */
 import type { PrismaClient, User } from "@prisma/client";
 import { findUserByEmail, emailWriteData } from "./user-directory.service.js";
@@ -34,11 +41,14 @@ import type { DirectoryRole } from "./scim-role-mapping.service.js";
 import type { ParsedScimUser } from "./scim-resource.js";
 import type { Role } from "./jwt.service.js";
 import {
+  assertDisableAllowed,
+  assertDisableInvariantsTx,
   assertRoleChangeAllowed,
   assertRoleChangeInvariantsTx,
   isConcurrencyConflict,
   readGuardTargetTx,
   RoleMutationRefusedError,
+  runDisablePostEffects,
   runRoleChangePostEffects,
   SERIALIZABLE_TX,
   type GuardActor,
@@ -115,20 +125,39 @@ export async function provisionUser(
   // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
   const existing = await findUserByEmail(prisma, parsed.email);
   if (existing) {
-    const user = await prisma.user.update({
-      where: { id: existing.id },
-      data: {
-        displayName: parsed.displayName,
-        directoryStatus: targetStatus,
-        // NB: role is intentionally NOT changed here — an existing
-        // owner/admin keeps their role; group membership (provisionGroup) is
-        // the only thing that elevates, and never via a plain user upsert.
-      },
-    });
+    // WARP-2550 — an email-matched POST is a full replace in everything but
+    // the verb: it carries `active`, so it MUST flip active-state through the
+    // one guarded funnel, exactly like `replaceUser` (PUT). Until this it did
+    // a bare `prisma.user.update` writing `directoryStatus`, which made POST
+    // the fourth active-state verb and the only unrailed one — an Okta push
+    // with active:false whose userName matched the sole owner, or the last
+    // ACTIVE admin, deactivated them with no owner-immutability rail (403),
+    // no last-operator invariant (409), no session revocation and no audit
+    // row: the exact operator lockout WARP-2016 closed on PUT/PATCH/DELETE.
+    //
+    // Reusing `replaceUser` rather than re-deriving the rails here is the
+    // point — the ordering contract (guarded flip FIRST, so a refused call
+    // applies no part of the upsert, displayName included) lives in ONE
+    // place and cannot drift per-verb.
+    const user = await replaceUser(prisma, existing.id, parsed);
+    // A null here means the row we resolved a moment ago was hard-deleted
+    // inside the window. Nothing was applied — the guard's own answer for a
+    // lost race; Okta's retry then converges down the create path.
+    if (!user) throw RoleMutationRefusedError.concurrentMutation();
+    // NB: role is intentionally NOT changed here — an existing owner/admin
+    // keeps their role; group membership (provisionGroup) is the only thing
+    // that elevates, and never via a plain user upsert.
     await ensureOktaLink(prisma, user.id, parsed);
     return { user, created: false };
   }
 
+  // WARP-2550 — a NEW row created with active:false is deliberately NOT
+  // routed through the disable funnel: there is no prior row holding live
+  // access, and the row is minted least-privilege `family`, so rail 1
+  // (owner immutability) has no owner to protect and rail 5 (last operator)
+  // no operator to strand. Create-disabled is a plain create; running the
+  // rails would mean create-then-deactivate, which emits a "User disabled"
+  // audit row for a person who was never enabled.
   const user = await prisma.user.create({
     data: {
       username: usernameSeedFromEmail(parsed.email),
@@ -159,15 +188,87 @@ async function ensureOktaLink(prisma: PrismaClient, userId: string, parsed: Pars
   });
 }
 
-/** Soft-deactivate a user by local id (the SCIM resource id). Sets
- *  DEACTIVATED; never deletes. Idempotent. Returns null for an unknown id. */
+/**
+ * Soft-deactivate a user by local id (the SCIM resource id). Sets
+ * DEACTIVATED; never deletes. Idempotent. Returns null for an unknown id.
+ *
+ * WARP-2016 — this write goes through role-mutation-guard.service.ts, the
+ * ONE place the person-mutation rails live, exactly like the WARP-1568 role
+ * writes above (`raiseUserRoleTo`). Until this change SCIM deactivation was
+ * the last active-state surface still writing `directoryStatus` bare, so an
+ * Okta push could deactivate the sole owner — or the last ACTIVE admin —
+ * and strand the box with zero operators able to sign in, with no session
+ * revocation and no audit row. Not privilege escalation (auth middleware
+ * re-reads directoryStatus and fails closed); total operator lockout.
+ *
+ * The shape mirrors POST /auth/users/:username/disable:
+ *   • pre-tx: `assertDisableAllowed` (rail 2 self-action — vacuous for the
+ *     id-less SCIM principal — then rail 1 owner-immutability, 403);
+ *   • the write inside ONE SERIALIZABLE transaction, after re-reading the
+ *     target in-transaction and running rail 5 (last-operator, 409) against
+ *     THAT row, with `directoryStatus` pinned in the write's `where` so a
+ *     status flip landing in the window is a 0-row P2025 no-op instead of a
+ *     decision made on stale state;
+ *   • rail 6 post-commit: `runDisablePostEffects` — session revocation plus
+ *     the mandatory "User disabled" audit row, attributed to the system
+ *     actor like every other SCIM emit.
+ *
+ * Re-deactivating an already-DEACTIVATED row stays an idempotent success:
+ * rail 5 early-returns for a DEACTIVATED target (it holds no live access to
+ * strand), the pinned write is a no-op rewrite, and the post-effects run per
+ * call — Okta retries converge, they never wedge.
+ *
+ * A SERIALIZABLE loser / optimistic-pin miss is rethrown as the guard's
+ * CONCURRENT_MUTATION refusal (409): nothing was applied and Okta's retry
+ * converges — the same mapping auth.ts applies.
+ */
 export async function deactivateUser(prisma: PrismaClient, id: string): Promise<User | null> {
   const existing = await prisma.user.findUnique({ where: { id } });
   if (!existing) return null;
-  return prisma.user.update({ where: { id }, data: { directoryStatus: "DEACTIVATED" } });
+
+  // Rails 2 → 1 on the snapshot (the pre-tx composite the interactive
+  // disable surface runs). Rail 1 is what stops Okta deactivating the owner.
+  assertDisableAllowed({
+    actor: SCIM_ACTOR,
+    target: { id: existing.id, role: existing.role as Role },
+  });
+
+  let updated: User;
+  try {
+    updated = await prisma.$transaction(async (tx) => {
+      const fresh = await readGuardTargetTx(tx, id);
+      if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
+      // Rail 5 against the IN-TRANSACTION row: whether it runs at all is
+      // derived from the target's tier, so the snapshot is not good enough.
+      await assertDisableInvariantsTx(tx, { target: fresh });
+      return tx.user.update({
+        where: { id, directoryStatus: fresh.directoryStatus },
+        data: { directoryStatus: "DEACTIVATED" },
+      });
+    }, SERIALIZABLE_TX);
+  } catch (err) {
+    if (isConcurrencyConflict(err)) {
+      logger.warn({ userId: id }, "SCIM deactivate lost a write race; retry converges");
+      throw RoleMutationRefusedError.concurrentMutation();
+    }
+    throw err;
+  }
+
+  // Rail 6 (consolidated): WARP-116/247 session revocation + the WARP-1062
+  // mandatory-emit audit row — previously this path revoked and emitted
+  // NOTHING, leaving live sessions behind a "deactivated" row.
+  await runDisablePostEffects({
+    targetUserId: existing.id,
+    username: existing.username,
+    actor: { type: "system", id: null },
+  });
+  return updated;
 }
 
-/** Re-activate a soft-deactivated user (active:true on a DEACTIVATED row). */
+/** Re-activate a soft-deactivated user (active:true on a DEACTIVATED row).
+ *  Deliberately rail-free (WARP-2016): a reactivate removes no operator
+ *  capacity, and the sole DEACTIVATED admin must always be able to come
+ *  back — a rail here would be a second lockout, not a safeguard. */
 export async function reactivateUser(prisma: PrismaClient, id: string): Promise<User | null> {
   const existing = await prisma.user.findUnique({ where: { id } });
   if (!existing) return null;
@@ -175,9 +276,31 @@ export async function reactivateUser(prisma: PrismaClient, id: string): Promise<
 }
 
 /** Apply a SCIM PATCH/PUT `active` change by id (true → ACTIVE, false →
- *  DEACTIVATED). Returns null for an unknown id. */
+ *  DEACTIVATED). Returns null for an unknown id. THE shared funnel: every
+ *  SCIM verb that flips active-state routes through here (WARP-2016), so
+ *  the disable rails cannot be bypassed per-verb. */
 export async function setUserActive(prisma: PrismaClient, id: string, active: boolean): Promise<User | null> {
   return active ? reactivateUser(prisma, id) : deactivateUser(prisma, id);
+}
+
+/**
+ * SCIM PUT full-replace (WARP-2016): apply the `active` state THROUGH the
+ * shared funnel first, then the attribute update. Order is the contract —
+ * a replace the rails refuse applies NO part of the replace (the route
+ * renders the refusal envelope and Okta sees the resource unchanged), so
+ * the guarded flip must precede the displayName write. Previously this verb
+ * performed its own bare `prisma.user.update` writing `directoryStatus`,
+ * bypassing scim.service.ts entirely — railing PATCH/DELETE alone would
+ * have left PUT as the open door.
+ */
+export async function replaceUser(
+  prisma: PrismaClient,
+  id: string,
+  parsed: ParsedScimUser,
+): Promise<User | null> {
+  const active = await setUserActive(prisma, id, parsed.active);
+  if (!active) return null;
+  return prisma.user.update({ where: { id }, data: { displayName: parsed.displayName } });
 }
 
 export async function findUserById(prisma: PrismaClient, id: string): Promise<User | null> {

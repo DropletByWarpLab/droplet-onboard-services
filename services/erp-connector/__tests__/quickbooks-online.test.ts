@@ -90,6 +90,12 @@ const INVOICE_PAGE = {
         CustomerRef: { value: "12", name: "Northside Clinic" },
         TotalAmt: 1200,
         Balance: 1200,
+        // WARP-2475 — Intuit's shape exactly: local wall-clock with an offset,
+        // and EDITED two weeks after TxnDate. That gap is the whole point of
+        // the column: a `TxnDate` fallback would report 07-01 for a document
+        // last touched on 07-15, which is a creation time wearing a
+        // modification time's name.
+        MetaData: { CreateTime: "2026-07-01T09:37:38-07:00", LastUpdatedTime: "2026-07-15T11:17:56-07:00" },
       },
       {
         Id: "2",
@@ -99,6 +105,7 @@ const INVOICE_PAGE = {
         CustomerRef: { value: "12", name: "Northside Clinic" },
         TotalAmt: 500,
         Balance: 0,
+        MetaData: { CreateTime: "2026-06-02T08:00:00-07:00", LastUpdatedTime: "2026-06-20T16:05:00-07:00" },
       },
     ],
   },
@@ -115,6 +122,7 @@ const BILL_PAGE = {
         VendorRef: { value: "44", name: "Henry Schein" },
         TotalAmt: 2000,
         Balance: 2000,
+        MetaData: { CreateTime: "2026-07-05T07:12:00-07:00", LastUpdatedTime: "2026-07-06T08:30:00-07:00" },
       },
       {
         Id: "8",
@@ -124,6 +132,12 @@ const BILL_PAGE = {
         VendorRef: { value: "45", name: "Patterson Dental" },
         TotalAmt: 850.25,
         Balance: 850.25,
+        // WARP-2475 — NO `MetaData`. Intuit documents it on every entity, so
+        // this row is the defensive case: a response that omits it must leave
+        // `updated_at` undefined and must NOT throw, because a whole read
+        // failing on one odd row would take the practice's payables with it.
+        // Kept in the SHIPPED fixture rather than a bespoke one so the
+        // absent-MetaData path is exercised by every test that reads bills.
       },
       {
         Id: "9",
@@ -133,6 +147,7 @@ const BILL_PAGE = {
         VendorRef: { value: "44", name: "Henry Schein" },
         TotalAmt: 100,
         Balance: 0,
+        MetaData: { CreateTime: "2026-07-21T10:00:00-07:00", LastUpdatedTime: "2026-07-22T09:15:30-07:00" },
       },
     ],
   },
@@ -277,6 +292,62 @@ describe("token custody", () => {
     const { c, calls } = qbo({ tok: tokens({ accessExpiresAt: NOW - 1 }) });
     await expect(c.runRead("get_open_bills", {})).rejects.toBeInstanceOf(ConnectorBlockedError);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ── WARP-2475: the vendor modification timestamp ────────────────────────────
+
+describe("updated_at comes from MetaData.LastUpdatedTime", () => {
+  it("normalises Intuit's offset timestamp to a UTC instant", async () => {
+    // The vendor field is `MetaData.LastUpdatedTime`, confirmed against a raw
+    // QBO Invoice response: it is local wall-clock with an offset
+    // ("2026-07-15T11:17:56-07:00"), NOT UTC. Storing it verbatim would leave a
+    // watermark comparing strings across mixed offsets, which orders a
+    // -07:00 11:17 after a +00:00 18:17 that is the same instant.
+    //
+    // Mutation: drop `MetaData` from INV-1001 in INVOICE_PAGE → undefined → red.
+    // Mutation: return the raw string instead of converting → red on the Z form.
+    const { c } = qbo({ pages: [INVOICE_PAGE] });
+    const rows = (await c.runRead("get_open_invoices", {})) as Record<string, unknown>[];
+    expect(rows[0].updated_at).toBe("2026-07-15T18:17:56.000Z");
+  });
+
+  it("reads the MODIFICATION time, not the creation time", async () => {
+    // The defect this column exists to prevent. INV-1001 was created 07-01 and
+    // edited 07-15; every neighbouring field on the row is a creation-side
+    // fact, so a builder that reached for the nearest plausible one is a live
+    // risk rather than a hypothetical.
+    // Mutation: map `MetaData.CreateTime`, or `TxnDate`, instead → red.
+    const { c } = qbo({ pages: [INVOICE_PAGE] });
+    const rows = (await c.runRead("get_open_invoices", {})) as Record<string, unknown>[];
+    expect(rows[0].updated_at).not.toBe("2026-07-01T16:37:38.000Z"); // CreateTime
+    expect(rows[0].updated_at).not.toBe(rows[0].issued_at); // TxnDate
+  });
+
+  it("fills it on bills too, from the same field", async () => {
+    // Mutation: drop `MetaData` from BILL-77 in BILL_PAGE → undefined → red.
+    const { c } = qbo({ pages: [BILL_PAGE] });
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    const b77 = rows.find((r) => r.bill_id === "BILL-77")!;
+    expect(b77.updated_at).toBe("2026-07-06T15:30:00.000Z");
+  });
+
+  it("leaves it undefined when MetaData is absent, and does not throw", async () => {
+    // BILL-78 carries no `MetaData` at all. The read must still complete and
+    // still return the row: a practice's payables must not disappear because
+    // one document came back without its metadata block.
+    // Mutation: read `MetaData.LastUpdatedTime` unguarded → TypeError → red.
+    // Mutation: fall back to TxnDate when MetaData is absent → red.
+    const { c } = qbo({ pages: [BILL_PAGE] });
+    const rows = (await c.runRead("get_open_bills", {})) as Record<string, unknown>[];
+    const b78 = rows.find((r) => r.bill_id === "BILL-78")!;
+    expect(b78.updated_at).toBeUndefined();
+    // present-and-undefined, never absent — the key-set contract the shape
+    // test pins. Mutation: omit the key when MetaData is missing → red.
+    expect(Object.keys(b78)).toContain("updated_at");
+    // and the rest of the row is intact, so this is a missing timestamp and
+    // not a half-parsed document.
+    expect(b78.balance).toBe(850.25);
   });
 });
 

@@ -40,6 +40,12 @@ vi.mock("../services/cache.service.js", () => ({
 vi.mock("../services/jwt.service.js", () => ({
   verifyAccessToken: vi.fn().mockReturnValue(null),
   roleFromGroups: vi.fn().mockReturnValue("family"),
+  // WARP-1636 — the OCS fallback mints through this funnel now. Stubbed
+  // flat here because this suite is about the OCS transport, not the rank
+  // cap; the cap itself is covered against the REAL module in
+  // __tests__/auth.ocs-role-cap.test.ts (which deliberately does not mock
+  // jwt.service, so deleting the cap turns it red).
+  resolveNcSessionRole: vi.fn().mockReturnValue("family"),
   ACCESS_TOKEN_TTL_SECONDS: 900,
   REFRESH_TOKEN_TTL_SECONDS: 60 * 60 * 24 * 30,
 }));

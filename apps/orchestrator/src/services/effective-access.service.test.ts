@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { ModuleId } from "@prisma/client";
-import { TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   computeEffectiveAccess,
   resolveEffectiveAccess,
@@ -304,6 +304,44 @@ describe("effective-access — role narrowing (admins narrowable, no short-circu
     expect(res.toolDomains).not.toContain("network");
     // calendar feature on, but NO tool grant row → domain absent (absent row = OFF)
     expect(res.toolDomains).not.toContain("calendar");
+  });
+
+  it("an unclaimed domain is still a GRANTED domain — a role without `business` reaches no business tool (WARP-2583)", () => {
+    // `business` passes the module filter unconditionally (no module claims
+    // it — it spans projects AND crm), which is exactly why the grant axis has
+    // to hold it: the old Projects row's `pm` grant reaches nothing since
+    // ADR-045, and a role built before the dashboard row moved holds `system`
+    // and `data` from the System toggle and nothing for `business`.
+    // MUTATION: fold `business` into `granted` -> red.
+    const domainsFor = (toolGrants: Array<{ domain: string; level: "view" | "use" }>) =>
+      computeEffectiveAccess(
+        baseInputs({
+          user: {
+            id: "u-biz",
+            role: "admin",
+            accessRole: role({
+              featureGrants: [
+                { moduleId: "projects", level: "manage" },
+                { moduleId: "crm", level: "manage" },
+              ],
+              toolGrants,
+            }),
+          },
+        }),
+      ).toolDomains;
+    const withoutBusiness = domainsFor([
+      { domain: "system", level: "use" },
+      { domain: "data", level: "use" },
+      { domain: "pm", level: "use" },
+      { domain: "crm", level: "use" },
+    ]);
+    expect(withoutBusiness).toContain("system");
+    expect(withoutBusiness).not.toContain("business");
+    // …and every business_* tool lives there, so none of them is in reach.
+    const business = TOOL_CATALOG.filter((t) => t.name.startsWith("business_"));
+    expect(business.length).toBeGreaterThanOrEqual(5);
+    for (const t of business) expect(withoutBusiness, t.name).not.toContain(t.domain);
+    expect(domainsFor([{ domain: "business", level: "use" }])).toContain("business");
   });
 });
 

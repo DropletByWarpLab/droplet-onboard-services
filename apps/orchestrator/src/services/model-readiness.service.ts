@@ -52,7 +52,10 @@ import {
 
 const logger = createLogger("model-readiness");
 
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
+// WARP-2857 — resolved per call by the ONE resolver in inference-runtime.ts,
+// which reads INFERENCE_RUNTIME_URL first and falls back to the deprecated
+// OLLAMA_URL. This was a module-level capture of the legacy variable alone,
+// which is why it could not see the canonical name at all.
 
 interface OllamaTagsResponse {
   models?: Array<{ name: string; size?: number; modified_at?: string }>;
@@ -125,7 +128,7 @@ export async function warmDefaultModel(): Promise<void> {
   lastWarmAttemptAt = now;
   const startedAt = Date.now();
   try {
-    const resp = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
+    const resp = await fetch(`${inferenceRuntimeUrl()}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -217,8 +220,8 @@ export async function probeColdModel(
     // under undici an undrained body can pin the socket until GC. allSettled
     // lets us reach and drain that fulfilled body below.
     const [psSettled, tagsSettled] = await Promise.allSettled([
-      fetch(`${OLLAMA_URL}/api/ps`, { signal }),
-      fetch(`${OLLAMA_URL}/api/tags`, { signal }),
+      fetch(`${inferenceRuntimeUrl()}/api/ps`, { signal }),
+      fetch(`${inferenceRuntimeUrl()}/api/tags`, { signal }),
     ]);
     const psResp = psSettled.status === "fulfilled" ? psSettled.value : null;
     const tagsResp =
@@ -471,10 +474,10 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   // Step 1 — which models are already in Ollama?
   let tags: OllamaTagsResponse;
   try {
-    const resp = await fetch(`${OLLAMA_URL}/api/tags`);
+    const resp = await fetch(`${inferenceRuntimeUrl()}/api/tags`);
     if (!resp.ok) {
       logger.warn(
-        { status: resp.status, url: OLLAMA_URL },
+        { status: resp.status, url: inferenceRuntimeUrl() },
         "Ollama /api/tags returned non-2xx; skipping model-readiness",
       );
       return;
@@ -482,7 +485,7 @@ export async function ensureDefaultModelPulled(): Promise<void> {
     tags = (await resp.json()) as OllamaTagsResponse;
   } catch (err) {
     logger.warn(
-      { err: (err as Error).message, url: OLLAMA_URL },
+      { err: (err as Error).message, url: inferenceRuntimeUrl() },
       "Cannot reach Ollama for model-readiness check; will retry on next startup",
     );
     return;
@@ -543,7 +546,7 @@ export async function ensureDefaultModelPulled(): Promise<void> {
     // Step 2 — model not ready: either absent from the listing, or listed but
     // not serveable (WARP-1749). Kick off a background pull.
     logger.info(
-      { model, url: OLLAMA_URL },
+      { model, url: inferenceRuntimeUrl() },
       "Model not ready — starting background pull (download time depends on model size and network)",
     );
     // Fire-and-forget. The `void` makes intent explicit and silences the
@@ -560,7 +563,7 @@ export async function backgroundPull(model: string): Promise<void> {
   // throttle below and logs the start of the pull.
   let lastLoggedPercent = -10;
   try {
-    const resp = await fetch(`${OLLAMA_URL}/api/pull`, {
+    const resp = await fetch(`${inferenceRuntimeUrl()}/api/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: model, stream: true }),

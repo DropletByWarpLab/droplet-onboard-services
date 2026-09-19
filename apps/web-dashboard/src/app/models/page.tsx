@@ -16,9 +16,11 @@
  * is a Settings action (the off-LAN allowlist) that logs to Activity.
  *
  * Honesty contract: metrics ai-gateway doesn't expose yet (per-model disk,
- * tokens/sec, role, GPU, average latency) render as "—"/"Unavailable", and
- * cloud spend as "$0.00" — never fabricated. The page must still render with an
- * empty `local` list (ai-gateway down) — it shows a calm degraded note.
+ * tokens/sec, role, GPU, average latency) render as "—"/"Unavailable" — never
+ * fabricated. Cloud spend has no tile at all: the orchestrator hard-codes it
+ * to 0, and a "$0.00" reading nobody measured is the same dishonesty.
+ * The page must still render with an empty `local` list (ai-gateway down) —
+ * it shows a calm degraded note.
  *
  * WARP-1340 — the page is wrapped in ShellPage (the indigo design language),
  * finishing the WARP-1091 conversion: the child components (KpiStrip,
@@ -50,6 +52,7 @@ import { useModelsPage } from "@/lib/hooks/useModelsPage";
 import { useModelsCatalog } from "@/lib/hooks/useModelsCatalog";
 import { useModelPull } from "@/lib/hooks/useModelPull";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { KpiStrip } from "@/components/models/KpiStrip";
 import { LocalModelCard } from "@/components/models/LocalModelCard";
 import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
@@ -63,10 +66,6 @@ const SUB =
 
 /** Owner/admin can change the active model; everyone else sees it read-only.
  *  Mirrors the orchestrator's requireRole("owner","admin") on the write. */
-function isAdminRole(role?: string): boolean {
-  return role === "owner" || role === "admin";
-}
-
 export default function ModelsPage() {
   const { data, error, isLoading, refresh } = useModelsPage();
   const catalog = useModelsCatalog();
@@ -145,7 +144,7 @@ export default function ModelsPage() {
     );
   }
 
-  const { local, cloud, gpu, gpuReason, avgLatencyMs, cloudSpendUsd } = data;
+  const { local, cloud, gpu, gpuReason, avgLatencyMs } = data;
   const localEmpty = local.length === 0;
   // WARP-1289 — the orchestrator's honesty flag: the local list can't be
   // trusted as complete (ai-gateway unreachable, or its Ollama provider
@@ -194,7 +193,6 @@ export default function ModelsPage() {
           gpu={gpu}
           gpuReason={gpuReason}
           avgLatencyMs={avgLatencyMs}
-          cloudSpendUsd={cloudSpendUsd}
           localCount={local.length}
         />
 

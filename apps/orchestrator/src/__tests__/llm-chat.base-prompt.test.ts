@@ -99,6 +99,16 @@ vi.mock("../services/llm-agent.service.js", () => ({
 
 import { createLlmRouter } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  promptBlockPrismaDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — this file measures the ASSEMBLED base prompt, so a block that
+// silently failed to compose was measured as absent. See the helper's header.
+guardComposerFailOpen();
 
 interface MockFact {
   category: string;
@@ -109,6 +119,10 @@ interface MockFact {
 
 function createPrismaMock(facts: MockFact[]) {
   return {
+    // WARP-2652 — persona + business + workspace. Absent here until now, so
+    // both block composers threw on every turn and the route's fail-open ate
+    // it: every assertion below ran against a prompt missing two blocks.
+    ...promptBlockPrismaDelegates(),
     memoryFact: {
       findMany: vi.fn(async ({ where }: { where: { active: boolean } }) =>
         facts.filter((f) => f.active === where.active),
@@ -150,6 +164,23 @@ beforeEach(() => {
 });
 
 describe("POST /api/llm/chat — base system prompt + memory injection", () => {
+  // WARP-2652 — the fixture floor: the prompt every case below measures
+  // carries both composed blocks. One assertion per block, on the marker each
+  // composer builds its output from, so a fixture regression names which one
+  // went missing instead of vanishing into the fail-open.
+  it("assembles a base prompt carrying both the persona and the business block", async () => {
+    const app = buildApp(createPrismaMock([]));
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "m1", messages: [{ role: "user", content: "hello" }] });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    expect(sys.content).toContain(PERSONA_BLOCK_PREFIX);
+    expect(sys.content).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+  });
+
   it("injects a base system message naming the retrieval and memory tools", async () => {
     const app = buildApp(createPrismaMock([]));
 

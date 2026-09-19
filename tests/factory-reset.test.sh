@@ -7,6 +7,13 @@
 #
 # Prerequisites: Docker running, no other services on ports 80/8080.
 # Runtime: ~3–5 minutes (builds images + waits for services).
+#
+# ci: developer-only — builds the whole image set and binds host ports 80/8080
+# for 3–5 minutes per run. A runner can do it, but not on every PR under the
+# $100/month Actions cap (docs/ci-cost-budget.md); setup-e2e.yml already owns
+# the from-scratch build lane. The reset's own invariants are covered without
+# Docker by tests/factory-reset-{storage,volume}-wipe and -purge-scope, all
+# three of which DO run at PR time (WARP-2647).
 # =============================================================================
 set -euo pipefail
 

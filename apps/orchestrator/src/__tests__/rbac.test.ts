@@ -188,6 +188,14 @@ const MATRIX: GuardedRoute[] = [
   // storage. Same posture as the rest of /api/admin/files.
   { method: "get", path: "/api/admin/files/usage", allowed: ["owner", "admin"] },
 
+  // ── admin console: the prompt + tool inspector ── (owner + admin) ──
+  //
+  // WARP-2823. Both read somebody ELSE's assembled prompt and tool reach, so
+  // the guard is the whole of their access control — there is no second check
+  // downstream and nothing about the target narrows what the CALLER may see.
+  { method: "get", path: "/api/admin/prompt-inspect/u1", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/admin/tool-inspect/u1", allowed: ["owner", "admin"] },
+
   // WARP-1258 (T6): departments/teams CRUD — same owner+admin posture as
   // people mutations. GET /api/departments is open (not in this matrix as it's
   // a read with no role restriction).
@@ -306,6 +314,41 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/auth/users", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/display/wifi/connect", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/admin/retrieval-eval/search", allowed: ["owner", "admin"] },
+
+  // ── ADR-048 filing review (WARP-2730) — owner + admin, on READS TOO ──
+  //
+  // Narrower than the rest of the CRM, which admits `family` for writes. Two
+  // reasons, both on the router's own header: a review card carries VERBATIM
+  // QUOTES from a stored document (a document-content read wearing a CRM
+  // read's clothes, and `family` has no document grant on this box), and
+  // applying is the act that turns a machine's reading into a record other
+  // people rely on — the consent for which was given by the owner who enabled
+  // filing.
+  //
+  // `service` is rejected by every row, like every other write here. There is
+  // no confirmation-gated tool behind this surface and there is not going to
+  // be one: a model choosing which of its own extractions to apply is the loop
+  // this design exists to keep a human inside of. The real router's wiring —
+  // including the `_service:mcp` id refusal that `requireRole` alone cannot
+  // express — is proven in `crm-filing.routes.test.ts`.
+  { method: "get", path: "/api/crm/filing/summary", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/proposals", allowed: ["owner", "admin"] },
+  { method: "patch", path: "/api/crm/filing/settings", allowed: ["owner", "admin"] },
+  // WARP-2733 — arming the auto-mode gate. Owner/admin AND a human: the route
+  // refuses a service principal separately, because this is the consent act
+  // that lets the box write to the CRM unattended.
+  { method: "post", path: "/api/crm/filing/canary", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/apply", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/reject", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/proposals/abc/not-same", allowed: ["owner", "admin"] },
+  // WARP-2731 — undo, the Rules memory and the Skipped list. Same reasoning as
+  // the rows above: a rule names a domain the owner filed under, and a skip
+  // list is a list of documents that exist. `family` sees neither.
+  { method: "post", path: "/api/crm/filing/proposals/abc/undo", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/rules", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/crm/filing/rules", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/crm/filing/rules/abc", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/crm/filing/skipped", allowed: ["owner", "admin"] },
 ];
 
 /**

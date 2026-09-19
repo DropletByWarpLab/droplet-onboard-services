@@ -4,14 +4,15 @@
  * (`POST /api/llm/complete`) for a concise summary.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import summarizeFile from "../../../src/handlers/files/summarize-file.js";
 import type { ToolContext } from "../../../src/types.js";
 
 const TRUNCATE_AT = 24000;
 
 function ctxWith(
-  get: ReturnType<typeof vi.fn>,
-  post: ReturnType<typeof vi.fn>,
+  get: Mock,
+  post: Mock,
   opts: { ncToken?: string; userId?: string } = {},
 ): ToolContext {
   return {

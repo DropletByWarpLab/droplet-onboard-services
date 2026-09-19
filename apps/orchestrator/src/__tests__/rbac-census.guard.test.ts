@@ -40,8 +40,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
+import { PACKAGE_ROOT } from "./helpers/test-paths.js";
 
-const ORCH = process.cwd();
+// Anchored to this test file, not the runner's cwd (WARP-2654) — a census
+// that reads a different tree's rbac.test.ts proves nothing about this one.
+const ORCH = PACKAGE_ROOT;
 const RBAC = path.join(ORCH, "src", "__tests__", "rbac.test.ts");
 const VITEST_CONFIG = path.join(ORCH, "vitest.config.ts");
 

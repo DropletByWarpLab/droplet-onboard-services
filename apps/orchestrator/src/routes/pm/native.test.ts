@@ -29,10 +29,14 @@ const uid = (p: string) => `${p}-${++id}`;
  *  (`err.code`), matching the production stand-in used elsewhere in the repo
  *  (`name === "PrismaClientKnownRequestError"` + a `code`). Lets a test force a
  *  specific write to lose a race (P2002 / P2025 / P2003) without a real DB. */
-function prismaError(code: string): Error & { code: string } {
-  const e = new Error(`Prisma ${code}`) as Error & { code: string };
+function prismaError(code: string, fieldName?: string): Error & { code: string } {
+  const e = new Error(`Prisma ${code}`) as Error & { code: string; meta?: Row };
   e.name = "PrismaClientKnownRequestError";
   e.code = code;
+  // ADR-048 — a real P2003 names the constraint it violated. `PmProject` has
+  // three settable FKs, so the service maps ONLY the company one; tests need
+  // the field name to prove that discrimination works.
+  if (fieldName) e.meta = { field_name: fieldName };
   return e;
 }
 
@@ -45,12 +49,16 @@ function makeFake(hooks: Hooks = {}) {
     const code = hooks[op];
     if (code) {
       hooks[op] = undefined;
-      throw prismaError(code);
+      const [c, field] = code.split(":");
+      throw prismaError(c, field);
     }
   };
   const db = {
     workspaces: [] as Row[],
     projects: [] as Row[],
+    // ADR-048 (WARP-2729) — `assertCompanyExists` probes this before a project
+    // may be filed under a customer.
+    companies: [] as Row[],
     states: [] as Row[],
     labels: [] as Row[],
     items: [] as Row[],
@@ -58,6 +66,11 @@ function makeFake(hooks: Hooks = {}) {
     itemLabels: [] as Row[],
     comments: [] as Row[],
     activity: [] as Row[],
+    // WARP-2586: the relation edge table. No test in this file creates one —
+    // relations have their own suite (routes/pm/relations.test.ts) — but the
+    // store and its model methods must exist, because the work-item DETAIL
+    // read and deleteWorkItem now both consult it.
+    relations: [] as Row[],
   };
 
   const resolveItem = (it: Row, include?: Row) => {
@@ -127,6 +140,7 @@ function makeFake(hooks: Hooks = {}) {
           icon: null,
           color: null,
           leadId: null,
+          companyId: null,
           createdById: null,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -141,7 +155,15 @@ function makeFake(hooks: Hooks = {}) {
         return out;
       },
       update: async ({ where, data, include, select }: { where: Row; data: Row; include?: Row; select?: Row }) => {
+        fire("pmProject.update");
         const p = db.projects.find((x) => x.id === where.id)!;
+        // Prisma's checked update exposes relations, not raw FKs — mirror the
+        // connect/disconnect the service actually sends.
+        const rel = data.company as { connect?: Row; disconnect?: boolean } | undefined;
+        if (rel) {
+          p.companyId = rel.disconnect ? null : (rel.connect as Row).id;
+          delete (data as Row).company;
+        }
         if (data.seqCounter && typeof data.seqCounter === "object") {
           p.seqCounter = (p.seqCounter as number) + (data.seqCounter as { increment: number }).increment;
         }
@@ -156,6 +178,11 @@ function makeFake(hooks: Hooks = {}) {
         db.projects = db.projects.filter((x) => x.id !== where.id);
         return {};
       },
+    },
+
+    crmCompany: {
+      findUnique: async ({ where }: { where: Row }) =>
+        db.companies.find((c) => c.id === where.id) ?? null,
     },
 
     pmState: {
@@ -328,6 +355,31 @@ function makeFake(hooks: Hooks = {}) {
         const a = { id: uid("ac"), createdAt: new Date(), ...data };
         db.activity.push(a);
         return a;
+      },
+      createMany: async ({ data }: { data: Row[] }) => {
+        for (const row of data) db.activity.push({ id: uid("ac"), createdAt: new Date(), ...row });
+        return { count: data.length };
+      },
+    },
+
+    // WARP-2586: consulted by the composed work-item detail read and by
+    // deleteWorkItem's pre-cascade relation audit. Both pass the two-arm
+    // `OR: [{ fromId }, { toId }]` shape; the store stays empty in this file,
+    // so the behaviour under test is "an item with no relations reads and
+    // deletes exactly as before".
+    pmWorkItemRelation: {
+      findMany: async ({ where, take }: { where: Row; take?: number }) => {
+        const or = (where.OR as Row[] | undefined) ?? [];
+        const rows = db.relations.filter((r) => {
+          if (where.kind !== undefined && r.kind !== where.kind) return false;
+          if (or.length === 0) return true;
+          return or.some(
+            (c) =>
+              (c.fromId !== undefined && r.fromId === c.fromId) ||
+              (c.toId !== undefined && r.toId === c.toId),
+          );
+        });
+        return take === undefined ? rows : rows.slice(0, take);
       },
     },
   };
@@ -791,14 +843,34 @@ describe("native PM routes — identity PATCH writes no spurious activity row", 
     expect(after).toBe(before);
   });
 
-  it("CHANGING the assignee set DOES write an 'updated' activity row", async () => {
-    const before = db.activity.filter((a) => a.verb === "updated").length;
+  it("CHANGING the assignee set writes assigned/unassigned, not a generic 'updated'", async () => {
+    // WARP-2587 — this case used to pin `updated`, because assignee churn was
+    // folded into the `updated`/`fields` bucket. It is not any more: `assigned`
+    // and `unassigned` had been members of PmActivityVerb since WARP-884 with
+    // ZERO writers, and this is the change that gave them one.
+    //
+    // The test's intent is unchanged and is what still holds — an identity
+    // PATCH writes nothing, a real change writes an audit row. What changed is
+    // that the row now NAMES what happened, which is strictly more information
+    // and which the dashboard was already built to render: `detail.tsx`'s
+    // `humanizeActivity` has carried `case "assigned": "changed assignees"`
+    // all along, against a producer that did not exist. `updated` rendered as
+    // the vaguer "updated the item".
+    //
+    // Asserted per-verb rather than as a total, so this cannot pass on a
+    // future change that emits the right COUNT of the wrong rows.
+    const before = db.activity.length;
     const res = await request(makeApp(prisma, OWNER))
       .patch(`/api/pm/work-items/${wiId}`)
       .send({ assignees: ["u1", "u3"] });
     expect(res.status).toBe(200);
-    const after = db.activity.filter((a) => a.verb === "updated").length;
-    expect(after).toBe(before + 1);
+
+    const written = db.activity.slice(before);
+    // u1,u2 -> u1,u3 is exactly one departure and one arrival.
+    expect(written.filter((a) => a.verb === "unassigned")).toHaveLength(1);
+    expect(written.filter((a) => a.verb === "assigned")).toHaveLength(1);
+    // ...and NOT the generic bucket, which is the regression this replaces.
+    expect(written.filter((a) => a.verb === "updated")).toHaveLength(0);
   });
 
   it("re-PATCHing the SAME (empty) labelIds writes no 'updated' activity row", async () => {
@@ -809,5 +881,111 @@ describe("native PM routes — identity PATCH writes no spurious activity row", 
     expect(res.status).toBe(200);
     const after = db.activity.filter((a) => a.verb === "updated").length;
     expect(after).toBe(before);
+  });
+});
+
+// ── ADR-048 (WARP-2729) — filing a project under a customer ──────────────────
+// The `company_id` writer added by this PR was previously unobservable and
+// undefended: nothing asserted the round-trip, `""` slipped past the existence
+// check into an invalid FK write, and a customer deleted mid-request produced a
+// raw 500 instead of a 404.
+
+describe("native PM routes — project → customer link (ADR-048)", () => {
+  const COMPANY = "co-acme";
+
+  function seeded() {
+    id = 0;
+    const fake = makeFake();
+    fake.db.companies.push({ id: COMPANY, name: "Acme" });
+    return fake;
+  }
+
+  it("POST company_id links the project AND the link is readable back", async () => {
+    const fake = seeded();
+    const app = makeApp(fake.prisma, OWNER);
+    const created = await request(app).post("/api/pm/projects").send({ name: "Roof", company_id: COMPANY });
+    expect(created.status).toBe(201);
+    // Observability: without `companyId` on ApiProject the write could only be
+    // confirmed by reading Postgres directly.
+    expect(created.body.project.companyId).toBe(COMPANY);
+
+    const fetched = await request(app).get(`/api/pm/projects/${created.body.project.id}`);
+    expect(fetched.body.project.companyId).toBe(COMPANY);
+  });
+
+  it("POST an unknown company_id → 404 company_not_found", async () => {
+    const fake = seeded();
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .post("/api/pm/projects")
+      .send({ name: "Roof", company_id: "co-nope" });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("company_not_found");
+  });
+
+  it('POST company_id: "" is rejected at the boundary (400), never written', async () => {
+    // The defect: "" is falsy, so the old truthy guard skipped the existence
+    // check, and `?? null` does not coerce "" — an empty FK reached Postgres.
+    const fake = seeded();
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .post("/api/pm/projects")
+      .send({ name: "Roof", company_id: "" });
+    expect(res.status).toBe(400);
+    expect(fake.db.projects).toHaveLength(0);
+  });
+
+  it('PATCH company_id: "" is rejected (400) — "" is malformed, not a clear', async () => {
+    const fake = seeded();
+    const app = makeApp(fake.prisma, OWNER);
+    const proj = await request(app).post("/api/pm/projects").send({ name: "Roof", company_id: COMPANY });
+    const res = await request(app).patch(`/api/pm/projects/${proj.body.project.id}`).send({ company_id: "" });
+    expect(res.status).toBe(400);
+    // …and the existing link is untouched.
+    const after = await request(app).get(`/api/pm/projects/${proj.body.project.id}`);
+    expect(after.body.project.companyId).toBe(COMPANY);
+  });
+
+  it("PATCH company_id: null clears the link", async () => {
+    const fake = seeded();
+    const app = makeApp(fake.prisma, OWNER);
+    const proj = await request(app).post("/api/pm/projects").send({ name: "Roof", company_id: COMPANY });
+    const res = await request(app).patch(`/api/pm/projects/${proj.body.project.id}`).send({ company_id: null });
+    expect(res.status).toBe(200);
+    expect(res.body.project.companyId).toBeNull();
+  });
+
+  it("createProject company FK race → P2003 → 404 company_not_found", async () => {
+    // The company passes `assertCompanyExists`, then is hard-deleted before the
+    // insert. Companies CAN be hard-deleted, so this race is reachable.
+    const fake = seeded();
+    fake.hooks["pmProject.create"] = "P2003:PmProject_companyId_fkey (index)";
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .post("/api/pm/projects")
+      .send({ name: "Roof", company_id: COMPANY });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("company_not_found");
+  });
+
+  it("updateProject company FK race → P2003 → 404 company_not_found", async () => {
+    const fake = seeded();
+    const app = makeApp(fake.prisma, OWNER);
+    const proj = await request(app).post("/api/pm/projects").send({ name: "Roof" });
+    fake.hooks["pmProject.update"] = "P2003:PmProject_companyId_fkey (index)";
+    const res = await request(app)
+      .patch(`/api/pm/projects/${proj.body.project.id}`)
+      .send({ company_id: COMPANY });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("company_not_found");
+  });
+
+  it("🔴 a P2003 on a DIFFERENT foreign key is NOT reported as company_not_found", async () => {
+    // The discrimination that makes the mapping honest. `PmProject` has three
+    // settable FKs; blanket-mapping P2003 would tell an operator the customer
+    // is missing when the DEPARTMENT is the row that vanished.
+    const fake = seeded();
+    fake.hooks["pmProject.create"] = "P2003:PmProject_departmentId_fkey (index)";
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .post("/api/pm/projects")
+      .send({ name: "Roof", company_id: COMPANY });
+    expect(res.body.error).not.toBe("company_not_found");
   });
 });

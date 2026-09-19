@@ -8,6 +8,10 @@
  *   PATCH  /api/tools/:slug                     — edit + publish draft→live
  *   POST   /api/tools/:slug/runs                — imperative run-now
  *   GET    /api/tools/:slug/runs                — paginated history
+ *   GET    /api/tools/:slug/schedules           — WARP-2665 rrule schedules
+ *   POST   /api/tools/:slug/schedules           — WARP-2665 create
+ *   PATCH  /api/tools/:slug/schedules/:id       — WARP-2665 edit / enable
+ *   DELETE /api/tools/:slug/schedules/:id       — WARP-2665 remove
  *
  * The §7 spec model lives in this orchestrator, NOT in
  * `packages/tools-core` — that registry is the capability source of
@@ -24,6 +28,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
   plannedToolNames,
+  referencedStepNames,
   runToolSpec,
   type StepDispatcher,
   type Summarizer,
@@ -31,8 +36,11 @@ import {
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   resolveToolAccessScope,
+  writeToolsIn,
 } from "../services/tool-access.service.js";
+import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -44,6 +52,14 @@ type SpecStatus = (typeof SPEC_STATUSES)[number];
 // be URL-safe in `/api/tools/:slug` without escaping; loose enough for
 // operator-typed names.
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * WARP-2670 — the name a step may publish its result under, for later steps
+ * to read as `${steps.<name>}`. Lowercase snake so the reference syntax needs
+ * no quoting or escaping, and so two names cannot differ only by case.
+ */
+const OUTPUT_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
+const outputNameSchema = z.string().regex(OUTPUT_NAME_RE).optional();
 
 /**
  * A step is either a tool CALL or — since WARP-1996 — a SUMMARIZE, which
@@ -58,12 +74,14 @@ const callStepSchema = z.object({
   kind: z.literal("call").default("call"),
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
 });
 
 const summarizeStepSchema = z.object({
   kind: z.literal("summarize"),
   /** Optional framing; the runner supplies its default when absent. */
   prompt: z.string().min(1).max(4000).optional(),
+  as: outputNameSchema,
 });
 
 const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
@@ -80,10 +98,141 @@ type ParsedStep = z.infer<typeof stepSchema>;
  * malformed on the next run.
  */
 function storedArgsFor(s: ParsedStep): Record<string, unknown> {
+  // WARP-2670 — `as` rides in the same JSON blob for both kinds. It is not a
+  // column because `ToolStep.args` is Json and `kind` is a plain String, the
+  // seam C1's schema comment already nominated for exactly this; a column
+  // would cost a migration to store something only the walker reads.
+  const named = s.as ? { as: s.as } : {};
   if (s.kind === "summarize") {
-    return s.prompt ? { prompt: s.prompt } : {};
+    return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
   }
-  return { tool: s.tool, args: s.args ?? {} };
+  return { tool: s.tool, args: s.args ?? {}, ...named };
+}
+
+/**
+ * WARP-2670 — refuse a reference graph the runner could not satisfy.
+ *
+ * Three ways to write a spec that parses but cannot run:
+ *   - two steps publishing the same name (the second silently shadows);
+ *   - `${steps.x}` where nothing is named `x`;
+ *   - `${steps.x}` where `x` is published by a LATER step, or by this one.
+ *
+ * The walker catches all three, but only on the first fire — and for a
+ * scheduled spec the first fire is at 03:00 with nobody reading. Checking
+ * here means the author is told while they are still looking at the step
+ * they typed. This is the same argument the schedule routes make for
+ * parsing an rrule at write time instead of auto-disabling it later.
+ *
+ * Paths are NOT checked: `${steps.invoices.0.total}` depends on what the
+ * tool returns at run time, which authoring cannot know. Only the name
+ * graph — which is static — is decided here.
+ *
+ * A summarize step's `prompt` is NOT scanned either. The runner hands the
+ * prompt to the summarizer verbatim — it never runs `resolveRefs` over it —
+ * so a `${steps.x}` inside prose is text, not a reference, and refusing it
+ * here would enforce a contract the runtime does not implement. Only the
+ * args a `call` step dispatches are resolved, so only those are checked.
+ */
+function stepReferenceError(steps: ParsedStep[]): Record<string, unknown> | null {
+  const published = new Set<string>();
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const scanned = step.kind === "summarize" ? {} : storedArgsFor(step);
+    for (const ref of referencedStepNames(scanned)) {
+      if (!published.has(ref)) {
+        return {
+          error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
+          detail:
+            "give the producing step an `as` name, and make sure it comes first",
+          step: i,
+          reference: ref,
+        };
+      }
+    }
+    if (step.as) {
+      if (published.has(step.as)) {
+        return {
+          error: `Two steps publish the name "${step.as}"`,
+          detail: "step output names must be unique within a spec",
+          step: i,
+          reference: step.as,
+        };
+      }
+      published.add(step.as);
+    }
+  }
+  return null;
+}
+
+/**
+ * WARP-2665 — the write tools a step list actually calls.
+ *
+ * `ToolSpec.writes` gates two safety decisions: run-now's 409 confirmation
+ * (`POST /tools/:slug/runs`) and the WARP-463 ticker's refusal to auto-fire a
+ * `writes && !reversible` spec unattended. Until now it was whatever the
+ * author put in the request body and was never checked against the steps, so
+ * a spec calling a writing tool could be stored as `writes: false` and would
+ * then fire with nobody watching. The ADR-004 write tier still applied at
+ * fire time — this was never an escalation — but a gate that exists for
+ * "destructive, and nobody is looking" was deciding on a self-declared field.
+ *
+ * Names come from `plannedToolNames`, the runner's OWN parser and the same one
+ * the walker dispatches through, rather than a second reading of the step
+ * shape that could drift from it. A step kind that dispatches no tool (today
+ * `summarize`) contributes no name, so it can never make a spec look like it
+ * writes — which is also what keeps a future non-dispatching kind correct here
+ * without touching this function.
+ *
+ * `writeToolsIn` is the classification the ticker's gate and the miner read
+ * too, against `WRITE_TOOLS` — derived from each tool's `requiresWrite` in
+ * `@droplet/tools-core` — so a write tool added to the registry is classified
+ * everywhere without anyone remembering to update a list.
+ */
+function writeToolNamesIn(
+  steps: ReadonlyArray<{ kind: string; args: unknown }>,
+): string[] {
+  return writeToolsIn(plannedToolNames(steps));
+}
+
+/** Parsed request steps in the stored `{kind, args}` shape `plannedToolNames` reads. */
+function toStoredShape(
+  steps: ParsedStep[],
+): Array<{ kind: string; args: unknown }> {
+  return steps.map((s) => ({ kind: s.kind, args: storedArgsFor(s) }));
+}
+
+/**
+ * WARP-2665 — reconcile a declared `writes` against the derived one.
+ *
+ * Asymmetric on purpose. Declaring `writes: true` on a spec that calls no
+ * write tool is a CONSERVATIVE disagreement: it can only add a confirmation
+ * prompt and keep the scheduler's hands off, so it is accepted as authored.
+ * Declaring `writes: false` on a spec that does call one is the only
+ * direction that defeats a safety gate, and it is refused — loudly, at
+ * authoring time while a human is present to read the error, rather than
+ * silently at 03:00 when the schedule fires.
+ *
+ * Omitting the field derives it. That is what keeps existing clients and the
+ * miner's draft→live promotion correct without asking either to change.
+ */
+function reconcileWrites(
+  declared: boolean | undefined,
+  writeTools: string[],
+): { ok: true; writes: boolean } | { ok: false; writeTools: string[] } {
+  if (declared === false && writeTools.length > 0) {
+    return { ok: false, writeTools };
+  }
+  return { ok: true, writes: declared === true ? true : writeTools.length > 0 };
+}
+
+/** The 400 body for a `writes: false` declaration the steps contradict. */
+function writesDisagreementBody(writeTools: string[]): Record<string, unknown> {
+  return {
+    error: "Declared writes:false, but these steps call write tools",
+    detail:
+      "omit `writes` to have it derived from the steps, or declare writes:true",
+    writeTools,
+  };
 }
 
 const createSpecSchema = z.object({
@@ -109,6 +258,58 @@ const patchSpecSchema = z.object({
   steps: z.array(stepSchema).min(1).max(32).optional(),
   status: z.enum(SPEC_STATUSES).optional(),
 });
+
+/**
+ * WARP-2665 — schedule write schemas.
+ *
+ * `rrule` is validated by PARSING it (see the route), not by a regex: the
+ * ticker's `nextFireFromRrule` is the only authority on what this box can
+ * actually fire, and a rule it cannot read is auto-disabled on its first
+ * tick. Refusing it here instead means the operator learns at the moment
+ * they typed it.
+ *
+ * `timezone` is likewise validated by the parser, which rejects any zone
+ * ECMA-402 does not know.
+ */
+const createScheduleSchema = z.object({
+  rrule: z.string().min(3).max(512),
+  timezone: z.string().min(1).max(64).optional(),
+  enabled: z.boolean().optional(),
+});
+
+const patchScheduleSchema = z
+  .object({
+    rrule: z.string().min(3).max(512).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "empty patch — pass at least one of rrule, timezone, enabled",
+  });
+
+interface ScheduleRow {
+  id: string;
+  specId: string;
+  rrule: string;
+  timezone: string;
+  nextFireAt: Date;
+  enabled: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+function projectSchedule(row: ScheduleRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    specId: row.specId,
+    rrule: row.rrule,
+    timezone: row.timezone,
+    nextFireAt: row.nextFireAt,
+    enabled: row.enabled,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
 interface StepRow {
   id: string;
@@ -280,6 +481,24 @@ export function createToolsRouter(
         // diverge from cameras / network-firewall / reminders which
         // all key on req.user.id.
         const actor = req.user?.id ?? null;
+
+        // WARP-2670 — refuse a reference graph the walker could not satisfy.
+        const refError = stepReferenceError(parsed.data.steps);
+        if (refError) {
+          res.status(400).json(refError);
+          return;
+        }
+
+        // WARP-2665 — classify from the steps, not from the body.
+        const reconciled = reconcileWrites(
+          parsed.data.writes,
+          writeToolNamesIn(toStoredShape(parsed.data.steps)),
+        );
+        if (!reconciled.ok) {
+          res.status(400).json(writesDisagreementBody(reconciled.writeTools));
+          return;
+        }
+
         try {
           const created = (await prisma.toolSpec.create({
             data: {
@@ -289,7 +508,7 @@ export function createToolsRouter(
               description: parsed.data.description ?? null,
               share: parsed.data.share ?? null,
               safety: parsed.data.safety ?? 1,
-              writes: parsed.data.writes ?? false,
+              writes: reconciled.writes,
               reversible: parsed.data.reversible ?? true,
               ownerId: actor,
               steps: {
@@ -332,11 +551,43 @@ export function createToolsRouter(
             .json({ error: "Invalid patch", details: parsed.error.flatten() });
           return;
         }
+        // WARP-2665 — steps are loaded because the write classification is
+        // derived from them. A patch that changes `writes` without touching
+        // the steps must be checked against the steps already stored, and a
+        // patch that replaces the steps must re-derive even when it says
+        // nothing about `writes` — that second case is how a read-only spec
+        // silently grew a write step before this.
         const existing = (await prisma.toolSpec.findUnique({
           where: { slug: req.params.slug },
-        })) as unknown as SpecRow | null;
+          include: { steps: { orderBy: { idx: "asc" } } },
+        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!existing) {
           res.status(404).json({ error: "Spec not found" });
+          return;
+        }
+
+        // WARP-2670 — only when the steps are being replaced. A patch that
+        // leaves them alone cannot have introduced a bad reference, and
+        // re-validating stored steps would turn an unrelated rename into a
+        // 400 on a spec that has been running fine.
+        if (parsed.data.steps) {
+          const refError = stepReferenceError(parsed.data.steps);
+          if (refError) {
+            res.status(400).json(refError);
+            return;
+          }
+        }
+
+        const reconciled = reconcileWrites(
+          parsed.data.writes,
+          writeToolNamesIn(
+            parsed.data.steps
+              ? toStoredShape(parsed.data.steps)
+              : existing.steps,
+          ),
+        );
+        if (!reconciled.ok) {
+          res.status(400).json(writesDisagreementBody(reconciled.writeTools));
           return;
         }
 
@@ -384,7 +635,17 @@ export function createToolsRouter(
               description: parsed.data.description,
               share: parsed.data.share,
               safety: parsed.data.safety,
-              writes: parsed.data.writes,
+              // WARP-2665 — an explicit `writes` wins (the reconcile above
+              // has already refused one the steps contradict); otherwise a
+              // PATCH may only RAISE the flag: `existing.writes ||
+              // reconciled.writes` lets the derivation add a write flag and
+              // never clears a conservative `writes: true` an author set by
+              // hand. Always persisted, never a Prisma skip — the body that
+              // promotes a mined suggestion is a bare `{"status":"live"}`,
+              // and the WARP-464 miner used to mint those rows `writes:
+              // false`, so a skip here published a spec whose own steps
+              // contradicted the flag the ticker's gate trusts.
+              writes: parsed.data.writes ?? (existing.writes || reconciled.writes),
               reversible: parsed.data.reversible,
               status: parsed.data.status as any,
               version: { increment: 1 },
@@ -440,7 +701,16 @@ export function createToolsRouter(
         // we refuse with 409 + a confirmation token shape the dashboard
         // can re-POST. This keeps imperative run-now in lockstep with
         // the C2 scheduler's `safeRun` skip-and-warn posture.
-        if (spec.writes && !spec.reversible) {
+        //
+        // WARP-2665 — "writes" is the stored column OR what the steps call,
+        // the same derivation the ticker's gate reads. A spec stored before
+        // the derivation existed (or seeded outside the routes) can carry
+        // `writes: false` while its steps call a write tool; trusting the
+        // column alone here would let a person fire that spec from the Live
+        // tab without the confirmation the ticker would have withheld.
+        const effectiveWrites =
+          spec.writes || hasWriteTool(plannedToolNames(spec.steps));
+        if (effectiveWrites && !spec.reversible) {
           const confirmed =
             String(req.query.confirm ?? "").toLowerCase() === "true";
           if (!confirmed) {
@@ -450,7 +720,8 @@ export function createToolsRouter(
                 "this spec writes and is not reversible — re-POST with ?confirm=true",
               specId: spec.id,
               slug: spec.slug,
-              writes: spec.writes,
+              writes: effectiveWrites,
+              writesSource: spec.writes ? "stored" : "derived",
               reversible: spec.reversible,
             });
             return;
@@ -571,6 +842,222 @@ export function createToolsRouter(
             trace: r.trace,
           })),
         });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── WARP-2665: schedules ─────────────────────────────────────────
+  //
+  // The WARP-463 ticker has scanned `ToolSchedule` every 60s since it
+  // shipped and has never fired anything, because nothing in the repo could
+  // create a row: no route, no seed, no tool. Its rrule parser, its
+  // `writes && !reversible` safety gate, its per-fire principal resolution
+  // (WARP-1580) and its malformed-rule auto-disable were reachable only by
+  // hand-inserted SQL. These four routes are the missing write path.
+  //
+  // Owner/admin only for the mutating three — the same floor as draft→live
+  // promotion, because scheduling a spec and publishing one are the same
+  // decision: this now runs without anybody pressing a button.
+
+  /**
+   * Resolve `:slug` → spec, and (when `:id` is present) the schedule that
+   * belongs to it. Returns null after answering 404, so callers just return.
+   *
+   * The spec-ownership check is not decoration: without it
+   * `PATCH /tools/any-spec/schedules/<id-belonging-to-another-spec>` would
+   * edit that other spec's schedule, and `:slug` would be advisory.
+   */
+  async function resolveSchedule(
+    req: Request,
+    res: Response,
+  ): Promise<{ spec: SpecRow; schedule: ScheduleRow | null } | null> {
+    const spec = (await prisma.toolSpec.findUnique({
+      where: { slug: req.params.slug },
+    })) as unknown as SpecRow | null;
+    if (!spec) {
+      res.status(404).json({ error: "Spec not found" });
+      return null;
+    }
+    if (req.params.id === undefined) return { spec, schedule: null };
+
+    const schedule = (await prisma.toolSchedule.findUnique({
+      where: { id: req.params.id },
+    })) as unknown as ScheduleRow | null;
+    if (!schedule || schedule.specId !== spec.id) {
+      res.status(404).json({ error: "Schedule not found" });
+      return null;
+    }
+    return { spec, schedule };
+  }
+
+  /**
+   * Compute the first fire, and in doing so validate the rule.
+   *
+   * `isSupportedRrule` goes first, and it is not a courtesy check: it is the
+   * DAILY/WEEKLY, INTERVAL=1 subset `routes/scenes.ts` accepts, and it is
+   * what BOUNDS the computation below. `nextFireFromRrule` walks
+   * 8 x INTERVAL candidate days for a WEEKLY rule, synchronously, so an
+   * INTERVAL taken from the request body (`INTERVAL=100000000` is 40 bytes,
+   * well inside the 512-char cap) would hold the event loop for minutes.
+   *
+   * `nextFireFromRrule` then returns null for anything this box cannot
+   * actually fire — a malformed segment, an unknown IANA zone. The ticker's
+   * response to such a rule is to disable the schedule and audit it;
+   * refusing at write time means the operator finds out while they are
+   * still looking at the field they typed it into.
+   */
+  function firstFire(rrule: string, timezone: string): Date | null {
+    if (!isSupportedRrule(rrule)) return null;
+    return nextFireFromRrule(rrule, new Date(), timezone);
+  }
+
+  const UNSUPPORTED_RULE = {
+    error: "Unsupported schedule rule",
+    detail:
+      "FREQ must be DAILY or WEEKLY (optionally with BYDAY/BYHOUR/BYMINUTE, " +
+      "no INTERVAL), and timezone must be a valid IANA zone",
+  };
+
+  router.get(
+    "/tools/:slug/schedules",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const found = await resolveSchedule(req, res);
+        if (!found) return;
+        const rows = (await prisma.toolSchedule.findMany({
+          where: { specId: found.spec.id },
+          orderBy: { nextFireAt: "asc" },
+        })) as unknown as ScheduleRow[];
+        res.json({
+          slug: found.spec.slug,
+          schedules: rows.map(projectSchedule),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/tools/:slug/schedules",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = createScheduleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid schedule",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const found = await resolveSchedule(req, res);
+        if (!found) return;
+
+        // Same rule as run-now: a draft or a suggestion cannot be put on a
+        // timer. The ticker already skips a non-live spec, but silently —
+        // an operator who scheduled a draft would otherwise wait for a fire
+        // that never comes with nothing telling them why.
+        if (found.spec.status !== "live") {
+          res.status(400).json({
+            error: "Only live specs can be scheduled",
+            status: found.spec.status,
+          });
+          return;
+        }
+
+        const timezone = parsed.data.timezone ?? "UTC";
+        const nextFireAt = firstFire(parsed.data.rrule, timezone);
+        if (nextFireAt === null) {
+          res.status(400).json(UNSUPPORTED_RULE);
+          return;
+        }
+
+        const created = (await prisma.toolSchedule.create({
+          data: {
+            specId: found.spec.id,
+            rrule: parsed.data.rrule,
+            timezone,
+            nextFireAt,
+            enabled: parsed.data.enabled ?? true,
+          },
+        })) as unknown as ScheduleRow;
+
+        logger.info(
+          { slug: found.spec.slug, scheduleId: created.id, timezone },
+          "tool schedule created",
+        );
+        res.status(201).json(projectSchedule(created));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.patch(
+    "/tools/:slug/schedules/:id",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = patchScheduleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid schedule patch",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const found = await resolveSchedule(req, res);
+        if (!found || !found.schedule) return;
+        const current = found.schedule;
+
+        // Recompute the next fire only when the CADENCE changed. Toggling
+        // `enabled` must not move it: re-enabling a schedule should resume
+        // the rhythm it was paused on, not skip to the next slot from now.
+        const rrule = parsed.data.rrule ?? current.rrule;
+        const timezone = parsed.data.timezone ?? current.timezone;
+        const cadenceChanged =
+          rrule !== current.rrule || timezone !== current.timezone;
+
+        let nextFireAt: Date | undefined;
+        if (cadenceChanged) {
+          const next = firstFire(rrule, timezone);
+          if (next === null) {
+            res.status(400).json(UNSUPPORTED_RULE);
+            return;
+          }
+          nextFireAt = next;
+        }
+
+        const updated = (await prisma.toolSchedule.update({
+          where: { id: current.id },
+          data: {
+            rrule: parsed.data.rrule,
+            timezone: parsed.data.timezone,
+            enabled: parsed.data.enabled,
+            nextFireAt,
+          },
+        })) as unknown as ScheduleRow;
+
+        res.json(projectSchedule(updated));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/tools/:slug/schedules/:id",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const found = await resolveSchedule(req, res);
+        if (!found || !found.schedule) return;
+        await prisma.toolSchedule.delete({ where: { id: found.schedule.id } });
+        res.status(204).end();
       } catch (err) {
         next(err);
       }

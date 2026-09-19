@@ -15,6 +15,38 @@ After=network-online.target docker.service
 # loses DHCP until reboot. After= still orders us after Docker; Wants= won't cascade.
 Wants=network-online.target docker.service
 
+# WARP-2575: br-lan is NOT created by this repo. The only definition of it is
+# scripts/host/etc-netplan/70-eth.yaml.example — an *example* that setup.sh
+# never installs — and droplet-openwrt-attach only ever *consumes* the bridge
+# (it enslaves veth-dap into an existing one). So on a stock single-box the
+# bridge is simply absent, ExecStart's very first `ip addr replace ... dev
+# br-lan` dies under `set -e`, and single-box.sh has nonetheless `enable`d us:
+# measured on the bench 2026-08-31, 7251 restarts in 10.5 h of uptime, 60% of
+# every line in the journal.
+#
+# Skipping on a missing bridge is what the sibling unit already does — see the
+# "host br-lan not found — falling back to routed AP mode" branch in
+# /usr/local/sbin/droplet-openwrt-attach. This unit was the outlier that
+# hard-failed instead of degrading.
+#
+# The condition is evaluated when a start job runs, NOT continuously: a br-lan
+# created after boot (e.g. `netplan apply` of the example file) needs an
+# explicit `systemctl start droplet-host-net` to pick it up. netplan-created
+# bridges exist well before network-online.target, so the ordering above
+# already covers the normal case.
+ConditionPathExists=/sys/class/net/br-lan
+
+# WARP-2575: a start limit that can actually trip. systemd's defaults are
+# StartLimitIntervalSec=10s / StartLimitBurst=5, and at RestartSec=5s only TWO
+# restarts fit in a 10 s window — the burst ceiling of 5 is unreachable by
+# construction, which is why the loop above ran unbounded instead of parking
+# after five tries. Widening the window to 120 s makes the ceiling reachable:
+# a genuine transient (a bridge a moment late, a bad lan-dhcp.conf) still gets
+# 5 attempts across ~25 s, and anything permanent lands in `failed` — loud
+# once, rather than loud forever.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 Type=simple
 EnvironmentFile=-/etc/default/droplet-host-net

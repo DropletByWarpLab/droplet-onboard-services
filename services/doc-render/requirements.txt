@@ -1,0 +1,25 @@
+# Pinned to the fastapi/uvicorn line every sibling service uses (web-fetch,
+# ai-gateway, routing, switch, ops-console). See the WARP-1948 note in
+# services/web-fetch/requirements.txt for why the 0.115 line is not an option.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+
+# Document writers. All permissive — shipping the appliance is conveyance, so
+# a copyleft dependency here would attach an obligation to the whole image.
+#   python-docx  MIT
+#   openpyxl     MIT
+#   reportlab    BSD-3-Clause, and PURE PYTHON: no cairo/pango/HarfBuzz, so no
+#                LGPL native layer enters the image. That is why WeasyPrint
+#                (BSD itself, LGPL stack) was rejected; wkhtmltopdf is LGPL
+#                outright.
+# python-docx and openpyxl are already vetted in services/file-indexer, where
+# they READ documents for the RAG index; reportlab is vetted there too, as a
+# dev dependency that builds PDF test fixtures.
+python-docx==1.2.0
+openpyxl==3.1.5
+reportlab==4.2.5
+
+# OSV floor: the osv-nightly resolver scores transitive deps at their minimum
+# resolvable version, so state the real minimum instead of suppressing the
+# advisory (same idiom as web-fetch).
+idna>=3.15

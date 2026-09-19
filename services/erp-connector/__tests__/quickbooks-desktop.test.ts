@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 
 import { XmlError, decodeEntities, parseXml, textAt } from "../src/quickbooks/xml.js";
 import {
+  QBXML_STEPS,
   QBXML_VERSION,
   QbxmlStatusError,
   buildRequest,
@@ -43,12 +44,18 @@ const INVOICE_RS = `<?xml version="1.0"?><?qbxml version="13.0"?>
       <TxnDate>2026-07-01</TxnDate><DueDate>2026-07-31</DueDate>
       <CustomerRef><ListID>80000001</ListID><FullName>Northside Clinic</FullName></CustomerRef>
       <Subtotal>1200.00</Subtotal><BalanceRemaining>1200.00</BalanceRemaining>
+      <!-- WARP-2475 — DATETIMETYPE with an explicit offset, and edited two
+           weeks after TxnDate: the gap a TxnDate fallback would hide. -->
+      <TimeModified>2026-07-15T14:23:11-07:00</TimeModified>
     </InvoiceRet>
     <InvoiceRet>
       <TxnID>A2</TxnID><RefNumber>INV-0999</RefNumber>
       <TxnDate>2026-06-02</TxnDate><DueDate>2026-07-02</DueDate>
       <CustomerRef><ListID>80000001</ListID><FullName>Northside Clinic</FullName></CustomerRef>
       <Subtotal>500.00</Subtotal><BalanceRemaining>0.00</BalanceRemaining>
+      <!-- Already-UTC form. Both spellings are legal DATETIMETYPE and a host
+           that prints Z must not be refused alongside the naive case below. -->
+      <TimeModified>2026-06-03T09:00:00Z</TimeModified>
     </InvoiceRet>
   </InvoiceQueryRs>
 </QBXMLMsgsRs></QBXML>`;
@@ -68,17 +75,25 @@ const BILL_RS = `<?xml version="1.0"?><?qbxml version="13.0"?>
       <TxnID>B2</TxnID><RefNumber>BILL-78</RefNumber>
       <TxnDate>2026-07-20</TxnDate><DueDate>2026-08-19</DueDate>
       <VendorRef><ListID>90000002</ListID><FullName>Patterson Dental</FullName></VendorRef>
-      <AmountDue>1000.00</AmountDue><OpenAmount>850.25</OpenAmount></BillRet>
+      <AmountDue>1000.00</AmountDue><OpenAmount>850.25</OpenAmount>
+      <TimeModified>2026-07-22T16:45:09-07:00</TimeModified></BillRet>
     <BillRet>
       <TxnID>B1</TxnID><RefNumber>BILL-77</RefNumber>
       <TxnDate>2026-07-05</TxnDate><DueDate>2026-08-04</DueDate>
       <VendorRef><ListID>90000001</ListID><FullName>Henry Schein</FullName></VendorRef>
-      <AmountDue>2000.00</AmountDue><OpenAmount>2000.00</OpenAmount></BillRet>
+      <AmountDue>2000.00</AmountDue><OpenAmount>2000.00</OpenAmount>
+      <!-- WARP-2475 — NAIVE: no offset, which older QuickBooks releases print.
+           There is no declared host offset anywhere in this track, so this one
+           must stay undefined rather than be read as UTC or as the box's local
+           zone. Kept in the SHIPPED fixture so the refusal is exercised by
+           every test that reads bills. -->
+      <TimeModified>2026-07-06T08:30:00</TimeModified></BillRet>
     <BillRet>
       <TxnID>B3</TxnID><RefNumber>BILL-79</RefNumber>
       <TxnDate>2026-07-21</TxnDate><DueDate>2026-08-20</DueDate>
       <VendorRef><ListID>90000001</ListID><FullName>Henry Schein</FullName></VendorRef>
-      <AmountDue>300.00</AmountDue><OpenAmount>300.00</OpenAmount></BillRet>
+      <AmountDue>300.00</AmountDue><OpenAmount>300.00</OpenAmount>
+      <TimeModified>2026-07-23T11:05:00-07:00</TimeModified></BillRet>
   </BillQueryRs>
 </QBXMLMsgsRs></QBXML>`;
 
@@ -280,6 +295,83 @@ describe("qbXML", () => {
     expect(rq).toContain("<IncludeLineItems>false</IncludeLineItems>");
     expect(rq).toContain("InvoiceQueryRq");
     expect(buildRequest("bill")).toContain("BillQueryRq");
+  });
+
+  it("asks for TimeModified rather than restricting it away", () => {
+    // WARP-2475. `IncludeRetElement` is qbXML's projection list: supply none
+    // and QuickBooks returns every element of the *Ret aggregate, supply one
+    // or more and it returns ONLY those. This request supplies none, so
+    // `TimeModified` — a REQUIRED element of both InvoiceRet and BillRet —
+    // already arrives, and no request change was needed to fetch it.
+    //
+    // That is a property of the request, not a fact about it, so it is pinned
+    // here: the day someone adds a projection list to trim the response, this
+    // fails unless TimeModified is in it. Silently dropping the column a
+    // watermark keys on is exactly the regression that would otherwise ship
+    // green — every other assertion in this file still passes without it.
+    //
+    // Mutation: add `<IncludeRetElement>TxnID</IncludeRetElement>` to
+    // buildRequest → red.
+    for (const step of QBXML_STEPS) {
+      const rq = buildRequest(step);
+      const projects = rq.includes("<IncludeRetElement>");
+      const asksForIt =
+        !projects || rq.includes("<IncludeRetElement>TimeModified</IncludeRetElement>");
+      expect(asksForIt, step + ": projection list omits TimeModified").toBe(true);
+    }
+  });
+
+  it("maps TimeModified to updated_at as a UTC instant", () => {
+    // Confirmed against the qbXML schema: `TimeModified` is a REQUIRED
+    // DATETIMETYPE element of InvoiceRet and BillRet. QuickBooks prints local
+    // wall-clock with an offset, so it is converted, not passed through.
+    //
+    // Mutation: drop <TimeModified> from the INV-1001 InvoiceRet in INVOICE_RS
+    // → undefined → red.
+    // Mutation: pass the raw string through → "2026-07-15T14:23:11-07:00" → red.
+    const invoices = parseResponse("invoice", INVOICE_RS);
+    const inv = invoices.find((r) => r.invoice_id === "INV-1001")!;
+    expect(inv.updated_at).toBe("2026-07-15T21:23:11.000Z");
+    // ...and it is the modification time, not TxnDate wearing its name.
+    // Mutation: map TxnDate instead → red.
+    expect(inv.updated_at).not.toBe(inv.issued_at);
+  });
+
+  it("accepts an already-UTC Z timestamp as well as an offset one", () => {
+    // Both spellings are legal DATETIMETYPE. A gate that demanded a numeric
+    // offset would blank the column on any host that prints Z — a silent
+    // half-outage that looks exactly like "this host has no timestamps".
+    // Mutation: require a [+-]HH:MM offset and reject Z → undefined → red.
+    const inv = parseResponse("invoice", INVOICE_RS).find((r) => r.invoice_id === "INV-0999")!;
+    expect(inv.updated_at).toBe("2026-06-03T09:00:00.000Z");
+  });
+
+  it("fills it on bills too", () => {
+    // Mutation: drop <TimeModified> from the BILL-78 BillRet → undefined → red.
+    const b78 = parseResponse("bill", BILL_RS).find((r) => r.bill_id === "BILL-78")!;
+    expect(b78.updated_at).toBe("2026-07-22T23:45:09.000Z");
+  });
+
+  it("refuses a NAIVE timestamp rather than guessing the host's zone", () => {
+    // BILL-77 carries `2026-07-06T08:30:00` with no offset, which older
+    // QuickBooks releases print. Nothing in this track declares the host's UTC
+    // offset — `parseResponse` is documented PURE, with no clock and no I/O,
+    // and no QbwcSession field carries one — so there is no honest way to
+    // resolve it. Reading it as UTC would be wrong by up to a day either way,
+    // and a watermark TRUSTS this value: a timestamp shifted forward skips
+    // real edits on the next incremental pass, with nothing reporting a fault.
+    // Undefined is what tells the watermark to fall back to its ordering key.
+    //
+    // Mutation: treat a naive timestamp as UTC (append "Z" before parsing) →
+    // "2026-07-06T08:30:00.000Z" → red.
+    // Mutation: parse it with `new Date(raw)`, which resolves naive input in
+    // the RUNNING PROCESS's zone → red (and would make the suite
+    // machine-dependent, passing in UTC CI and failing on a box in Costa Mesa).
+    const b77 = parseResponse("bill", BILL_RS).find((r) => r.bill_id === "BILL-77")!;
+    expect(b77.updated_at).toBeUndefined();
+    // The row survives — a refused timestamp is a missing column, not a
+    // dropped document. Mutation: skip the row → red.
+    expect(b77.balance).toBe(2000);
   });
 
   it("reads the OUTSTANDING figure, not the document total", () => {

@@ -1,0 +1,36 @@
+# WARP-2498 — the heading-slug rule, stated once, checked by both sides.
+#
+# GitHub's algorithm turns a heading into the id an `#anchor` link targets:
+# trim, lowercase, drop everything that is not a word character / whitespace /
+# hyphen, then turn EACH whitespace character into one hyphen. That last word
+# is load-bearing: "Track B — a cloud service" leaves two spaces where the em
+# dash was, so the anchor is `b--a`, not `b-a`.
+#
+# TWO implementations depend on it, in two languages:
+#   • `headingSlug()` — apps/web-dashboard/src/lib/integration-guides.ts, used
+#     by the /help/integrations/<provider> route to give headings their ids;
+#   • `slugify()` — scripts/check-setup-guides.sh, used to prove every
+#     `#fragment` in the docs resolves to a heading that exists.
+#
+# If those two disagree, the checker passes links the browser cannot follow —
+# which is exactly the failure WARP-2498 exists to close, one level up. So
+# neither is trusted: both run this file and must produce the right-hand
+# column. Add a case here when you meet a heading shape neither covers.
+#
+# Format: heading<TAB>expected-slug. Blank lines and #-comments are skipped.
+# Leading/trailing whitespace cases are deliberately NOT expressed here —
+# invisible in a TSV, and covered by the TypeScript unit test instead.
+
+3. Track B — a cloud service you already pay for (cloud/SaaS providers)	3-track-b--a-cloud-service-you-already-pay-for-cloudsaas-providers
+3.6 Changing a credential later (WARP-2275)	36-changing-a-credential-later-warp-2275
+Plan prerequisite	plan-prerequisite
+Cost	cost
+Click-path	click-path
+Scopes and permissions	scopes-and-permissions
+Rotation and expiry	rotation-and-expiry
+Revocation	revocation
+Rotation & expiry	rotation--expiry
+Read-only by default	read-only-by-default
+The _quiet_ path	the-_quiet_-path
+1. Which track are you on?	1-which-track-are-you-on
+What Droplet does with your credential	what-droplet-does-with-your-credential

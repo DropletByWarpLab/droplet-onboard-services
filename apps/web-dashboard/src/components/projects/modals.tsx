@@ -2,7 +2,7 @@
 
 // Create item / create project / delete-project — canonical Dialog (center).
 
-import { useId, useState } from "react";
+import { useId, useState, type JSX } from "react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { PmIcon } from "./icons";

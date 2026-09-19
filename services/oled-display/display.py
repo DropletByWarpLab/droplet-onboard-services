@@ -351,11 +351,44 @@ RAIL_QR_BYTE_BUDGET = 62
 BOOT_READINESS_URL = os.environ.get(
     "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
 # Unverified context for the loopback HTTPS hop after the :80->:443 redirect.
-# Scoped to the readiness probe only; nothing else in this module makes TLS
-# calls (the bridge endpoints are plain-HTTP loopback).
-_READINESS_SSL_CTX = ssl.create_default_context()
-_READINESS_SSL_CTX.check_hostname = False
-_READINESS_SSL_CTX.verify_mode = ssl.CERT_NONE
+# Scoped to the two calls this module makes against that gateway — the
+# readiness probe and WARP-2668's storage read. The bridge endpoints are
+# plain-HTTP loopback and never touch it.
+#
+# WARP-1646 states the trade in full on the bridge side and it holds
+# identically here: this connection never leaves the box, and anyone able to
+# answer 127.0.0.1 ahead of the gateway already has code execution on it. The
+# skip is safe because the URL is a loopback literal, NOT because of what
+# rides it — do not point either caller at a non-loopback host on the strength
+# of this note.
+_GATEWAY_SSL_CTX = ssl.create_default_context()
+_GATEWAY_SSL_CTX.check_hostname = False
+_GATEWAY_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+# ---------------------------------------------------------------------------
+# Orchestrator read (WARP-2668 / WARP-2098 LEG 5)
+# ---------------------------------------------------------------------------
+# The STORAGE cell's figure is the ONE panel feed that does not come from the
+# device-bridge, and it cannot: what the cell wants is the sum over the
+# os_disk-filtered data-drive list, and that filter (isUserDataDrive, WARP-827)
+# lives in the orchestrator's storage route. The bridge's /drives is that
+# route's INPUT, so sourcing it from the bridge would mean either re-deriving
+# the filter here — a second opinion about which disks are the owner's, which
+# is precisely what WARP-2098 was filed about — or a bridge → orchestrator →
+# bridge round trip to fetch one number the orchestrator had already computed.
+#
+# No new listener and no new secret. `network_mode: host` puts the container on
+# the host's loopback, which is how BOOT_READINESS_URL above already reaches
+# the same nginx gateway; the bearer is the SERVICE_TOKEN_DISPLAY compose
+# already hands this container (as SERVICE_SECRET), which the orchestrator
+# matches to its `_service:display` principal.
+#
+# Separate from the bridge's own ORCHESTRATOR_URL: that one defaults to :3000
+# and is corrected by droplet-device-bridge.service, and the orchestrator is
+# only `expose:`d, so :3000 is not reachable from the host. Defaulting to the
+# gateway here means the panel is right without a unit file.
+PANEL_ORCHESTRATOR_URL = os.environ.get(
+    "PANEL_ORCHESTRATOR_URL", "http://127.0.0.1").rstrip("/")
 
 
 def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
@@ -396,6 +429,16 @@ BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0")
 # its boot screen against a stale host fd.
 LIVENESS_CHECK_INTERVAL = float(
     os.environ.get("LIVENESS_CHECK_INTERVAL", "2.0"))
+# WARP-2668 — how often the panel re-reads the box's data-drive total.
+#
+# Slow on purpose, for the same reason JOIN_REFRESH_SECONDS is: a capacity
+# total is not a hot-plug event. What makes a newly-plugged disk appear on the
+# panel is the 8s /drives poll; this is the number underneath it, and each read
+# costs the orchestrator a bridge round trip plus an lsblk. It sits down here
+# rather than beside the bridge cadences it belongs with because it is the
+# first of them to go through `_env_positive_int`, which is defined above: a
+# malformed value must not take the whole service down at import (WARP-624 L1).
+STORAGE_REFRESH_SECONDS = _env_positive_int("STORAGE_REFRESH_SECONDS", 60)
 LOGO_DURATION = 5
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
@@ -502,11 +545,31 @@ def _get_font(size: int, bold: bool = False,
 # Canonical Droplet brand mark
 # ---------------------------------------------------------------------------
 # Geometry copied verbatim from apps/web-dashboard/src/components/DropletMark.tsx
-# (52x60 viewBox). Rendering it here rather than bundling a PNG keeps the
+# (512x512 viewBox). Rendering it here rather than bundling a PNG keeps the
 # device logo pixel-perfect across panel sizes and rotations.
-_MARK_VIEWBOX = (52, 60)
-_MARK_LEFT = [(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)]
-_MARK_RIGHT = [(26, 0), (44, 28), (26, 36)]
+_MARK_LEFT = [(256, 72), (420, 308), (352, 440), (160, 440), (92, 308)]
+_MARK_RIGHT = [(256, 72), (420, 308), (256, 368)]
+# The mark's bounding box inside that viewBox — it is centred in the box, so
+# projecting against the BOX would hand callers 28% padding they did not ask
+# for. Project against the bbox and scale by the ratio the old 52x60 geometry
+# happened to have (48 of 60), which keeps the drawn height identical and so
+# leaves every hand-tuned call-site coordinate below where it already was.
+_MARK_BBOX = (92, 72, 328, 368)  # x, y, w, h
+_MARK_HEIGHT_RATIO = 48 / 60
+
+
+def _mark_height(size: int) -> int:
+    """Drawn height of the mark inside a `size`-tall box.
+
+    render_boot/render_shutdown/render_standby hand-place a wordmark and a
+    status line under the mark, so they need the same number the draw
+    functions scale by. Mirrors pyportal/code.py's `_mark_h`.
+
+    The draw functions below scale by the UNtruncated `size *
+    _MARK_HEIGHT_RATIO`; truncating first and dividing by `bh` moves points
+    inside the mark, so this is a baseline helper, not a scale factor.
+    """
+    return int(size * _MARK_HEIGHT_RATIO)
 
 
 def draw_droplet_mark(
@@ -518,16 +581,17 @@ def draw_droplet_mark(
     """Draw the Droplet brand mark at (x, y) sized to `size` pixels tall.
 
     (x, y) is the top-left of the bounding box; the mark is drawn
-    proportionally so the full 52x60 geometry fits inside `size x size`.
+    proportionally, `_MARK_HEIGHT_RATIO` of `size` tall and centred
+    horizontally inside `size x size`.
     """
-    vw, vh = _MARK_VIEWBOX
-    scale = size / vh  # scale by height so the mark looks like its web twin
+    bx, by, bw, bh = _MARK_BBOX
+    scale = size * _MARK_HEIGHT_RATIO / bh
     # Horizontal centering offset inside the size-box
-    x_off = x + (size - int(vw * scale)) // 2
+    x_off = x + (size - int(bw * scale)) // 2
     y_off = y
 
     def proj(pt):
-        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+        return (int(x_off + (pt[0] - bx) * scale), int(y_off + (pt[1] - by) * scale))
 
     draw.polygon([proj(p) for p in _MARK_LEFT], fill=primary)
     draw.polygon([proj(p) for p in _MARK_RIGHT], fill=highlight)
@@ -545,13 +609,13 @@ def draw_droplet_mark_liquid(
     markSilhouette. `img` is the frame `draw` is bound to (PIL gives no public
     way back from a Draw to its Image, so callers pass both).
     """
-    vw, vh = _MARK_VIEWBOX
-    scale = size / vh
-    x_off = x + (size - int(vw * scale)) // 2
+    bx, by, bw, bh = _MARK_BBOX
+    scale = size * _MARK_HEIGHT_RATIO / bh
+    x_off = x + (size - int(bw * scale)) // 2
     y_off = y
 
     def proj(pt):
-        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+        return (int(x_off + (pt[0] - bx) * scale), int(y_off + (pt[1] - by) * scale))
 
     body = [proj(p) for p in _MARK_LEFT]
     # Empty shell — dim flat fill so the vessel reads before it fills.
@@ -559,9 +623,9 @@ def draw_droplet_mark_liquid(
     frac = max(0.0, min(1.0, frac))
     if frac <= 0.002:
         return
-    # Liquid level rises from the bottom of the body (viewbox y=48) upward.
+    # Liquid level rises from the bottom of the body upward.
     top = y_off
-    bottom = y_off + int(48 * scale)
+    bottom = y_off + int(bh * scale)
     level = bottom - int((bottom - top) * frac)
     # Build a clip mask = body silhouette ∩ (everything at/below the level).
     from PIL import ImageChops
@@ -569,7 +633,7 @@ def draw_droplet_mark_liquid(
     ImageDraw.Draw(body_mask).polygon(body, fill=255)
     level_mask = Image.new("L", img.size, 0)
     ImageDraw.Draw(level_mask).rectangle(
-        [x_off - 4, level, x_off + int(vw * scale) + 4, bottom + 6], fill=255)
+        [x_off - 4, level, x_off + int(bw * scale) + 4, bottom + 6], fill=255)
     liquid = Image.new("RGB", img.size, V3_ACCENT)
     img.paste(liquid, (0, 0), ImageChops.multiply(body_mask, level_mask))
 
@@ -871,6 +935,20 @@ class TFTDisplay:
             # rail's Wi-Fi face permanently dark.
             "wifi_join": {},
             "cameras": {"online": 0, "total": 0},
+            # WARP-2668 (WARP-2098 LEG 5) — the wide panel's STORAGE cell,
+            # filled by fetch_storage() from the orchestrator's data-drive
+            # total. Until this key existed the cell read `storage` off a
+            # vitals dict that never carried it, so a fully-built meter and
+            # byte row rendered an em dash on every box ever shipped.
+            #
+            # Seeded EMPTY, not zeroed, and the cell's `—` is the reading for
+            # every unknown: not polled yet, orchestrator down, bridge down, no
+            # data drives. A 0.0 / 0.0 TB meter would claim the box has no room
+            # — the WARP-1643 fake-sensor mistake in capacity form. It must
+            # also never borrow `disk` above: that is `psutil.disk_usage("/")`,
+            # the INSTALL disk, and calling it the owner's storage is the whole
+            # of WARP-2098.
+            "storage": {},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.
             "services": {"up": None, "total": None, "status": None,
@@ -1036,6 +1114,8 @@ class TFTDisplay:
                 self.update_cameras(data)
             elif mode == "services":
                 self.update_services(data)
+            elif mode == "storage":
+                self.update_storage(data)
             elif mode == "qr":
                 self.update_wifi_join(data)
         except Exception as e:                                  # noqa: BLE001
@@ -1811,7 +1891,7 @@ class TFTDisplay:
         size = 116
         mx = (WIDTH - size) // 2
         my = 44
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         if progress >= 0.999:
             draw_droplet_mark(draw, mx, my, size, primary=V3_ACCENT,
                               highlight=V3_ACCENT_INK)
@@ -1881,7 +1961,7 @@ class TFTDisplay:
         size = 116
         mx = (WIDTH - size) // 2
         my = 44
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         # collapse phase begins at 80% of the sequence.
         collapse_start = 0.80
         if progress < collapse_start:
@@ -2020,6 +2100,47 @@ class TFTDisplay:
     def update_cameras(self, data: dict) -> None:
         self._v3["cameras"] = {"online": data.get("online", 0),
                                "total": data.get("total", 0)}
+
+    def update_storage(self, data: dict) -> None:
+        """WARP-2668 — the wide panel's STORAGE cell, from the orchestrator's
+        `totals` (see fetch_storage).
+
+        Replaces wholesale rather than merging, for the same reason
+        update_services does: `totals` going null is the signal that the cell
+        must go back to `—`, and a merge would pin the last good capacity on
+        the glass for a box that no longer reports one.
+
+        EVERY unusable shape lands on `{}`, which the cell renders as `—`:
+        null totals (no data drives, or the orchestrator could not read the
+        bridge), a non-dict, non-numeric bytes, and a zero/negative size. That
+        last one matters — the cell only guards its text row on
+        `total_tb is None`, so a zeroed total would print "0.0 / 0.0 TB", which
+        reads as a full box rather than an unknown one. There is deliberately
+        no fallback to `disk`: substituting the boot filesystem here is the
+        defect WARP-2098 exists to remove, not a graceful degradation.
+
+        Converts to TB at the seam rather than in the layout so the panel and
+        the dashboard cannot disagree about the same box: binary units labelled
+        "TB", matching DrivesPanel's fmtBytes. Both keys are set together or
+        neither is, because the cell formats `used` with `:.1f` after testing
+        only `cap` — a half-filled dict would raise mid-render.
+        """
+        totals = (data or {}).get("totals")
+        if not isinstance(totals, dict):
+            self._v3["storage"] = {}
+            return
+        size = totals.get("size_bytes")
+        used = totals.get("used_bytes")
+        if (not isinstance(size, (int, float)) or isinstance(size, bool)
+                or not isinstance(used, (int, float))
+                or isinstance(used, bool) or size <= 0):
+            self._v3["storage"] = {}
+            return
+        tb = float(1024 ** 4)
+        self._v3["storage"] = {
+            "used_tb": max(0.0, float(used)) / tb,
+            "total_tb": float(size) / tb,
+        }
 
     def update_net(self, data: dict) -> None:
         if "wan_latency_ms" in data:
@@ -2475,7 +2596,7 @@ class TFTDisplay:
         size = 78
         mx = (WIDTH - size) // 2
         my = HEIGHT // 2 - int(size * 0.55)
-        mb = my + int(size * 48 / 60)
+        mb = my + _mark_height(size)
         draw_droplet_mark(draw, mx, my, size, primary=(0x14, 0x14, 0x22),
                           highlight=(0x1A, 0x1A, 0x30))
         _v3_text(draw, "STANDBY", WIDTH // 2, mb + 20,
@@ -3630,6 +3751,65 @@ class TFTDisplay:
         make the panel forget what it knew."""
         return self._bridge_get("/services", timeout)
 
+    def fetch_storage(self, timeout: float = 6.0) -> Optional[dict]:
+        """WARP-2668 — the box's DATA-drive capacity, for the STORAGE cell.
+
+        The one fetch here that talks to the orchestrator instead of the
+        bridge; PANEL_ORCHESTRATOR_URL carries the reasoning for that and for
+        why no new secret or listener is involved.
+
+        Returns `{"totals": <totals-or-None>}` on a good read and `None` on a
+        bad one, and the difference is load-bearing:
+
+          * `None` — we could not ask (no token, gateway down, orchestrator
+            restarting, malformed body). The pump skips the push, so the cell
+            keeps whatever it last knew. Same rule as fetch_services: one
+            dropped poll must not make the panel forget.
+          * `{"totals": None}` — we asked and the answer was "there is no
+            figure": no data drives, or the orchestrator could not reach the
+            bridge. That is an ANSWER, so it is pushed, and the cell goes back
+            to `—`. Collapsing the two would leave a stale capacity on the
+            glass after the last drive was pulled.
+
+        `totals` is taken verbatim and never recomputed here. It is summed over
+        the os_disk-filtered drive list, so it already excludes the install
+        disk and counts a pool as its one mounted filesystem rather than its
+        raw members (WARP-2098 LEG 1). An orchestrator that predates that key
+        simply has no `totals`, which lands on the same em dash as null.
+        """
+        # SERVICE_SECRET is the container's own name for SERVICE_TOKEN_DISPLAY
+        # (docker-compose wires both it and BRIDGE_AUTH_TOKEN to that value).
+        # DEVICE_SECRET_KEY is deliberately NOT in this chain even though
+        # _bridge_get accepts it — it is the FIPS-sealed master encryption key,
+        # never a service credential (orchestrator lib/bridge-errors.ts says
+        # the same about the other direction).
+        token = (os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or "").strip()
+        if not token:
+            logger.debug("no service token — skipping storage read")
+            return None
+        req = urllib.request.Request(
+            PANEL_ORCHESTRATOR_URL + "/api/storage",
+            headers={"Authorization": "Bearer " + token})
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout, context=_GATEWAY_SSL_CTX) as r:
+                body = json.loads(r.read().decode("utf-8"))
+        except Exception as e:                                       # noqa: BLE001
+            # A 401/403 here means the orchestrator does not know this box's
+            # SERVICE_TOKEN_DISPLAY — the fix is `setup.sh --sync-secrets`, not
+            # a reboot, so name it rather than letting it read as "unreachable".
+            if getattr(e, "code", None) in (401, 403):
+                logger.warning("orchestrator rejected the panel's service "
+                               "token — run ./scripts/setup.sh --sync-secrets")
+            else:
+                logger.debug("storage fetch failed: %s", e)
+            return None
+        if not isinstance(body, dict):
+            return None
+        return {"totals": body.get("totals")}
+
     def connect_wifi(self, ssid: str, password: str = "",
                      timeout: float = 30.0) -> dict:
         body = json.dumps({"ssid": ssid, "password": password}).encode()
@@ -3775,7 +3955,7 @@ class TFTDisplay:
         try:
             req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
             with urllib.request.urlopen(
-                    req, timeout=2.0, context=_READINESS_SSL_CTX) as r:
+                    req, timeout=2.0, context=_GATEWAY_SSL_CTX) as r:
                 return 200 <= getattr(r, "status", 0) < 300
         except Exception as e:                                       # noqa: BLE001
             logger.debug("readiness probe failed: %s", e)
@@ -3879,6 +4059,7 @@ class TFTDisplay:
         last_cams_push = 0.0
         last_services_push = 0.0
         last_join_push = 0.0
+        last_storage_push = 0.0
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
@@ -3994,6 +4175,24 @@ class TFTDisplay:
                 if svc is not None:
                     self._pyportal_send("services", svc)
                 last_services_push = now
+            # WARP-2668 — the box's data-drive total for the STORAGE cell.
+            #
+            # Wide panels only, on the same reasoning as the join pump below:
+            # the STORAGE cell exists in layout_wide's C4 and nowhere on the
+            # 480x320 face, so on a PyPortal this would be a `storage` frame
+            # over serial for a screen that has nothing to draw with it.
+            #
+            # Not in `_push_full_state` for the same reason — that burst
+            # answers the firmware's READY/REQUEST_STATE, and a wide panel has
+            # no firmware to ask. This cadence is the only feeder, which is why
+            # its anchor is not reset by either resync block (`last_join_push`
+            # is left out of them too).
+            if (self._wants_data() and _is_wide_panel()
+                    and (now - last_storage_push) > STORAGE_REFRESH_SECONDS):
+                store = self.fetch_storage()
+                if store is not None:
+                    self._pyportal_send("storage", store)
+                last_storage_push = now
             # WARP-1800 — the household join code for the rail's Wi-Fi face.
             #
             # Wide panels only. On a PyPortal the QR already arrives on demand

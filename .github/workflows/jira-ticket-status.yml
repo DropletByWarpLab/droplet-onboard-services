@@ -1,0 +1,191 @@
+name: jira-ticket-status
+
+# Board truth, half 2 — a PR's lifecycle moves the tickets its title names.
+#
+# WARP-1811. Half 1 is pr-title-ticket-lint.yml, which makes the title carry
+# the key. This is what then acts on it: In Review when the PR opens, Done
+# when it merges.
+#
+# ─── WHY THIS IS BACK, AND WHY IT WENT MISSING ───────────────────────────
+# Written under WARP-2066 and APPROVED on PR #1614, which was auto-closed
+# unmerged on 2026-08-17 when the `stage` branch was deleted — GitHub closes
+# every PR whose base ref disappears, and a closed PR whose base is gone
+# cannot be reopened. The lint half was restored by hand under WARP-2171;
+# this half was not, and its header note ("dormant without the secrets")
+# stopped being true the next day: JIRA_EMAIL and JIRA_API_TOKEN were both
+# set on this repository on 2026-08-16. So the automation existed, was
+# reviewed, had its credentials, and simply never ran.
+#
+# The cost of that is measured. Three hand sweeps since — 30 tickets on
+# 2026-07-11, 63 on 2026-08-07, 15 more on 2026-09-07 — every one of them
+# already merged to `stage` when it was corrected.
+#
+# ─── #1614's REVIEW FINDING, FIXED ───────────────────────────────────────
+# The approved version incremented its success counter only on a 204
+# transition, so a single-key PR naming an ALREADY-DONE ticket went
+# `OK=0, FAILED=1` and exited 1 — a red X on a merged PR, the exact outcome
+# its own header promised never to produce. It rested on an unpinned
+# assumption that transition 51 is a self-loop reachable from Done.
+#
+# Both of the reviewer's suggested fixes are in, because they are load-
+# bearing for different reasons: the issue's status is READ first so an
+# already-Done ticket is skipped rather than attempted, AND a rejected
+# transition (400/409) is counted apart from a failure so it can never
+# drive the exit code. The three nits are fixed too — `--max-time` on every
+# call, no `|| echo 000` double-emit, and a fork PR that says the secrets
+# were WITHHELD rather than claiming they are unset.
+#
+# ─── WHAT IT WILL NOT TOUCH ──────────────────────────────────────────────
+#   - Epics (an epic closes when a person says its children add up)
+#   - "Hardware Test" (a deliberate hold: merging is not proving)
+#   - anything already in or past the target state
+# Every one of those is pinned by tests/jira-ticket-status.test.sh, which the
+# self-test job below runs on every PR event except the merge itself. The
+# logic lives in scripts/jira-ticket-status.sh precisely so it CAN be tested:
+# this thing writes to a board with no staging copy and no undo.
+#
+# ─── WHAT THIS HANDS TO A PR, AND WHY THAT IS A CHOICE ───────────────────
+# This is the FIRST `pull_request` workflow in this repo to hand a DURABLE
+# credential to a job that runs the PR's own code. The other four that touch a
+# secret on `pull_request` — docker-build.yml, orchestrator-tests.yml,
+# setup-e2e.yml, test-fips.yml — reference only `secrets.GITHUB_TOKEN`, which
+# GitHub mints per job and scopes by `permissions:`. An Atlassian API token is
+# neither. It is not scopable at all: it carries the full Jira permissions of
+# the account that minted it, across the whole site.
+#
+# What that is NOT: an escalation over write access. Only someone who can push
+# a branch here reaches these jobs, and they could already add a workflow of
+# their own that reads the same secret. Fork PRs get nothing — GitHub withholds
+# secrets from them, and the script says so by name rather than claiming the
+# secrets are unset.
+#
+# What it IS: a surface that should be deliberate. Two ways to shrink it:
+#
+#   (a) MINT THE TOKEN FROM A SCOPED JIRA ACCOUNT — recommended, and the only
+#       one of the two that is a change to Jira rather than to CI. That account
+#       needs Transition Issues and Add Comments on the WARP project and
+#       nothing else; those two calls plus a read are this script's entire API
+#       surface. It turns the worth of a leak from "the whole site" into "one
+#       project's comments and transitions". The script already tolerates the
+#       result: a 403 on the comment or the transition is counted as a missing
+#       permission, never as a dead token, so a too-narrow grant produces a
+#       warning and a legible log rather than a red X on a merged PR.
+#
+#   (b) MOVE THE TWO SECRETS INTO A GitHub ENVIRONMENT and put these jobs
+#       behind it. Not done here, and not only because it needs repo settings.
+#       A secret can be written but never read back, so only whoever holds the
+#       Jira token can move it — and an `environment:` label on jobs whose
+#       secrets still live at repo scope changes nothing whatsoever. The one
+#       protection rule that would actually gate the credential, required
+#       reviewers, pauses every PR open and every merge on a human click:
+#       that is the hand sweep this workflow exists to end. A deployment
+#       branch policy is worse — `pull_request` runs on `refs/pull/N/merge`,
+#       which matches no branch pattern, so it would block the jobs outright.
+#
+# Checking out the BASE ref rather than the PR's merge ref was considered as a
+# third option, since the script needs only the PR title and that arrives by
+# env. Rejected: it cannot bootstrap — the script is not on `stage` until this
+# PR merges — and it would trade a documented exposure for a job that silently
+# does nothing any time the base lacks the file.
+#
+# Cost: two ~15-second ubuntu jobs per PR event — the self-test plus at most
+# one of the two Jira jobs, which are mutually exclusive by action.
+
+on:
+  pull_request:
+    # `synchronize` is here for the self-test only: without it a push that
+    # edits the script would never re-run the suite that guards it, and the
+    # last green run would be from before the change. The Jira-touching jobs
+    # below name their actions explicitly so a push does not re-announce a
+    # ticket that is already In Review.
+    types: [opened, reopened, ready_for_review, synchronize, closed]
+    branches: [stage, main]
+
+permissions: {}
+
+jobs:
+  # Runs on every event but the merge, and deliberately not behind a
+  # `paths:` filter. A gate that only fires when someone remembers to touch
+  # the right file is the failure mode scripts/check-test-wiring.sh exists to
+  # catch — and this suite guards code that writes to Jira unattended.
+  self-test:
+    name: jira-ticket-status unit tests
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the guard tests
+        run: bash tests/jira-ticket-status.test.sh
+
+  in-review:
+    name: move opened tickets to In Review
+    # Not on a draft: a draft is not in review, and opening one should not
+    # announce otherwise on the board. `ready_for_review` is what promotes it.
+    #
+    # `startsWith(..., 'stage')` and not `!= 'stage'` — see the `done` job.
+    if: >
+      contains(fromJSON('["opened","reopened","ready_for_review"]'), github.event.action) &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      !startsWith(github.event.pull_request.head.ref, 'stage') &&
+      github.event.pull_request.head.ref != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Transition to In Review
+        env:
+          # env indirection — a PR title is attacker-controlled input and must
+          # never be interpolated into the script text itself.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: bash scripts/jira-ticket-status.sh --mode in-review
+
+  done:
+    name: move merged tickets to Done
+    # A promotion PR (head=stage*) and a sync (head=main) are skipped: their
+    # titles describe a merge, not a ticket, and stage→main would double-fire
+    # every key that already closed when the feature landed on stage.
+    #
+    # The stage side is a PREFIX, not equality, because promotions here have
+    # not all been called `stage`: `stage-catchup-2026-08-14` and
+    # `stage-sync-main-20260816` are both still on the remote, and a
+    # `stage-conflict-fix` shape recurs whenever a promote has to be redone.
+    # Exact equality exempted none of them — and pr-title-ticket-lint.yml
+    # exempts only the literal `stage|main` too, so a PR from any of those is
+    # REQUIRED to carry WARP keys in its title, which this job would then walk
+    # and close a second time. `main` stays exact on purpose: a prefix there
+    # would swallow `maintenance/...` and any other main-prefixed feature
+    # branch, and the cost of a wrong exemption is a ticket that never moves.
+    if: >
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      !startsWith(github.event.pull_request.head.ref, 'stage') &&
+      github.event.pull_request.head.ref != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Transition to Done
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: bash scripts/jira-ticket-status.sh --mode done

@@ -334,9 +334,16 @@ beforeEach(() => {
   (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
 });
 
+// The whole BRAIN_ROOT is torn down after EVERY test, and `seedItem` rebuilds
+// the per-item directories the next one needs. That is one recursive delete per
+// test, which on Windows (slow unlink + AV scanning) does not reliably fit
+// vitest's default 10s hook budget once the suite is this long — WARP-2207
+// took it from 10 tests to 18 and started tripping it intermittently. The work
+// is genuinely slow, not stuck, so give the hook room rather than trading away
+// the per-test isolation that rm-ing the root buys.
 afterEach(async () => {
   await rm(brainRoot, { recursive: true, force: true });
-});
+}, 60_000);
 
 /**
  * Seed an item directly: db row + on-disk original bytes. Avoids going
@@ -609,5 +616,148 @@ describe("GET /api/files/brain/:itemId/download", () => {
     (app as unknown as { __setUser: (u: string) => void }).__setUser("bob");
     const res = await request(app).get(`/api/files/brain/${id}/download`);
     expect(res.status).toBe(404);
+  });
+
+  // ── WARP-2207: ?disposition=inline ──────────────────────────────────
+  //
+  // A chat attachment could never be rendered in place: this route is the
+  // only endpoint serving its original bytes, and it hard-coded
+  // `Content-Disposition: attachment`, which a browser honours inside
+  // <object>/<img>/<video> by DOWNLOADING. Same regression WARP-1919 fixed
+  // for /api/files/download, still live here.
+  //
+  // Inline is granted ONLY through `inlinePreviewContentType()` — the same
+  // safelist the Files route uses, not a second copy. A brain item is
+  // arbitrary user-uploaded content, so `text/html` and `image/svg+xml`
+  // must keep downloading: rendering one inline on the dashboard origin is
+  // stored XSS against the session cookie.
+  describe("?disposition=inline (WARP-2207)", () => {
+    /**
+     * Drain the response body before returning.
+     *
+     * These assertions only read headers, but the route answers with
+     * `createReadStream(...).pipe(res)`. Leaving that stream unconsumed keeps
+     * an open handle on the seeded file, and Windows refuses to unlink a file
+     * with an open handle — so `afterEach`'s tempdir cleanup retried until the
+     * hook timed out and took the whole suite with it. Same `.buffer().parse()`
+     * shape the sibling byte-for-byte test already uses.
+     */
+    function getDrained(url: string) {
+      return request(app)
+        .get(url)
+        .buffer(true)
+        .parse((r, cb) => {
+          const data: Buffer[] = [];
+          r.on("data", (c: Buffer) => data.push(c));
+          r.on("end", () => cb(null, Buffer.concat(data)));
+        });
+    }
+
+    it("serves a safelisted PDF inline, with the safelisted type and nosniff", async () => {
+      const { id } = await seedItem("alice", "quote.pdf", Buffer.from("%PDF-1.4"), {
+        mime: "application/pdf",
+      });
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers["content-disposition"]).toMatch(/^inline/);
+      expect(res.headers["content-disposition"]).toMatch(/quote\.pdf/);
+      expect(res.headers["content-type"]).toBe("application/pdf");
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    });
+
+    it("exempts PDF from the sandbox CSP — a sandboxed PDF renders blank", async () => {
+      const { id } = await seedItem("alice", "quote.pdf", Buffer.from("%PDF-1.4"), {
+        mime: "application/pdf",
+      });
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+    });
+
+    it("sandboxes every other safelisted inline type", async () => {
+      const { id } = await seedItem("alice", "photo.png", Buffer.from("\x89PNG"), {
+        mime: "image/png",
+      });
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.headers["content-disposition"]).toMatch(/^inline/);
+      expect(res.headers["content-type"]).toBe("image/png");
+      expect(res.headers["content-security-policy"]).toBe("sandbox");
+    });
+
+    it("refuses inline for HTML — it downloads instead (stored-XSS guard)", async () => {
+      const { id } = await seedItem(
+        "alice",
+        "evil.html",
+        Buffer.from("<script>alert(1)</script>"),
+        { mime: "text/html" },
+      );
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      // The disposition is the whole guard. The attachment branch still
+      // echoes the stored mimeType (unchanged by WARP-2207), and
+      // `Content-Type: text/html` under `Content-Disposition: attachment` is
+      // inert — the browser downloads it rather than rendering it on our
+      // origin. What must never happen is `inline`.
+      expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+      expect(res.headers["content-disposition"]).not.toMatch(/inline/);
+    });
+
+    it("refuses inline for SVG — it downloads instead (stored-XSS guard)", async () => {
+      const { id } = await seedItem("alice", "evil.svg", Buffer.from("<svg/>"), {
+        mime: "image/svg+xml",
+      });
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+    });
+
+    // The stored MIME is attacker-influenced at upload time. The inline
+    // branch must derive its type from the FILENAME through the safelist,
+    // never from the row — otherwise a row claiming application/pdf on an
+    // .html file would be served inline as a scriptable document.
+    it("never trusts the stored mimeType — a spoofed PDF row on .html still downloads", async () => {
+      const { id } = await seedItem(
+        "alice",
+        "evil.html",
+        Buffer.from("<script>alert(1)</script>"),
+        { mime: "application/pdf" },
+      );
+      const res = await getDrained(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+    });
+
+    it("leaves the default (no query) as an attachment, byte for byte", async () => {
+      const bytes = Buffer.from("payload-XYZ");
+      const { id } = await seedItem("alice", "doc.txt", bytes);
+      const res = await request(app)
+        .get(`/api/files/brain/${id}/download`)
+        .buffer(true)
+        .parse((r, cb) => {
+          const data: Buffer[] = [];
+          r.on("data", (c: Buffer) => data.push(c));
+          r.on("end", () => cb(null, Buffer.concat(data)));
+        });
+      expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+      expect((res.body as Buffer).equals(bytes)).toBe(true);
+    });
+
+    it("still 404s another user's item when inline is requested (RBAC unchanged)", async () => {
+      const { id } = await seedItem("alice", "a.pdf", Buffer.from("%PDF"));
+      (app as unknown as { __setUser: (u: string) => void }).__setUser("bob");
+      const res = await request(app).get(
+        `/api/files/brain/${id}/download?disposition=inline`,
+      );
+      expect(res.status).toBe(404);
+    });
   });
 });

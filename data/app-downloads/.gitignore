@@ -1,11 +1,19 @@
-# Client-app installers are BINARIES baked into the appliance image at
-# build time — they are never committed to this repo (they'd bloat every
-# clone and they're built from droplet-windows / droplet-android, not
-# here). The image build stages them into this directory and runs
-# scripts/app-downloads/gen-catalog.mjs to pin their digests.
+# Client-app installers are BINARIES built from droplet-windows /
+# droplet-android — they are never committed here (they'd bloat every
+# clone, and this is not the repo that builds them).
 #
-# Tracked here: only the hand-authored side of the contract and the docs.
+# NOTHING STAGES THEM FOR YOU. There is no image-build step, no setup.sh
+# path and no OTA payload that puts an installer in this directory; an
+# operator runs scripts/app-downloads/stage.sh on the box. If you are
+# reading this because /downloads is empty, that is why — see README.md,
+# and `bash scripts/app-downloads/audit.sh` will tell you what this
+# release is supposed to carry.
+#
+# Tracked here: only the hand-authored side of the contract, the docs,
+# and EXPECTED — the per-platform declaration the auditor reconciles
+# against what is actually staged.
 *
 !.gitignore
 !README.md
 !platforms.example.json
+!EXPECTED

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import assignDeviceRoom from "../../../src/handlers/smart-home/assign-device-room.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -31,9 +32,9 @@ const DEN = { id: "r-den", name: "Den", icon: "sofa", sortOrder: 1, deviceCount:
 interface MockCtxOpts {
   devices?: unknown;
   listDevicesError?: Error;
-  get?: ReturnType<typeof vi.fn>;
-  post?: ReturnType<typeof vi.fn>;
-  patch?: ReturnType<typeof vi.fn>;
+  get?: Mock;
+  post?: Mock;
+  patch?: Mock;
 }
 
 function ctxWith(opts: MockCtxOpts = {}) {
@@ -60,7 +61,7 @@ function ctxWith(opts: MockCtxOpts = {}) {
 }
 
 /** get mock that serves the rooms list. */
-function roomsList(rooms: unknown[]): ReturnType<typeof vi.fn> {
+function roomsList(rooms: unknown[]): Mock {
   return vi.fn().mockResolvedValue(jsonRes({ rooms }));
 }
 

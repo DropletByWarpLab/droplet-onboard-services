@@ -109,12 +109,62 @@ export function cosignUnavailableMessage(bin: string, code: string): string {
 export function nodeMismatchMessage(range: string, running: string): string {
   return [
     "",
-    `⚠ Node ${range} expected (engines.node); running ${running}.`,
+    `⚠ Node ${range} expected (.nvmrc, engines.node, every workflow's setup-node); running ${running}.`,
+    "  Switch with:  nvm use   (or `fnm use`) — the repo pins the major on purpose.",
+    "",
     "  Known risk on Node 24: vitest worker deaths (see the WARP-1584 note in",
     "  vitest.config.ts). This does NOT cause signature-test failures — if the",
     "  update-agent tests are red, check cosign, not your Node version.",
     "",
+    "  WARP-2626 — the class of bug this pin hides: an npm-undici dispatcher is",
+    "  only honoured by the undici that minted it, so code pairing one with the",
+    "  runtime's BUILT-IN fetch works on Node 20 and throws UND_ERR_INVALID_ARG",
+    "  on Node >= 22, where every request degrades to a bare `fetch failed` that",
+    "  reads as an unreachable box. Passing here on a mismatched Node is not",
+    "  proof the pinned Node is fine, and vice versa.",
+    "",
   ].join("\n");
+}
+
+/**
+ * Is this a CI runner? `CI` is set to a truthy value by GitHub Actions.
+ *
+ * Treats "0"/"false"/"" as not-CI so a developer who exports CI for an
+ * unrelated tool does not get a hard failure they cannot act on.
+ */
+export function runningInCi(env: NodeJS.ProcessEnv = process.env): boolean {
+  const ci = env.CI;
+  return ci !== undefined && ci !== "" && ci !== "0" && ci !== "false";
+}
+
+/**
+ * The Node-pin verdict for a run (WARP-2626).
+ *
+ * Deliberately asymmetric, and the asymmetry is the whole design:
+ *
+ *   - **Locally: warn.** This repo has contributors on machines with no
+ *     `nvm`/`fnm` installed at all, where the running Node is the only Node.
+ *     Hard-failing there (or via `engine-strict=true` in `.npmrc`, which would
+ *     break `npm ci` itself) strands every worktree on the machine and buys
+ *     nothing — the tests that actually depend on the pin now assert their own
+ *     behaviour directly (`api-auth.dispatcher.test.ts`,
+ *     `undici-fetch-pairing.guard.test.ts`) rather than relying on the runtime.
+ *   - **In CI: fail.** Every workflow pins the major through `setup-node`, so a
+ *     mismatch there is never a developer's machine — it is `.nvmrc` /
+ *     `engines.node` and a workflow having drifted apart. That drift is exactly
+ *     how a Node-major-sensitive defect like WARP-2626 reaches the field, and
+ *     it is invisible in a green run otherwise. This turns it into one loud
+ *     line at the top of the run.
+ *
+ * @returns the message to print, and whether it must abort the run.
+ */
+export function nodePinVerdict(
+  running = process.versions.node,
+  env: NodeJS.ProcessEnv = process.env,
+): { message: string; fatal: boolean } | null {
+  const message = nodeWarningIfMismatched(running);
+  if (!message) return null;
+  return { message, fatal: runningInCi(env) };
 }
 
 /** The Node warning text when the running major differs, else null. */

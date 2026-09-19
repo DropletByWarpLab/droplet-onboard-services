@@ -110,6 +110,16 @@ def upsert_chunk(
     auto-NULLs for sensitive rows, keeping ciphertext out of the lexical
     index. Default "standard" keeps the Nextcloud watcher path untouched.
     """
+    # WARP-2196: the single chokepoint every chunk write funnels through
+    # (watcher, brain_ingest, transcription_worker). Gating HERE rather than
+    # in each caller means a future write path cannot forget to ask whether
+    # this box is allowed to add to the corpus it has. Raises
+    # CorpusModelMismatch when the corpus was built by a different embedding
+    # model — see corpus_state.py for why mixing is unrecoverable.
+    from corpus_state import raise_if_write_blocked  # noqa: PLC0415
+
+    raise_if_write_blocked()
+
     metadata_value = json.dumps(metadata) if metadata is not None else None
     # IDX-01: hold _db_lock for the cursor's lifetime so concurrent threads
     # never execute on the shared connection at once.

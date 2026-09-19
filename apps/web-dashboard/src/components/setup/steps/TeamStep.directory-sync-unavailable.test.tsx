@@ -24,7 +24,7 @@
  * Same choreography as TeamStep.sso.test.tsx (bare render, mocked useAuth).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 
 const getEnabledSsoProviders = vi.fn();
 
@@ -48,6 +48,33 @@ vi.mock("@/lib/api", async () => {
 
 import { TeamStep } from "./TeamStep";
 
+/**
+ * 🔴 WARP-2775 — resolve the panel only once the SSO probe has SETTLED.
+ *
+ * `data-testid="directory-sync-panel"` is on ONE container that renders in
+ * three states — "Checking whether a directory is connected…", "directory sync
+ * isn't available yet", and "Directory sync is on". So `findByTestId` is
+ * satisfied by the FIRST render, before `getEnabledSsoProviders` resolves, and
+ * every synchronous assertion after it reads the checking frame.
+ *
+ * That is what went red in `node / web-dashboard`, on the rejection case —
+ * `mockRejectedValue` takes an extra hop through the catch, so it is the one
+ * that loses the race most often. The other three tests here were the same bug
+ * passing by luck of scheduling, and "no buttons in the panel" passing while
+ * the panel says "Checking…" is not the assertion it looks like.
+ *
+ * Note this is NOT a reason to distrust every `findByTestId` in the suite: the
+ * pattern is safe wherever the test-id belongs to the target state alone
+ * (`knowledge-search-unavailable`, `camera-access-empty`, …), because then
+ * waiting for the id IS waiting for the state. It only bites when one id spans
+ * the loading state and the settled one, as here.
+ */
+async function settledPanel(): Promise<HTMLElement> {
+  const panel = await screen.findByTestId("directory-sync-panel");
+  await waitFor(() => expect(panel.textContent).not.toMatch(/Checking whether/i));
+  return panel;
+}
+
 describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -57,7 +84,7 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
     getEnabledSsoProviders.mockResolvedValue([]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    const panel = await screen.findByTestId("directory-sync-panel");
+    const panel = await settledPanel();
     expect(panel.textContent).toMatch(
       /directory sync isn(?:'|’)t available yet/i,
     );
@@ -73,7 +100,7 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
     getEnabledSsoProviders.mockResolvedValue([]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    const panel = await screen.findByTestId("directory-sync-panel");
+    const panel = await settledPanel();
     // Nothing clickable, focusable, or link-shaped in the panel.
     expect(within(panel).queryAllByRole("button")).toHaveLength(0);
     expect(within(panel).queryAllByRole("link")).toHaveLength(0);
@@ -88,7 +115,7 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
     getEnabledSsoProviders.mockRejectedValue(new Error("offline"));
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    const panel = await screen.findByTestId("directory-sync-panel");
+    const panel = await settledPanel();
     expect(panel.textContent).toMatch(
       /directory sync isn(?:'|’)t available yet/i,
     );

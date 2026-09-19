@@ -26,17 +26,25 @@ name: pr-title-ticket-lint
 # emitted — enforcing nothing for org admins, who bypass, and deadlocking
 # anyone else. Restored verbatim; only this header changed.
 #
-# Half 2 (jira-close-on-merge.yml, transitioning tickets to Done on merge)
-# is NOT restored here. It stays with WARP-2066: it is dormant without the
-# JIRA_EMAIL / JIRA_API_TOKEN secrets, no ruleset references it, and #1614's
-# review left an open finding against its dead-token canary.
+# Half 2 IS restored, as jira-ticket-status.yml (WARP-1811) — renamed from
+# jira-close-on-merge.yml because it now moves tickets in BOTH directions,
+# In Review on open and Done on merge, so the old name described half of it.
+#
+# Two things this paragraph used to say had stopped being true, and are
+# corrected rather than deleted because the reason matters: the secrets were
+# NOT missing (JIRA_EMAIL and JIRA_API_TOKEN were set on this repository on
+# 2026-08-16, the day after #1614 was written), and #1614's dead-token
+# finding is no longer open — both of the reviewer's suggested fixes are in,
+# with tests. What actually kept half 2 from shipping for three weeks was
+# #1614 being auto-closed when `stage` was deleted, the same trap this
+# header already records for the lint itself.
 #
 # Convention this enforces, and that the failure message teaches:
 #   - the title carries the key(s) the PR IMPLEMENTS: "WARP-123: …" or
 #     "fix(scope): … (WARP-123)"
 #   - keys that are merely REFERENCED (a gate, a follow-up, a related
 #     ticket) belong in the PR body, never the title — the close-on-merge
-#     automation (WARP-2066, not yet landed) closes every key it finds
+#     automation (jira-ticket-status.yml) closes every key it finds
 #     in the title, so a referenced key there would close someone else's
 #     ticket
 #   - genuinely ticketless maintenance opts out with "[no-ticket]"

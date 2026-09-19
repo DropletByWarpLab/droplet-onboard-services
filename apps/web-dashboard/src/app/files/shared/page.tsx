@@ -1,9 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useState } from "react";
 import {
-  ArrowLeft,
   AlertTriangle,
   Share2,
   Globe,
@@ -17,7 +15,6 @@ import { useSpaceAttribution } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
 import { LibraryChip } from "@/components/FileManager/FileListSimple";
 import type { ShareDetail } from "@/lib/types";
-import { ShellPage } from "@/components/shell/ShellPage";
 
 type Tab = "with-me" | "by-me";
 
@@ -73,18 +70,7 @@ export default function SharedPage() {
   const error = active.error;
 
   return (
-    <ShellPage
-      icon={<Share2 size={15} />}
-      label="Shared"
-      title="Shared"
-      sub="Files shared with you, and files you've shared with others."
-      actions={
-        <Link href="/files" className="btn ghost" aria-label="Back to files">
-          <ArrowLeft size={15} />
-          Files
-        </Link>
-      }
-    >
+    <>
       {/* Tabs */}
       <div className="tabstrip">
         <button
@@ -225,6 +211,6 @@ export default function SharedPage() {
           </div>
         </div>
       )}
-    </ShellPage>
+    </>
   );
 }

@@ -1,5 +1,5 @@
 import { Router, Request } from "express";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
@@ -82,10 +82,12 @@ function getUser(req: Request): string {
 }
 
 function generatePairingCode(): string {
-  const bytes = randomBytes(PAIRING_CODE_LENGTH);
+  // CodeQL js/biased-cryptographic-random: `randomBytes()[i] % 32` is only
+  // uniform because the alphabet length happens to divide 256. randomInt
+  // rejection-samples, so the code stays uniform if the alphabet changes.
   let out = "";
   for (let i = 0; i < PAIRING_CODE_LENGTH; i++) {
-    out += PAIRING_CODE_ALPHABET[bytes[i] % PAIRING_CODE_ALPHABET.length];
+    out += PAIRING_CODE_ALPHABET[randomInt(PAIRING_CODE_ALPHABET.length)];
   }
   return out;
 }
@@ -697,8 +699,10 @@ export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
       // Only engage for a session-less Basic request. A session cookie means
       // an authenticated (or about-to-be-authenticated) operator — defer to
       // the session path so its behavior stays exactly as today. Scheme
-      // match is case-insensitive per RFC 7235.
-      const match = /^Basic\s+(.+)$/i.exec(req.headers.authorization ?? "");
+      // match is case-insensitive per RFC 7235. The token must start with a
+      // non-space: `\s+(.+)` overlaps on whitespace and backtracks
+      // quadratically on a long space run (CodeQL js/polynomial-redos).
+      const match = /^Basic\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
       if (!match || req.cookies?.[SESSION_COOKIE_NAME]) {
         next();
         return;

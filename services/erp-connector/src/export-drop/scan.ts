@@ -339,7 +339,7 @@ export async function readExportBytes(path: string, maxBytes: number): Promise<B
  * with a `degraded-dedup` diagnostic. See the key construction in
  * `scanDropDirectory`.
  */
-const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
+export const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   appointment: ["appt_id"],
   patient: ["patient_id"],
   account: ["account_id"],
@@ -350,6 +350,53 @@ const NATURAL_KEY: Readonly<Record<DatasetName, readonly string[]>> = {
   // identity: re-exporting must replace the vendor's row, not accumulate a
   // second one and double its balance.
   ap_summary: ["vendor_id"],
+
+  // WARP-2280 — the SaaS datasets key on their identifier ALONE, and that is a
+  // claim about the vendors rather than a relaxation of the ⚠ above. Every id
+  // here is issued by the vendor's own system and unique within it (Stripe
+  // `ch_…`, a HubSpot object id, a Shopify order id, a Mailchimp campaign id);
+  // none is a human-typed reference number like QuickBooks' `Num`, which is
+  // what made the accounting keys composite. If a vendor is ever found to
+  // reuse one of these, its key becomes composite here — not everywhere.
+  charge: ["charge_id"],
+  refund: ["refund_id"],
+  payout: ["payout_id"],
+  balance_transaction: ["balance_transaction_id"],
+  subscription: ["subscription_id"],
+  contact: ["contact_id"],
+  company: ["company_id"],
+  deal: ["deal_id"],
+  ticket: ["ticket_id"],
+  engagement: ["engagement_id"],
+  order: ["order_id"],
+  product: ["product_id"],
+  customer: ["customer_id"],
+  // A campaign is sent once; the send is the identity. An audience row is a
+  // current snapshot per list, so a re-export must REPLACE it — accumulating
+  // would double `member_count`, the marketing twin of doubling a balance.
+  campaign: ["campaign_id"],
+  audience: ["audience_id"],
+  // WARP-2466 — a membership is identified by the member row the platform
+  // issues, not by the address: an address can leave a list and rejoin it, and
+  // keying on it would collapse two distinct consent events into one.
+  audience_member: ["audience_member_id"],
+  ecommerce_order: ["ecommerce_order_id"],
+  // ── WARP-2832 ──
+  // 🔴 This is the FOURTH total Record keyed on `DatasetName`, and ADR-046's
+  // follow-up misses it when it says "three". It is also the one with no
+  // totality fixture in `vocabulary-contract.ts`, so the mutation "make this
+  // `Partial<>`" is caught by nothing and would silently key dedup on
+  // `undefined` for every dataset at once.
+  //
+  // All three are single vendor-issued ids rather than composites: each comes
+  // from a SaaS whose id is authoritative and stable, unlike the ledger shapes
+  // above whose reference numbers a human types.
+  booking: ["booking_id"],
+  employee: ["employee_id"],
+  // Composite: a task id is unique WITHIN its project on several trackers
+  // (GitLab numbers issues per project, Jira per project key), so a bare
+  // `task_id` would collide across projects on one connection.
+  task: ["project_id", "task_id"],
 };
 
 /**
@@ -409,7 +456,12 @@ function projectRow(
         row[canonical] = iso;
         break;
       }
+      // WARP-2280: a count parses exactly as money does — the comma-tolerant
+      // numeric read — because `"1,234"` members is the same wrong string as
+      // `"1,234.56"` dollars. The kinds stay distinct because only one of them
+      // must carry a currency (`assertMoneyColumnsCarryCurrency`).
       case "money":
+      case "count":
         row[canonical] = parseMoney(raw);
         break;
       default:

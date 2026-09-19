@@ -17,7 +17,7 @@
  * and `guest` included — needs the client app to use the box they were
  * invited to; gating the installer to owner/admin would lock a guest out
  * of the product while still letting them log into the dashboard. This
- * is a READ of an artifact that ships inside the appliance image, not a
+ * is a READ of an artifact an operator staged onto the box, not a
  * host mutation, so ADR-004's `requireRole("owner","admin")` convention
  * for administrative writes does not apply. The download is still LAN-
  * and-session-bound: nothing here is anonymous.

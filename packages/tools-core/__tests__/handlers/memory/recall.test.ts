@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import memoryRecall from "../../../src/handlers/memory/recall.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(findMany: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(findMany: Mock): ToolContext {
   return {
     prisma: {
       memoryFact: { findMany },

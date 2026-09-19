@@ -451,7 +451,7 @@ Two single-page references answer the auditor question "what cryptography does t
 - [`docs/security/fips-allowed-algorithms.md`](docs/security/fips-allowed-algorithms.md) — approved algorithms, key sizes, protocol versions.
 - [`docs/security/fips-exceptions.md`](docs/security/fips-exceptions.md) — registry of every protocol-mandated non-FIPS escape (RTSP digest auth, WireGuard X25519). Every entry has a documented rationale, owner, and annual review cadence.
 
-The static lint at [`scripts/test-fips.sh`](scripts/test-fips.sh) runs as a required PR check via `.github/workflows/test-fips.yml` on every change to `apps/`, `services/`, `packages/`, `scripts/`, or `docker/`. Adding a new exception requires editing `docs/security/fips-exceptions.md` and gets code-reviewed.
+The static lint at [`scripts/test-fips.sh`](scripts/test-fips.sh) runs as the `fips / static lint` leg of `.github/workflows/ci.yml` on every change to `apps/`, `services/`, `packages/`, `scripts/`, or `docker/`. It is genuinely merge-blocking: its result is aggregated by `ci-summary`, which is a required status check on both the `stage` and `main` rulesets (WARP-2481 — before that it ran in its own path-filtered workflow, which no ruleset named, so a red lint never stopped a merge). Adding a new exception requires editing `docs/security/fips-exceptions.md` and gets code-reviewed.
 
 ### Internal service-to-service mTLS (WARP-1061)
 

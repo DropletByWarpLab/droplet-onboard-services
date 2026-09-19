@@ -53,7 +53,19 @@ const RECENT_LIMIT_DEFAULT = 50;
 const SEARCH_LIMIT_MAX = 20;
 const SEARCH_LIMIT_DEFAULT = 20;
 const SEARCH_MIN_QUERY_LENGTH = 2;
-const SEARCH_MIN_SIMILARITY = 0.25;
+/**
+ * Cosine floor for the dashboard's knowledge search, deliberately a little
+ * more permissive than `SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY`.
+ *
+ * WARP-2196: 0.25 -> 0.63. Same recalibration as the hybrid default, same
+ * reason — the old value was tuned to all-MiniLM-L6-v2's score distribution,
+ * and under bge-small-en-v1.5 nothing in the measured corpus scores below
+ * 0.344, so 0.25 filtered exactly nothing. 0.63 is the measured
+ * bge-equivalent of MiniLM's 0.25 by irrelevant-pair selectivity (15.6% vs
+ * 16.3%), which preserves the intended "looser than the default" posture.
+ * See services/similarity-floors.test.ts for the distributions.
+ */
+const SEARCH_MIN_SIMILARITY = 0.63;
 const SNIPPET_MAX_CHARS = 240;
 
 type SourceFilter = "nextcloud" | "brain";

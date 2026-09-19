@@ -152,13 +152,22 @@ export async function runNightlyChainVerification(
     refs: { brokenAtId: result.brokenAtId, rowsChecked: result.rowsChecked },
     actor: { type: "system", id: null },
   });
+  // The notifications subsystem is keyed by `User.username`, not `User.id` —
+  // `sendNotification` publishes to `droplet/notifications/${userId}` and the
+  // only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
+  // while both readers of the persisted NotificationLog (routes/notifications.ts
+  // and the `list_notifications` tool) also filter by username. Selecting `id`
+  // here used to make this the one UUID-keyed caller in the codebase, so the
+  // toast was dropped by the broker AND the stored row was invisible to every
+  // reader — the single alert that must never be missed reached nobody. Select
+  // the username so this caller speaks the same vocabulary as the rest.
   const admins = await prisma.user.findMany({
     where: { role: { in: ["owner", "admin"] } },
-    select: { id: true },
+    select: { username: true },
   });
   for (const admin of admins) {
     await sendNotification(prisma, {
-      userId: admin.id,
+      userId: admin.username,
       kind: "system",
       title: "Audit log integrity check failed",
       body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,

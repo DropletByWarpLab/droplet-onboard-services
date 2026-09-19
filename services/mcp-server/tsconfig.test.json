@@ -1,0 +1,21 @@
+{
+  // WARP-329 class — `tsconfig.json` excludes `__tests__`, so none of this
+  // package's 24 test files were ever seen by `tsc`, and `vitest` cannot cover
+  // for it: esbuild strips types without checking them. Picked up automatically
+  // by `ship-check.sh tsc-full`'s second pass, which is opt-in by this file's
+  // existence.
+  //
+  // Extends the package config so tests are checked under the SAME flags the
+  // package actually builds with, rather than a looser set that would hide the
+  // errors this exists to catch. Overrides only `noEmit` (a check, not a build —
+  // `tsconfig.json` still owns the emit into `dist/`) and `rootDir` (widened
+  // from `./src` to `.` so `__tests__/` is not reported as TS6059 "not under
+  // rootDir").
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "__tests__/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

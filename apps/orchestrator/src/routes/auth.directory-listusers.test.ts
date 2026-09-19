@@ -233,4 +233,29 @@ describe("GET /api/auth/users — directory carries the local userId UUID (WARP-
       accessRoleId: true,
     });
   });
+
+  it("carries the directory `enabled` flag through to the roster", async () => {
+    // The roster could not tell an active person from a deactivated one, so
+    // the row only ever offered Disable and an admin had no way back. The
+    // flag comes from Nextcloud's /cloud/users/details and reaches the
+    // dashboard through the spread — this pins that it is not dropped again.
+    (nc.ncListUsers as any).mockResolvedValue([
+      { id: "ana", displayName: "Ana", email: null, enabled: true },
+      { id: "tomas", displayName: "Tomas", email: null, enabled: false },
+    ]);
+    const prisma = createPrismaMock([]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    expect(res.status).toBe(200);
+    expect(
+      res.body.users.map((u: { id: string; enabled?: boolean }) => [
+        u.id,
+        u.enabled,
+      ]),
+    ).toEqual([
+      ["ana", true],
+      ["tomas", false],
+    ]);
+  });
 });

@@ -23,7 +23,6 @@ import { describe, it, expect, vi, beforeAll } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 vi.mock("swr", () => ({ default: () => ({ data: undefined }) }));
 vi.mock("@/lib/auth", () => ({
@@ -91,9 +90,9 @@ describe("WARP-1899 density option title/description spacing", () => {
   });
 
   it(".dh-opt-txt stacks title over description with spacing (home-bento.css)", () => {
-    // fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
-    // on Windows, which path.resolve doubles into "C:\C:\...".
-    const here = path.dirname(fileURLToPath(import.meta.url));
+    // `__dirname`, the one anchoring idiom this package uses (WARP-2654) — see
+    // src/__tests__/helpers/test-paths.ts for why it is spelled this way here.
+    const here = __dirname;
     const css = readFileSync(
       path.resolve(here, "../components/home/home-bento.css"),
       "utf-8",

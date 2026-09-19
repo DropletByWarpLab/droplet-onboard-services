@@ -44,7 +44,22 @@ vi.mock("../services/chat-persistence.service.js", () => ({
   })),
 }));
 
+const pinTargets = vi.hoisted(() => ({
+  checkBusinessPinTarget: vi.fn(),
+  resolveBusinessPinTargets: vi.fn(),
+}));
+vi.mock("../services/context-pin-targets.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/context-pin-targets.service.js")>()),
+  checkBusinessPinTarget: pinTargets.checkBusinessPinTarget,
+  resolveBusinessPinTargets: pinTargets.resolveBusinessPinTargets,
+}));
+vi.mock("../services/tool-access.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/tool-access.service.js")>()),
+  resolveToolAccessScope: vi.fn().mockResolvedValue(null),
+}));
+
 import { createLlmRouter } from "../routes/llm.js";
+import { MAX_PINS_PER_SESSION } from "../services/context-pin-prompt.js";
 
 const OWNER_ID = "owner-uuid";
 const OWNER_USERNAME = "stefan";
@@ -99,7 +114,28 @@ function createPrismaMock() {
             .sort((a, b) => a.addedAt.getTime() - b.addedAt.getTime());
         },
       ),
+      // WARP-2582 — POST now counts the session's pins before creating one, so
+      // a thread cannot accumulate an unbounded prompt block. Runs for EVERY
+      // kind, not only the business ones, so this mock is required even though
+      // this suite creates only folder/file/camera_window pins.
+      count: vi.fn(async ({ where }: { where: { sessionId: string } }) =>
+        pins.filter((p) => p.sessionId === where.sessionId).length,
+      ),
+      findFirst: vi.fn(
+        async ({ where }: { where: { sessionId: string; kind?: string; ref?: string } }) =>
+          pins.find(
+            (p) =>
+              p.sessionId === where.sessionId &&
+              (where.kind === undefined || p.kind === where.kind) &&
+              (where.ref === undefined || p.ref === where.ref),
+          ) ?? null,
+      ),
       create: vi.fn(async ({ data }: { data: Omit<MockPin, "id" | "addedAt"> }) => {
+        // The partial unique index (sessionId, kind, ref), modelled: the route's
+        // idempotent branch is only reachable through this P2002.
+        if (pins.some((p) => p.sessionId === data.sessionId && p.kind === data.kind && p.ref === data.ref)) {
+          throw Object.assign(new Error("unique"), { code: "P2002" });
+        }
         const created: MockPin = {
           id: `pin-${pins.length + 1}`,
           sessionId: data.sessionId,
@@ -142,6 +178,8 @@ function buildApp(prismaMock: ReturnType<typeof createPrismaMock>, asUser: { id?
 
 beforeEach(() => {
   vi.clearAllMocks();
+  pinTargets.checkBusinessPinTarget.mockResolvedValue({ ok: true });
+  pinTargets.resolveBusinessPinTargets.mockResolvedValue(new Map());
 });
 
 describe("WARP-460 — context-pin CRUD", () => {
@@ -200,5 +238,119 @@ describe("WARP-460 — context-pin CRUD", () => {
     expect(res.status).toBe(404);
     // Pin still present.
     expect(prisma.pins.find((p) => p.id === "pin-existing")).toBeDefined();
+  });
+});
+
+// ── WARP-2582 (review): the business-pin branches of the route itself ───────
+describe("WARP-2582 — business pins through the real route handler", () => {
+  const CUSTOMER = "11111111-2222-4333-8444-555555555555";
+  const owner = { id: OWNER_ID, username: OWNER_USERNAME, role: "owner" };
+
+  it("404s module_disabled when the pin's module is switched off", async () => {
+    pinTargets.checkBusinessPinTarget.mockResolvedValue({
+      ok: false,
+      reason: "module_disabled",
+      module: "crm",
+    });
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "crm" });
+    expect(prisma.contextPin.create).not.toHaveBeenCalled();
+  });
+
+  it("422s pin_target_not_found when the record does not exist or cannot be read", async () => {
+    pinTargets.checkBusinessPinTarget.mockResolvedValue({ ok: false, reason: "not_found" });
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "pin_target_not_found" });
+    expect(prisma.contextPin.create).not.toHaveBeenCalled();
+  });
+
+  it("409s too_many_pins at the cap — for a NEW pin", async () => {
+    const prisma = createPrismaMock();
+    for (let i = 0; i < MAX_PINS_PER_SESSION - 1; i++) {
+      prisma.pins.push({
+        id: `pin-fill-${i}`,
+        sessionId: OWNED_SESSION,
+        kind: "folder",
+        ref: `/share/fill-${i}`,
+        meta: null,
+        addedAt: new Date(),
+      });
+    }
+    expect(prisma.pins.filter((p) => p.sessionId === OWNED_SESSION)).toHaveLength(MAX_PINS_PER_SESSION);
+    const res = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "too_many_pins", limit: MAX_PINS_PER_SESSION });
+  });
+
+  it("re-pinning an existing record is 200 with the existing row, not 201 and not a second row", async () => {
+    const prisma = createPrismaMock();
+    const first = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(first.status).toBe(201);
+    const again = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(again.status).toBe(200);
+    expect(again.body.pin.id).toBe(first.body.pin.id);
+    expect(prisma.pins.filter((p) => p.ref === CUSTOMER)).toHaveLength(1);
+  });
+
+  it("re-pinning an existing record at the cap is STILL 200 — the cap bounds new pins", async () => {
+    const prisma = createPrismaMock();
+    prisma.pins.push({
+      id: "pin-customer",
+      sessionId: OWNED_SESSION,
+      kind: "customer",
+      ref: CUSTOMER,
+      meta: null,
+      addedAt: new Date(),
+    });
+    for (let i = 0; i < MAX_PINS_PER_SESSION - 2; i++) {
+      prisma.pins.push({
+        id: `pin-fill-${i}`,
+        sessionId: OWNED_SESSION,
+        kind: "folder",
+        ref: `/share/fill-${i}`,
+        meta: null,
+        addedAt: new Date(),
+      });
+    }
+    expect(prisma.pins.filter((p) => p.sessionId === OWNED_SESSION)).toHaveLength(MAX_PINS_PER_SESSION);
+    const res = await request(buildApp(prisma, owner))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(res.status).toBe(200);
+    expect(res.body.pin.id).toBe("pin-customer");
+    expect(prisma.contextPin.create).not.toHaveBeenCalled();
+  });
+
+  it("GET still lists the pins when business-target resolution fails — business pins read unavailable", async () => {
+    pinTargets.resolveBusinessPinTargets.mockRejectedValue(new Error("crm read timed out"));
+    const prisma = createPrismaMock();
+    prisma.pins.push({
+      id: "pin-customer",
+      sessionId: OWNED_SESSION,
+      kind: "customer",
+      ref: CUSTOMER,
+      meta: null,
+      addedAt: new Date(),
+    });
+    const res = await request(buildApp(prisma, owner)).get(`/api/llm/${OWNED_SESSION}/pins`);
+    expect(res.status).toBe(200);
+    const byId = new Map(res.body.pins.map((p: { id: string; resolved: unknown }) => [p.id, p.resolved]));
+    // The path-shaped pin is untouched by a CRM outage.
+    expect(byId.get("pin-existing")).toBeNull();
+    expect(byId.get("pin-customer")).toEqual({ state: "unavailable", label: null, sublabel: null });
   });
 });

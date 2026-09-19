@@ -20,6 +20,13 @@
 #
 # Requires local Docker for 1-7 (SKIPs cleanly without a daemon). A static
 # TLS 1.3 pin check runs unconditionally.
+#
+# ci: developer-only — boots a redis container per ACL identity. The ACL
+# GENERATION invariants (hashes only, PING-only default, per-service
+# least-privilege shapes) are the half that can be proven without a daemon,
+# and tests/redis-acl.test.sh now runs them at PR time on setup-tests.yml
+# (WARP-2647). What stays uncovered is live ENFORCEMENT — that the server
+# actually refuses the denied commands.
 # =============================================================================
 set -uo pipefail
 

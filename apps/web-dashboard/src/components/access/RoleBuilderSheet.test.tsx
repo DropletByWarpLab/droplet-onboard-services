@@ -315,6 +315,22 @@ describe("AI tools & connectors (axis 4)", () => {
     expect(within(row).getByRole("button", { name: "Use" })).toBeDisabled();
   });
 
+  it("renders Business as its own tool row, which Projects-off does not auto-off (WARP-2583)", () => {
+    // The row that used to be Projects (`pm`) gated the project and task
+    // tools. Those live in `business` now, which spans the projects AND crm
+    // modules, so one feature switch cannot honestly auto-off it: the
+    // operator narrows it with View (reads only) and the server's per-entity
+    // route gate does the rest.
+    const base = blankRoleDraft("family");
+    base.features.projects = { on: false, level: "view" };
+    renderSheet({ base });
+    expect(screen.queryByTestId("access-tools-projects")).not.toBeInTheDocument();
+    const row = screen.getByTestId("access-tools-business");
+    expect(within(row).getByText("Business")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "View" })).toBeEnabled();
+    expect(within(row).getByRole("button", { name: "Use" })).toBeEnabled();
+  });
+
   it("Escape closes only the topmost dialog — the draft survives a nested-confirm ESC (review F1)", async () => {
     const { onClose } = renderSheet();
     fireEvent.change(screen.getByPlaceholderText("Name this role"), {
@@ -443,10 +459,15 @@ describe("AI tools & connectors (axis 4)", () => {
   it("renders the connectors empty state with the Integrations link", () => {
     renderSheet({ connectors: [] });
     expect(screen.getByText(ACCESS_COPY.emptyConnectors)).toBeInTheDocument();
-    // setup.ts mocks next/link into a plain string, so assert the deep-link
-    // copy (+ its target) rather than an anchor role.
-    expect(screen.getByText(/Open Integrations/)).toBeInTheDocument();
-    expect(screen.getByText(/\/integrations/)).toBeInTheDocument();
+    // WARP-2563 — this asserted the deep-link copy and the raw href as TEXT,
+    // with a comment explaining that setup.ts mocked next/link into a plain
+    // string. It did, and that mock was a bug: React renders a returned string
+    // as text, so every <Link> on every surface rendered as escaped markup and
+    // no test could see a link as a link. The mock builds a real element now,
+    // so this asserts what the reader actually gets — an anchor, pointing at
+    // Integrations.
+    const link = screen.getByRole("link", { name: /Open Integrations/ });
+    expect(link).toHaveAttribute("href", "/integrations");
   });
 });
 
@@ -512,5 +533,50 @@ describe("save (footer)", () => {
     expect(ids).not.toContain("chat");
     expect(ids).not.toContain("home");
     expect(ids).not.toContain("settings");
+  });
+});
+
+// ── WARP-2738: a sheet seeded from a role template ───────────────────
+//
+// `dirty` is a JSON diff against `base`, which is exactly right for editing an
+// existing role and exactly wrong for a PRE-FILLED create: `base` IS the seed,
+// so the diff is empty and a fully-populated sheet opens with Save disabled
+// and no reason on screen. `initialDirty` says so explicitly instead of
+// loosening the diff for everyone.
+describe("WARP-2738 — initialDirty", () => {
+  it("a seeded create sheet is saveable on the first render", () => {
+    const seeded = { ...blankRoleDraft("family"), name: "Front Desk" };
+    renderSheet({ base: seeded, initialDirty: true });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeEnabled();
+  });
+
+  it("emits the seed unchanged when the operator saves without touching anything", () => {
+    // The bar for a pre-filled sheet: what the card advertised is what gets
+    // written, with no edit required to unlock the button.
+    const seeded = { ...blankRoleDraft("family"), name: "Front Desk" };
+    const { onSave } = renderSheet({ base: seeded, initialDirty: true });
+    fireEvent.click(screen.getByRole("button", { name: "Save role" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0][0].name).toBe("Front Desk");
+    expect(onSave.mock.calls[0][0].startingPoint).toBe("family");
+  });
+
+  it("still refuses an unnamed seed — dirty is not the only gate", () => {
+    renderSheet({ base: blankRoleDraft("family"), initialDirty: true });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+
+  it("REGRESSION: the ordinary edit path keeps its no-op guard", () => {
+    // The fix must not have been "make everything dirty". An edit sheet that
+    // has not been touched still cannot be saved.
+    renderSheet({ mode: "edit", base: roleToDraft(makeRole()) });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+
+  it("REGRESSION: a blank create is not dirty by default either", () => {
+    renderSheet({ base: { ...blankRoleDraft("family"), name: "Typed" } });
+    // Named but untouched: `blankRoleDraft` + a name is still identical to
+    // `base`, so only an explicit `initialDirty` may unlock this.
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
   });
 });

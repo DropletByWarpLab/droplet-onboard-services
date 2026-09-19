@@ -13,10 +13,11 @@
  * is host process attribution — pids, comm, full argv, container ids.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getGpuStatus from "../../../src/handlers/system/get-gpu-status.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
-function ctxWith(get: ReturnType<typeof vi.fn>, role?: Role): ToolContext {
+function ctxWith(get: Mock, role?: Role): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

@@ -10,11 +10,10 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
-// on Windows, which path.resolve doubles into "C:\C:\...".
-const here = path.dirname(fileURLToPath(import.meta.url));
+// `__dirname`, the one anchoring idiom this package uses (WARP-2654) — see
+// src/__tests__/helpers/test-paths.ts for why it is spelled this way here.
+const here = __dirname;
 const ROOT = path.resolve(here, "..");
 
 function read(rel: string): string {

@@ -21,6 +21,7 @@ import { Router } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { standardRateLimit } from "../middleware/rate-limit.js";
 import {
   canTargetAudience,
   visibleAudiences,
@@ -128,6 +129,9 @@ export function createMemoryRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/memory/facts",
+    // CodeQL js/missing-rate-limiting — routine authenticated write (one
+    // row per call); the standard per-IP preset is the right ceiling.
+    standardRateLimit,
     requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {

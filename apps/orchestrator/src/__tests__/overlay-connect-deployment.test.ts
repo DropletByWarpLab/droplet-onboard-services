@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { REPO_ROOT } from "./helpers/test-paths.js";
 
 /**
  * WARP-1767 — the overlay connect agent must be reachable from a shipping box.
@@ -23,22 +24,9 @@ import { join, resolve } from "node:path";
  * the original defect was never about the schema.
  */
 
-function findRepoRoot(): string {
-  // Vitest may run from the repo root or from apps/orchestrator.
-  const candidates = [
-    process.cwd(),
-    join(process.cwd(), "..", ".."),
-    join(process.cwd(), "..", "..", ".."),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, ".env.example"))) return resolve(candidate);
-  }
-  throw new Error(
-    `Could not locate .env.example from ${process.cwd()} — tried ${candidates.join(", ")}`,
-  );
-}
-
-const REPO_ROOT = findRepoRoot();
+// The repo root, anchored to this test file rather than searched for from the
+// runner's cwd (WARP-2654) — the old candidate list accepted the first
+// directory that happened to hold a `.env.example`.
 const ENV_EXAMPLE = readFileSync(join(REPO_ROOT, ".env.example"), "utf8");
 const SECRETS_SH = readFileSync(
   join(REPO_ROOT, "scripts", "lib", "secrets.sh"),

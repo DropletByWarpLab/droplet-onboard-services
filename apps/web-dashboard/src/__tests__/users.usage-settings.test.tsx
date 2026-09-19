@@ -38,6 +38,11 @@ vi.mock("@/lib/api", () => ({
   // WARP-1532 (T8): the page now pulls the access-roles surface — resolve
   // benign empties so this file keeps exercising its own concern only.
   listAccessRoles: vi.fn().mockResolvedValue({ roles: [] }),
+  // WARP-2738 role templates. Panel-mounting suites need BOTH: a named
+  // export missing from this factory throws the moment the component reads
+  // it, so the mock has to move with the imports.
+  listRoleTemplates: vi.fn().mockResolvedValue({ roleTemplates: [], enforcedModuleIds: [] }),
+  createRoleFromTemplate: vi.fn(),
   createAccessRole: vi.fn(),
   updateAccessRole: vi.fn(),
   deleteAccessRole: vi.fn(),
@@ -114,12 +119,59 @@ beforeEach(() => {
 });
 
 async function openEditDialog() {
-  render(<UsersPage />);
+  const view = render(<UsersPage />);
   await waitFor(() =>
     expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
   );
   fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
-  return screen.getByRole("dialog");
+  return Object.assign(screen.getByRole("dialog"), { __view: view });
+}
+
+/**
+ * 🔴 WARP-2775 — wait for the usage section to have LOADED, not for the fetch
+ * to have been CALLED.
+ *
+ * `users/page.tsx` renders
+ *
+ *     {editUsageLoading ? "Loading usage…" : `${formatUsedBytes(…)} used`}
+ *
+ * and every test below used to wait on
+ * `expect(fetchUserUsageMock).toHaveBeenCalled()`. That is satisfied the
+ * moment the effect fires — before the promise settles, and before React
+ * flushes the state update that clears `editUsageLoading`. The assertion after
+ * it is synchronous, so on a loaded CI runner it reads the loading frame and
+ * the test fails with the product code working perfectly.
+ *
+ * It failed exactly that way in the `node / web-dashboard` leg while the same
+ * spec passed in isolation on a developer machine — the signature of a race,
+ * not a defect. And because that leg is affected-legs-gated and does not run
+ * on a `stage` push (WARP-2761), the flake only ever surfaced on somebody
+ * else's PR, attributed to their change.
+ *
+ * Waiting on the rendered outcome removes the timing question entirely: the
+ * dialog either says "Loading usage…" or it does not, and no test proceeds
+ * until it does not.
+ */
+/**
+ * Run the promise chain forward WITHOUT letting a macrotask through.
+ *
+ * The teardown cases below delete `globalThis.window`. A `setTimeout` wait
+ * there hands the loop to whatever else is pending — `closeEdit` schedules a
+ * `focus()` on a 0 ms timer — and a jsdom DOM event dispatched into React with
+ * no `window` throws the very ReferenceError these tests exist to prevent,
+ * failing the whole run from the wrong direction. Seen on CI, run 34291647020:
+ * 572 files passed, one uncaught `window is not defined` out of
+ * `dispatchDiscreteEvent`.
+ *
+ * `.then`/`.catch`/`.finally` are microtasks, so draining microtasks alone
+ * carries the chain to its end and no timer can interleave.
+ */
+async function drainMicrotasks(hops = 20) {
+  for (let i = 0; i < hops; i += 1) await Promise.resolve();
+}
+
+async function awaitUsageLoaded(dialog: HTMLElement) {
+  await waitFor(() => expect(dialog.textContent).not.toMatch(/Loading usage…/));
 }
 
 describe("Users page — roster used/limit column (WARP-1271)", () => {
@@ -156,6 +208,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     });
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalledWith("u1"));
+    await awaitUsageLoaded(dialog);
 
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     await waitFor(() => expect(storageInput.value).toBe("2"));
@@ -166,7 +219,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("empty storage value means No limit (placeholder), never a fabricated 0", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     const storageInput = within(dialog).getByLabelText(/storage limit$/i) as HTMLInputElement;
     expect(storageInput.value).toBe("");
     expect(storageInput.placeholder).toMatch(/no limit/i);
@@ -174,7 +227,7 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
 
   it("saving a storage value + unit sends the correct byte string", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -220,13 +273,13 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
   it("shows an em dash when used bytes is unknown (never fabricates 0)", async () => {
     fetchUserUsageMock.mockResolvedValueOnce({ policy: null, usedBytes: null });
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
     expect(dialog.textContent).toMatch(/— used/);
   });
 
   it("shows the sync-state transition (Applying to storage… -> Applied) after save", async () => {
     const dialog = await openEditDialog();
-    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+    await awaitUsageLoaded(dialog);
 
     fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
       target: { value: "5" },
@@ -241,9 +294,139 @@ describe("Users page — Edit dialog Usage section (WARP-1271)", () => {
     });
   });
 
-  it("rejects a non-positive upload cap without saving", async () => {
+  /**
+   * WARP-2696 — the post-save "Applied" beat is a 700 ms `await` in the middle
+   * of `handleEditSave`, and `closeEdit()` + `reload()` sit after it. A page
+   * that unmounts inside that window used to resume the continuation into a
+   * dead tree; in jsdom that lands after environment teardown, where `window`
+   * is gone, so it failed the whole run as an unhandled `ReferenceError` with
+   * every test file green and nothing to point at.
+   *
+   * `reload()` calls `fetchUsers`, so "did the continuation run after
+   * unmount?" is observable as "did the roster get refetched?".
+   */
+  it("a save still holding its Applied beat at unmount touches nothing afterwards", async () => {
     const dialog = await openEditDialog();
     await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    fireEvent.change(within(dialog).getByLabelText(/storage limit$/i), {
+      target: { value: "5" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save/i }));
+
+    // The write has landed, so the handler is now parked in the beat.
+    await waitFor(() => expect(updateUserUsageMock).toHaveBeenCalledTimes(1));
+    const reloadsBeforeUnmount = fetchUsersMock.mock.calls.length;
+
+    (dialog as unknown as { __view: { unmount: () => void } }).__view.unmount();
+
+    // Well past the beat: if the guard were gone, the continuation would have
+    // resumed by now and called reload().
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fetchUsersMock.mock.calls.length).toBe(reloadsBeforeUnmount);
+  });
+
+  /**
+   * WARP-2696, the other half. The guard above covers the post-save beat; this
+   * covers the OPEN path, which is the one that actually took a run down.
+   *
+   * `openEdit` fires `fetchUserUsage(...).then(...).catch(...).finally(...)` and
+   * never awaits it. `.finally` is the end of that chain, so a throw inside it
+   * has nothing to catch it and escapes the test as an unhandled rejection. If
+   * the page unmounts while the read is in flight and the promise settles after
+   * vitest has torn the jsdom environment down, the handler writes state,
+   * `window` no longer exists, and the run dies with all 555 files green and no
+   * test to point at (run 33938733210).
+   *
+   * Deleting `window` here is not theatre: it is precisely the post-teardown
+   * condition, and it is the only way to observe a fault whose whole signature
+   * is that it lands after every test has finished. Restored in `finally` so a
+   * failure here cannot take the rest of the file with it.
+   */
+  it("a usage read landing after unmount + teardown escapes nothing", async () => {
+    let resolveUsage!: (value: unknown) => void;
+    fetchUserUsageMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsage = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /edit user alice/i })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit user alice/i }));
+    await waitFor(() => expect(fetchUserUsageMock).toHaveBeenCalled());
+
+    // The page goes away while the usage read is still in flight.
+    view.unmount();
+
+    const escaped: string[] = [];
+    const onRejection = (err: unknown) =>
+      escaped.push(String((err as { message?: string })?.message ?? err));
+    process.on("unhandledRejection", onRejection);
+
+    const realWindow = (globalThis as { window?: unknown }).window;
+    try {
+      delete (globalThis as { window?: unknown }).window;
+      resolveUsage({ policy: null, usedBytes: "1" });
+      await drainMicrotasks();
+    } finally {
+      (globalThis as { window?: unknown }).window = realWindow;
+      process.off("unhandledRejection", onRejection);
+    }
+
+    // Without the mountedRef guards this is ["window is not defined"].
+    expect(escaped).toEqual([]);
+  });
+
+  /**
+   * Review follow-up on the same PR: `reload()` is the wider version of the
+   * same fault and the most reachable one in the file. It runs three awaits
+   * over six setters, and the mount effect calls it WITHOUT awaiting, so a
+   * throw inside it after teardown has nothing to catch it — on every single
+   * page mount, not just an Edit-dialog one.
+   *
+   * `handleEditSave`'s `if (!mountedRef.current) return;` before calling
+   * `reload()` does not cover this: it checks the mount state at the CALL
+   * SITE, not during `reload`'s own in-flight awaits.
+   *
+   * HOW THIS ONE DETECTS, because it is not obvious and the assertion below
+   * looks redundant: reverting the guard does NOT trip `expect(escaped)`. The
+   * un-awaited `reload()` surfaces through vitest's own unhandled-error
+   * channel rather than `unhandledRejection`, so the run ends
+   * `Tests 12 passed` + an Unhandled Errors section + exit 1 — which is the
+   * ORIGINAL failure signature, verbatim. Verified by mutation. Keep the
+   * assertion (it is the one that fires for the sibling usage case) and do
+   * not "simplify" this test on the grounds that it always passes.
+   *
+   * A `process.on("uncaughtException")` listener would make the assertion
+   * fire directly, but it also swallows unrelated async errors raised while
+   * `window` is missing and made both tests here fail spuriously. Not worth it.
+   */
+  it("a roster reload landing after unmount touches nothing afterwards", async () => {
+    let resolveUsers!: (value: unknown) => void;
+    fetchUsersMock.mockImplementation(
+      () => new Promise((resolve) => { resolveUsers = resolve; }),
+    );
+
+    const view = render(<UsersPage />);
+    await waitFor(() => expect(fetchUsersMock).toHaveBeenCalled());
+    const invitesBefore = listInvitesMock.mock.calls.length;
+
+    // The page goes away while the very first roster read is still in flight.
+    view.unmount();
+    resolveUsers({ users: [] });
+    await drainMicrotasks();
+
+    // `reload()` runs straight into `listInvites()` once the roster lands, so
+    // "did the continuation get past the guard?" is observable as a call count
+    // — no environment surgery needed, and nothing here can be upset by an
+    // unrelated timer.
+    expect(listInvitesMock.mock.calls.length).toBe(invitesBefore);
+  });
+
+  it("rejects a non-positive upload cap without saving", async () => {
+    const dialog = await openEditDialog();
+    await awaitUsageLoaded(dialog);
     fireEvent.change(within(dialog).getByLabelText(/upload cap in megabytes/i), {
       target: { value: "0" },
     });

@@ -22,6 +22,7 @@ factory-reset.sh / docker / `down -v` is NEVER executed. Nothing is wiped.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -253,3 +254,49 @@ def test_reset_spawn_failure_maps_to_502(monkeypatch):
                         {"jobId": "j", "targetName": "droplet-home"})
     assert status == 502
     assert obj.get("ok") is False
+
+
+# ---------------------------------------------------------------------------
+# CodeQL py/command-line-injection (#66): the job context comes off the request
+# body and is handed to the host script as argv. It is allow-listed first.
+# ---------------------------------------------------------------------------
+
+def test_factory_reset_forwards_a_well_formed_job_context(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    captured = {}
+
+    def fake_spawn(cmd):
+        captured["cmd"] = cmd
+        return _FakeProc(), None
+
+    monkeypatch.setattr(bridge, "_spawn_detached", fake_spawn)
+    ok, info = bridge.run_factory_reset(
+        {"jobId": "cm0z9x1y20000abcd1234efgh", "targetName": "d-0123456789abcdef.devices.warp-lab.ai"})
+    assert ok is True
+    assert json.loads(captured["cmd"][1]) == {
+        "jobId": "cm0z9x1y20000abcd1234efgh",
+        "targetName": "d-0123456789abcdef.devices.warp-lab.ai",
+    }
+    assert info["jobId"] == "cm0z9x1y20000abcd1234efgh"
+
+
+@pytest.mark.parametrize("bad", [
+    "job-1; rm -rf /", "$(reboot)", "`id`", "a\nb", "ünïcode", "-flag",
+    " leading-space", "two words", "x" * 129, 42, None, ["list"],
+])
+def test_factory_reset_drops_an_out_of_shape_job_context_but_still_wipes(monkeypatch, bad):
+    """The context is informational (the host script only logs jobId), so junk
+    is dropped to "" rather than refusing the owner-confirmed wipe — but junk
+    never reaches the host script's argv."""
+    bridge = _load_bridge(monkeypatch)
+    captured = {}
+
+    def fake_spawn(cmd):
+        captured["cmd"] = cmd
+        return _FakeProc(), None
+
+    monkeypatch.setattr(bridge, "_spawn_detached", fake_spawn)
+    ok, info = bridge.run_factory_reset({"jobId": bad, "targetName": bad})
+    assert ok is True
+    assert json.loads(captured["cmd"][1]) == {"jobId": "", "targetName": ""}
+    assert info["jobId"] == ""

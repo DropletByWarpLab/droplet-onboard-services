@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { buildBrainBlock } from "../services/brain/brain-block.service.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import {
   attachImageBlocksToLastUserMessage,
@@ -16,14 +17,35 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
+// and the wire payload cannot disagree.
+import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
+// WARP-2582 — business context pins. The renderer is pure; the resolver is
+// where the module gate and the per-person tool-domain grant compose.
+import {
+  MAX_PINS_PER_SESSION,
+  isBusinessPinKind,
+  renderContextPinBlock,
+  type BusinessPinKind,
+} from "../services/context-pin-prompt.js";
+import {
+  checkBusinessPinTarget,
+  resolveBusinessPinTargets,
+} from "../services/context-pin-targets.service.js";
 import {
   isPrivilegedRole,
   narrowToolNamesForPrincipal,
+  narrowToolsToScope,
   resolveToolAccessScope,
+  toolAllowedForTier,
   VOICE_WRITE_TOOLS,
   WRITE_TOOLS,
   type ToolAccessScope,
 } from "../services/tool-access.service.js";
+// WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
+// domain selection, so it sizes the tools[] the model actually receives.
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
@@ -45,7 +67,7 @@ import {
   resolveActiveChatModel,
   localModelIdentifiers,
 } from "../services/active-model.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import {
   decideCloudTurn,
   isLocalProvider,
@@ -58,9 +80,10 @@ import {
 } from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
-import { visibleAudiences } from "../services/memory-audience.js";
-import { loadIdentityPrompt } from "../services/identity-prompt.js";
-import { composeToolGuidance } from "../services/tool-guidance.service.js";
+import {
+  buildBaseSystemPrompt,
+  buildMemoryFactsBlock,
+} from "../services/system-prompt.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
   getInterviewOverlay,
@@ -74,6 +97,7 @@ import {
 } from "../services/business-profile.service.js";
 import {
   degradeToFit,
+  resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
 
@@ -219,9 +243,56 @@ function logPollutedAnswer(
   );
 }
 
-// /llm/chat accepts tool-role messages on replay so a client can resume a
-// session that already went through the agent loop. tool_call_id / tool_calls
-// are optional so plain chat callers don't have to care.
+/**
+ * WARP-2469 / WARP-2486 — scrub the interceptor's confirmation secret from
+ * a trace entry before the NON-STREAMING path persists the trace or returns
+ * it to the client.
+ *
+ * A WARP-2305 challenge carries its single-use token in `error.details`
+ * (nested under `interceptor` AND flat, for the WARP-640 chip), and the
+ * agent loop's trace holds the raw payload. The streaming path already
+ * egresses only an opaque `challengeId` (llm-agent.service.ts registers the
+ * challenge and never forwards the token); this closes the same hole on the
+ * blocking path, where the full trace rides both `liveToolCalls` (persisted)
+ * and the response body. Only an INTERCEPTOR challenge is scrubbed — a
+ * WARP-640 scene challenge's flat token is the client-facing "Approve & run"
+ * handle by design and passes through untouched.
+ */
+function scrubInterceptorChallenge(result: unknown): unknown {
+  const r = result as {
+    status?: unknown;
+    error?: { details?: { interceptor?: { outcome?: unknown } } };
+  } | null;
+  if (r?.status !== "confirmation_required") return result;
+  if (r.error?.details?.interceptor?.outcome !== "confirmation_required") {
+    return result;
+  }
+  const { details: _details, ...error } = r.error as Record<string, unknown>;
+  return { ...(r as Record<string, unknown>), error };
+}
+
+// /llm/chat accepts `role:"tool"` messages and `tool_call_id` on the wire and
+// then DROPS both, before the turn runs. `stripClientToolReplay` (below) is
+// where that happens; its doc comment is the canonical explanation of WHY the
+// two fields are unusable, why they are discarded rather than rejected, and
+// what the caller is told instead. Do not restate it here.
+//
+// The comment that stood in this spot until WARP-2849 promised the opposite —
+// a working resume path built out of the request body. It was never true.
+// `tool_calls` is not in the schema below and never has been: the field and
+// that comment landed in the same commit (`136890fa`, #95, 2026-04-24)
+// already contradicting each other, so a client that followed it broke on
+// EVERY turn rather than merely losing context silently.
+//
+// Consequence for anyone reading this before building a client: send
+// user/assistant text only. Nothing a previous turn's tools returned re-enters
+// the model's context today. `prior_tool_names` (WARP-1921) carries the tool
+// NAMES server-side from the persisted trace — server-side precisely because a
+// client must not be able to claim a tool result it never received. Carrying
+// the calls and RESULTS the same way is WARP-2849's second slice.
+//
+// `tool_call_id` stays declared: removing a wire field is a breaking change,
+// and accepting-then-discarding it costs nothing.
 //
 // WARP-304: `conversationId` lets the caller continue an existing thread.
 // When absent, the server mints a new one and returns it via the
@@ -331,6 +402,28 @@ const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
  *  above. The dashboard re-ids its optimistic user bubble with it so
  *  edit-and-resend can truncate the persisted thread by a real row id. */
 const USER_MESSAGE_ID_HEADER = "X-User-Message-Id";
+/**
+ * WARP-2849: the counters `stripClientToolReplay` returns, handed back to the
+ * caller that supplied the discarded fields.
+ *
+ * Without them the strip is invisible from the client side: the turn 200s and
+ * the model answers as if the tool output had never been sent, which reads
+ * exactly like a turn where the model chose not to use it. That is a quieter
+ * failure than the ai-gateway 422 the strip replaces, and it lands on precisely
+ * the callers who were trying to use tool replay. Headers, because this route
+ * already returns its per-turn metadata that way (the three above), because the
+ * streaming branch has no response body to put a field in, and because the
+ * non-streaming body is the ai-gateway's completion rather than ours to extend.
+ *
+ * Set as a PAIR and ONLY when something was actually discarded — so their
+ * presence alone is the signal, and a client can branch on either one. An
+ * unconditional `0`/`0` on every ordinary turn would train callers to ignore
+ * them.
+ */
+const TOOL_REPLAY_DROPPED_MESSAGES_HEADER = "X-Tool-Replay-Dropped-Messages";
+/** @see TOOL_REPLAY_DROPPED_MESSAGES_HEADER — always set with it, never alone. */
+const TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER =
+  "X-Tool-Replay-Stripped-Tool-Call-Ids";
 
 // RBAC helpers for /api/llm/chat. The ADR-004 tier gate itself —
 // `WRITE_TOOLS`, `VOICE_WRITE_TOOLS`, `isPrivilegedRole` — moved to
@@ -496,116 +589,111 @@ export function replayedWriteToolAttempt(
     });
 }
 
+/**
+ * A message as `chatRequestSchema` parses it — post-zod, so `tool_calls` is
+ * already gone whatever the client sent.
+ *
+ * DERIVED, not restated. A hand-written copy of the schema's shape is a second
+ * source of truth that nothing keeps in step: the two can drift silently, and
+ * `stripClientToolReplay`'s drop rules are written against this shape.
+ */
+export type ReplayedChatMessage = z.infer<
+  typeof chatRequestSchema
+>["messages"][number];
+
+/**
+ * Every message field `stripClientToolReplay` has actually reasoned about.
+ * Deriving the type above stops the SHAPE drifting; this stops the DECISION
+ * drifting, which is the half that bites.
+ *
+ * WARP-2849's own second slice adds `tool_calls` to the schema. Inference
+ * alone would widen `ReplayedChatMessage` and let the strip keep compiling
+ * untouched — the new field would ride through unexamined, which is how the
+ * orphaned tool message this slice removes gets re-created. So: add a field to
+ * the message object in `chatRequestSchema` and the assertion below stops
+ * compiling until someone lists it here, having decided whether the strip
+ * forwards it or drops it.
+ */
+type StripDecidedMessageField = "role" | "content" | "tool_call_id";
+type StripUndecidedMessageField = Exclude<
+  keyof ReplayedChatMessage,
+  StripDecidedMessageField
+>;
+/**
+ * The assertion itself. `[X] extends [never]` (tuple-wrapped so a union
+ * distributes as one thing) holds only while nothing is undecided; otherwise
+ * the annotated type becomes an object literal that `true` cannot satisfy, and
+ * the compiler names the offending field in the error text.
+ */
+const _stripCoversEveryMessageField: [StripUndecidedMessageField] extends [never]
+  ? true
+  : { "undecided message field, add it to StripDecidedMessageField": StripUndecidedMessageField } =
+  true;
+// Compile-time only; `void` keeps `noUnusedLocals` quiet without an eslint escape.
+void _stripCoversEveryMessageField;
+
+/**
+ * WARP-2849 — drop the tool fields a client cannot legitimately supply.
+ *
+ * Post-condition: no returned message carries `role:"tool"` or a
+ * `tool_call_id`. Both are unusable by construction, and forwarding either one
+ * does not degrade the turn — it FAILS the turn, at the ai-gateway:
+ *
+ *   - a tool message is an orphan, because zod stripped the assistant
+ *     `tool_calls` it answers → "tool result references unknown tool_call_id",
+ *   - a `tool_call_id` on any other role hits the same validator's rule 4,
+ *     "tool_call_id is only valid on tool messages".
+ *
+ * Both raise → FastAPI 422 (`services/ai-gateway/schemas.py`
+ * `_validate_tool_message_integrity`). Dropping them lets the rest of the
+ * thread answer, which is what every shipping client already gets: the
+ * dashboard's `replayMessages` (useChat.ts) has never sent a tool message.
+ *
+ * Deliberately lenient rather than a 400. The fields are accepted and
+ * discarded so a client that sends them keeps working; rejecting would turn a
+ * silent no-op into a hard break for callers whose turns succeed today by
+ * simply not exercising the path.
+ *
+ * Lenient is not the same as silent. Both counters are returned so the caller
+ * can be TOLD, on the response, that its tool-replay content never reached the
+ * model — see `TOOL_REPLAY_DROPPED_MESSAGES_HEADER`. Discarding without saying
+ * so would swap the ai-gateway's loud 422 for a 200 that looks like a normal
+ * answer, which is worse to debug than the failure it replaces.
+ *
+ * This is NOT the cross-turn carry, and it must not grow into one. Prior
+ * results have to be reconstructed SERVER-side from the persisted trace —
+ * WARP-1921's rule is that a client cannot claim a tool result it never
+ * received, and `replayedWriteToolAttempt` above already treats this surface
+ * as hostile. This function is what guarantees nothing arrives from the client
+ * to be carried.
+ */
+export function stripClientToolReplay(messages: readonly ReplayedChatMessage[]): {
+  messages: ReplayedChatMessage[];
+  droppedToolMessages: number;
+  strippedToolCallIds: number;
+} {
+  let droppedToolMessages = 0;
+  let strippedToolCallIds = 0;
+  const kept: ReplayedChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "tool") {
+      droppedToolMessages += 1;
+      continue;
+    }
+    if (m.tool_call_id !== undefined) {
+      const { tool_call_id: _unusable, ...rest } = m;
+      strippedToolCallIds += 1;
+      kept.push(rest);
+      continue;
+    }
+    kept.push(m);
+  }
+  return { messages: kept, droppedToolMessages, strippedToolCallIds };
+}
+
 // WARP-329 replaced the post-stream `persistTurn` helper with
 // save-on-send: see `persistence.createTurnRows` (pre-agent) +
 // `persistence.finalizeAssistantMessage` (post-agent) inline below.
-
-// ── Base system prompt (RAG + durable-memory steering) ──
-//
-// Without a server-side base prompt the model receives ZERO guidance
-// about this appliance's retrieval and memory surfaces — RAG invocation
-// rode entirely on the search_content tool description, which already
-// failed in practice (the WARP-642 hallucinated-tool guard exists
-// because gpt-oss:20b invented `knowledge_base_search`), and WARP-461
-// memory facts only surfaced if the model spontaneously called
-// memory_recall. The base prompt names the tools and inlines the active
-// facts (bounded below) so both work by default.
-/**
- * Build the base prompt from the caller's EFFECTIVE tool set. Mentioning
- * a tool the role can't call is worse than silence: non-privileged roles
- * (family/guest/service) have write tools like memory_extract_fact
- * stripped by narrowAllowedToolsForRole, and a system prompt instructing
- * a stripped tool sends small local models straight into the WARP-642
- * hallucinated-tool guard (and, after 3 guard-only iterations, a failed
- * turn). `allowed` undefined = privileged caller = every tool.
- */
-function buildBaseSystemPrompt(
-  allowed: string[] | undefined,
-  /**
-   * WARP-1118 — the composed personality block (persona.service.ts). Spliced
-   * in RIGHT AFTER identity and BEFORE tool guidance (§7.2): personality
-   * refines HOW Droplet talks without outranking the identity layer's
-   * safety/honesty rules (the block itself carries that reminder as its
-   * prefix). Read fresh from Prisma each request by the caller; passed in
-   * here so this stays a pure string builder. "" (or undefined) = no persona
-   * block this turn — e.g. the estimator degraded it away under overflow, or
-   * the fresh read failed (fail-open, same posture as the memory block).
-   */
-  personaBlock?: string,
-  /**
-   * WARP-1120 (§8/§10/§15) — the role-filtered business-context block
-   * (business-profile.service.ts). Spliced in RIGHT AFTER the persona block
-   * and BEFORE tool guidance (§10 composition order), rendered inside its own
-   * §15 data-framing delimiter so the model treats it as reference data, not
-   * directives. Already role-filtered by the composer (owner/admin → summary +
-   * fields, family → summary only, guest/service → ""), and empty entirely on
-   * a non-BUSINESS box. "" (or undefined) = no business block this turn — the
-   * estimator degraded it away (dropped 1st), the box is HOME-typed, or the
-   * fresh read failed (fail-open).
-   */
-  businessBlock?: string,
-): string {
-  // Identity leads: the full "who you are / what this box does" block
-  // from data/droplet-identity.md (fail-open to the legacy one-liner),
-  // shared by every surface — dashboard, voice, external MCP clients.
-  const lines = [loadIdentityPrompt()];
-  // Personality is appended immediately after identity, before tool
-  // guidance — one injection owner for the persona block on this path.
-  if (personaBlock && personaBlock.length > 0) {
-    lines.push("", personaBlock);
-  }
-  // Business context follows persona, still before tool guidance. Summary-
-  // first + delimiter-framed by the composer; a truncation loses detail, not
-  // meaning.
-  if (businessBlock && businessBlock.length > 0) {
-    lines.push("", businessBlock);
-  }
-  // Tool guidance is composed per-category from the caller's EFFECTIVE
-  // set (tool-guidance.service.ts) — the WARP-642 never-name-a-stripped-
-  // tool invariant lives there, with its own unit tests.
-  const guidanceBlock = composeToolGuidance(allowed);
-  if (guidanceBlock.length > 0) {
-    lines.push("", guidanceBlock);
-  }
-  return lines.join("\n");
-}
-
-/** Bounds for the durable-memory block appended to the base prompt.
- *  MemoryFact rows are short one-liners; 20 facts / 2k chars keeps the
- *  block well under the attachment/pin budgets while covering every
- *  realistic household fact list. Older facts beyond the cap stay
- *  reachable via the memory_recall tool. */
-const MEMORY_FACTS_LIMIT = 20;
-const MEMORY_FACTS_CHAR_BUDGET = 2000;
-
-/** Render the active WARP-461 memory facts as a bounded bullet list,
- *  or "" when none exist. Newest first — when the budget bites, recent
- *  facts win. */
-async function buildMemoryFactsBlock(
-  prisma: PrismaClient,
-  /** Caller's role — facts are filtered to the audiences this role may
-   *  read (WARP-845 role-scoped distribution). */
-  role: string | undefined,
-): Promise<string> {
-  const facts = await prisma.memoryFact.findMany({
-    where: { active: true, audience: { in: visibleAudiences(role) } },
-    orderBy: { addedAt: "desc" },
-    take: MEMORY_FACTS_LIMIT,
-  });
-  const lines: string[] = [];
-  let used = 0;
-  for (const f of facts) {
-    const line = `- [${f.category}] ${f.fact}`;
-    if (used + line.length > MEMORY_FACTS_CHAR_BUDGET) break;
-    used += line.length;
-    lines.push(line);
-  }
-  if (lines.length === 0) return "";
-  return (
-    "\n\nDurable memory — facts previously saved for this business:\n" +
-    lines.join("\n")
-  );
-}
 
 // ── Chat-attachment context injection ──
 //
@@ -1091,7 +1179,34 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // `chatReq.messages` intact for the persistence reads above. A copy (not
       // an alias) so attaching image blocks never mutates the persisted user
       // text. `agentModel` may be overridden per-turn by vision auto-routing.
-      let agentMessages: ChatMessage[] = [...chatReq.messages];
+      // WARP-2849 — the client's unusable tool fields are dropped here, before
+      // anything reads `agentMessages`. Still a fresh array (the copy the
+      // comment above requires), and the persistence reads above still see the
+      // request exactly as the client sent it.
+      const replayStrip = stripClientToolReplay(chatReq.messages);
+      if (replayStrip.droppedToolMessages > 0 || replayStrip.strippedToolCallIds > 0) {
+        // Tell the CALLER, not just the box's log. Set here rather than beside
+        // the id headers below so every response shape carries it: ephemeral
+        // turns, turns whose persistence failed, the `turn_already_completed`
+        // 409, and the streaming branch — `res.writeHead` merges with headers
+        // already set, it does not replace them.
+        res.setHeader(
+          TOOL_REPLAY_DROPPED_MESSAGES_HEADER,
+          String(replayStrip.droppedToolMessages),
+        );
+        res.setHeader(
+          TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER,
+          String(replayStrip.strippedToolCallIds),
+        );
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] dropped unusable client tool fields", {
+          conversationId: chatReq.conversationId ?? null,
+          role: role ?? null,
+          droppedToolMessages: replayStrip.droppedToolMessages,
+          strippedToolCallIds: replayStrip.strippedToolCallIds,
+        });
+      }
+      let agentMessages: ChatMessage[] = replayStrip.messages;
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
       // `agentModel`. Vision auto-routing (below) can swap the user's selected
@@ -1233,6 +1348,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           conversationId && assistantMessageId
             ? createFileCitationService(prisma)
             : undefined,
+        // WARP-2469 — the chat approval round-trip. The SAME instance the
+        // `POST /api/llm/confirm/:challengeId` handler above writes to: a
+        // second store would put the approval somewhere the loop never
+        // looks, which is exactly the mint-a-token-nobody-can-redeem
+        // failure `confirm-dispatcher-coverage.guard.test.ts` exists for.
+        approvals: chatApprovalStore,
       };
       // Carry the authenticated user.id (UUID, not username) onto every
       // citation insert so the related-chats route can scope by owner.
@@ -1424,21 +1545,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             orderBy: { addedAt: "asc" },
           });
           if (pins.length > 0) {
-            const lines = pins.map((p: { kind: string; ref: string; meta: unknown }) => {
-              const metaSuffix =
-                p.meta && typeof p.meta === "object"
-                  ? ` ${JSON.stringify(p.meta)}`
-                  : "";
-              return `- ${p.kind}: ${p.ref}${metaSuffix}`;
+            // WARP-2582 — a business pin (customer / deal / project /
+            // work_item) carries a RECORD ID, not a path, so it has to be
+            // resolved before it can be rendered: prepending a bare uuid is
+            // worse than prepending nothing, because the model spends a turn
+            // guessing what it names or invents an answer.
+            //
+            // The resolver is also where the two authorization axes compose.
+            // `/api/llm/*` is gated on the `chat` module, NOT on `crm` or
+            // `projects` — so without this a pin would keep naming a customer
+            // on a box whose operator turned the CRM off, which is a module
+            // gate bypassed through a prompt. It runs PER TURN, not once at
+            // create, precisely because enablement changes under a live pin.
+            // `toolAccessScope` is the s3 reach already resolved above for
+            // this turn; re-resolving it here would buy a second REPEATABLE
+            // READ transaction on the chat critical path for nothing.
+            //
+            // Zero added queries on a turn with no business pin — which is
+            // nearly every turn — so this is affordable inline.
+            const targets = await resolveBusinessPinTargets(prisma, pins, {
+              scope: toolAccessScope,
             });
-            const pinSystemMessage: ChatMessage = {
-              role: "system",
-              content:
-                "Context pins for this conversation — prefer these as " +
-                "scope hints when calling retrieval tools:\n" +
-                lines.join("\n"),
-            };
-            agentMessages = [pinSystemMessage, ...agentMessages];
+            const block = renderContextPinBlock(pins, targets);
+            // `null` when nothing survived resolution (every pin unavailable,
+            // or a business pin the resolver could not reach). A header with
+            // no lines under it is prompt the model reads for nothing.
+            if (block) {
+              const pinSystemMessage: ChatMessage = { role: "system", content: block };
+              agentMessages = [pinSystemMessage, ...agentMessages];
+            }
           }
         } catch (err) {
           // Pin-load failure must NOT block chat — degrade gracefully.
@@ -1628,6 +1763,73 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       //
       // Additive splice at index 0 (same pattern as pins/attachments
       // above; this unshift runs LAST so the base prompt lands first).
+      // WARP-2851 — how many tokens THIS turn can actually carry.
+      //
+      // Resolved ONCE, here, and handed to all three budget sites below
+      // (`degradeToFit` and both `runAgent` calls) so they cannot disagree
+      // about the window they are budgeting against.
+      //
+      // Keyed off `agentModel`, NOT `chatReq.model`: vision auto-routing above
+      // may have swapped the caller's pick for a local VISION_MODEL, and the
+      // budget has to describe the model that actually runs. That is the same
+      // reason `agentProvider` tracks `agentModel` (WARP-904).
+      //
+      // Placed outside the `tool_choice !== "none"` block below because both
+      // `runAgent` calls need it and only `degradeToFit` is inside.
+      //
+      // Never blocks the turn: `getModelContextWindow` degrades to `undefined`
+      // on an unreachable gateway, and `undefined` resolves to the local
+      // window — the value every turn used before this change.
+      //
+      // AWAITED HERE, ahead of the four Prisma reads that follow, and that is
+      // not a serialized gateway round-trip in front of the DB work: THIS
+      // request already called `getModelProvider` twice — unconditionally, at
+      // `decideCloudTurn` and `resolveOffLanProvider` above — and
+      // `findModelInfo` caches the whole model LIST, not one model's entry. So
+      // `_modelsCache` is warm by the time we get here and this call does no
+      // I/O, including for a local-only turn that will resolve to
+      // `local_default` anyway, and including when vision auto-routing made
+      // `agentModel` a different id than the one the provider lookups used.
+      // Pinned by `ai-gateway.client.capabilities-cache.test.ts` (WARP-2851
+      // block) so a future per-model cache cannot make this a real fetch
+      // silently. Moving the await down to the use site would buy nothing:
+      // the only paths where it is a fetch are the ones where the gateway is
+      // already unreachable or listed degraded, and there the cost is a
+      // timeout, not the few ms of DB work it could overlap with.
+      //
+      // try/catch, NOT `.catch()` — the same reason spelled out at the
+      // WARP-1921 continuity lookup below. `.catch()` only handles a REJECTED
+      // promise; if `getModelContextWindow` is missing from the module object
+      // entirely (an injected double in a suite that predates it, a
+      // partially-migrated deployment) the call throws TypeError
+      // SYNCHRONOUSLY, before any promise exists, and every chat turn 500s.
+      // A budget optimisation must never cost the user their answer.
+      let advertisedWindow: number | undefined;
+      try {
+        advertisedWindow = await aiGateway.getModelContextWindow(agentModel);
+      } catch (err: unknown) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[llm/chat] context-window lookup failed; budgeting against the local window:",
+          err,
+        );
+      }
+      const turnWindow = resolveTurnContextWindow({
+        advertised: advertisedWindow,
+        localWindow: config.OLLAMA_CONTEXT_LENGTH,
+      });
+      if (turnWindow.source !== "local_default") {
+        // eslint-disable-next-line no-console
+        console.warn("[llm/chat] context window resolved from the model catalogue", {
+          conversationId: conversationId ?? null,
+          model: agentModel,
+          advertised: turnWindow.advertised,
+          window: turnWindow.window,
+          source: turnWindow.source,
+          localWindow: config.OLLAMA_CONTEXT_LENGTH,
+        });
+      }
+
       // Skipped when tool_choice="none": that's voice-io's greeting
       // path, which advertises zero tools and ships its own persona
       // prompt — tool guidance there would be misleading. Memory-fact
@@ -1640,6 +1842,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("[llm/chat] memory-fact load failed:", err);
+        }
+
+        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
+        // memory block above: an unreadable brain degrades the turn, it never
+        // fails it. `buildBrainBlock` resolves the caller's scope itself and
+        // returns "" if it cannot, so a family turn can never inherit
+        // company-scope rows through an error path.
+        let brainBlock = "";
+        try {
+          brainBlock = await buildBrainBlock(prisma, {
+            id: req.user?.id ?? "",
+            role: role ?? "",
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] brain block load failed:", err);
         }
 
         // WARP-1118 — compose the personality block fresh from Prisma each
@@ -1698,26 +1916,81 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const interviewBlock = interviewActive
           ? INTERVIEW_CONDUCTOR_BLOCK
           : "";
-        // Serialize the effective tools[] the same way llm-agent.service.ts
-        // does, so the estimate reflects what the model actually receives:
-        // an explicit allowed set verbatim, otherwise the WARP-1424 default
-        // chat scope (registry minus chat-tool-scope.ts exclusions).
-        const effectiveTools = allowedForUser
+        // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
+        // default chat scope (registry minus chat-tool-scope.ts exclusions).
+        const pooledTools = allowedForUser
           ? Array.from(TOOLS.values()).filter((t) =>
               allowedForUser!.includes(t.name),
             )
           : Array.from(TOOLS.values()).filter(
               (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
             );
+        // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
+        //
+        // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
+        // with no explicit `allowed_tools`, regardless of `toolAccessScope`, so
+        // `allowedForUser` alone does not carry the scope. The agent loop
+        // applies `inScope` unconditionally from `req.toolAccessScope` — so
+        // without this line an admin on a restrictive AccessRole gets an
+        // estimate sized against the FULL pool while a smaller set goes on the
+        // wire, which is the estimate/actual divergence WARP-2552 exists to
+        // close, reopened for one role+scope combination.
+        //
+        // WARP-2497 had this filter; the conflict resolution that merged
+        // WARP-2552's shared-helper estimate over it kept the better estimate
+        // and lost the scope narrowing with the version it replaced. Restored
+        // here, and `tool-selection.parity.test.ts` now runs a SCOPED fixture
+        // so an unscoped one cannot pass for coverage again.
+        //
+        // Through the SHARED helper, not an inline re-expression of the same
+        // rule: an inline copy here is what drifted out of step with the
+        // dispatch-side filter in the first place.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
+        // WARP-2552 — but the pool is NOT what the model receives, and sizing
+        // it as though it were is the defect this fixes.
+        //
+        // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
+        // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
+        // which the route passes UNCONDITIONALLY — there is no path that ships
+        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // The comment that used to sit here still claimed the estimate
+        // "reflects what the model actually receives"; it had been false since
+        // selection landed. Measured on a 16384 window: the estimator charged
+        // ~14,986 tokens of tool schemas on a turn that ships ~3,426 — an
+        // ~11.5K-token phantom on EVERY turn.
+        //
+        // The consequence was not theoretical. `degradeToFit` below drops the
+        // business block, then the persona block, once the estimate exceeds
+        // the window; with the phantom included, identity + tool guidance +
+        // the pool alone came to ~15,853 tokens against a 15,360 ceiling. So
+        // on any box carrying durable memory facts, persona and business were
+        // being dropped from the system prompt on every turn — to make room
+        // for schemas that were never sent.
+        //
+        // Under `off` the pool genuinely IS the wire payload, so it is sized
+        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
+        // that. Runtime-registered remote tools are not in this estimate — the
+        // route has no registry access — which is unchanged from before; the
+        // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
+        // the fully assembled advertisement.
+        const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
+          mode: config.TOOL_SELECTION_MODE,
+          messages: agentMessages,
+          priorToolNames,
+          pool: effectiveTools.map((t) => t.name),
+        });
         const toolSchemasJson = JSON.stringify(
-          effectiveTools.map((t) => ({
-            type: "function" as const,
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.inputSchema,
-            },
-          })),
+          effectiveTools
+            .filter((t) => advertisedNamesForEstimate.has(t.name))
+            .map((t) => ({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema,
+              },
+            })),
         );
         // Everything already spliced onto agentMessages (pins, attachments,
         // history) counts toward the window; serialize it as one blob.
@@ -1732,13 +2005,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           businessBlock, // WARP-1120 — role-filtered, BUSINESS-only, dropped 1st.
           toolGuidance: "", // folded into identityBlock above.
           memoryFactsBlock: memoryBlock,
+          // WARP-2752 (ADR-051) — what the box worked out on its own. Dropped
+          // LAST of the three: it is the only one derived from the business's
+          // own data, so a busy turn should lose the typed summary and the
+          // persona before it loses what was actually read.
+          brainBlock,
           toolSchemasJson,
           pinsText: "",
           attachmentsText: "",
           historyText: assembledText,
         };
         const degraded = degradeToFit(sizeParts, {
-          contextWindow: config.OLLAMA_CONTEXT_LENGTH,
+          // WARP-2851 — the model's own window, not the local runtime's.
+          contextWindow: turnWindow.window,
           warn: (event) => {
             // Structured warn on every drop (§10) so an overflow-driven
             // degradation is diagnosable in the box logs.
@@ -1760,6 +2039,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               degraded.businessBlock,
             ) +
             memoryBlock +
+            // WARP-2752 (ADR-051) — the brain block, AFTER degradation so a
+            // turn that overflowed sends "" here rather than the pre-drop text.
+            degraded.brainBlock +
             // WARP-1121 (§9.3) — conductor appended AFTER the base prompt on
             // interview turns; "" on every other turn.
             (interviewBlock ? "\n\n" + interviewBlock : "") +
@@ -1919,7 +2201,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-1442 — resolved reasoning effort (voice → "low" default).
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
-            context_window: config.OLLAMA_CONTEXT_LENGTH,
+            context_window: turnWindow.window,
             tool_selection_mode: config.TOOL_SELECTION_MODE,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
@@ -2006,7 +2288,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-1442 — resolved reasoning effort (voice → "low" default).
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
-          context_window: config.OLLAMA_CONTEXT_LENGTH,
+          context_window: turnWindow.window,
           tool_selection_mode: config.TOOL_SELECTION_MODE,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
@@ -2019,6 +2301,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
+        // WARP-2486 — scrub interceptor confirmation secrets from the
+        // trace BEFORE anything downstream reads it: `liveToolCalls`
+        // (persisted below) and the `res.json` body both carry
+        // `result.trace`.
+        result = {
+          ...result,
+          trace: result.trace.map((t) => ({
+            ...t,
+            result: scrubInterceptorChallenge(t.result),
+          })),
+        };
         logBlankAnswer(result, conversationId, assistantMessageId);
         logPollutedAnswer(result, conversationId, assistantMessageId);
         liveAssistantContent = contentToText(result.message.content);
@@ -2476,6 +2769,143 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   //
   // The `inputSchema → parameters` rename mirrors the OpenAI
   // function-calling shape callers historically expected.
+  // ── WARP-2469 — the chat approval round-trip ──────────────────────
+  //
+  // WARP-2305's interceptor can REFUSE a write and mint a token bound to
+  // it. This is the only route that turns a human's thumbs-up into that
+  // token. Without it, the 8 registry tools that never had a handler-side
+  // check, every connector write tool, and every WARP-320 remote tool
+  // fail closed in chat with no path to approval.
+  //
+  // RBAC, two layers, both required:
+  //
+  //  1. AT REGISTRATION — `requireRole` excludes `guest` and every
+  //     service principal. A guest gets 403 *and* a `recordAccessDenied`
+  //     policy-violation row, from the shared guard rather than an
+  //     inlined role compare (WARP-1062: local guards that skip the row
+  //     deny silently, which is how an ACL breach becomes invisible).
+  //
+  //  2. IN THE HANDLER — `toolAllowedForTier` re-checks the CALLER's tier
+  //     against THIS tool. Registration cannot express "family may
+  //     approve a read-ish confirming tool but not a write", because the
+  //     tool is only known once the challenge is loaded. Same predicate
+  //     the chat dispatch path uses, so approval and execution cannot
+  //     disagree about what a tier may do.
+  //
+  // The response body deliberately does NOT carry the bound token. The
+  // agent loop that redeems it runs server-side on `/api/llm/chat` for
+  // EVERY caller — the dashboard and a raw API client alike — and claims
+  // the grant from the approval store itself, attaching the token via
+  // `_meta` when the model re-issues the call (see
+  // `chat-approval.service.ts`). No client ever needs the secret, so
+  // returning it would hand a live single-use write capability to
+  // whatever holds the HTTP response, for nothing.
+  const confirmDecisionSchema = z.object({
+    decision: z.enum(["approve", "deny"]),
+  });
+
+  router.post(
+    "/llm/confirm/:challengeId",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const user = (req as AuthedRequest).user;
+        const username = user?.username;
+        if (!username) {
+          // Defense in depth: `requireRole` has already established a
+          // role, but a principal with no username owns no challenge and
+          // must not be able to approve one.
+          recordAccessDenied(req, "confirm-no-username");
+          res.status(403).json({ error: "Forbidden: no user on session" });
+          return;
+        }
+
+        const parsed = confirmDecisionSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "decision must be 'approve' or 'deny'" });
+          return;
+        }
+
+        const challengeId = req.params.challengeId;
+        const challenge = chatApprovalStore.get(challengeId);
+        if (!challenge) {
+          res.status(404).json({ error: "Unknown or expired challenge" });
+          return;
+        }
+
+        // Layer 2. A `family` caller may not approve a write tool, even
+        // though the route admits the role.
+        if (!toolAllowedForTier(challenge.tool, user?.role)) {
+          recordAccessDenied(req, "confirm-tool-tier");
+          res.status(403).json({ error: "Forbidden: role not permitted for this tool" });
+          return;
+        }
+
+        if (parsed.data.decision === "deny") {
+          const denied = chatApprovalStore.deny(challengeId, username);
+          if (!denied.ok) {
+            res
+              .status(denied.reason === "expired" ? 410 : 409)
+              .json({ status: denied.reason, challengeId });
+            return;
+          }
+          // A refusal is a security-relevant decision and is audited with
+          // the same PHI-free shape the interceptor's own rows use: tool
+          // name and outcome, no arguments, and no field one could be put
+          // in.
+          await recordActivity({
+            kind: "tool_call",
+            severity: "warn",
+            sourceIcon: "shield-off",
+            what: `${denied.tool} refused by user`,
+            sub: `for ${username}`,
+            refs: {
+              name: denied.tool,
+              confirmation: "user_denied",
+              userId: username,
+              ticket: "WARP-2469",
+            },
+            actor: actorFromRequest(req),
+          });
+          res.json({ challengeId, status: "denied", tool: denied.tool });
+          return;
+        }
+
+        const approved = chatApprovalStore.approve(challengeId, username);
+        if (!approved.ok) {
+          res
+            .status(approved.reason === "expired" ? 410 : 409)
+            .json({ status: approved.reason, challengeId });
+          return;
+        }
+
+        await recordActivity({
+          kind: "tool_call",
+          severity: "info",
+          sourceIcon: "shield-check",
+          what: `${approved.tool} approved by user`,
+          sub: `for ${username}`,
+          refs: {
+            name: approved.tool,
+            confirmation: "user_approved",
+            userId: username,
+            ticket: "WARP-2469",
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.json({
+          challengeId,
+          status: "approved",
+          tool: approved.tool,
+          expiresAt: approved.expiresAt,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   router.get("/llm/tools", async (req, res, next) => {
     try {
       const tools = await mcpClient.listTools();
@@ -2591,11 +3021,32 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // creation (today: `req.user.username`; per WARP-485+WARP-488 the
   // backfill to UUID lands separately on ChatSession in a follow-up).
   // Read both shapes so the gate works through the transition.
+  // WARP-2582 — the four business kinds join the five WARP-460 ones. A
+  // business `ref` is a record id, so it is validated as a uuid: `.uuid()`
+  // here is a ROUTE guard on user input and never reaches a model. The
+  // WARP-1839 prohibition on `pattern`/`enum`/`maxLength` is about TOOL JSON
+  // SCHEMAS, which the ai-gateway feeds to llama.cpp's GBNF compiler — this
+  // zod object is not one of those and never serialises into `tools[]`.
   const pinCreateSchema = z.object({
-    kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
+    kind: z.enum([
+      "folder",
+      "file",
+      "email_thread",
+      "camera",
+      "camera_window",
+      "customer",
+      "deal",
+      "project",
+      "work_item",
+    ]),
     ref: z.string().min(1).max(512),
     meta: z.record(z.unknown()).optional(),
   });
+
+  /** A business pin's ref must be a record id. Kept separate from the shape
+   *  above so the five path-shaped kinds keep accepting exactly what they
+   *  always did. */
+  const businessRefSchema = z.string().uuid();
 
   async function loadOwnedSession(
     sessionId: string,
@@ -2632,7 +3083,48 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           where: { sessionId: req.params.sessionId },
           orderBy: { addedAt: "asc" },
         });
-        res.json({ pins });
+        // WARP-2582 — resolve alongside the rows so the dashboard can render a
+        // NAME. Without this the Context panel would list a raw uuid, which is
+        // the same defect on the human side that the prompt resolution fixes
+        // on the model side.
+        //
+        // `resolved` is an ADDITIVE field and `null` for the five path-shaped
+        // kinds: their `ref` is self-describing and there is no record to look
+        // up. That is a property of the KIND, not a state derived from a null
+        // column — the four target states are an explicit enum
+        // (`ContextPinTargetState`), never inferred from a missing label.
+        //
+        // Same two-axis gate as the chat turn, and the same reason: this route
+        // is behind the `chat` module, not `crm`/`projects`.
+        //
+        // Resolution is BEST-EFFORT here, as it is on the chat turn: a CRM/PM
+        // read failing must not take the whole listing down, least of all for
+        // a session whose pins are all path-shaped and never touched CRM. On a
+        // failure every business pin reads `unavailable` — the same explicit
+        // state the per-target resolver uses when a module cannot answer —
+        // and the path-shaped pins are unaffected.
+        let targets: Awaited<ReturnType<typeof resolveBusinessPinTargets>> = new Map();
+        try {
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/pins] failed to resolve business pin targets:", err);
+        }
+        res.json({
+          pins: pins.map((p: { id: string; kind: string }) => ({
+            ...p,
+            resolved:
+              targets.get(p.id) ??
+              (isBusinessPinKind(p.kind)
+                ? { state: "unavailable", label: null, sublabel: null }
+                : null),
+          })),
+        });
       } catch (err) {
         next(err);
       }
@@ -2657,15 +3149,105 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           });
           return;
         }
-        const pin = await prisma.contextPin.create({
-          data: {
-            sessionId: req.params.sessionId!,
-            kind: parsed.data.kind,
-            ref: parsed.data.ref,
-            meta: parsed.data.meta as object | undefined,
-          },
+        // WARP-2582 — a business pin is only accepted for a record the caller
+        // can read RIGHT NOW. This does not make the per-turn resolution
+        // redundant and is not meant to: a module can be switched off, or a
+        // record deleted, between the pin being made and the next turn.
+        // Create-time validation exists so the failure surfaces on the button
+        // the user pressed, instead of as a pin that silently never worked.
+        if (isBusinessPinKind(parsed.data.kind)) {
+          const refOk = businessRefSchema.safeParse(parsed.data.ref);
+          if (!refOk.success) {
+            res.status(400).json({ error: "Invalid pin", details: "ref must be a record id" });
+            return;
+          }
+          const scope = await resolveToolAccessScope(
+            prisma,
+            (req as AuthedRequest).user,
+            "session-claim",
+          );
+          const check = await checkBusinessPinTarget(
+            prisma,
+            parsed.data.kind as BusinessPinKind,
+            parsed.data.ref,
+            { scope },
+          );
+          if (!check.ok) {
+            if (check.reason === "module_disabled") {
+              // Byte-consistent with requireModuleEnabled / the feature gate:
+              // a module that is off reads as ABSENT, never as FORBIDDEN.
+              res.status(404).json({ error: "module_disabled", module: check.module });
+              return;
+            }
+            // 422, not 404: the request is well-formed and the SESSION exists
+            // — it is the referenced record that does not. 404 on this route
+            // already means "no such session", and collapsing the two would
+            // make a deleted customer read as a revoked thread.
+            res.status(422).json({ error: "pin_target_not_found" });
+            return;
+          }
+        }
+
+        // Advisory cap. The ENFORCING gate is the pin block's char budget
+        // (CONTEXT_PIN_BLOCK_MAX_CHARS), which no concurrent insert can get
+        // around; this one exists to tell a user who is over it, at the moment
+        // they go over, rather than to be race-free.
+        const existingCount = await prisma.contextPin.count({
+          where: { sessionId: req.params.sessionId },
         });
-        res.status(201).json({ pin });
+        if (existingCount >= MAX_PINS_PER_SESSION) {
+          // The cap bounds NEW pins. Re-pinning a record that is already in
+          // the set is idempotent (the P2002 branch below) and adds nothing to
+          // the block, so a full session still answers 200 with the existing
+          // row instead of refusing the one gesture that changes nothing.
+          const already = await prisma.contextPin.findFirst({
+            where: {
+              sessionId: req.params.sessionId,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+            },
+          });
+          if (already) {
+            res.status(200).json({ pin: already });
+            return;
+          }
+          res.status(409).json({ error: "too_many_pins", limit: MAX_PINS_PER_SESSION });
+          return;
+        }
+
+        try {
+          const pin = await prisma.contextPin.create({
+            data: {
+              sessionId: req.params.sessionId!,
+              kind: parsed.data.kind,
+              ref: parsed.data.ref,
+              meta: parsed.data.meta as object | undefined,
+            },
+          });
+          res.status(201).json({ pin });
+        } catch (err) {
+          // WARP-2582 — pinning the same record twice is IDEMPOTENT, not an
+          // error: the record-drawer action makes a double click one gesture,
+          // and the user's intent ("this thread is about Northwind") is
+          // already satisfied. Caught from the unique index rather than
+          // pre-checked with findFirst, which would be the exact
+          // findUnique-then-write TOCTOU the review patterns flag. 200, not
+          // 201, so a client can tell it created nothing.
+          if ((err as { code?: string }).code === "P2002") {
+            const existing = await prisma.contextPin.findFirst({
+              where: {
+                sessionId: req.params.sessionId,
+                kind: parsed.data.kind,
+                ref: parsed.data.ref,
+              },
+            });
+            if (existing) {
+              res.status(200).json({ pin: existing });
+              return;
+            }
+          }
+          throw err;
+        }
       } catch (err) {
         next(err);
       }

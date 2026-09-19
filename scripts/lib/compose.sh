@@ -229,6 +229,12 @@ prepare_and_build() {
     oled-display
     # full profile (email ingestion — same drift fix as mcp-server above)
     email-indexer
+    # WARP-2211: the document renderer behind POST /api/files/render. NOT
+    # profile-gated — the three writers are pure Python (~150 MB), unlike the
+    # 2 GB Collabora `docs` engine — so it belongs in the unconditional list
+    # and must be pre-built here. Built lazily at first `up`, the first
+    # "make me a report" of a fresh box would stall behind an image build.
+    doc-render
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
@@ -263,8 +269,20 @@ prepare_and_build() {
   # failure at `up` applies. Same build-only-when-active idiom: a box still on
   # the ollama runtime never starts it, and building a python image there is
   # pure waste.
+  # WARP-2543: `dmr-cuda` is the NVIDIA sibling of `dmr`. Matching only `,dmr,`
+  # here meant an NVIDIA box never BUILT the sidecar either — so even with the
+  # profile fixed it would have failed at `up` with "No such image", which is
+  # the exact failure this build-only-when-active idiom exists to prevent.
   case ",${active_profiles}," in
-    *,dmr,*) build_services+=(inference-manager) ;;
+    *,dmr,*|*,dmr-cuda,*) build_services+=(inference-manager) ;;
+  esac
+  # remote-mcp profile: mcp-bridge (WARP-2627, the outbound MCP session
+  # component, ADR-043 §5) is `["remote-mcp"]`-profiled and has a `build:`
+  # section, so the same "No such image" failure at `up` applies. Same
+  # build-only-when-active idiom: the profile is off on every box that has not
+  # connected a remote MCP vendor, which is every box today.
+  case ",${active_profiles}," in
+    *,remote-mcp,*) build_services+=(mcp-bridge) ;;
   esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
@@ -274,8 +292,10 @@ prepare_and_build() {
   #                 (WARP-1436 screened ambient-data fetcher)
   #   erp-sql-bridge — appended above only when the erp profile is active
   #                 (WARP-1106 direct-SQL ERP bridge)
-  #   inference-manager — appended above only when the dmr profile is active
-  #                 (WARP-2131 model-catalog sidecar)
+  #   inference-manager — appended above only when a dmr profile is active
+  #                 (`dmr` or `dmr-cuda`; WARP-2131 model-catalog sidecar)
+  #   mcp-bridge  — appended above only when the remote-mcp profile is active
+  #                 (WARP-2627 outbound MCP session component, ADR-043 §5)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -297,7 +317,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then
@@ -333,7 +353,8 @@ prepare_and_build() {
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
       run_docker_compose --profile full --profile linux --profile eval \
-        --profile web --profile erp --env-file "$COMPOSE_ENV_FILE" \
+        --profile web --profile erp --profile remote-mcp \
+        --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         ${DROPLET_COMPOSE_BUILD_EXTRA_FILE:+-f "$DROPLET_COMPOSE_BUILD_EXTRA_FILE"} \
         build "$svc"; then

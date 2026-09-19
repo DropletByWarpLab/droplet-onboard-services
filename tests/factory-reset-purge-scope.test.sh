@@ -58,7 +58,7 @@ echo "--- No daemon-wide image sweep in the executable path ---"
 
 # `docker system prune` with -a (in any flag grouping: -af, -a, -fa, --all)
 # removes all unused images daemon-wide. It must not appear in executable code.
-if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+system[[:space:]]+prune'; then
+if grep -qE 'docker[[:space:]]+system[[:space:]]+prune' <<<"$CODE"; then
   fail "executable code runs 'docker system prune' (daemon-wide) — would sweep sibling Ollama images"
 else
   pass "no 'docker system prune' in executable code"
@@ -67,7 +67,7 @@ fi
 # Defense in depth: catch a plain `docker image prune -a` / `-af` too — that is
 # also a daemon-wide all-unused-images sweep (only dangling, i.e. `-f` without
 # `-a`, is in-scope for a reset).
-if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+image[[:space:]]+prune[[:space:]]+(-[a-z]*a[a-z]*|--all)\b'; then
+if grep -qE 'docker[[:space:]]+image[[:space:]]+prune[[:space:]]+(-[a-z]*a[a-z]*|--all)\b' <<<"$CODE"; then
   fail "executable code runs 'docker image prune -a' (all unused, not just dangling) — would sweep sibling images"
 else
   pass "no all-unused 'docker image prune -a' in executable code"
@@ -77,7 +77,7 @@ fi
 echo "--- Scoped reclaim still does its job ---"
 
 # Build cache (the original always-on reclaim — the whole point of the PR).
-if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+builder[[:space:]]+prune'; then
+if grep -qE 'docker[[:space:]]+builder[[:space:]]+prune' <<<"$CODE"; then
   pass "build cache is reclaimed (docker builder prune)"
 else
   fail "build cache reclaim (docker builder prune) is gone — the PR's core behavior"
@@ -85,21 +85,21 @@ fi
 
 # Dangling (untagged) images — `-f` WITHOUT `-a`. Required by the --purge-images
 # intent ("dangling images go too") while leaving tagged sibling images intact.
-if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+image[[:space:]]+prune[[:space:]]+-f\b'; then
+if grep -qE 'docker[[:space:]]+image[[:space:]]+prune[[:space:]]+-f\b' <<<"$CODE"; then
   pass "dangling images are reclaimed (docker image prune -f, no -a)"
 else
   fail "dangling-image reclaim (docker image prune -f) missing from --purge-images path"
 fi
 
 # Unused networks — the other half of the stated --purge-images intent.
-if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+network[[:space:]]+prune'; then
+if grep -qE 'docker[[:space:]]+network[[:space:]]+prune' <<<"$CODE"; then
   pass "unused networks are reclaimed (docker network prune)"
 else
   fail "unused-network reclaim (docker network prune) missing from --purge-images path"
 fi
 
 # Named volumes stay Phase 2's job — the reclaim must NOT pass --volumes.
-if printf '%s\n' "$CODE" | grep -qE 'prune[^|]*--volumes'; then
+if grep -qE 'prune[^|]*--volumes' <<<"$CODE"; then
   fail "a prune step passes --volumes — named volumes are Phase 2's job, not this reclaim"
 else
   pass "no --volumes on the reclaim (named volumes left to Phase 2)"

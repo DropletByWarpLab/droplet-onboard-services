@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
-import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
+import { verifyAccessToken, resolveNcSessionRole, type Role } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
 import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -437,8 +437,11 @@ type OcsValidationResult =
  *     privilege-escalation vector (an attacker who somehow holds a valid
  *     OCS token for an unrelated NC user could otherwise mint a local row).
  *     `req.user.username` keeps the Nextcloud username for display, and
- *     `req.user.role` is still derived from OCS groups via `roleFromGroups`
- *     (the JWT path's role takes precedence when a JWT is present).
+ *     `req.user.role` is resolved by `resolveNcSessionRole` — the OCS
+ *     groups CAPPED at the local row's `User.role` (WARP-1636; before
+ *     that cap the groups alone decided, and Nextcloud's built-in
+ *     `admin` group mapped straight to `owner`). The JWT path's role
+ *     takes precedence when a JWT is present.
  *
  * Downstream invariant: every `req.user.id` consumer (people self-action
  * guard, camera pins, /auth/me, brain-memory ownership checks, etc.) may
@@ -540,7 +543,14 @@ async function validateNextcloudTokenDetailed(
       id: localUser.id,
       username: ncUsername,
       displayName: ocs.data["display-name"] || ncUsername,
-      role: roleFromGroups(groups),
+      // WARP-1636 — CAP the group-derived role at the role Droplet's own
+      // store holds. `roleFromGroups(groups)` alone read Nextcloud's
+      // built-in `admin` group back as `owner`, so a deliberately-narrowed
+      // admin (or anyone an NC administrator added to that group) could
+      // mint the one tier ADR-032 §3 says bypasses layer 2. `localUser` is
+      // already in hand from the WARP-485 lookup above, so the authority is
+      // free — see resolveNcSessionRole for the full rail.
+      role: resolveNcSessionRole(groups, localUser.role),
     };
 
     await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
@@ -683,9 +693,17 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
   },
   {
     // WARP-1800: the rack panel's device-bridge presents this Bearer on GET
-    // /api/network/wifi/join-code — the ONE route this principal may reach
-    // (pinned by requireRoleOrService, so the coarse `service` role shared by
-    // every principal above is not enough).
+    // /api/network/wifi/join-code, which is pinned to this principal by name
+    // via requireRoleOrService — the coarse `service` role shared by every
+    // principal above is not enough to reach it.
+    //
+    // WARP-2668 adds a SECOND caller in the other half of the panel: display.py
+    // reads GET /api/storage for the STORAGE cell's data-drive total. That
+    // route carries no requireRole at all — like every authenticated reader on
+    // this router it is open to any principal — so nothing here changes for it,
+    // and the pin above is a statement about join-code, not an allowlist. If
+    // the panel's reach ever needs to be BOUNDED rather than described, that is
+    // a per-route guard on the routes themselves, not an edit to this comment.
     //
     // Same token as the orchestrator → oled-display leg (WARP-165); compose
     // already gives both ends the value, so this adds a direction, not a

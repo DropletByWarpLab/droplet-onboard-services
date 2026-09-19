@@ -155,11 +155,37 @@ describe("getConnectionView", () => {
 describe("beginDeviceCodeConnect", () => {
   it("returns the code for the person to enter and parks the row in PENDING_CONSENT", async () => {
     const prisma = fakePrisma(null);
-    const started = await beginDeviceCodeConnect(prisma as never, fakeEntra(), USER);
+    // Hold Microsoft's side of the flow open: PENDING_CONSENT is the state
+    // BETWEEN the code being handed back and the person approving, so the
+    // fake must not complete until the test says so. (Until Vitest 2 this
+    // passed by accident — `vi.fn(async impl)` returned a `.then`-chained
+    // promise, which delayed the fire-and-forget persistConnected by one
+    // microtask; tinyspy 4 returns the implementation's own promise, so an
+    // instantly-resolving fake now writes CONNECTED before the caller's
+    // await resumes.)
+    let approve!: () => void;
+    const approved = new Promise<void>((resolve) => (approve = resolve));
+    const entra = fakeEntra({
+      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+        onCode({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://microsoft.com/devicelogin",
+          expiresAt: new Date(Date.now() + 900_000),
+          message: "enter the code",
+        });
+        await approved;
+        return authResult();
+      }),
+    });
+
+    const started = await beginDeviceCodeConnect(prisma as never, entra, USER);
 
     expect(started.userCode).toBe("ABCD-EFGH");
     expect(started.verificationUri).toContain("microsoft.com");
     expect((prisma.__row() as any).state).toBe("PENDING_CONSENT");
+
+    approve();
+    await vi.waitFor(() => expect((prisma.__row() as any).state).toBe("CONNECTED"));
   });
 
   it("stores the token sealed, not in the clear, once the person approves", async () => {

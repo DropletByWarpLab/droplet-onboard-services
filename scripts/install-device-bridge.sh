@@ -288,6 +288,20 @@ fi
 install -m 0755 "$SET_BOX_NAME_SCRIPT_SRC" "$SET_BOX_NAME_SCRIPT_DST"
 log "installed $SET_BOX_NAME_SCRIPT_DST"
 
+# NVR recordings-target write-back executor (WARP-2099). The only writer of
+# NVR_MEDIA_SOURCE, the key that decides whether 24/7 camera footage lands on
+# a storage pool or on the boot disk. Must be installed before anything can
+# change the target on a real box. Repo-tracked (architecture-guard rule 20),
+# installed here so factory-reset removes it cleanly.
+SET_NVR_MEDIA_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-nvr-media.sh"
+SET_NVR_MEDIA_SCRIPT_DST="/usr/local/sbin/droplet-set-nvr-media.sh"
+if [[ ! -f "$SET_NVR_MEDIA_SCRIPT_SRC" ]]; then
+  log "missing source: $SET_NVR_MEDIA_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$SET_NVR_MEDIA_SCRIPT_SRC" "$SET_NVR_MEDIA_SCRIPT_DST"
+log "installed $SET_NVR_MEDIA_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

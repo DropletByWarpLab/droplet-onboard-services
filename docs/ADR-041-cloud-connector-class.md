@@ -6,6 +6,7 @@
 - **Answers:** [`docs/integrations/ADD-A-PROVIDER.md`](integrations/ADD-A-PROVIDER.md) §0, which routes a "radically different category (non-database, API-based)" provider to an ADR before any code.
 - **Builds on:** `shared_brain/FOUNDATION.md` (the air-gapped-mentality thesis), ADR-009 (no public inbound), ADR-012 (phone-home egress control), WARP-269 / WARP-268 (the default-deny egress registry and its runtime audit).
 - **First consumers:** Microsoft 365 / Graph ([WARP-2115](https://warp-lab.atlassian.net/browse/WARP-2115), [WARP-2118](https://warp-lab.atlassian.net/browse/WARP-2118)) and Salesforce ([WARP-2116](https://warp-lab.atlassian.net/browse/WARP-2116)).
+- **Amended by:** [ADR-042](ADR-042-customer-supplied-credentials.md), which adds a **third** consent model to §5 — a credential the customer mints in their own vendor account and pastes into the box — and settles which vendors require Warp Lab to register an app. §5's delegated-per-user default is narrowed, not replaced.
 
 ## Context
 
@@ -49,6 +50,14 @@ It does, however, mean a customer may already be signing into Droplet with the s
 
 ### 4. Cloud connectors persist; ERP connectors do not — and that difference is the product
 
+> **Amended by [WARP-2549](https://warp-lab.atlassian.net/browse/WARP-2549) (2026-09-01).** The "synced content is encrypted at rest" rule below was read two ways, and the reading decided whether a landing seam could ship at all. Read broadly it forbids writing a HubSpot company name into a plaintext `CrmCompany.name` — which would leave the cloud tracks permanently unable to deliver the local copy this very section calls the point. **The narrow reading is the decided one:** the rule is about inheriting an UNKEPT PROMISE. `ErpEntityCache`'s docstring claims an at-rest encryption that does not exist (WARP-2028), so becoming its first writer ships a lie about the data's protection. `CrmCompany`, `Contact` and `CrmDeal` make no such claim, and already hold exactly this data the moment a human types it. Landing into them is therefore permitted, and `ErpEntityCache` still has zero writers and still must not gain one.
+>
+> Two obligations came with the amendment, both shipped in the same change:
+>
+> * **Provenance is complete or refused, in the database.** A landed row carries `connectionId`, `externalSystem` and `externalId` or none of the three, and a row carrying them is `origin: EXTERNAL`. Three CHECK constraints, proven in `landing-provenance.pg.test.ts`.
+> * **PHI does not land.** `patient`, `appointment` and `account` are read-through only, behind the ERP router's own gate, and there is no flag that turns landing on for them (ADR-044 §3).
+
+
 The ERP tracks are **read-through**: `erp.service.ts` builds, connects and closes a connector per read, and nothing is stored. That was right for a system of record sitting one switch-port away, where the freshest copy is always the vendor's.
 
 Cloud sync is the opposite by design. **The local copy is the point** — it is what survives the vendor's outage, what the customer still owns after an account lockout, what RAG indexes and the local model can reason over without a round trip. This is the same thesis as [WARP-1234](https://warp-lab.atlassian.net/browse/WARP-1234) ("own a copy of everything the cloud has on you"), and the M365 connector delivers that ticket as a side effect of delivering itself.
@@ -59,6 +68,8 @@ Two constraints follow, and both are binding:
 - **Deletion is a real operation.** Disconnecting an account must offer to purge what was synced from it, and a factory reset must remove it — consistent with how a wipe already rotates identity and invalidates pairings.
 
 ### 5. Tokens are credentials to the customer's whole account, and are treated as such
+
+> **Amended by [ADR-042](ADR-042-customer-supplied-credentials.md) (2026-08-27).** This section names two consent models; there are three. Every SaaS vendor in [WARP-2214](https://warp-lab.atlassian.net/browse/WARP-2214) — Stripe, HubSpot, Mailchimp, Shopify, Xero — supports a credential the **customer mints in their own vendor account and pastes into the box**, which is neither delegated-per-user nor an application-wide secret we distribute. ADR-042 authorises that third model, states what the owner pastes per vendor, rules the boundary rejection of full-privilege keys, and settles who registers the vendor app. The delegated-per-user default below still stands wherever the vendor offers no customer-creatable credential.
 
 An OAuth refresh token for Microsoft 365 is, functionally, a long-lived key to the customer's mailbox and files. It is encrypted at rest, never written to `docker/.env` or any tracked file, never logged, purged on disconnect, and purged on factory reset.
 

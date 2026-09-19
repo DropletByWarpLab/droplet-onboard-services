@@ -32,6 +32,10 @@ const verifyAccessToken = vi.fn();
 vi.mock("../services/jwt.service.js", () => ({
   verifyAccessToken: (...a: unknown[]) => verifyAccessToken(...(a as [string])),
   roleFromGroups: vi.fn().mockReturnValue("family"),
+  // WARP-1636 — the OCS fallback's session-mint funnel. See the note in
+  // middleware/auth.test.ts: the rank cap is pinned against the real
+  // module in __tests__/auth.ocs-role-cap.test.ts.
+  resolveNcSessionRole: vi.fn().mockReturnValue("family"),
 }));
 
 const checkSession = vi.fn();

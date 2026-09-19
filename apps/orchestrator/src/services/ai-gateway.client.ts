@@ -147,10 +147,44 @@ export async function getModelProvider(
   return (await findModelInfo(model, now))?.provider;
 }
 
+/**
+ * WARP-2851 — the model's OWN context window, from the same cached list.
+ *
+ * The gateway publishes this per provider (`schemas.py` `ModelInfo`):
+ * anthropic 200000, openai 128000, and **null for every local model** — Ollama
+ * does not report a window, and the deployed one is an operator setting
+ * (`OLLAMA_CONTEXT_LENGTH`) rather than a property of the model.
+ *
+ * `undefined` therefore means BOTH "unknown model / gateway unreachable" and
+ * "the provider does not publish one", and both must resolve to the local
+ * default — see `resolveTurnContextWindow`. Never guess a window: budgeting a
+ * 16K model as though it were 200K is the WARP-854 overflow, which is the
+ * failure this whole budget path exists to prevent.
+ */
+export async function getModelContextWindow(
+  model: string,
+  now: number = Date.now(),
+): Promise<number | undefined> {
+  return (await findModelInfo(model, now))?.context_window ?? undefined;
+}
+
+/**
+ * WARP-2749 — per-call options. `priority` is the gateway's
+ * `X-Request-Priority` (services/ai-gateway/main.py: 0 user-initiated, the
+ * default when the header is absent; 5 automation; 10 background). Its
+ * scheduler serves lower values first and REJECTS a request ≥ 5 with 429
+ * while five or more requests are pending — so a background caller must
+ * treat 429 as "chat is busy, try later", never as a failure of its own.
+ */
+export interface ChatCallOptions {
+  priority?: number;
+}
+
 export async function chat(
   request: ChatRequest,
   signal?: AbortSignal,
-  userId?: string
+  userId?: string,
+  opts?: ChatCallOptions,
 ): Promise<Response> {
   // Streaming chat: no timeout — inference can legitimately take minutes on
   // local Ollama. The orchestrator's agent loop owns turn-level timeouts.
@@ -162,7 +196,11 @@ export async function chat(
   // model running.
   const res = await internalFetch(`${BASE_URL}/ai/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders(userId) },
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(userId),
+      ...(opts?.priority !== undefined ? { "X-Request-Priority": String(opts.priority) } : {}),
+    },
     body: JSON.stringify(request),
     signal,
   });
@@ -194,8 +232,9 @@ export async function* chatStream(
   request: ChatRequest,
   signal?: AbortSignal,
   userId?: string,
+  opts?: ChatCallOptions,
 ): AsyncGenerator<ChatStreamChunk, void, unknown> {
-  const res = await chat({ ...request, stream: true }, signal, userId);
+  const res = await chat({ ...request, stream: true }, signal, userId, opts);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`AI Gateway streaming error ${res.status}: ${body}`);
@@ -255,7 +294,10 @@ export async function saveKey(
   apiKey: string,
   userId?: string
 ): Promise<void> {
-  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
+  // CodeQL js/request-forgery: `provider` is `req.params.provider` from
+  // routes/llm.ts; encode it so it can only ever be one path segment of the
+  // gateway URL (same as every other caller of internalFetch does).
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${encodeURIComponent(provider)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify({ api_key: apiKey }),
@@ -285,7 +327,7 @@ export async function deleteKey(
   provider: string,
   userId?: string
 ): Promise<void> {
-  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${encodeURIComponent(provider)}`, {
     method: "DELETE",
     headers: authHeaders(userId),
     signal: timeout(),

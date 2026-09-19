@@ -13,12 +13,17 @@ import {
   DENY_ALL_TOOL_SCOPE,
   firstForbiddenToolName,
   firstToolDeniedForPrincipal,
+  hasWriteTool,
   isLockLikeInvocation,
   lockOperationDenied,
+  narrowToolNamesForPrincipal,
   narrowToolNamesToScope,
+  narrowToolsToScope,
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
+  WRITE_TOOLS,
+  writeToolsIn,
   type ToolAccessScope,
 } from "./tool-access.service.js";
 
@@ -41,6 +46,29 @@ const nameOf = (domain: string, write: boolean): string => {
   if (!entry) throw new Error(`no ${write ? "write" : "read"} tool in ${domain}`);
   return entry.name;
 };
+
+describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classification", () => {
+  const read = nameOf("files", false);
+  const write = nameOf("files", true);
+
+  it("names the write tools in a list, in order, and nothing else", () => {
+    expect(writeToolsIn([read, write, read])).toEqual([write]);
+    expect(writeToolsIn([read])).toEqual([]);
+    expect(writeToolsIn([])).toEqual([]);
+  });
+
+  it("hasWriteTool is true iff writeToolsIn is non-empty", () => {
+    expect(hasWriteTool([read])).toBe(false);
+    expect(hasWriteTool([read, write])).toBe(true);
+    expect(hasWriteTool([])).toBe(false);
+  });
+
+  it("agrees with WRITE_TOOLS for every registered tool, so no consumer can drift", () => {
+    for (const { name } of TOOL_CATALOG) {
+      expect(hasWriteTool([name])).toBe(WRITE_TOOLS.has(name));
+    }
+  });
+});
 
 describe("toolAllowedInScope — the shared narrowing predicate", () => {
   it("`view` on a domain keeps its read tools and drops its write tools", () => {
@@ -89,6 +117,50 @@ describe("narrowToolNamesToScope", () => {
     expect(
       narrowToolNamesToScope([read, write, other, "not_a_tool"], scopeOf(["files"])),
     ).toEqual([read]);
+  });
+});
+
+describe("narrowToolsToScope — the single narrowing expression (WARP-2556)", () => {
+  // Both the context estimate (`routes/llm.ts`) and the dispatch filter
+  // (`llm-agent.service.ts`) narrow through THIS function. They each used to
+  // re-express the rule inline, and one of the two copies was lost in a merge
+  // — the estimate then sized a pool the wire never carried. The behaviour is
+  // pinned here so the shared expression has a test of its own, rather than
+  // only being asserted by source-grep in the parity suite.
+  const toolsOf = (...names: string[]) => names.map((name) => ({ name, schema: {} }));
+
+  it("filters objects by scope, preserving order and dropping unknowns", () => {
+    const read = nameOf("files", false);
+    const write = nameOf("files", true);
+    const other = nameOf("cameras", false);
+    const tools = toolsOf(read, write, other, "not_a_tool");
+    expect(narrowToolsToScope(tools, scopeOf(["files"])).map((t) => t.name)).toEqual([read]);
+  });
+
+  it("agrees with narrowToolNamesToScope on the same input", () => {
+    // The two helpers exist because the call sites hold different shapes, not
+    // because the RULE differs. If they can ever disagree, the estimate and
+    // the dispatch can disagree, which is the whole defect.
+    const names = [nameOf("files", false), nameOf("files", true), nameOf("cameras", false)];
+    const scope = scopeOf(["files"], ["files"]);
+    expect(narrowToolsToScope(toolsOf(...names), scope).map((t) => t.name)).toEqual(
+      narrowToolNamesToScope(names, scope),
+    );
+  });
+
+  it("narrows nothing when the scope is absent, for both nullish forms", () => {
+    // The owner bypass and service principals. Carried in the helper so the
+    // two call sites cannot implement it differently — `routes/llm.ts` passes
+    // `undefined`, the agent loop's request field is typed `| null`.
+    const tools = toolsOf(nameOf("files", false), nameOf("cameras", true));
+    expect(narrowToolsToScope(tools, undefined)).toBe(tools);
+    expect(narrowToolsToScope(tools, null)).toBe(tools);
+  });
+
+  it("denies everything under the deny-all scope", () => {
+    // Fail-closed, same as the predicate: an empty scope is not "no scope".
+    const tools = toolsOf(nameOf("files", false), nameOf("cameras", true));
+    expect(narrowToolsToScope(tools, DENY_ALL_TOOL_SCOPE)).toEqual([]);
   });
 });
 
@@ -379,6 +451,43 @@ describe("firstToolDeniedForPrincipal — the composed A ∧ B pre-flight", () =
     expect(
       firstToolDeniedForPrincipal([CAMERAS_READ], "admin", scopeOf(["files"], ["files"])),
     ).toEqual({ tool: CAMERAS_READ, axis: "role_grant" });
+  });
+
+  it("a role granted System but not Business cannot reach business_create — the ADR-045 seam (WARP-2583)", () => {
+    // Before the collapse the project and task writes were `pm_*` tools
+    // behind the `pm` grant; now all of them, and the CRM's, are `business_*`
+    // behind `business`. A scope shaped like the old System toggle — `system`
+    // and `data`, with the emptied `pm` / `crm` for good measure — must reach
+    // none of them, and `view` on `business` must reach the reads only.
+    // MUTATION: exempt `business` from the domain check in
+    // `toolAllowedInScope` -> red.
+    const BUSINESS = TOOL_CATALOG.filter((t) => t.domain === "business").map((t) => t.name);
+    const WRITES = ["business_create", "business_update", "business_link"];
+    expect(BUSINESS).toEqual(
+      expect.arrayContaining([...WRITES, "business_find", "business_timeline"]),
+    );
+    const oldSystemRow = scopeOf(
+      ["system", "data", "pm", "crm"],
+      ["system", "data", "pm", "crm"],
+    );
+    expect(narrowToolNamesForPrincipal(BUSINESS, "admin", oldSystemRow)).toEqual([]);
+    expect(firstToolDeniedForPrincipal(["business_create"], "admin", oldSystemRow)).toEqual({
+      tool: "business_create",
+      axis: "role_grant",
+    });
+    // `view` keeps the reads and still refuses the three writes.
+    const view = scopeOf(["business"]);
+    expect(narrowToolNamesForPrincipal(BUSINESS, "admin", view)).toEqual(
+      BUSINESS.filter((n) => !WRITES.includes(n)),
+    );
+    expect(firstToolDeniedForPrincipal(WRITES, "admin", view)).toEqual({
+      tool: "business_create",
+      axis: "role_grant",
+    });
+    // `use` opens all of them.
+    expect(
+      narrowToolNamesForPrincipal(BUSINESS, "admin", scopeOf(["business"], ["business"])),
+    ).toEqual(BUSINESS);
   });
 
   it("returns null when every name clears both axes", () => {

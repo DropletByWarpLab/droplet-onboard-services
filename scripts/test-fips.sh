@@ -69,7 +69,10 @@ note() {
 #
 # We match on the *intent* of the call site, not just the algorithm name.
 # Plain mentions in comments / docstrings are stripped from the candidate
-# set before the escape-comment check (see _strip_comment_only_lines).
+# set before the escape-comment check (see _strip_comment_only_lines). The
+# strip is LINE-scoped: a prose mention buys no exemption for a real call
+# site elsewhere in the same file, and a code line carrying a trailing
+# comment stays a candidate.
 PATTERNS=(
   "md5 (Python hashlib.md5)|hashlib\\.md5\\("
   "md5 (Python hashlib.new('md5'))|hashlib\\.new\\(\\s*['\\\"]md5['\\\"]"
@@ -208,6 +211,56 @@ is_in_scope() {
   echo "$path" | grep -qE "$INCLUDE_EXTS_REGEX"
 }
 
+# Drop comment-only lines from a `grep -nE` hit list (WARP-2480).
+#
+# Reads `<lineno>:<content>` hits for ONE file on stdin and re-emits only the
+# hits whose line is not comment-only — i.e. whose first non-blank characters
+# are none of `//`, `#`, `*`, `/*`, `*/`. This runs BEFORE resolve_escape, so a
+# file can explain in prose why it avoids a forbidden primitive without an
+# undeserved `fips:allowed:` escape (which would in turn need a reason-id
+# registered in fips-exceptions.md that the file does not deserve). The
+# PATTERNS header above has promised this since WARP-229; WARP-2460's Mailchimp
+# docstring is the call site that proved it was never implemented.
+#
+# Deliberately conservative — the safe direction to be wrong in is UNDER-
+# stripping (a spurious report a human resolves) rather than over-stripping
+# (a real call site the gate goes silent about):
+#   * `#` opens a comment in Python / shell / YAML / OpenSSL conf, but opens a
+#     PRIVATE CLASS FIELD in JS/TS — `#digest = createHash("md5")` is code, and
+#     the repo really does start lines that way (`#src = "";` in the dashboard
+#     camera-widget tests). So `#` counts as a comment introducer only outside
+#     the JS/TS family.
+#   * No block-comment state is tracked. A `/* … */` continuation line that
+#     starts with neither `*` nor a comment token stays a candidate and still
+#     needs an escape.
+#   * A trailing comment on a code line (`foo(); // md5 here`) is not
+#     comment-only; that line stays a candidate.
+_strip_comment_only_lines() {
+  local file="$1"
+  # Whether a leading `#` introduces a comment in this file's language.
+  local hash_starts_comment=1
+  case "$file" in
+    *.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs) hash_starts_comment=0 ;;
+  esac
+  local hit content trimmed
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    content="${hit#*:}"
+    # Strip leading blanks without spawning a process per hit — this runs once
+    # per grep hit across the whole tree.
+    trimmed="${content#"${content%%[![:space:]]*}"}"
+    case "$trimmed" in
+      '//'* | '/*'* | '*/'* | '*'*) continue ;;
+    esac
+    if [ "$hash_starts_comment" -eq 1 ]; then
+      case "$trimmed" in
+        '#'*) continue ;;
+      esac
+    fi
+    printf '%s\n' "$hit"
+  done
+}
+
 # For a given file + line number, look at the ±2 surrounding lines for a
 # `fips:allowed: <reason-id>` comment. Echo the resolved reason-id (or
 # the literal token "MISSING" if no comment present, or "UNRESOLVED:<id>"
@@ -315,7 +368,7 @@ for entry in "${PATTERNS[@]}"; do
           note "$relpath:$lineno [$label] — allowed via fips:allowed: $resolution"
           ;;
       esac
-    done < <(grep -nE "$regex" "$file" 2>/dev/null || true)
+    done < <(grep -nE "$regex" "$file" 2>/dev/null | _strip_comment_only_lines "$file" || true)
   done <<< "$CANDIDATES"
 done
 

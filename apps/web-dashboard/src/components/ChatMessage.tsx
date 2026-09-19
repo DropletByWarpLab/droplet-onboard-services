@@ -27,6 +27,7 @@ import { CitationCard } from "@/components/citations/CitationCard";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
 import { ThinkingMessage } from "@/components/chat/ThinkingMessage";
+import { ToolApprovalPrompt } from "@/components/chat/ToolApprovalPrompt";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
 
@@ -101,6 +102,22 @@ interface ChatMessageProps {
    */
   onApproveScene?: (messageId: string, toolCallId: string) => void;
   /**
+   * WARP-2469: approve or decline a WARP-2305 interceptor challenge
+   * raised on this turn. Wired by the page to
+   * `useChat.decideToolConfirmation`. Distinct from `onApproveScene`
+   * because the two confirmations are different mechanisms: a scene run
+   * echoes its own single-use token to a REST route, while an interceptor
+   * challenge is redeemed by `challengeId` and the token never reaches
+   * the browser at all.
+   */
+  onToolDecision?: (
+    messageId: string,
+    toolCallId: string,
+    decision: "approve" | "deny",
+  ) => void;
+  /** WARP-2469: re-ask after an approval expired, minting a fresh challenge. */
+  onRerequestApproval?: (messageId: string) => void;
+  /**
    * WARP-844: edit & resend. Wired by the page to `useChat.editMessage`.
    * Rendering the pencil is gated on this prop AND the row being a user
    * message; the page withholds it while a stream is in flight.
@@ -122,6 +139,8 @@ export const ChatMessage = memo(function ChatMessage({
   onQuote,
   onRegenerate,
   onApproveScene,
+  onToolDecision,
+  onRerequestApproval,
   onEdit,
   onFeedback,
 }: ChatMessageProps) {
@@ -326,7 +345,28 @@ export const ChatMessage = memo(function ChatMessage({
             {!hasThinking && toolChipRow ? (
               <div className="mb-2">{toolChipRow}</div>
             ) : null}
-            {confirmCall && (
+            {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
+                approval prompt: Approve / Don't, a PHI-free argument
+                summary, and an expired state that offers a re-request.
+                Every other confirmation keeps the pre-existing display
+                block below (they resolve on their own dashboard surface,
+                or via the WARP-640 one-click token). */}
+            {confirmCall?.confirmation?.kind === "tool_confirmation" ? (
+              <ToolApprovalPrompt
+                call={confirmCall}
+                onDecision={
+                  onToolDecision
+                    ? (_challengeId, decision) =>
+                        onToolDecision(message.id, confirmCall.id, decision)
+                    : undefined
+                }
+                onRerequest={
+                  onRerequestApproval
+                    ? () => onRerequestApproval(message.id)
+                    : undefined
+                }
+              />
+            ) : confirmCall ? (
               <div
                 className="mb-2 p-2 rounded-lg bg-system-orange/10 text-system-orange type-caption-1"
                 role="alert"
@@ -377,7 +417,7 @@ export const ChatMessage = memo(function ChatMessage({
                   )
                 ) : null}
               </div>
-            )}
+            ) : null}
             {/* WARP-1605: the trace moved to the thinking row above — a
                 collapsed disclosure inside the answer bubble was exactly the
                 "no boundary" this ticket exists to remove. */}

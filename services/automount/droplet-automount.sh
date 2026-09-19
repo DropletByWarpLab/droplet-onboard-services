@@ -585,6 +585,28 @@ case "$ACTION" in
       RW_MODE="rw"
     fi
 
+    # Hostile-media options. This script runs as ROOT out of a udev unit and
+    # mounts whatever partition appears, so the media is attacker-supplied by
+    # definition on a box anyone can reach a USB port on.
+    #
+    # `ro` is NOT a mitigation for this: a read-only mount executes setuid-root
+    # binaries and honours device nodes exactly like a read-write one. The
+    # untrusted-ro branch above picked the right trust model and then handed it
+    # to a mount that still trusted the media.
+    #
+    # nosuid,nodev UNCONDITIONALLY, including trusted and enrolled drives.
+    # These are DATA drives (documents, media, the NVR pool); a setuid binary
+    # or a device node on one is never legitimate, and "we enrolled it" says
+    # the disk is ours, not that its contents are.
+    #
+    # noexec ONLY on untrusted media. Deliberately not unconditional: the same
+    # branch mounts the md RAID pool, and an operator keeping a script on their
+    # own pool is a reasonable thing this must not break.
+    HARDEN="nosuid,nodev"
+    if [ "$TRUST" = "untrusted-ro" ]; then
+      HARDEN="${HARDEN},noexec"
+    fi
+
     # If something already mounted this device at a STALE PATH UNDER OUR OWN
     # BASE (re-enumerated /dev/sdX after a re-plug, a desktop distro's
     # udisks), unmount it so we can reseat it at the derived path — that's
@@ -650,12 +672,12 @@ case "$ACTION" in
       # WARP-232: $RW_MODE is ro for untrusted plain drives, rw otherwise.
       case "$TYPE" in
         vfat|exfat|ntfs|msdos)
-          mount -o "${RW_MODE},noatime,uid=1000,gid=1000,umask=0002,nofail" \
+          mount -o "${RW_MODE},${HARDEN},noatime,uid=1000,gid=1000,umask=0002,nofail" \
             "$DEVICE" "$MOUNT" \
             || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
           ;;
         *)
-          if ! mount -o "${RW_MODE},noatime,nofail" "$DEVICE" "$MOUNT"; then
+          if ! mount -o "${RW_MODE},${HARDEN},noatime,nofail" "$DEVICE" "$MOUNT"; then
             if [ "$RW_MODE" = "rw" ] && is_md_node "$DEVICE"; then
               # WARP-1361: a healthy-but-read-only array (mdadm auto-read-
               # only after an unclean stop, or an explicit readonly state)
@@ -664,7 +686,7 @@ case "$ACTION" in
               log "mount failed for $DEVICE ($TYPE) — array may be read-only; running mdadm --readwrite and retrying"
               mdadm --readwrite "$DEVICE" 2>/dev/null \
                 || log "mdadm --readwrite $DEVICE failed (retrying the mount anyway)"
-              mount -o "${RW_MODE},noatime,nofail" "$DEVICE" "$MOUNT" \
+              mount -o "${RW_MODE},${HARDEN},noatime,nofail" "$DEVICE" "$MOUNT" \
                 || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT even after mdadm --readwrite"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
             else
               log "mount failed for $DEVICE ($TYPE) -> $MOUNT"

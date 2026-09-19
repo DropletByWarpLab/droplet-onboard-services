@@ -16,7 +16,7 @@
  * + display name are read-only — the admin pre-claimed them.
  */
 
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState, use } from "react";
 import Link from "next/link";
 import { Lock, User as UserIcon, Eye, EyeOff } from "lucide-react";
 import { AuthLayout } from "@/components/auth/AuthLayout";
@@ -34,10 +34,11 @@ type LoadState =
   | { kind: "accepted"; displayName: string | null };
 
 interface PageProps {
-  params: { token: string };
+  params: Promise<{ token: string }>;
 }
 
-export default function InviteAcceptPage({ params }: PageProps) {
+export default function InviteAcceptPage(props: PageProps) {
+  const params = use(props.params);
   const { token } = params;
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [password, setPassword] = useState("");

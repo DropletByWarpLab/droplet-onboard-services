@@ -29,12 +29,30 @@ export function formatApptTime(iso: string): string {
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-/** ISO → "Mar 3, 1985" (DOB, visit dates). A date-only ISO string is parsed as
- *  LOCAL time (not UTC midnight), so a DOB / visit date never renders one day
- *  early for a box in a timezone behind UTC (all of the US). */
-export function formatDate(iso?: string): string {
+/**
+ * The two shapes one CALENDAR DATE arrives in.
+ *
+ * A date of birth, a visit date, an invoice's issue or due date has no time
+ * and no timezone — it is a day on a calendar. Both of these parse to UTC
+ * midnight, which is the previous EVENING everywhere behind UTC, i.e. all of
+ * the US:
+ *
+ *   • `2026-09-10` — the bare value a vendor or a form sends.
+ *   • `2026-09-10T00:00:00.000Z` — what that same value becomes once it has
+ *     been through a `DateTime` column. WARP-2581's `/api/money` serves
+ *     `issuedAt`/`dueAt` in exactly this shape, which is how an invoice due
+ *     the 10th came to read "Sep 9" on a box in California.
+ *
+ * Both are re-read as LOCAL calendar dates below. An instant with a real time
+ * on it is left alone — 03:00 UTC genuinely IS the evening before in Los
+ * Angeles, and `formatApptTime` is what renders times.
+ */
+const CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T00:00(?::00(?:\.0+)?)?(?:Z|\+00:00))?$/;
+
+/** ISO → "Mar 3, 1985" (DOB, visit dates, ledger dates). */
+export function formatDate(iso?: string | null): string {
   if (!iso) return "—";
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const m = CALENDAR_DATE.exec(iso);
   const d = m
     ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
     : new Date(iso);

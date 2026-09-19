@@ -1072,6 +1072,42 @@ describe("GET /api/vpn/overlay/devices/by-token/:id/profile (NO bearer)", () => 
     return pop ? r.set("X-Overlay-PoP", pop) : r;
   };
 
+  // WARP-2689 — this is the route a device calls to REBUILD its conf after a
+  // router wipe, i.e. exactly when the router is most likely to have come back
+  // without WireGuard. A profile issued then can never handshake; refuse like
+  // the mint route and provisionOverlayPeer do, and say why.
+  it("refuses with tunnel_not_ready when the router reports interface_live=false", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    vpnSetupMock.mockResolvedValueOnce({
+      public_key: "SERVERPUBKEY0000000000000000000000000000000=",
+      interface_live: false,
+    } as never);
+
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("tunnel_not_ready");
+    expect(res.body).not.toHaveProperty("server_public_key");
+  });
+
+  it("still issues when the router cannot say (interface_live null)", async () => {
+    const { app } = buildApp();
+    const { pendingId, key } = await stageWithKey(app);
+    await request(app)
+      .post(`/api/vpn/overlay/pending-enrollments/${pendingId}/approve`)
+      .send({});
+    vpnSetupMock.mockResolvedValueOnce({
+      public_key: "SERVERPUBKEY0000000000000000000000000000000=",
+      interface_live: null,
+    } as never);
+
+    const res = await getProfile(app, pendingId, profilePop(key.privateKey, pendingId));
+    expect(res.status).toBe(200);
+  });
+
   it("issues a complete, self-consistent profile to an approved device", async () => {
     const { app, prisma } = buildApp();
     const { pendingId, key } = await stageWithKey(app);

@@ -4,11 +4,19 @@
  * Manage Eaglesoft sheet — reached from the connected hero's "Manage" action
  * (design brief §4.1, §7.5, §10). Holds the write mode toggle (a confirmed
  * state change), Sync now, and Disconnect (destructive-ish, confirmed).
+ *
+ * WARP-2518 — the disconnect block is no longer this sheet's. It was the ONLY
+ * Disconnect control in the product, which meant a cloud connection made from
+ * `/integrations` or `/integrations/credentials` could be created in the
+ * dashboard and removed only through the API. `DisconnectControl` now owns the
+ * confirmation, the call and the failure, and this sheet is one of its three
+ * consumers rather than the place the other two would have had to copy.
  */
 
-import { useId, useState } from "react";
-import { RefreshCw, Lock, PlugZap, Unplug } from "lucide-react";
+import { useId } from "react";
+import { RefreshCw, Lock, PlugZap } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
+import { DisconnectControl } from "@/components/integrations/DisconnectControl";
 import type { IntegrationConnection } from "@/lib/erp-types";
 import { writeModeOf } from "@/lib/erp-types";
 
@@ -16,30 +24,37 @@ export function ManageSheet({
   open,
   onClose,
   connection,
+  displayName = "Eaglesoft",
   canToggleWrites = true,
   onToggleWrites,
   onSyncNow,
-  onDisconnect,
+  onDisconnected,
 }: {
   open: boolean;
   onClose: () => void;
   connection: IntegrationConnection;
+  /** What the owner calls this connection. Defaults to the one vendor this
+   *  sheet is reached for today; carried as a prop so the sheet does not have
+   *  to be forked for the second. */
+  displayName?: string;
   /** Only owner/admin may flip the write kill-switch (RBAC). When false the
    *  toggle is hidden and the mode is shown read-only. */
   canToggleWrites?: boolean;
   onToggleWrites: (next: boolean) => void;
   onSyncNow: () => void;
-  onDisconnect: () => void;
+  /** Fired after the box CONFIRMED the disconnect — see `DisconnectControl`.
+   *  It replaces the old `onDisconnect`, which fired on the click and left the
+   *  page owning a call whose failure it then swallowed (WARP-2519). */
+  onDisconnected: () => void;
 }) {
   const headingId = useId();
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const mode = writeModeOf(connection);
   const writesOn = mode === "writes-enabled";
 
   return (
     <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="md">
       <div className="p-5">
-        <h2 id={headingId} className="type-title-3 text-label-primary">Manage Eaglesoft</h2>
+        <h2 id={headingId} className="type-title-3 text-label-primary">Manage {displayName}</h2>
 
         <div className="mt-4 dp-group">
           <button type="button" className="dp-row w-full text-left" onClick={onSyncNow}>
@@ -79,35 +94,19 @@ export function ManageSheet({
         )}
 
         <div className="mt-4 border-t border-separator pt-4">
-          {!confirmDisconnect ? (
-            <button
-              type="button"
-              className="flex items-center gap-2 type-footnote text-system-red"
-              onClick={() => setConfirmDisconnect(true)}
-            >
-              <Unplug size={14} /> Disconnect Eaglesoft
-            </button>
-          ) : (
-            <div className="rounded-sm bg-system-red/8 p-3">
-              <p className="type-footnote text-label-primary">
-                Disconnect Eaglesoft? Droplet will stop reading your practice. Your Eaglesoft data is
-                untouched.
-              </p>
-              <div className="mt-3 flex items-center gap-2">
-                <button type="button" className="type-footnote text-label-secondary px-2" onClick={() => setConfirmDisconnect(false)}>
-                  Keep connected
-                </button>
-                <button
-                  type="button"
-                  className="dp-btn-primary"
-                  style={{ background: "var(--color-system-red)" }}
-                  onClick={() => { onDisconnect(); onClose(); }}
-                >
-                  Disconnect
-                </button>
-              </div>
-            </div>
-          )}
+          {/* The sheet no longer closes itself on the click. It used to —
+              `onDisconnect(); onClose();` — which dismissed the one surface
+              that could have reported the failure, at the exact moment the
+              request was still in flight. It now closes when the box has
+              answered, and only then. */}
+          <DisconnectControl
+            provider={connection.provider}
+            displayName={displayName}
+            onDisconnected={() => {
+              onDisconnected();
+              onClose();
+            }}
+          />
         </div>
       </div>
     </Dialog>

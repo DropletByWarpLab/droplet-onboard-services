@@ -24,4 +24,15 @@ describe("ai-gateway client request-id header", () => {
     const headers = (call[1]?.headers ?? {}) as Record<string, string>;
     expect(headers["x-request-id"]).toBe("ctx-req-id-123");
   });
+
+  it("stamps X-Request-Priority only when the caller asks for one (WARP-2749)", async () => {
+    const { chat } = await import("../services/ai-gateway.client.js");
+    await chat({ model: "m", messages: [] } as never, undefined, undefined, { priority: 10 });
+    await chat({ model: "m", messages: [] } as never);
+    const calls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const withPriority = (calls[0][1]?.headers ?? {}) as Record<string, string>;
+    const without = (calls[1][1]?.headers ?? {}) as Record<string, string>;
+    expect(withPriority["X-Request-Priority"]).toBe("10");
+    expect("X-Request-Priority" in without).toBe(false);
+  });
 });

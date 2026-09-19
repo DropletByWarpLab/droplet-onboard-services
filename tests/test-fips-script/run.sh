@@ -9,17 +9,33 @@
 #   - Known-good samples → zero exit
 #   - Known-bad-with-valid-allowlist-comment → zero exit
 #   - Known-bad-with-broken-allowlist-reason-id → non-zero exit
+#   - Comment-only mentions stripped, code lines never (WARP-2480)
 #
 # Each test sets up a temp repo with the fixtures laid out under
 # `scripts/test-fips.sh`-compatible scan roots, then runs the real script
 # against that root. Sandbox isolation keeps the actual repo source out
 # of the assertions.
+#
+# Two fixture styles live here, deliberately:
+#   * heredocs, for one-liner algorithm/escape cases where the fixture IS the
+#     assertion and inlining keeps it readable;
+#   * files under `fixtures/`, for the WARP-2480 comment-stripping cases, whose
+#     point is the *shape* of a whole file (JSDoc blocks, block-comment
+#     terminators, indentation) and which are reviewed as source, not as a
+#     quoted string.
+# `fixtures/` is out of the lint's own scan roots (apps/services/packages/
+# scripts/docker) and additionally matches the `/tests/test-fips-script`
+# exclude fragment, so its deliberate MD5 call sites never trip the real run.
+#
+# Mutation harness hook: set `FIPS_LINT_SCRIPT=/path/to/mutated-copy.sh` to run
+# this suite against a mutated copy of the lint instead of the tracked one.
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEST_SCRIPT="$REPO_ROOT/scripts/test-fips.sh"
+TEST_SCRIPT="${FIPS_LINT_SCRIPT:-$REPO_ROOT/scripts/test-fips.sh}"
+FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 if [ ! -x "$TEST_SCRIPT" ]; then
   echo "FAIL: $TEST_SCRIPT not executable" >&2
@@ -68,6 +84,38 @@ run_script_in_sandbox() {
   local sandbox="$1"
   ( cd "$sandbox" && bash scripts/test-fips.sh ) > "$sandbox/stdout.log" 2> "$sandbox/stderr.log"
   echo $?
+}
+
+# Copy a file from `fixtures/` into a sandbox scan root, keeping its name so
+# the reported violation path is recognisable in a failure dump.
+copy_fixture() {
+  local sandbox="$1" fixture="$2" dest_dir="${3:-services}"
+  cp "$FIXTURES_DIR/$fixture" "$sandbox/$dest_dir/$fixture"
+}
+
+# Number of violations the run reported, read off its own summary line
+# (`FAIL  <n> FIPS violation(s); see above`). A clean run prints no such line,
+# which is 0. Asserting the COUNT — not just the exit code — is what keeps the
+# comment-stripping tests from passing for the wrong reason: a fixture pair
+# that trades one violation for another still exits 1.
+violation_count() {
+  local sandbox="$1" n
+  n="$(sed -nE 's/^FAIL[[:space:]]+([0-9]+) FIPS violation.*$/\1/p' "$sandbox/stderr.log" | head -n1)"
+  [ -n "$n" ] || n=0
+  printf '%s' "$n"
+}
+
+# Assert a substring appears in the run's stderr, so a test that expects a
+# violation names WHICH line it expects rather than accepting any failure.
+stderr_has() {
+  local sandbox="$1" needle="$2"
+  grep -qF -- "$needle" "$sandbox/stderr.log"
+}
+
+dump_logs() {
+  local sandbox="$1"
+  sed 's/^/      | /' "$sandbox/stdout.log" >&2
+  sed 's/^/      | /' "$sandbox/stderr.log" >&2
 }
 
 # We need the candidate-file enumeration to find our fixture files. The
@@ -237,6 +285,116 @@ EOF
   rm -rf "$s"
 }
 
+# -----------------------------------------------------------------------------
+# WARP-2480 — comment-only mentions are stripped before the escape check
+# -----------------------------------------------------------------------------
+#
+# `scripts/test-fips.sh` has promised this since WARP-229 (its PATTERNS header:
+# "Plain mentions in comments / docstrings are stripped from the candidate set
+# before the escape-comment check"), but `_strip_comment_only_lines` did not
+# exist, so a file could not document why it avoids a primitive without either
+# an undeserved `fips:allowed:` escape or rewording the prose until the regex
+# stopped matching. WARP-2460's Mailchimp docstring hit exactly that.
+#
+# Tests 8-9 are the new behaviour; tests 10-13 are the guard rails — the strip
+# is line-scoped and must never reach a code line.
+#
+# Mutation (run with FIPS_LINT_SCRIPT pointed at the mutated copy): make
+# `_strip_comment_only_lines` drop every hit rather than only comment-only
+# ones. Tests 10-13 go red because the real call sites stop being reported.
+
+test_comment_only_ts_mentions_pass() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" comment-only-mentions.ts
+  write_exceptions_doc "$s"  # empty — the fixture must not need an escape
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "0" ] && [ "$n" = "0" ]; then
+    pass "comment-only mentions (//, /*, *, */) produce no violation"
+  else
+    fail "comment-only .ts mentions should be stripped (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
+test_comment_only_py_mentions_pass() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" comment-only-mentions.py
+  write_exceptions_doc "$s"
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "0" ] && [ "$n" = "0" ]; then
+    pass "comment-only mentions (#) produce no violation"
+  else
+    fail "comment-only .py mentions should be stripped (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
+test_real_call_still_violates() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" real-call.ts
+  write_exceptions_doc "$s"
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "1" ] && [ "$n" = "1" ] && stderr_has "$s" "real-call.ts:7"; then
+    pass "a real createHash(\"md5\") call is still a violation"
+  else
+    fail "real call should violate at line 7 (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
+test_real_call_with_unregistered_escape_still_violates() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" real-call-unregistered-escape.ts
+  write_exceptions_doc "$s" rtsp-digest-rfc2617
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "1" ] && [ "$n" = "1" ] \
+     && stderr_has "$s" "real-call-unregistered-escape.ts:8" \
+     && stderr_has "$s" "not-a-registered-reason-id is not registered"; then
+    pass "a real call with an unregistered fips:allowed id is still a violation"
+  else
+    fail "unregistered escape should violate at line 8 (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
+test_comment_mention_does_not_excuse_call_in_same_file() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" mixed-comment-and-call.ts
+  write_exceptions_doc "$s"
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "1" ] && [ "$n" = "1" ] && stderr_has "$s" "mixed-comment-and-call.ts:14"; then
+    pass "a prose mention does not exempt the real call below it"
+  else
+    fail "mixed fixture should report exactly line 14 (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
+test_hash_prefixed_code_line_is_not_a_comment() {
+  local s; s="$(make_sandbox)"
+  copy_fixture "$s" hash-prefixed-code.ts
+  write_exceptions_doc "$s"
+  local rc; rc="$(run_script_in_sandbox "$s")"
+  local n; n="$(violation_count "$s")"
+  if [ "$rc" = "1" ] && [ "$n" = "1" ] && stderr_has "$s" "hash-prefixed-code.ts:10"; then
+    pass "a #private class field in .ts is code, not a comment"
+  else
+    fail "#private field should violate at line 10 (rc=$rc, violations=$n)"
+    dump_logs "$s"
+  fi
+  rm -rf "$s"
+}
+
 test_clean_passes
 test_md5_without_escape_fails
 test_md5_with_valid_escape_passes
@@ -244,6 +402,12 @@ test_md5_with_broken_escape_fails
 test_sha1_without_escape_fails
 test_node_md5_with_escape_passes
 test_escape_too_far_fails
+test_comment_only_ts_mentions_pass
+test_comment_only_py_mentions_pass
+test_real_call_still_violates
+test_real_call_with_unregistered_escape_still_violates
+test_comment_mention_does_not_excuse_call_in_same_file
+test_hash_prefixed_code_line_is_not_a_comment
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

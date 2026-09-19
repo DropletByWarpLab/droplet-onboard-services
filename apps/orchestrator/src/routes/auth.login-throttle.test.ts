@@ -27,6 +27,26 @@ import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
 
+// CodeQL js/missing-rate-limiting sweep — POST /auth/login now carries the
+// shared `authRateLimit` preset (express-rate-limit, keyed on req.ip). This
+// file tests the Redis-backed WARP-579 lockout underneath it, and one case
+// ("caller IP cannot be resolved") deliberately strips req.ip, which
+// express-rate-limit answers with an error (500 here, no error handler)
+// before the handler can log the per-IP warning under test. Swap the presets
+// for pass-throughs in this file only; middleware/rate-limit.test.ts covers
+// the limiter itself and the other auth route files exercise the real one.
+vi.mock("../middleware/rate-limit.js", () => {
+  const passThrough = Object.assign(
+    (_req: unknown, _res: unknown, next: () => void) => next(),
+    { resetKey: () => undefined },
+  );
+  return {
+    authRateLimit: passThrough,
+    sensitiveRateLimit: passThrough,
+    standardRateLimit: passThrough,
+  };
+});
+
 vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,

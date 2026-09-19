@@ -28,14 +28,14 @@ import {
   isRevokeApplied,
   installOverlayVpnPeer,
   listVpnPeers,
-  fetchNetworkSummary,
   RouterError,
 } from "../services/openwrt.client.js";
 import {
   allocateMintAndPersistPeer,
   allocatePeerIp,
-  parseVpnSubnet,
   renderPeerConf,
+  serverAddressFromSubnet,
+  OVERLAY_KEEPALIVE_SECONDS,
   VpnConfigError,
   VpnIpExhaustedError,
   type VpnPeerMode,
@@ -54,6 +54,11 @@ import {
   fetchBridgeStunProbe,
 } from "../lib/vpn-home-endpoint.js";
 import { observePlacement } from "../services/overlay-placement.service.js";
+import {
+  readNetworkSummary,
+  resolveVpnLanRouting,
+  type NetworkSummaryRead,
+} from "../lib/vpn-lan.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -82,6 +87,7 @@ import {
   verifyProfilePop,
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("vpn-route");
 
@@ -108,7 +114,11 @@ const createPeerSchema = z.object({
  *      GET /host/uplink-ip (VPN home-mode P1.5). On single-box the WAN is
  *      HOST-owned so the summary reports wan.present:false — the bridge, which
  *      sees the host default route, supplies the egress source IP the summary
- *      can't.
+ *      can't. WARP-2183: this step is reached ONLY when the summary was read
+ *      successfully and affirmatively showed no WAN. If the summary could not
+ *      be read at all the shape is UNKNOWN, and the box's own uplink is not a
+ *      safe guess: behind an edge router it is a router-LAN address that no
+ *      home-mode peer can dial.
  *   3. Else null — surfaced honestly rather than minting a conf pointed at a
  *      wrong guess.
  *
@@ -118,19 +128,36 @@ const createPeerSchema = z.object({
  * summary/env didn't already yield an IP, so the multi-box path adds no call.
  * Away mode never calls this.
  */
-async function resolveHomeEndpointHost(): Promise<string | null> {
+async function resolveHomeEndpointHost(read?: NetworkSummaryRead): Promise<string | null> {
   const envFallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
-  let summary: Awaited<ReturnType<typeof fetchNetworkSummary>> | null = null;
-  try {
-    summary = await fetchNetworkSummary();
-  } catch (err) {
-    logger.warn({ err }, "vpn: network summary unavailable for home-endpoint discovery");
-  }
+  // One summary read per request: a caller that also derives the LAN facts
+  // (WARP-2692) passes its read in rather than paying the sidecar round-trip
+  // twice.
+  const { summary, ok: summaryOk } = read ?? (await readNetworkSummary());
   // Only reach for the bridge when env + summary came up empty (single-box).
-  const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null });
+  const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null, summaryOk });
   if (fromSummary) return fromSummary;
+  // WARP-2183: the bridge answers with the BOX's own uplink IP, which is only a
+  // usable endpoint when the box itself owns the WAN. Behind a real edge router
+  // that address sits on the router's LAN (e.g. 192.168.9.195) and is
+  // unreachable from the household network a home-mode peer actually dials — so
+  // minting it would hand the user a conf that silently never handshakes.
+  //
+  // The distinction is "the summary says there is no WAN" (single-box: the
+  // uplink is host-owned, so the bridge is right) versus "the summary could not
+  // be read at all" (shape UNKNOWN). The old code conflated them, because a
+  // throw and a genuine present:false both arrive here as `summary === null`.
+  // A transient routing fault on an edge-router box therefore minted a conf
+  // pointed at an unreachable address; now it returns the same honest null the
+  // no-discovery path already does, and the route surfaces its 503.
+  if (!summaryOk) {
+    logger.warn(
+      "vpn: skipping host-uplink fallback — network summary unreadable, so the box's own uplink cannot be confirmed as the WAN edge",
+    );
+    return null;
+  }
   const bridgeIp = await fetchBridgeUplinkIp();
-  return pickHomeEndpoint({ envFallback, summary, bridgeIp });
+  return pickHomeEndpoint({ envFallback, summary, bridgeIp, summaryOk });
 }
 
 /**
@@ -162,11 +189,6 @@ async function resolveEndpointHost(): Promise<string> {
 // clear now that resolveEndpointHost() reads the env var directly.
 export function _resetEndpointCacheForTests(): void {}
 
-/** WARP-1757 — keepalive for overlay peers, in seconds. Matches the value the
- *  connect agent installs (overlay-connect.service.ts) so a peer's keepalive
- *  doesn't change depending on which path last touched it. */
-const OVERLAY_KEEPALIVE_SECONDS = 25;
-
 /** WARP-1757 — the routing sidecar, behind the structural surface
  *  provisionOverlayPeer takes, so the service unit-tests without it. */
 const overlayRouter: OverlayProvisionRouter = {
@@ -188,14 +210,14 @@ const overlayRouter: OverlayProvisionRouter = {
  * — advertising it is the WARP-1391 dead-endpoint bug, and it is the box's
  * HTTPS/API address, not a WireGuard transport address.
  */
-async function resolveOverlayEndpointCandidates(): Promise<
-  OverlayEndpointCandidate[]
-> {
+async function resolveOverlayEndpointCandidates(
+  read?: NetworkSummaryRead,
+): Promise<OverlayEndpointCandidate[]> {
   const snapshot = await observePlacement(
     {
       wanAddress: () => fetchBridgeUplinkIp(),
       stun: () => fetchBridgeStunProbe(),
-      lanAddress: () => resolveHomeEndpointHost(),
+      lanAddress: () => resolveHomeEndpointHost(read),
       // No second STUN destination is available from the host bridge yet, so
       // NAT class stays `unknown` and `srflx` is still offered — we withhold it
       // only on a POSITIVE address-dependent finding, never on absence of
@@ -757,17 +779,21 @@ export function createVpnRouter(
           });
         }
 
+        // WARP-2692 — LAN facts from the router that terminates the tunnel.
+        // One summary read for these and for the endpoint candidates below.
+        const netRead = await readNetworkSummary();
+        const lan = await resolveVpnLanRouting(netRead);
         const profile = buildOverlayProfile({
           assignedIp: provisioned.assignedIp,
           serverPublicKey: provisioned.serverPublicKey,
           mode: OVERLAY_PEER_MODE,
-          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
-          awayDns: config.WIREGUARD_DNS,
-          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
-          homeDns: config.WIREGUARD_HOME_DNS,
+          awayAllowedIps: lan.lanCidr,
+          awayDns: lan.dns,
+          homeAllowedIps: lan.homeAllowedIps,
+          homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
-          endpointCandidates: await resolveOverlayEndpointCandidates(),
+          endpointCandidates: await resolveOverlayEndpointCandidates(netRead),
         });
 
         // The owner should be able to see, after the fact, that a device
@@ -1060,6 +1086,13 @@ export function createVpnRouter(
     // redeem route. Reuse the by-token per-IP + global limiter keys so a flood
     // of polls shares the redeem budget (bounded on an always-on box).
     auditEvery4xx(ROUTE_STATUS),
+    // CodeQL js/missing-rate-limiting — the hand-rolled FixedWindowRateLimiter
+    // below IS the real limit (20/min/IP shared with redeem) but CodeQL only
+    // credits a limiter it recognises, so `sensitiveRateLimit` (60/min/IP)
+    // rides along as the outer ceiling. Placed AFTER auditEvery4xx so its 429s
+    // are audited like every other 4xx on this route, and it is looser than
+    // the local limiter so it never becomes the binding constraint.
+    sensitiveRateLimit,
     (req: Request, res: Response, next: NextFunction) => {
       if (
         !rl.check("bytoken:global", limits.byTokenGlobal, limits.windowMs) ||
@@ -1111,6 +1144,7 @@ export function createVpnRouter(
   router.get(
     ROUTE_PROFILE,
     auditEvery4xx(ROUTE_PROFILE),
+    sensitiveRateLimit, // CodeQL js/missing-rate-limiting — see ROUTE_STATUS
     (req: Request, res: Response, next: NextFunction) => {
       // Same unauthenticated-endpoint DoS backstop as redeem/status, sharing
       // their budget: an ECDSA verify per hit on an always-on box.
@@ -1177,23 +1211,39 @@ export function createVpnRouter(
           listenPort: config.WIREGUARD_LISTEN_PORT,
           address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
         });
+        // WARP-2689 — same refusal as the mint route and provisionOverlayPeer:
+        // a profile issued over a router with no WireGuard support is a conf
+        // that can never handshake, and this is the route a device calls to
+        // REBUILD its conf after a router wipe (WARP-2694) — exactly when the
+        // router is most likely to be missing it. `null` still issues.
+        if (setup.interface_live === false) {
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "Your Droplet's router doesn't have WireGuard support yet, so this device can't connect. Update the router's software, then try again.",
+          });
+        }
         // AllowedIPs and DNS come as a PAIR, selected by the peer row's own
         // mode — never one mode's subnet with the other's resolver. A resolver
         // outside every AllowedIPs entry leaves the tunnel up but sends DNS out
         // the client's default route, so the split-horizon FQDN (ADR-023 §3.4)
         // resolves to public NXDOMAIN. buildOverlayProfile owns the selection;
         // the route only supplies both pairs.
+        // WARP-2692 — LAN facts from the router that terminates the tunnel.
+        // One summary read for these and for the endpoint candidates below.
+        const netRead = await readNetworkSummary();
+        const lan = await resolveVpnLanRouting(netRead);
         const profile = buildOverlayProfile({
           assignedIp: peer.assignedIp,
           serverPublicKey: setup.public_key,
           mode: (peer.mode as VpnPeerMode | undefined) ?? OVERLAY_PEER_MODE,
-          awayAllowedIps: config.WIREGUARD_LAN_CIDR,
-          awayDns: config.WIREGUARD_DNS,
-          homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
-          homeDns: config.WIREGUARD_HOME_DNS,
+          awayAllowedIps: lan.lanCidr,
+          awayDns: lan.dns,
+          homeAllowedIps: lan.homeAllowedIps,
+          homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
-          endpointCandidates: await resolveOverlayEndpointCandidates(),
+          endpointCandidates: await resolveOverlayEndpointCandidates(netRead),
         });
         audit({
           event: "overlay_profile_issued",
@@ -1679,6 +1729,15 @@ export function createVpnRouter(
         serverPublicKey: status.public_key,
         addresses: status.addresses,
         peerCount: status.peer_count,
+        // WARP-2689 — kernel truth beside the uci intent. `configured: true`
+        // above only says the router HOLDS a wg0 section; on a router flashed
+        // without WireGuard (every field RB5009 before edge 4aa8a39) that
+        // section exists, `ip link show wg0` says the device does not, and
+        // nothing on this page used to say so. `false` is an observation the
+        // dashboard must act on (no conf minted here can handshake); `null`
+        // means the router could not say and changes nothing.
+        interfaceLive: status.interface_live ?? null,
+        livePeerCount: status.live_peer_count ?? null,
       });
     } catch (err) {
       // WARP-1283: every other input to this handler already degrades to null,
@@ -1819,9 +1878,11 @@ export function createVpnRouter(
       // a router-side peer nobody can dial.
       //   away — the public FQDN / operator override (resolveEndpointHost).
       //   home — the box's discovered home-facing LAN IP (resolveHomeEndpointHost).
+      // One routing-summary read serves the home endpoint and the LAN facts.
+      const netRead = await readNetworkSummary();
       let confEndpointHost: string;
       if (mode === "home") {
-        const homeHost = await resolveHomeEndpointHost();
+        const homeHost = await resolveHomeEndpointHost(netRead);
         if (!homeHost) {
           return res.status(503).json({
             error:
@@ -1849,6 +1910,25 @@ export function createVpnRouter(
         // First-time only; ignored when the interface already exists.
         address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
       });
+      // WARP-2689 — a 200 from setup is a uci write-back; `interface_live` is
+      // what the kernel says. On a router with no WireGuard support the
+      // section exists and the device does not, and a conf minted now is a QR
+      // the customer scans into a tunnel that can never handshake. Refuse
+      // before allocating an address or minting a router-side key, and say
+      // what is actually wrong. `null` (router cannot say) does not refuse —
+      // that is the common case on older images and the mint worked there.
+      if (setup.interface_live === false) {
+        return res.status(503).json({
+          error:
+            "Your router doesn’t have WireGuard support yet, so a remote-access device can’t be added. Update the router’s software, then try again.",
+          code: "ROUTER_WIREGUARD_UNSUPPORTED",
+        });
+      }
+      // WARP-2692 — the LAN the conf routes is the ROUTER's LAN, read live.
+      // The env pins describe one deployment shape and are written back on
+      // every provision, so a box behind an edge router used to hand out a
+      // conf that handshook and reached nothing.
+      const lan = await resolveVpnLanRouting(netRead);
 
       // 2-4. Allocate next free IP, mint the router-side peer with it, and
       //    persist — as one retryable unit. WARP-565: the allocate-then-persist
@@ -1904,15 +1984,15 @@ export function createVpnRouter(
         // Home mode points DNS at the split-horizon resolver so the per-device
         // FQDN resolves over the tunnel (ADR-023 §3.4); away mode keeps the
         // LAN DNS.
-        dns: mode === "home" ? config.WIREGUARD_HOME_DNS : config.WIREGUARD_DNS,
+        dns: mode === "home" ? lan.homeDns : lan.dns,
         serverPublicKey: setup.public_key,
         endpointHost: confEndpointHost,
         listenPort: config.WIREGUARD_LISTEN_PORT,
-        lanCidr: config.WIREGUARD_LAN_CIDR,
+        lanCidr: lan.lanCidr,
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
         mode,
         // Split-tunnel box subnet(s) for home mode; ignored by away mode.
-        homeAllowedIps: config.WIREGUARD_HOME_ALLOWED_IPS,
+        homeAllowedIps: lan.homeAllowedIps,
       });
 
       // Status display screen QR — surface this peer for ~60 s so a phone
@@ -2080,15 +2160,4 @@ export function createVpnRouter(
   );
 
   return router;
-}
-
-/**
- * Compute the server's CIDR address inside a VPN subnet, e.g.
- * "10.13.13.0/24" -> "10.13.13.1/24". Used on first-time /vpn/setup;
- * idempotent calls don't reach this path.
- */
-function serverAddressFromSubnet(subnet: string): string {
-  const parsed = parseVpnSubnet(subnet);
-  const mask = subnet.split("/")[1] ?? "24";
-  return `${parsed.serverIp}/${mask}`;
 }

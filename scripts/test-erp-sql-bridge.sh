@@ -95,7 +95,10 @@ done
 echo "--- applying the mock PattersonPM schema + least-privilege grants ---"
 psql_super() { "$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U "$PG_SUPERUSER" -v ON_ERROR_STOP=1 "$@"; }
 psql_super -d postgres -q -c "CREATE DATABASE $PG_DB"
-for f in 01-schema.sql 02-seed.sql 03-provision.sql; do
+# 04-sa-catalog.sql (WARP-2874): SQL Anywhere-shaped SYS.* views, so the lane
+# introspects with the statements that ship instead of Postgres catalog SQL —
+# which the bridge no longer accepts.
+for f in 01-schema.sql 02-seed.sql 03-provision.sql 04-sa-catalog.sql; do
   psql_super -d "$PG_DB" -q -f "$HARNESS_INIT/$f"
 done
 # 03-provision.sql grants SELECT on the mapped tables but cannot grant CONNECT
@@ -139,6 +142,14 @@ echo "--- pytest (services/erp-sql-bridge, live database) ---"
 # ---------------------------------------------------------------------------
 BRIDGE_PORT="${ERP_BRIDGE_PORT:-9391}"
 BRIDGE_LOG="$RUN_DIR/bridge.log"
+
+# WARP-2590 — the bridge refuses every route except /health without this, so
+# the lane must provision one exactly as scripts/lib/secrets.sh does on a box.
+# Exported (not passed inline) so BOTH halves see the same value: the uvicorn
+# process below reads it from the environment, and the vitest client presents
+# it. That makes this lane cover the REAL authenticated path — a lane that ran
+# with the gate disabled would prove nothing about what ships.
+export SERVICE_TOKEN_ERP_BRIDGE="${SERVICE_TOKEN_ERP_BRIDGE:-$(openssl rand -hex 32)}"
 
 echo "--- starting the bridge on :${BRIDGE_PORT} ---"
 (cd "$BRIDGE_DIR" && python -m uvicorn main:app --host 127.0.0.1 --port "$BRIDGE_PORT" --log-level warning >"$BRIDGE_LOG" 2>&1) &

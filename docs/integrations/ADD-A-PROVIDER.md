@@ -98,13 +98,37 @@ The MCP server picks tools up automatically; the orchestrator's `WRITE_TOOLS` is
 
 ## 6. Add dashboard metadata
 
-The hub renders a provider from static metadata — `apps/web-dashboard/src/lib/connectors.ts`:
+The hub's catalog is **derived** from your provider's `ProviderDescriptor` (WARP-2217, `packages/shared-types/src/provider-registry.ts`) — `apps/web-dashboard/src/lib/connectors.ts` reads it and holds no provider list of its own. Declare the `catalog` block:
 
 ```ts
-{ id, name, category, description, availability: "available" | "coming-soon" }
+catalog: {
+  id, name, category, description,
+  availability: "available" | "coming-soon",
+  order,                 // sort position on the hub, pinned
+  setupGuideHref,        // WARP-2342 — REQUIRED for a cloud track that is `available`
+}
 ```
 
-Live connection **status** is merged in from `GET /api/integrations`; this file is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
+`setupGuideHref` is where the customer reads how to produce the credential. It is **not optional for an `available` cloud card** — `ProviderDescriptor`'s cloud arm requires it, so omitting it is a `tsc` error at the declaration site, not a review note. A `coming-soon` card is exempt: it has no connect flow, so there is no moment of use to link from. LAN tracks are exempt for the same reason the guide gate is cloud-only — there is no vendor console involved.
+
+**The value is always `/help/integrations/<providerId>`** (WARP-2490). That route serves `docs/integrations/<providerId>.md` from a **bundled** `?raw` import — the markdown is inlined into the JS at build time and the page prerenders static, so the guide opens on a box whose browser has no route to the internet. An external link would break exactly the promise the appliance is sold on. Two consequences when you add a guide:
+
+1. **Add the import** to `apps/web-dashboard/src/lib/integration-guides.ts`. A static import is the only kind a bundler can inline, so the list is hand-written; `scripts/check-setup-guides.sh` fails if a cloud provider's guide is missing from it, and `integration-guides.test.ts` fails if the bundle and `docs/integrations/*.md` disagree in either direction.
+2. **The drift gate** in that same test asserts every descriptor's `setupGuideHref` resolves to a page `generateStaticParams` emits — so a descriptor pointing at a guide nobody wrote goes red instead of shipping a 404 to the one screen where the owner is stuck.
+
+Cross-guide links keep working: the renderer rewrites `credential-handling.md#anchor` to `/help/integrations/credential-handling#anchor` and gives headings GitHub-compatible ids. A link this build cannot serve (`../ADR-041-…`) renders as plain text rather than as an anchor to nowhere.
+
+Live connection **status** is merged in from `GET /api/integrations`; the descriptor is only the descriptive metadata (safe client-side). Add a connector icon/visual in `components/integrations/connector-visuals.tsx`. The connect wizard, per-provider surface, and manage flows are generic — a new provider inherits them.
+
+**The connect wizard is descriptor-driven (WARP-2451).** It renders whatever `credentialFields` you declare, in the shapes the v1 vendors actually span:
+
+- **one pasted secret** — one field, `secret: true`, an optional `pattern`;
+- **a pair** — two fields, only the secret one masked;
+- **a discriminated choice** — declare `credentialVariants`, each with its own `fields`; the wizard renders the chosen path's fields only, and sends the chosen `credentialVariant` id alongside them. Fields common to every path stay in `credentialFields`.
+
+A descriptor that declares `lanProvisioning` instead gets the LAN-database flow (find the server → provision the read-only account → choose read scopes → confirm). That block carries every string the flow shows: `accountName`, `databaseName`, `defaultPort`, `hostPlaceholder`, `reachableLabel`, the one-off DBA `script`, the read `scopes`, and the optional `writeOptIn`. **`ConnectWizard.tsx` names no vendor and a test asserts it** — if a provider needs special handling there, the descriptor is under-specified and that is the bug to fix.
+
+> **A cloud/SaaS provider also needs a customer setup guide** at `docs/integrations/<id>.md`, listed in `SETUP.md` §3.3, before it can ship. The credential is created by the customer in a vendor console we do not control, so an undocumented click-path is the connector being unusable rather than an inconvenience. `scripts/check-setup-guides.sh` enforces coverage, the six required sections, the per-vendor fact pins and link integrity, and runs on every PR. Start from an existing guide — [`stripe.md`](stripe.md) is the simplest, [`xero.md`](xero.md) the one with the most qualification gates — and link the shared [`credential-handling.md`](credential-handling.md) rather than paraphrasing it. Point `setupGuideHref` at that guide; the hub card and the wizard's credential step both render it.
 
 ---
 
@@ -119,6 +143,53 @@ The moment the **orchestrator imports your connector package**, the build graph 
 3. **Sync the lockfile** — `npm install --package-lock-only` (a new workspace/dependency edge reddens all node CI at `npm ci` if the lockfile is stale — see the `new-npm-workspace-needs-lockfile-sync` note).
 
 *(Extending the existing `erp-connector` package avoids most of this — it's already wired.)*
+
+---
+
+## 7b. Reach every dataset you declared (the links that fail SILENTLY)
+
+> **Read this section even if you are extending `erp-connector` and skipped §7.** Everything in §7 fails loudly — a missing dependency reddens CI. Everything here fails **silently**: green build, green `tsc`, green tests, a card that reads CONNECTED, and data nobody can reach.
+
+Declaring a dataset in your descriptor's `datasets` does **not** make it reachable. The descriptor says what your connector *can* produce; four other lists decide whether anything ever *asks* for it or *keeps* it, and **none of them is derived from the descriptor**.
+
+This is not a hypothetical failure mode. It is how three shipped features got there:
+
+| what shipped | what was missing | how long it was invisible |
+|---|---|---|
+| Cal.com (WARP-2707) | `appointment` was in no read map | until WARP-2832, with every test green |
+| Square's `refund` + `payout` (WARP-2676) | both read maps | until WARP-2833 |
+| `audience` — Brevo **and** Klaviyo, both projecting canonical rows | both read maps, and `ERP_SYNC_ENTITIES` | until WARP-2833 |
+
+### The four links, and what each one's absence costs you
+
+1. **`CLOUD_DATASET_READS`** — `apps/orchestrator/src/services/erp.service.ts`. Maps `dataset → read-query name`. **Absent ⇒ `queryDataset` throws `unknown dataset "…"`.** Nothing on the box can ask.
+2. **`CLOUD_QUERY_DATASETS`** — `packages/tools-core/src/handlers/cloud/query-dataset.ts`. The tool's `enum`, a hand-maintained **mirror** of (1). **Absent ⇒ the model is never shown the name**, so it cannot ask even when the route would answer.
+3. **`ERP_SYNC_ENTITIES`** — `apps/orchestrator/src/services/erp-sync/entities.ts`. `registerCursors` walks **this table**, never your descriptor. **Absent ⇒ zero cursors ⇒ no incremental tick and no reconciliation sweep**, so a healthy connection is never polled and the sweep skips it entirely.
+4. **The landing classification** — `LANDED_ENTITIES` / `NEVER_LANDED_ENTITIES` (`erp-sync/land.ts`) and `MONEY_ENTITIES` (`erp-sync/land-money.ts`). `landsOnBox()` is checked **after** the vendor has already been read and paged. **In none of the three ⇒ the rows are fetched, discarded, the watermark advanced past them, and the tick audited `"Connector synced", true`.**
+
+> 🔴 **(1) and (2) are gated only against EACH OTHER.** They can agree perfectly while both lag what your connector serves — which is exactly what happened all three times above. `cloud-dataset-tool.e2e.test.ts` now also gates *every declared dataset of an available provider* against (1); that guard is what catches you, so read its failure message rather than adding your name to a list to make it pass.
+
+### Do this, per dataset, before opening the PR
+
+```bash
+# every dataset your descriptor declares that nothing can ask for:
+node -e 'const {providerDescriptor}=require("@droplet/shared-types");
+console.log(providerDescriptor("<your-id>").datasets)'
+# then check each against CLOUD_DATASET_READS and CLOUD_QUERY_DATASETS by eye.
+```
+
+For each declared dataset, answer all four in the PR body:
+
+- **Askable?** In (1) and (2), or say why not.
+- **Polled?** A row in (3), or say why not — the reason must be about **your** vendor. `ERP_SYNC_ENTITIES` is keyed by dataset **name**, so a reason recorded for another vendor's connector is silently applied to yours (WARP-2835).
+- **Landed?** In one of (4)'s three lists. If it should not land, put it in `NEVER_LANDED_ENTITIES` **with a reason** — do not leave it unclassified, which reads identically at runtime and is what `land.test.ts`'s debt pin exists to stop.
+- **Swept?** If its watermark is `complete: false`, it must not be scheduled until something reads that flag — `erp-provider.descriptor.test.ts` turns it into a build failure.
+
+### Adding a dataset NAME (not just wiring an existing one)
+
+Widening `DATASET_NAMES` is a much larger job than it looks — the two vocabulary arrays must agree **at matching indexes**, four total `Record<DatasetName, …>`s must gain an entry (`DATASET_CATEGORY`, `CANONICAL_COLUMNS`, `REQUIRED_CANONICAL`, and **`NATURAL_KEY` in `scan.ts`**, which is easy to miss), `COLUMN_KIND` throws at module load rather than failing `tsc`, and `statement_manifest.json` is cross-language. Follow ADR-046 and copy WARP-2832's diff.
+
+🔴 **A dataset name is a WIRE FORMAT.** Operators author export-drop profile JSON on their own sites naming datasets as bare strings, and Warp Lab does not hold those files. Add a name beside an existing one; never rename or reshape one.
 
 ---
 
@@ -141,6 +212,8 @@ The moment the **orchestrator imports your connector package**, the build graph 
 - **No mock-database integration tests** (team rule — a prior mock/prod divergence incident). DB-touching paths stay stubbed + unit-tested, or run against a **real** database.
 - **The copy-DB harness** (`services/erp-connector/harness/`, WARP-1106): a PostgreSQL mock (`Variant A`, runs in CI now) and a real-engine template (`Variant B`, needs the provider's dev-edition binaries). It runs the connector's **actual built SQL** against a synthetic schema to prove reads/writes/guards before a live driver exists. Use it as the live target for a new provider's driver.
 - **Gate:** `./scripts/test/ship-check.sh tsc-full` (typecheck all workspaces) + `lifecycle-naming`. Run before every PR.
+  - **Interpreter prerequisite: bash 3.2+.** The script targets the bash 3.2 feature set — the version macOS ships as `/bin/bash` — so it runs on the dev Mac unchanged; no `brew install bash` (WARP-2449). On an older interpreter it exits **4** with a message naming the requirement and the remedy.
+  - **Exit 4 means COULD NOT RUN, not "a check failed"** (only exit 1 means that). A run that exited 4 is not a passing gate — say so rather than reporting the gate as clean.
 
 ---
 
@@ -153,6 +226,9 @@ The moment the **orchestrator imports your connector package**, the build graph 
 - [ ] `provision.sql` / `revoke.sql` (idempotent, least-privilege, `secretRef`).
 - [ ] tools-core handlers (`requiresWrite`/`requiresConfirmation`, writes stage a request).
 - [ ] Dashboard connector metadata + visual.
+- [ ] **Every declared dataset is ASKABLE** — in `CLOUD_DATASET_READS` *and* `CLOUD_QUERY_DATASETS` (§7b). Silent if missed.
+- [ ] **Every declared dataset is POLLED or deliberately not** — a row in `ERP_SYNC_ENTITIES`, or a reason that is about *your* vendor. Silent if missed.
+- [ ] **Every declared dataset is CLASSIFIED for landing** — `LANDED_ENTITIES`, `MONEY_ENTITIES`, or `NEVER_LANDED_ENTITIES` *with a reason*. Silent if missed.
 - [ ] Build graph wired (dep + Dockerfile + ship-check leaf + lockfile) — if a new package.
 - [ ] Unit tests green; ship-check `tsc-full` + `lifecycle-naming` pass.
 - [ ] A WARP ticket filed for the work; PR opened review-ready (never self-merged).

@@ -786,3 +786,41 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
     expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
   });
 });
+
+// CodeQL js/xss-through-dom (DrivesPanel `aria-label={`Open ${name}`}`): the
+// rename draft is DOM text (the input's value) and reaches the card's
+// aria-label, title and heading. React sets attributes via setAttribute and
+// escapes text children, so HTML metacharacters in a name are inert — no
+// markup is ever parsed. Pinned here so the false-positive stays provable.
+describe("DrivesPanel — a renamed drive's name is never reinterpreted as HTML", () => {
+  it("renders metacharacters verbatim in text and attributes and injects no element", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({
+      uuid: "U-DATA-1",
+      displayName: "ignored",
+      icon: null,
+      notes: null,
+    });
+    setup({ role: "owner" });
+    // Upper-case, no `-`/`_`: the display chain title-cases `\b[a-z]` and
+    // maps separator runs to spaces, and this must compare byte-for-byte.
+    const payload = '<IMG SRC=X ONERROR="ALERT(1)"> & "QUOTES"';
+
+    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
+      target: { value: payload },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    const heading = await screen.findByText(payload);
+    expect(heading).toBeInTheDocument();
+    expect(heading).toHaveAttribute("title", payload);
+    expect(document.querySelector("img")).toBeNull();
+    const link = screen.getByRole("link", { name: `Open ${payload}` });
+    expect(link.getAttribute("aria-label")).toBe(`Open ${payload}`);
+    // The deep-link target is built from the mount, never from the name.
+    expect(link).toHaveAttribute(
+      "href",
+      expect.stringContaining("/files?path=%2Fphotos-ab12cd34"),
+    );
+  });
+});

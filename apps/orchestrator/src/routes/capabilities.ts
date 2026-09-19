@@ -40,6 +40,28 @@ export interface AppCapabilities {
   /** The Projects (native PM, ADR-026) surface is effective (available &&
    *  enabled per the module-toggles layer) on this box. */
   projects: boolean;
+  /**
+   * WARP-2558 (ADR-044) — the CRM's own surface at /customers. Reported
+   * through the SAME effective-set read as `projects`, and that is the whole
+   * contract: this route applies whatever edges the registry declares and
+   * declares none of its own.
+   *
+   * As of WARP-2558 the registry's `crm` entry has NO `requires: "projects"`
+   * edge — the CRM stopped borrowing the Projects page and got /customers, so
+   * a box with CRM enabled and Projects off is a supported shape (the dental
+   * box: customers, no PM) and answers `crm: true` here. `capabilities.test.ts`
+   * pins exactly that case.
+   *
+   * Re-deriving the old edge here (`crm && projects`) would be a second copy
+   * of a dependency the registry no longer has — it would silently recouple
+   * the two modules this route just decoupled. If an edge is ever wanted
+   * again, it belongs in `module-registry.ts` where `satisfiedModuleIds`
+   * applies it, never in this file.
+   */
+  crm: boolean;
+  /** WARP-2038 — the /contacts surface. Off until that ticket builds it; the
+   *  flag ships now so the CRM's people picker has one contract to read. */
+  contacts: boolean;
 }
 
 export function createCapabilitiesRouter(
@@ -57,16 +79,25 @@ export function createCapabilitiesRouter(
       return;
     }
     let projects = false;
+    let crm = false;
+    let contacts = false;
     try {
       const effective = await getEffectiveModuleIds(prisma, cfg);
       projects = effective.has("projects");
+      // Whatever edges the registry declares are already applied by
+      // `satisfiedModuleIds` inside getEffectiveModuleIds; the `crm` entry
+      // declares none since WARP-2558, so this is a straight read and
+      // CRM-on/Projects-off answers true. Do not re-derive — see the note on
+      // AppCapabilities.crm.
+      crm = effective.has("crm");
+      contacts = effective.has("contacts");
     } catch (e) {
       // Fail closed — module-gate parity (see the posture note above). The
       // dashboard treats an explicit `false` as "module off", which is what
       // the gate would enforce for every PM request right now anyway.
       logger.error({ err: e }, "capabilities_enablement_read_failed");
     }
-    const body: AppCapabilities = { projects };
+    const body: AppCapabilities = { projects, crm, contacts };
     // Module state changes only on reconfiguration; let the browser cache
     // briefly so the nav doesn't re-probe on every client mount (same
     // rationale as /admin/capabilities).

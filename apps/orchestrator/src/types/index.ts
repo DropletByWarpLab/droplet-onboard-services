@@ -279,6 +279,13 @@ export interface BulkOperationResult {
 
 // --- Storage types ---
 
+/**
+ * The four-scalar storage shape. Used for BOTH the GET /api/storage headline
+ * (WARP-2098: the box's DATA drives) and its `cloud` sibling (the signed-in
+ * user's Nextcloud account quota). The shape is identical; what differs is what
+ * it describes, which is why the endpoint now names each one explicitly instead
+ * of returning a bare quadruple that read as "your storage".
+ */
 export interface StorageStats {
   used: number;       // bytes
   total: number;      // bytes

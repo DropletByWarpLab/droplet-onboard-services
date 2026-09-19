@@ -105,8 +105,8 @@ export function DiscoveryStep({
   const [scanPhase, setScanPhase] = useState<
     "active" | "downshifted" | "stopped"
   >("active");
-  const pollRef = useRef<ReturnType<typeof setInterval>>();
-  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const timerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const seenIdsRef = useRef<Set<string>>(new Set());
   const lastFoundAtSecRef = useRef<number>(0);
 
@@ -131,7 +131,7 @@ export function DiscoveryStep({
   // phantom stale poll failure would trip the unavailable verdict one real
   // failure early, and a phantom success would pre-seed the fresh list).
   const scanGenRef = useRef(0);
-  const discoverTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const discoverTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const discoverFailsRef = useRef(0);
   // Sticky "the controller told us it isn't started" flag — only an actual
   // discovery SUCCESS clears it (a succeeding commissioned poll does not:

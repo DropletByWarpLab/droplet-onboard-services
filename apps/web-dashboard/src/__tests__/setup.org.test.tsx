@@ -278,14 +278,14 @@ describe("setup Org step (PR #380)", () => {
   // jsdom ships no URL.createObjectURL/revokeObjectURL — stub them so we can
   // both render the preview and assert the object-URL lifecycle.
   describe("logo preview in the tile", () => {
-    let createObjectURL: ReturnType<typeof vi.fn<[Blob], string>>;
-    let revokeObjectURL: ReturnType<typeof vi.fn<[string], void>>;
+    let createObjectURL: ReturnType<typeof vi.fn<(blob: Blob) => string>>;
+    let revokeObjectURL: ReturnType<typeof vi.fn<(url: string) => void>>;
     let urlSeq: number;
 
     beforeEach(() => {
       urlSeq = 0;
-      createObjectURL = vi.fn<[Blob], string>(() => `blob:preview-${++urlSeq}`);
-      revokeObjectURL = vi.fn<[string], void>();
+      createObjectURL = vi.fn<(blob: Blob) => string>(() => `blob:preview-${++urlSeq}`);
+      revokeObjectURL = vi.fn<(url: string) => void>();
       // URL.createObjectURL is absent in jsdom; define it on the global URL.
       (URL as unknown as { createObjectURL: unknown }).createObjectURL =
         createObjectURL;

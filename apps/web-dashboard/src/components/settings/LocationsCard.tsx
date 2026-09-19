@@ -13,9 +13,9 @@ import {
 } from "@/lib/api";
 
 /**
- * WARP-1906 — Settings → "Locations": the premade buildings + named
- * conference rooms this workspace offers as suggestions in the event form's
- * Location field (they rank ahead of the map lookup there).
+ * WARP-1906 — Settings → Workspace → "Locations": the premade buildings +
+ * named conference rooms this workspace offers as suggestions in the event
+ * form's Location field (they rank ahead of the map lookup there).
  *
  * The smallest honest admin surface: a flat list of "Building - Room" rows
  * with inline rename + remove, and a two-field add row. No optimistic
@@ -25,6 +25,13 @@ import {
  * Renders nothing for family/guest — Settings is an admin surface (§6.3).
  * Ratified DESIGN.md tokens only (.card / type-* / the indigo CSS vars),
  * mirroring the ratchet-clean settings cards (PersonalityCard/FeaturesCard).
+ *
+ * HEADLESS (WARP-2667): this card carries its own `type-headline` but no
+ * <Sect>, so it cannot own a Settings group — a <Sect title="Locations" />
+ * above it would print "Locations" twice. It is passed as a child of
+ * PersonalityCard, which owns the "Workspace" <section>. It used to render
+ * as a bare sibling after the AI-provider key forms, which put it under the
+ * "AI providers" heading; the data is workspace-scoped and so is the card.
  */
 
 const SAVE_ERROR_LINE =

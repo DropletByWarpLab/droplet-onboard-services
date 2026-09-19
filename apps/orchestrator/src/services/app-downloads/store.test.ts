@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { AppDownloadsStore } from "./store.js";
@@ -319,7 +319,14 @@ describe("AppDownloadsStore — caching", () => {
     expect(second.failureReason).toBe("digest_mismatch");
   });
 
-  it("invalidate() forces a fresh catalog read", async () => {
+  it("a stage under a running process is visible without invalidate()", async () => {
+    // WARP-2666. This used to assert the opposite ("still cached as missing
+    // until told otherwise"), which pinned the bug: the host side of the
+    // mount IS writable, so `stage.sh` really does drop a catalog next to a
+    // running orchestrator, and a memoised failure made that stage invisible
+    // until someone restarted the container — indistinguishable from a stage
+    // that silently failed. `invalidate()` has no production caller, so a
+    // restart was the only cure.
     const store = new AppDownloadsStore({ dir });
     await expect(store.loadCatalog()).resolves.toMatchObject({
       ok: false,
@@ -327,10 +334,27 @@ describe("AppDownloadsStore — caching", () => {
     });
 
     await stage();
-    // Still cached as missing until told otherwise.
-    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: false });
+    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("still memoises a SUCCESSFUL catalog read", async () => {
+    // The counterweight to the test above: not caching failures must not
+    // turn into not caching at all. A good catalog is read once — re-reading
+    // and re-parsing it per request is the overhead the memo exists to
+    // avoid, and only the DIGESTS are deliberately re-checked every time.
+    await stage();
+    const store = new AppDownloadsStore({ dir });
+    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
+
+    // Remove the catalog entirely. A re-read would now fail; the memo must
+    // still answer with the version it already parsed.
+    await rm(path.join(dir, "catalog.json"));
+    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
 
     store.invalidate();
-    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
+    await expect(store.loadCatalog()).resolves.toMatchObject({
+      ok: false,
+      failureReason: "catalog_missing",
+    });
   });
 });
