@@ -129,12 +129,19 @@ describe("🔴 the audit row carries ids, codes and counts — nothing else", ()
 
 // ── Digest ─────────────────────────────────────────────────────────────────
 
+/** Id and username are DELIBERATELY different here, the way they are on a box
+ *  (`User.id` is a uuid, `User.username` is the login name). `enabledById` is
+ *  the id; `sendNotification` is keyed by the username. A fake that conflated
+ *  them let WARP-2910 through — the digest sent to a uuid nobody subscribes
+ *  to, and this file agreed with it. */
+const DIGEST_OWNER = { id: "u-owner", username: "owner" };
+
 const DIGEST_SETTING = {
   id: "singleton",
   mode: "propose",
   level: "links_only",
   vertical: "general",
-  enabledById: "u-owner",
+  enabledById: DIGEST_OWNER.id,
   enabledAt: new Date("2026-01-01T00:00:00Z"),
   folders: [],
   pathDenylist: null,
@@ -143,11 +150,31 @@ const DIGEST_SETTING = {
   digestHour: 8,
 };
 
-function digestPrisma(over: { setting?: unknown; pending?: number; already?: unknown }) {
+type LogRow = { id: string; userId: string };
+
+function digestPrisma(over: {
+  setting?: unknown;
+  pending?: number;
+  /** A row the idempotence read returns WHATEVER it asks for. */
+  already?: unknown;
+  /** `NotificationLog` rows keyed the way the table is — by USERNAME. The
+   *  fake filters on `where.userId`, so a read keyed by the id finds none. */
+  log?: LogRow[];
+  /** The `User` row behind `enabledById`; `null` is a deleted owner. */
+  user?: { id: string; username: string } | null;
+}) {
   return {
     autoFilingSetting: { findUnique: vi.fn(async () => over.setting ?? DIGEST_SETTING) },
     ingestProposal: { count: vi.fn(async () => over.pending ?? 0) },
-    notificationLog: { findFirst: vi.fn(async () => over.already ?? null) },
+    user: {
+      findUnique: vi.fn(async () => ("user" in over ? over.user : DIGEST_OWNER)),
+    },
+    notificationLog: {
+      findFirst: vi.fn(async (arg: { where: { userId: string } }) => {
+        if (over.already !== undefined) return over.already;
+        return (over.log ?? []).find((r) => r.userId === arg.where.userId) ?? null;
+      }),
+    },
   } as never;
 }
 
@@ -165,12 +192,19 @@ describe("🔴 the digest speaks only when there is something to say", () => {
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 
-  it("sends once when something is waiting", async () => {
-    const r = await runFilingDigest(digestPrisma({ pending: 3 }), atEight());
+  it("sends once when something is waiting — to the owner's USERNAME, not the id", async () => {
+    const prisma = digestPrisma({ pending: 3 });
+    const r = await runFilingDigest(prisma, atEight());
     expect(r.sent).toBe(true);
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
     const input = sendNotificationMock.mock.calls[0][1];
-    expect(input).toMatchObject({ userId: "u-owner", kind: "ai" });
+    // 🔴 WARP-2910. `enabledById` is a `User.id`; the toast topic, the push
+    // subscription filter and every reader of `NotificationLog` are keyed by
+    // `User.username`. The id reached nobody, and nobody could see the row.
+    expect(input).toMatchObject({ userId: "owner", kind: "ai" });
+    expect((prisma as { user: { findUnique: ReturnType<typeof vi.fn> } }).user.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "u-owner" } }),
+    );
     expect(input.title).toContain("3 things need a look");
     // 🔴 No body. The count IS the message, and a body is the first place a
     // customer name or a filename would appear.
@@ -183,6 +217,26 @@ describe("🔴 the digest speaks only when there is something to say", () => {
       atEight(),
     );
     expect(r).toMatchObject({ sent: false, reason: "already_sent" });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it("MUTATION: key the already-sent read on the id — today's digest is sent again", async () => {
+    // The stored row carries the USERNAME (that is what `sendNotification`
+    // writes). A read keyed by the id is self-consistent and always empty, so
+    // the digest re-sends every hour and nothing errors — WARP-2910's second
+    // half, the one that kept the first invisible.
+    const prisma = digestPrisma({ pending: 3, log: [{ id: "n0", userId: "owner" }] });
+    const r = await runFilingDigest(prisma, atEight());
+    expect(r).toMatchObject({ sent: false, reason: "already_sent" });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+    const read = (prisma as { notificationLog: { findFirst: ReturnType<typeof vi.fn> } })
+      .notificationLog.findFirst.mock.calls[0][0];
+    expect(read.where).toMatchObject({ userId: "owner" });
+  });
+
+  it("a deleted owner is an explicit no_owner, never a send to undefined", async () => {
+    const r = await runFilingDigest(digestPrisma({ pending: 3, user: null }), atEight());
+    expect(r).toMatchObject({ sent: false, reason: "no_owner" });
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 

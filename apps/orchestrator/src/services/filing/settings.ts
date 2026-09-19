@@ -102,13 +102,32 @@ export async function permittedOwnerIds(
   prisma: PrismaClient,
   settings: ResolvedFilingSettings,
 ): Promise<string[]> {
-  if (!settings.enabledById) return [];
+  const username = await enablingOwnerUsername(prisma, settings);
+  if (!username) return [];
+  return [username, HOUSEHOLD_INDEX_USER];
+}
+
+/**
+ * The enabling owner's `User.username`, or null when there is no enabling
+ * owner or that owner is gone.
+ *
+ * `enabledById` is a `User.id` — `routes/crm-filing.ts` stamps it from
+ * `req.user.id`. Everything downstream that is keyed by a PERSON rather than
+ * a row is keyed by the username: the index owner column, the notification
+ * topic, the push-subscription filter and every reader of `NotificationLog`.
+ * This is the one place that translation happens, so a caller has nothing to
+ * forget. WARP-2910 was the digest skipping it and notifying the id.
+ */
+export async function enablingOwnerUsername(
+  prisma: PrismaClient,
+  settings: ResolvedFilingSettings,
+): Promise<string | null> {
+  if (!settings.enabledById) return null;
   const user = await prisma.user.findUnique({
     where: { id: settings.enabledById },
     select: { username: true },
   });
-  if (!user?.username) return [];
-  return [user.username, HOUSEHOLD_INDEX_USER];
+  return user?.username || null;
 }
 
 /**

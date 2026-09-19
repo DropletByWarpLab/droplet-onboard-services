@@ -38,7 +38,7 @@ import type { PrismaClient } from "@prisma/client";
 
 import { sendNotification } from "../notifications.service.js";
 import { createLogger } from "../../lib/logger.js";
-import { readFilingSettings, permittedOwnerIds } from "./settings.js";
+import { readFilingSettings, permittedOwnerIds, enablingOwnerUsername } from "./settings.js";
 
 const logger = createLogger("filing-digest");
 
@@ -132,6 +132,15 @@ export async function runFilingDigest(
     return { sent: false, pending: 0, reason: "wrong_hour" };
   }
 
+  // 🔴 WARP-2910. `enabledById` is a `User.id`; `sendNotification`'s `userId`
+  // is a `User.username` end to end (the toast topic, the push-subscription
+  // filter, every reader of `NotificationLog`). Sending the id reached nobody,
+  // and reading the log back by the id never found the row it wrote — so it
+  // also re-sent every hour. Resolve the person once, and use that for both.
+  // An owner whose row is gone is the same outcome as no owner at all.
+  const owner = await enablingOwnerUsername(prisma, settings);
+  if (!owner) return { sent: false, pending: 0, reason: "no_owner" };
+
   const pending = await prisma.ingestProposal.count({ where: { status: "PENDING" } });
   if (pending === 0) return { sent: false, pending: 0, reason: "nothing_waiting" };
 
@@ -139,7 +148,7 @@ export async function runFilingDigest(
   startOfDay.setHours(0, 0, 0, 0);
   const already = await prisma.notificationLog.findFirst({
     where: {
-      userId: settings.enabledById,
+      userId: owner,
       kind: "ai",
       createdAt: { gte: startOfDay },
       title: { startsWith: DIGEST_TITLE_PREFIX },
@@ -149,7 +158,7 @@ export async function runFilingDigest(
   if (already) return { sent: false, pending, reason: "already_sent" };
 
   await sendNotification(prisma, {
-    userId: settings.enabledById,
+    userId: owner,
     kind: "ai",
     title:
       pending === 1
