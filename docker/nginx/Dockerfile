@@ -187,7 +187,7 @@ RUN set -eu; \
     printf '}\n' >> /tmp/leg-test.conf; \
     nginx -t -c /tmp/leg-test.conf; \
     nginx -c /tmp/leg-test.conf -g 'pid /tmp/leg.pid; error_log /tmp/leg.err;'; \
-    for i in $(seq 1 50); do bash -c 'exec 3<>/dev/tcp/127.0.0.1/9981' 2>/dev/null && break; sleep 0.2; done; \
+    for _ in $(seq 1 50); do bash -c 'exec 3<>/dev/tcp/127.0.0.1/9981' 2>/dev/null && break; sleep 0.2; done; \
     req() { bash -c 'exec 3<>/dev/tcp/127.0.0.1/9981; printf "GET %s HTTP/1.0\r\nHost: gateway:9981\r\nAccept-Encoding: gzip\r\n\r\n" "$1" >&3; cat <&3' _ "$1"; }; \
     disc="$(req /docs/hosting/discovery)"; \
     caps="$(req /docs/hosting/capabilities)"; \
