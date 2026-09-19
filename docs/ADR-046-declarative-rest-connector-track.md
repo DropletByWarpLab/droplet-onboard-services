@@ -216,7 +216,7 @@ in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and w
 silently key dedup on `undefined` for every dataset at once.
 
 
-### Implementation record — 2026-09-18 (WARP-2916, GitHub)
+## Implementation record — 2026-09-18 (WARP-2916, GitHub)
 
 **The third profile, and the first on the track that needed a change to the shared
 connector.** `rest/vendors/github.ts` serves `task` from `GET /issues` — issues AND pull
@@ -272,7 +272,7 @@ but NO Issues permission (the endpoint says no permissions are required; the
 permissions page does not list it). The guide tells the owner to grant `Issues:
 Read-only` regardless, and warns that a token with too little — or an org-owned token
 still pending approval — probes green and reads fewer rows.
-### 2026-09-18 — GitLab (WARP-2917), the first vendor on the widened vocabulary
+## Implementation record — 2026-09-18 (WARP-2917, GitLab) — the first vendor on the widened vocabulary
 
 * **GitLab (gitlab.com hosted) — shipped, one dataset: `task` ← `GET /api/v4/issues`.**
   Every issue the token's user can see, across every project and group. Eight of
