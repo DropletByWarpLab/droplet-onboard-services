@@ -28,14 +28,14 @@ import {
   isRevokeApplied,
   installOverlayVpnPeer,
   listVpnPeers,
-  fetchNetworkSummary,
   RouterError,
 } from "../services/openwrt.client.js";
 import {
   allocateMintAndPersistPeer,
   allocatePeerIp,
-  parseVpnSubnet,
   renderPeerConf,
+  serverAddressFromSubnet,
+  OVERLAY_KEEPALIVE_SECONDS,
   VpnConfigError,
   VpnIpExhaustedError,
   type VpnPeerMode,
@@ -54,7 +54,11 @@ import {
   fetchBridgeStunProbe,
 } from "../lib/vpn-home-endpoint.js";
 import { observePlacement } from "../services/overlay-placement.service.js";
-import { resolveVpnLanRouting } from "../lib/vpn-lan.js";
+import {
+  readNetworkSummary,
+  resolveVpnLanRouting,
+  type NetworkSummaryRead,
+} from "../lib/vpn-lan.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
@@ -124,16 +128,12 @@ const createPeerSchema = z.object({
  * summary/env didn't already yield an IP, so the multi-box path adds no call.
  * Away mode never calls this.
  */
-async function resolveHomeEndpointHost(): Promise<string | null> {
+async function resolveHomeEndpointHost(read?: NetworkSummaryRead): Promise<string | null> {
   const envFallback = (config.WIREGUARD_HOME_ENDPOINT_HOST ?? "").trim();
-  let summary: Awaited<ReturnType<typeof fetchNetworkSummary>> | null = null;
-  let summaryOk = false;
-  try {
-    summary = await fetchNetworkSummary();
-    summaryOk = true;
-  } catch (err) {
-    logger.warn({ err }, "vpn: network summary unavailable for home-endpoint discovery");
-  }
+  // One summary read per request: a caller that also derives the LAN facts
+  // (WARP-2692) passes its read in rather than paying the sidecar round-trip
+  // twice.
+  const { summary, ok: summaryOk } = read ?? (await readNetworkSummary());
   // Only reach for the bridge when env + summary came up empty (single-box).
   const fromSummary = pickHomeEndpoint({ envFallback, summary, bridgeIp: null, summaryOk });
   if (fromSummary) return fromSummary;
@@ -189,11 +189,6 @@ async function resolveEndpointHost(): Promise<string> {
 // clear now that resolveEndpointHost() reads the env var directly.
 export function _resetEndpointCacheForTests(): void {}
 
-/** WARP-1757 — keepalive for overlay peers, in seconds. Matches the value the
- *  connect agent installs (overlay-connect.service.ts) so a peer's keepalive
- *  doesn't change depending on which path last touched it. */
-const OVERLAY_KEEPALIVE_SECONDS = 25;
-
 /** WARP-1757 — the routing sidecar, behind the structural surface
  *  provisionOverlayPeer takes, so the service unit-tests without it. */
 const overlayRouter: OverlayProvisionRouter = {
@@ -215,14 +210,14 @@ const overlayRouter: OverlayProvisionRouter = {
  * — advertising it is the WARP-1391 dead-endpoint bug, and it is the box's
  * HTTPS/API address, not a WireGuard transport address.
  */
-async function resolveOverlayEndpointCandidates(): Promise<
-  OverlayEndpointCandidate[]
-> {
+async function resolveOverlayEndpointCandidates(
+  read?: NetworkSummaryRead,
+): Promise<OverlayEndpointCandidate[]> {
   const snapshot = await observePlacement(
     {
       wanAddress: () => fetchBridgeUplinkIp(),
       stun: () => fetchBridgeStunProbe(),
-      lanAddress: () => resolveHomeEndpointHost(),
+      lanAddress: () => resolveHomeEndpointHost(read),
       // No second STUN destination is available from the host bridge yet, so
       // NAT class stays `unknown` and `srflx` is still offered — we withhold it
       // only on a POSITIVE address-dependent finding, never on absence of
@@ -785,7 +780,9 @@ export function createVpnRouter(
         }
 
         // WARP-2692 — LAN facts from the router that terminates the tunnel.
-        const lan = await resolveVpnLanRouting();
+        // One summary read for these and for the endpoint candidates below.
+        const netRead = await readNetworkSummary();
+        const lan = await resolveVpnLanRouting(netRead);
         const profile = buildOverlayProfile({
           assignedIp: provisioned.assignedIp,
           serverPublicKey: provisioned.serverPublicKey,
@@ -796,7 +793,7 @@ export function createVpnRouter(
           homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
-          endpointCandidates: await resolveOverlayEndpointCandidates(),
+          endpointCandidates: await resolveOverlayEndpointCandidates(netRead),
         });
 
         // The owner should be able to see, after the fact, that a device
@@ -1214,6 +1211,18 @@ export function createVpnRouter(
           listenPort: config.WIREGUARD_LISTEN_PORT,
           address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
         });
+        // WARP-2689 — same refusal as the mint route and provisionOverlayPeer:
+        // a profile issued over a router with no WireGuard support is a conf
+        // that can never handshake, and this is the route a device calls to
+        // REBUILD its conf after a router wipe (WARP-2694) — exactly when the
+        // router is most likely to be missing it. `null` still issues.
+        if (setup.interface_live === false) {
+          return res.status(503).json({
+            error: "tunnel_not_ready",
+            message:
+              "Your Droplet's router doesn't have WireGuard support yet, so this device can't connect. Update the router's software, then try again.",
+          });
+        }
         // AllowedIPs and DNS come as a PAIR, selected by the peer row's own
         // mode — never one mode's subnet with the other's resolver. A resolver
         // outside every AllowedIPs entry leaves the tunnel up but sends DNS out
@@ -1221,7 +1230,9 @@ export function createVpnRouter(
         // resolves to public NXDOMAIN. buildOverlayProfile owns the selection;
         // the route only supplies both pairs.
         // WARP-2692 — LAN facts from the router that terminates the tunnel.
-        const lan = await resolveVpnLanRouting();
+        // One summary read for these and for the endpoint candidates below.
+        const netRead = await readNetworkSummary();
+        const lan = await resolveVpnLanRouting(netRead);
         const profile = buildOverlayProfile({
           assignedIp: peer.assignedIp,
           serverPublicKey: setup.public_key,
@@ -1232,7 +1243,7 @@ export function createVpnRouter(
           homeDns: lan.homeDns,
           vpnSubnet: config.WIREGUARD_VPN_SUBNET,
           keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
-          endpointCandidates: await resolveOverlayEndpointCandidates(),
+          endpointCandidates: await resolveOverlayEndpointCandidates(netRead),
         });
         audit({
           event: "overlay_profile_issued",
@@ -1867,9 +1878,11 @@ export function createVpnRouter(
       // a router-side peer nobody can dial.
       //   away — the public FQDN / operator override (resolveEndpointHost).
       //   home — the box's discovered home-facing LAN IP (resolveHomeEndpointHost).
+      // One routing-summary read serves the home endpoint and the LAN facts.
+      const netRead = await readNetworkSummary();
       let confEndpointHost: string;
       if (mode === "home") {
-        const homeHost = await resolveHomeEndpointHost();
+        const homeHost = await resolveHomeEndpointHost(netRead);
         if (!homeHost) {
           return res.status(503).json({
             error:
@@ -1915,7 +1928,7 @@ export function createVpnRouter(
       // The env pins describe one deployment shape and are written back on
       // every provision, so a box behind an edge router used to hand out a
       // conf that handshook and reached nothing.
-      const lan = await resolveVpnLanRouting();
+      const lan = await resolveVpnLanRouting(netRead);
 
       // 2-4. Allocate next free IP, mint the router-side peer with it, and
       //    persist — as one retryable unit. WARP-565: the allocate-then-persist
@@ -2147,15 +2160,4 @@ export function createVpnRouter(
   );
 
   return router;
-}
-
-/**
- * Compute the server's CIDR address inside a VPN subnet, e.g.
- * "10.13.13.0/24" -> "10.13.13.1/24". Used on first-time /vpn/setup;
- * idempotent calls don't reach this path.
- */
-function serverAddressFromSubnet(subnet: string): string {
-  const parsed = parseVpnSubnet(subnet);
-  const mask = subnet.split("/")[1] ?? "24";
-  return `${parsed.serverIp}/${mask}`;
 }
