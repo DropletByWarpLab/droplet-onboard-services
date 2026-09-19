@@ -60,7 +60,7 @@ function stateOf(
 }
 
 /** Humanise a context window: 131072 → "128k", 8192 → "8k", small → exact. */
-function formatContext(tokens: number | null): string {
+export function formatContext(tokens: number | null): string {
   if (tokens == null) return DASH;
   if (tokens >= 1000) {
     const k = tokens / 1024;

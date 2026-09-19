@@ -21,7 +21,7 @@ import {
   moduleForPath,
 } from "@/components/nav-config";
 
-const openCapabilities = { claudeActivity: true, ragEval: true };
+const openCapabilities = { claudeActivity: true, ragEval: true, medicalConnector: true };
 const only =
   (...ids: string[]) =>
   (id: string) =>
@@ -147,6 +147,26 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
 
   it("claims no module for its route, so the route gate cannot 404 it", () => {
     expect(moduleForPath("/practice")).toBeNull();
+  });
+
+  // WARP-2880 — and by a connected MEDICAL integration. The page is the
+  // practice's day read from a practice-management system; a box without one
+  // (accounting only, or nothing connected yet) has nothing to show there.
+  it("is hidden until the box reports a connected medical integration", () => {
+    const noMedical = { ...openCapabilities, medicalConnector: false };
+    const visible = visibleItems(businessItems(), "owner", noMedical, everyModuleOn);
+    expect(visible.map((i) => i.href)).toEqual([
+      "/business",
+      "/brief",
+      "/customers",
+      "/projects",
+      "/money",
+    ]);
+  });
+
+  it("keeps the fixed label when it appears — added, never relabelled (ADR-044 rule 1)", () => {
+    const visible = visibleItems(businessItems(), "owner", openCapabilities, everyModuleOn);
+    expect(visible.find((i) => i.href === "/practice")?.label).toBe("Practice");
   });
 
   it("has left the Integrations subtree, which keeps only the plumbing", () => {

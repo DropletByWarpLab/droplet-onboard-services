@@ -81,6 +81,8 @@ export interface OverlayProfile {
 export interface OverlayProvisionRouter {
   setup(opts: { listenPort: number; address: string }): Promise<{
     public_key: string;
+    /** WARP-2689 — kernel truth; `false` = the router has no WireGuard. */
+    interface_live?: boolean | null;
   }>;
   installPeer(opts: {
     interface: string;
@@ -193,6 +195,17 @@ export async function provisionOverlayPeer(
     listenPort: config.listenPort,
     address: config.serverAddress,
   });
+  // WARP-2689 — `setup` answered from uci; `interface_live: false` is the
+  // kernel saying the device does not exist (no WireGuard on this router).
+  // Provisioning past this point would write an active row and install a
+  // peer nothing can ever handshake with, and the device would sit at
+  // "approved" forever. Fail here; every caller already maps a provisioning
+  // throw to `tunnel_not_ready`, which is the honest answer.
+  if (setup.interface_live === false) {
+    throw new Error(
+      "wg0 is configured but the router has no WireGuard support (interface_live=false) — see WARP-2689",
+    );
+  }
 
   const existing = await prisma.vpnPeer.findUnique({
     where: { publicKey: input.wgPublicKey },

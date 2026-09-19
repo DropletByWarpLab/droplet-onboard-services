@@ -153,6 +153,32 @@ describe("business_find — the discriminator", () => {
     expect(out.ok).toBe(false);
     expect(get).not.toHaveBeenCalled();
   });
+
+  it("treats a non-string id as absent instead of throwing (WARP-2878)", async () => {
+    // `a.id?.trim()` guarded null/undefined only, so a NUMBER threw a
+    // TypeError straight out of the tool call. That is reachable: the
+    // ai-gateway's DMR sanitizer strips the schema's `type` for local models
+    // (see find.ts's header), so a 20B model answering `id: 42` arrives here
+    // unfiltered. create.ts/update.ts/link.ts all use `typeof x === "string"`;
+    // this is the same guard, and an unusable id reads as "no id" — a search —
+    // rather than as a crash.
+    get.mockResolvedValue(res(true, 200, { companies: [], total: 0 }));
+    const out = await businessFind.handler({ entity: "customer", id: 42 }, ctx);
+    expect(out.ok).toBe(true);
+    expect(get.mock.calls[0][0]).toContain("/api/crm/companies?");
+    expect(get.mock.calls[0][0]).not.toContain("42");
+  });
+
+  it("treats a non-string query, parent_id or department as absent too (WARP-2878)", async () => {
+    // The same guard on the other three string args — one bad type must not
+    // decide which of them crashes.
+    get.mockResolvedValue(res(true, 200, { work_items: [] }));
+    const out = await businessFind.handler(
+      { entity: "work_item", query: 7, parent_id: 9, department: 3 },
+      ctx,
+    );
+    expect(out.ok).toBe(true);
+  });
 });
 
 describe("business_find — searches", () => {

@@ -3,14 +3,18 @@
 /**
  * WARP-836 — the Models page KPI strip.
  *
- * Four read-only tiles: model-store usage, GPU, average latency, cloud spend.
+ * Three read-only tiles: model-store usage, GPU, average latency.
  * Model-store disk and average latency are still placeholders (no probe
  * exists yet), so those render an honest "Unavailable" rather than a
- * fabricated number. GPU is a real reading as of WARP-1861, and cloud spend
- * is real — $0.00 while no cloud escapes are enabled.
+ * fabricated number. GPU is a real reading as of WARP-1861.
+ *
+ * Cloud spend is deliberately NOT a tile: the orchestrator still hard-codes
+ * `cloudSpendUsd: 0` (no egress meter behind it), so a "$0.00" tile was a
+ * fabricated reading dressed as a real one. Bring it back only when the
+ * number is measured.
  */
 
-import { Clock, Cloud, Cpu, HardDrive, type LucideIcon } from "lucide-react";
+import { Clock, Cpu, HardDrive, type LucideIcon } from "lucide-react";
 import type { ModelsGpuInfo, ModelsGpuReason } from "@/lib/types";
 
 interface KpiStripProps {
@@ -18,14 +22,8 @@ interface KpiStripProps {
   /** Why `gpu` is null — see `gpuFallbackMeta`. Ignored when `gpu` is set. */
   gpuReason?: ModelsGpuReason;
   avgLatencyMs: number;
-  cloudSpendUsd: number;
   /** Count of local models — used only for the model-store tile's sub-line. */
   localCount: number;
-}
-
-/** Format USD with two decimals, e.g. 0 → "$0.00". */
-function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
 }
 
 /**
@@ -83,11 +81,10 @@ export function KpiStrip({
   gpu,
   gpuReason,
   avgLatencyMs,
-  cloudSpendUsd,
   localCount,
 }: KpiStripProps) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       {/* Model store — disk usage isn't reported yet, so the value is honest
           "Unavailable"; the sub-line states the true, known fact instead. */}
       <KpiTile
@@ -137,14 +134,6 @@ export function KpiStrip({
             ? "to first token"
             : "Latency isn’t measured yet"
         }
-      />
-
-      {/* Cloud spend — a real value. Zero while no provider is enabled. */}
-      <KpiTile
-        icon={Cloud}
-        label="Cloud spend"
-        value={usd(cloudSpendUsd)}
-        meta="No cloud models enabled this month"
       />
     </div>
   );

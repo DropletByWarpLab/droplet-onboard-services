@@ -188,3 +188,26 @@ def test_fetch_sends_the_bearer_and_the_eval_user(monkeypatch) -> None:
     assert cf.fetch_fingerprint() == "v1:1:x"
     assert "user=eval-fixtures" in seen["url"]
     assert seen["auth"] == "Bearer fallback-tok"
+
+
+# ─── WARP-2879: an empty corpus is never worth scoring ──────────────────────
+
+def test_empty_corpus_skips_on_first_run() -> None:
+    # 0 chunks = the eval-fixtures user exists in config but nothing is
+    # indexed for it (seed script not run yet). Running would write an
+    # all-zero result and then pin that as "measured".
+    run, reason = cf.should_run("v1:0:none", None)
+    assert run is False
+    assert "seed-eval-fixtures" in reason
+
+
+def test_empty_corpus_skips_even_though_it_changed() -> None:
+    run, _ = cf.should_run("v1:0:none", "v1:100:2026-08-11T00:00:00.000Z")
+    assert run is False
+
+
+def test_eval_user_is_stripped_and_empty_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("RAGAS_EVAL_USER", raising=False)
+    assert cf.eval_user() == ""
+    monkeypatch.setenv("RAGAS_EVAL_USER", "  eval-fixtures ")
+    assert cf.eval_user() == "eval-fixtures"

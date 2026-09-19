@@ -524,6 +524,21 @@ describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 r
     expect(mcp.minted()).toBe(3); // park, resume leg 1, re-park
     const titles = sendNotificationMock.mock.calls.map((x) => (x[1] as { title: string }).title);
     expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(2);
+
+    // WARP-2877 — the SECOND prompt must not repeat "Nothing has been done
+    // yet". The approval was spent on the lost dispatch and the delete DID
+    // run; the person being asked a second time is the only one who can tell.
+    const lost = (reparked.trace as AgentRunTraceEntry[]).filter((e) => e.unknownOutcome);
+    expect(lost).toHaveLength(1);
+    expect(lost[0]!.tool).toBe("delete_file");
+    expect(lost[0]!.text).toBeUndefined();
+    const bodies = sendNotificationMock.mock.calls
+      .map((x) => x[1] as { title: string; body: string })
+      .filter((n) => n.title.startsWith("Approval needed"))
+      .map((n) => n.body);
+    expect(bodies[0]).toContain("Nothing has been done yet");
+    expect(bodies[1]).toContain("MAY ALREADY");
+    expect(bodies[1]).not.toContain("Nothing has been done yet");
   });
 
   it("a redeem leg that THROWS is a tool error the run survives, audited as approved-but-did-not-run", async () => {

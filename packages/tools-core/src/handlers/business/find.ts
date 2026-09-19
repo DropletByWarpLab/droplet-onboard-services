@@ -175,6 +175,11 @@ const DEAL_SEARCH_PAGE = 200;
  *  only match what it fetched, so a search reads the route's maximum page. */
 const DIGEST_SEARCH_PAGE = 200;
 
+/** WARP-2878 — a trimmed string, or "" for anything that is not one. */
+function str(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const a = args as unknown as Args;
 
@@ -209,14 +214,20 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (findingStatus !== undefined && typeof findingStatus !== "string") return findingStatus;
 
   const limit = clampLimit(a.limit);
-  const id = a.id?.trim() ? encodeURIComponent(a.id.trim()) : null;
-  const parent = a.parent_id?.trim() ? encodeURIComponent(a.parent_id.trim()) : null;
-  const q = a.query?.trim();
+  // WARP-2878 — `str()` rather than `a.x?.trim()`. `?.` guards null/undefined
+  // and NOTHING else, so a non-string threw a TypeError out of the tool call
+  // before any branch ran. That is reachable rather than theoretical: the
+  // ai-gateway's DMR sanitizer strips `type` for local models (see the header),
+  // so a 20B model answering `id: 42` arrives here unfiltered. create.ts,
+  // update.ts and link.ts all use this form; an unusable value reads as absent.
+  const id = str(a.id) ? encodeURIComponent(str(a.id)) : null;
+  const parent = str(a.parent_id) ? encodeURIComponent(str(a.parent_id)) : null;
+  const q = str(a.query) || undefined;
   // Sent verbatim, resolved by the orchestrator. It is a NAME here — the
   // assistant cannot look one up, because `GET /api/departments` scopes its
   // listing to the caller's own memberships and the service principal holds
   // none, so it receives an empty list however the request is shaped.
-  const department = a.department?.trim() ? a.department.trim() : null;
+  const department = str(a.department) || null;
 
   try {
     switch (entity) {
@@ -524,7 +535,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         // work, and returning dismissed rows alongside would make the answer
         // an archive rather than a to-do list.
         qs.set("status", typeof findingStatus === "string" ? findingStatus : "new");
-        if (a.limit) qs.set("limit", String(a.limit));
+        // WARP-2878 — `limit` is already `clampLimit(a.limit)` (1..50), and this
+        // branch was the one place the raw argument was forwarded. The schema's
+        // `maximum` bounds nothing for a local model: the DMR sanitizer strips
+        // it, so `limit: 10000` reached the route and flooded the context.
+        if (a.limit) qs.set("limit", String(limit));
         const data = await callOrch<{
           findings?: Array<Record<string, unknown>>;
           total?: number;

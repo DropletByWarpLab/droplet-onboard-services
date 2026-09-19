@@ -798,6 +798,15 @@ SERVICE_TOKEN_ERP_BRIDGE=$service_token_erp_bridge
 # orchestrator + rag-eval together.
 SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 
+# --- RAG eval target corpus ---
+# WARP-2879: whose indexed corpus the RAGAS eval scores (rag-eval sends it
+# as ?user= on every search; the service principal owns no files). Defaults
+# to the user scripts/seed-eval-fixtures.sh creates — the only corpus the
+# goldens are meaningful against. Until that script has run, the corpus
+# gate skips every scheduled slot (0 chunks), so the default never scores
+# an empty corpus. Was hand-set config before, and every re-image lost it.
+RAGAS_EVAL_USER=eval-fixtures
+
 # --- Document renderer bearer (orchestrator → doc-render) ---
 # WARP-2211. The orchestrator presents this on POST /render to the
 # doc-render container, which turns a document spec into .pdf/.docx/.xlsx
@@ -1244,6 +1253,10 @@ migrate_env() {
   # as the fresh-install heredoc: orchestrator SERVICE_PRINCIPALS ↔ rag-eval
   # container ORCHESTRATOR_SERVICE_TOKEN (compose wires it to this value).
   _migrate_ensure_key SERVICE_TOKEN_RAG_EVAL "$(openssl rand -hex 32)"
+  # WARP-2879 backfill: the eval target user was never written by the
+  # installer, so every re-imaged box lost it and every scheduled RAGAS
+  # slot 400'd eval_user_required. Same default as the fresh-install heredoc.
+  _migrate_ensure_key RAGAS_EVAL_USER "eval-fixtures"
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.

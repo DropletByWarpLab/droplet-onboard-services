@@ -24,10 +24,15 @@
  * `company`-scope row never reaches a `family` turn — the same filter /brief
  * and `business_find` run, and the reason it lives in the service rather than
  * at each call site.
+ *
+ * 🔴 CONSENT-GATED (WARP-2876). See `buildBrainBlock` — the gate is the first
+ * thing it does, and the reasoning for where it is and what it deliberately
+ * does NOT do is stated there.
  */
 import type { PrismaClient } from "@prisma/client";
 import { formatMinorUnits } from "@droplet/shared-types";
 import { visibleScopeFilter } from "./brain-digest.service.js";
+import { isBrainEnabled } from "./brain-switch.service.js";
 import type { Prisma } from "@prisma/client";
 
 /** Mirrors MEMORY_FACTS_* — same shape of budget, same reason. */
@@ -44,10 +49,59 @@ function money(minor: bigint | null, currency: string | null): string {
   return shown ? ` (${shown} ${currency})` : "";
 }
 
+/**
+ * WARP-2876 — 🔴 THE CONSENT GATE. Read this before moving or removing it.
+ *
+ * THE DEFECT. The owner's switch (`brain-switch.service.ts`, WARP-2838) gated
+ * the WRITE path only: `index.ts`'s `preconditions` stop the passes, so a
+ * revoked brain stops reading the business's documents. Nothing gated the
+ * TELL path. This function was called unconditionally by `routes/llm.ts` and
+ * `prompt-inspect.service.ts`, so after an owner revoked consent every single
+ * chat turn was still handed a system-prompt block assembled from rows derived
+ * from their documents before the revocation. The click stopped the reading
+ * and not the telling, and the telling is the half that reaches the model.
+ *
+ * WHY THE GATE IS HERE, at the bottom, rather than at the two call sites. Both
+ * callers funnel through this function, a third one is the likely shape of the
+ * next regression, and a guard repeated at each site is a guard that will be
+ * forgotten once. This is also where `visibleScopeFilter` lives, for the same
+ * stated reason — consent and scope are both "who may be told what", and they
+ * belong at the same choke point.
+ *
+ * 🔴 IT IS A SERVE GATE, NOT A DELETE, AND THAT IS A PRODUCT RULING. ADR-051
+ * §9.9 is explicit that "turning the brain off stops the passes WITHOUT
+ * deleting what has already been written", and the switch's own on-screen
+ * consent copy promises the owner that "what it has already written stays
+ * until you delete it" (`BrainSwitchPanel.tsx`, pinned by
+ * `brief-switch.test.tsx`). `GET /api/brain/findings` is role-gated and never
+ * brain-gated on purpose, so `/brief` keeps rendering the rows across the
+ * switch. Purging on the click would make the box delete the owner's data
+ * while the sentence beside the button said it would not.
+ *
+ * The line that ruling draws, and the line this gate implements: the brain
+ * stops TELLING the model unbidden, it does not stop SHOWING the owner what it
+ * already wrote. `/brief` and `business_find` are asked for by a human; this
+ * block is injected into every turn whether or not anybody wanted it. Revoked
+ * consent withdraws the unbidden path.
+ *
+ * FAILS CLOSED. An unreadable switch sends no block — the same posture as the
+ * unresolvable-scope path below, and for the same reason: on a consent
+ * question, failing open serves content nobody has consented to.
+ *
+ * ASKED PER CALL, never cached. The switch is a row an owner flips mid-session;
+ * resolving it once would make the revocation take effect at the next restart,
+ * which is the exact defect WARP-2838 fixed for the pass schedule.
+ */
 export async function buildBrainBlock(
   prisma: PrismaClient,
   caller: { id: string; role: string },
 ): Promise<string> {
+  try {
+    if (!(await isBrainEnabled(prisma))) return "";
+  } catch {
+    return "";
+  }
+
   let scopeFilter: Prisma.BrainDigestWhereInput;
   try {
     scopeFilter = await visibleScopeFilter(prisma, caller);

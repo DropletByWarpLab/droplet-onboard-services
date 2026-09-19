@@ -34,6 +34,15 @@ import { brainIsOff, setBrainEnabled, type CoverageResult } from "./api";
  *   does not delete digests. Implying otherwise would be a promise no code
  *   here keeps.
  *
+ *   WARP-2876 — "and the assistant stops bringing it up in chat" is the other
+ *   half of that same sentence, and it was untrue until the consent gate landed
+ *   in `brain-block.service.ts`. The switch gated the WRITE path only, so a
+ *   revoked brain stopped reading the business's documents and went on feeding
+ *   what it had already read into the system prompt of every chat turn. The
+ *   clause is here because "it stops" and "it keeps what it has" are the two
+ *   things an owner needs in order to read the off state correctly, and stating
+ *   only the second one describes a box that has quietly kept talking.
+ *
  * THE PANEL NEVER STATES A CAUSE IT WAS NOT TOLD. It takes a `CoverageResult`
  * rather than a `Coverage | null` for that reason: a null body used to mean
  * both "the brain is off" and "the box did not answer", and this component
@@ -138,7 +147,7 @@ export function BrainSwitchPanel({
         </li>
         <li>
           You can turn it off at any time. What it has already written stays
-          until you delete it.
+          until you delete it, and the assistant stops bringing it up in chat.
         </li>
       </ul>
       {canToggle === true ? (

@@ -189,10 +189,14 @@ export function buildHubEntries(
  * hub: `shouldRetryOnError: false` means one failure stands until the next
  * 30-second tick, so silently rendering "nothing is connected" would be a lie
  * with a 30-second half-life.
+ *
+ * `enabled: false` skips the fetch entirely (SWR null key) — WARP-2880: the
+ * Sidebar reads this for every signed-in person, and family/guest would
+ * otherwise 403 against the owner/admin-only route every 30 s.
  */
-export function useIntegrations() {
+export function useIntegrations(enabled = true) {
   const { data, error, isLoading, mutate } = useSWR<IntegrationConnection[]>(
-    "/api/integrations",
+    enabled ? "/api/integrations" : null,
     fetchIntegrations,
     { refreshInterval: 30_000, shouldRetryOnError: false },
   );
