@@ -3030,9 +3030,10 @@ export type AppDownloadAssetKind = "installer" | "signature" | "manifest";
 /**
  * How the catalog's authenticity was established.
  *
- * `digest-only` is the DEFAULT and is not a weakness: the artifacts ship
- * inside the appliance image, and the box re-hashes every byte against
- * the catalog's pinned sha256 before serving. `signed` additionally means
+ * `digest-only` is the DEFAULT and is not a weakness: an operator staged
+ * the artifacts onto the box (ADR-045 — nothing ships inside the image),
+ * and the box re-hashes every byte against the catalog's pinned sha256
+ * before serving. `signed` additionally means
  * a cosign signature over the catalog verified against a real trust
  * anchor — only claimed when it was actually checked.
  */

@@ -149,7 +149,11 @@ function CopyDigest({ sha256 }: { sha256: string }) {
 /**
  * One platform's card. Four distinct states, because collapsing them
  * would mean lying in at least one:
- *   - a real installer to download
+ *   - a real installer to download — and, when more than one format was
+ *     staged (the MSI beside the NSIS exe), every other one listed beneath
+ *     the button as its own download. gen-catalog pins them all and the
+ *     API serves them all; a package the page never links is a package
+ *     nobody can get (WARP-2889).
  *   - store-distributed (Android / iOS): link out, no fake download
  *   - listed but nothing staged: say so
  *   - not in the catalog at all: say that instead of implying "soon"
@@ -166,9 +170,21 @@ function PlatformCard({
   const label = PLATFORM_LABELS[platform];
   const isMobile = platform === "android" || platform === "ios";
 
+  const installers: AppDownloadAsset[] =
+    entry?.assets.filter((a) => a.kind === "installer") ?? [];
+
+  // The catalog's `primary` is THE download. The schema leaves it optional,
+  // so a catalog that stages installers without naming one must still offer
+  // them: falling back to the first installer beats telling a customer
+  // nothing is here while the API serves the files happily.
   const primary: AppDownloadAsset | undefined = entry?.primary
     ? entry.assets.find((a) => a.name === entry.primary)
-    : undefined;
+    : installers[0];
+
+  // Every other installer format that was staged. Secondary on purpose —
+  // one button is THE thing to do — but each is a real, digest-checked
+  // download of its own.
+  const otherInstallers = installers.filter((a) => a.name !== primary?.name);
 
   // The catalog named a primary that isn't in its own asset list. Today
   // that falls through to the muted "nothing staged yet" note, which reads
@@ -221,13 +237,43 @@ function PlatformCard({
               </div>
             ) : null}
           </dl>
+          {otherInstallers.length > 0 ? (
+            <div className="dl-others">
+              <p className="dl-others-title">Also available for {label}</p>
+              <ul className="dl-others-list">
+                {otherInstallers.map((asset) => (
+                  <li key={asset.name}>
+                    <a className="dl-others-link" href={asset.url} download>
+                      <Download size={13} />
+                      {asset.name}
+                    </a>
+                    <span className="dl-others-meta">
+                      {formatBytes(asset.size)} ·{" "}
+                      <CopyDigest sha256={asset.sha256} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {platform === "windows" ? (
+            // Stated so it stays true whether or not a minisign `.sig` was
+            // staged beside the installer: the warning comes from the
+            // absence of an Authenticode certificate, which no build has.
             <p className="dl-note">
               Windows will warn you about an “unknown publisher” when you run
-              this. That is expected — the installer is signed for the app’s
-              own updater, not with a commercial certificate. Choose{" "}
-              <b>More info</b> then <b>Run anyway</b>, and check the SHA-256
-              above first if you want to be certain.
+              this. That is expected — the installer isn’t signed with a
+              commercial code-signing certificate yet. Choose <b>More info</b>{" "}
+              then <b>Run anyway</b>, and compare the SHA-256 above first if
+              you want to be certain.
+            </p>
+          ) : null}
+          {platform === "android" ? (
+            <p className="dl-note">
+              Your phone will ask you to allow installs from this browser
+              before it opens the file. That is expected for an app that
+              doesn’t come from Google Play — allow it once, then open the
+              download.
             </p>
           ) : null}
           {signature ? (

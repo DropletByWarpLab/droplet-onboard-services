@@ -73,6 +73,28 @@ node scripts/app-downloads/gen-catalog.mjs --dir data/app-downloads --check
 `--check` exits non-zero when the staged bytes disagree with the catalog,
 which is what stops a stale catalog shipping next to swapped binaries.
 
+### More than one platform, or more than one format
+
+`stage.mjs` stages one platform per call — a `.exe` and an `.apk` carry
+different versions, so mixing them in one call is refused. Stage each
+platform with its own call and let only the **last** one restart the
+orchestrator; every restart takes the whole API down for ~40 s, not just
+this page:
+
+```bash
+./scripts/app-downloads/stage.sh --no-restart --min-os "Windows 10 (1809) or newer" \
+    ~/Droplet_0.2.0_x64-setup.exe ~/Droplet_0.2.0_x64_en-US.msi
+./scripts/app-downloads/stage.sh --min-os "Android 8.0 or newer" ~/Droplet_0.3.0.apk
+```
+
+Every installer format you stage is offered on the page: the platform's
+`primary` (the NSIS `-setup.exe` on Windows) is the button, and the rest —
+the MSI here — are listed beneath it with their own size and digest
+(WARP-2889). Name the APK with its version in the filename
+(`Droplet_0.3.0.apk`, not `app-release.apk`) or pass `--version`: the page
+shows the version the filename carries, and the asset name IS the filename
+the customer downloads.
+
 ### Do not leave the previous release in place
 
 `gen-catalog`'s `pickPrimary()` takes the first `-setup.exe` in **sorted**
