@@ -322,6 +322,27 @@ entries:
       id and an API key (see anthropic_cloud.py, which names no host).
       Already stated in this entry's purpose. (WARP-2452)
 
+  - id: ref-cloud-provider-key-consoles
+    kind: reference
+    service: web-dashboard
+    destination:
+      # NOT an egress destination. These are the two "get a key" links on the
+      # Models page: an owner/admin clicks one and THEIR OWN BROWSER opens the
+      # provider's console to mint an API key, which they then paste back into
+      # the box. The appliance never opens a connection to either host — the
+      # calls it can make are api.anthropic.com / api.openai.com, registered
+      # separately as cloud-llm-providers-optin above (kind: egress,
+      # data_class: user-content-on-request). They are deliberately NOT folded
+      # into that entry: these carry no data, are dialled by nobody, and would
+      # break its no_code_literal declaration, which is true only of the two
+      # API hosts the SDK owns.
+      hosts: [console.anthropic.com, platform.openai.com]
+    purpose: the provider consoles an admin visits in their own browser to mint an API key, linked from each cloud provider row on the Models page — not a connection the box makes
+    ticket: WARP-2871
+    added: 2026-09-09
+    review_by: 2027-09-09
+    code_refs: [apps/web-dashboard/src/components/models/CloudProviderRow.tsx]
+
   - id: ambient-weather-open-meteo
     kind: egress
     service: web-fetch

@@ -10,12 +10,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 const createUserMock = vi.fn();
 const deleteUserMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: (...a: any[]) => createUserMock(...a),
   deleteUser: (...a: any[]) => deleteUserMock(...a),
@@ -32,7 +30,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   useDevice: () => ({ device: null, devices: [], health: null, isLoading: false, error: null }),
 }));
 
-vi.mock("@/components/ProviderKeyForm", () => ({ ProviderKeyForm: () => null }));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 
 import SettingsPage from "@/app/settings/page";
@@ -41,10 +38,8 @@ const STRONG = "Temp-secret123";
 
 beforeEach(() => {
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
   createUserMock.mockReset();
   deleteUserMock.mockReset();
-  listProviderKeysMock.mockResolvedValue([]);
   fetchUsersMock.mockResolvedValue({ users: [] });
   // A request that stays in flight for the whole test window, so the guard is
   // what (and only what) prevents the second submission.

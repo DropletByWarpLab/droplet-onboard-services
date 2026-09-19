@@ -359,16 +359,31 @@ export interface ModelsCatalogPayload {
   models: CatalogModelEntry[];
 }
 
-/** One opt-in cloud provider. Read-only on this surface — enabling a provider
- *  happens in Settings (the off-LAN allowlist), never here. */
+/** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
+ *  ONE place for cloud models: the escape switch and the keys live here. */
 export interface CloudProviderRow {
-  provider: "anthropic" | "openai" | "gemini";
-  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  /** WARP-2871: gemini removed — no gateway provider exists for it. */
+  provider: "anthropic" | "openai";
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
   enabled: boolean;
+  /** WARP-2871: null = the gateway could not be asked (render "Unknown",
+   *  never "Not set up" — absence of an answer is not absence of a key). */
+  hasKey: boolean | null;
   /** ISO timestamp of the last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until egress aggregation lands. */
   spendUsd: number;
+}
+
+/** WARP-2871 — the workspace `cloud_model_escape` channel as the caller sees
+ *  it. `allowedForYou` is the caller's EFFECTIVE verdict (escape && role);
+ *  null = unknown, and the page must not guess. */
+export interface CloudAccessInfo {
+  escapeEnabled: boolean;
+  escapeChangedBy: string | null;
+  /** ISO */
+  escapeChangedAt: string | null;
+  allowedForYou: boolean | null;
 }
 
 /**
@@ -413,6 +428,8 @@ export type ModelsGpuReason = "unreachable" | "no_card" | null;
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
+  /** WARP-2871 — escape state + the caller's verdict, for the Cloud section. */
+  cloudAccess: CloudAccessInfo;
   gpu: ModelsGpuInfo | null;
   /** WARP-1861 (additive; optional so an older orchestrator that predates the
    *  field still parses). Absent ⇒ we know nothing about why, and the tile

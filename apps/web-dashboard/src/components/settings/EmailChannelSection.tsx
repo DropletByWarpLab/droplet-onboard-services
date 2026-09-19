@@ -17,7 +17,7 @@ import {
  * appliance never runs its own MTA; the owner brings their provider's SMTP
  * (Gmail app-password, Fastmail, a corporate relay, …).
  *
- * The password is WRITE-ONLY, mirroring ProviderKeyForm: the field starts empty
+ * The password is WRITE-ONLY, mirroring the cloud-key editor on /models (WARP-2871): the field starts empty
  * and the placeholder reflects whether one is stored. Submitting blank keeps the
  * existing password (the API treats omitted-password as keep-existing). The raw
  * SMTP transport error is never rendered — only a friendly line — so a 535/auth

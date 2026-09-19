@@ -32,7 +32,7 @@ class AnthropicCloudProvider(BaseProvider):
         self, messages: list[ChatMessage], model: str, stream: bool = False, **kwargs
     ) -> dict | AsyncGenerator[str, None]:
         if not self.api_key:
-            raise ValueError("Anthropic API key not configured. Add your key in Settings.")
+            raise ValueError("Anthropic API key not configured. An owner or admin can add the key on the Models page.")
 
         import litellm  # lazy: heavy import, only needed on a cloud call
 
