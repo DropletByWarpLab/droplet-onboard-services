@@ -67,7 +67,20 @@ export type ConnectorId =
   // onto. Deriving the union from `catalogDescriptors()` would satisfy the
   // cast by deleting the check.
   | "square"
-  | "calcom";
+  | "calcom"
+  // WARP-2916 — GitHub, the third REST-track vendor. Same hand-widening,
+  // same reason.
+  | "github"
+  // WARP-2917 — GitLab, the fourth declarative REST vendor. Same hand-written
+  // widening, same reason: the union is the check behind the `as ConnectorId`
+  // cast, and deriving it would delete the check.
+  | "gitlab"
+  // WARP-2918 — Todoist, the fifth REST-track vendor, and the first task
+  // tracker. Same hand-widening, same reason.
+  | "todoist"
+  // WARP-2919 — Loyverse, the sixth declarative REST vendor, and the first
+  // point-of-sale card. Same hand-widening, same reason: the union is the check.
+  | "loyverse";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

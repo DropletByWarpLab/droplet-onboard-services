@@ -186,6 +186,47 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/calcom",
   },
+  {
+    // WARP-2916 — the REST track's third vendor, at catalog.order 14.
+    id: "github",
+    name: "GitHub",
+    category: "Project management",
+    description:
+      "Issues and pull requests across every repository your token can see — read from GitHub.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/github",
+  },
+  {
+    // WARP-2917 — the REST track's fourth vendor, at catalog.order 15.
+    id: "gitlab",
+    name: "GitLab",
+    category: "Project management",
+    description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/gitlab",
+  },
+  {
+    // WARP-2918 — the REST track's fifth vendor, at catalog.order 16. The
+    // copy states the one deliberate omission on the card itself: Todoist's
+    // active-tasks endpoint never returns a completed task, so the tile must
+    // not read as "your whole Todoist".
+    id: "todoist",
+    name: "Todoist",
+    category: "Project management",
+    description:
+      "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/todoist",
+  },
+  {
+    // WARP-2919 — the REST track's sixth vendor, at catalog.order 17.
+    id: "loyverse",
+    name: "Loyverse",
+    category: "Point of sale",
+    description: "Customers and catalogue items — read from Loyverse POS.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/loyverse",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -253,8 +294,11 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "calcom",
       "dentrix",
       "eaglesoft",
+      "github",
+      "gitlab",
       "hubspot",
       "klaviyo",
+      "loyverse",
       "mailchimp",
       "opendental",
       "pipedrive",
@@ -262,6 +306,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "shopify",
       "square",
       "stripe",
+      "todoist",
       "xero",
     ];
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual(allowed);
@@ -464,9 +509,12 @@ describe("the setup guide travels with the card", () => {
       return descriptor !== undefined && GUIDE_REQUIRED_TRACKS.has(descriptor.track);
     }).map((card) => card.id);
 
-    // The two REST cards WARP-2707 ships…
+    // The two REST cards WARP-2707 ships, and WARP-2918's third…
     expect(covered).toContain("square");
     expect(covered).toContain("calcom");
+    // …the third, WARP-2917…
+    expect(covered).toContain("gitlab");
+    expect(covered).toContain("todoist");
     // …and a cloud card, so a set that had SWAPPED one track for the other
     // rather than widening would still be caught.
     expect(covered).toContain("stripe");

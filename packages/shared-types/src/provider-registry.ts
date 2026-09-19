@@ -1205,6 +1205,222 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 13,
     },
   },
+  // WARP-2916 — the third REST profile, and the first PROJECT-TRACKER vendor
+  // on the declarative track.
+  {
+    id: "github",
+    displayName: "GitHub",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "GitHub fine-grained personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // 🔴 A `pattern`, unlike Square and Cal.com — because GitHub DOCUMENTS
+        // its token formats ("GitHub's token formats" table on
+        // about-authentication-to-github): `github_pat_` is a fine-grained
+        // PAT, `ghp_` a classic one. The classic shape is refused ON PURPOSE:
+        // its `repo` scope is read AND write over every repository the user
+        // can reach, with no read-only option, while a fine-grained token is
+        // the only shape that can be minted `Issues: Read-only` over a chosen
+        // set of repositories. Same call ADR-042 §4 makes for Stripe's `sk_`.
+        // Pinned by `github-profile.test.ts`.
+        pattern: "^github_pat_",
+        help:
+          "In GitHub: your profile photo → Settings → Developer settings → Personal access tokens → " +
+          "Fine-grained tokens → Generate new token. Pick the repositories to include and grant " +
+          "Issues: Read-only (Pull requests: Read-only too if pull requests should appear). " +
+          "Any plan works, including Free.",
+      },
+    ],
+    // ONE FIXED HOST. GitHub Enterprise Server and GHEC data-residency use
+    // other hosts and are a second profile, not a variable host on this one.
+    egressHosts: ["api.github.com"],
+    // `task` from `GET /issues` — issues AND pull requests, because GitHub's
+    // REST API "considers every pull request an issue" and the track has no
+    // per-row filter. `ticket` is deliberately NOT declared: an issue has no
+    // `contact_id` and is a work item, not a support conversation. See
+    // `rest/vendors/github.ts` for the full list of what is not served.
+    datasets: ["task"],
+    // 5,000 requests per hour for a PAT, documented — and it is the USER's
+    // budget, shared with every other tool authenticating as them.
+    rateLimit: { callCeiling: 5_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "github",
+      name: "GitHub",
+      category: "Project management",
+      description:
+        "Issues and pull requests across every repository your token can see — read from GitHub.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/github",
+      order: 14,
+    },
+  },
+  // WARP-2917 — the third REST profile, and the first PROJECT-TRACKER vendor
+  // on the declarative track. gitlab.com hosted ONLY: self-managed GitLab is
+  // an arbitrary customer hostname, which is a separate provider question
+  // (see `rest/vendors/gitlab.ts`), not a variable host on this descriptor.
+  {
+    id: "gitlab",
+    displayName: "GitLab",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "GitLab personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // 🔴 NO `pattern`. The build spec's `^glpat-[A-Za-z0-9_-]+$` rejects
+        // EVERY token gitlab.com mints today: personal access tokens are now
+        // ROUTABLE (`glpat-<27..300>.<2>.<9>`, two dots), and a required field
+        // whose value fails its pattern is treated as absent and rejects the
+        // config. The shape has already drifted once; the prefix is
+        // admin-configurable on self-managed; and the only proof of a token
+        // is GitLab answering `GET /api/v4/user` with it, which `connect()`
+        // does. The prefix lives HERE, in the help, where it guides instead
+        // of refusing. Pinned absent by `gitlab-profile.test.ts`.
+        help:
+          "In GitLab: your avatar (top right) → Edit profile → Access → Personal access tokens → Generate token. " +
+          "Choose Legacy token and tick the read_api scope, or choose Fine-grained token and grant " +
+          "Work Item: Read and User: Read. Starts with glpat-. It expires (365 days by default) — " +
+          "paste a new one here before that date.",
+      },
+    ],
+    egressHosts: ["gitlab.com"],
+    // `task` — every issue the token's user can see, across every project and
+    // group they belong to. GitLab's issue is a work item with a `project_id`
+    // and an assignee, which is exactly what `task` means; it is NOT a
+    // `ticket` (no `contact_id` on the row). `priority` is the one canonical
+    // column left undefined: GitLab issues carry no priority field.
+    datasets: ["task"],
+    // The ANNOUNCED plan-aware Free-tier sustained limit on gitlab.com —
+    // 5,000 requests an hour — which GitLab's rate-limit page says takes
+    // precedence over the per-minute burst figure. One request per 720 ms.
+    rateLimit: { callCeiling: 5_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "gitlab",
+      name: "GitLab",
+      category: "Project management",
+      description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/gitlab",
+      order: 15,
+    },
+  },
+  // WARP-2918 — the third REST profile, and the first TASK-TRACKER vendor.
+  {
+    id: "todoist",
+    displayName: "Todoist",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "Todoist API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason. Todoist
+        // documents no token format; the only token it shows is the
+        // forty-hex-character EXAMPLE in its Authorization section, and a
+        // regex anchored on one sample is a false rejection that blocks a
+        // paying owner for zero security gain. Pinned absent by
+        // `todoist-profile.test.ts`.
+        help:
+          "In Todoist: your avatar → Settings → Integrations → Developer → Copy API token. " +
+          "Any plan works, including the free one. The token grants access to the whole account; " +
+          "Droplet reads active tasks and nothing else.",
+      },
+    ],
+    // ONE FIXED HOST — no region code, no per-account subdomain, no
+    // self-hosted option. A plain registered destination whose origin is a
+    // whole-string literal in `rest/vendors/todoist.ts`.
+    egressHosts: ["api.todoist.com"],
+    // `task` only: ACTIVE tasks from `GET /api/v1/tasks`, as a declared full
+    // scan (the endpoint has no last-modified filter). Completed tasks are
+    // deliberately NOT read — their endpoint needs a moving `until` the
+    // declarative track cannot express — and the reason is written out in
+    // the profile rather than left to be discovered.
+    datasets: ["task"],
+    // NO `rateLimit`. Todoist publishes ceilings only for its Sync endpoint
+    // and none for the REST-style GETs; a number here would be a guess
+    // wearing a policy's clothes, the Square reasoning exactly.
+    catalog: {
+      id: "todoist",
+      name: "Todoist",
+      category: "Project management",
+      description:
+        "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/todoist",
+      order: 16,
+    },
+  },
+  // WARP-2919 — the third REST profile, and the first POINT-OF-SALE vendor.
+  {
+    id: "loyverse",
+    displayName: "Loyverse",
+    category: "Point of sale",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "Personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo/Square/Cal.com reason: Loyverse documents
+        // no prefix and no length for a personal access token, so a regex
+        // here would be a guess that refuses valid tokens. Pinned absent by
+        // `loyverse-profile.test.ts`.
+        //
+        // 🔴 The help text carries two facts the owner must read BEFORE
+        // pasting, and both are pinned by test: the token is UNLIMITED (read
+        // and write — there is no read-only scope on this path; the box
+        // narrows itself to reads, the token does not), and expiry is optional
+        // at mint time, so setting one is the owner's only control.
+        help:
+          "In Loyverse: Back Office → Integrations → Access tokens → + Add access token. " +
+          "The token grants unlimited read AND write access to the whole account, so " +
+          "set an expiration date if you can. Droplet reads only.",
+      },
+    ],
+    // ONE FIXED HOST — no region, no merchant subdomain, no self-hosted
+    // option. The `/v1.0` version is a PATH on every request, not part of the
+    // host, so this is a plain registered destination whose origin is a
+    // whole-string literal the egress scanner reads directly.
+    egressHosts: ["api.loyverse.com"],
+    // Customers and items. 🔴 NOT receipts (`order`): Loyverse carries
+    // currency per MERCHANT (on `GET /v1.0/merchant/`), never per row, and
+    // `REQUIRED_CANONICAL.order` names `currency` — a money dataset without it
+    // is refused by the REST profile guard at module load. The dataset returns
+    // the day the track can read a per-account constant off the probe. Reason
+    // recorded in `rest/vendors/loyverse.ts` and ADR-046's implementation
+    // record.
+    datasets: ["customer", "product"],
+    // "300 requests per 300 sec per account", documented. Expressed in the
+    // `ProviderRateLimit` shape as a five-minute period. PER ACCOUNT: every
+    // other integration the merchant runs shares it.
+    rateLimit: { callCeiling: 300, periodMs: 300_000 },
+    catalog: {
+      id: "loyverse",
+      name: "Loyverse",
+      category: "Point of sale",
+      description: "Customers and catalogue items — read from Loyverse POS.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/loyverse",
+      order: 17,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

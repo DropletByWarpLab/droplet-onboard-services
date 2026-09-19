@@ -216,6 +216,222 @@ in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and w
 silently key dedup on `undefined` for every dataset at once.
 
 
+## Implementation record — 2026-09-18 (WARP-2916, GitHub)
+
+**The third profile, and the first on the track that needed a change to the shared
+connector.** `rest/vendors/github.ts` serves `task` from `GET /issues` — issues AND pull
+requests, because GitHub's API "considers every pull request an issue" and the track has
+no per-row filter; the undocumented `pulls` parameter is deliberately not sent. Static
+host `api.github.com`; `since` (ISO, verified live to be inclusive, and a 422 rather than a
+silent full scan when malformed); RFC-5988 `Link` pagination, which `profile.ts` had
+declared with GitHub as the named vendor since WARP-2707 and which now has its first
+shipped profile; bare-array body (`rowsPath: ""`); pacing at the documented 5,000/h
+(720 ms). `assignee_id` reads `assignees[0].id` rather than the singular `assignee`, which
+the 2026-03-10 API version removes — the profile is correct under both, and the
+`X-GitHub-Api-Version: 2022-11-28` pin is the whole migration when it comes.
+
+**One connector change, admitted under §2's criterion.** GitHub answers rate-limit
+exhaustion with *"a 403 or 429"*, carrying `retry-after` (secondary limits) or
+`x-ratelimit-remaining: 0` (primary). The shared connector read EVERY 403 as "the vendor
+rejected the credential" — evicting the cached token and sending the owner to paste a new
+one for a budget that refills within the hour, and a budget that is the USER's, shared with
+every other tool on that account. `request()` now classifies a 403 carrying either header
+as rate-limited, on the same path a 429 takes, and both raise a `RestRateLimitedError`
+(a `RestVendorError` subclass carrying the raw `Retry-After`). The signals are the vendor's
+own rate-limit vocabulary, not a `provider === "github"` branch. The orchestrator's sync
+loop maps that class to TRANSIENT by `instanceof`, exactly as it maps
+`XeroRateLimitedError` — without which the error's real 403 status would have reached
+`classifySyncFailure` and been read as AUTH, re-creating the "paste a new key" it was
+meant to remove one hop downstream. Pinned in `rest-track.test.ts`,
+`github-profile.test.ts` and `erp-sync.service.test.ts`.
+
+**Two constant-header findings, recorded so they are not re-derived:**
+
+* `Accept` is NOT declared. `request()` spreads `constantHeaders` first and then sets
+  `accept: application/json` unconditionally; Node's `Headers` merges the two
+  case-variant keys, so a profile-level `Accept: application/vnd.github+json` cannot pin
+  GitHub's media type — it can only claim to. GitHub answers 200 `application/json` to the
+  connector's value (verified live).
+* `User-Agent: droplet-erp-connector` IS declared. GitHub refuses a request with no
+  User-Agent (403 text/html, verified live), and the track never set one — every REST
+  vendor so far has worked only because undici sends `User-Agent: node` by default. That
+  runtime-default dependency is now explicit for GitHub and is the obvious candidate for a
+  track-level constant when the next vendor documents the same requirement.
+
+**Datasets NOT served, and why:** `ticket` — an issue is a work item, not a support
+conversation, and `CANONICAL_COLUMNS.ticket` wants a `contact_id` an issue does not have;
+`task` and `ticket` were separated on purpose in WARP-2832. A repository or pull-request
+dataset — no canonical name exists, and `since` is verified ABSENT on `/pulls` and
+`/orgs/{org}/repos`, so neither would have an incremental watermark even if one did.
+GitHub Enterprise Server / GHEC data residency — other hosts, a second `kind: dynamic`
+profile, not a widening.
+
+**Left open, stated rather than guessed:** whether `GET /issues` with `filter=all`
+returns PRIVATE-repository issues for a fine-grained token that has repository access
+but NO Issues permission (the endpoint says no permissions are required; the
+permissions page does not list it). The guide tells the owner to grant `Issues:
+Read-only` regardless, and warns that a token with too little — or an org-owned token
+still pending approval — probes green and reads fewer rows.
+## Implementation record — 2026-09-18 (WARP-2917, GitLab) — the first vendor on the widened vocabulary
+
+* **GitLab (gitlab.com hosted) — shipped, one dataset: `task` ← `GET /api/v4/issues`.**
+  Every issue the token's user can see, across every project and group. Eight of
+  `task`'s nine columns are filled; `priority` stays `undefined` because GitLab issues
+  carry no priority field (`severity` is incident-only, `weight` is Premium-only effort,
+  `priority::high` is a per-project label convention). The watermark is `updated_after`,
+  a complete last-modified filter, so `task` is polled, swept and read-through (it is
+  `NEVER_LANDED` with a reason, like `booking` and `employee`).
+* **Datasets GitLab could serve and does not, and why:** `ticket` (a GitLab issue has no
+  `contact_id`; Service Desk exposes an author e-mail, which is a contact detail, not an
+  id); `employee` (`/users` is admin-gated beyond the public profile and group membership
+  is a per-group fan-out — one endpoint per dataset); `engagement` (`/events` filters
+  `after` by DATE and by creation time; a candidate for `format: "date"` on its own
+  ticket). Merge requests, pipelines, projects, groups and epics have no canonical name.
+* **Self-managed GitLab is OUT**, and it is the same finding Cal.com's self-hosted edition
+  produced from the other side: an arbitrary customer hostname cannot satisfy the dynamic
+  arm's allowlist, so it is a separate provider, not a variable host.
+* **No profile field was admitted.** Every value the track needs existed: static host,
+  one literal auth header, GET only, `link-header` pagination (offset mode — keyset is
+  documented for `GET /projects/:id/issues` only), `rowsPath: ""`. The `link-header` arm,
+  declared on WARP-2707 for GitHub/GitLab and exercised only by `rest-track.test.ts` until
+  now, has its first shipped profile.
+* **The refutation caught a build-blocking literal, recorded so it is not re-proposed:** the
+  spec's credential `pattern` `^glpat-[A-Za-z0-9_-]+$` rejects every routable token
+  gitlab.com now mints (`glpat-<27..300>.<2>.<9>`, two dots). The descriptor ships with
+  NO pattern, pinned absent by `gitlab-profile.test.ts`, and the prefix moved to the help
+  text. Three cosmetic corrections also applied: `assignees[0].id` over the documented-
+  deprecated singular `assignee`; 720 ms pacing from the 5,000/h sustained Free limit
+  rather than 600 ms from the per-minute burst; and the 50,000 max-offset ceiling does NOT
+  apply to the global `/issues` (only to keyset-capable endpoints), so `REST_MAX_PAGES` is
+  the only ceiling on a first full scan.
+
+## Implementation record — 2026-09-18 (WARP-2918, Todoist)
+
+The third profile, and the first task-tracker vendor — the class the §2
+follow-up said the vocabulary had to widen for, which WARP-2832's `task` did.
+`rest/vendors/todoist.ts` serves **`task`** from `GET /api/v1/tasks` on the
+unified v1 API (`https://api.todoist.com`, one static host). Custody is model 3:
+the owner copies a personal API token from Settings → Integrations → Developer;
+no app registration, no review, nothing held by Warp Lab. Todoist's OAuth path
+exists and is deliberately not used.
+
+**No profile field was admitted.** Everything Todoist needs is already in §2's
+shape: a plain Bearer header, a static origin, `cursor` pagination (body
+`next_cursor` echoed as query `cursor`), rows at `results`, a constant `limit=200`
+query parameter. The refuter caught one shape error in the build spec — the
+`cursor` arm carries exactly `nextCursorPath` and `cursorParam`, so the page size
+lives in `query`, not in the pagination object — and the profile is written that
+way.
+
+* **`watermark: null`, declared.** `GET /api/v1/tasks` accepts exactly
+  `project_id`, `section_id`, `parent_id`, `label`, `ids`, `cursor` and `limit`
+  (verified from the OpenAPI document embedded in the reference). There is no
+  last-modified filter under any spelling, so every read is a declared full scan
+  — the GitHub case §2 names, handled the way §2 prescribes rather than by a
+  guessed `updated_since` Todoist would ignore. The incremental read Todoist does
+  offer is the Sync API (`POST /api/v1/sync`, `sync_token` form body): a POST with
+  a body, which the GET-only track cannot express. Recorded as a possible future
+  widening; it is not needed to ship.
+* **Active tasks only — two columns are honest and thin.** The endpoint's own
+  description is "Get all active tasks for the user". So `closed_at`
+  (`completed_at`) is `undefined` on every row and a completed task VANISHES from
+  the feed rather than arriving closed; and `status` (`checked`, a boolean) is
+  the text `"false"` on every row, so `get_tasks_by_status` with its documented
+  example `{ status: "open" }` matches nothing. Both are pinned by
+  `todoist-profile.test.ts`. Completed tasks are on a separate endpoint whose
+  `since` **and** `until` are required, with `until` a moving "now" — a query the
+  constant-only track cannot express, and a profile cannot declare `task` twice.
+  Out of scope, stated on the catalog card. A value mapping for `status`
+  (`checked=false` → `"open"`) would be a §2 widening and is flagged for review,
+  not shipped.
+* **No rate ceiling, like Square.** The Request-limits section publishes ceilings
+  only for the Sync endpoint; nothing for the REST-style GETs. `minRequestIntervalMs`
+  is omitted and the connector reacts to `429` / `Retry-After` / `retry_after`.
+* **No credential pattern.** Todoist documents no token format; the reference's
+  single forty-hex example is not a contract. The build spec's `^[0-9a-f]{40}$`
+  was dropped for the Brevo / Square / Cal.com reason.
+* **Datasets not served, and why:** projects, sections, labels and comments have
+  no canonical home (a project is a container, not a work item — a vocabulary
+  question); completed tasks for the reason above.
+* **§7b, per dataset:** `task` was already askable (`CLOUD_DATASET_READS` /
+  `CLOUD_QUERY_DATASETS`, `get_tasks_by_status`), already polled
+  (`ERP_SYNC_ENTITIES` row from WARP-2832), and already classified
+  `NEVER_LANDED` (read-through). Todoist inherits all three; the only new fact is
+  that its tick is a full scan, which the descriptor test records beside the
+  `unscheduled` pin.
+* **One thing unverified:** whether `GET /api/v1/user` (the probe) accepts a
+  personal token — its description speaks of OAuth audiences. If a live token
+  gets 401/403 there, the fallback is `/api/v1/projects?limit=1`, a one-line
+  `probePath` change.
+---
+
+## Implementation record — 2026-09-18 (WARP-2919, Loyverse)
+
+**Third profile, zero widening — and the first `assertValidRestProfile` rule added by a
+vendor.** Loyverse POS shipped as `rest/vendors/loyverse.ts` with NO new profile field: one
+static host (`api.loyverse.com`, the `/v1.0` version carried on every path because §2's
+static-origin rule refuses a path on the origin), `Authorization: Bearer`, no constant
+header, `GET /v1.0/merchant/` as the probe, `updated_at_min` as a genuine last-modified
+filter on both endpoints (`complete: true`), body `cursor` echoed as query `cursor` with the
+final page OMITTING the key — which the shared connector already treats as end-of-walk —
+and `limit=250` as a constant query parameter (the `cursor` arm has no page size; the spec
+JSON's `pageSize` was a shape artefact and was dropped). Money is already major-unit
+decimals, so no `minor-units`. Custody is model 3: the owner mints a personal access token
+in their own Back Office; the OAuth path (model 2) is not used. Paced at 1 s against the
+published 300-per-300-s per-account ceiling.
+
+* **Datasets shipped: `customer`, `product` (items).** Both were already askable
+  (`CLOUD_DATASET_READS` / `CLOUD_QUERY_DATASETS`), scheduled (`ERP_SYNC_ENTITIES`,
+  Shopify's rows) and in `land.test.ts`'s existing unclassified-debt pin, so §7b needed no
+  edit — and that inheritance is recorded as a decision about Loyverse in
+  `erp-provider.descriptor.test.ts`'s `unscheduled` pin, not left to apply by accident.
+  `product` sends a constant `show_deleted=true` so a deleted item reaches the box as a
+  change instead of quietly stopping.
+* 🔴 **`order` (receipts) is NOT served, and the guard that refuses it is new.**
+  `REQUIRED_CANONICAL.order` names `currency`, and Loyverse carries currency per MERCHANT
+  (`GET /v1.0/merchant/` → `currency.code`), never per row. The track has no per-account
+  constant. An earlier cut of this profile shipped receipts anyway with `currency`
+  undefined, because `assertValidRestProfile` checked `fieldMap ⊆ CANONICAL_COLUMNS` and
+  nothing checked `REQUIRED_CANONICAL ⊆ fieldMap` — so a `cloud_query_dataset` row of
+  `total_amount: 17.52, currency: undefined` reached the model as a dollar-shaped answer for
+  a merchant in Tokyo. The verifier caught it; the fix is two-fold. **(1) The guard:**
+  `assertValidRestProfile` now refuses any dataset that leaves a `REQUIRED_CANONICAL`
+  column unmapped, at module load, naming the column (`rest-track.test.ts` pins the
+  refusal and that Square and Cal.com pass it). **(2) The dataset is dropped**, not
+  hardcoded: `loyverse-profile.test.ts` keeps the researched receipts spec as a constant,
+  pins that the guard refuses it naming `currency` and NOTHING else, and that the same spec
+  with `currency` mapped passes — so the day the track gains a probe-derived per-account
+  constant (§2's admission criterion is met: this is a verified failure, and Brevo's
+  bespoke connector solves the same vendor shape with a second call to the account's
+  display currency) the return is one fieldMap line. That widening is a separate decision,
+  recorded here, not smuggled in behind one vendor.
+* **Datasets NOT served, and why:** `refund` (a Loyverse refund is a receipt with
+  `receipt_type: REFUND` in the SAME list, with no type filter — the track cannot route
+  one endpoint to two datasets by row value; moot while receipts are not read, recorded so
+  the future `order` dataset knows a refund lands with a POSITIVE total);
+  `charge`/`payout` (payments are an array on the receipt, and there is no payout
+  resource); `employee` (behind a paid add-on and HR-shaped — not researched to build
+  depth); `inventory_quantity` on `product` (a second endpoint, `/v1.0/inventory`, per
+  variant per store — a join one spec cannot express).
+* **Two honest consequences of the read semantics, pinned rather than patched:** a
+  NAMED `find_customer` search (a `last_name` prefix) returns zero rows from Loyverse,
+  because Loyverse has one `name` field and the track has no split; and
+  `get_low_stock_products` with a threshold returns zero rows, because
+  `inventory_quantity` is on another endpoint. Both are limitations a reader can find;
+  the wrong fixes (`last_name: "name"`, a fabricated quantity) are the mutations the tests
+  refuse.
+* **Tool selection:** `loyverse` joins the cloud-domain keyword regex as the vendor name,
+  exactly as `shopify` and `square` do. `receipts?` does NOT: the word is already claimed
+  by the `files` domain ("file this receipt"), and no cloud dataset serves receipts; a
+  negative case pins it.
+* **Left UNVERIFIED, deliberately:** the empty-list shape (`absentRowsMeansEmpty` left off
+  so a wrong `rowsPath` fails loudly); whether `/customers` carries the top-level `cursor`
+  its 200 schema omits while the generic Pagination section promises it; and
+  customer-deletion visibility (the YAML contradicts itself — prose says hard delete, the
+  schema carries `deleted_at` and `permanent_deletion_at` — so the reconciliation sweep is
+  the control). The 31-day sales-history gate (402 vs truncation on a free account) is a
+  receipts fact, recorded in the profile header for the day `order` ships.
+
 ### Fixed by WARP-2920 — the dynamic-host factory read the wrong declaration (2026-09-19)
 
 🔴 **A defect this track shipped with, dormant only because no dynamic-host vendor had

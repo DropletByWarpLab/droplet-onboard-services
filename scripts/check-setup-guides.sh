@@ -94,7 +94,11 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # control, so an undocumented click-path is the connector being unusable.
 # The track they ride on changes nothing about that obligation — ADR-046 §5
 # is explicit that a profile ships only with its guide and its ADR-042 row.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom"
+# WARP-2916 — `github`, the third REST vendor, for the same reason.
+# WARP-2917 — `gitlab` is the fourth REST-track vendor, same obligation.
+# WARP-2918 — `todoist` is the fifth REST-track vendor; same obligation.
+# WARP-2919 — `loyverse`, the sixth REST-track vendor, for the same reason.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -242,6 +246,76 @@ fact_pins() {
       # there is no host at all, so the guide must not present it as optional.
       printf '%s
 ' 'company domain' 'exactly the permissions of the user who created it' 'Permission sets'
+      ;;
+    github)
+      # Four facts a customer acts on (WARP-2916), each verified against
+      # GitHub's own pages on 2026-09-18:
+      #  - The box accepts ONLY a fine-grained token, by its documented
+      #    `github_pat_` prefix, and refuses the classic `ghp_` shape — the
+      #    Stripe `sk_` reasoning (ADR-042 §4). A guide that does not name
+      #    both prefixes cannot explain the refusal the customer will hit.
+      #  - `Issues: Read-only` is the one permission to tick. Softening it to
+      #    "read access" loses the exact menu label the customer must find.
+      #  - The 5,000-an-hour allowance is the USER's, shared with every other
+      #    tool on that account; the guide must say the box waits rather than
+      #    reporting a bad token, or the first busy CI hour becomes a support
+      #    call about a credential that is fine.
+      #  - Pull requests come along with issues and cannot be filtered out —
+      #    a copy pass that promised "issues only" would be a false claim.
+      printf '%s\n' 'github_pat_' 'ghp_' 'Issues: Read-only' '5,000' 'pull request'
+      ;;
+    gitlab)
+      # Four facts a customer acts on (WARP-2917), each a way the setup fails
+      # for a reason Droplet cannot fix:
+      #  - `read_api` is the ONE scope to tick on a legacy token. `read_user`
+      #    alone cannot list issues and `api` can write; a guide that names
+      #    neither the scope nor its fine-grained equivalent sends the owner
+      #    to a token that either fails or can do too much.
+      #  - 'Work Item: Read' is the fine-grained permission that covers the
+      #    issues endpoint. Fine-grained tokens can be ENFORCED by a group
+      #    Owner, after which the legacy path stops working, so the guide
+      #    must carry both.
+      #  - `glpat-` is the prefix the owner should expect, named in the help
+      #    rather than enforced by a pattern (the routable-token change is
+      #    why); the guide must say the same thing the connect form does.
+      #  - 365 days is a REQUIRED expiry with no grace period and no
+      #    auto-renewal — like Atlassian, a date the owner must diary, and
+      #    softening it produces a silent outage a year later.
+      printf '%s
+' 'read_api' 'Work Item: Read' 'glpat-' '365 days'
+      ;;
+    todoist)
+      # Three facts a customer acts on, each of which a copy pass would
+      # round off into something false (WARP-2918):
+      #  - 'Issue a new API token' is the ONLY rotation and the ONLY
+      #    revocation Todoist offers (there is no delete button), and
+      #    Todoist's own article says it also logs you out on all your
+      #    devices. A guide that softened that to "you may be asked to sign
+      #    in again" would turn a planned rotation into a surprise.
+      #  - 'Copy API token' is the click that yields the credential; there
+      #    is no create form, no name, no expiry, and a guide describing
+      #    one would send the owner looking for a screen that is not there.
+      #  - 'active tasks' — the endpoint reads active tasks ONLY, so a task
+      #    the owner completes vanishes from the feed rather than arriving
+      #    as done. Dropping the word "active" is the exact mutation that
+      #    makes the guide promise a history the connector cannot read.
+      printf '%s
+' 'Issue a new API token' 'Copy API token' 'log out of Todoist on all your devices' 'active tasks'
+      ;;
+    loyverse)
+      # Four facts a customer acts on (WARP-2919, ADR-042 §2 row):
+      #  - The token is UNLIMITED, read and write, with no read-only kind on
+      #    this path. Softening that to "an API key" loses the reason the
+      #    guide tells the owner to set an expiry.
+      #  - Receipts are NOT read — a Loyverse receipt carries no currency and
+      #    the box will not store an amount without one. A guide that promises
+      #    sales has described a dataset the connection refuses by name.
+      #  - 300 requests per 300 seconds PER ACCOUNT, shared with every other
+      #    tool on the account — the pacing the guide promises.
+      #  - The Access tokens page in the Back Office is the click-path; a
+      #    guide that sends the owner to the OAuth developer dashboard has
+      #    described the wrong credential.
+      printf '%s\n' 'unlimited access' 'receipts are not among the things this connection reads' '300 requests every 300 seconds' 'Access tokens'
       ;;
     *)
       : # no pins declared for this provider
