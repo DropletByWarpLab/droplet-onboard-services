@@ -160,6 +160,13 @@ const SAAS_PROVIDERS_WARP_2383 = ["xero"] as const;
  * reporting ERP_NOT_CONNECTED with a green build.
  */
 const REST_PROVIDERS_WARP_2707 = ["square", "calcom"] as const;
+/**
+ * WARP-2916 — GitHub, the third REST profile. Its own const rather than an
+ * edit to the WARP-2707 one, so the record of what each ticket shipped stays
+ * readable in a diff; spread everywhere the 2707 list is.
+ */
+const REST_PROVIDERS_WARP_2916 = ["github"] as const;
+const REST_PROVIDERS = [...REST_PROVIDERS_WARP_2707, ...REST_PROVIDERS_WARP_2916] as const;
 
 afterEach(() => {
   __resetRegisteredProvidersForTest();
@@ -180,6 +187,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2916,
       ]),
     );
   });
@@ -197,6 +205,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
         ...SAAS_PROVIDERS_WARP_2214,
         ...SAAS_PROVIDERS_WARP_2383,
         ...REST_PROVIDERS_WARP_2707,
+        ...REST_PROVIDERS_WARP_2916,
       ]),
     );
   });
@@ -212,6 +221,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2916,
     ]);
     expect(CLOUD_ERP_PROVIDERS.slice(0, CLOUD_ERP_PROVIDERS_BEFORE.length)).toEqual([
       ...CLOUD_ERP_PROVIDERS_BEFORE,
@@ -220,6 +230,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
       ...SAAS_PROVIDERS_WARP_2214,
       ...SAAS_PROVIDERS_WARP_2383,
       ...REST_PROVIDERS_WARP_2707,
+      ...REST_PROVIDERS_WARP_2916,
     ]);
   });
 
@@ -272,7 +283,7 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // Mutation: delete the `if (restProfileFor(provider)) return
     // restProfileFactory;` line from `connectorFactoryFor` -> red here, while
     // the negative loop above stays green.
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of REST_PROVIDERS) {
       const profile = restProfileFor(id);
       expect(profile, `${id} must have a registered REST profile`).toBeDefined();
 
@@ -343,13 +354,16 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // owner's card reads CONNECTED while nothing is stored.
     const syncedEntities = new Set(ERP_SYNC_ENTITIES.map((e) => e.entity));
     const unscheduled: Record<string, string[]> = {};
-    for (const id of REST_PROVIDERS_WARP_2707) {
+    for (const id of REST_PROVIDERS) {
       const declared = providerDescriptor(id)!.datasets as readonly string[];
       const missing = declared.filter((d) => !syncedEntities.has(d));
       if (missing.length > 0) unscheduled[id] = missing;
     }
     // Square's three money datasets are on-demand by design; Cal.com's
     // `booking` is scheduled as of WARP-2832 and so appears nowhere here.
+    // GitHub's `task` (WARP-2916) has an `ERP_SYNC_ENTITIES` row keyed on a
+    // COMPLETE `since` watermark, so GitHub appears nowhere here either — a
+    // GitHub connection is ticked and swept like Cal.com's.
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1064,6 +1078,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // implementation detail into the product.
       "square",
       "calcom",
+      // WARP-2916 — GitHub, at `catalog.order: 14`.
+      "github",
     ]);
   });
 

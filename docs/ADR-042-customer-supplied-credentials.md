@@ -58,6 +58,7 @@ Vendor facts have a shelf life — prefixes, plan tiers and scope models change 
 | **Pipedrive** | A personal API token **and** the company domain, which are two halves of one credential | An opaque token in an `x-api-token` header, plus the account's own subdomain | No — but the legacy `?api_token=` query form must be refused: v1-only, and it puts the credential in the customer's own proxy logs | **The token carries its creator's permissions exactly.** Narrowing it needs a dedicated user in a custom permission set, which is a **higher-tier plan feature** — on the entry plan the token is unavoidably full account access | **No.** | 2026-09-03, WARP-2710 |
 | **Square** | A **production** access token from an application the seller created in their own developer console | An opaque token in `Authorization: Bearer`. **No documented prefix or length** — Square publishes neither, so the box refuses an empty value and nothing else | No — but the **Sandbox** token is the confusable one, and it authenticates only against `connect.squareupsandbox.com`, a host this box never dials | **None on the token itself.** Square's own permission model sits on the application, and the box narrows by reading three endpoints and no more | **No.** | 2026-09-07, WARP-2676 |
 | **Cal.com** | An API key from the owner's own developer settings, on any plan including free | An opaque key in `Authorization: Bearer`. 🔴 **Do not pattern-match it:** a hosted live key is `cal_live_…` but a hosted *test* key is `cal_…`, and on a self-hosted install the prefix is the operator-set `API_KEY_PREFIX` and can be anything | No — there is one key shape | **None. The key carries its creator's access.** | **Optional — the owner picks an expiry at creation, or none.** | 2026-09-07, WARP-2828 |
+| **GitHub** | A **fine-grained** personal access token from the owner's own developer settings, on any plan including Free | `github_pat_…` in `Authorization: Bearer`. GitHub **documents** its token formats, so this one IS pattern-matched | **Yes — `ghp_` (classic).** A classic token's `repo` scope is read **and** write over every repository the user can reach, with no read-only option; only the fine-grained shape can be minted `Issues: Read-only` over chosen repositories | **Per repository, per permission** — the finest on this table after Stripe: the owner picks the repositories and grants `Issues: Read-only` (and `Pull requests: Read-only` if PRs should appear). Every fine-grained token also reads all **public** repositories regardless. An org can block fine-grained tokens or require per-token approval; a pending token reads public resources only, while the probe stays green | **Optional — defaults to 30 days at creation; `No expiration` allowed unless an org/enterprise max-lifetime policy blocks it.** GitHub also deletes a token unused for a year, and caps a user at 50 fine-grained tokens | 2026-09-18, WARP-2916 |
 
 Two rows carry a hazard the others do not, and both are already ACs on their stories:
 
@@ -99,6 +100,7 @@ Per vendor, the check is:
 | Xero | Path A: client id + secret. Path B: client id with **no** secret field | a Path A config carrying a redirect URI, or a Path B config carrying a secret — these are disjoint variants, not optional fields |
 | Square | any non-empty token | **nothing by shape** — Square documents no prefix and no length, so a regex here would be a guess that refuses valid tokens |
 | Cal.com | any non-empty key | **nothing by shape** — `^cal_(live\|test)_` would reject a valid hosted *test* key (`cal_…`, no second segment) and every self-hosted key, whose prefix is an operator-set env var |
+| GitHub | `^github_pat_` — the documented fine-grained prefix | **`^ghp_`** (classic) — by the Stripe reasoning: the classic shape cannot be scoped read-only per repository, the fine-grained one can, and GitHub documents both prefixes, so the shape is a fact rather than a guess |
 
 Two limits of this rule, stated so nobody over-reads it:
 
@@ -146,6 +148,7 @@ Three cases. The third is stated rather than left silent, because "nothing needs
 | Atlassian | The customer creates an API token; their org admin enables Rovo MCP | **No** |
 | Square | The seller, in their own Square developer console | **No** |
 | Cal.com | The account owner, in their own Cal.com developer settings | **No** |
+| GitHub | The account owner (or a member of the org that owns the repositories), in their own GitHub developer settings; an org owner may additionally have to approve the token | **No** |
 | Eaglesoft · Dentrix · Open Dental · QuickBooks Desktop | **Neither.** A credential inside the customer's own database on their own LAN | **Nothing to register** — no vendor relationship, no console, no app |
 | **Slack** | Per-user OAuth on top of a **workspace-level app** | **Yes — and Slack is the only one.** See below. |
 
@@ -189,6 +192,7 @@ Following ADR-041 §3's precedent — *"each subsequent provider registers its o
 | Mailchimp | `<dc>.api.mailchimp.com` | **`kind: dynamic`** + `config_key` — the host is a function of the credential |
 | Shopify | `<shop>.myshopify.com` | **`kind: dynamic`** + `config_key`; `shopify.dev` as `kind: reference`, since it is a page the merchant's browser visits, never a host the box dials |
 | Xero | `api.xero.com`; `identity.xero.com`, `login.xero.com` | `user-content-on-request` for the API host, `none` for the token hosts — the `m365-graph-api` / `m365-entra-login` pair is the template |
+| GitHub (WARP-2916) | `api.github.com` | `kind: egress`, `data_class: user-content-on-request`, as its own `github-api` entry — the host is ALSO registered under `ota-github-releases` (data class `none`, the orchestrator's release manifest), and the two stay separate rows on purpose: retiring one contract must not silently un-register the other |
 
 By **domain, never by IP** (ADR-041 §3). Nothing may be `data_class: ambient-customer-content`, which `docs/SECURITY.md:176-178` bans by name.
 

@@ -48,6 +48,7 @@ import {
   readPath,
   RestPaginationContractError,
   RestProfileConnector,
+  RestRateLimitedError,
   RestVendorError,
   REST_MAX_PAGES,
   vendorErrorCode,
@@ -596,6 +597,12 @@ describe("RestProfileConnector", () => {
     // with new untracked files is a false green. This asserts the property
     // directly instead of relying on that run.
     // Mutation: change any fieldMap path back to `a.0.b` -> red here.
+    //
+    // ⚠ Scoped to NUMERIC segments. A plain object key can also end in a real
+    // TLD — GitHub's `repository.id` (WARP-2916) does, `.id` being Indonesia —
+    // and has no bracket spelling to escape into. That case is registered as
+    // `kind: reference` (`ref-github-repository-id-path`) rather than avoided,
+    // and only the scanner itself can catch the next one.
     for (const profile of REST_VENDOR_PROFILES) {
       for (const spec of profile.datasets) {
         for (const [column, source] of Object.entries(spec.fieldMap)) {
@@ -1041,6 +1048,108 @@ describe("RestProfileConnector", () => {
     await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
     await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
     expect(resolves).toBe(1);
+  });
+
+  it("🔴 WARP-2916 — a 403 carrying a rate-limit header is a RATE LIMIT, not a rejected credential", async () => {
+    // The verified failure that admitted this branch (ADR-046 §2's bar for
+    // a change to the shared connector). GitHub documents that exceeding the
+    // primary OR a secondary rate limit answers "a 403 or 429 response" —
+    // with `retry-after` on secondary limits and `x-ratelimit-remaining: 0`
+    // on the primary (rate-limits-for-the-rest-api#exceeding-the-rate-limit).
+    // Until this branch every 403 was "the vendor rejected the credential":
+    // the cached token was evicted and the hub told the owner to paste a new
+    // key for a condition that clears itself within the hour. Worse, the
+    // owner's 5,000/h budget is shared with every other tool on that user, so
+    // this connector could be told its key was bad because a CI job elsewhere
+    // was busy.
+    //
+    // The two signals are the vendor's OWN rate-limit vocabulary (RFC 9110
+    // `Retry-After`; the de-facto `X-RateLimit-Remaining`), not a
+    // GitHub-specific branch — there is still no `if (provider === …)` here.
+    // Mutation: delete the `rateLimited` guard in `request()` -> red on both
+    // headers below, and `resolves` climbs to 2.
+    const rateLimited: Record<string, string>[] = [{ "retry-after": "60" }, { "x-ratelimit-remaining": "0" }];
+    for (const headers of rateLimited) {
+      let resolves = 0;
+      const { impl } = stubFetch([{ body: { message: "API rate limit exceeded" }, status: 403, headers }]);
+      const c = new RestProfileConnector(
+        staticProfile(),
+        { provider: "test-vendor" },
+        {
+          fetchImpl: impl,
+          resolveCredentials: async () => {
+            resolves += 1;
+            return { token: "k" };
+          },
+        },
+      );
+      const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as RestRateLimitedError;
+      // The SUBCLASS, so the orchestrator's sync loop can map it TRANSIENT by
+      // `instanceof` (its classifier would otherwise read the 403 as AUTH),
+      // and still a `RestVendorError` for every existing path.
+      expect(err, JSON.stringify(headers)).toBeInstanceOf(RestRateLimitedError);
+      expect(err, JSON.stringify(headers)).toBeInstanceOf(RestVendorError);
+      expect(err.status, JSON.stringify(headers)).toBe(403);
+      // The vendor's own wait, threaded through raw for `computeBackoffMs`
+      // to honour exactly; `undefined` when the vendor sent none.
+      expect(err.retryAfter, JSON.stringify(headers)).toBe(
+        "retry-after" in headers ? "60" : undefined,
+      );
+      // Not evicted: the SAME credential is replayed, because it was never
+      // the problem.
+      await c.runRead("get_company", {}).catch(() => undefined);
+      expect(resolves, JSON.stringify(headers)).toBe(1);
+    }
+
+    // A 403 with NEITHER header is still a rejected credential — that is the
+    // lockout GitHub documents after repeated bad auth, and it IS about the
+    // key. A 403 whose `x-ratelimit-remaining` is anything but 0 is not a
+    // rate limit either: the vendor sends that header on EVERY answer.
+    const notRateLimited: Record<string, string>[] = [{}, { "x-ratelimit-remaining": "4999" }];
+    for (const headers of notRateLimited) {
+      const { impl } = stubFetch([{ body: {}, status: 403, headers }]);
+      const c = new RestProfileConnector(
+        staticProfile(),
+        { provider: "test-vendor" },
+        { fetchImpl: impl, resolveCredentials: creds },
+      );
+      await expect(c.runRead("get_company", {}), JSON.stringify(headers)).rejects.toThrow(
+        ConnectorBlockedError,
+      );
+    }
+
+    // And a 401 is a rejected credential whatever headers ride on it: GitHub
+    // sends `x-ratelimit-*` on every response, including a 401 for a revoked
+    // token, and a `retry-after` on a 401 would be a vendor telling a caller
+    // to retry a credential it just refused.
+    const { impl } = stubFetch([{ body: {}, status: 401, headers: { "retry-after": "60", "x-ratelimit-remaining": "0" } }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(ConnectorBlockedError);
+  });
+
+  it("WARP-2916 — a 429 is the same class, with the vendor's retry-after threaded through", async () => {
+    // Before WARP-2916 a 429 was a plain `RestVendorError` and the sync loop
+    // rode the jittered exponential ramp regardless of what the vendor asked.
+    // `retryAfterOf` reads `retryAfter` off the error, so a vendor that says
+    // "120 seconds" is waited for 120 seconds, not 15–30.
+    // Mutation: throw `RestVendorError` for a 429 -> red on the first line.
+    const { impl } = stubFetch([
+      { body: { code: "RATE_LIMITED" }, status: 429, headers: { "retry-after": "120" } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as RestRateLimitedError;
+    expect(err).toBeInstanceOf(RestRateLimitedError);
+    expect(err.status).toBe(429);
+    expect(err.retryAfter).toBe("120");
+    expect(err.message).toContain("RATE_LIMITED");
   });
 
   it("🔴 keeps the vendor's BODY out of the error that gets persisted", async () => {
