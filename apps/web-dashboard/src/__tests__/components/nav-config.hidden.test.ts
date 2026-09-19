@@ -17,7 +17,7 @@ import {
   type NavItem,
 } from "@/components/nav-config";
 
-const openCapabilities = { claudeActivity: true, ragEval: true };
+const openCapabilities = { claudeActivity: true, ragEval: true, medicalConnector: true };
 const everyModuleOn = () => true;
 
 describe("nav-config hidden flag (WARP-1807)", () => {

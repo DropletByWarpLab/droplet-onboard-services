@@ -10,7 +10,7 @@
  * "Measure speed" since WARP-836, "Download" since WARP-1827 — are exercised
  * by their own component tests, not here).
  * They also pin the honest-placeholder contract: not-yet-wired metrics render
- * as "—"/"Unavailable", and cloud spend as "$0.00", never fabricated values.
+ * as "—"/"Unavailable", never fabricated values.
  *
  * WARP-2871 — the Cloud section is now the ONE place for cloud models: the
  * workspace cloud_model_escape switch (admin, double-confirmed on the way ON)
@@ -229,15 +229,15 @@ describe("<ModelsPage /> (WARP-836)", () => {
     expect(retry).toBeInTheDocument();
   });
 
-  it("renders the KPI strip with model store, GPU, avg latency and cloud spend", () => {
+  it("renders the KPI strip with model store, GPU and avg latency — no cloud-spend tile", () => {
     ready();
     render(<ModelsPage />);
     expect(screen.getByText(/model store/i)).toBeInTheDocument();
     expect(screen.getByText(/^GPU$/i)).toBeInTheDocument();
     expect(screen.getByText(/avg latency/i)).toBeInTheDocument();
-    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
-    // Cloud spend is the one KPI with a real (zero) value — shown as $0.00.
-    expect(screen.getByText(/\$0\.00/)).toBeInTheDocument();
+    // cloudSpendUsd is a hard-coded 0 upstream, so no tile claims "$0.00".
+    expect(screen.queryByText(/cloud spend/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$0\.00/)).not.toBeInTheDocument();
   });
 
   it("renders a local model card with name, family, context length and the local-only shield", () => {
@@ -327,7 +327,7 @@ describe("<ModelsPage /> (WARP-836)", () => {
     // The page still renders (KPIs + cloud), and shows an explicit empty note
     // for the local section rather than a blank gap. Query the heading by role
     // so it's unambiguous (the KPI tiles also legitimately say "Unavailable").
-    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    expect(screen.getByText(/avg latency/i)).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: /no local models/i }),
     ).toBeInTheDocument();
@@ -352,7 +352,7 @@ describe("<ModelsPage /> (WARP-836)", () => {
       screen.queryByRole("heading", { name: /no local models/i }),
     ).not.toBeInTheDocument();
     // The rest of the page still renders (KPIs + cloud).
-    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    expect(screen.getByText(/avg latency/i)).toBeInTheDocument();
     expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
   });
 
@@ -661,9 +661,9 @@ describe("<ModelsPage /> indigo shell scope (WARP-1340)", () => {
   it("mounts the .droplet-shell scope around the KPI strip", () => {
     ready();
     const { container } = render(<ModelsPage />);
-    // All four KPI tiles must sit inside the shell scope, or their `.kpi` /
+    // All three KPI tiles must sit inside the shell scope, or their `.kpi` /
     // `.k` / `.v` / `.d` spans render as unstyled inline text.
-    expect(container.querySelectorAll(".droplet-shell .kpi").length).toBe(4);
+    expect(container.querySelectorAll(".droplet-shell .kpi").length).toBe(3);
   });
 
   it("keeps the local-model + cloud cards inside the shell scope", () => {

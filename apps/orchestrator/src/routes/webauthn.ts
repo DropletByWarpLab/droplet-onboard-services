@@ -45,7 +45,7 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import type {
-  AuthenticatorTransportFuture,
+  AuthenticatorTransport,
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
@@ -88,17 +88,26 @@ const verifyBodySchema = z.object({
 });
 
 /** CSV (stored) -> transports array (the library's shape). */
-function parseTransports(csv: string | null): AuthenticatorTransportFuture[] | undefined {
+function parseTransports(csv: string | null): AuthenticatorTransport[] | undefined {
   if (!csv) return undefined;
   const list = csv
     .split(",")
     .map((t) => t.trim())
-    .filter(Boolean) as AuthenticatorTransportFuture[];
+    .filter(Boolean) as AuthenticatorTransport[];
   return list.length > 0 ? list : undefined;
 }
 
-/** transports array (the library's shape) -> CSV (stored). */
-function serializeTransports(transports: AuthenticatorTransportFuture[] | undefined): string | null {
+/**
+ * transports array -> CSV (stored).
+ *
+ * Deliberately takes `readonly string[]`, not `AuthenticatorTransport[]`: from
+ * v14 the *verification result's* `credential.transports` is `string[]`, because
+ * it is whatever the authenticator actually sent rather than a value we chose.
+ * This helper only joins to CSV, so the narrower type bought nothing and the
+ * wire shape is the honest one here. `parseTransports` stays strict -- its
+ * output IS handed back to the library.
+ */
+function serializeTransports(transports: readonly string[] | undefined): string | null {
   return transports && transports.length > 0 ? transports.join(",") : null;
 }
 

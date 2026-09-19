@@ -49,7 +49,13 @@ const H = vi.hoisted(() => ({ coverage: null as unknown }));
 vi.mock("@/app/brief/api", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   fetchFindings: vi.fn(async () => ({ findings: [], total: 0 })),
-  fetchCoverage: vi.fn(async () => H.coverage),
+  // WARP-2838 changed `fetchCoverage` from `Coverage` to the discriminated
+  // `CoverageResult`, so that a fetch that FAILED is distinguishable from a
+  // box that answered "the brain is off" — two states this page must not say
+  // the same sentence about. A mock returning the bare `Coverage` leaves
+  // `reached` undefined, which the page correctly reads as "did not answer":
+  // it renders the unreachable line and none of the copy this file asserts on.
+  fetchCoverage: vi.fn(async () => ({ reached: true as const, coverage: H.coverage })),
 }));
 
 import BriefPage from "@/app/brief/page";

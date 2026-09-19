@@ -46,7 +46,17 @@ export type PassRunner = () => Promise<void>;
  * A reason this box cannot run this pass AT ALL right now, or `null` to
  * proceed. Synchronous and cheap on purpose — see `preconditions`.
  */
-export type PassPrecondition = () => TriggerReason | null;
+/**
+ * WARP-2838 — may return a PROMISE. The master switch is a `BrainSetting` row,
+ * not an env var, so answering "is the brain on" is a database read. Making
+ * this async is what lets that consent check sit in the one place the ordering
+ * comment below insists on — before the claim — instead of inside a runner,
+ * where it would mark a run the owner never authorised.
+ */
+export type PassPrecondition = () =>
+  | TriggerReason
+  | null
+  | Promise<TriggerReason | null>;
 
 export type TriggerReason =
   /** Another worker holds the lease. */
@@ -124,7 +134,7 @@ export function createBrainPassTrigger(deps: TriggerDeps): BrainPassTrigger {
       // them is honest: "just ran, try again in 4 min" sends an operator away
       // to wait for something that is never going to work. The true reason
       // wins, and it costs no round trip to ask for it first.
-      const refusal = preconditions[passKey]?.();
+      const refusal = await preconditions[passKey]?.();
       if (refusal) return { ok: false, reason: refusal };
 
       const now = opts.now ?? new Date();

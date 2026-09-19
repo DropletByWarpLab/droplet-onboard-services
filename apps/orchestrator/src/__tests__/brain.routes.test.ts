@@ -46,6 +46,12 @@ function db(over: Record<string, unknown> = {}) {
     },
     brainPass: { findMany: vi.fn(async () => []) },
     fileIndexStatus: { count: vi.fn(async () => 0) },
+    // WARP-2838 — the consent row `/coverage` and `/brain/settings` resolve
+    // against. Absent by default, which is every box that has never consented.
+    brainSetting: {
+      findUnique: vi.fn(async () => null),
+      upsert: vi.fn(async () => ({})),
+    },
     // The directory the mcp principal's asserted username is resolved against
     // (WARP-2810). `stefan` is the owner; anyone else does not exist.
     user: {
@@ -279,5 +285,91 @@ describe("brain coverage — says whether the brain runs at all (WARP-2812)", ()
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("enabled");
     expect(typeof res.body.enabled).toBe("boolean");
+  });
+});
+
+/**
+ * WARP-2838 — the switch, and the gate that is easy to get wrong.
+ *
+ * 🔴 THE MUTATION USES `requireRole`, NOT `requireRoleOrMcpService`. Every read
+ * in this router uses the latter, and copying it here would have been the
+ * natural move — but it admits `_service:mcp` BEFORE any role check, and the
+ * reads are safe only because `visibleScopeFilter` re-checks the resolved human
+ * INSIDE the query. A route with no rows has no filter, so on the tool path it
+ * would have had nothing at all: a `family` or `guest` chat user arrives as the
+ * service principal, and `if (!caller)` is not a role check. Turning the brain
+ * on is not a chat capability.
+ */
+describe("brain settings — the on switch (WARP-2838)", () => {
+  it.each([
+    ["family", family],
+    ["guest", guest],
+  ])("%s cannot read or write the switch", async (_label, user) => {
+    const app = buildApp(user);
+    expect((await request(app).get("/api/brain/settings")).status).toBe(403);
+    expect((await request(app).put("/api/brain/settings").send({ enabled: true })).status).toBe(403);
+  });
+
+  it("the mcp service principal is refused BY THE GATE, not by the handler", async () => {
+    // 🔴 The status alone does not test this. Swap `requireRole` for
+    // `requireRoleOrMcpService` and the principal is admitted, reaches the
+    // handler, fails its `startsWith("_service:")` check and still answers 403
+    // — a green test over the wrong gate. This mutation was run and it
+    // SURVIVED the first version of this case.
+    //
+    // The BODY is what tells the two apart, so it is what is asserted:
+    // `requireRole` refuses on the role, the handler refuses on the actor. The
+    // difference matters because the handler's check is not load-bearing
+    // forever — the moment somebody copies `resolveCaller` down here from the
+    // reads above (which is the natural next edit), the gate becomes the only
+    // protection, and it must already be the right one.
+    const res = await request(buildApp(mcp)).put("/api/brain/settings").send({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Forbidden: role not permitted");
+    expect(res.body.error).not.toBe("actor_unresolved");
+  });
+
+  it("an owner turns it on, and the actor comes from the SESSION", async () => {
+    const prisma = db();
+    const res = await request(buildApp(owner, prisma))
+      .put("/api/brain/settings")
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    const call = (prisma as unknown as {
+      brainSetting: { upsert: { mock: { calls: [{ create: Record<string, unknown> }][] } } };
+    }).brainSetting.upsert.mock.calls[0]![0];
+    expect(call.create.enabled).toBe(true);
+    expect(call.create.enabledById).toBe("u-owner");
+  });
+
+  it("refuses a body that tries to attribute the consent to somebody else", async () => {
+    // `.strict()`. A 400 rather than a silently ignored field: a consent record
+    // an HTTP client can address elsewhere is not a consent record.
+    const res = await request(buildApp(owner))
+      .put("/api/brain/settings")
+      .send({ enabled: true, enabledById: "u-someone-else" });
+    expect(res.status).toBe(400);
+  });
+
+  it("/coverage reports the EFFECTIVE state, not the boot-time env value", async () => {
+    // The regression this replaces: `enabled` was `config.brain.enabled`, so
+    // after the owner switched the brain on, the page that told them to do it
+    // went on saying it was off.
+    const prisma = db({
+      brainSetting: {
+        findUnique: vi.fn(async () => ({
+          enabled: true,
+          enabledById: "u-owner",
+          enabledAt: new Date(),
+        })),
+        upsert: vi.fn(async () => ({})),
+      },
+    });
+    const res = await request(buildApp(owner, prisma)).get("/api/brain/coverage");
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    // Not pinned, so the page renders a control rather than an explanation.
+    expect(res.body.canToggle).toBe(true);
   });
 });

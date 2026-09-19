@@ -46,7 +46,6 @@ function renderStrip(
       gpu={g}
       gpuReason={gpuReason}
       avgLatencyMs={0}
-      cloudSpendUsd={0}
       localCount={1}
     />,
   );

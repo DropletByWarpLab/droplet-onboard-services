@@ -452,6 +452,96 @@ describe("WARP-2016 — the deactivate funnel runs the disable rails", () => {
     expect(updated?.displayName).toBe("Renamed");
     expect(updated?.directoryStatus).toBe("DEACTIVATED");
   });
+
+  // ── WARP-2550 — POST /scim/v2/Users shares the SAME funnel ──
+  //
+  // pr-reviewer on PR #1798, confirmed by a human reviewer: WARP-2016 railed
+  // PUT, PATCH and DELETE, but `provisionUser`'s email-match branch (the
+  // create-or-UPDATE half of POST) still wrote `directoryStatus` bare. A POST
+  // is a full replace in everything but name — it carries `active` — so an
+  // Okta push with active:false whose userName matched the sole owner, or the
+  // last ACTIVE admin, deactivated them with no owner-immutability rail, no
+  // last-operator invariant, no session revocation and no audit row. The
+  // fourth verb was the open door WARP-2016 left; these pin it shut.
+  it("refuses a POST active:false matching the sole owner — 403 OWNER_IMMUTABLE, NOTHING applied", async () => {
+    const prisma = createPrismaMock([owner(), admin()]);
+    await expect(
+      provisionUser(prisma, {
+        email: "boss@acme.test", displayName: "Renamed By Okta", active: false, externalId: "okta-2550",
+      }),
+    ).rejects.toMatchObject({ name: "RoleMutationRefusedError", status: 403, code: "OWNER_IMMUTABLE" });
+    const target = prisma._users.find((u: UserRow) => u.id === "u-owner")!;
+    expect(target.directoryStatus).toBe("ACTIVE");
+    // A refused POST applies NO part of the upsert — the displayName the
+    // same payload carried included (the PUT precedent, same ordering).
+    expect(target.displayName).toBe("boss");
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    // No audit row lies about a deactivation that never happened.
+    expect(recordActivityMock.mock.calls.some((c) => c[0].what === "User disabled")).toBe(false);
+  });
+
+  it("refuses a POST active:false matching the last ACTIVE admin — 409 LAST_OPERATOR_INVARIANT", async () => {
+    const prisma = createPrismaMock([admin(), seedRow({ id: "u-fam", username: "fam" })]);
+    await expect(
+      provisionUser(prisma, {
+        email: "adm@acme.test", displayName: "Renamed By Okta", active: false, externalId: "okta-2551",
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "LAST_OPERATOR_INVARIANT" });
+    const target = prisma._users.find((u: UserRow) => u.id === "u-adm")!;
+    expect(target.directoryStatus).toBe("ACTIVE");
+    expect(target.displayName).toBe("adm");
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it("a POST active:false matching an ordinary member deactivates THROUGH the funnel — revoked + audited", async () => {
+    const prisma = createPrismaMock([admin(), seedRow({ id: "u-fam", username: "fam" })]);
+    const { user, created } = await provisionUser(prisma, {
+      email: "fam@acme.test", displayName: "Fam Renamed", active: false, externalId: "okta-2552",
+    });
+    expect(created).toBe(false);
+    expect(user.directoryStatus).toBe("DEACTIVATED");
+    expect(user.displayName).toBe("Fam Renamed");
+    // Same rails, same isolation level, same optimistic pin as deactivateUser.
+    expectAllTransactionsAt(prisma._seam, SERIALIZABLE_TX);
+    const write = prisma.user.update.mock.calls.find(
+      (c: any[]) => c[0]?.data?.directoryStatus === "DEACTIVATED",
+    );
+    expect(write?.[0]?.where).toEqual({ id: "u-fam", directoryStatus: "ACTIVE" });
+    // Rail 6 post-effects, byte-identical to what deactivateUser's own tests assert.
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-fam");
+    const disabled = recordActivityMock.mock.calls.map((c) => c[0]).filter((p) => p.what === "User disabled");
+    expect(disabled).toHaveLength(1);
+    expect(disabled[0]).toMatchObject({
+      kind: "auth", severity: "warn", sub: "fam", actor: { type: "system", id: null },
+    });
+  });
+
+  it("a POST active:true on an existing row stays rail-free — the sole DEACTIVATED admin comes back", async () => {
+    const prisma = createPrismaMock([
+      seedRow({ id: "u-back", username: "back", role: "admin", directoryStatus: "DEACTIVATED" }),
+    ]);
+    const { user } = await provisionUser(prisma, {
+      email: "back@acme.test", displayName: "Back", active: true, externalId: "okta-2553",
+    });
+    expect(user.directoryStatus).toBe("ACTIVE");
+    expect(user.displayName).toBe("Back");
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a NEW row created with active:false needs no rails — it strands no operator", async () => {
+    // Creation is not a deactivation: there is no prior row holding access,
+    // and the new row is least-privilege `family`, so neither rail 1 nor
+    // rail 5 has anything to protect. Create-disabled stays a plain create.
+    const prisma = createPrismaMock([admin()]);
+    const { user, created } = await provisionUser(prisma, {
+      email: "brandnew@acme.test", displayName: "Brand New", active: false, externalId: "okta-2554",
+    });
+    expect(created).toBe(true);
+    expect(user.directoryStatus).toBe("DEACTIVATED");
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("findUserById / findUserByUserName", () => {

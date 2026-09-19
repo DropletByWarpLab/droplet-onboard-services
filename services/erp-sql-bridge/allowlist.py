@@ -16,14 +16,47 @@ A registry statement is a fixed template with two degrees of freedom:
 PHYSICAL identifiers (resolved per practice through the introspected schema
 map, always double-quoted) and bound values (always `?`, never inline). The
 template is the invariant — so the manifest registers the template.
-`normalize_statement` masks every double-quoted identifier to `<id>` and
-collapses whitespace; the result must equal a registered skeleton for the
-named statement EXACTLY, character for character. Everything an injection
-needs — an extra predicate, a UNION, a comment, a second statement, a changed
-verb — survives normalization and misses the skeleton. Identifier NAMES stay
-free (the server still resolves them against the real schema); identifier
-QUOTING is what confines them: inside `"…"` a payload is an identifier token,
-never syntax.
+`normalize_statement` masks double-quoted identifiers to `<id>` and collapses
+whitespace; the result must equal a registered skeleton for the named
+statement EXACTLY, character for character. Everything an injection needs —
+an extra predicate, a UNION, a comment, a second statement, a changed verb —
+survives normalization and misses the skeleton. Identifier QUOTING is what
+confines what is left: inside `"…"` a payload is an identifier token, never
+syntax.
+
+WHY THE TABLE IS NOT MASKED (WARP-2874)
+---------------------------------------
+Masking EVERY identifier made the skeleton say nothing about what a statement
+reads, and several registered statements share a shape: `get_open_invoices`
+(AR, `invoice`) and `get_open_bills` (AP, `bill`) are both seven columns, one
+`<> 0` predicate and two ORDER BY terms. So `POST /read/get_open_invoices`
+carrying bill SQL passed — and so did any other seven-column table
+`droplet_ro` can see. The name in the route, the audit log and the capability
+gate all claimed one thing while the bridge ran another.
+
+So the skeleton now carries the TABLE verbatim: in a qualified
+`"owner"."table"` the owner is masked (it genuinely varies — "dba" is only the
+stock install) and the table is not. That is sound because the registries do
+not rename anything: `buildSchemaMap` keys the map by the PHYSICAL table name
+and `resolveTable`/`resolveColumn` return what they looked up, so a registered
+statement always emits the vocabulary the registry declares — a practice whose
+table is spelled differently has no mapping and the query is unavailable, with
+or without this check.
+
+Columns stay masked. Pinning them too would multiply the write manifest by
+every SET-column subset for no new confinement worth the entry count: within
+one table, the grant is the boundary. If a column-level confusion ever
+matters, unmask them the same way and regenerate the manifest.
+
+INTROSPECTION IS ALLOWLISTED TOO (WARP-2874)
+--------------------------------------------
+`/introspect` used to run whatever SELECT the wire carried — the whole point
+of the allowlist, missing on the one route that never called it. It is checked
+by SHAPE ONLY, with no name: the caller LABELS each query (the column pass
+labels by table name), so a label is data and can carry no authority. The
+registered set is the catalog SQL `erp-connector/src/introspection.ts` emits,
+both dialect families, because which one runs is decided by the engine version
+the TypeScript side detected.
 
 FAIL CLOSED
 -----------
@@ -33,9 +66,9 @@ FAIL CLOSED
 * Manifest missing or malformed → ManifestError at import: a bridge that
   cannot prove what it may run does not start.
 
-Both refusals happen in `main.py` before any pool acquire. The pre-existing
-single-statement and SELECT/non-SELECT guards stay in place as the second
-layer, and the database grants remain the last one.
+All three refusals happen in `main.py` before any pool acquire. The
+pre-existing single-statement and SELECT/non-SELECT guards stay in place as
+the second layer, and the database grants remain the last one.
 
 KEPT IN SYNC
 ------------
@@ -63,8 +96,25 @@ class ManifestError(RuntimeError):
     """The shipped statement manifest is missing or malformed."""
 
 
+def _end_of_identifier(sql: str, start: int) -> int | None:
+    """Index of the closing `"` of the identifier opening at `start`, or None
+    when it is never closed. A doubled `""` is an escaped quote INSIDE the
+    identifier, not the end of it."""
+    j = start + 1
+    n = len(sql)
+    while j < n:
+        if sql[j] == '"':
+            if j + 1 < n and sql[j + 1] == '"':
+                j += 2  # doubled quote: still inside the identifier
+                continue
+            return j
+        j += 1
+    return None
+
+
 def normalize_statement(sql: str) -> str | None:
-    """Mask double-quoted identifiers to `<id>`, collapse whitespace.
+    """Mask double-quoted identifiers to `<id>` — except a qualified name's
+    table, which is kept verbatim (WARP-2874) — and collapse whitespace.
 
     Returns None when the statement cannot be normalized — an unterminated
     quoted identifier, an unterminated string literal, or a raw `<id>` marker
@@ -93,18 +143,23 @@ def normalize_statement(sql: str) -> str | None:
     while i < n:
         ch = sql[i]
         if ch == '"':
-            j = i + 1
-            while j < n:
-                if sql[j] == '"':
-                    if j + 1 < n and sql[j + 1] == '"':
-                        j += 2  # doubled quote: still inside the identifier
-                        continue
-                    break
-                j += 1
-            if j >= n:
+            j = _end_of_identifier(sql, i)
+            if j is None:
                 return None  # unterminated identifier
-            out.append(_ID_MARK)
             i = j + 1
+            # WARP-2874: `"owner"."table"` — mask the owner, keep the table.
+            # Only the right half of a qualified pair is a table; a bare
+            # identifier is a column as the registries emit them, and stays
+            # masked.
+            if sql[i : i + 2] == '."':
+                k = _end_of_identifier(sql, i + 1)
+                if k is None:
+                    return None
+                out.append(_ID_MARK)
+                out.append(sql[i : k + 1])  # `."table"`, escaping intact
+                i = k + 1
+            else:
+                out.append(_ID_MARK)
         elif ch == "'":
             # Copy the literal through verbatim, and — the point of this
             # branch — consume it as ONE span, so nothing inside it is read as
@@ -129,7 +184,7 @@ def normalize_statement(sql: str) -> str | None:
     return " ".join("".join(out).split())
 
 
-def _load(path: Path) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+def _load(path: Path) -> tuple[dict[str, tuple[str, ...]], ...]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -150,18 +205,25 @@ def _load(path: Path) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, 
             ):
                 raise ManifestError(f"manifest entry {kind}/{name}: not a non-empty list of skeletons")
             for s in skeletons:
-                # Normal form = no unmasked identifier, whitespace collapsed.
-                # A skeleton outside normal form could never match anything —
-                # a silently dead allowlist entry — so refuse to start on it.
-                if '"' in s or " ".join(s.split()) != s:
+                # Normal form = whitespace collapsed, and no UNMASKED owner.
+                # WARP-2874 put the table into the skeleton, so `"` is expected
+                # now; `"."` is the tell that the owner was left in, which
+                # would pin the entry to one install and match nothing anywhere
+                # else — a silently dead allowlist entry. Refuse to start on it.
+                if '"."' in s or " ".join(s.split()) != s:
                     raise ManifestError(f"manifest skeleton for {kind}/{name} is not in normal form")
             out[name] = tuple(skeletons)
         return out
 
-    return section("reads"), section("writes")
+    return section("reads"), section("writes"), section("introspect")
 
 
-READS, WRITES = _load(STATEMENT_MANIFEST_PATH)
+READS, WRITES, INTROSPECT = _load(STATEMENT_MANIFEST_PATH)
+
+#: Introspection is matched by shape alone (see the module docstring), so the
+#: names in the manifest are documentation for a human reading it — the check
+#: is against this flattened set.
+_INTROSPECT_SKELETONS = frozenset(s for skeletons in INTROSPECT.values() for s in skeletons)
 
 
 def check_statement(kind: str, name: str, sql: str) -> str | None:
@@ -178,5 +240,20 @@ def check_statement(kind: str, name: str, sql: str) -> str | None:
         return UNKNOWN_STATEMENT
     normalized = normalize_statement(sql)
     if normalized is None or normalized not in skeletons:
+        return STATEMENT_MISMATCH
+    return None
+
+
+def check_introspection(sql: str) -> str | None:
+    """None when `sql` is one of the registered catalog statements; otherwise
+    the refusal code (WARP-2874).
+
+    No name is taken: `/introspect`'s labels are caller-chosen (the column pass
+    labels by table name), so a label proves nothing and the shape is the whole
+    check. STATEMENT_MISMATCH is the only refusal — there is no name to be
+    unknown.
+    """
+    normalized = normalize_statement(sql)
+    if normalized is None or normalized not in _INTROSPECT_SKELETONS:
         return STATEMENT_MISMATCH
     return None
