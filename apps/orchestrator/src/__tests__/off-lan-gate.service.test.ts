@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { outboundEmailGate } from "../services/off-lan-gate.service.js";
+import { outboundEmailGate, webPushGate } from "../services/off-lan-gate.service.js";
 
 /**
  * Minimal Prisma mock exposing only offLanAllowlistChannel.findUnique
@@ -56,6 +56,42 @@ describe("outboundEmailGate (off-LAN outbound_email gate)", () => {
     await outboundEmailGate(prisma);
     expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
       where: { key: "outbound_email" },
+    });
+  });
+});
+
+// WARP-2904 — the gate `dispatchToUser` reads before it loads a single
+// PushSubscription row. Copies the `ambientDataGate` posture, NOT
+// `outboundEmailGate`: there is no operator split here worth a 503, so a
+// gate that cannot be read refuses. One fail-closed boolean, never a throw.
+describe("webPushGate (off-LAN web_push gate, WARP-2904)", () => {
+  it("returns true only when the web_push channel is explicitly enabled", async () => {
+    const prisma = mockPrisma(async () => ({ key: "web_push", enabled: true }));
+    await expect(webPushGate(prisma)).resolves.toBe(true);
+  });
+
+  it("returns false when the channel is disabled", async () => {
+    const prisma = mockPrisma(async () => ({ key: "web_push", enabled: false }));
+    await expect(webPushGate(prisma)).resolves.toBe(false);
+  });
+
+  it("fails CLOSED when the row is missing / unprovisioned", async () => {
+    const prisma = mockPrisma(async () => null);
+    await expect(webPushGate(prisma)).resolves.toBe(false);
+  });
+
+  it("fails CLOSED on a DB error — resolves false, never throws", async () => {
+    const prisma = mockPrisma(async () => {
+      throw new Error("db unreachable");
+    });
+    await expect(webPushGate(prisma)).resolves.toBe(false);
+  });
+
+  it("reads the channel by its unique enum key", async () => {
+    const prisma = mockPrisma(async () => ({ enabled: true }));
+    await webPushGate(prisma);
+    expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
+      where: { key: "web_push" },
     });
   });
 });

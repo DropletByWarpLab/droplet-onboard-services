@@ -22,14 +22,107 @@
  * the Android Droplet app can register a service worker if it uses a
  * webview shell. Native FCM/APNS wiring is left for a future PR
  * (those need platform-specific server keys + auth dances).
+ *
+ * WARP-2904 — THE DIAL IS OFF-LAN EGRESS, and it is treated like one.
+ * `dispatchToUser` is the single site that talks to a push service — a
+ * Google, Apple or Mozilla host the browser named at subscribe time, held
+ * in a database row where the CI egress gate cannot see it. So the
+ * controls every other channel has are applied HERE, on every call:
+ *
+ *   1. Gate — the `web_push` off-LAN channel (off-lan-gate.service.ts),
+ *      read BEFORE `findMany`. Fail-closed: a missing row, a disabled
+ *      row or an unreadable gate all refuse without loading a single
+ *      subscription, and the refusal is returned as data
+ *      (`refused: "egress_disabled"`), never thrown — every caller
+ *      treats push as best-effort and must not start failing its write.
+ *   2. Destination — each row's endpoint passes the WARP-2022 outbound
+ *      URL guard (and an https-only rule; Web Push endpoints are always
+ *      https) before it is dialled. A row that fails is skipped and
+ *      PRUNED: rows inserted before the guard existed at registration
+ *      are never otherwise re-checked.
+ *   3. Audit — every dial and every refusal lands one fail-soft
+ *      ActivityRow (kind "network", sub "push_egress") the way
+ *      routes/web.ts does for ambient data, carrying the endpoint's
+ *      HOST only — the full endpoint is a per-subscriber capability URL
+ *      — and never the payload.
+ *
+ * What crosses the boundary on a dial: the endpoint, the VAPID JWT with
+ * its contact, the ciphertext length and the timing. What does not: the
+ * title and body, encrypted to the subscription's own keys (RFC 8291).
  */
 
 import webpush from "web-push";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
+import { webPushGate } from "./off-lan-gate.service.js";
+import { recordActivity } from "./activity.singleton.js";
 
 const logger = createLogger("push-dispatch");
+
+/** The off-LAN channel this module's one dial site is gated on. */
+const PUSH_CHANNEL = "web_push" as const;
+
+/** What happened at one dial-site event, for the audit row. */
+type PushEgressOutcome =
+  | "sent"
+  | "refused_gate"
+  | "blocked_destination"
+  | "gone"
+  | "failed";
+
+/**
+ * One signed activity row per dial and per refusal — the routes/web.ts
+ * idiom. Fire-and-forget: `recordActivity` is fail-soft by contract and
+ * the dispatch never waits on the append lock. `dst` is the endpoint's
+ * host only; the payload never reaches the row.
+ */
+function auditPushEgress(
+  userId: string,
+  outcome: PushEgressOutcome,
+  dst?: string,
+): void {
+  const what: Record<PushEgressOutcome, string> = {
+    sent: "Web push: sent to push service",
+    refused_gate: "Web push: refused (web_push channel off)",
+    blocked_destination: "Web push: refused (blocked destination)",
+    gone: "Web push: subscription gone, pruned",
+    failed: "Web push: send failed",
+  };
+  void recordActivity({
+    kind: "network",
+    severity: outcome === "sent" || outcome === "gone" ? "info" : "warn",
+    sourceIcon: "bell",
+    what: what[outcome],
+    sub: "push_egress",
+    refs: {
+      channel: PUSH_CHANNEL,
+      outcome,
+      userId,
+      ...(dst ? { dst } : {}),
+    },
+    actor: { type: "system" },
+  });
+}
+
+/**
+ * The endpoint's host if the row may be dialled, else `null`.
+ *
+ * Reuses the WARP-2022 guard rather than a second SSRF check: scheme,
+ * userinfo and the whole inside-the-boundary address space. Web Push
+ * endpoints are always https, so plain http is refused on top — the
+ * guard admits http: for CalDAV, this caller does not.
+ */
+function dialableHost(endpoint: string): string | null {
+  try {
+    const url = assertOutboundUrlAllowed(endpoint);
+    if (url.protocol !== "https:") return null;
+    return url.hostname;
+  } catch {
+    return null;
+  }
+}
 
 let configured = false;
 let publicKey: string | null = null;
@@ -171,19 +264,49 @@ export interface PushPayload {
   data?: Record<string, unknown>;
 }
 
+/** Result of one `dispatchToUser` call. `refused` is present ONLY when the
+ *  `web_push` gate declined and nothing was loaded or dialled;
+ *  `subscriptions` is how many rows the user had, so a caller can tell
+ *  "no subscribers" from "subscribers, nothing delivered". */
+export interface DispatchToUserResult {
+  sent: number;
+  pruned: number;
+  subscriptions: number;
+  refused?: "egress_disabled";
+}
+
 /**
  * Send a push to every active subscription for `userId`. Subscriptions
  * that come back with 404 or 410 are deleted — those are the standard
  * "this endpoint is dead, give up" status codes per the Web Push spec.
+ *
+ * WARP-2904 — reads the `web_push` off-LAN gate FIRST, on every call, and
+ * returns `{ sent: 0, pruned: 0, subscriptions: 0, refused:
+ * "egress_disabled" }` without touching the table when it is closed. Never
+ * throws for the gate: `webPushGate` already fails closed, and the extra
+ * catch below is belt-and-braces for the same reason — an unreadable gate
+ * is a closed gate.
  */
 export async function dispatchToUser(
   prisma: PrismaClient,
   userId: string,
   payload: PushPayload,
-): Promise<{ sent: number; pruned: number }> {
+): Promise<DispatchToUserResult> {
+  let open = false;
+  try {
+    open = await webPushGate(prisma);
+  } catch (err) {
+    logger.warn({ err, userId }, "web_push gate threw — failing closed (no egress)");
+    open = false;
+  }
+  if (!open) {
+    auditPushEgress(userId, "refused_gate");
+    return { sent: 0, pruned: 0, subscriptions: 0, refused: "egress_disabled" };
+  }
+
   if (!configured) initPushDispatch();
   const subs = await prisma.pushSubscription.findMany({ where: { userId } });
-  if (subs.length === 0) return { sent: 0, pruned: 0 };
+  if (subs.length === 0) return { sent: 0, pruned: 0, subscriptions: 0 };
 
   const body = JSON.stringify(payload);
   let sent = 0;
@@ -194,6 +317,16 @@ export async function dispatchToUser(
   // serially would compound latency on a slow push service.
   await Promise.allSettled(
     subs.map(async (s) => {
+      // WARP-2904 — destination check at dispatch time, on every row.
+      // A row that fails is never dialled and is pruned with the dead
+      // ones: it predates the registration-time guard, or it is not an
+      // https push endpoint at all.
+      const host = dialableHost(s.endpoint);
+      if (host === null) {
+        deadEndpoints.push(s.endpoint);
+        auditPushEgress(userId, "blocked_destination");
+        return;
+      }
       try {
         await webpush.sendNotification(
           {
@@ -204,12 +337,15 @@ export async function dispatchToUser(
           { TTL: 60 }, // Best-effort: stale notifications past 1 min are useless.
         );
         sent++;
+        auditPushEgress(userId, "sent", host);
       } catch (err) {
         const status = (err as { statusCode?: number })?.statusCode;
         if (status === 404 || status === 410) {
           deadEndpoints.push(s.endpoint);
+          auditPushEgress(userId, "gone", host);
         } else {
           logger.warn({ err, endpoint: s.endpoint.slice(0, 60) }, "push send failed");
+          auditPushEgress(userId, "failed", host);
         }
       }
     }),
@@ -229,7 +365,7 @@ export async function dispatchToUser(
       data: { lastFiredAt: new Date() },
     })
     .catch(() => {});
-  return { sent, pruned };
+  return { sent, pruned, subscriptions: subs.length };
 }
 
 /**

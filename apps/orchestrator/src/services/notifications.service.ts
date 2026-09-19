@@ -143,16 +143,29 @@ export async function sendNotification(
   // letting that populate `error` on every successful toast would make the
   // column uniformly non-null — at which point a real failure is invisible in
   // exactly the place someone would look for it.
+  //
+  // WARP-2904 — the push DECISION is recorded on its own column. `channels`
+  // and `error` cannot carry it: `push` joins `channels` only when a push went
+  // out, and `error` is only written when nothing delivered, so a refusal by
+  // the `web_push` off-LAN gate behind a delivered toast would be invisible.
+  // `pushOutcome` says explicitly which of the four things happened; it is
+  // written on EVERY sendNotification call, never left to be inferred.
   let pushError: string | null = null;
+  let pushOutcome: $Enums.PushOutcome = "failed";
   try {
     await ensurePushDispatch(prisma);
-    const { sent } = await dispatchToUser(prisma, input.userId, {
+    const result = await dispatchToUser(prisma, input.userId, {
       title: input.title,
       body: input.body ?? "",
     });
-    if (sent > 0) channels.push("push");
+    if (result.refused === "egress_disabled") pushOutcome = "refused_gate";
+    else if (result.sent > 0) pushOutcome = "sent";
+    else if (result.subscriptions > 0) pushOutcome = "failed";
+    else pushOutcome = "no_subscribers";
+    if (result.sent > 0) channels.push("push");
   } catch (err) {
     pushError = `push: ${err instanceof Error ? err.message : String(err)}`;
+    pushOutcome = "failed";
     // Always visible to an operator, whether or not it reaches the row.
     logger.warn({ err, userId: input.userId }, "push notification failed");
   }
@@ -168,6 +181,7 @@ export async function sendNotification(
       channels: channels.join(","),
       deliveredAt: delivered ? new Date() : null,
       error: errors.length > 0 ? errors.join(" | ") : null,
+      pushOutcome,
     },
   });
 

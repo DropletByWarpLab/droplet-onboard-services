@@ -74,3 +74,31 @@ export async function ambientDataGate(
     return false;
   }
 }
+
+/**
+ * WARP-2904 — true only when the `web_push` off-LAN channel is explicitly
+ * enabled. Read by `dispatchToUser` (push-dispatch.service.ts) on EVERY
+ * call, before a single PushSubscription row is loaded, so the camera
+ * fan-out, the test button and `sendNotification` are all covered by the
+ * one gate at the one dial site.
+ *
+ * Same posture as `ambientDataGate`, not `outboundEmailGate`: this gate
+ * NEVER throws — a DB error resolves to `false` (closed), a missing row
+ * resolves to `false`. There is no operator-remediation split here worth
+ * a 503; push is best-effort at every caller, and a gate that cannot be
+ * read must refuse rather than default open.
+ */
+export async function webPushGate(prisma: OffLanGatePrisma): Promise<boolean> {
+  try {
+    const row = await prisma.offLanAllowlistChannel.findUnique({
+      where: { key: OffLanChannelKey.web_push },
+    });
+    return row?.enabled === true;
+  } catch (err) {
+    logger.warn(
+      { err },
+      "web_push off-LAN gate read failed — failing closed (no egress)",
+    );
+    return false;
+  }
+}
