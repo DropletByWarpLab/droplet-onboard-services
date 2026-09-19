@@ -243,7 +243,7 @@ describe("the assistant inspector", () => {
 });
 
 describe("nav", () => {
-  const CAPS = { claudeActivity: true, ragEval: true };
+  const CAPS = { claudeActivity: true, ragEval: true, medicalConnector: true };
   const ALL_MODULES_ON = () => true;
 
   it("puts Assistant in the operator nav and nowhere else", async () => {

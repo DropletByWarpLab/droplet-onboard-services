@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import {
   PROVIDER_DESCRIPTORS,
   descriptorForReportedProvider,
+  isMedicalConnector,
   partyNounFor,
   partyNounForProviderKey,
 } from "@/components/integrations/provider-descriptors";
@@ -66,6 +67,17 @@ describe("resolving the noun from a provider KEY", () => {
 
   it("gives an unrecognised key the neutral word", () => {
     expect(partyNounForProviderKey("stripe")).toBe("customer");
+  });
+});
+
+describe("isMedicalConnector (WARP-2880)", () => {
+  it("is exactly the patient-noun connectors, derived rather than listed twice", () => {
+    for (const d of PROVIDER_DESCRIPTORS) {
+      expect(isMedicalConnector(d.meta.id)).toBe(d.partyNoun === "patient");
+    }
+    expect(isMedicalConnector("eaglesoft")).toBe(true);
+    expect(isMedicalConnector("quickbooks")).toBe(false);
+    expect(isMedicalConnector("never-heard-of-it")).toBe(false);
   });
 });
 
