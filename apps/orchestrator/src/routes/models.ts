@@ -33,7 +33,6 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { createLogger } from "../lib/logger.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
-import { isLocalProvider } from "../services/cloud-access.service.js";
 import {
   getModelsPagePayload,
   type ModelsPagePayload,
@@ -41,8 +40,8 @@ import {
 import {
   ACTIVE_CHAT_MODEL_KEY,
   readActiveChatModel,
-  resolveActiveChatModel,
   resolveLocalModelId,
+  resolveStoredChatModel,
 } from "../services/active-model.service.js";
 import {
   benchmarkModel,
@@ -86,28 +85,19 @@ export function createModelsRouter(prisma: PrismaClient): Router {
           }
         }
 
-        // Resolve the active model against what's actually installed (for
-        // local models the row `name` IS the tag). WARP-1511: a blank/stale
-        // setting now falls back to the sole/first installed local model
-        // (see resolveActiveChatModel's doc comment for the full contract)
+        // Resolve the active model against what's actually installed.
+        // WARP-1511: a blank/stale setting falls back to the sole/first
+        // installed local model (see resolveActiveChatModel's doc comment)
         // instead of claiming a permanent phantom-blank active model. When
         // the local list itself can't be trusted (gateway/Ollama listing
-        // degraded), pass `null` so the resolver treats the installed set as
-        // unknown and returns the stored value unresolved rather than
-        // nulling it out — or fabricating a fallback — against an
-        // incomplete list. On-box providers only, same "local never
-        // points off-box" invariant as resolveLocalModelId. WARP-2882:
-        // keyed on the runtime `id` — `name` is a display string.
-        const installed = payload.degraded
-          ? null
-          : new Set(
-              payload.local
-                .filter((m) => isLocalProvider(m.provider))
-                .map((m) => m.id),
-            );
-        const activeModel = resolveActiveChatModel(
+        // degraded), pass `null` so the stored value passes through
+        // unresolved rather than being nulled out — or a fallback fabricated
+        // — against an incomplete list. WARP-2882: the stored row may hold a
+        // legacy display name; `resolveStoredChatModel` maps it to the
+        // runtime id first (the same path `/api/llm/models` uses).
+        const activeModel = resolveStoredChatModel(
           await readActiveChatModel(prisma),
-          installed,
+          payload.degraded ? null : payload.local,
         );
 
         res.json({ ...payload, activeModel });

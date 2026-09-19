@@ -27,12 +27,12 @@ import * as aiGateway from "../ai-gateway.client.js";
 import { completeOnce } from "../llm-complete.service.js";
 import { extractJson } from "../llm-json.js";
 import {
-  localModelIdentifiers,
   readActiveChatModel,
-  resolveActiveChatModel,
+  resolveStoredChatModel,
 } from "../active-model.service.js";
 import { resolveOffLanProvider } from "../cloud-access.service.js";
 import { createLogger } from "../../lib/logger.js";
+import type { ModelInfo } from "../../types/index.js";
 
 import {
   ClassifyOut,
@@ -107,7 +107,7 @@ export type ResolvedModel =
  * every analysis into a silent default. A worker that writes must fail loudly.
  */
 export async function resolveFilingModel(prisma: PrismaClient): Promise<ResolvedModel> {
-  let installed: Set<string>;
+  let installed: ModelInfo[];
   try {
     const models = await aiGateway.listModels();
     // 🔴 A DEGRADED listing is treated as unreachable, not as "no local
@@ -119,18 +119,20 @@ export async function resolveFilingModel(prisma: PrismaClient): Promise<Resolved
     if (models.degraded === true || (models.degraded_providers?.length ?? 0) > 0) {
       return { ok: false, reason: "model_unreachable", detail: "model listing degraded" };
     }
-    installed = localModelIdentifiers(models.models ?? []);
+    installed = models.models ?? [];
   } catch (err) {
     logger.warn({ err }, "filing: could not list models");
     return { ok: false, reason: "model_unreachable", detail: "model listing failed" };
   }
 
-  const model = resolveActiveChatModel(await readActiveChatModel(prisma), installed);
+  // WARP-2882: the same resolver as GET /api/models — a stored legacy
+  // display name maps to the runtime id instead of the first installed model.
+  const model = resolveStoredChatModel(await readActiveChatModel(prisma), installed);
   if (!model) {
     return { ok: false, reason: "model_unreachable", detail: "no local model installed" };
   }
 
-  // Belt and braces. `localModelIdentifiers` already filtered to local
+  // Belt and braces. `resolveStoredChatModel` already filtered to local
   // providers, so a non-local answer here means the catalogue disagrees with
   // itself — and a disagreement about whether a request leaves the LAN is
   // resolved in the direction of not sending it.
