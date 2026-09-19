@@ -8584,13 +8584,14 @@ async function routineJson<T>(res: Response, what: string): Promise<T> {
 export async function fetchRoutines(status?: RoutineStatus): Promise<Routine[]> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   const res = await authFetch(`${BASE}/api/tools${qs}`);
-  const body = await routineJson<{ tools?: Routine[] } | Routine[]>(
+  // WARP-2797 — the list route answers `{ specs }` and iOS already decodes
+  // that key; it is the one envelope both clients share. Read exactly that.
+  // A tolerant "either shape" reader is what hid the empty page for weeks.
+  const body = await routineJson<{ specs: Routine[] }>(
     res,
     "Failed to load routines",
   );
-  // The list route has been through two shapes; accept either rather than
-  // breaking the page on a field rename.
-  return Array.isArray(body) ? body : (body.tools ?? []);
+  return body.specs ?? [];
 }
 
 export async function fetchRoutine(slug: string): Promise<Routine> {
