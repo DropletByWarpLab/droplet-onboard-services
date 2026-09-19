@@ -570,6 +570,28 @@ describe("<ModelsPage /> cloud section (WARP-2871)", () => {
     expect(screen.getByText(/Off since setup · Nothing has left this Droplet/)).toBeInTheDocument();
   });
 
+  it("still says 'Off since setup' on a seeded row (a date but no person)", () => {
+    // `lastChangedAt` is `@default(now())`, so the wire always carries a
+    // date for a row nobody touched — the seed date is not a change.
+    ready({
+      cloudAccess: {
+        escapeEnabled: false,
+        escapeChangedBy: null,
+        escapeChangedAt: "2026-08-20T09:00:00.000Z",
+        allowedForYou: false,
+      },
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText(/Off since setup · Nothing has left this Droplet/)).toBeInTheDocument();
+    expect(screen.queryByText(/Turned off/)).toBeNull();
+  });
+
+  it("says who turned cloud off, and when", () => {
+    ready(escapeOn({ escapeEnabled: false }));
+    render(<ModelsPage />);
+    expect(screen.getByText(/Turned off by romain ·/)).toBeInTheDocument();
+  });
+
   it("add-key flow: expand → type → Save → saveProviderKey → refresh", async () => {
     asAdmin();
     saveProviderKeyMock.mockResolvedValue(undefined);

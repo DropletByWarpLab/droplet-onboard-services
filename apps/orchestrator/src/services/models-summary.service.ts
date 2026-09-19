@@ -242,7 +242,9 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   try {
     const resp = await aiGateway.listModels();
     degraded = resp.degraded_providers?.some(isLocalProvider) ?? false;
-    local = resp.models.map((m) => ({
+    // WARP-2871: once a cloud key is saved the gateway lists that vendor's
+    // catalogue in the same response — "On your Droplet" is on-box only.
+    local = resp.models.filter((m) => isLocalProvider(m.provider)).map((m) => ({
       name: m.name,
       family: inferFamily(m.name),
       provider: m.provider,
