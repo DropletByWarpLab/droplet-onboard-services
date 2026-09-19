@@ -1,5 +1,10 @@
-"""WARP-2882 — `context_window` on local models comes from the `/api/show`
-probe `list_models` already makes for capabilities.
+"""WARP-2882 — `trained_context_window` on local models comes from the
+`/api/show` probe `list_models` already makes for capabilities.
+
+`context_window` stays None for every local model: the served window is the
+operator's OLLAMA_CONTEXT_LENGTH, and the orchestrator budgets each turn
+against any positive `context_window` (WARP-854). The trained length is a
+separate, display-only field.
 
 Ollama reports the architecture's context length as
 `model_info["<arch>.context_length"]`. Docker Model Runner's Ollama-compatible
@@ -49,7 +54,7 @@ class TestParser:
 
 class TestListModels:
     @respx.mock
-    async def test_ollama_reports_context_window(self, provider):
+    async def test_ollama_reports_trained_length_but_never_a_served_window(self, provider):
         respx.get(TAGS_URL).mock(
             return_value=httpx.Response(200, json={"models": [{"name": "gpt-oss:20b"}]})
         )
@@ -60,7 +65,9 @@ class TestListModels:
             )
         )
         models = await provider.list_models()
-        assert models[0].context_window == 131072
+        assert models[0].trained_context_window == 131072
+        # The budget-bearing field must not carry the trained length.
+        assert models[0].context_window is None
 
     @respx.mock
     async def test_dmr_shaped_show_leaves_it_none(self, provider):
@@ -71,4 +78,5 @@ class TestListModels:
             return_value=httpx.Response(200, json={"details": {"family": "gptoss"}})
         )
         models = await provider.list_models()
+        assert models[0].trained_context_window is None
         assert models[0].context_window is None

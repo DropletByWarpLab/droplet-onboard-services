@@ -97,8 +97,10 @@ export function ActiveModelPicker({
                 m.family,
                 m.parameterSize,
                 m.quantization,
-                m.contextLength != null
-                  ? `${formatContext(m.contextLength)} context`
+                // WARP-2882 — trained length, display only; the served
+                // window is an operator setting.
+                m.trainedContextLength != null
+                  ? `${formatContext(m.trainedContextLength)} trained context`
                   : null,
                 m.loaded ? "in memory" : null,
               ]

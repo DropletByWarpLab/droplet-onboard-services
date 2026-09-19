@@ -218,7 +218,10 @@ def static_capabilities(model: str) -> ModelCapabilities | None:
 
 
 def ollama_context_window_from_show(show: dict) -> int | None:
-    """WARP-2882 — the model's context length from an Ollama `/api/show` body.
+    """WARP-2882 — the model's TRAINED context length from an Ollama
+    `/api/show` body. Not the window the daemon serves (that is
+    ``OLLAMA_CONTEXT_LENGTH``) — it feeds ``ModelInfo.trained_context_window``,
+    never ``context_window``.
 
     Ollama reports it as ``model_info["<arch>.context_length"]`` (the key is
     architecture-prefixed: ``gptoss.context_length``, ``llama.context_length``).

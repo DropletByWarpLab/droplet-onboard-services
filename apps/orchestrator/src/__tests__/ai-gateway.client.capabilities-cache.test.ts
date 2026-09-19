@@ -187,6 +187,32 @@ describe("WARP-2851 — the context-window lookup rides the cache the turn alrea
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("ignores a local model's TRAINED length — only `context_window` is a budget (WARP-2882)", async () => {
+    // The gateway publishes the probed trained length on a separate field.
+    // It must never reach `resolveTurnContextWindow`: OLLAMA_CONTEXT_LENGTH=16384
+    // with gpt-oss:20b "131072" would budget ~34k of prompt into a 16k window
+    // — the WARP-854 overflow.
+    const fetchMock = fetch as unknown as FetchMock;
+    fetchMock.mockResolvedValue(
+      modelsResponse({
+        models: [
+          {
+            id: "gpt-oss:20b",
+            provider: "local",
+            name: "Gpt-oss 20B",
+            context_window: null,
+            trained_context_window: 131072,
+          },
+        ],
+      }),
+    );
+    const client = await freshClient();
+
+    expect(
+      await client.getModelContextWindow("gpt-oss:20b", 1_000_000),
+    ).toBeUndefined();
+  });
+
   it("maps a null published window to undefined (every local model)", async () => {
     // `?? undefined` matters: `null` is what ollama publishes, and a `null`
     // leaking into `resolveTurnContextWindow` as a number would be a window of

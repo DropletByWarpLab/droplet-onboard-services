@@ -273,6 +273,10 @@ export interface LocalModelRow {
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 (additive; optional so an older orchestrator still parses) —
+   *  the context length the model was TRAINED with. Display only: the window
+   *  the box actually serves is an operator setting, not this. */
+  trainedContextLength?: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | … — null until ai-gateway tags models. */

@@ -770,7 +770,8 @@ class OllamaLocalProvider(BaseProvider):
         # else an `/api/show` probe — see _capabilities) and reuse the result
         # across list_models calls.
         self._caps_cache: dict[str, ModelCapabilities | None] = {}
-        # WARP-2882 — context window read off the same `/api/show` probe.
+        # WARP-2882 — TRAINED context length read off the same `/api/show`
+        # probe. Not the served window (see list_models).
         self._ctx_cache: dict[str, int | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
@@ -887,7 +888,7 @@ class OllamaLocalProvider(BaseProvider):
         for m in data.get("models", []):
             name = m["name"]
             # WARP-2882 — probe first: the same `/api/show` call fills the
-            # context-window cache the field below reads.
+            # trained-context cache the field below reads.
             caps = await self._capabilities(name)
             out.append(
                 ModelInfo(
@@ -899,7 +900,12 @@ class OllamaLocalProvider(BaseProvider):
                     # Runner served every token.
                     provider="local",
                     name=prettify_model_name(name),
-                    context_window=self._ctx_cache.get(name),
+                    # Stays None: the SERVED window is OLLAMA_CONTEXT_LENGTH,
+                    # an operator setting the orchestrator already budgets
+                    # against. The probed value is the TRAINED length — display
+                    # only, never a budget (WARP-2882 review, WARP-854).
+                    context_window=None,
+                    trained_context_window=self._ctx_cache.get(name),
                     capabilities=caps,
                 )
             )

@@ -41,6 +41,10 @@ export interface LocalModelInfo {
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 — the context length the model was TRAINED with (Ollama
+   *  `/api/show`); null when the daemon doesn't report it (DMR). Display
+   *  only: the window actually served is `OLLAMA_CONTEXT_LENGTH`. */
+  trainedContextLength: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | etc — null until ai-gateway tags. */
@@ -217,6 +221,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       family: inferFamily(m.name),
       provider: m.provider,
       contextLength: m.context_window,
+      trainedContextLength: m.trained_context_window ?? null,
       gbOnDisk: null,
       role: null,
       status: "ready" as const,

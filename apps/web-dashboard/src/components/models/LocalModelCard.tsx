@@ -263,9 +263,17 @@ export function LocalModelCard({
           <Layers size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">{spec}</span>
         </span>
-        <span className="inline-flex items-center gap-1" title="Context window">
+        {/* WARP-2882 — the TRAINED length, not the served window (that is an
+            operator setting the box never reports here). Labelled as such so
+            "128k" on a box serving 16k is not read as a promise. */}
+        <span
+          className="inline-flex items-center gap-1"
+          title="Context length the model was trained with — the window your Droplet serves is set separately"
+        >
           <BookOpen size={12} strokeWidth={2} aria-hidden />
-          <span className="tabular-nums">ctx {formatContext(model.contextLength)}</span>
+          <span className="tabular-nums">
+            trained ctx {formatContext(model.trainedContextLength ?? null)}
+          </span>
         </span>
         <span
           className="inline-flex items-center gap-1"
