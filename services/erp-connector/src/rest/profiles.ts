@@ -21,6 +21,7 @@ import { CALCOM_PROFILE, CALCOM_PROVIDER } from "./vendors/calcom.js";
 import { GITHUB_PROFILE, GITHUB_PROVIDER } from "./vendors/github.js";
 import { GITLAB_PROFILE, GITLAB_PROVIDER } from "./vendors/gitlab.js";
 import { SQUARE_PROFILE, SQUARE_PROVIDER } from "./vendors/square.js";
+import { TODOIST_PROFILE, TODOIST_PROVIDER } from "./vendors/todoist.js";
 
 /**
  * Every vendor served by the declarative track.
@@ -34,6 +35,7 @@ export const REST_VENDOR_PROFILES: readonly RestVendorProfile[] = [
   GITHUB_PROFILE,
   GITLAB_PROFILE,
   SQUARE_PROFILE,
+  TODOIST_PROFILE,
 ];
 
 // Fail the BUILD, not a customer's connection.
@@ -58,4 +60,4 @@ export function restProviderIds(): readonly string[] {
   return REST_VENDOR_PROFILES.map((p) => p.provider);
 }
 
-export { CALCOM_PROVIDER, GITHUB_PROVIDER, GITLAB_PROVIDER, SQUARE_PROVIDER };
+export { CALCOM_PROVIDER, GITHUB_PROVIDER, GITLAB_PROVIDER, SQUARE_PROVIDER, TODOIST_PROVIDER };

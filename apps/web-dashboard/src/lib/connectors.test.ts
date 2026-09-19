@@ -205,6 +205,19 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/gitlab",
   },
+  {
+    // WARP-2918 — the REST track's fifth vendor, at catalog.order 16. The
+    // copy states the one deliberate omission on the card itself: Todoist's
+    // active-tasks endpoint never returns a completed task, so the tile must
+    // not read as "your whole Todoist".
+    id: "todoist",
+    name: "Todoist",
+    category: "Project management",
+    description:
+      "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/todoist",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -283,6 +296,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "shopify",
       "square",
       "stripe",
+      "todoist",
       "xero",
     ];
     expect(CONNECTORS.map((c) => c.id).sort()).toEqual(allowed);
@@ -485,11 +499,12 @@ describe("the setup guide travels with the card", () => {
       return descriptor !== undefined && GUIDE_REQUIRED_TRACKS.has(descriptor.track);
     }).map((card) => card.id);
 
-    // The two REST cards WARP-2707 ships…
+    // The two REST cards WARP-2707 ships, and WARP-2918's third…
     expect(covered).toContain("square");
     expect(covered).toContain("calcom");
     // …the third, WARP-2917…
     expect(covered).toContain("gitlab");
+    expect(covered).toContain("todoist");
     // …and a cloud card, so a set that had SWAPPED one track for the other
     // rather than widening would still be caught.
     expect(covered).toContain("stripe");

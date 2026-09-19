@@ -1314,6 +1314,56 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 15,
     },
   },
+  // WARP-2918 — the third REST profile, and the first TASK-TRACKER vendor.
+  {
+    id: "todoist",
+    displayName: "Todoist",
+    category: "Project management",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "Todoist API token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason. Todoist
+        // documents no token format; the only token it shows is the
+        // forty-hex-character EXAMPLE in its Authorization section, and a
+        // regex anchored on one sample is a false rejection that blocks a
+        // paying owner for zero security gain. Pinned absent by
+        // `todoist-profile.test.ts`.
+        help:
+          "In Todoist: your avatar → Settings → Integrations → Developer → Copy API token. " +
+          "Any plan works, including the free one. The token grants access to the whole account; " +
+          "Droplet reads active tasks and nothing else.",
+      },
+    ],
+    // ONE FIXED HOST — no region code, no per-account subdomain, no
+    // self-hosted option. A plain registered destination whose origin is a
+    // whole-string literal in `rest/vendors/todoist.ts`.
+    egressHosts: ["api.todoist.com"],
+    // `task` only: ACTIVE tasks from `GET /api/v1/tasks`, as a declared full
+    // scan (the endpoint has no last-modified filter). Completed tasks are
+    // deliberately NOT read — their endpoint needs a moving `until` the
+    // declarative track cannot express — and the reason is written out in
+    // the profile rather than left to be discovered.
+    datasets: ["task"],
+    // NO `rateLimit`. Todoist publishes ceilings only for its Sync endpoint
+    // and none for the REST-style GETs; a number here would be a guess
+    // wearing a policy's clothes, the Square reasoning exactly.
+    catalog: {
+      id: "todoist",
+      name: "Todoist",
+      category: "Project management",
+      description:
+        "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/todoist",
+      order: 16,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

@@ -305,3 +305,61 @@ still pending approval — probes green and reads fewer rows.
   apply to the global `/issues` (only to keyset-capable endpoints), so `REST_MAX_PAGES` is
   the only ceiling on a first full scan.
 
+## Implementation record — 2026-09-18 (WARP-2918, Todoist)
+
+The third profile, and the first task-tracker vendor — the class the §2
+follow-up said the vocabulary had to widen for, which WARP-2832's `task` did.
+`rest/vendors/todoist.ts` serves **`task`** from `GET /api/v1/tasks` on the
+unified v1 API (`https://api.todoist.com`, one static host). Custody is model 3:
+the owner copies a personal API token from Settings → Integrations → Developer;
+no app registration, no review, nothing held by Warp Lab. Todoist's OAuth path
+exists and is deliberately not used.
+
+**No profile field was admitted.** Everything Todoist needs is already in §2's
+shape: a plain Bearer header, a static origin, `cursor` pagination (body
+`next_cursor` echoed as query `cursor`), rows at `results`, a constant `limit=200`
+query parameter. The refuter caught one shape error in the build spec — the
+`cursor` arm carries exactly `nextCursorPath` and `cursorParam`, so the page size
+lives in `query`, not in the pagination object — and the profile is written that
+way.
+
+* **`watermark: null`, declared.** `GET /api/v1/tasks` accepts exactly
+  `project_id`, `section_id`, `parent_id`, `label`, `ids`, `cursor` and `limit`
+  (verified from the OpenAPI document embedded in the reference). There is no
+  last-modified filter under any spelling, so every read is a declared full scan
+  — the GitHub case §2 names, handled the way §2 prescribes rather than by a
+  guessed `updated_since` Todoist would ignore. The incremental read Todoist does
+  offer is the Sync API (`POST /api/v1/sync`, `sync_token` form body): a POST with
+  a body, which the GET-only track cannot express. Recorded as a possible future
+  widening; it is not needed to ship.
+* **Active tasks only — two columns are honest and thin.** The endpoint's own
+  description is "Get all active tasks for the user". So `closed_at`
+  (`completed_at`) is `undefined` on every row and a completed task VANISHES from
+  the feed rather than arriving closed; and `status` (`checked`, a boolean) is
+  the text `"false"` on every row, so `get_tasks_by_status` with its documented
+  example `{ status: "open" }` matches nothing. Both are pinned by
+  `todoist-profile.test.ts`. Completed tasks are on a separate endpoint whose
+  `since` **and** `until` are required, with `until` a moving "now" — a query the
+  constant-only track cannot express, and a profile cannot declare `task` twice.
+  Out of scope, stated on the catalog card. A value mapping for `status`
+  (`checked=false` → `"open"`) would be a §2 widening and is flagged for review,
+  not shipped.
+* **No rate ceiling, like Square.** The Request-limits section publishes ceilings
+  only for the Sync endpoint; nothing for the REST-style GETs. `minRequestIntervalMs`
+  is omitted and the connector reacts to `429` / `Retry-After` / `retry_after`.
+* **No credential pattern.** Todoist documents no token format; the reference's
+  single forty-hex example is not a contract. The build spec's `^[0-9a-f]{40}$`
+  was dropped for the Brevo / Square / Cal.com reason.
+* **Datasets not served, and why:** projects, sections, labels and comments have
+  no canonical home (a project is a container, not a work item — a vocabulary
+  question); completed tasks for the reason above.
+* **§7b, per dataset:** `task` was already askable (`CLOUD_DATASET_READS` /
+  `CLOUD_QUERY_DATASETS`, `get_tasks_by_status`), already polled
+  (`ERP_SYNC_ENTITIES` row from WARP-2832), and already classified
+  `NEVER_LANDED` (read-through). Todoist inherits all three; the only new fact is
+  that its tick is a full scan, which the descriptor test records beside the
+  `unscheduled` pin.
+* **One thing unverified:** whether `GET /api/v1/user` (the probe) accepts a
+  personal token — its description speaks of OAuth audiences. If a live token
+  gets 401/403 there, the fallback is `/api/v1/projects?limit=1`, a one-line
+  `probePath` change.

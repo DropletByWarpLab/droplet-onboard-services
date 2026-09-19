@@ -74,7 +74,10 @@ export type ConnectorId =
   // WARP-2917 — GitLab, the fourth declarative REST vendor. Same hand-written
   // widening, same reason: the union is the check behind the `as ConnectorId`
   // cast, and deriving it would delete the check.
-  | "gitlab";
+  | "gitlab"
+  // WARP-2918 — Todoist, the fifth REST-track vendor, and the first task
+  // tracker. Same hand-widening, same reason.
+  | "todoist";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

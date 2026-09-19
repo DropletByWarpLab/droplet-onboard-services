@@ -173,10 +173,18 @@ const REST_PROVIDERS_WARP_2916 = ["github"] as const;
  * assertions the first wave is.
  */
 const REST_PROVIDERS_WARP_2917 = ["gitlab"] as const;
+/**
+ * WARP-2918 — the third REST vendor, and the first task tracker. Its own
+ * const rather than an append to the WARP-2707 list, for the reason the
+ * dashboard's `CATALOG_WARP_2707` gives: each block is the record of one
+ * story's ids, and a running total is a diff nobody can read.
+ */
+const REST_PROVIDERS_WARP_2918 = ["todoist"] as const;
 const REST_PROVIDERS = [
   ...REST_PROVIDERS_WARP_2707,
   ...REST_PROVIDERS_WARP_2916,
   ...REST_PROVIDERS_WARP_2917,
+  ...REST_PROVIDERS_WARP_2918,
 ] as const;
 
 afterEach(() => {
@@ -375,6 +383,15 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // `updated_after` watermark is a complete last-modified filter, so the
     // poller sees state changes and reassignments) — so GitLab appears
     // nowhere here either, and a GitLab connection is ticked and swept.
+    //
+    // WARP-2918 — Todoist's `task` has a row (`get_tasks_by_status`,
+    // `task_id`, `created_at` / `updated_at`), so Todoist appears nowhere
+    // here either: it is ticked and swept. What is unusual about it is
+    // written in the profile, not in this map — the dataset carries
+    // `watermark: null` because `GET /api/v1/tasks` has no last-modified
+    // filter, so every tick is a DECLARED full scan of the owner's active
+    // tasks (page size 200), and the assertion above lets it through because
+    // a null watermark is honest, not incomplete.
     expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
   });
 
@@ -1093,6 +1110,8 @@ describe("the hub catalog is derived from the same descriptors", () => {
       "github",
       // WARP-2917 — GitLab, at `catalog.order: 15`.
       "gitlab",
+      // WARP-2918 — Todoist, at `catalog.order: 16`.
+      "todoist",
     ]);
   });
 
