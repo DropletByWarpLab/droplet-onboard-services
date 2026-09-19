@@ -157,22 +157,89 @@ export class BridgeSessionStore {
    * credential changed, and a surface that answered "already open" would leave
    * the box authenticated with a credential the operator has revoked. The old
    * session is closed first so the replaced transport is not left dangling.
+   *
+   * WARP-2744: serialized per server id. A second concurrent open for the same
+   * id waits for the first to finish and then REPLACES it, rather than
+   * coalescing into it — see {@link BridgeSessionStore.#serialize} for the race,
+   * and the paragraph above for why the last caller's credential has to win.
    */
   async open(serverId: string, input: OpenSessionInput): Promise<RemoteMcpSessionHealth> {
-    const factory = this.#factories[serverId];
-    if (!factory) throw new Error(`no session factory for "${serverId}"`);
-    await this.close(serverId);
-    const session = factory(input);
-    this.#sessions.set(serverId, session);
-    return session.connect();
+    return this.#serialize(serverId, async () => {
+      const factory = this.#factories[serverId];
+      if (!factory) throw new Error(`no session factory for "${serverId}"`);
+      await this.#closeNow(serverId);
+      const session = factory(input);
+      this.#sessions.set(serverId, session);
+      return session.connect();
+    });
   }
 
   async close(serverId: string): Promise<boolean> {
+    return this.#serialize(serverId, () => this.#closeNow(serverId));
+  }
+
+  /**
+   * The close body, WITHOUT the lock.
+   *
+   * `open()` calls this while it HOLDS the id's chain; routing that call
+   * through the public `close()` would make it queue behind itself and never
+   * resolve.
+   */
+  async #closeNow(serverId: string): Promise<boolean> {
     const session = this.#sessions.get(serverId);
     if (!session) return false;
     this.#sessions.delete(serverId);
     await session.close();
     return true;
+  }
+
+  /**
+   * WARP-2744 — one promise chain per server id, so `open` and `close` cannot
+   * interleave on the same session.
+   *
+   * WHY: both operations `await` BEFORE they write to `#sessions`. Two
+   * concurrent `POST /sessions/<id>/open` — a client retry after a slow
+   * response is enough — therefore both ran the `close()` at the top of
+   * `open()` while the map was still empty, both built a session, and both
+   * `set()` the same key. The map keeps the last writer, so the LOSER's session
+   * stays connected, holding the vendor `Authorization` header, but untracked:
+   * `DELETE /sessions/<id>` and `healthAll()` cannot see it, and nothing else
+   * holds a reference that could close it. ADR-043 §4 is explicit that flipping
+   * the channel off "tears down live sessions" — a transport no map entry
+   * points at survives the kill switch until the container restarts, which is
+   * exactly the property §4 says a kill switch must not have. The mirror image
+   * is a `close()` landing in that same window: it found an empty map, answered
+   * `false`, and the open that followed it registered a session the operator
+   * had already killed.
+   *
+   * A chain and not a flag: `open()` dials, so it is slow, and a caller that
+   * was refused with "busy" would just retry into the same race. Per id and not
+   * one global lock: two vendors have no reason to queue behind each other, and
+   * a global lock would let one unreachable host stall every other session's
+   * teardown.
+   */
+  readonly #chains = new Map<string, Promise<void>>();
+
+  #serialize<T>(serverId: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.#chains.get(serverId) ?? Promise.resolve();
+    // `then(work, work)` rather than `then(work)`: a predecessor that REJECTED
+    // (the factory refusing an unsafe URL) must not wedge the id for the life
+    // of the process. The chain copy below swallows the outcome so the tail is
+    // always resolvable; `run` keeps the rejection for this caller.
+    const run = prior.then(work, work);
+    const tail: Promise<void> = run
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        // Released in a `finally`, and only by the CURRENT tail: a caller that
+        // has already chained onto this promise replaced the entry, and
+        // deleting it here would drop that caller out of the queue.
+        if (this.#chains.get(serverId) === tail) this.#chains.delete(serverId);
+      });
+    this.#chains.set(serverId, tail);
+    return run;
   }
 
   /** Every open session's health, sorted by id. Served by `/health`. */

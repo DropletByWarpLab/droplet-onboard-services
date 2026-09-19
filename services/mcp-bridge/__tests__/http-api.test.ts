@@ -494,3 +494,166 @@ describe("rule 19 — the credential never comes back out", () => {
     expect(h.logLines.every((l) => Object.keys(l).every((k) => ["method", "path", "status"].includes(k)))).toBe(true);
   });
 });
+
+/**
+ * WARP-2744 — the TOCTOU in `BridgeSessionStore.open()`.
+ *
+ * Every connection here is gated: `connect` does not resolve until the test
+ * releases it, which is what lets a second call be issued while the first is
+ * still in flight. Nothing dials, nothing listens, and no timer is involved —
+ * the store's own ordering is the whole subject.
+ *
+ * `live()` counts connections handed out minus connections closed, which is the
+ * assertion that matters: an ORPHAN is a connection that is live and that the
+ * store no longer has a reference to, so `live() === healthAll().length` is the
+ * property ADR-043 §4's kill switch needs.
+ */
+describe("BridgeSessionStore serializes open/close per server id (WARP-2744)", () => {
+  const INPUT = {
+    email: FAKE_EMAIL,
+    apiToken: FAKE_API_TOKEN,
+    cloudId: FAKE_CLOUD_ID,
+    url: TEST_URL,
+  };
+
+  /** Let every already-scheduled microtask and macrotask turn run. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function lockHarness(serverIds: string[] = ["atlassian"]) {
+    const closes: ReturnType<typeof vi.fn>[] = [];
+    const gates: (() => void)[] = [];
+    let live = 0;
+    const ctl = { failNextFactory: false };
+
+    const connect = vi.fn(async (): Promise<RemoteMcpConnection> => {
+      const index = closes.length;
+      const close = vi.fn(async () => {
+        live -= 1;
+      });
+      closes.push(close);
+      await new Promise<void>((resolve) => {
+        gates[index] = resolve;
+      });
+      live += 1;
+      return {
+        listTools: async () => [],
+        callTool: async () => ({ content: [], isError: false }),
+        close,
+        onClosed: () => {},
+      } as unknown as RemoteMcpConnection;
+    });
+
+    const factories: Record<string, SessionFactory> = {};
+    for (const id of serverIds) {
+      factories[id] = ((input: { email: string; apiToken: string; url?: string }) => {
+        if (ctl.failNextFactory) {
+          ctl.failNextFactory = false;
+          throw new Error("factory refused this input");
+        }
+        return new RemoteMcpSession({
+          serverId: id,
+          url: input.url ?? TEST_URL,
+          credential: basicCredential(input.email, input.apiToken),
+          connect: connect as never,
+          scheduleRetry: () => undefined,
+        });
+      }) as unknown as SessionFactory;
+    }
+
+    return {
+      store: new BridgeSessionStore(factories),
+      connect,
+      closes,
+      ctl,
+      release: (index: number) => gates[index]?.(),
+      live: () => live,
+    };
+  }
+
+  it("holds the second concurrent open until the first has finished dialling", async () => {
+    const h = lockHarness();
+
+    const first = h.store.open("atlassian", INPUT);
+    const second = h.store.open("atlassian", INPUT);
+    await settle();
+
+    // Pre-fix this was 2: both calls passed the `close()` at the top of
+    // `open()` while the map was still empty and both went on to dial.
+    expect(h.connect).toHaveBeenCalledTimes(1);
+
+    h.release(0);
+    await settle();
+    expect(h.connect).toHaveBeenCalledTimes(2);
+    h.release(1);
+    await Promise.all([first, second]);
+
+    // Exactly one tracked session, and exactly one live transport: the first
+    // session was closed as part of the replacement, not abandoned.
+    expect(h.store.healthAll()).toHaveLength(1);
+    expect(h.live()).toBe(1);
+    expect(h.closes[0]).toHaveBeenCalledTimes(1);
+    expect(h.closes[1]).not.toHaveBeenCalled();
+  });
+
+  it("leaves no session the kill switch cannot see after concurrent opens", async () => {
+    const h = lockHarness();
+
+    const opens = [h.store.open("atlassian", INPUT), h.store.open("atlassian", INPUT)];
+    await settle();
+    h.release(0);
+    await settle();
+    h.release(1);
+    await Promise.all(opens);
+
+    // ADR-043 §4: flipping the channel off tears every live session down.
+    expect(await h.store.close("atlassian")).toBe(true);
+    expect(h.store.healthAll()).toEqual([]);
+    expect(h.live()).toBe(0);
+  });
+
+  it("closes a session opened by an open() that was already in flight", async () => {
+    const h = lockHarness();
+
+    const opening = h.store.open("atlassian", INPUT);
+    // The `DELETE /sessions/<id>` kill switch, landing in the window where
+    // `open()` has yielded but has not yet written to the map. Pre-fix this
+    // answered `false` against an empty map and the open then registered a
+    // session the operator had already killed.
+    const closing = h.store.close("atlassian");
+    await settle();
+    h.release(0);
+    const [, closed] = await Promise.all([opening, closing]);
+
+    expect(closed).toBe(true);
+    expect(h.store.healthAll()).toEqual([]);
+    expect(h.live()).toBe(0);
+  });
+
+  it("locks per server id — a second vendor does not queue behind the first", async () => {
+    const h = lockHarness(["atlassian", "other"]);
+
+    const both = [h.store.open("atlassian", INPUT), h.store.open("other", INPUT)];
+    await settle();
+    expect(h.connect).toHaveBeenCalledTimes(2);
+    h.release(0);
+    h.release(1);
+    await Promise.all(both);
+
+    expect(h.store.healthAll()).toHaveLength(2);
+    await Promise.all([h.store.close("atlassian"), h.store.close("other")]);
+    expect(h.store.healthAll()).toEqual([]);
+    expect(h.live()).toBe(0);
+  });
+
+  it("releases the lock when an open REJECTS, so the id is not wedged", async () => {
+    const h = lockHarness();
+
+    h.ctl.failNextFactory = true;
+    await expect(h.store.open("atlassian", INPUT)).rejects.toThrow(/factory refused/);
+
+    const opened = h.store.open("atlassian", INPUT);
+    await settle();
+    h.release(0);
+    expect((await opened).state).toBe("ready");
+  });
+});
