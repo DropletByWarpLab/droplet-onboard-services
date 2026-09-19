@@ -361,6 +361,375 @@ done
 check "install mode: no marker content was ever executed" $? "$PWNED2 was created"
 rm -f "$PWNED2"
 
+# --- 10. The login (WARP-2887) -----------------------------------------------
+# The applier now also manages ONE account in the droplet-ssh group. These
+# cases run it against stubbed user tools and a scratch sshd_config and pin
+# what a text guard cannot: that a hostile or malformed login line is refused
+# without a single account command, that a system account cannot be hijacked
+# by name, and that the sshd edit is the fixed sentinel block and nothing else.
+# glibc crypt(3) of "Hello world!" at the pinned 100000 rounds — the grammar
+# the applier accepts. The 5000-round default form is deliberately refused.
+GOOD_HASH='$6$rounds=100000$saltstring$9s1nPRwOKo4FeNBCK5BUtBm4SG17hIi1AdBjtdwEAoIS.4ckJW8FPR8goM6zZZeHEFTq2BK/BQz3f/G/Yjbkg/'
+WEAK_HASH='$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1'
+
+setup_login() {
+  setup
+  export CMD_LOG="$WORK/cmd.log"
+  : >"$CMD_LOG"
+  export DROPLET_SSHD_CONFIG="$WORK/sshd_config"
+  printf 'Include /etc/ssh/sshd_config.d/*.conf\nUsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n' >"$DROPLET_SSHD_CONFIG"
+  # Fake account database: $WORK/passwd lists existing users, $WORK/group
+  # lists droplet-ssh members (comma-separated), $WORK/groups-<user> lists a
+  # user's groups, $WORK/pwstatus-<user> is the `passwd -S` status letter.
+  : >"$WORK/passwd"
+  : >"$WORK/group"
+  for tool in useradd usermod groupadd chpasswd userdel; do
+    cat >"$WORK/bin/$tool" <<STUB
+#!/bin/sh
+echo "$tool \$*" >>"\$CMD_LOG"
+case "$tool" in
+  useradd)
+    # Real useradd exits 9 on an existing name; mirror it so the applier's
+    # existence guard is actually exercised (a removed guard would then fail).
+    grep -qx "\$6" "\$WORK/passwd" 2>/dev/null && exit 9
+    echo "\$6" >>"\$WORK/passwd"; printf '%s' "\$5" >"\$WORK/groups-\$6"; m="\$(cat "\$WORK/group")"; printf '%s' "\${m:+\$m,}\$6" >"\$WORK/group"; echo P >"\$WORK/pwstatus-\$6" ;;
+  groupadd) : >"\$WORK/group" ;;
+  usermod)
+    # A planted marker makes the lock fail, to test the lock-failure path.
+    # (No backticks in this heredoc: it is unquoted, so a backtick here would
+    # be command substitution executed when the stub is generated.)
+    case "\$1" in
+      -L) [ -e "\$WORK/lockfail" ] && exit 1; echo L >"\$WORK/pwstatus-\$2" ;;
+      -U) echo P >"\$WORK/pwstatus-\$2" ;;
+    esac ;;
+  chpasswd)
+    cat >"\$WORK/chpasswd.in"
+    [ -e "\$WORK/chpasswd-fail" ] && exit 1 ;;
+  userdel)
+    # userdel -r <user>: drop it from the fake account DB and group list.
+    _u="\$2"
+    grep -vx "\$_u" "\$WORK/passwd" >"\$WORK/passwd.tmp" 2>/dev/null; mv -f "\$WORK/passwd.tmp" "\$WORK/passwd"
+    rm -f "\$WORK/pwstatus-\$_u" "\$WORK/groups-\$_u"
+    m="\$(cat "\$WORK/group" | tr ',' '\n' | grep -vx "\$_u" | paste -sd, -)"; printf '%s' "\$m" >"\$WORK/group" ;;
+esac
+exit 0
+STUB
+    chmod +x "$WORK/bin/$tool"
+  done
+  cat >"$WORK/bin/getent" <<'STUB'
+#!/bin/sh
+case "$1" in
+  passwd) grep -qx "$2" "$WORK/passwd" ;;
+  group)  [ -f "$WORK/group" ] && [ "$2" = droplet-ssh ] && { echo "droplet-ssh:x:1500:$(cat "$WORK/group")"; exit 0; }; exit 2 ;;
+esac
+STUB
+  cat >"$WORK/bin/id" <<'STUB'
+#!/bin/sh
+# id -nG <user>
+cat "$WORK/groups-$2" 2>/dev/null | tr ',' ' '; echo
+STUB
+  cat >"$WORK/bin/passwd" <<'STUB'
+#!/bin/sh
+# passwd -S <user>
+echo "$2 $(cat "$WORK/pwstatus-$2" 2>/dev/null || echo NP) 2026-09-17 0 99999 7 -1"
+STUB
+  cat >"$WORK/bin/sshd" <<'STUB'
+#!/bin/sh
+# sshd -t: accept unless the harness planted a refusal marker.
+[ -e "$WORK/sshd-refuse" ] && exit 255
+exit 0
+STUB
+  chmod +x "$WORK/bin/getent" "$WORK/bin/id" "$WORK/bin/passwd" "$WORK/bin/sshd"
+  export WORK
+}
+
+run_login_case() { # run_login_case <intent-file-contents>
+  printf '%s' "$1" >"$DROPLET_SSH_ACCESS_DIR/intent.d/intent"
+  /bin/sh "$SCRIPT" >/dev/null 2>&1
+  RC=$?
+  LOG="$(cat "$SYSTEMCTL_LOG" 2>/dev/null)"
+  CMDS="$(cat "$CMD_LOG" 2>/dev/null)"
+  STATE="$(cat "$DROPLET_SSH_ACCESS_DIR/state" 2>/dev/null || echo '<none>')"
+}
+
+# A well-formed login creates the account in the group, grants sudo, sets
+# the hash through chpasswd -e, and appends the sentinel block ONCE.
+setup_login
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=on
+"
+echo "$CMDS" | grep -q '^useradd -m -s /bin/bash -G droplet-ssh support$'
+check "login: creates the account in the droplet-ssh group" $? "cmds=[$CMDS]"
+echo "$CMDS" | grep -q '^usermod -aG sudo support$'
+check "login: grants sudo" $? "cmds=[$CMDS]"
+[ "$(cat "$WORK/chpasswd.in" 2>/dev/null)" = "support:$GOOD_HASH" ]
+check "login: hands chpasswd -e exactly user:hash" $? "chpasswd.in=[$(cat "$WORK/chpasswd.in" 2>/dev/null)]"
+grep -q '^Match Group droplet-ssh$' "$DROPLET_SSHD_CONFIG" && grep -q '^    PasswordAuthentication yes$' "$DROPLET_SSHD_CONFIG"
+check "login: appends the Match block to the main sshd config" $? "config=[$(cat "$DROPLET_SSHD_CONFIG")]"
+[ "$(grep -c '^# >>> droplet-ssh-access' "$DROPLET_SSHD_CONFIG")" = "1" ]
+check "login: exactly one sentinel block" $?
+head -1 "$DROPLET_SSHD_CONFIG" | grep -q '^Include '
+check "login: the existing config is preserved above the block" $?
+echo "$STATE" | grep -q '^login_user=support$' && echo "$STATE" | grep -q '^login_result=applied$'
+check "login: state reports login_user + login_result=applied" $? "state=[$STATE]"
+echo "$LOG" | grep -q '^start ssh.service$'
+check "login: the access half still runs afterwards" $? "log=[$LOG]"
+# Running it AGAIN must not append a second block.
+/bin/sh "$SCRIPT" >/dev/null 2>&1
+[ "$(grep -c '^# >>> droplet-ssh-access' "$DROPLET_SSHD_CONFIG")" = "1" ]
+check "login: a second run does not duplicate the Match block" $?
+teardown
+
+# The parse is a single pass that STOPS at the access key (the fifo case in
+# §7 depends on it). Login keys written BELOW the access key are therefore
+# never read — the orchestrator writes them above it, and this pins that a
+# file in the wrong order is treated as having no login at all.
+setup_login
+run_login_case "DROPLET_SSH_ACCESS=off
+DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+"
+[ -z "$CMDS" ]
+check "ordering: login keys below the access key are never read" $? "cmds=[$CMDS]"
+echo "$STATE" | grep -q '^login_result=none$'
+check "ordering: ...and are reported as no login request" $? "state=[$STATE]"
+teardown
+
+# An existing account that is NOT ours is refused by name — the intent file
+# cannot be used to take over root or droplet, or any pre-existing user.
+for who in root droplet stefan; do
+  setup_login
+  echo "$who" >>"$WORK/passwd"; printf 'sudo' >"$WORK/groups-$who"
+  run_login_case "DROPLET_SSH_LOGIN_USER=$who
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+  [ ! -e "$WORK/chpasswd.in" ] && ! echo "$CMDS" | grep -qE '^(useradd|usermod|chpasswd)'
+  check "login: refuses to touch existing non-managed account '$who'" $? "cmds=[$CMDS]"
+  echo "$STATE" | grep -q '^login_result=refused$'
+  check "login: '$who' is reported as refused" $? "state=[$STATE]"
+  echo "$LOG" | grep -q '^stop ssh.service$'
+  check "login: a refused login does not block the access half ('$who')" $? "log=[$LOG]"
+  teardown
+done
+
+# Hostile and malformed login lines never reach an account tool.
+for bad in \
+  "DROPLET_SSH_LOGIN_USER=support; rm -rf /
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+" \
+  "DROPLET_SSH_LOGIN_USER=\$(touch /tmp/pwned)
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+" \
+  "DROPLET_SSH_LOGIN_USER=Support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+" \
+  "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=correct-horse-battery-staple
+" \
+  "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$WEAK_HASH
+" \
+  "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=\$6\$salt\$\$(id)
+" \
+  "DROPLET_SSH_LOGIN_USER=support
+" \
+  "DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+" \
+  "DROPLET_SSH_LOGIN_USER=abcdefghijklmnopqrstuvwxyzabcdefghij
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+"; do
+  setup_login
+  run_login_case "$bad
+DROPLET_SSH_ACCESS=off
+"
+  label="$(printf '%s' "$bad" | head -c 40 | tr '\n' ' ')"
+  if echo "$CMDS" | grep -qE '^(useradd|usermod|groupadd|chpasswd)'; then
+    check "login refuses [$label]: no account command" 1 "cmds=[$CMDS]"
+  else
+    check "login refuses [$label]: no account command" 0
+  fi
+  echo "$STATE" | grep -q '^login_result=refused$'
+  check "login refuses [$label]: reported as refused" $? "state=[$STATE]"
+  ! grep -q 'droplet-ssh-access' "$DROPLET_SSHD_CONFIG"
+  check "login refuses [$label]: sshd config untouched" $?
+  teardown
+done
+
+# A toggle with no login keys leaves accounts alone and reports login_result=none,
+# while login_user still reflects the SYSTEM (the account created earlier).
+setup_login
+echo support >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-support"; printf 'support' >"$WORK/group"; echo P >"$WORK/pwstatus-support"
+run_login_case "DROPLET_SSH_ACCESS=on
+"
+[ -z "$CMDS" ]
+check "no login keys: no account command at all" $? "cmds=[$CMDS]"
+echo "$STATE" | grep -q '^login_user=support$' && echo "$STATE" | grep -q '^login_result=none$'
+check "no login keys: state still reports the live system login" $? "state=[$STATE]"
+teardown
+
+# Replacing the login locks the previous member so only one credential works.
+setup_login
+echo old >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-old"; printf 'old' >"$WORK/group"; echo P >"$WORK/pwstatus-old"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+echo "$CMDS" | grep -q '^usermod -L old$'
+check "replace login: the previous account is locked" $? "cmds=[$CMDS]"
+echo "$STATE" | grep -q '^login_user=support$'
+check "replace login: the new account is the live one" $? "state=[$STATE]"
+teardown
+
+# sshd refusing the config: the block is backed out and the login is refused —
+# and the accounts are left EXACTLY as found. The sshd edit runs before any
+# account mutation for this reason: a refusal that had already created the new
+# account and locked the previous one would report `refused` while the
+# readback named the new, unusable account as the login that "still works".
+setup_login
+touch "$WORK/sshd-refuse"
+echo old >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-old"; printf 'old' >"$WORK/group"; echo P >"$WORK/pwstatus-old"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+! grep -q 'droplet-ssh-access' "$DROPLET_SSHD_CONFIG"
+check "sshd -t failure: the Match block is removed again" $? "config=[$(cat "$DROPLET_SSHD_CONFIG")]"
+grep -q '^UsePAM yes$' "$DROPLET_SSHD_CONFIG"
+check "sshd -t failure: the original config survives intact" $?
+echo "$STATE" | grep -q '^login_result=refused$'
+check "sshd -t failure: reported as refused" $? "state=[$STATE]"
+if echo "$CMDS" | grep -qE '^(useradd|usermod|chpasswd)'; then
+  check "sshd -t failure: no account was created, re-passworded or locked" 1 "cmds=[$CMDS]"
+else
+  check "sshd -t failure: no account was created, re-passworded or locked" 0
+fi
+[ ! -e "$WORK/chpasswd.in" ]
+check "sshd -t failure: chpasswd never ran" $?
+echo "$STATE" | grep -q '^login_user=old$'
+check "sshd -t failure: the previous login is still the live one" $? "state=[$STATE]"
+teardown
+
+# --- 11. Login: order, cleanup, and the single-credential invariant (WARP-2887 review) ---
+
+# Password is set BEFORE sudo is granted, so a chpasswd failure can never leave
+# a passwordless account sitting in sudo.
+setup_login
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+cp_line=$(printf '%s\n' "$CMDS" | grep -n '^chpasswd' | head -1 | cut -d: -f1)
+su_line=$(printf '%s\n' "$CMDS" | grep -n '^usermod -aG sudo' | head -1 | cut -d: -f1)
+[ -n "$cp_line" ] && [ -n "$su_line" ] && [ "$cp_line" -lt "$su_line" ]
+check "order: chpasswd runs before usermod -aG sudo" $? "cmds=[$CMDS]"
+teardown
+
+# A 2-char username is refused by the applier's own length bound (the shared
+# 3..32 rule), even though it matches the sed charset.
+setup_login
+run_login_case "DROPLET_SSH_LOGIN_USER=ab
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+if printf '%s\n' "$CMDS" | grep -qE '^(useradd|usermod|chpasswd)'; then
+  check "min-length: a 2-char username touches no account tool" 1 "cmds=[$CMDS]"
+else
+  check "min-length: a 2-char username touches no account tool" 0
+fi
+echo "$STATE" | grep -q '^login_result=refused$'
+check "min-length: a 2-char username is reported refused" $? "state=[$STATE]"
+teardown
+
+# chpasswd failure on a freshly-created account: the account is removed again
+# (userdel), sudo is never granted, and the result is refused — no orphan.
+setup_login
+touch "$WORK/chpasswd-fail"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+if printf '%s\n' "$CMDS" | grep -q '^usermod -aG sudo'; then
+  check "chpasswd fail: sudo is never granted" 1 "cmds=[$CMDS]"
+else
+  check "chpasswd fail: sudo is never granted" 0
+fi
+printf '%s\n' "$CMDS" | grep -q '^userdel -r support'
+check "chpasswd fail: the half-created account is removed" $? "cmds=[$CMDS]"
+grep -qx support "$WORK/passwd"
+if [ $? -eq 0 ]; then check "chpasswd fail: no account survives" 1 "passwd=[$(cat "$WORK/passwd")]"; else check "chpasswd fail: no account survives" 0; fi
+echo "$STATE" | grep -q '^login_result=refused$'
+check "chpasswd fail: reported refused" $? "state=[$STATE]"
+teardown
+
+# A pre-existing MANAGED account whose chpasswd fails is NOT deleted (we did
+# not create it) — only our own work is unwound.
+setup_login
+echo support >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-support"; printf 'support' >"$WORK/group"; echo P >"$WORK/pwstatus-support"
+touch "$WORK/chpasswd-fail"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+if printf '%s\n' "$CMDS" | grep -q '^userdel'; then
+  check "chpasswd fail on existing account: it is NOT deleted" 1 "cmds=[$CMDS]"
+else
+  check "chpasswd fail on existing account: it is NOT deleted" 0
+fi
+grep -qx support "$WORK/passwd"
+check "chpasswd fail on existing account: the account survives" $?
+teardown
+
+# usermod -L failing on a previous member must not read as success: two live
+# credentials would break the single-login invariant, so report refused.
+setup_login
+echo old >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-old"; printf 'old' >"$WORK/group"; echo P >"$WORK/pwstatus-old"
+touch "$WORK/lockfail"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+echo "$STATE" | grep -q '^login_result=refused$'
+check "lock fail: a previous login that cannot be locked reports refused" $? "state=[$STATE] cmds=[$CMDS]"
+teardown
+
+# Re-setting the SAME login (only the password changes): no useradd on an
+# existing managed account, chpasswd still runs, applied.
+setup_login
+echo support >>"$WORK/passwd"; printf 'droplet-ssh,sudo' >"$WORK/groups-support"; printf 'support' >"$WORK/group"; echo P >"$WORK/pwstatus-support"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+if printf '%s\n' "$CMDS" | grep -q '^useradd'; then
+  check "re-set login: no useradd on an existing account" 1 "cmds=[$CMDS]"
+else
+  check "re-set login: no useradd on an existing account" 0
+fi
+[ "$(cat "$WORK/chpasswd.in" 2>/dev/null)" = "support:$GOOD_HASH" ]
+check "re-set login: the password is still changed" $? "chpasswd.in=[$(cat "$WORK/chpasswd.in" 2>/dev/null)]"
+echo "$STATE" | grep -q '^login_result=applied$'
+check "re-set login: reported applied" $? "state=[$STATE]"
+teardown
+
+# First login on a fresh box: the droplet-ssh group does not exist yet, so the
+# applier must groupadd it before useradd.
+setup_login
+rm -f "$WORK/group"
+run_login_case "DROPLET_SSH_LOGIN_USER=support
+DROPLET_SSH_LOGIN_HASH=$GOOD_HASH
+DROPLET_SSH_ACCESS=off
+"
+ga=$(printf '%s\n' "$CMDS" | grep -n '^groupadd droplet-ssh' | head -1 | cut -d: -f1)
+ua=$(printf '%s\n' "$CMDS" | grep -n '^useradd' | head -1 | cut -d: -f1)
+[ -n "$ga" ] && [ -n "$ua" ] && [ "$ga" -lt "$ua" ]
+check "first run: groupadd droplet-ssh precedes useradd" $? "cmds=[$CMDS]"
+echo "$STATE" | grep -q '^login_result=applied$'
+check "first run: login applied" $? "state=[$STATE]"
+teardown
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = "0" ]
