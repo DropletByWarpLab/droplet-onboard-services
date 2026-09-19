@@ -164,6 +164,8 @@ installs all three when single-box mode is active:
 | `/etc/systemd/system/droplet.service` | **Generated** by `lib/systemd.sh::install_systemd_service` | `docker compose up -d` on boot |
 | `/usr/local/sbin/droplet-host-units` | `scripts/host/droplet-host-units.sh` | `install -m 0755`. WARP-1829 — see below |
 | `/etc/systemd/system/droplet-host-units.service` | `scripts/host/etc-systemd-system/droplet-host-units.service` | On-demand oneshot; deliberately **not** enabled and given no timer |
+| `/usr/local/sbin/droplet-reapply-host-integration` | `scripts/host/usr-local-sbin/droplet-reapply-host-integration` | `install -m 0755`. WARP-2574 delivery half — see below |
+| `/etc/systemd/system/droplet-host-integration.service` | `scripts/host/etc-systemd-system/droplet-host-integration.service` | Root oneshot, `Before=droplet.service`, `+ systemctl enable` (never `--now` — it would recurse into the installer) |
 
 > **After anything updates the checkout, refresh the host units (WARP-1829).**
 > Host units execute their source straight out of the git working tree —
@@ -182,6 +184,28 @@ installs all three when single-box mode is active:
 > nothing extra. The standing detection rides the existing
 > `droplet-watchdog.timer` as the `host_unit_staleness` check. Full contract:
 > `scripts/host/README.md`.
+
+> **After a refresh delivers a NEW or CHANGED host artefact, re-apply it (WARP-2574).**
+> The refresh updates the checkout and restarts *containers* but does not re-run
+> the installer, so a merged artefact (a new `/usr/local/sbin` script, a new
+> systemd unit, a changed applier) reaches **zero existing boxes** until it is
+> re-applied. `droplet-host-integration.service` — a **root** oneshot ordered
+> `Before=droplet.service` — does this automatically on the refresh path, gated on
+> `droplet-host-units audit` so a healthy box is a cheap no-op (and so it is never
+> the 3-minute watchdog re-provisioning a live appliance):
+>
+> ```bash
+> sudo droplet-host-units audit                       # 0 = in sync, 1 = drift/missing
+> systemctl start droplet-host-integration.service    # audit-gated re-apply (deploy hook)
+> sudo ./scripts/setup.sh --reapply-host-integration  # the focused re-run it calls
+> ```
+>
+> **The delivery contract.** A host-artefact-changing ticket is "Done" only once
+> its target boxes have re-applied — **never** assume a merged feature is live on
+> an already-deployed box. A box provisioned *before* this shipped gains the
+> `droplet-host-integration.service` unit on its next `sudo ./scripts/setup.sh`
+> (or `--reapply-host-integration`) run; from then on it self-heals on every
+> refresh. Full contract: `scripts/host/README.md`.
 
 > **Migrating a pre-rename box (WARP-445):** a box provisioned before the
 > host-net artifacts were de-`poc` renamed (rule 17 / ADR-018) may still run

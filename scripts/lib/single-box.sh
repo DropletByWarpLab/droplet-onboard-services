@@ -501,6 +501,25 @@ EOF
     /etc/systemd/system/droplet-host-units.service
   log_success "Installed /usr/local/sbin/droplet-host-units (+ on-demand unit)"
 
+  # --- WARP-2574 host-integration re-apply — the DELIVERY half ---------------
+  # droplet-host-units above DETECTS when the box is not running what its
+  # checkout declares (`audit`) but could only ever name the fix; the box
+  # refresh updates the checkout and restarts CONTAINERS and never re-runs THIS
+  # installer, so a merged host-artefact feature reached ZERO existing boxes
+  # (WARP-2190 + WARP-2192 sat uninstalled for five days, 2026-08-31). This is
+  # the re-APPLY: droplet-host-integration.service runs the wrapper below as
+  # root before the stack comes up, audit-gated so a healthy box is a no-op —
+  # the deploy-path heal the watchdog's detect-only host_artefacts check points
+  # at, and the symmetric partner of droplet-host-units.service (which restarts
+  # units running stale CODE). It re-runs install_single_box_host_integration
+  # itself (via setup.sh --reapply-host-integration), so every track artefact is
+  # covered by the ONE installer — no second install surface to drift.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-reapply-host-integration" \
+    /usr/local/sbin/droplet-reapply-host-integration
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-integration.service" \
+    /etc/systemd/system/droplet-host-integration.service
+  log_success "Installed /usr/local/sbin/droplet-reapply-host-integration (+ boot re-apply unit)"
+
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
   # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged
@@ -649,10 +668,17 @@ EOF
   # the unit self-heals on the next setup.sh re-run once the deps land.
   sudo systemctl enable droplet-egress-audit.service >/dev/null 2>&1
   sudo systemctl restart droplet-egress-audit.service >/dev/null 2>&1 || true
+  # WARP-2574 (delivery half): boot-time host-integration re-apply. `enable`,
+  # NEVER `--now`. It belongs to the NEXT boot / the next refresh — and starting
+  # it here would recurse: the wrapper re-runs setup.sh --reapply-host-integration,
+  # which re-enters THIS very function. It is audit-gated, so on the next boot of
+  # an already-correct box it is a cheap no-op.
+  sudo systemctl enable droplet-host-integration.service >/dev/null 2>&1
 
   log_success "single-box host integration installed"
   log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-host-net.service"
   log_info "  Self-heal:   droplet-watchdog.timer (status: /var/lib/droplet/watchdog/status.json)"
+  log_info "  Re-apply:    droplet-host-integration.service (audit-gated; re-installs artefacts the refresh delivered when the checkout moves)"
   log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
 
