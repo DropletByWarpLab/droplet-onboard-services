@@ -31,7 +31,9 @@
 #        `SupplementaryGroups=docker` is a new always-on host-root surface and
 #        must be a conscious decision (update this guard + ADR-020 §D6).
 #
-# Static only — no root, no systemd, no docker. Runtime: < 1s.
+# No root, no systemd, no docker. Sections 1-3 are static greps; 2b runs the
+# ExecStartPost command string hermetically (stubbed sudo/id/gpasswd, paths
+# rerooted under mktemp). Runtime: < 1s.
 # ci: runs at PR time via .github/workflows/setup-tests.yml (scripts/** trigger).
 # =============================================================================
 set -uo pipefail
@@ -79,6 +81,49 @@ if grep -qE 'gpasswd[[:space:]]+-d[[:space:]]+droplet[[:space:]]+lxd' "$USER_DAT
   pass "firstboot ExecStartPost drops droplet from the unused lxd group"
 else
   fail "$USER_DATA no longer removes droplet from lxd (gpasswd -d droplet lxd)"
+fi
+
+# --- 2b. RUNTIME: the sudoers teardown must not depend on the lxd-drop -------
+# Section 2 is a grep; this runs the real ExecStartPost command string. The
+# `gpasswd -d droplet lxd` step sits between the .firstboot-done stamp and the
+# `rm -f /etc/sudoers.d/droplet-firstboot`. If it is `&&`-chained, a gpasswd
+# failure (group-file lock, transient EROFS, ...) aborts the chain BEFORE the
+# rm and strands the NOPASSWD: ALL drop-in past first boot — the exact outcome
+# ADR-020 §D6 forbids. Simulate: droplet IS in lxd, gpasswd FAILS, sudo is a
+# pass-through, and every absolute path is rerooted under a temp dir.
+post_cmd="$(grep -E '^[[:space:]]*ExecStartPost=' "$USER_DATA" \
+  | sed -E 's|^[[:space:]]*ExecStartPost=/bin/bash -lc "||; s|"[[:space:]]*$||')"
+if [ -z "$post_cmd" ]; then
+  fail "could not extract the ExecStartPost command string from $USER_DATA"
+else
+  fb_tmp="$(mktemp -d)"
+  trap 'rm -rf "$fb_tmp"' EXIT
+  mkdir -p "$fb_tmp/etc/sudoers.d"
+  : > "$fb_tmp/etc/sudoers.d/droplet-firstboot"
+  rerooted="${post_cmd//\/var\/lib\/droplet/$fb_tmp/var/lib/droplet}"
+  rerooted="${rerooted//\/etc\/sudoers.d/$fb_tmp/etc/sudoers.d}"
+  sudo() { "$@"; }
+  id() { echo "droplet lxd docker"; }
+  gpasswd() { echo "gpasswd: stub failure" >&2; return 1; }
+  export -f sudo id gpasswd
+  # bash -c, not -lc: a login shell would source profiles over the stubs.
+  fb_err="$(bash -c "$rerooted" 2>&1 >/dev/null || true)"
+  unset -f sudo id gpasswd
+  if [ ! -e "$fb_tmp/etc/sudoers.d/droplet-firstboot" ] \
+     && [ -f "$fb_tmp/var/lib/droplet/.firstboot-done" ]; then
+    pass "firstboot sudoers drop-in is removed even when the lxd-drop fails"
+  else
+    fail "a failing gpasswd -d droplet lxd left /etc/sudoers.d/droplet-firstboot in place (ADR-020 §D6)"
+    printf '      sudoers drop-in present: %s | marker present: %s\n' \
+      "$([ -e "$fb_tmp/etc/sudoers.d/droplet-firstboot" ] && echo yes || echo no)" \
+      "$([ -f "$fb_tmp/var/lib/droplet/.firstboot-done" ] && echo yes || echo no)"
+  fi
+  case "$fb_err" in
+    *"gpasswd: stub failure"*)
+      pass "a failing lxd-drop still surfaces on stderr (visible in the firstboot journal)" ;;
+    *)
+      fail "the lxd-drop's failure was swallowed — gpasswd stderr must reach the journal" ;;
+  esac
 fi
 
 # --- 3. droplet.service is the ONLY shipped unit granted the docker group -----

@@ -145,7 +145,7 @@ autoinstall:
       User=droplet
       WorkingDirectory=/home/droplet/edge-platform
       ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
-      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done && if id -nG droplet 2>/dev/null | grep -qw lxd; then sudo gpasswd -d droplet lxd; fi && sudo rm -f /etc/sudoers.d/droplet-firstboot"
+      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done; if id -nG droplet 2>/dev/null | grep -qw lxd; then sudo gpasswd -d droplet lxd; fi; sudo rm -f /etc/sudoers.d/droplet-firstboot"
       RemainAfterExit=yes
       TimeoutStartSec=45min
       StandardInput=null
