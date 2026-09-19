@@ -158,7 +158,8 @@ export interface OffLanChannelDefault {
     | "outbound_email"
     | "telemetry"
     | "web_fetch"
-    | "ambient_data";
+    | "ambient_data"
+    | "web_push";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -173,6 +174,12 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // Bank). Gates GET /api/web/weather + /api/web/rates. OFF by default,
   // same sovereignty posture as web_fetch: the operator opts in.
   { key: "ambient_data", enabled: false, requiresAdmin: true },
+  // WARP-2904 — Web Push delivery: the dial to the Google / Apple / Mozilla
+  // push service each PushSubscription row names. OFF by default, the
+  // web_fetch / ambient_data / cloud_model_escape posture: a sovereignty
+  // channel cannot self-enable, and the seed is insert-or-skip so an
+  // operator who has flipped it is never clobbered on a later boot.
+  { key: "web_push", enabled: false, requiresAdmin: true },
 ];
 
 /**

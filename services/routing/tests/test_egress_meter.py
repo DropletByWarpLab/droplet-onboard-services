@@ -35,6 +35,23 @@ class TestChannelMapping:
         assert _channel_for_chain("droplet_offlan_unknown") is None
         assert _channel_for_chain("offlan_telemetry") is None  # missing droplet_ prefix
 
+    def test_mirrors_every_orchestrator_channel_key(self):
+        # WARP-2904 — CHANNEL_KEYS is the mirror of prisma's OffLanChannelKey
+        # enum. WARP-1436 added `ambient_data` to the schema and never came
+        # here, so the meter silently dropped that chain; `web_push` joins
+        # both in the same change so the two sets are equal again.
+        assert set(egress_meter.CHANNEL_KEYS) == {
+            "software_updates",
+            "cloud_model_escape",
+            "outbound_email",
+            "telemetry",
+            "web_fetch",
+            "ambient_data",
+            "web_push",
+        }
+        assert _channel_for_chain("droplet_offlan_web_push") == "web_push"
+        assert _channel_for_chain("droplet_offlan_ambient_data") == "ambient_data"
+
 
 class TestDiffDerivation:
     def test_first_sample_emits_no_deltas(self):

@@ -213,6 +213,33 @@ describe("WARP-467 — PATCH /api/settings/off-lan/:key", () => {
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
+  // WARP-2904 — `web_push` is a real channel key: the router's literal list
+  // must admit it or the operator has no way to flip it (ships OFF; see
+  // OFF_LAN_CHANNEL_DEFAULTS). The fixture above deliberately stops at the
+  // five pre-1436 keys, so the row is seeded here.
+  it("admin can enable web_push with a reason (WARP-2904)", async () => {
+    const prisma = createPrismaMock([
+      ...seedChannels(),
+      {
+        key: "web_push",
+        enabled: false,
+        requiresAdmin: true,
+        lastChangedBy: null,
+        lastChangedAt: new Date("2026-09-19T00:00:00Z"),
+        reason: null,
+      },
+    ]);
+    const app = buildApp(prisma, mkUser("admin", "romain"));
+    const res = await request(app)
+      .patch("/api/settings/off-lan/web_push")
+      .send({ enabled: true, reason: "Household wants agent-run pushes on phones." });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(res.body.changed).toBe(true);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0][0].refs.channel).toBe("web_push");
+  });
+
   it("idempotent no-op: same enabled + same reason returns changed=false and skips activity", async () => {
     // Pre-seed a row with the same reason text we'll PATCH with.
     const ts = new Date("2026-05-27T00:00:00Z");

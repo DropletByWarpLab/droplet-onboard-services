@@ -31,6 +31,8 @@ const OFF_LAN_CHANNEL_KEYS = [
   "web_fetch",
   // WARP-1436 — Weather & currency data (Open-Meteo, European Central Bank).
   "ambient_data",
+  // WARP-2904 — Web Push delivery (Google / Apple / Mozilla push services).
+  "web_push",
 ] as const;
 type ChannelKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
 const channelKeyEnum = z.enum(OFF_LAN_CHANNEL_KEYS);
@@ -119,6 +121,7 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           telemetry: 0n,
           web_fetch: 0n,
           ambient_data: 0n,
+          web_push: 0n,
         };
         for (const r of rows as Array<{ channel: ChannelKey; bytes: bigint }>) {
           totals[r.channel] += r.bytes;

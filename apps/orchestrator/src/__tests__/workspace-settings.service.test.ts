@@ -72,7 +72,12 @@ function createPrismaMock(initial: MockSettingRow[] = []) {
 }
 
 // Hoisted import so each test imports the live seeder under test.
-import { seedWorkspaceSettings, WORKSPACE_SETTING_DEFAULTS } from "../services/workspace-settings.service.js";
+import {
+  seedWorkspaceSettings,
+  WORKSPACE_SETTING_DEFAULTS,
+  OFF_LAN_CHANNEL_DEFAULTS,
+  seedOffLanChannels,
+} from "../services/workspace-settings.service.js";
 import { ALLOWED_ENUM_VALUES } from "../routes/settings.js";
 
 describe("seedWorkspaceSettings", () => {
@@ -196,5 +201,68 @@ describe("seedWorkspaceSettings", () => {
           `its own ALLOWED_ENUM_VALUES allow-list`,
       ).toContain(def.value);
     }
+  });
+});
+
+// WARP-2904 — web push is an off-LAN channel. It ships OFF (the web_fetch /
+// ambient_data / cloud_model_escape posture) and admin-only, and the seed is
+// insert-or-skip so an operator who has already flipped it is never clobbered
+// by a later boot.
+describe("seedOffLanChannels — web_push (WARP-2904)", () => {
+  function createChannelPrismaMock(initial: Array<{ key: string; enabled: boolean }> = []) {
+    const rows = new Map(initial.map((r) => [r.key, r]));
+    return {
+      rows,
+      offLanAllowlistChannel: {
+        createMany: vi.fn(
+          async ({
+            data,
+            skipDuplicates,
+          }: {
+            data: Array<{ key: string; enabled: boolean; requiresAdmin: boolean }>;
+            skipDuplicates?: boolean;
+          }) => {
+            let count = 0;
+            for (const c of data) {
+              if (rows.has(c.key)) {
+                if (skipDuplicates) continue;
+                throw new Error(`unique constraint: ${c.key}`);
+              }
+              rows.set(c.key, { key: c.key, enabled: c.enabled });
+              count += 1;
+            }
+            return { count };
+          },
+        ),
+      },
+    };
+  }
+
+  it("declares web_push OFF and admin-only", () => {
+    const def = OFF_LAN_CHANNEL_DEFAULTS.find((d) => d.key === "web_push");
+    expect(def).toBeDefined();
+    expect(def?.enabled).toBe(false);
+    expect(def?.requiresAdmin).toBe(true);
+  });
+
+  it("seeds web_push on a fresh box", async () => {
+    const prisma = createChannelPrismaMock();
+    const { inserted } = await seedOffLanChannels(prisma as never);
+    expect(inserted).toBe(OFF_LAN_CHANNEL_DEFAULTS.length);
+    expect(prisma.rows.get("web_push")).toEqual({ key: "web_push", enabled: false });
+  });
+
+  it("never clobbers an operator's web_push choice on a re-run (insert-or-skip)", async () => {
+    const prisma = createChannelPrismaMock([{ key: "web_push", enabled: true }]);
+    const before = prisma.rows.size;
+    await seedOffLanChannels(prisma as never);
+    // Re-run: row count stable, the operator's `enabled: true` untouched.
+    const { inserted } = await seedOffLanChannels(prisma as never);
+    expect(inserted).toBe(0);
+    expect(prisma.rows.size).toBe(before + OFF_LAN_CHANNEL_DEFAULTS.length - 1);
+    expect(prisma.rows.get("web_push")).toEqual({ key: "web_push", enabled: true });
+    expect(prisma.offLanAllowlistChannel.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skipDuplicates: true }),
+    );
   });
 });

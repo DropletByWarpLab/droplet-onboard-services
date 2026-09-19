@@ -2275,6 +2275,34 @@ enum NotificationKind {
   ai
 }
 
+/// WARP-2904 — what happened to the web-push half of ONE `sendNotification`.
+///
+/// `channels` keeps its meaning ("channels actually attempted"; `push`
+/// appears only when a push went out) and `error` is only written when
+/// nothing delivered — so a refusal by the `web_push` off-LAN gate behind a
+/// delivered toast had nowhere to land, and "no subscribers", "gate refused"
+/// and "push service failed" were indistinguishable in a query. This column
+/// says which one it was, explicitly.
+///
+///   - sent            at least one push left the box
+///   - no_subscribers  gate open, no PushSubscription rows for the user
+///   - refused_gate    the `web_push` channel is off (or unreadable — the
+///                     gate fails closed) and NOTHING was dialled
+///   - failed          gate open, subscribers present, every dial failed (or
+///                     the push pipeline threw before dialling)
+///
+/// Nullable because `recordNotification` (the WARP-2587 transactional path)
+/// writes the row BEFORE any transport runs, and rows predating this column
+/// carry nothing. NULL means "no push decision was recorded on this row" and
+/// is never read as any of the four outcomes — the sendNotification path
+/// always writes one of them.
+enum PushOutcome {
+  sent
+  no_subscribers
+  refused_gate
+  failed
+}
+
 // Append-only log of every notification dispatched. Powers the in-app
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {
@@ -2287,6 +2315,8 @@ model NotificationLog {
   channels    String
   deliveredAt DateTime?
   error       String?
+  // WARP-2904 — the web-push decision, explicit. See `PushOutcome`.
+  pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
@@ -4134,6 +4164,14 @@ enum OffLanChannelKey {
   /// Bank)": the /api/web/weather + /api/web/rates routes' egress gate,
   /// fronting the services/web-fetch allowlisted fetcher.
   ambient_data
+  /// WARP-2904 — Web Push delivery. `dispatchToUser` dials whichever push
+  /// service the PushSubscription row names (a Google, Apple or Mozilla
+  /// host, browser-supplied) — the endpoint, the VAPID JWT + contact,
+  /// the ciphertext length and the timing cross; title/body do not (RFC
+  /// 8291 encrypts them to the subscriber's own keys). Read fail-closed
+  /// at the one dial site, before `findMany`. A native APNs/FCM relay,
+  /// when it exists, is its own key and its own registry entry.
+  web_push
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.

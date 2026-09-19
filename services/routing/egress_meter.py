@@ -77,13 +77,17 @@ ORCHESTRATOR_SAMPLER_TOKEN = (
 # Closed enum mirrored from prisma/schema.prisma OffLanChannelKey. Adding
 # a channel here without a schema migration silently drops the sample on
 # the orchestrator side (zod rejects unknown enum values) — that's the
-# behaviour we want.
+# behaviour we want. The mirror is pinned by tests/test_egress_meter.py;
+# WARP-1436 added `ambient_data` to the schema and never came here, so the
+# meter dropped that chain for two months (WARP-2904 caught up both keys).
 CHANNEL_KEYS = (
     "software_updates",
     "cloud_model_escape",
     "outbound_email",
     "telemetry",
     "web_fetch",
+    "ambient_data",
+    "web_push",
 )
 CHAIN_PREFIX = "droplet_offlan_"
 
