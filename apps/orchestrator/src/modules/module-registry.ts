@@ -198,10 +198,14 @@ export const MODULES: readonly ModuleDef[] = [
     // sub-tree. Gating only `/api/pm/projects` meant switching Projects off
     // in Settings still served `business_find({entity:"work_item"})`,
     // `business_update({entity:"task"})` and a note on a task — the toggle
-    // enforced a fraction of the surface it advertises. `/api/pm` is the
-    // whole PM surface and nothing else: `crm` (`/api/crm`) and `money`
-    // (`/api/money`) are disjoint prefixes with their own toggles.
-    category: "workspace", routePrefixes: ["/api/pm"], navHrefs: ["/projects"],
+    // enforced a fraction of the surface it advertises. `/api/pm` plus
+    // `/api/mobile/pm` is the whole PM surface and nothing else: the mobile
+    // router (routes/mobile/pm.ts) reads the same pm.service.ts behind a
+    // role check only, and `pathIsUnder` is segment-bounded so `/api/pm`
+    // never reaches it. Sibling prefixes, not nested — `gateScopeFor` stays
+    // null. `crm` (`/api/crm`) and `money` (`/api/money`) are disjoint
+    // prefixes with their own toggles.
+    category: "workspace", routePrefixes: ["/api/pm", "/api/mobile/pm"], navHrefs: ["/projects"],
     // WARP-1527: the tools-core domain for the PM suite is "pm".
     toolDomains: ["pm"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator

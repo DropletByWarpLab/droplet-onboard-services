@@ -172,6 +172,12 @@ const PM_ROUTES = [
   ["get", "/api/pm/summary"],
   ["patch", "/api/pm/states/s1"],
   ["patch", "/api/pm/labels/l1"],
+  // routes/mobile/pm.ts — the same pm.service.ts reads behind a role check,
+  // on a prefix the segment-bounded `/api/pm` gate cannot reach.
+  ["get", "/api/mobile/pm/workspaces"],
+  ["get", "/api/mobile/pm/projects"],
+  ["get", "/api/mobile/pm/work-items"],
+  ["get", "/api/mobile/pm/work-items/w1"],
 ] as const satisfies ReadonlyArray<readonly ["get" | "post" | "patch" | "delete", string]>;
 
 const KNOWLEDGE = "/api/files/knowledge/recent";

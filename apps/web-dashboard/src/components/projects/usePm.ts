@@ -78,8 +78,13 @@ export function useProjects(includeArchived: boolean) {
   return { projects: data?.projects, error, isLoading, mutate };
 }
 
-export function useSummary() {
-  const { data, error, isLoading, mutate } = useSWR("/api/pm/summary", (u: string) =>
+/**
+ * WARP-2875 — `enabled` is the `projects` capability flag. A null key when the
+ * module is off is how useSWR is told not to fetch (same as useCrmSummary);
+ * /business mounts this hook on every box, and Projects is off by default.
+ */
+export function useSummary(enabled: boolean) {
+  const { data, error, isLoading, mutate } = useSWR(enabled ? "/api/pm/summary" : null, (u: string) =>
     getJson<{ summary: PmSummary }>(u),
   );
   return { summary: data?.summary, error, isLoading, mutate };
