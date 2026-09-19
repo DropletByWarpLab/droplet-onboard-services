@@ -224,6 +224,83 @@ else
   fail "nextcloud-init.sh does not parse"
 fi
 
+echo "--- Phase 3b: the probe and the wait, driven with a stubbed curl under the hook's own set -euo pipefail ---"
+
+# The shape checks above cannot see the failure that matters most here: a
+# probe that ABORTS the hook. Under `set -euo pipefail` an unmatched grep in a
+# command substitution kills the script, and the first time that happens is a
+# boot where the engine is slow — exactly when the rest of the hook (shared
+# folders, connector wiring) is most needed. So lift the probe and the wait
+# out of the hook verbatim and run them against a scripted `curl`.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+probe_s=$(grep -n 'rd_urlsrc="\$( { curl' "$HOOK" | head -1 | cut -d: -f1)
+probe_e=$(awk -v s="${probe_s:-0}" 'NR>s && /^[[:space:]]*esac/{print NR; exit}' "$HOOK")
+wait_s=$(grep -n 'rd_tries="\${RICHDOCUMENTS_DISCOVERY_TRIES' "$HOOK" | head -1 | cut -d: -f1)
+wait_e=$(awk -v s="${wait_s:-0}" 'NR>s && /^[[:space:]]*done/{print NR; exit}' "$HOOK")
+if [ -n "$probe_s" ] && [ -n "$probe_e" ] && [ -n "$wait_s" ] && [ -n "$wait_e" ]; then
+  sed -n "${probe_s},${probe_e}p" "$HOOK" > "$WORK/probe.sh"
+  sed -n "${wait_s},${wait_e}p" "$HOOK" > "$WORK/wait.sh"
+  pass "probe (lines $probe_s-$probe_e) and wait (lines $wait_s-$wait_e) lifted from the hook"
+else
+  fail "could not lift the probe/wait out of the hook (probe ${probe_s:-?}-${probe_e:-?}, wait ${wait_s:-?}-${wait_e:-?})"
+fi
+
+# stub_curl <mode>: down = connection refused; relative/absolute = the two
+# discovery shapes. `sleep` is stubbed so the wait's give-up path runs in ms.
+stub_curl() {
+  cat > "$WORK/curl" <<EOF
+#!/usr/bin/env bash
+case "$1" in
+  down)     exit 7 ;;
+  relative) printf '%s\n' '<wopi-discovery><action urlsrc="/docs/browser/2229109277/cool.html?"/></wopi-discovery>' ;;
+  absolute) printf '%s\n' '<wopi-discovery><action urlsrc="https://docserver:9980/docs/browser/2229109277/cool.html?"/></wopi-discovery>' ;;
+esac
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/sleep"
+  chmod +x "$WORK/curl" "$WORK/sleep"
+}
+run_probe() {
+  stub_curl "$1"
+  PATH="$WORK:$PATH" bash -c 'set -euo pipefail; rd_wopi="http://gateway:9981/docs"; rd_drift=0; . "$1"; echo "HOOK_ALIVE rd_drift=$rd_drift"' _ "$WORK/probe.sh" 2>&1
+}
+if [ -s "$WORK/probe.sh" ]; then
+  out="$(run_probe down)"
+  if printf '%s' "$out" | grep -q 'HOOK_ALIVE rd_drift=0' && printf '%s' "$out" | grep -q 'deferred'; then
+    pass "engine down: probe defers, rd_drift stays 0, and the hook stays alive (no pipefail abort)"
+  else
+    fail "engine down: expected a deferred message with rd_drift=0 and the hook alive, got: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  fi
+  out="$(run_probe relative)"
+  if printf '%s' "$out" | grep -q 'HOOK_ALIVE rd_drift=0' && printf '%s' "$out" | grep -q 'path-relative'; then
+    pass "relative urlsrc: reported healthy, rd_drift 0"
+  else
+    fail "relative urlsrc: expected healthy with rd_drift=0, got: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  fi
+  out="$(run_probe absolute)"
+  if printf '%s' "$out" | grep -q 'HOOK_ALIVE rd_drift=1' && printf '%s' "$out" | grep -q 'ABSOLUTE'; then
+    pass "absolute urlsrc (the WARP-2903 failure): reported as drift, rd_drift 1, hook alive"
+  else
+    fail "absolute urlsrc: expected drift with rd_drift=1, got: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  fi
+fi
+if [ -s "$WORK/wait.sh" ]; then
+  stub_curl down
+  out="$(PATH="$WORK:$PATH" RICHDOCUMENTS_DISCOVERY_TRIES=3 bash -c 'set -euo pipefail; rd_wopi="http://gateway:9981/docs"; . "$1"; echo "WAIT_RETURNED n=$rd_n"' _ "$WORK/wait.sh" 2>&1)"
+  if printf '%s' "$out" | grep -q 'WAIT_RETURNED n=3' && printf '%s' "$out" | grep -q 'not reachable'; then
+    pass "engine never comes up: the wait gives up after RICHDOCUMENTS_DISCOVERY_TRIES, says so, and returns"
+  else
+    fail "the wait did not give up cleanly after RICHDOCUMENTS_DISCOVERY_TRIES=3: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  fi
+  stub_curl relative
+  out="$(PATH="$WORK:$PATH" RICHDOCUMENTS_DISCOVERY_TRIES=3 bash -c 'set -euo pipefail; rd_wopi="http://gateway:9981/docs"; . "$1"; echo "WAIT_RETURNED n=$rd_n"' _ "$WORK/wait.sh" 2>&1)"
+  if printf '%s' "$out" | grep -q 'WAIT_RETURNED n=0'; then
+    pass "engine already up: the wait returns immediately without a single retry"
+  else
+    fail "engine up: expected an immediate return (n=0), got: $(printf '%s' "$out" | tail -1)"
+  fi
+fi
+
 echo "--- Phase 4: the build gate exercises the leg for real ---"
 
 if grep -qE 'buf ~ /listen 9981;/' "$DOCKERFILE"; then
