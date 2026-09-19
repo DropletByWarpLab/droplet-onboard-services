@@ -418,3 +418,54 @@ describe("POST /api/devices/pair — code alphabet", () => {
     expect(seen.size).toBeGreaterThan(1);
   });
 });
+
+// WARP-2904 — the endpoint a browser hands over at subscribe time is a URL the
+// orchestrator will POST to on every notification. The WARP-2022 rule applies:
+// a user-supplied URL the server dials is an SSRF primitive before it is
+// egress, so it passes the outbound-url guard at REGISTRATION time (and again
+// at dispatch time — push-dispatch.test.ts). Web Push endpoints are always
+// https, so a plain-http one is refused with its own self-describing error.
+// Endpoint shapes only: a public TEST-NET literal, a loopback literal, an
+// RFC1918 literal — never a hostname.
+describe("POST /api/devices/push/subscribe — endpoint hardening (WARP-2904)", () => {
+  const keys = { p256dh: "p".repeat(24), auth: "a".repeat(12) };
+
+  it("refuses a loopback endpoint with 400 blocked_destination and never touches the table", async () => {
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "https://127.0.0.1/wpush/evil", keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "blocked_destination" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses an RFC1918 endpoint with 400 blocked_destination", async () => {
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "https://192.168.1.20/wpush/lan", keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "blocked_destination" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses a plain-http endpoint with its own error (Web Push endpoints are always https)", async () => {
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "http://203.0.113.12/wpush/plain", keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "endpoint_not_https" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("accepts a public https endpoint and upserts it", async () => {
+    mockPrisma.pushSubscription.upsert.mockResolvedValue({ id: "sub-1" });
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "https://203.0.113.10/wpush/abc", keys });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: "sub-1" });
+    expect(mockPrisma.pushSubscription.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { endpoint: "https://203.0.113.10/wpush/abc" } }),
+    );
+  });
+});

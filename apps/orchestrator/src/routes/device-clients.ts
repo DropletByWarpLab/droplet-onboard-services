@@ -16,6 +16,7 @@ import {
   dispatchToUser,
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
+import { assertOutboundUrlAllowed, isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
@@ -575,7 +576,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   //   public key the dashboard's serviceWorker.pushManager.subscribe()
   //   needs. Cheap; no auth-sensitive info.
   // POST /api/devices/push/subscribe — body { endpoint, keys: { p256dh,
-  //   auth }, deviceClientId? }. Upserts into PushSubscription.
+  //   auth }, deviceClientId? }. Upserts into PushSubscription. The
+  //   endpoint passes the WARP-2022 outbound-url guard + https-only first
+  //   (WARP-2904): 400 blocked_destination / endpoint_not_https.
   // DELETE /api/devices/push/subscribe — body { endpoint }. Removes
   //   the row so a notification permission revoke doesn't leave dead
   //   subscriptions piling up.
@@ -606,6 +609,27 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return res
           .status(400)
           .json({ error: "Invalid subscription", details: parsed.error.flatten() });
+      }
+      // WARP-2904 — the endpoint is a URL the orchestrator will POST to on
+      // every notification, from inside the box's trust boundary. The
+      // WARP-2022 rule: a user-supplied URL the server dials is an SSRF
+      // primitive before it is egress, so it passes the outbound-url guard
+      // HERE (a 400 when the browser hands it over, not a mystery at 3am)
+      // and again at dispatch time (push-dispatch.service.ts). The guard's
+      // message is the fixed `blocked_destination` string by construction —
+      // echoing it cannot rebuild a probe oracle. Web Push endpoints are
+      // always https; the guard admits http: for CalDAV, this route does
+      // not, and says so with its own error.
+      try {
+        const url = assertOutboundUrlAllowed(parsed.data.endpoint);
+        if (url.protocol !== "https:") {
+          return res.status(400).json({ error: "endpoint_not_https" });
+        }
+      } catch (err) {
+        if (isOutboundUrlBlocked(err)) {
+          return res.status(400).json({ error: err.message });
+        }
+        throw err;
       }
       const userId = getUser(req);
 
