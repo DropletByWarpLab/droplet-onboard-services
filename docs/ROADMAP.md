@@ -161,7 +161,7 @@ GA readiness is tracked by five risk-based epics, WARP-956 through WARP-960. The
 - **GTM scope:** Input sanitization, output schema validation, rate limiting on sensitive tools.
 - **This repo's slice:** ai-gateway is the entry point; `services/ai-gateway/middleware/` and `tools/` directories exist. Rate limiting and input validation are now implemented.
 - **Files involved:** `services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`, `services/ai-gateway/tools/`
-- **Cross-ref:** Depth-defence in `droplet-local-LLM` (OpenClaw guardrails + sandbox). This repo's ai-gateway is the outer input layer.
+- **Cross-ref:** Depth-defence is this repo's own: the confirmation interceptor and the classification record (ADR-043 §2, ADR-056 §D) and, for code the model writes, `services/sandbox` (ADR-056 §C, WARP-2895). OpenClaw was deleted from `droplet-local-LLM` on 2026-04-30. This repo's ai-gateway is the outer input layer.
 - **Status:** `[~]` Partial — rate limiting, input bounds, and CORS restriction are done. Output schema validation for tool-call responses remains.
 - **Blockers:** None.
 - **What was done:** Sliding-window rate limiter (Redis/in-memory) on chat endpoints; `max_tokens` capped at 4096; message list capped at 100; content length capped at 32k; CORS restricted from `*` to explicit origins.
@@ -199,11 +199,11 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 
 ### M3.6 Community marketplace
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.
-- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `droplet-local-LLM` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
+- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox is `services/sandbox` on the first `internal: true` network ([ADR-056 §C](ADR-056-agentic-extensibility.md), WARP-2895); extensions run there as processes first (WARP-2900) and as containers through the apply-path fragment schema second (WARP-2898).
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
 - **Status:** `[ ]` Not started. ADR-020's signed-manifest substrate + ADR-004's RBAC guard are design-committed to reuse (WARP-908 / [ADR-030](ADR-030-signed-rbac-gated-app-catalog-installer.md) — a curated, signed, RBAC-gated catalog installer, explicitly NOT the free-form Docker-socket one-click install pattern some competitors ship). ADR-030 is a design ADR only; build is explicitly deferred to post-GA.
-- **Blockers:** Sandbox contract with `droplet-local-LLM`'s OpenClaw (ADR-030 does not resolve this half); signing/trust model (resolved by ADR-030, reusing ADR-020).
-- **Next action:** Post-GA, build against ADR-030 once the OpenClaw sandbox contract lands.
+- **Blockers:** the sandbox contract — owned by ADR-056 §C (WARP-2895 the service, WARP-2898 the fragment schema); signing/trust model (resolved by ADR-030, reusing ADR-020; the box-local extension key is ADR-056 §C).
+- **Next action:** Post-GA, build against ADR-030 as revised by ADR-056 §C, in the WARP-2891 slice order (WARP-2895 → WARP-2900 → WARP-2898).
 
 ---
 
@@ -259,7 +259,7 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
 | LLM inference too slow on a low-power host (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation — M1.6 token streaming — is shipped (WARP-1442); hardware path is droplet-local-LLM / the inference host. |
-| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in droplet-local-LLM's OpenClaw tool policy. |
+| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence is the confirmation interceptor and the classification record (ADR-043 §2, ADR-056 §D); OpenClaw is gone. |
 | Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in droplet-local-LLM. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |
 | SD card corruption / data loss | High | Medium | `scripts/setup.sh`, `openwrt/` | Storage health monitoring + A/B partition scheme (overlaps M3.4). |

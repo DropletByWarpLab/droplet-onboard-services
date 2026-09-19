@@ -111,7 +111,7 @@ Design intent for the copy: name the **device**, name the **data/target**, make 
 ## How to apply
 
 - Tier classification for new client tools follows `docs/llm-safety-tiers.md`. Client tools are `requiresWrite`/`requiresConfirmation` per the same registry conventions as on-appliance tools.
-- New client tools beyond the V1 catalog require an ADR amendment (catalog is a closed whitelist for V1).
+- New client tools beyond the V1 catalog require an ADR amendment (catalog is a closed whitelist for V1). **Amended by [ADR-056 §B](ADR-056-agentic-extensibility.md) (2026-09-19, Proposed until Romain's sign-off):** tools that enter through WARP-2426's classification record — servers hosted by the desktop shell — are admitted without a further amendment; per-tool consent stays default-`block`, `readOnlyHint` / `destructiveHint` are never relayed or read, and the exec / keystroke / screen-capture / clipboard-read class stays Tier-3 until WARP-549.
 - `get_clipboard` / `screenshot` (and any keystroke / screen-recording / arbitrary-exec capability) are **blocked** until the deep-assist ADR (**WARP-549**) is Accepted.
 - All client dispatch audit-logs through `activity.service.ts::record({ kind: "tool_call", … , refs: { targetDeviceId, requestId } })`. Use the existing `tool_call` kind (a `"client"` kind is **not** valid — it is absent from the `ActivityKindName` union / `KNOWN_KINDS` guard and would throw); distinguish client-targeted calls by the `refs.targetDeviceId` field.
 
