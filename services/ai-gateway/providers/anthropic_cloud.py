@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 
+import httpx
+
 from capabilities import cloud_capabilities
 from providers.base import BaseProvider, to_litellm_messages
 from request_context import get_request_id
@@ -27,6 +29,22 @@ class AnthropicCloudProvider(BaseProvider):
 
     async def list_models(self) -> list[ModelInfo]:
         return ANTHROPIC_MODELS if self.api_key else []
+
+    async def is_reachable(self) -> bool:
+        """WARP-2883: one authenticated GET /v1/models — the cheapest call that
+        proves the key AND the route work, never a generation (no tokens, no
+        spend, no model load). False without a key, on any error, or past
+        3 s, so the latency tile shows "—" rather than a number nobody
+        measured. The host literal is registered in
+        docs/security/allowed-egress.yaml (cloud-llm-providers-optin)."""
+        if not self.api_key:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as c:
+                resp = await c.get("https://api.anthropic.com/v1/models", headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01"})
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     async def chat(
         self, messages: list[ChatMessage], model: str, stream: bool = False, **kwargs

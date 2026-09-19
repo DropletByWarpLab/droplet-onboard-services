@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -53,6 +54,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
+from middleware.off_lan_gating import get_cloud_model_escape, is_local_provider
 from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
 from middleware.request_id import RequestIdMiddleware
 from models.registry import ModelRegistry
@@ -296,6 +298,44 @@ async def health():
     if provider_router:
         inference_reachable = await provider_router.local.is_reachable()
     return {"status": "ok", "inference_reachable": inference_reachable}
+
+
+@app.get("/ai/latency")
+async def latency():
+    """WARP-2883: round-trip time to each inference endpoint, in ms.
+
+    `null` for a provider that is unreachable, has no box-wide key, or timed
+    out — never 0, which would read as "instant". Local is the runtime's
+    /api/tags; cloud is an authenticated /v1/models. Neither generates a
+    token. The orchestrator averages whichever of these are ENABLED on the
+    box (it, not the gateway, knows the cloud-escape switch).
+    """
+    if not provider_router:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    # Box-wide (shared) keys — the same namespace model listing uses.
+    await provider_router.refresh_keys(None)
+    # WARP-468 off-LAN gate, applied HERE because this is the component that
+    # dials. A saved key with escape OFF must mean zero connections to the
+    # cloud hosts — the same posture chat enforces in router.py. Read once per
+    # request (cached 30 s by the middleware); fails closed like chat does.
+    escape = await get_cloud_model_escape()
+
+    async def timed(name: str, provider) -> int | None:
+        if not escape and not is_local_provider(name):
+            return None
+        started = time.monotonic()
+        try:
+            ok = await provider.is_reachable()
+        except Exception:
+            ok = False
+        return round((time.monotonic() - started) * 1000) if ok else None
+
+    local_ms, anthropic_ms, openai_ms = await asyncio.gather(
+        timed("local", provider_router.local),
+        timed("anthropic", provider_router.anthropic),
+        timed("openai", provider_router.openai),
+    )
+    return {"providers": {"local": local_ms, "anthropic": anthropic_ms, "openai": openai_ms}}
 
 
 @app.get("/ai/readiness")
