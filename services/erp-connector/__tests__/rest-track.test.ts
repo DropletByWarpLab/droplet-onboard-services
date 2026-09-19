@@ -272,6 +272,23 @@ describe("host guard — the ONLY enforcement for a dynamic destination", () => 
     expect(assertSafeRestBaseUrl("v", dynamicProfile().baseUrl, "acme")).toBe("https://acme.example.com");
   });
 
+  it("🔴 completes a bare label with the FIRST suffix only — the documented multi-region hazard", () => {
+    // WARP-2920 — pinned so the rule in `RestBaseUrl.dynamic.allowedSuffixes`
+    // ("a multi-suffix profile must have the customer enter the whole host")
+    // cannot go stale: if the completion ever tries every suffix or refuses a
+    // bare label under several, this goes red and that docstring is rewritten
+    // in the same change. Mutation: complete with the LAST suffix → red.
+    const multiRegion = {
+      kind: "dynamic" as const,
+      configField: "companyDomain",
+      allowedSuffixes: [".example.com", ".example.net"],
+      allowedHosts: [],
+    };
+    expect(assertSafeRestBaseUrl("v", multiRegion, "acme")).toBe("https://acme.example.com");
+    // The whole host is what selects the other region.
+    expect(assertSafeRestBaseUrl("v", multiRegion, "acme.example.net")).toBe("https://acme.example.net");
+  });
+
   it("🔴 refuses a host that merely ENDS WITH the suffix", () => {
     // `endsWith(".example.com")` admits `example.com.evil.example.com` from
     // anyone who controls a subdomain. A suffix test is not a host test.

@@ -82,8 +82,10 @@ import {
   vendorFromExportProvider,
   restProfileFor,
   RestProfileConnector,
+  InvalidRestProfileError,
   authPlaceholders,
   type Connector,
+  type RestVendorProfile,
   type EaglesoftApiRouteMap,
   type ExportProfile,
   type QboTokens,
@@ -100,6 +102,7 @@ import {
   parseProviderConfigWith,
   providerConfigNumber,
   providerConfigString,
+  providerConfigKeyFor,
   CREDENTIAL_VARIANT_FIELD,
   type ProviderConfig,
   type ProviderDescriptor,
@@ -1141,6 +1144,104 @@ const exportDropFactory: ConnectorFactory = ({ selector: sel }) => {
 };
 
 /**
+ * The REST profile lookup `connectorFactoryFor` and `restProfileFactory` share.
+ *
+ * `restProfileFor` by default. Swappable ONLY through
+ * `__setRestProfileLookupForTest`, so a test can drive a fixture profile through
+ * the real dispatch path without appending a vendor to `REST_VENDOR_PROFILES`
+ * — a fixture in the shipped registry would be a vendor the hub could list.
+ * The same reason `registerConnectorFactory` / `unregisterConnectorFactory`
+ * exist for the static map.
+ */
+let lookupRestProfile: (provider: string) => RestVendorProfile | null = restProfileFor;
+
+/** Test seam: override (or, with `null`, restore) the REST profile lookup. */
+export function __setRestProfileLookupForTest(
+  lookup: ((provider: string) => RestVendorProfile | null) | null,
+): void {
+  lookupRestProfile = lookup ?? restProfileFor;
+}
+
+/**
+ * WARP-2920 — the three declarations of a per-account host field must agree.
+ *
+ * A dynamic-host vendor names its `providerConfig` field THREE times: the
+ * profile's `baseUrl.configField` (what the factory reads), the descriptor's
+ * `dynamicEgress.configKey` (the documentation path mirroring the
+ * `allowed-egress.yaml` entry), and the `credentialFields` entry that puts the
+ * value on the row in the first place. The defect this guards against was the
+ * factory reading the SECOND as if it were the first: every shipped
+ * `configKey` is `IntegrationConnection.providerConfig.<field>`, so the lookup
+ * returned `undefined` and the host guard refused every connection of the
+ * first dynamic vendor at construction — with a green build, because no such
+ * vendor had shipped and the guard's tests hand it the value directly.
+ *
+ * Checked at construction (from `restProfileFactory`) AND over every shipped
+ * profile by `erp-provider.descriptor.test.ts`, so the drift fails the build
+ * that carries it and, failing that, the connection rather than the request.
+ * Throws `InvalidRestProfileError`, the same class `assertValidRestProfile`
+ * uses for a profile that is structurally wrong — because that is what a
+ * profile whose declared field the descriptor cannot supply is.
+ */
+export function assertRestProfileAgreesWithDescriptor(
+  profile: RestVendorProfile,
+  descriptor: ProviderDescriptor | undefined,
+): void {
+  const drift = (reason: string) => new InvalidRestProfileError(profile.provider, reason);
+  if (profile.baseUrl.kind === "static") {
+    if (descriptor?.dynamicEgress) {
+      throw drift(
+        `the profile dials a static origin but its descriptor declares dynamicEgress ` +
+          `(configKey "${descriptor.dynamicEgress.configKey}") — one of the two is wrong ` +
+          `about where this vendor is dialled`,
+      );
+    }
+    return;
+  }
+  const field = profile.baseUrl.configField;
+  if (!descriptor) {
+    throw drift(
+      `the profile reads its host from providerConfig.${field} but the provider has no descriptor`,
+    );
+  }
+  if (!descriptor.dynamicEgress) {
+    throw drift(
+      `the profile reads its host from providerConfig.${field} but its descriptor declares no ` +
+        `dynamicEgress — an empty egressHosts would read as "never leaves the LAN"`,
+    );
+  }
+  const expectedKey = providerConfigKeyFor(field);
+  if (descriptor.dynamicEgress.configKey !== expectedKey) {
+    throw drift(
+      `dynamicEgress.configKey is "${descriptor.dynamicEgress.configKey}" but the profile's ` +
+        `baseUrl.configField is "${field}", so the key must be "${expectedKey}"`,
+    );
+  }
+  // The SHARED `credentialFields`, not a variant's: the host is dialled on
+  // every authentication path, so a field that only one variant collects would
+  // leave the other path's rows with no host at all.
+  const entry = descriptor.credentialFields.find((f) => f.name === field);
+  if (!entry) {
+    throw drift(
+      `the profile reads its host from providerConfig.${field} but the descriptor has no ` +
+        `credentialFields entry named "${field}" — no row could ever carry it`,
+    );
+  }
+  if (entry.storage !== "providerConfig") {
+    throw drift(
+      `credential field "${field}" selects the host, so it needs storage "providerConfig" ` +
+        `(it has "${entry.storage}") — an encrypted field is never emitted into providerConfig`,
+    );
+  }
+  if (entry.secret) {
+    throw drift(
+      `credential field "${field}" selects the host, so it needs secret: false — ` +
+        `answering "where does this connection dial?" must never require unmasking a credential`,
+    );
+  }
+}
+
+/**
  * WARP-2707 / ADR-046 — the declarative REST track's factory.
  *
  * ONE factory for N vendors, exactly as `exportDropFactory` is one factory for
@@ -1148,7 +1249,7 @@ const exportDropFactory: ConnectorFactory = ({ selector: sel }) => {
  * everything connection-specific is read generically here.
  */
 const restProfileFactory: ConnectorFactory = ({ selector: sel, descriptor, config: cfg }) => {
-  const profile = restProfileFor(sel.provider);
+  const profile = lookupRestProfile(sel.provider);
   if (!profile) {
     // Unreachable through `connectorFactoryFor`, which only selects this
     // factory when a profile exists. Refused by name rather than left to
@@ -1158,19 +1259,31 @@ const restProfileFactory: ConnectorFactory = ({ selector: sel, descriptor, confi
       UNKNOWN_PROVIDER_REMEDIATION,
     );
   }
+  // WARP-2920 — refuse a profile whose descriptor cannot supply the field it
+  // reads, before a connection is built on a host that resolves to nothing.
+  assertRestProfileAgreesWithDescriptor(profile, descriptor);
   const resolve = sel.cloudTokens?.resolveSaasSecret;
   return new RestProfileConnector(
     profile,
     {
       provider: sel.provider,
-      // The per-account host, named by the DESCRIPTOR's `dynamicEgress.configKey`
-      // rather than by a literal here — so the connection field, the allowlist
-      // entry's `config_key` and this read are one declaration, not three that
-      // can drift. Undefined for a static profile, which is what the host guard
-      // expects.
-      hostConfigValue: descriptor?.dynamicEgress
-        ? providerConfigString(cfg, descriptor.dynamicEgress.configKey)
-        : undefined,
+      // The per-account host, read from the field the PROFILE names
+      // (`baseUrl.configField`) — the same bare field name the hand-written
+      // tracks read (`providerConfigString(cfg, "companyDomain")`).
+      //
+      // 🔴 WARP-2920 — NOT from `descriptor.dynamicEgress.configKey`. That key
+      // is the documentation path mirroring the `allowed-egress.yaml` entry
+      // (`IntegrationConnection.providerConfig.<field>`), and reading it as a
+      // lookup name resolved `undefined` on every row, so the host guard
+      // refused every connection of the first dynamic vendor at construction.
+      // The three declarations are kept from drifting by
+      // `assertRestProfileAgreesWithDescriptor` above, not by reading one as
+      // if it were another. Undefined for a static profile, which is what the
+      // host guard expects.
+      hostConfigValue:
+        profile.baseUrl.kind === "dynamic"
+          ? providerConfigString(cfg, profile.baseUrl.configField)
+          : undefined,
     },
     {
       // Resolved by DESCRIPTOR FIELD NAME, generically: the profile's auth
@@ -1197,7 +1310,7 @@ function connectorFactoryFor(provider: string): ConnectorFactory | undefined {
   // WARP-2707 — consulted BEFORE the static map, mirroring the export-drop
   // branch above. A REST vendor registers no factory of its own; its profile
   // IS its registration.
-  if (restProfileFor(provider)) return restProfileFactory;
+  if (lookupRestProfile(provider)) return restProfileFactory;
   return connectorFactories.get(provider);
 }
 
