@@ -14,6 +14,8 @@ import {
   type SaasCredentialView,
   type SaasConnectionState,
 } from "@/lib/api";
+import { connectCloudProvider } from "@/lib/api.erp";
+import { providerDescriptor } from "@droplet/shared-types";
 
 /**
  * WARP-2275 — the admin-only credential configurator.
@@ -51,6 +53,22 @@ type Status =
   | { kind: "saved"; provider: string }
   | { kind: "error"; message: string }
   | { kind: "loadFailed" };
+
+/**
+ * WARP-2842 — the tracks whose pasted credential the box PROBES on connect.
+ *
+ * `cloud` and `rest` land PROVISIONING after a save ("stored, not yet
+ * checked") and the orchestrator can build their connector from the row;
+ * `mcp` lands CONNECTED on the paste itself and the connect route refuses it.
+ * Read off the descriptor — the same declaration the orchestrator branches on
+ * — so this page and the box agree on which providers get checked by reading
+ * ONE field. Not a vendor name: the descriptor is under-specified if one is
+ * ever needed here.
+ */
+function isProbedOnConnect(provider: string): boolean {
+  const track = providerDescriptor(provider)?.track;
+  return track === "cloud" || track === "rest";
+}
 
 /** What each state means to a person, in their words rather than the enum's. */
 const STATE_COPY: Record<SaasConnectionState, { label: string; tone: "ok" | "warn" | "idle" }> =
@@ -407,11 +425,10 @@ function SaasCredentialsPanel() {
     fields: Record<string, string>,
   ): Promise<boolean> => {
     setStatus({ kind: "saving", provider });
+    let saved: SaasCredentialView;
     try {
-      const saved = await saveSaasCredential(provider, fields);
+      saved = await saveSaasCredential(provider, fields);
       setViews((cur) => cur.map((v) => (v.provider === provider ? saved : v)));
-      setStatus({ kind: "saved", provider });
-      return true;
     } catch (err) {
       // The message names refused FIELDS, never their values — the orchestrator
       // guarantees that, and the form does not add anything to it.
@@ -424,6 +441,39 @@ function SaasCredentialsPanel() {
       });
       return false;
     }
+    /**
+     * WARP-2842 — saved is not connected. For a probed track the save left
+     * the row at PROVISIONING, and this is the call that asks the vendor and
+     * writes the verdict. The state line then shows THAT — "Credential
+     * rejected — replace it", "Can't connect", "Connected" — through the same
+     * `STATE_COPY` it always rendered from, so a key the vendor turned down
+     * is visible here rather than sitting behind "Checking the connection"
+     * forever.
+     *
+     * A save that CLEARED the secret has nothing to check; the box already
+     * said NOT_CONFIGURED and a probe would only say it again.
+     */
+    if (!isProbedOnConnect(provider) || !saved.hasCredentials) {
+      setStatus({ kind: "saved", provider });
+      return true;
+    }
+    try {
+      const probed = await connectCloudProvider(provider);
+      setViews((cur) =>
+        cur.map((v) => (v.provider === provider ? { ...v, state: probed.status } : v)),
+      );
+      setStatus({ kind: "saved", provider });
+    } catch {
+      // The key IS stored — the form may drop it — but the check did not
+      // happen, and the page must not claim either outcome. The line stays on
+      // the PROVISIONING the save returned, which is the truth.
+      setStatus({
+        kind: "error",
+        message:
+          "Saved, but Droplet couldn't check the connection just now. Try saving again in a moment.",
+      });
+    }
+    return true;
   };
 
   if (status.kind === "loading") {

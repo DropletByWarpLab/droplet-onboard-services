@@ -25,7 +25,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { apiFetch } from "./hooks/apiFetch";
-import { disconnectProvider, setProviderWrites } from "./api.erp";
+import { connectCloudProvider, disconnectProvider, setProviderWrites } from "./api.erp";
 
 vi.mock("./hooks/apiFetch", () => ({ apiFetch: vi.fn() }));
 
@@ -127,5 +127,39 @@ describe("a provider key is URL-encoded, not interpolated raw", () => {
 
     expect(calledUrl()).toBe("/api/integrations/weird%2Fkey/disconnect");
     expect(calledUrl()).not.toContain("/weird/key/");
+  });
+});
+
+/**
+ * WARP-2842 — the cloud connect: the SAME URL `connectLanProvider` posts to,
+ * with an EMPTY body. The credential is on the row (sealed by the PATCH), so
+ * there is nothing for the body to carry — and the orchestrator's cloud body
+ * schema is strict, so a LAN-shaped body here would be a 400.
+ */
+describe("connectCloudProvider", () => {
+  it("POSTs an empty JSON body to that provider's own connect route", async () => {
+    // Mutation: send `{ host: "" }` or no body → red.
+    await connectCloudProvider("stripe");
+
+    expect(calledUrl()).toBe("/api/integrations/stripe/connect");
+    expect(calledInit().method).toBe("POST");
+    expect(calledInit().body).toBe("{}");
+    expect((calledInit().headers as Record<string, string>)["content-type"]).toBe(
+      "application/json",
+    );
+  });
+
+  it("returns the box's verdict, whatever it is, rather than assuming CONNECTED", async () => {
+    apiFetchMock.mockResolvedValue({ provider: "stripe", status: "NEEDS_RECONNECT" } as never);
+
+    const res = await connectCloudProvider("stripe");
+
+    expect(res.status).toBe("NEEDS_RECONNECT");
+  });
+
+  it("URL-encodes the provider key", async () => {
+    await connectCloudProvider("weird/key");
+
+    expect(calledUrl()).toBe("/api/integrations/weird%2Fkey/connect");
   });
 });

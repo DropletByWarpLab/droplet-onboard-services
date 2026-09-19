@@ -17,6 +17,13 @@
  *   POST /api/integrations/:provider/connect        Run/verify provisioning.
  *   POST /api/integrations/:provider/test           Reachability test (no save).
  *
+ * WARP-2842 — the SAME connect URL admits a cloud / REST track, with an empty
+ * body: it probes the credential `PATCH /:provider/credentials` already sealed
+ * onto the row and writes the verdict (CONNECTED / NEEDS_RECONNECT / DEGRADED /
+ * CAPABILITY_LIMITED / ERROR / NOT_CONFIGURED). Idempotent — the dashboard's
+ * "check again". Until this, nothing could move a pasted key out of
+ * PROVISIONING: the only connect admission was `lanProvisioning`.
+ *
  * The five `/api/integrations/eaglesoft/{connect,test,disconnect,write-enable,
  * write-disable}` spellings remain as DEPRECATED aliases for one release, so a
  * dashboard bundle cached from before this deploy keeps working. See the
@@ -149,6 +156,36 @@ export function createIntegrationsRouter(
     },
   );
 
+  /**
+   * WARP-2842 — the deprecated literal alias takes its provider from the
+   * BODY, and that body is the LAN shape (a required `host`). A body naming a
+   * DESCRIBED non-LAN track is refused here rather than resolved: `{ provider:
+   * "stripe", host: "x" }` used to reach `connect()` with a ConnectInput and
+   * no row material, the probe rejected CONNECTOR_BLOCKED, and a Stripe row
+   * holding a perfectly good key was driven PROVISIONING → NOT_CONFIGURED.
+   * Cloud and REST tracks have `/integrations/:provider/connect` below.
+   *
+   * Only a provider WITH a descriptor is judged: the export-drop keys
+   * (`<vendor>-export`) declare none and are still connected through this
+   * alias with a body — `resolveProvider` in the service keeps admitting or
+   * refusing those exactly as before.
+   */
+  const refusesNonLanBodyProvider = (provider: string | undefined): string | null => {
+    if (provider === undefined) return null;
+    const descriptor = providerDescriptor(provider);
+    if (!descriptor || descriptor.track === "lan") return null;
+    // Names the right door for each track: cloud / REST have the empty-body
+    // connect; an MCP track's paste IS its connection and has no connect at all.
+    const door =
+      descriptor.track === "mcp"
+        ? `PATCH /api/integrations/${provider}/credentials`
+        : `POST /api/integrations/${provider}/connect with an empty body`;
+    return (
+      `provider "${provider}" is a ${descriptor.track} track — it is connected by ` +
+      `${door}, not through this alias`
+    );
+  };
+
   const provisionBody =
     (fn: (input: ConnectInput, req: Request) => Promise<unknown>) =>
     async (req: Request, res: Response, next: (e?: unknown) => void) => {
@@ -158,6 +195,11 @@ export function createIntegrationsRouter(
           res
             .status(400)
             .json({ error: "Invalid request", details: parsed.error.flatten() });
+          return;
+        }
+        const refused = refusesNonLanBodyProvider(parsed.data.provider);
+        if (refused) {
+          res.status(400).json({ error: "Invalid request", details: refused });
           return;
         }
         res.json(await fn(parsed.data as ConnectInput, req));
@@ -194,6 +236,64 @@ export function createIntegrationsRouter(
     }
     return provider;
   };
+
+  /**
+   * WARP-2842 — the sibling admission for the tracks `connect()` PROBES.
+   *
+   * `cloud` and `rest` are the two tracks whose credential is pasted
+   * (`PATCH /:provider/credentials`) and lands PROVISIONING, and the two
+   * `integrations.service.ts` builds from the row and probes. `mcp` is
+   * deliberately NOT here — the paste IS the connection for that track and
+   * `isKnownErpProvider` refuses it — and neither is `lan`, which needs a
+   * body this branch does not take. A provider that is neither falls through
+   * to `requireLanProvider`, which 404s it with the message it always has.
+   *
+   * Read through the live registry, like its sibling.
+   */
+  const isCloudProvider = (provider: string): boolean => {
+    const track = providerDescriptor(provider)?.track;
+    return track === "cloud" || track === "rest";
+  };
+
+  /**
+   * The cloud connect body: NOTHING. Strict, so the LAN shape posted at a
+   * cloud provider is a 400 rather than silently ignored — a `host` sent to
+   * Stripe is a caller that misunderstands which track it is on, and the
+   * honest answer names that. No `enableWrites` either: the write opt-in for
+   * these tracks is `/:provider/write-enable`, and a probe that also toggled
+   * writes would couple two consent events into one request.
+   */
+  const cloudConnectSchema = z.object({}).strict();
+
+  /**
+   * The cloud-track sibling of {@link lanProvisionBody}.
+   *
+   * The URL is the only source of the provider, and the ConnectInput the
+   * service receives carries nothing but that provider: the credential is
+   * on the ROW and the service reads it from there. `host: ""` because the
+   * input type requires one and a cloud track has none — the service does
+   * not write it for these tracks.
+   */
+  const cloudProbeBody =
+    (fn: (input: ConnectInput, req: Request) => Promise<unknown>) =>
+    async (req: Request, res: Response, next: (e?: unknown) => void) => {
+      try {
+        const provider = String(req.params.provider);
+        const parsed = cloudConnectSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid request",
+            details:
+              `a ${providerDescriptor(provider)?.track} track is connected by pasting a ` +
+              "credential; POST an empty body here to check it",
+          });
+          return;
+        }
+        res.json(await fn({ provider, host: "" }, req));
+      } catch (err) {
+        if (!handleErpError(res, err)) next(err);
+      }
+    };
 
   /**
    * The parameterised sibling of {@link provisionBody}.
@@ -386,12 +486,22 @@ export function createIntegrationsRouter(
 
   // WARP-2520 — the same shape, and safe for the same reason: parameter in the
   // middle, literal verb last.
+  //
+  // WARP-2842 — ONE route, branched on the descriptor's track, so the URL
+  // stays the one `api.erp.ts` already posts to. Both branches call the same
+  // `svc.connect` with the same actor, so the consent record (`auditConnect`
+  // in the service) has one shape whichever track it was written for.
+  const connectHandler = (input: ConnectInput, req: Request) =>
+    svc.connect(input, { actor: actorFromRequest(req as never) });
+  const lanConnect = lanProvisionBody(connectHandler);
+  const cloudConnect = cloudProbeBody(connectHandler);
   router.post(
     "/integrations/:provider/connect",
     requireRole("owner", "admin"),
-    lanProvisionBody((input, req) =>
-      svc.connect(input, { actor: actorFromRequest(req as never) }),
-    ),
+    (req: Request, res: Response, next: (e?: unknown) => void) =>
+      isCloudProvider(String(req.params.provider))
+        ? cloudConnect(req, res, next)
+        : lanConnect(req, res, next),
   );
   router.post(
     "/integrations/:provider/test",

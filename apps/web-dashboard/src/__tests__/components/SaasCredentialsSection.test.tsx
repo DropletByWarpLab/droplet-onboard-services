@@ -29,8 +29,21 @@ vi.mock("@/lib/api", () => ({
 
 // WARP-2518 — the page now carries a Disconnect control, and the control makes
 // the call itself. Stubbed at the module boundary like every other API here.
-const { disconnectProviderMock } = vi.hoisted(() => ({ disconnectProviderMock: vi.fn() }));
-vi.mock("@/lib/api.erp", () => ({ disconnectProvider: disconnectProviderMock }));
+const { disconnectProviderMock, connectCloudProviderMock } = vi.hoisted(() => ({
+  disconnectProviderMock: vi.fn(),
+  // WARP-2842 — the probe the page fires after a save on a cloud / REST track.
+  connectCloudProviderMock: vi.fn(),
+}));
+vi.mock("@/lib/api.erp", () => ({
+  disconnectProvider: disconnectProviderMock,
+  connectCloudProvider: connectCloudProviderMock,
+}));
+
+import {
+  registerProviderDescriptor,
+  __resetRegisteredProvidersForTest,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 
 import {
   SaasCredentialsSection,
@@ -111,9 +124,11 @@ function setRole(role: string | null) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetRegisteredProvidersForTest();
   fetchSaasCredentialsMock.mockResolvedValue([BILLING, CRM]);
   saveSaasCredentialMock.mockResolvedValue(BILLING);
   disconnectProviderMock.mockResolvedValue({});
+  connectCloudProviderMock.mockResolvedValue({ provider: BILLING.provider, status: "CONNECTED" });
 });
 
 describe("the admin gate", () => {
@@ -632,6 +647,132 @@ describe("the three-way rule, client half", () => {
     await waitFor(() =>
       expect(screen.getByLabelText(/Restricted API key/)).toHaveValue(""),
     );
+  });
+});
+
+/**
+ * WARP-2842 — a saved credential is CHECKED, and the line shows the verdict.
+ *
+ * `handleSave` used to stop at `saveSaasCredential` and show "Saved" — true,
+ * and beside the point: the box had stored the key and answered PROVISIONING
+ * ("stored, not yet checked"), and nothing ever asked the vendor. The page
+ * now posts `/integrations/:provider/connect` after the save and renders the
+ * state the probe returns, in the same words `STATE_COPY` already had for it.
+ *
+ * The two fixture providers are registered as descriptors here because the
+ * decision "is this track probed?" is read off the descriptor — the same
+ * declaration the orchestrator branches on. `fixture-billing` is a cloud
+ * track; `fixture-crm` is registered as `mcp`, the one track whose paste IS
+ * the connection and which the connect route refuses.
+ */
+describe("a saved credential is checked, and the state line shows the verdict", () => {
+  const BILLING_DESCRIPTOR: ProviderDescriptor = {
+    id: BILLING.provider,
+    displayName: BILLING.displayName,
+    category: BILLING.category,
+    track: "cloud",
+    credentialFields: [],
+    egressHosts: ["api.fixture-billing.invalid"],
+    datasets: ["invoice"],
+  };
+  const CRM_MCP_DESCRIPTOR: ProviderDescriptor = {
+    id: CRM.provider,
+    displayName: CRM.displayName,
+    category: CRM.category,
+    track: "mcp",
+    mcpServerId: "fixture-crm",
+    description: "Fixture MCP.",
+    setupGuideHref: "/help/integrations/fixture-crm",
+    credentialFields: [],
+    egressHosts: ["mcp.fixture-crm.invalid"],
+    datasets: [],
+  };
+
+  beforeEach(() => {
+    registerProviderDescriptor(BILLING_DESCRIPTOR);
+    registerProviderDescriptor(CRM_MCP_DESCRIPTOR);
+    // What the box actually answers to a paste on a cloud track.
+    saveSaasCredentialMock.mockResolvedValue({ ...BILLING, state: "PROVISIONING" });
+  });
+
+  async function saveBillingKey() {
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByLabelText(/Restricted API key/);
+    fireEvent.change(screen.getByLabelText(/Restricted API key/), {
+      target: { value: "rk_live_new" },
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[0]);
+    await waitFor(() => expect(saveSaasCredentialMock).toHaveBeenCalled());
+  }
+
+  /**
+   * Mutation: delete the `connectCloudProvider` call from `handleSave` → red
+   * on the call count, and the state line reads "Checking the connection"
+   * (PROVISIONING) forever — which is the shipped defect on this page.
+   */
+  it("calls connectCloudProvider for that provider AFTER the save", async () => {
+    await saveBillingKey();
+
+    await waitFor(() => expect(connectCloudProviderMock).toHaveBeenCalledTimes(1));
+    expect(connectCloudProviderMock).toHaveBeenCalledWith(BILLING.provider);
+    expect(connectCloudProviderMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+      saveSaasCredentialMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("shows the verdict on the state line — a rejected key reads as rejected", async () => {
+    connectCloudProviderMock.mockResolvedValue({
+      provider: BILLING.provider,
+      status: "NEEDS_RECONNECT",
+    });
+
+    await saveBillingKey();
+
+    const card = await screen.findByTestId(`provider-${BILLING.provider}`);
+    await waitFor(() =>
+      expect(card).toHaveTextContent("Credential rejected — replace it"),
+    );
+    // Not "Checking the connection" (the PROVISIONING the save returned) and
+    // not the CONNECTED the row held before the paste.
+    expect(card).not.toHaveTextContent("Checking the connection");
+  });
+
+  it("shows Connected when the vendor accepted the key", async () => {
+    await saveBillingKey();
+
+    const card = await screen.findByTestId(`provider-${BILLING.provider}`);
+    await waitFor(() => expect(card).toHaveTextContent("Connected"));
+    expect(card).toHaveTextContent("Saved");
+  });
+
+  it("does not probe an mcp track — the paste is the connection", async () => {
+    saveSaasCredentialMock.mockResolvedValue({ ...CRM, state: "CONNECTED", hasCredentials: true });
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByLabelText(/Private app token/);
+    fireEvent.change(screen.getByLabelText(/Private app token/), {
+      target: { value: "pat-" + "fixture" },
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[1]);
+
+    await waitFor(() => expect(saveSaasCredentialMock).toHaveBeenCalled());
+    const card = await screen.findByTestId(`provider-${CRM.provider}`);
+    await waitFor(() => expect(card).toHaveTextContent("Saved"));
+    expect(connectCloudProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed check as an error and keeps the saved state honest", async () => {
+    connectCloudProviderMock.mockRejectedValue(new Error("boom"));
+
+    await saveBillingKey();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn.t check/i);
+    // The key WAS stored — the line says so (PROVISIONING = "Checking the
+    // connection"), and "Saved" is not shown alongside an error.
+    const card = screen.getByTestId(`provider-${BILLING.provider}`);
+    expect(card).toHaveTextContent("Checking the connection");
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 });
 

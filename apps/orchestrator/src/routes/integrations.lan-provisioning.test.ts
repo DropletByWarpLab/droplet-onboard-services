@@ -120,19 +120,70 @@ describe("POST /api/integrations/:provider/connect", () => {
   });
 
   /**
-   * The admission rule is `lanProvisioning`, not "any known provider".
+   * WARP-2842 — re-scoped. This case used to pin "404s a cloud provider": the
+   * admission rule was `lanProvisioning` alone, so no route could ever drive a
+   * pasted cloud credential out of PROVISIONING. A cloud / REST track is now
+   * ADMITTED on the same URL with a body of its own shape — no host, because
+   * there is nothing to dial — and the LAN body is still refused for it: a
+   * `host` posted at Stripe must not reach a code path that opens a database
+   * session against whatever that host is.
    *
-   * A cloud track is connected by pasting a credential; there is nothing for
-   * it to provision, and a `host` posted at one would otherwise reach a code
-   * path that opens a database session against whatever that host is.
-   *
-   * Mutation: swap `requireLanProvider` for `isKnownErpProvider` → red, because
-   * Stripe is a known provider and the call reaches the service.
+   * Mutation: drop `requireCloudProvider` and the cloud branch → red with a
+   * 404 on the first case (the shipped defect); swap the whole admission for
+   * `isKnownErpProvider` with one body → red on the second, because the LAN
+   * body then reaches the service for Stripe.
    */
-  it("404s a cloud provider, and never reaches the service", async () => {
+  it("admits a cloud provider with an EMPTY body and hands the service that provider", async () => {
+    const res = await request(app()).post("/api/integrations/stripe/connect").send({});
+
+    expect(res.status).toBe(200);
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(connectMock.mock.calls[0][0]).toMatchObject({ provider: "stripe" });
+    // No LAN material is invented for it.
+    expect(connectMock.mock.calls[0][0].host).toBe("");
+  });
+
+  it("refuses the LAN body shape for a cloud provider, and never reaches the service", async () => {
     const res = await request(app()).post("/api/integrations/stripe/connect").send(BODY);
 
+    expect(res.status).toBe(400);
+    expect(connectMock).not.toHaveBeenCalled();
+  });
+
+  it("admits a REST-track provider the same way (WARP-2707 — rest is probed like cloud)", async () => {
+    const res = await request(app()).post("/api/integrations/square/connect").send({});
+
+    expect(res.status).toBe(200);
+    expect(connectMock.mock.calls[0][0]).toMatchObject({ provider: "square" });
+  });
+
+  it("still 404s an mcp-track provider — it has no connector to probe", async () => {
+    // `isKnownErpProvider` excludes `mcp` (erp-provider.ts): the paste IS the
+    // connection for that track, and `connect()` would refuse it anyway. The
+    // route says so before the service has to.
+    const res = await request(app()).post("/api/integrations/atlassian/connect").send({});
+
     expect(res.status).toBe(404);
+    expect(connectMock).not.toHaveBeenCalled();
+  });
+
+  it("threads the actor into the cloud connect, so the consent record names who", async () => {
+    await request(app({ id: "u-owner", role: "owner" }))
+      .post("/api/integrations/stripe/connect")
+      .send({});
+
+    expect(connectMock.mock.calls[0][1]).toMatchObject({ actor: expect.objectContaining({ id: "u-owner" }) });
+  });
+
+  it("is admin-gated for a cloud provider too", async () => {
+    // Mutation: register the cloud branch without `requireRole("owner",
+    // "admin")` → red, because a `family` session then re-probes a vendor
+    // with the owner's key.
+    const res = await request(app({ id: "u-2", role: "family" }))
+      .post("/api/integrations/stripe/connect")
+      .send({});
+
+    expect(res.status).toBe(403);
     expect(connectMock).not.toHaveBeenCalled();
   });
 
@@ -213,6 +264,9 @@ describe("POST /api/integrations/:provider/test", () => {
   });
 
   it("404s a provider that declares no LAN provisioning", async () => {
+    // Unchanged by WARP-2842: `test()` validates a body's credentials before
+    // anything is persisted, and a cloud track's credential is on the ROW —
+    // there is nothing in a body for it to test.
     const res = await request(app()).post("/api/integrations/hubspot/test").send(BODY);
 
     expect(res.status).toBe(404);
@@ -228,6 +282,13 @@ describe("POST /api/integrations/:provider/test", () => {
  * Mutation: register the parameterised routes BEFORE the literals → red on the
  * second case, because `/integrations/eaglesoft/connect` then matches
  * `:provider` and the contradiction check rejects the REST track's body.
+ *
+ * WARP-2842 — but the body may only name a LAN track. Before this, `{
+ * provider: "stripe", host: "x" }` posted here reached `connect()` with a
+ * ConnectInput and no row material, the probe rejected CONNECTOR_BLOCKED, and
+ * a Stripe row holding a perfectly good key was driven PROVISIONING →
+ * NOT_CONFIGURED. Now the literal alias is gated to the tracks its body
+ * shape describes; the cloud tracks have `/integrations/:provider/connect`.
  */
 describe("the deprecated eaglesoft literal connect/test", () => {
   it("still answers, defaulting the provider in the service", async () => {
@@ -246,5 +307,31 @@ describe("the deprecated eaglesoft literal connect/test", () => {
 
     expect(res.status).toBe(200);
     expect(connectMock.mock.calls[0][0]).toMatchObject({ provider: "eaglesoft-api" });
+  });
+
+  /**
+   * Mutation: drop the `lan` gate on `provisionBody`'s parsed `provider` →
+   * red, because the call then reaches `svc.connect` with a cloud provider
+   * and a LAN body.
+   */
+  it.each(["stripe", "square", "atlassian"])(
+    "refuses a body provider naming a non-LAN track (%s), and never reaches the service",
+    async (provider) => {
+      const res = await request(app())
+        .post("/api/integrations/eaglesoft/connect")
+        .send({ host: "x", provider });
+
+      expect(res.status).toBe(400);
+      expect(connectMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses the same on the literal test route", async () => {
+    const res = await request(app())
+      .post("/api/integrations/eaglesoft/test")
+      .send({ host: "x", provider: "stripe" });
+
+    expect(res.status).toBe(400);
+    expect(testMock).not.toHaveBeenCalled();
   });
 });
