@@ -85,7 +85,7 @@ import {
   checkSession,
   listUserSessions,
   idleLimitSecondsForRole,
-  absoluteLimitSeconds,
+  absoluteLimitSecondsForRole,
 } from "../services/session.service.js";
 import {
   storeNcToken,
@@ -3548,7 +3548,7 @@ export function createProtectedAuthRouter(
                     // that recomputed them would drift the moment the limits
                     // are made configurable.
                     idleDeadline: sn.lastSeenAt + idleLimitSecondsForRole(sn.role),
-                    absoluteDeadline: sn.createdAt + absoluteLimitSeconds(),
+                    absoluteDeadline: sn.createdAt + absoluteLimitSecondsForRole(sn.role),
                   })),
           };
         }),

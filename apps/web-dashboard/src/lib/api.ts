@@ -1774,6 +1774,12 @@ export interface SshAccessStatus {
   enabled: boolean;
   status: "applied" | "pending" | "unknown";
   changedAt: string | null;
+  /** WARP-2887 — the troubleshooting login, as the HOST reports it. Absent on
+   *  an older orchestrator; treat as unknown. */
+  login?: {
+    username: string | null;
+    status: "set" | "none" | "pending" | "refused" | "unknown";
+  };
 }
 
 export async function fetchSshAccess(): Promise<SshAccessStatus> {
@@ -1791,6 +1797,21 @@ export async function setSshAccess(enabled: boolean): Promise<NetworkCommandResu
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update SSH access");
+  return data;
+}
+
+/** WARP-2887 — set the SSH login (username + password). Tier 3 — answers 202
+ *  `confirmation_required`. The password is hashed server-side before any
+ *  token is minted; it is sent once, over the session's TLS, and never
+ *  echoed back. */
+export async function setSshLogin(username: string, password: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/ssh/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to save the SSH login");
   return data;
 }
 
