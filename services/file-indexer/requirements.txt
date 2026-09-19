@@ -1,5 +1,5 @@
 watchdog>=6.0.0
-psycopg2-binary>=2.9.12
+psycopg2-binary>=2.9.13
 paho-mqtt>=2.1.0
 grpcio>=1.83.1
 grpcio-tools>=1.83.1
@@ -21,7 +21,7 @@ olefile>=0.47
 # ODF (.odt/.ods/.odp/.odg) is handled with stdlib zipfile + ElementTree —
 # no odfpy needed, see extractors/odf.py.
 # WARP-201 RAG Phase 1 extractors
-pypdf>=6.17.0
+pypdf>=6.18.0
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
 # pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
 # rebuilds words from glyph geometry. MIT-licensed.

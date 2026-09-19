@@ -1812,7 +1812,23 @@ def vpn_setup(req: VpnSetupRequest):
 
         if r.vpn.interface_exists(req.interface):
             info = r.vpn.get_interface_info(req.interface)
-            return {"status": "ok", "created": False, **info}
+            # WARP-2689 — report kernel truth on the idempotent branch TOO, not
+            # only on create below. A uci `wg0` section exists on every box
+            # after its first setup (and after this PR's reconciler runs), so
+            # this is the branch the field actually hits; returning `created:
+            # False` WITHOUT `interface_live` here left every consumer's
+            # `setup.interface_live === false` gate — the mint 503, the profile
+            # 503, provisionOverlayPeer, the reconciler — reading `undefined`
+            # and never firing on exactly the routers WARP-2689 is about. The
+            # value is three-valued (True/False/None); None = the router cannot
+            # say (no rpcd-mod-wireguard / ACL), and callers must not treat that
+            # as either proof or failure.
+            return {
+                "status": "ok",
+                "created": False,
+                "interface_live": r.vpn.interface_is_live(req.interface),
+                **info,
+            }
 
         # Wrap in safe_apply so a misconfigured firewall change can't lock
         # the orchestrator out of the router. 60s timeout matches /config/apply.

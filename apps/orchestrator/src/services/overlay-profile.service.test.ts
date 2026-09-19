@@ -156,6 +156,36 @@ describe("provisionOverlayPeer", () => {
     expect(rows[0].lastSessionAt).toBeInstanceOf(Date);
     expect(rows[0].lastSessionAt).toEqual(new Date("2026-08-05T00:00:00Z"));
   });
+
+  // WARP-2689 — `setup` answers from uci. When the router adds that the
+  // kernel device does not exist (no WireGuard support), provisioning must
+  // stop: an active row + a router peer nothing can handshake with would
+  // leave the device "approved" and dead, with no signal anywhere.
+  it("refuses to provision when the router reports interface_live=false", async () => {
+    const { d, calls, rows } = deps({
+      router: {
+        setup: vi.fn(async () => ({ public_key: "SRVPUB=", interface_live: false })),
+        installPeer: vi.fn(async () => ({})),
+      },
+    });
+    await expect(provisionOverlayPeer(d, input)).rejects.toThrow(/no WireGuard support/);
+    expect(calls).not.toContain("installPeer");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("provisions normally when the router cannot say (interface_live null)", async () => {
+    const { d, calls } = deps({
+      router: {
+        setup: vi.fn(async () => ({ public_key: "SRVPUB=", interface_live: null })),
+        installPeer: vi.fn(async () => {
+          calls.push("installPeer");
+          return {};
+        }),
+      },
+    });
+    await provisionOverlayPeer(d, input);
+    expect(calls).toContain("installPeer");
+  });
 });
 
 // The unit assertions above pin the field; this pins the CONSEQUENCE. The row

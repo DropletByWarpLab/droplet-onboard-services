@@ -20,6 +20,7 @@
 import { useState } from "react";
 import { Check, Cpu, Loader2 } from "lucide-react";
 import { setActiveModel } from "@/lib/api";
+import { formatContext } from "./LocalModelCard";
 import type { LocalModelRow } from "@/lib/types";
 
 interface ActiveModelPickerProps {
@@ -74,91 +75,91 @@ export function ActiveModelPicker({
         <span className="sx">The model your Droplet answers with</span>
       </div>
 
-      <div
-        className="card"
-        role={canManage ? "radiogroup" : undefined}
-        aria-label={canManage ? "Active model" : undefined}
-        style={{ padding: 6 }}
-      >
-        <div className="rows">
-          {models.map((m) => {
-            const isActive = idOf(m) === effective;
-            const isPending = pending === idOf(m);
-            const interactive = canManage && !isPending;
-            return (
-              <button
-                key={idOf(m)}
-                type="button"
-                role={canManage ? "radio" : undefined}
-                aria-checked={canManage ? isActive : undefined}
-                disabled={!interactive || isActive}
-                onClick={() => choose(idOf(m))}
-                className="row"
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  background: isActive ? "var(--brand-subtle)" : "transparent",
-                  cursor:
-                    !canManage || isActive
-                      ? "default"
-                      : isPending
-                        ? "progress"
-                        : "pointer",
-                }}
-              >
-                <span
-                  className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
+      {/* Same 2-up grid as the Local cards below, so this card shares their
+          column width and left/right edges instead of stretching a single
+          row across the whole page. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div
+          className="card"
+          role={canManage ? "radiogroup" : undefined}
+          aria-label={canManage ? "Active model" : undefined}
+          style={{ padding: 6 }}
+        >
+          <div className="rows">
+            {models.map((m) => {
+              const isActive = idOf(m) === effective;
+              const isPending = pending === idOf(m);
+              const interactive = canManage && !isPending;
+              // What actually distinguishes one installed model from another:
+              // family, size, quantization, context window, and whether it is
+              // already resident (an unloaded model pays a load on first use).
+              const spec = [
+                m.family,
+                m.parameterSize,
+                m.quantization,
+                m.contextLength != null
+                  ? `${formatContext(m.contextLength)} context`
+                  : null,
+                m.loaded ? "in memory" : null,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                <button
+                  key={idOf(m)}
+                  type="button"
+                  role={canManage ? "radio" : undefined}
+                  aria-checked={canManage ? isActive : undefined}
+                  disabled={!interactive || isActive}
+                  onClick={() => choose(idOf(m))}
+                  className="lrow enabled:hover:bg-[var(--inset)] focus-visible:outline-2 focus-visible:outline-[var(--brand)]"
                   style={{
-                    background: "var(--brand-subtle)",
-                    color: "var(--brand)",
+                    width: "100%",
+                    textAlign: "left",
+                    border: 0,
+                    font: "inherit",
+                    padding: "10px 12px",
+                    borderRadius: 11,
+                    background: isActive ? "var(--brand-subtle)" : "transparent",
+                    cursor:
+                      !canManage || isActive
+                        ? "default"
+                        : isPending
+                          ? "progress"
+                          : "pointer",
                   }}
-                  aria-hidden
                 >
-                  <Cpu size={16} strokeWidth={2} />
-                </span>
+                  <span className="ri brand" aria-hidden>
+                    <Cpu size={17} strokeWidth={2} />
+                  </span>
 
-                <span className="flex-1 min-w-0">
-                  <span
-                    className="type-subheadline font-medium truncate block"
-                    style={{ color: "var(--text)" }}
-                  >
-                    {m.name}
+                  <span className="rt">
+                    <span className="nm">{m.name}</span>
+                    <span className="sub" title={spec}>
+                      {spec}
+                    </span>
                   </span>
-                  <span
-                    className="type-caption-1 truncate block"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    {m.family}
-                  </span>
-                </span>
 
-                {isPending ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 type-caption-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <Loader2 size={14} className="animate-spin" aria-hidden />
-                    Switching…
-                  </span>
-                ) : isActive ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 type-caption-1 font-medium"
-                    style={{ color: "var(--brand)" }}
-                  >
-                    <Check size={14} strokeWidth={2.5} aria-hidden />
-                    Active
-                  </span>
-                ) : canManage ? (
-                  <span
-                    className="type-caption-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    Use this
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+                  {isPending ? (
+                    <span className="rmeta inline-flex items-center gap-1.5">
+                      <Loader2 size={14} className="animate-spin" aria-hidden />
+                      Switching…
+                    </span>
+                  ) : isActive ? (
+                    <span
+                      className="rmeta inline-flex items-center gap-1.5 font-medium"
+                      style={{ color: "var(--brand)" }}
+                    >
+                      <Check size={14} strokeWidth={2.5} aria-hidden />
+                      Active
+                    </span>
+                  ) : canManage ? (
+                    <span className="rmeta">Use this</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 

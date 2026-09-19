@@ -106,7 +106,7 @@ function openDrawer(): HTMLElement {
   return screen.getByRole("dialog");
 }
 
-const NO_CAPS = { claudeActivity: false, ragEval: false };
+const NO_CAPS = { claudeActivity: false, ragEval: false, medicalConnector: false };
 const allOn = () => true;
 
 beforeEach(() => {

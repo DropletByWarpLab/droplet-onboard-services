@@ -146,7 +146,7 @@ describe("/admin — Overview", () => {
 });
 
 describe("/admin — nav entry", () => {
-  const caps = { claudeActivity: true, ragEval: true };
+  const caps = { claudeActivity: true, ragEval: true, medicalConnector: true };
   const allModulesOn = () => true;
   const adminGroup = () => NAV_GROUPS.find((g) => g.label === "Admin")!;
 

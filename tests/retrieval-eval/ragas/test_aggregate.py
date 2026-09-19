@@ -664,3 +664,24 @@ def test_render_markdown_tolerates_none_stats() -> None:
     assert "Queries: 20" in md
     assert "| faithfulness | 0.800 | 0.900 | 0.850 |" in md
     assert "| answer_relevancy | n/a | n/a | n/a |" in md
+
+
+# ─── WARP-2879: a 4xx names its cause ───────────────────────────────────────
+
+def test_call_search_surfaces_the_error_body(monkeypatch) -> None:
+    """"HTTP Error 400: Bad Request" hid eval_user_required for a month; the
+    orchestrator puts the cause in the body, so the runner must too."""
+    import io
+    import urllib.error
+
+    import ragas_runner
+
+    def boom(req, timeout=None, context=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {},
+            io.BytesIO(b'{"error":"eval_user_required"}'),
+        )
+
+    monkeypatch.setattr(ragas_runner.urllib.request, "urlopen", boom)
+    with pytest.raises(RuntimeError, match="eval_user_required"):
+        ragas_runner.call_search("http://orchestrator:3000", "hybrid", "q", 10)

@@ -407,3 +407,145 @@ describe("/downloads — no false provenance", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// WARP-2889 — every staged package is reachable, not just the primary
+// ---------------------------------------------------------------------------
+// gen-catalog pins every installer format in a platform directory and the API
+// serves each one after its digest check. The page used to link only the
+// catalog's `primary`, so the Tauri bundle's MSI — staged, verified, served —
+// was unreachable from the one place a customer looks.
+describe("/downloads — every staged package is reachable", () => {
+  const windowsEntry = WINDOWS_CATALOG.platforms[0]!;
+  const MSI = {
+    name: "Droplet_0.2.0_x64_en-US.msi",
+    kind: "installer" as const,
+    size: 211763200,
+    sha256: "c".repeat(64),
+    signs: null,
+    signatureAlgorithm: null,
+    url: "/api/app-downloads/windows/Droplet_0.2.0_x64_en-US.msi",
+  };
+  const TWO_FORMATS: AppDownloadCatalog = {
+    ...WINDOWS_CATALOG,
+    platforms: [{ ...windowsEntry, assets: [...windowsEntry.assets, MSI] }],
+  };
+
+  it("lists the MSI beneath the primary button as its own download", async () => {
+    fetchAppDownloadsMock.mockResolvedValue(TWO_FORMATS);
+    render(<DownloadsPage />);
+
+    // The main action is still the NSIS exe …
+    const main = await screen.findByRole("link", {
+      name: /download for windows/i,
+    });
+    expect(main).toHaveAttribute(
+      "href",
+      "/api/app-downloads/windows/Droplet_0.2.0_x64-setup.exe",
+    );
+
+    // … and the MSI is a real, separate download: linked, downloadable, and
+    // NOT dressed up as a second primary button.
+    const msi = await screen.findByRole("link", {
+      name: /Droplet_0\.2\.0_x64_en-US\.msi/,
+    });
+    expect(msi).toHaveAttribute("href", MSI.url);
+    expect(msi).toHaveAttribute("download");
+    expect(msi).not.toHaveClass("dl-btn");
+
+    // Its own digest is reachable too — a customer verifies the file they
+    // actually downloaded, not the other format's.
+    expect(screen.getByTitle("c".repeat(64))).toBeInTheDocument();
+  });
+
+  it("shows no 'also available' list when a platform has a single installer", async () => {
+    fetchAppDownloadsMock.mockResolvedValue(WINDOWS_CATALOG);
+    render(<DownloadsPage />);
+    await screen.findByRole("link", { name: /download for windows/i });
+
+    expect(screen.queryByText(/also available/i)).toBeNull();
+  });
+
+  it("still offers a download when installers are staged but no primary is named", async () => {
+    // `primary` is optional in the catalog schema. A catalog that stages an
+    // installer without naming one used to render "No Windows app has been
+    // added to this box yet" — false, with the API serving the file.
+    fetchAppDownloadsMock.mockResolvedValue({
+      ...WINDOWS_CATALOG,
+      platforms: [{ ...windowsEntry, primary: null }],
+    } satisfies AppDownloadCatalog);
+    render(<DownloadsPage />);
+
+    const main = await screen.findByRole("link", {
+      name: /download for windows/i,
+    });
+    expect(main).toHaveAttribute(
+      "href",
+      "/api/app-downloads/windows/Droplet_0.2.0_x64-setup.exe",
+    );
+    expect(screen.queryByText(/no windows app has been added/i)).toBeNull();
+  });
+
+  it("explains the sideload prompt next to a staged Android APK", async () => {
+    fetchAppDownloadsMock.mockResolvedValue({
+      ...WINDOWS_CATALOG,
+      platforms: [
+        {
+          platform: "android",
+          version: "0.3.0",
+          primary: "Droplet_0.3.0.apk",
+          storeUrl: null,
+          note: null,
+          minOsVersion: "Android 8.0 or newer",
+          releasedAt: null,
+          assets: [
+            {
+              name: "Droplet_0.3.0.apk",
+              kind: "installer",
+              size: 41492466,
+              sha256: "d".repeat(64),
+              signs: null,
+              signatureAlgorithm: null,
+              url: "/api/app-downloads/android/Droplet_0.3.0.apk",
+            },
+          ],
+        },
+      ],
+    } satisfies AppDownloadCatalog);
+    render(<DownloadsPage />);
+
+    const apk = await screen.findByRole("link", {
+      name: /download for android/i,
+    });
+    expect(apk).toHaveAttribute("href", "/api/app-downloads/android/Droplet_0.3.0.apk");
+    expect(apk).toHaveAttribute("download");
+    expect(
+      screen.getByText(/allow installs from this browser/i),
+    ).toBeInTheDocument();
+    // A staged APK is the supported path today; the Android card must not
+    // fall through to the "isn’t published yet" copy for an unstaged phone
+    // app. (The iOS card, unstaged in this fixture, still says its own.)
+    expect(screen.queryByText(/the android app isn’t published yet/i)).toBeNull();
+  });
+
+  it("keeps the Windows SmartScreen note true without a staged signature", async () => {
+    // The old copy said the installer "is signed for the app's own updater".
+    // A build made with createUpdaterArtifacts:false has no minisign .sig, so
+    // the note must explain the warning without claiming a signature exists.
+    fetchAppDownloadsMock.mockResolvedValue({
+      ...WINDOWS_CATALOG,
+      platforms: [
+        {
+          ...windowsEntry,
+          assets: windowsEntry.assets.filter((a) => a.kind === "installer"),
+        },
+      ],
+    } satisfies AppDownloadCatalog);
+    render(<DownloadsPage />);
+    await screen.findByRole("link", { name: /download for windows/i });
+
+    expect(await screen.findByText(/unknown publisher/i)).toBeInTheDocument();
+    expect(screen.queryByText(/signed for the app/i)).toBeNull();
+    expect(screen.queryByRole("link", { name: /minisign/i })).toBeNull();
+  });
+});

@@ -348,3 +348,142 @@ describe("the artefacts ship through setup.sh, not by hand (guard rule 20)", () 
     expect(INSTALLER).not.toMatch(/systemctl\s+enable\s+(--now\s+)?droplet-ssh-access\.service/);
   });
 });
+
+describe("the login half (WARP-2887) keeps the same posture", () => {
+  const body = code(SCRIPT);
+
+  it("reads the two login keys in the same single bounded pass, ahead of the access key", () => {
+    expect(body).toMatch(/DROPLET_SSH_LOGIN_USER\[\[:space:\]\]\*=/);
+    expect(body).toMatch(/DROPLET_SSH_LOGIN_HASH\[\[:space:\]\]\*=/);
+    // The capture group IS the grammar: a portable username, a $6$ hash.
+    expect(body).toMatch(/\\\(\[a-z\]\[a-z0-9_-\]\*\\\)/);
+    expect(body).toMatch(/\\\$6\\\$rounds=100000\\\$\[\.\/0-9A-Za-z\]\\\{1,16\\\}\\\$\[\.\/0-9A-Za-z\]\\\{86\\\}/);
+    // The pass still quits at the access key — the only `q` — so a
+    // never-ending file cannot hang this root process (the fifo case in
+    // tests/droplet-ssh-access.test.sh), and the login expressions sit
+    // before it in the same sed invocation.
+    expect(body.match(/;q;\}/g)?.length).toBe(1);
+    const user = body.indexOf("s//user=\\1/p;d;");
+    const hash = body.indexOf("s//hash=\\1/p;d;");
+    const access = body.indexOf("s//access=\\1/p;q;");
+    expect(user).toBeGreaterThan(-1);
+    expect(hash).toBeGreaterThan(user);
+    expect(access).toBeGreaterThan(hash);
+    // No second read of the file: every later extraction is over `$parsed`.
+    expect(body.match(/"\$INTENT_FILE"/g)?.length).toBe(2); // the -r test + the one sed
+  });
+
+  it("manages accounts in the droplet-ssh group only and refuses root/droplet by name", () => {
+    expect(body).toMatch(/SSH_GROUP="droplet-ssh"/);
+    expect(body).toMatch(/root\|droplet\)/);
+    expect(body).toMatch(/is_managed_account/);
+    expect(body).toMatch(/useradd -m -s \/bin\/bash -G "\$SSH_GROUP"/);
+  });
+
+  it("hands the hash to chpasswd -e and never to a shell", () => {
+    expect(body).toMatch(/chpasswd -e/);
+    expect(body).not.toMatch(/\beval\b/);
+    expect(body).not.toMatch(/\bpasswd\s+"\$login_user"\s*<</);
+  });
+
+  it("never writes a value from the intent file into the sshd config", () => {
+    // The Match block is fixed text between sentinels; the group name comes
+    // from this script's own constant, not from the file. Read the function
+    // that writes the block and assert no intent-derived variable appears in
+    // it at all.
+    const fn = /install_sshd_match\(\) \{\n([\s\S]*?)\n\}/.exec(body)?.[1];
+    expect(fn).toBeTruthy();
+    expect(fn).toMatch(/Match Group %s/);
+    expect(fn).not.toMatch(/\$login_/);
+    expect(fn).not.toMatch(/\$parsed/);
+  });
+
+  it("validates the sshd config it wrote and backs out on refusal", () => {
+    expect(body).toMatch(/sshd -t/);
+    expect(body).toMatch(/remove_sshd_match/);
+  });
+
+  it("writes the sshd block BEFORE it touches any account, so a refusal changes nothing", () => {
+    // Inside apply_login: the one step that can fail after the name checks
+    // (`sshd -t`) must come before useradd / chpasswd / usermod -L. The
+    // reverse order left a refused login with the new account live and the
+    // previous one locked, and the readback naming the wrong account.
+    const fn = /apply_login\(\) \{\n([\s\S]*?)\n\}/.exec(body)?.[1] ?? "";
+    const sshd = fn.indexOf("install_sshd_match");
+    expect(sshd).toBeGreaterThan(-1);
+    for (const mutation of ["useradd ", "chpasswd -e", "usermod -aG", "usermod -L", "usermod -U"]) {
+      expect(fn.indexOf(mutation)).toBeGreaterThan(sshd);
+    }
+  });
+
+  it("locks every other droplet-ssh member so exactly one login is live", () => {
+    expect(body).toMatch(/usermod -L "\$_member"/);
+  });
+
+  it("reports the login the SYSTEM holds, not the one the intent asked for", () => {
+    expect(body).toMatch(/passwd -S "\$_member"/);
+    expect(body).toMatch(/login_user=\$live_login/);
+    expect(body).not.toMatch(/login_user=\$login_user/);
+  });
+
+  it("still adds no firewall rule (the LAN-only guarantee is unchanged)", () => {
+    expect(body).not.toMatch(/\biptables\b|\bnft\b|\bufw\b|upnp/i);
+  });
+});
+
+describe("the login half can actually run under its unit (WARP-2887)", () => {
+  // The DOA finding: ProtectSystem=strict + ProtectHome=yes made /etc and
+  // /home read-only, so every useradd/chpasswd/sshd_config write failed EROFS
+  // and every login save reported "refused" forever. These pin the widening
+  // that lets the login apply — a future re-tightening that re-DOAs the
+  // feature fails here instead of on a customer's box.
+  it("carves /etc and /home read-write so useradd/chpasswd/sshd_config can write", () => {
+    const rw = /^ReadWritePaths=(.*)$/m.exec(code(UNIT))?.[1] ?? "";
+    // Tokens may carry systemd's optional '-' prefix ("carve out IF present,
+    // don't hard-fail if absent") — tests/systemd-readwritepaths-must-exist.
+    // test.sh REQUIRES that prefix so the unit-sandbox job stays green, so
+    // normalise it away here: this guard's job is only that both paths are
+    // carved read-write, not which form the prefix takes.
+    const carved = rw.split(/\s+/).map((p) => p.replace(/^-/, ""));
+    expect(carved).toEqual(expect.arrayContaining(["/etc", "/home"]));
+  });
+
+  it("turns ProtectHome OFF (it takes precedence over a /home carve-out)", () => {
+    expect(code(UNIT)).toMatch(/^ProtectHome=no$/m);
+    expect(code(UNIT)).not.toMatch(/^ProtectHome=yes$/m);
+  });
+
+  it("keeps ProtectSystem=strict — everything outside the carve-outs stays read-only", () => {
+    expect(code(UNIT)).toMatch(/^ProtectSystem=strict$/m);
+  });
+
+  it("still has no EnvironmentFile and no [Install] section", () => {
+    expect(code(UNIT)).not.toMatch(/EnvironmentFile/i);
+    expect(code(UNIT)).not.toMatch(/\[Install\]/);
+  });
+});
+
+describe("apply_login order + cleanup (WARP-2887 review)", () => {
+  const fn = /apply_login\(\) \{\n([\s\S]*?)\n\}/.exec(SCRIPT)?.[1] ?? "";
+
+  it("sets the password before granting sudo, so a chpasswd failure leaves no passwordless sudo account", () => {
+    const chpasswd = fn.indexOf("chpasswd -e");
+    const sudo = fn.indexOf("usermod -aG sudo");
+    expect(chpasswd).toBeGreaterThan(-1);
+    expect(sudo).toBeGreaterThan(chpasswd);
+  });
+
+  it("removes a just-created account on a later failure (no half-provisioned orphan)", () => {
+    expect(fn).toMatch(/_created=1/);
+    expect(fn).toMatch(/userdel -r/);
+  });
+
+  it("enforces the shared 3..32 length bound, not just useradd's implicit max", () => {
+    expect(fn).toMatch(/-lt 3/);
+    expect(fn).toMatch(/-gt 32/);
+  });
+
+  it("does not report success when a previous login could not be locked", () => {
+    expect(fn).toMatch(/_lock_failed/);
+  });
+});
