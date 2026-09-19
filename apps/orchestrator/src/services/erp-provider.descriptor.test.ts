@@ -17,7 +17,7 @@
  * `@ts-expect-error` case is a `tsc` assertion that happens to sit in a test
  * file; it runs under ship-check, not under vitest.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   DATASETS,
   PRACTICE_DATASETS,
@@ -34,7 +34,10 @@ import {
   ConnectorBlockedError,
   RestProfileConnector,
   restProfileFor,
+  InvalidRestProfileError,
+  UnsafeRestBaseUrlError,
   type DatasetName as ConnectorDatasetName,
+  type RestVendorProfile,
   REST_VENDOR_PROFILES,
 } from "@droplet/erp-connector";
 import {
@@ -53,6 +56,7 @@ import {
   credentialSecretFieldsFor,
   validateCredentialFieldValue,
   CREDENTIAL_VARIANT_FIELD,
+  providerConfigKeyFor,
   type DatasetName as SharedDatasetName,
   type ProviderDescriptor,
   type CredentialVariant,
@@ -69,6 +73,8 @@ import {
   __resetCallBudgetsForTest,
   KNOWN_ERP_PROVIDERS,
   CLOUD_ERP_PROVIDERS,
+  assertRestProfileAgreesWithDescriptor,
+  __setRestProfileLookupForTest,
 } from "./erp-provider.js";
 
 /**
@@ -165,6 +171,8 @@ afterEach(() => {
   __resetRegisteredProvidersForTest();
   __resetCallBudgetsForTest();
   unregisterConnectorFactory(FIXTURE_PROVIDER.id);
+  __setRestProfileLookupForTest(null);
+  vi.unstubAllGlobals();
 });
 
 // ===========================================================================
@@ -1101,5 +1109,277 @@ describe("the hub catalog is derived from the same descriptors", () => {
         "number",
       );
     }
+  });
+});
+
+// ===========================================================================
+// WARP-2920 — a dynamic-host REST profile resolves its host from the field
+// the PROFILE names, and the three declarations of that field cannot drift
+// ===========================================================================
+
+/**
+ * The first dynamic-host vendor on the declarative track, as a fixture.
+ *
+ * No shipped REST profile has `baseUrl.kind: "dynamic"` yet — Square and
+ * Cal.com are both fixed-host — which is the only reason the defect this
+ * section pins never fired: `restProfileFactory` read the per-account host off
+ * `descriptor.dynamicEgress.configKey`, which every shipped descriptor writes
+ * in the DOCUMENTATION shape `IntegrationConnection.providerConfig.<field>`
+ * (mirroring the `config_key` of its `allowed-egress.yaml` entry), while
+ * `providerConfigString` looks a config value up by its BARE field name. The
+ * first vendor to follow the registry's own convention would have resolved
+ * `undefined`, and `assertSafeRestBaseUrl` would have refused every one of its
+ * connections at construction — with a green build.
+ *
+ * Injected through `__setRestProfileLookupForTest` rather than appended to
+ * `REST_VENDOR_PROFILES`: a fixture in the shipped registry would be a vendor
+ * the hub could list.
+ */
+const FIXTURE_DYNAMIC_REST_PROFILE: RestVendorProfile = {
+  provider: "fixture-tenant-api",
+  baseUrl: {
+    kind: "dynamic",
+    configField: "companyDomain",
+    allowedSuffixes: [".ledger.example"],
+    allowedHosts: [],
+  },
+  auth: { headerName: "Authorization", valueTemplate: "Bearer {{apiKey}}" },
+  constantHeaders: {},
+  probePath: "/v1/me",
+  datasets: [
+    {
+      dataset: "company",
+      path: "/v1/companies",
+      watermark: { name: "updated_since", location: "query", format: "iso", complete: true },
+      pagination: { kind: "cursor", nextCursorPath: "meta.next", cursorParam: "cursor" },
+      rowsPath: "data",
+      fieldMap: { company_id: "id", name: "name", updated_at: "updated" },
+    },
+  ],
+};
+
+/** The descriptor half, in exactly the Pipedrive `companyDomain` shape
+ *  (`provider-registry.ts`): a non-secret `providerConfig` field that SELECTS
+ *  THE HOST, and a `dynamicEgress.configKey` in the registry's convention. */
+const FIXTURE_DYNAMIC_REST_DESCRIPTOR: ProviderDescriptor = {
+  id: "fixture-tenant-api",
+  displayName: "Fixture Tenant API",
+  category: "Accounting",
+  track: "rest",
+  credentialFields: [
+    {
+      name: "apiKey",
+      label: "API key",
+      type: "string",
+      required: true,
+      secret: true,
+      storage: "encrypted",
+    },
+    {
+      name: "companyDomain",
+      label: "Company domain",
+      type: "string",
+      required: true,
+      secret: false,
+      storage: "providerConfig",
+      pattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+    },
+  ],
+  egressHosts: [],
+  dynamicEgress: {
+    configKey: "IntegrationConnection.providerConfig.companyDomain",
+    registryId: "fixture-tenant-api",
+  },
+  datasets: ["company"],
+};
+
+/** A fetch stub that records the URL the connector dials and answers 200. */
+function recordingFetch(): { calls: string[] } {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    calls.push(url);
+    return {
+      ok: true,
+      status: 200,
+      redirected: false,
+      headers: { get: () => null } as unknown as Headers,
+      json: async () => ({}),
+      text: async () => "{}",
+    } as unknown as Response;
+  });
+  return { calls };
+}
+
+/** Wire the fixture pair in through the REAL dispatch path — the descriptor
+ *  registry `connectorForProvider` reads, and the profile lookup
+ *  `connectorFactoryFor` / `restProfileFactory` consult. */
+function registerDynamicFixture(
+  profile: RestVendorProfile = FIXTURE_DYNAMIC_REST_PROFILE,
+  descriptor: ProviderDescriptor = FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+): void {
+  registerProviderDescriptor(descriptor);
+  __setRestProfileLookupForTest((id) => (id === profile.provider ? profile : restProfileFor(id)));
+}
+
+describe("WARP-2920 — a dynamic-host REST profile dials the host the customer's row names", () => {
+  it("🔴 constructs through the REAL factory and dials <companyDomain>.<suffix>", async () => {
+    // Mutation: resolve `hostConfigValue` from `descriptor.dynamicEgress.configKey`
+    // again (the pre-WARP-2920 line) → `providerConfigString` looks up a key
+    // named "IntegrationConnection.providerConfig.companyDomain" on a row that
+    // carries `companyDomain`, gets undefined, and construction throws
+    // `UnsafeRestBaseUrlError` — red here, before the fetch assertion.
+    registerDynamicFixture();
+    const cfg = parseProviderConfig("fixture-tenant-api", { companyDomain: "acme" });
+    expect(cfg).toStrictEqual({ provider: "fixture-tenant-api", companyDomain: "acme" });
+
+    const connector = connectorForProvider({
+      provider: "fixture-tenant-api",
+      host: "",
+      connectionId: "conn-dyn",
+      providerConfig: cfg,
+      cloudTokens: { resolveSaasSecret: async () => "fixture-key" },
+    });
+    expect(connector).toBeInstanceOf(RestProfileConnector);
+
+    // The resolved origin is private to the connector by design, so it is
+    // observed the only way a customer would: by what the probe dials.
+    const fetch = recordingFetch();
+    await expect(connector.health()).resolves.toEqual({ ok: true });
+    expect(fetch.calls).toEqual(["https://acme.ledger.example/v1/me"]);
+  });
+
+  it("still refuses a row that carries NO value for the field, by the field's bare name", () => {
+    // The refusal the guard already had, now reached with the right key: the
+    // message names `companyDomain`, the thing the owner can fix, and not a
+    // dotted documentation path.
+    registerDynamicFixture();
+    const build = () =>
+      connectorForProvider({
+        provider: "fixture-tenant-api",
+        host: "",
+        connectionId: "conn-dyn",
+        providerConfig: { provider: "fixture-tenant-api" },
+      });
+    expect(build).toThrow(UnsafeRestBaseUrlError);
+    expect(build).toThrow(/supplies no "companyDomain"/);
+  });
+});
+
+describe("WARP-2920 — the profile, the descriptor and the credential field agree on the host field", () => {
+  // Sits here rather than in `rest-track.test.ts` because this is the ONE
+  // package that imports both `@droplet/erp-connector` (the profile) and
+  // `@droplet/shared-types` (the descriptor); the neighbours above — "declares
+  // datasets that the connectors actually report serving", "dispatches every
+  // REST provider to a RestProfileConnector" — are the same kind of
+  // profile↔descriptor join. `rest-track.test.ts` cannot see a descriptor.
+
+  it("holds for every SHIPPED REST profile", () => {
+    // Vacuous over the dynamic arm today (both shipped profiles are static),
+    // which is exactly why the fixture cases below exist. It stays here so
+    // the first dynamic vendor is checked the moment it lands.
+    expect(REST_VENDOR_PROFILES.length).toBeGreaterThan(0);
+    for (const profile of REST_VENDOR_PROFILES) {
+      expect(() =>
+        assertRestProfileAgreesWithDescriptor(profile, providerDescriptor(profile.provider)),
+      ).not.toThrow();
+    }
+  });
+
+  it("accepts the fixture pair, whose configKey follows the registry's convention", () => {
+    expect(providerConfigKeyFor("companyDomain")).toBe(
+      "IntegrationConnection.providerConfig.companyDomain",
+    );
+    expect(() =>
+      assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, FIXTURE_DYNAMIC_REST_DESCRIPTOR),
+    ).not.toThrow();
+  });
+
+  it("🔴 refuses a descriptor whose configKey is the BARE field name, naming the provider", () => {
+    // The drift the defect was: one declaration in the bare shape, one in the
+    // dotted shape, and a reader that assumed the wrong one.
+    const drifted: ProviderDescriptor = {
+      ...FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+      dynamicEgress: { configKey: "companyDomain", registryId: "fixture-tenant-api" },
+    };
+    const check = () => assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, drifted);
+    expect(check).toThrow(InvalidRestProfileError);
+    expect(check).toThrow(/fixture-tenant-api.*dynamicEgress\.configKey/);
+  });
+
+  it("🔴 refuses a descriptor with no dynamicEgress at all", () => {
+    const { dynamicEgress: _omitted, ...withoutEgress } = FIXTURE_DYNAMIC_REST_DESCRIPTOR;
+    expect(() =>
+      assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, withoutEgress as ProviderDescriptor),
+    ).toThrow(/declares no dynamicEgress/);
+    expect(() => assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, undefined)).toThrow(
+      /has no descriptor/,
+    );
+  });
+
+  it("🔴 refuses a descriptor that does not declare the host field as a non-secret providerConfig field", () => {
+    // Absent entirely: the setup form never asks for it, so no row can carry it.
+    const missing: ProviderDescriptor = {
+      ...FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+      credentialFields: FIXTURE_DYNAMIC_REST_DESCRIPTOR.credentialFields.filter(
+        (f) => f.name !== "companyDomain",
+      ),
+    };
+    expect(() => assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, missing)).toThrow(
+      /no credentialFields entry named "companyDomain"/,
+    );
+
+    // Present but sealed: `parseProviderConfig` never emits an `encrypted`
+    // field into providerConfig, so the factory could not read it either.
+    const sealed: ProviderDescriptor = {
+      ...FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+      credentialFields: FIXTURE_DYNAMIC_REST_DESCRIPTOR.credentialFields.map((f) =>
+        f.name === "companyDomain" ? { ...f, secret: true, storage: "encrypted" as const } : f,
+      ),
+    };
+    expect(() => assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, sealed)).toThrow(
+      /storage "providerConfig"/,
+    );
+
+    // Stored in the clear but marked secret: the hub would mask the one value
+    // the owner most needs to see when a connection dials the wrong place.
+    const secret: ProviderDescriptor = {
+      ...FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+      credentialFields: FIXTURE_DYNAMIC_REST_DESCRIPTOR.credentialFields.map((f) =>
+        f.name === "companyDomain" ? { ...f, secret: true } : f,
+      ),
+    };
+    expect(() => assertRestProfileAgreesWithDescriptor(FIXTURE_DYNAMIC_REST_PROFILE, secret)).toThrow(
+      /secret: false/,
+    );
+  });
+
+  it("refuses a STATIC profile whose descriptor claims a dynamic egress", () => {
+    // The same drift from the other side: a descriptor that says "the host is
+    // per-connection" over a profile that dials one fixed origin.
+    const staticProfile: RestVendorProfile = {
+      ...FIXTURE_DYNAMIC_REST_PROFILE,
+      baseUrl: { kind: "static", origin: "https://api.ledger.example" },
+    };
+    expect(() =>
+      assertRestProfileAgreesWithDescriptor(staticProfile, FIXTURE_DYNAMIC_REST_DESCRIPTOR),
+    ).toThrow(/static.*dynamicEgress/);
+  });
+
+  it("🔴 the factory runs the guard, so a drifted pair cannot build a connection", () => {
+    // Mutation: drop the `assertRestProfileAgreesWithDescriptor` call from
+    // `restProfileFactory` → this builds a connector (or throws the host
+    // guard's error instead) → red.
+    registerDynamicFixture(FIXTURE_DYNAMIC_REST_PROFILE, {
+      ...FIXTURE_DYNAMIC_REST_DESCRIPTOR,
+      dynamicEgress: { configKey: "companyDomain", registryId: "fixture-tenant-api" },
+    });
+    expect(() =>
+      connectorForProvider({
+        provider: "fixture-tenant-api",
+        host: "",
+        connectionId: "conn-dyn",
+        providerConfig: parseProviderConfig("fixture-tenant-api", { companyDomain: "acme" }),
+      }),
+    ).toThrow(InvalidRestProfileError);
   });
 });

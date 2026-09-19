@@ -215,3 +215,44 @@ rest provider has at least one dataset the assistant can ask about.
 in `vocabulary-contract.ts`, so making it `Partial<>` is caught by nothing and would
 silently key dedup on `undefined` for every dataset at once.
 
+
+### Fixed by WARP-2920 — the dynamic-host factory read the wrong declaration (2026-09-19)
+
+🔴 **A defect this track shipped with, dormant only because no dynamic-host vendor had
+landed.** `restProfileFactory` resolved a per-account host as
+`providerConfigString(cfg, descriptor.dynamicEgress.configKey)`. But every shipped
+`configKey` is the *documentation* path that mirrors the `allowed-egress.yaml` entry —
+`IntegrationConnection.providerConfig.companyDomain` — while `providerConfigString`
+reads `cfg[name]` by the **bare** field name, exactly as the hand-written tracks do
+(`providerConfigString(cfg, "companyDomain")`). The first REST profile with
+`baseUrl.kind: "dynamic"` that followed the registry's own convention would have
+resolved `undefined`, and §3's host guard would have refused every one of its
+connections at construction — *"this connection supplies no companyDomain"* — with a
+green build. Nothing caught it because the guard's tests hand it `hostConfigValue`
+directly and never go through the factory.
+
+**What changed.** The factory now reads the field the *profile* names,
+`profile.baseUrl.configField`, which is the only one of the three declarations that
+was ever a lookup key. The `configKey` stays what it always was — the descriptor's half
+of the YAML registration — and `PROVIDER_CONFIG_KEY_PREFIX` /
+`providerConfigKeyFor(field)` in `@droplet/shared-types` spell that convention once.
+
+**What now guards it.** `assertRestProfileAgreesWithDescriptor(profile, descriptor)` in
+`erp-provider.ts`: for a dynamic profile the descriptor must declare `dynamicEgress`,
+its `configKey` must equal `providerConfigKeyFor(configField)`, and the shared
+`credentialFields` must carry an entry of that name with `storage: "providerConfig"`
+and `secret: false` (the Pipedrive `companyDomain` shape); a static profile's
+descriptor must declare no `dynamicEgress`. It runs at construction from the factory
+and over every shipped profile in `erp-provider.descriptor.test.ts` — which lives in
+the orchestrator because that is the one package that can see both a profile and a
+descriptor. The guard is exercised by a fixture pair driven through the **real**
+dispatch path via `__setRestProfileLookupForTest`, so it is not vacuous while both
+shipped profiles are static.
+
+**A second hazard of the same class, documented rather than changed.** The guard
+completes a bare label (`acme`) with `allowedSuffixes[0]` only. A multi-region profile
+listing several suffixes would send `acme` to the first region whether or not it is the
+customer's, and the allow-set would pass it. The rule — such a profile must have the
+customer enter the whole host, enforced by the credential field's `pattern` — is now on
+`RestBaseUrl.dynamic.allowedSuffixes`, and the first-suffix behaviour is pinned in
+`rest-track.test.ts` so the docstring cannot go stale.

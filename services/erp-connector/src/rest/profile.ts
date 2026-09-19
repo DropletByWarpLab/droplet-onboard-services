@@ -274,6 +274,17 @@ export type RestBaseUrl =
        * value is a WHOLE host (a self-hosted GitLab, a self-hosted Cal.com)
        * carries `allowedSuffixes: []` and relies on `allowedHosts` instead;
        * one of the two must be non-empty, checked at registration.
+       *
+       * 🔴 WARP-2920 — a bare label (a value with no dot, `acme`) is completed
+       * with the FIRST suffix here and no other; `assertSafeRestBaseUrl` does
+       * not try the rest. So a multi-region vendor that lists several suffixes
+       * (`.vendor.com`, `.vendor.eu`) would silently send an EU customer who
+       * typed `acme` to `acme.vendor.com` — a wrong destination that passes
+       * the allow-set. A profile with more than one suffix must therefore make
+       * the customer enter the WHOLE host: give the descriptor's
+       * `credentialFields` entry a `pattern` that requires a dot, and say so
+       * in its `help`. Ordering is meaningful only for a single-suffix profile,
+       * where it is the completion; do not reorder to "prefer" a region.
        */
       readonly allowedSuffixes: readonly string[];
       /** Exact hosts permitted in addition to the suffixes, e.g. a closed set

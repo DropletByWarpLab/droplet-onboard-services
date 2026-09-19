@@ -319,6 +319,12 @@ export function assertSafeRestBaseUrl(
   // already contains a dot is taken as a whole host. Both then face the same
   // allow-set check below, so the completion is a convenience and never a
   // permission.
+  //
+  // WARP-2920 — it is the first suffix ONLY, and that is a hazard for a
+  // multi-suffix (multi-region) profile: `acme` completes to the first region
+  // whether or not it is the customer's, and passes the allow-set. See
+  // `RestBaseUrl.dynamic.allowedSuffixes` for the rule that follows — such a
+  // profile must have the customer enter the whole host.
   const candidateHost = value.includes(".")
     ? value
     : `${value}${baseUrl.allowedSuffixes[0] ?? ""}`;
