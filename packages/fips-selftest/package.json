@@ -20,7 +20,7 @@
     "lint": "eslint src/"
   },
   "devDependencies": {
-    "@types/node": "^20.12.12",
+    "@types/node": "^26.5.1",
     "typescript": "^5.4.5",
     "vitest": "^3.2.6"
   }
