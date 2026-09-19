@@ -11,6 +11,10 @@ interface NotificationRow {
   kind: string;
   title: string;
   body: string | null;
+  /** WARP-2909 — the deep link (a same-origin dashboard path) or null. The
+   *  row's `data` is deliberately NOT surfaced to the model: it is a client
+   *  badge hint, and the url is the only thing the model needs to relay. */
+  url: string | null;
   deliveredAt: Date | null;
   createdAt: Date;
 }
@@ -38,6 +42,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         kind: n.kind,
         title: n.title,
         body: n.body,
+        url: n.url ?? null,
         delivered: n.deliveredAt !== null,
         at: n.createdAt.toISOString(),
       })),
