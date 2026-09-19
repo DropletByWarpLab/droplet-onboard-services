@@ -8584,13 +8584,19 @@ async function routineJson<T>(res: Response, what: string): Promise<T> {
 export async function fetchRoutines(status?: RoutineStatus): Promise<Routine[]> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   const res = await authFetch(`${BASE}/api/tools${qs}`);
-  const body = await routineJson<{ tools?: Routine[] } | Routine[]>(
+  const body = await routineJson<{ specs?: unknown } | unknown[]>(
     res,
     "Failed to load routines",
   );
-  // The list route has been through two shapes; accept either rather than
-  // breaking the page on a field rename.
-  return Array.isArray(body) ? body : (body.tools ?? []);
+  // WARP-2797 — GET /api/tools answers `{ specs: [...] }` (routes/tools.ts)
+  // and has since the ToolSpec router shipped. This read `body.tools`, and
+  // the "accept either shape" fallback it carried turned the mismatch into a
+  // permanent empty list: every tab said "no routines" on every box, and
+  // nothing went red. A shape this function does not recognise is now an
+  // error the page can show, not an empty page.
+  if (Array.isArray(body)) return body as Routine[];
+  if (Array.isArray(body.specs)) return body.specs as Routine[];
+  throw new Error("Failed to load routines: unexpected response shape");
 }
 
 export async function fetchRoutine(slug: string): Promise<Routine> {
