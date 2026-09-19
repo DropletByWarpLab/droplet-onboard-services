@@ -439,7 +439,13 @@ describe("the login half can actually run under its unit (WARP-2887)", () => {
   // feature fails here instead of on a customer's box.
   it("carves /etc and /home read-write so useradd/chpasswd/sshd_config can write", () => {
     const rw = /^ReadWritePaths=(.*)$/m.exec(code(UNIT))?.[1] ?? "";
-    expect(rw.split(/\s+/)).toEqual(expect.arrayContaining(["/etc", "/home"]));
+    // Tokens may carry systemd's optional '-' prefix ("carve out IF present,
+    // don't hard-fail if absent") — tests/systemd-readwritepaths-must-exist.
+    // test.sh REQUIRES that prefix so the unit-sandbox job stays green, so
+    // normalise it away here: this guard's job is only that both paths are
+    // carved read-write, not which form the prefix takes.
+    const carved = rw.split(/\s+/).map((p) => p.replace(/^-/, ""));
+    expect(carved).toEqual(expect.arrayContaining(["/etc", "/home"]));
   });
 
   it("turns ProtectHome OFF (it takes precedence over a /home carve-out)", () => {

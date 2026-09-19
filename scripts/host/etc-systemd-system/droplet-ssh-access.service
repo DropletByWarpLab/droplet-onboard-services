@@ -42,13 +42,16 @@ ProtectSystem=strict
 # is deliberately the NARROWEST set that lets useradd/chpasswd/sshd_config
 # succeed while everything else stays read-only.
 #
-# WARP-2048: a ReadWritePaths= target that does not exist when the unit starts
-# fails the whole mount-namespace setup, so the unit never runs. /etc and /home
-# always exist on the appliance, so this holds; tests/systemd-readwritepaths-
-# must-exist.test.sh pins it.
-ReadWritePaths=/etc /home
+# WARP-2048: a bare ReadWritePaths= target that does not exist when the unit
+# starts fails the whole mount-namespace setup, so the unit never runs. /etc
+# and /home always exist on the appliance, but tests/systemd-readwritepaths-
+# must-exist.test.sh cannot prove that statically — it requires every carve-out
+# to be StateDirectory-created or '-'-prefixed. The '-' prefix means "carve this
+# out read-write IF present, don't hard-fail if absent": behaviour-identical
+# here (both always exist) and it satisfies the guard.
+ReadWritePaths=-/etc -/home
 # ProtectHome must be OFF: useradd -m writes under /home, and ProtectHome=yes
-# takes precedence over a ReadWritePaths=/home carve-out (systemd makes /home
+# takes precedence over a ReadWritePaths=-/home carve-out (systemd makes /home
 # inaccessible before the carve-out applies). ProtectSystem=strict + the narrow
 # ReadWritePaths above keep the rest of the tree read-only regardless.
 ProtectHome=no
