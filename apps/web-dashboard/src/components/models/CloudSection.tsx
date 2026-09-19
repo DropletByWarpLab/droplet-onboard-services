@@ -30,6 +30,11 @@ import type { CloudAccessInfo, CloudProviderRow as Row } from "@/lib/types";
 const TEXT_INDENT = 49;
 
 function changeLine(a: CloudAccessInfo): string | null {
+  // A seeded row carries a date (`lastChangedAt` defaults to now()) but no
+  // person — only a person means somebody actually flipped it.
+  if (!a.escapeEnabled && !a.escapeChangedBy) {
+    return "Off since setup · Nothing has left this Droplet for a cloud model.";
+  }
   const date = a.escapeChangedAt
     ? new Date(a.escapeChangedAt).toLocaleString(undefined, {
         month: "short",
@@ -38,9 +43,6 @@ function changeLine(a: CloudAccessInfo): string | null {
         minute: "2-digit",
       })
     : null;
-  if (!a.escapeEnabled && !a.escapeChangedBy && !date) {
-    return "Off since setup · Nothing has left this Droplet for a cloud model.";
-  }
   // Omit whichever of by/date the payload doesn't carry — never invent one.
   const parts = [
     `Turned ${a.escapeEnabled ? "on" : "off"}${a.escapeChangedBy ? ` by ${a.escapeChangedBy}` : ""}`,

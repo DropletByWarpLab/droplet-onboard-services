@@ -14,7 +14,7 @@
 import { describe, it, expect } from "vitest";
 import { NAV_GROUPS, visibleItems, moduleForPath } from "@/components/nav-config";
 
-const openCapabilities = { claudeActivity: true, ragEval: true };
+const openCapabilities = { claudeActivity: true, ragEval: true, medicalConnector: true };
 const everyModuleOn = () => true;
 const everyModuleOff = () => false;
 

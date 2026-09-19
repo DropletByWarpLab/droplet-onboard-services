@@ -144,6 +144,10 @@ const TIER_3_OPERATIONS = new Set([
   // principal, so an AI caller is refused twice, independently — the same
   // belt-and-braces posture as the VPN and firmware entries above.
   "set_ssh_access",
+  // WARP-2887 — the login that door uses. Setting it creates an account with
+  // administrative access on the appliance: same blast radius as opening the
+  // door, same tier, same web-UI-only + no-MCP-principal posture.
+  "set_ssh_login",
 ]);
 
 /**
@@ -158,6 +162,9 @@ const BLAST_RADIUS_REASON: Record<string, string> = {
   // that carries risk — turning it off only ever closes something.
   set_ssh_access:
     "Allowing SSH opens a command-line login to the appliance from your local network, for support troubleshooting. While it's on, anyone on this network who has the login can reach everything stored on the box. Turn it back off when you're done.",
+  // WARP-2887.
+  set_ssh_login:
+    "This sets the username and password for command-line access to the appliance. Whoever has them can run administrative commands and reach everything stored on the box whenever SSH access is on. Share them only with someone you trust.",
   create_interface:
     "Adding a network interface changes how the appliance connects. A wrong setting can disconnect devices — and could cut this dashboard's own connection.",
   edit_interface:

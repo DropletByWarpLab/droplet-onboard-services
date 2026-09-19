@@ -96,11 +96,16 @@ function TraceRow({ entry }: { entry: TraceEntry }) {
           ? "declined"
           : entry.replayOf
             ? "replayed after resume"
-            : entry.text === undefined
-              ? "dispatched…"
-              : entry.isError
-                ? "error"
-                : "ok";
+            : // WARP-2877 — it has no result and never will: the run was
+              // interrupted mid-call and this tool writes, so it was not
+              // repeated. Anything else here would read as "still working".
+              entry.unknownOutcome
+              ? "interrupted — may have run, not repeated"
+              : entry.text === undefined
+                ? "dispatched…"
+                : entry.isError
+                  ? "error"
+                  : "ok";
   return (
     <li className="py-2 border-b last:border-b-0 min-w-0" style={{ borderColor: "var(--border)" }}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[13px]">
@@ -144,7 +149,10 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
   const [detail, setDetail] = useState<AgentRunDetail | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // WARP-2878 — the id of the run an action is in flight for, not a panel-wide
+  // boolean. One flag disabled the buttons of whatever run the person had
+  // moved to while an earlier run's POST was still settling.
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const genRef = useRef(0);
 
@@ -263,16 +271,23 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
     return () => clearInterval(t);
   }, [live, selectedId, loadDetail, loadList]);
 
-  const act = async (fn: () => Promise<void>) => {
-    if (!selectedId) return;
-    setBusy(true);
+  // WARP-2878 — the run id is an ARGUMENT, not a closure capture, and the
+  // failure path is guarded the way `loadDetail`'s already is: a POST that
+  // fails after the person selected another run must not write its error into
+  // the panel they are now looking at, nor reload the run they left. The
+  // `busyId` reset is conditional for the same reason — clearing it blindly
+  // would re-enable a LATER action's buttons mid-flight.
+  const act = async (id: string, fn: () => Promise<void>) => {
+    setBusyId(id);
     try {
       await fn();
-      await Promise.all([loadDetail(selectedId), loadList()]);
+      if (selectedRef.current !== id) return;
+      await Promise.all([loadDetail(id), loadList()]);
     } catch (err) {
+      if (selectedRef.current !== id) return;
       setDetailError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setBusyId((cur) => (cur === id ? null : cur));
     }
   };
 
@@ -409,16 +424,16 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
                     <button
                       type="button"
                       className="btn primary"
-                      disabled={busy}
-                      onClick={() => void act(() => decideAgentRun(detail.id, "approved"))}
+                      disabled={busyId === detail.id}
+                      onClick={() => void act(detail.id, () => decideAgentRun(detail.id, "approved"))}
                     >
                       Approve and continue
                     </button>
                     <button
                       type="button"
                       className="btn"
-                      disabled={busy}
-                      onClick={() => void act(() => decideAgentRun(detail.id, "denied"))}
+                      disabled={busyId === detail.id}
+                      onClick={() => void act(detail.id, () => decideAgentRun(detail.id, "denied"))}
                     >
                       Deny
                     </button>
@@ -445,8 +460,8 @@ export function AgentRunsPanel({ initialRunId }: { initialRunId?: string | null 
                   <button
                     type="button"
                     className="btn"
-                    disabled={busy}
-                    onClick={() => void act(() => cancelAgentRun(detail.id))}
+                    disabled={busyId === detail.id}
+                    onClick={() => void act(detail.id, () => cancelAgentRun(detail.id))}
                   >
                     Cancel run
                   </button>

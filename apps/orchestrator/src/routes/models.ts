@@ -140,10 +140,16 @@ export function createModelsRouter(prisma: PrismaClient): Router {
                 }),
         ]);
 
-        res.json({
-          ...overlayCloudState(payload, { keys, escapeRow, allowedForYou }),
-          activeModel,
-        });
+        const overlaid = overlayCloudState(payload, { keys, escapeRow, allowedForYou });
+        // WARP-2871: GET /api/settings/off-lan 403s a guest — who flipped the
+        // escape, when, and which vendors are keyed must not leak here either.
+        // The switch state and the guest's own verdict are still served.
+        if (user?.role === "guest") {
+          overlaid.cloudAccess.escapeChangedBy = null;
+          overlaid.cloudAccess.escapeChangedAt = null;
+          overlaid.cloud = overlaid.cloud.map((row) => ({ ...row, hasKey: null }));
+        }
+        res.json({ ...overlaid, activeModel });
       } catch (err) {
         next(err);
       }

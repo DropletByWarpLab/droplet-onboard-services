@@ -68,8 +68,13 @@ export type NavItem = {
    * Hide unless the named backend capability is wired (GET
    * /api/admin/capabilities). Used for optional admin surfaces whose backing
    * integration may be unconfigured. Default: no capability gate.
+   *
+   * WARP-2880: `medicalConnector` is resolved by the Sidebar from GET
+   * /api/integrations (a connected practice-management system — see
+   * `isMedicalConnector`), not from /api/admin/capabilities. Same gate, same
+   * fail-closed posture: hidden until positively known.
    */
-  requiresCapability?: "claudeActivity" | "ragEval";
+  requiresCapability?: "claudeActivity" | "ragEval" | "medicalConnector";
   /**
    * Hide unless the named user-facing module is EFFECTIVE for this viewer —
    * GET /api/modules, readable by every authenticated role. Since WARP-1528
@@ -304,6 +309,15 @@ export const NAV_GROUPS: NavGroup[] = [
       // (money findings need the ERP connectors, document findings need the
       // corpus pass) and each degrades on its own — a module gate here would
       // hide the whole page because one source is off.
+      //
+      // WARP-2838 — AND NOT CAPABILITY-GATED ON THE BRAIN EITHER. That was the
+      // open question: hide /brief until the brain is on, the way /messages
+      // hides behind team_chat, or leave it visible as its own discovery
+      // surface? DECIDED: visible. /brief's off state is now the only place in
+      // the product that can turn the brain ON, so gating the entry on the
+      // brain being on would make the switch reachable only once it no longer
+      // needed pressing. /messages can hide because nothing about team chat is
+      // decided from that page; this one carries the consent screen.
       {
         href: "/brief",
         label: "Brief",
@@ -349,11 +363,17 @@ export const NAV_GROUPS: NavGroup[] = [
       // `partyNoun` on the connector descriptor; that is a later slice, and
       // making the nav label data-driven before a second connector exists
       // would be a mechanism with one caller.
+      //
+      // WARP-2880: shown only while a MEDICAL integration is connected. The
+      // page is the practice's day read from a practice-management system; a
+      // box without one has nothing to show there. Rule 1 above holds — the
+      // entry is ADDED or REMOVED with the connection, never relabelled.
       {
         href: "/practice",
         label: "Practice",
         icon: Stethoscope,
         roles: ["owner", "admin"],
+        requiresCapability: "medicalConnector",
       },
     ],
   },
@@ -549,7 +569,7 @@ export const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as cons
 export function visibleItems(
   items: NavItem[],
   role: AuthRole | undefined,
-  capabilities: { claudeActivity: boolean; ragEval: boolean },
+  capabilities: Record<NonNullable<NavItem["requiresCapability"]>, boolean>,
   isModuleOn: (moduleId: string) => boolean,
 ): NavItem[] {
   const allowed = (item: NavItem): boolean => {

@@ -820,6 +820,33 @@ class TestSetupDoesNotInventAnInterface:
         assert body["created"] is True, "the config was written; that part is true"
         assert body["interface_live"] is False, "but the tunnel cannot work and we must say so"
 
+    def test_idempotent_setup_reports_interface_live_too(
+        self, vpn_client: TestClient
+    ) -> None:
+        # WARP-2689 — the idempotent (`created: False`) branch is the one the
+        # field hits: a wg0 uci section exists on every box after its first
+        # setup. It MUST carry interface_live, or every orchestrator gate that
+        # reads `setup.interface_live === false` (mint 503, profile 503,
+        # provisionOverlayPeer, the reconciler) is dead on exactly the routers
+        # WARP-2689 is about.
+        first = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert first["created"] is True and first["interface_live"] is True
+        second = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert second["created"] is False, "interface already exists"
+        assert second["interface_live"] is True, "kernel truth reported on the idempotent branch too"
+
+    def test_idempotent_setup_reports_not_live_when_the_kernel_device_is_gone(
+        self, vpn_client: TestClient
+    ) -> None:
+        # A section exists (created: False) but the device does not — a router
+        # that lost WireGuard after the section was written. The idempotent
+        # branch must still say interface_live: False so the gates fire.
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        main.router_instance.vpn._kernel_device = False
+        body = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert body["created"] is False
+        assert body["interface_live"] is False
+
     def test_status_separates_configured_peers_from_live_peers(
         self, vpn_client: TestClient
     ) -> None:

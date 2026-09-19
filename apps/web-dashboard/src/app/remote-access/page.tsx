@@ -135,14 +135,22 @@ export default function RemoteAccessPage() {
   // Missing field ⇒ treat as "not reachable at home yet" (never over-promise —
   // the WARP-993 offLanReachable convention). Only surfaced once status loads.
   const homeMintBlocked = Boolean(status) && !status?.homeEndpointHost;
+  // WARP-2689: the router holds a wg0 section but the kernel has no device —
+  // it was flashed without WireGuard. `configured: true` alone would keep this
+  // page looking ready while every device added here could never connect.
+  // Strictly `=== false`: null/absent is "the router could not say" and must
+  // not disable anything.
+  const routerUnsupported = status?.interfaceLive === false;
   // a11y: when "Add device" is disabled, point screen-reader users at the card
   // that explains WHY (aria-describedby). endpointMissing takes precedence — its
   // card renders instead of the home-address one (they never stack).
-  const disabledReasonId = endpointMissing
-    ? "ra-endpoint-guidance"
-    : homeMintBlocked
-      ? "ra-home-guidance"
-      : undefined;
+  const disabledReasonId = routerUnsupported
+    ? "ra-router-guidance"
+    : endpointMissing
+      ? "ra-endpoint-guidance"
+      : homeMintBlocked
+        ? "ra-home-guidance"
+        : undefined;
   // WARP-993: only promise "from anywhere" when the endpoint is actually
   // routable from outside the home LAN. FQDN-only (split-horizon, no public
   // A record — ADR-023 §3) reports false until the ADR-025 relay lands.
@@ -169,7 +177,7 @@ export default function RemoteAccessPage() {
       <button
         className="btn primary"
         onClick={() => setShowAdd(true)}
-        disabled={endpointMissing === true || homeMintBlocked}
+        disabled={routerUnsupported || endpointMissing === true || homeMintBlocked}
         aria-describedby={disabledReasonId}
         type="button"
       >
@@ -200,6 +208,26 @@ export default function RemoteAccessPage() {
           <button onClick={() => setError(null)} type="button" aria-label="Dismiss error" className="icon-btn" style={{ width: 28, height: 28 }}>
             <X size={12} />
           </button>
+        </div>
+      )}
+
+      {/* WARP-2689: the one state no amount of waiting clears — the router
+          itself cannot run WireGuard. Rendered above the two "not ready yet"
+          cards because it is the reason they would never resolve, and in the
+          red tone because it needs a person to act, not to wait. */}
+      {routerUnsupported && (
+        <div id="ra-router-guidance" className="card" role="alert" style={{ marginBottom: 14, borderColor: "rgba(239,68,68,0.3)" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <AlertCircle size={16} style={{ color: "#ef4444", flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Your router can’t run remote access yet</p>
+              <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
+                It’s missing WireGuard support, so devices added here wouldn’t be
+                able to connect. Update the router’s software, then come back —
+                there’s nothing else to set up.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 

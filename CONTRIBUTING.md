@@ -5,6 +5,10 @@
 Work flows through **`stage`** before it reaches **`main`**. Open your PR
 against `stage` — `main` only ever receives merges from `stage`.
 
+> Governed by [WARP-2824](https://warp-lab.atlassian.net/browse/WARP-2824),
+> which supersedes WARP-2187's branching decision. If you remember this file
+> telling you to open PRs against `main`, that is the revision it replaces.
+
 ```
 your branch ──PR──▶ stage ──PR──▶ main
                       │             │

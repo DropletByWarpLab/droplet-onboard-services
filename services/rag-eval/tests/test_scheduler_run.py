@@ -29,6 +29,9 @@ def store(monkeypatch, tmp_path):
     with the minted run_id pinned so tests can address it."""
     monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(runner, "_utc_stamp", lambda: _RUN_ID)
+    # WARP-2879: an unset eval user is a pre-flight skip; pin one so the
+    # run-path tests below actually reach the runner.
+    monkeypatch.setenv("RAGAS_EVAL_USER", "eval-fixtures")
     fresh = RunStateStore()
     monkeypatch.setattr(scheduler_service, "STORE", fresh)
     return fresh
@@ -71,3 +74,21 @@ def test_scheduled_failure_persists_record_with_output_tail(
     )
     assert data["status"] == "failed"
     assert data["error"] == "ragas_runner exited 3: judge exploded"
+
+
+def test_unset_eval_user_skips_before_touching_the_runner(monkeypatch, store):
+    # WARP-2879: the third recurrence of "every slot 400s eval_user_required".
+    # With no eval user there is nothing the runner can do; record ONE
+    # skipped slot naming the setting instead of a failed run per hour.
+    monkeypatch.delenv("RAGAS_EVAL_USER", raising=False)
+    monkeypatch.setattr(
+        runner, "run_once",
+        lambda target_dir=None, stamp=None: pytest.fail("runner must not start"),
+    )
+    asyncio.run(scheduler_service._scheduled_run())
+
+    rec = store.get(_RUN_ID)
+    assert rec is not None
+    assert rec.status is RunStatus.SKIPPED
+    assert "RAGAS_EVAL_USER" in rec.error
+    assert "seed-eval-fixtures" in rec.error

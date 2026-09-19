@@ -218,6 +218,23 @@ describe("WARP-471 — models page payload", () => {
     expect(payload.cloud.every((c) => c.spendUsd === 0)).toBe(true);
   });
 
+  it("keeps cloud models out of `local` once a key makes the gateway list them (WARP-2871 review)", async () => {
+    // With a saved key, anthropic_cloud/openai_cloud return their catalogue
+    // in the same listing as the on-box models. "On your Droplet" must only
+    // ever count on-box providers — never a cloud row as status: "ready".
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "1", provider: "local", name: "gpt-oss:20b", context_window: 8192 },
+        { id: "2", provider: "anthropic", name: "claude-sonnet-4-5", context_window: 200000 },
+        { id: "3", provider: "openai", name: "gpt-4.1", context_window: 1000000 },
+      ],
+    });
+    const payload = await getModelsPagePayload();
+    expect(payload.local.map((m) => m.name)).toEqual(["gpt-oss:20b"]);
+    expect(payload.local.some((m) => m.provider === "anthropic")).toBe(false);
+    expect(payload.local.some((m) => m.provider === "openai")).toBe(false);
+  });
+
   it("degrades gracefully when ai-gateway is unreachable", async () => {
     listModelsMock.mockRejectedValue(new Error("connection refused"));
     const payload = await getModelsPagePayload();
@@ -457,6 +474,25 @@ describe("WARP-471 — /api/models route", () => {
     // No bridge in the test env, so the payload must say WHY it has no GPU
     // over the wire — the dashboard cannot re-derive that from `gpu: null`.
     expect(res.body.gpuReason).toBe("unreachable");
+  });
+
+  it("nulls the escape stamps and key state for a guest (WARP-2871 review)", async () => {
+    // GET /api/settings/off-lan excludes `guest`; the same facts must not
+    // leak through here. Everything else on the page is still served.
+    listModelsMock.mockResolvedValue({ models: [] });
+    listKeysMock.mockResolvedValue(["anthropic"]);
+    const prisma = createPrismaMock(null, {
+      enabled: true,
+      lastChangedBy: "romain",
+      lastChangedAt: new Date("2026-09-01T10:00:00.000Z"),
+    });
+    const app = buildApp({ id: "g1", username: "visitor", role: "guest" }, prisma);
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.cloudAccess.escapeEnabled).toBe(true);
+    expect(res.body.cloudAccess.escapeChangedBy).toBeNull();
+    expect(res.body.cloudAccess.escapeChangedAt).toBeNull();
+    expect(res.body.cloud.every((c: { hasKey: unknown }) => c.hasKey === null)).toBe(true);
   });
 
   it("serves a degraded payload UNCACHED so it self-heals (WARP-1289)", async () => {

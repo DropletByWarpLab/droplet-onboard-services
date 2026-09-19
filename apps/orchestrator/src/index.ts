@@ -62,6 +62,10 @@ import {
   type BrainPassTrigger,
 } from "./services/brain/brain-pass-runner.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
+import {
+  brainPassesSchedulable,
+  isBrainEnabled,
+} from "./services/brain/brain-switch.service.js";
 import * as aiGateway from "./services/ai-gateway.client.js";
 import { runBusinessReviewCheck } from "./services/business-review-nudge.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
@@ -103,7 +107,12 @@ import {
   expireIdleOverlayPeers,
   type OverlayConnectDeps,
 } from "./services/overlay-connect.service.js";
-import { allocatePeerIp } from "./services/vpn.service.js";
+import {
+  allocatePeerIp,
+  OVERLAY_KEEPALIVE_SECONDS,
+  serverAddressFromSubnet,
+} from "./services/vpn.service.js";
+import { reconcileVpnInterface } from "./services/vpn-reconcile.service.js";
 import { bridgeAuthToken } from "./lib/bridge-errors.js";
 import { createScheduleTicker } from "./services/schedule-ticker.js";
 import { createFirewallAdapter } from "./services/firewall-adapter.service.js";
@@ -662,7 +671,19 @@ async function main() {
   // `prisma/seed.ts`, which is invoked nowhere in scripts/ or docker/ on a
   // shipped box — the reason the daily-report ToolSpec does not exist in
   // production and its /reports button 404s.
-  if (config.brain.enabled) {
+  //
+  // WARP-2838 — SCHEDULED WHENEVER THE BRAIN COULD BE ON, not when it was on at
+  // boot. The owner's switch writes a row; gating registration on the
+  // boot-time value meant flipping it changed nothing until the next restart,
+  // which is a switch that does not switch. Each tick asks
+  // `isBrainEnabled(prisma)` instead. A box pinned OFF by `BRAIN_ENABLED`
+  // registers nothing at all — the pin is policy, not a per-tick early return.
+  if (brainPassesSchedulable()) {
+    // Seeding now runs on every box that is not pinned off, because the pass
+    // rows are what `/api/brain/coverage` reads and what the corpus pass
+    // claims — an owner who switches the brain on must not have to wait for a
+    // restart to see it. They are registry rows: a pass key, a cursor and
+    // counters, no business content.
     await seedBrainPasses(prisma);
 
     // Same resolution the agent-run routes use. Read at CALL time, not once at
@@ -732,8 +753,30 @@ async function main() {
       // "Started. This page will show what it finds.", nothing runs, and the
       // advanced `lastRunAt` then blocks the first real run once a model is
       // finally set. Here it is a refusal the route reports as `no_model`.
+      // WARP-2838 — the owner's switch is a PRECONDITION, on BOTH passes.
+      //
+      // It has to be here rather than inside the runners, for the reason the
+      // block above gives and one more. The ordering argument first: a check
+      // inside the runner runs after `claimPass` has stamped `runState` and
+      // `lastRunAt`, so a box whose owner has said no would still record a run
+      // and answer 202 "Started." to the route.
+      //
+      // The stronger reason is that this is the consent gate. A manual
+      // `POST /api/brain/passes/:key/run` reaches `trigger()` the same way a
+      // cron tick does, so gating only the tick would leave the route able to
+      // read a person's documents on a box where the brain is switched off.
+      // One check, before the claim, on the path every caller shares.
+      //
+      // Asked per CALL, never cached at boot: the switch writes a row, and
+      // gating on the boot-time value is a switch that does nothing until the
+      // next restart.
       preconditions: {
-        [CORPUS_PASS_KEY]: () => (resolveBrainModel() ? null : "no_model"),
+        [DETECTOR_PASS_KEY]: async () =>
+          (await isBrainEnabled(prisma)) ? null : "disabled",
+        [CORPUS_PASS_KEY]: async () => {
+          if (!(await isBrainEnabled(prisma))) return "disabled";
+          return resolveBrainModel() ? null : "no_model";
+        },
       },
     });
 
@@ -880,6 +923,49 @@ async function main() {
     );
     logger.info(
       "overlay connect agent enabled (HQ long-poll + idle-expiry sweep)",
+    );
+  }
+
+  // WARP-2694 — keep wg0 + its peers in step with the linked devices the
+  // owner has been shown. Interface creation is otherwise lazy (a mint, an
+  // approval, a profile fetch), so a router reflash / factory reset / upgrade
+  // silently dropped every linked device until one of those happened to run.
+  // Gated the same way as every router write above; acts only when active
+  // peer rows exist (see the service header for why that gate is not
+  // optional), and is idempotent, so a 10-minute cadence costs one
+  // /vpn/status-sized read per tick on a healthy box.
+  if (routerSupervisionEnabled) {
+    const vpnReconcileDeps = {
+      prisma,
+      router: {
+        setup: (opts: { listenPort: number; address: string }) => openwrt.vpnSetup(opts),
+        listPeers: (iface: string) => openwrt.listVpnPeers(iface),
+        installPeer: (p: {
+          interface: string;
+          publicKey: string;
+          allowedIps: string[];
+          persistentKeepalive: number;
+          description: string;
+        }) => openwrt.installOverlayVpnPeer(p),
+      },
+      // WARP-2686 — re-check a row is still active immediately before its peer
+      // is re-installed, so a revoke that lands mid-tick is never resurrected.
+      isStillActive: async (publicKey: string) =>
+        (await prisma.vpnPeer.findFirst({ where: { publicKey, status: "active" }, select: { id: true } })) !== null,
+      config: {
+        vpnInterface: "wg0",
+        listenPort: config.WIREGUARD_LISTEN_PORT,
+        serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
+        keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+      },
+      logger: createLogger("vpn-reconcile"),
+    };
+    cronRuntime.scheduleInterval(
+      10 * 60_000,
+      async () => {
+        await reconcileVpnInterface(vpnReconcileDeps);
+      },
+      { lockKey: "droplet:vpn-reconcile" },
     );
   }
 

@@ -3,16 +3,20 @@
 /**
  * WARP-836 — the Models page KPI strip.
  *
- * Four read-only tiles: models in use, GPU, average latency, cloud spend.
- * WARP-2883 made the first three real: the model tile counts what the box
- * can answer with (local + enabled cloud), the GPU tile names the hardware
- * and its VRAM, and latency is a measured round-trip per inference endpoint
- * with a colour-coded quality. Cloud spend is real — $0.00 while no cloud
- * escapes are enabled. Anything unmeasured still renders an honest "—".
+ * Three read-only tiles: models in use, GPU, average latency.
+ * WARP-2883 made them real: the model tile counts what the box can answer
+ * with (local + enabled cloud), the GPU tile names the hardware and its
+ * VRAM, and latency is a measured round-trip per inference endpoint with a
+ * colour-coded quality. Anything unmeasured still renders an honest "—".
+ *
+ * Cloud spend is deliberately NOT a tile: the orchestrator still hard-codes
+ * `cloudSpendUsd: 0` (no egress meter behind it), so a "$0.00" tile was a
+ * fabricated reading dressed as a real one. Bring it back only when the
+ * number is measured.
  */
 
 import type { ReactNode } from "react";
-import { Clock, Cloud, Cpu, HardDrive, type LucideIcon } from "lucide-react";
+import { Clock, Cpu, HardDrive, type LucideIcon } from "lucide-react";
 import type {
   EndpointLatencyMs,
   ModelsGpuInfo,
@@ -27,16 +31,10 @@ interface KpiStripProps {
   avgLatencyMs: number;
   /** The per-endpoint samples behind `avgLatencyMs`; null = not asked. */
   latency?: EndpointLatencyMs | null;
-  cloudSpendUsd: number;
   /** Local models installed on the box. */
   localCount: number;
   /** Cloud providers switched on AND keyed — usable from this box. */
   cloudCount: number;
-}
-
-/** Format USD with two decimals, e.g. 0 → "$0.00". */
-function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
 }
 
 /**
@@ -124,7 +122,6 @@ export function KpiStrip({
   gpuReason,
   avgLatencyMs,
   latency = null,
-  cloudSpendUsd,
   localCount,
   cloudCount,
 }: KpiStripProps) {
@@ -134,7 +131,7 @@ export function KpiStrip({
   const breakdown = latency ? latencyBreakdown(latency) : "";
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       {/* Models — what the box can answer with: local models on disk plus
           each cloud provider that is switched on and keyed (WARP-2883). */}
       <KpiTile
@@ -219,14 +216,6 @@ export function KpiStrip({
             "Latency isn’t measured yet"
           )
         }
-      />
-
-      {/* Cloud spend — a real value. Zero while no provider is enabled. */}
-      <KpiTile
-        icon={Cloud}
-        label="Cloud spend"
-        value={usd(cloudSpendUsd)}
-        meta="No cloud models enabled this month"
       />
     </div>
   );

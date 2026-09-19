@@ -518,8 +518,18 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     await waitFor(() => expect(fetchVpnStatus).toHaveBeenCalledTimes(2));
+    // WARP-2696 — the wait above proves the retry was ISSUED, not that its
+    // answer has landed. The error view (and with it Skip for now) only comes
+    // back after the SECOND rejection renders, so a synchronous read here sits
+    // in the checking frame and finds an empty step:
+    //
+    //   Unable to find an accessible element with the role "button" and name
+    //   `/skip for now/i`        (node / web-dashboard, run 34292573334)
+    //
+    // This is the exact pair WARP-2696's description names — wait on the mock,
+    // then read the DOM synchronously. Re-point it at the element.
     expect(
-      screen.getByRole("button", { name: /skip for now/i }),
+      await screen.findByRole("button", { name: /skip for now/i }),
     ).toBeInTheDocument();
     expect(onSkip).not.toHaveBeenCalled();
   });

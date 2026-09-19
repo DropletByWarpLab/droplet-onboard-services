@@ -1172,6 +1172,12 @@ export type VpnPeerWire = {
 export type VpnSetupResponse = VpnInterfaceInfo & {
   status: "ok";
   created: boolean;
+  /** WARP-2687/WARP-2689 — does the KERNEL device exist, as opposed to the
+   *  uci section? `false` is an observation: the router has no WireGuard
+   *  support (no kmod / proto handler), so no conf minted against this
+   *  interface can ever handshake. `null`/absent = the router could not say
+   *  (older image, no `wireguard` ubus grant) — never read that as either. */
+  interface_live?: boolean | null;
 };
 
 export type VpnPeerCreateResponse = {
@@ -1199,11 +1205,20 @@ export async function vpnSetup(opts?: {
   return res.json() as Promise<VpnSetupResponse>;
 }
 
+export type VpnStatusResponse = VpnInterfaceInfo & {
+  /** uci sections — what the box INTENDS the interface to hold. */
+  peer_count: number;
+  /** WARP-2689 — kernel truth, three-valued (see VpnSetupResponse). */
+  interface_live?: boolean | null;
+  /** Peers the kernel actually holds; null when the router cannot say. */
+  live_peer_count?: number | null;
+};
+
 export async function vpnStatus(
   iface: string = "wg0",
-): Promise<(VpnInterfaceInfo & { peer_count: number }) | null> {
+): Promise<VpnStatusResponse | null> {
   try {
-    return await routingFetchJson<VpnInterfaceInfo & { peer_count: number }>(
+    return await routingFetchJson<VpnStatusResponse>(
       `/vpn/status?interface=${encodeURIComponent(iface)}`,
       { label: "VPN status" },
     );

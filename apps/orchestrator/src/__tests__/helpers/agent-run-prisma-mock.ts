@@ -48,11 +48,13 @@ export interface AgentRunRow {
   pendingDecision: string | null;
   pendingDecidedAt: Date | null;
   pendingDecidedBy: string | null;
+  /** WARP-2877 — the schedule that fired this run, when one did. */
+  scheduleId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type MockOp = "create" | "findMany" | "findUnique" | "updateMany";
+export type MockOp = "create" | "findMany" | "findFirst" | "findUnique" | "updateMany";
 
 function matches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
   for (const [key, cond] of Object.entries(where)) {
@@ -204,6 +206,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         pendingDecision: null,
         pendingDecidedAt: null,
         pendingDecidedBy: null,
+        scheduleId: (args.data.scheduleId as string | null) ?? null,
         createdAt: now(),
         updatedAt: now(),
       };
@@ -231,6 +234,12 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     findUnique: vi.fn(async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
       guard("findUnique", args);
       const row = rows.find((r) => r.id === args.where.id);
+      return row ? pick(row as unknown as Record<string, unknown>, args.select) : null;
+    }),
+    /** WARP-2877 — the schedule ticker's overlap probe. */
+    findFirst: vi.fn(async (args: { where: Record<string, unknown>; select?: Record<string, boolean> }) => {
+      guard("findFirst", args);
+      const row = rows.find((r) => matches(r as unknown as Record<string, unknown>, args.where));
       return row ? pick(row as unknown as Record<string, unknown>, args.select) : null;
     }),
     updateMany: vi.fn(async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {

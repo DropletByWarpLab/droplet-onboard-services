@@ -76,6 +76,18 @@
  * Tier-3 (a tool outside the run's pool, or one the interceptor's deny tier
  * refuses) is refused exactly as in chat, never parked.
  *
+ * ── A LOST TOOL OUTCOME IS NOT A RETRY (WARP-2877) ────────────────────
+ *
+ * Die between `mcp.callTool` returning and the completion write and the trace
+ * entry has no `text`: the call may have done its whole job, and nothing on
+ * the box can say. Resuming used to re-dispatch it anyway after logging
+ * `agent_run_redispatch_unknown_outcome`. {@link redispatchSafe} decides now,
+ * off the catalog's own tier flags: a read repeats, an ungated write (in a
+ * run's pool, `send_notification`) does NOT — the run ends `failed` with
+ * `stopReason = "unknown_outcome"` and a message naming the tool — and a call
+ * whose approval was already spent re-parks with a notification that says so
+ * instead of "Nothing has been done yet".
+ *
  * ── `attempts` ────────────────────────────────────────────────────────
  *
  * Counts RECLAIMS (a lease found stale), not claims: a graceful redeploy
@@ -210,6 +222,52 @@ export function runToolPool(): string[] {
   ).map((t) => t.name);
 }
 
+/**
+ * WARP-2877 — may this lost call be dispatched a SECOND time?
+ *
+ * A worker that dies between `mcp.callTool` returning and the trace-completion
+ * write leaves an entry with no `text`. The outcome is genuinely unknown: the
+ * call may have had its full side effect. The old answer was to re-dispatch
+ * regardless, having logged `agent_run_redispatch_unknown_outcome` first —
+ * "we told you in the log" is not a safety property.
+ *
+ * The answer is the catalog's own tier metadata plus what the prior entry
+ * records, never a hand-kept list, so a tool declared tomorrow is covered
+ * with nothing to remember here:
+ *
+ *   - A READ (`!requiresWrite && !requiresConfirmation`) repeats harmlessly.
+ *     Re-dispatch, loudly.
+ *   - An UNGATED WRITE (`requiresWrite && !requiresConfirmation`) is the real
+ *     duplicate. Nothing stands between the call and its effect, so a second
+ *     dispatch is a second effect. In a run's pool that is `send_notification`
+ *     today (see {@link RUN_READMITTED_TOOLS}) — two toasts, not one — and it
+ *     is every Tier-1 write the pool admits if WARP-2002/2008 ever widen it.
+ *     Never repeat it.
+ *   - A GATED WRITE (`requiresConfirmation`) has the WARP-2305 interceptor in
+ *     front of it, and the token is what makes it run. So it depends on which
+ *     dispatch was lost:
+ *       · no `confirmation` marker — the lost dispatch carried NO token, so
+ *         the interceptor answered it with a challenge and the tool did not
+ *         run. Re-dispatching challenges again. Safe.
+ *       · `confirmation: "confirmed"` — the human's approval was already
+ *         spent on that dispatch (consumed BEFORE it, by design), so the
+ *         write may well have happened. A re-dispatch cannot repeat it
+ *         silently — with no decision left on the row it goes out without a
+ *         token and the run PARKS again (WARP-2179) — but the person is asked
+ *         a question whose honest answer nobody has. Not safe; see the caller,
+ *         which keeps the re-park and fixes what it tells them.
+ *   - A tool the catalog does not know is not safe. Runs only ever see
+ *     catalog tools (`runToolPool`), so this is unreachable in practice;
+ *     refusing to repeat an unknown call is the honest default if it is not.
+ */
+export function redispatchSafe(tool: string, prior: { confirmation?: string }): boolean {
+  const entry = TOOL_CATALOG.find((t) => t.name === tool);
+  if (!entry) return false;
+  if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
+  if (!entry.requiresConfirmation) return false;
+  return prior.confirmation !== "confirmed";
+}
+
 /** WARP-2179 — the parked-call columns, always cleared together. */
 const CLEAR_PENDING: Prisma.AgentRunUpdateManyMutationInput = {
   pendingTool: null,
@@ -238,6 +296,13 @@ export interface AgentRunTraceEntry {
   replayOf?: string;
   /** WARP-2179 — how a Tier-2 call was resolved, for the run-detail view. */
   confirmation?: "parked" | "confirmed" | "denied";
+  /**
+   * WARP-2877 — dispatched, then the worker died before the outcome was
+   * written, and {@link redispatchSafe} says this tool must not be repeated.
+   * The run stops on this entry; the step is marked so the run-detail view
+   * can say so rather than showing an eternal "dispatched…".
+   */
+  unknownOutcome?: true;
 }
 
 /**
@@ -260,6 +325,14 @@ export function initialRunMessages(goal: string): ChatMessage[] {
   ];
 }
 
+/**
+ * The non-terminal statuses — a run that is still going to do something.
+ * Cancellation targets exactly these, and so does WARP-2877's schedule
+ * overlap guard: "the previous fire has not finished" is the same question
+ * both times, and it must not be answered from two lists that can drift.
+ */
+export const ACTIVE_AGENT_RUN_STATUSES = ["queued", "running", "awaiting_confirmation"] as const;
+
 export interface EnqueueAgentRunInput {
   userId: string;
   goal: string;
@@ -268,6 +341,9 @@ export interface EnqueueAgentRunInput {
   /** Clamped to the run cap (config.agentRuns.maxIter — WARP-2749, not the chat cap). */
   maxIter?: number;
   runAfter?: Date;
+  /** WARP-2877 — set by the schedule ticker, so its overlap guard can find
+   *  this run on the next fire. Absent for a run started from chat. */
+  scheduleId?: string | null;
 }
 
 /** Create a `queued` run. The worker's next tick claims it. */
@@ -287,6 +363,7 @@ export async function enqueueAgentRun(
       model: input.model,
       sessionId: input.sessionId ?? null,
       maxIter,
+      scheduleId: input.scheduleId ?? null,
       ...(input.runAfter ? { runAfter: input.runAfter } : {}),
     },
     select: { id: true },
@@ -306,7 +383,7 @@ export async function cancelAgentRun(
   now: Date = new Date(),
 ): Promise<boolean> {
   const res = await prisma.agentRun.updateMany({
-    where: { id, status: { in: ["queued", "running", "awaiting_confirmation"] } },
+    where: { id, status: { in: [...ACTIVE_AGENT_RUN_STATUSES] } },
     // A parked run can be cancelled: the terminal write clears the parked
     // call too, like every other terminal write.
     data: { status: "cancelled", endedAt: now, ...CLEAR_PENDING },
@@ -409,7 +486,7 @@ export async function decideAgentRun(
 }
 
 /** Why an execution stopped before the loop finished on its own. */
-type StopReason = "cancelled" | "deadline" | "fenced" | "parked";
+type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outcome";
 
 class AgentRunStopped extends Error {
   constructor(
@@ -867,6 +944,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ? { tool: run.pendingTool, bindingHash: run.pendingBindingHash, decision: run.pendingDecision }
         : null;
     let lastDispatch: { tool: string; tool_call_id: string; iteration: number } | null = null;
+    // WARP-2877 — the tool whose outcome was lost, named in the terminal row.
+    let unknownOutcomeTool: string | null = null;
     const park: {
       request: {
         tool: string;
@@ -1090,12 +1169,52 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         );
         if (unknownOutcome) {
           // Dispatched before the crash, outcome never recorded. It may have
-          // had its side effect; we cannot know. Re-dispatching is the only
-          // way to make progress — say so loudly rather than silently.
-          logger.warn(
-            { runId, tool: call.tool, priorCallId: unknownOutcome.tool_call_id, iteration: abs },
-            "agent_run_redispatch_unknown_outcome",
-          );
+          // had its side effect; we cannot know.
+          //
+          // WARP-2877 — the old code logged this and re-dispatched anyway, so
+          // an approved delete could run twice and one `send_notification`
+          // became two toasts. {@link redispatchSafe} decides instead, from
+          // the catalog's tier flags and what this entry already records.
+          if (!redispatchSafe(call.tool, unknownOutcome)) {
+            // Marked either way: this step has no result and never will, and
+            // both the run-detail view and the park notification below read
+            // the mark rather than guessing from an absent `text`.
+            unknownOutcome.unknownOutcome = true;
+            await persistTrace();
+            // An APPROVED call that was lost still re-parks, because that is
+            // strictly better than stopping: with no decision left on the row
+            // the re-dispatch carries no token, the interceptor challenges,
+            // and the human gets to decide whether to run it again knowing it
+            // may already have run. (The park notification says exactly that
+            // — "Nothing has been done yet" would be a lie here.) Halting
+            // would take that choice away and leave a dead run.
+            if (unknownOutcome.confirmation === "confirmed") {
+              logger.warn(
+                { runId, tool: call.tool, priorCallId: unknownOutcome.tool_call_id, iteration: abs },
+                "agent_run_reask_unknown_outcome",
+              );
+            } else {
+              // Nothing gates this tool, so a second dispatch is a second
+              // effect and no human is in the loop to catch it. Stop.
+              unknownOutcomeTool = call.tool;
+              logger.error(
+                { runId, tool: call.tool, priorCallId: unknownOutcome.tool_call_id, iteration: abs },
+                "agent_run_halted_unknown_outcome",
+              );
+              stop(runId, "unknown_outcome");
+              throw new AgentRunStopped(
+                "unknown_outcome",
+                `${call.tool} may already have run before the restart`,
+              );
+            }
+          } else {
+            // A read, or a gated call whose lost dispatch carried no token.
+            // Repeating it is safe — say so loudly rather than silently.
+            logger.warn(
+              { runId, tool: call.tool, priorCallId: unknownOutcome.tool_call_id, iteration: abs },
+              "agent_run_redispatch_unknown_outcome",
+            );
+          }
         }
         trace.push({
           tool_call_id: call.tool_call_id,
@@ -1232,6 +1351,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         const summary = summarizeToolArguments(parkRequest.tool, parkRequest.args);
         const fields = summary.fields.map((f) => `${f.key}: ${f.detail}`).join("; ");
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
+        // WARP-2877 — "Nothing has been done yet" is TRUE for an ordinary
+        // park and FALSE for a re-park after an approved call whose outcome
+        // was lost to a restart: that dispatch spent the approval and may
+        // have written. The trace mark is what tells the two apart, and the
+        // person deciding is the one who needs to know.
+        const mayHaveRun = trace.some((e) => e.unknownOutcome && e.tool === parkRequest.tool);
         await sendNotification(prisma, {
           userId: user.username,
           kind: "ai",
@@ -1239,12 +1364,39 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           body:
             `Background run "${goal}" wants to run ${parkRequest.tool}` +
             (fields ? ` (${fields})` : "") +
-            ". Open the run to approve or deny it. Nothing has been done yet.",
+            (mayHaveRun
+              ? ". You approved this before and the run was interrupted mid-call, so it MAY ALREADY " +
+                "have happened — check before approving it again."
+              : ". Open the run to approve or deny it. Nothing has been done yet."),
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
       }
       logger.info({ runId, tool: parkRequest.tool }, "agent_run_parked");
+      return;
+    }
+    if (reason === "unknown_outcome") {
+      // WARP-2877 — terminal and explicit. `status` is the enum column, as it
+      // is for every other ending; `stopReason` names WHICH ending, the same
+      // typed slot `deadline` and `cancelled` already use, so the run-detail
+      // view and the notification can say what happened without a human
+      // reading a log. Not `awaiting_confirmation`: that status offers
+      // Approve/Deny, and there is nothing left to approve — the tool may
+      // already have run. Honest is `failed` plus the reason why.
+      const error =
+        `unknown_outcome: ${unknownOutcomeTool ?? "a tool"} was dispatched before this run was ` +
+        "interrupted and its result was never recorded, so it may already have taken effect. " +
+        "It was NOT run again. Check whether it happened, then start a new run if it did not.";
+      await finish(runId, {
+        status: "failed",
+        endedAt,
+        iteration: base + (result?.iterations ?? 0),
+        stopReason: "unknown_outcome",
+        error,
+        ...CLEAR_PENDING,
+      });
+      await audit(runId, run.userId, "failed", "Agent run halted (outcome unknown)", error,
+        user ? { username: user.username, goal: run.goal } : undefined);
       return;
     }
     if (reason === "deadline") {
