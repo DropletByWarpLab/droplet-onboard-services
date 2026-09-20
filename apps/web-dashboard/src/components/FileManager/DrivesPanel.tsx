@@ -253,7 +253,24 @@ export function DrivesPanel() {
   // Disks worth surfacing in "Available drives": everything the bridge
   // reports that is NOT already in use (in-use disks are the mounted drive
   // cards below — listing them twice would be confusing, not honest).
-  const availableDisks = (disks ?? []).filter((d) => d.state !== "in_use");
+  //
+  // WARP-2960: a pool's CURRENT members are already represented — once — by
+  // its pool card above (level, capacity, "N drives"), so a RAID 1's two
+  // mirror members must not also appear here as two loose disks. The join is
+  // the disk's own `md` AND the pool's mdstat member list, and it fails OPEN:
+  // a pool_member with no `md`, an md the pools payload doesn't carry (a
+  // degraded /storage/pools fetch), or one that has dropped out of its array
+  // keeps its card and its Reclaim action — losing a disk from the UI is
+  // worse than listing it twice. A live member is reclaimable by deleting
+  // the pool, which is the pool card's job, not this grid's.
+  const availableDisks = (disks ?? []).filter(
+    (d) =>
+      d.state !== "in_use" &&
+      !(
+        d.state === "pool_member" &&
+        pools.some((p) => p.device === d.md && p.members.includes(d.name))
+      ),
+  );
 
   // A pool whose md device backs no mounted filesystem was created but never
   // formatted+mounted (or lost its mount) — offer the owner a way forward
