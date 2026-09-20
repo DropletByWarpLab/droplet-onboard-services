@@ -205,13 +205,14 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
 
   // ── WARP-1554 ────────────────────────────────────────────────────────
   // /files owns a bottom tab, and the drawer used to drop a primary's
-  // children along with the primary's own row. That left Drives, Recents,
+  // children along with the primary's own row. That left Recents,
   // Favorites, Shared, Trash and Sync Devices with NO mobile navigation path
   // whatsoever — the desktop sub-nav lives in a `hidden lg:flex` <aside>, so
   // it is no fallback. These cases pin mobile reachability so the regression
-  // cannot happen silently again.
+  // cannot happen silently again. (WARP-2959 moved Drives out of Files
+  // entirely — it is reached from Settings -> Storage now, so it is no longer
+  // one of the sub-views this has to keep reachable.)
   const FILES_SUBVIEWS: Array<[string, RegExp, string]> = [
-    ["Drives", /^drives$/i, "/files/drives"],
     ["Recents", /^recents$/i, "/files/recents"],
     ["Favorites", /^favorites$/i, "/files/favorites"],
     ["Shared", /^shared$/i, "/files/shared"],

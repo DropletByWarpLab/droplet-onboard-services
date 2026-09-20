@@ -9,7 +9,7 @@
  * tying them together was a copy-pasted back-link. Five of them spent their
  * ENTIRE `actions` slot on that byte-identical "← Files" block.
  *
- * This owns the shared chrome for the five static sub-routes. Their pages now
+ * This owns the shared chrome for the four static sub-routes. Their pages now
  * render content and nothing else — no `ShellPage`, no back-link, no header
  * strings.
  *
@@ -25,12 +25,11 @@
  */
 
 import { usePathname } from "next/navigation";
-import { Clock, HardDrive, Share2, Star, Trash2, type LucideIcon } from "lucide-react";
+import { Clock, Share2, Star, Trash2, type LucideIcon } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { headerForPath, routeOwnership, type FilesRouteIcon } from "./files-routes";
 
 const ICONS: Record<FilesRouteIcon, LucideIcon> = {
-  drives: HardDrive,
   favorites: Star,
   recents: Clock,
   shared: Share2,

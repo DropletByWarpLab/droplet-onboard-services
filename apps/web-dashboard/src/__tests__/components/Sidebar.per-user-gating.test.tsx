@@ -232,7 +232,7 @@ describe("design §9 note (a) — a denied module leaves ALL THREE nav surfaces"
     expect(within(bottomBar()).queryByRole("link", { name: /^files$/i })).toBeNull();
     expect(within(openDrawer()).queryByRole("link", { name: /^files$/i })).toBeNull();
     // The sub-nav children must not survive their parent anywhere.
-    expect(document.querySelector("a[href='/files/drives']")).toBeNull();
+    expect(document.querySelector("a[href='/files/recents']")).toBeNull();
     expect(document.querySelector("a[href='/files/trash']")).toBeNull();
   });
 

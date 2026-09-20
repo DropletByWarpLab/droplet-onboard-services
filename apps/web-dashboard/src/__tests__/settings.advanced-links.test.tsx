@@ -113,3 +113,25 @@ describe("Settings — Advanced links to the tucked surfaces (WARP-1807)", () =>
     );
   });
 });
+
+/**
+ * WARP-2959 — Settings → "Storage" link row.
+ *
+ * The Drives surface moved off the Files sub-nav into /settings/storage, so
+ * this row is now the ONE way in. It is the same failure shape as the
+ * Advanced rows above: delete it and nothing breaks, builds, type-checks or
+ * fails — the surface just becomes unreachable.
+ */
+describe("Settings — Storage links to the moved Drives surface (WARP-2959)", () => {
+  it("renders a Storage section with a row pointing at /settings/storage", async () => {
+    render(<SettingsPage />);
+    const storage = await screen.findByRole("link", { name: /storage/i });
+    expect(storage).toHaveAttribute("href", "/settings/storage");
+    expect(storage).toHaveTextContent(/pools, drives, and the system disk/i);
+  });
+
+  it("never points at the old Files address", () => {
+    render(<SettingsPage />);
+    expect(document.querySelector("a[href='/files/drives']")).toBeNull();
+  });
+});

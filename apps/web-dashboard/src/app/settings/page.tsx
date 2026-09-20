@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Cloud,
   DownloadCloud,
+  HardDrive,
   Mic,
   Plus,
   Settings as SettingsIcon,
@@ -501,6 +502,36 @@ export default function SettingsPage() {
                 <span className="nm">Software updates</span>
                 <span className="sub">
                   Current release, pending updates, and the apply window
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
+
+        {/* Storage (WARP-2959) — a single link row; pools, volumes, the
+            system disk and the erase/adopt/reclaim actions live on the
+            /settings/storage surface (same pattern as the Voice and Software
+            updates rows). The surface moved here from the Files sub-nav: it
+            is box hardware, not a place files live. It carries no role gate
+            of its own — exactly as it did under Files — because DrivesPanel
+            already hides every destructive control from non-admins and the
+            orchestrator refuses them server-side. */}
+        <Sect title="Storage" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <Link
+              href="/settings/storage"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <HardDrive size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Storage</span>
+                <span className="sub">
+                  Storage pools, drives, and the system disk
                 </span>
               </span>
               <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
