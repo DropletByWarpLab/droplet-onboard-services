@@ -71,7 +71,7 @@ export default function BusinessPage(): JSX.Element {
   const pipeline = crmEnabled ? pipelines?.find((p) => p.isDefault) ?? pipelines?.[0] ?? null : null;
   const { stages, error: sumErr, isLoading: sumLoading } = useCrmSummary(pipeline?.id ?? null);
   const { deals, error: dealErr, isLoading: dealLoading } = useDeals(pipeline?.id ?? null);
-  const { summary: pm, error: pmErr, isLoading: pmLoading } = useSummary();
+  const { summary: pm, error: pmErr, isLoading: pmLoading } = useSummary(projectsEnabled);
   const { connection, schedule, isLoading: erpLoading } = useEaglesoft();
 
   // The practice tile needs BOTH: a connection that carries data, and a

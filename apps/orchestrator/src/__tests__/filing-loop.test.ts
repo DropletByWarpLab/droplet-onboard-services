@@ -195,7 +195,7 @@ describe("🔴 PATIENT_RECORD is terminal, decided in code", () => {
 
 describe("🔴 unattended extraction never leaves the LAN", () => {
   it("MUTATION: delete the resolveOffLanProvider refusal — a MISLABELLED cloud model is used", async () => {
-    // The case the second check exists for. `localModelIdentifiers` already
+    // The case the second check exists for. `resolveStoredChatModel` already
     // drops anything the catalogue calls cloud, so a plainly-labelled
     // `anthropic` entry never gets this far — it comes out `model_unreachable`
     // (no local models), which is also a refusal.
@@ -243,6 +243,22 @@ describe("🔴 unattended extraction never leaves the LAN", () => {
     expect(await resolveFilingModel(prisma)).toMatchObject({
       ok: false,
       reason: "model_unreachable",
+    });
+  });
+
+  it("a stored legacy DISPLAY name resolves to the runtime id, not the first model (WARP-2882)", async () => {
+    listModelsMock.mockResolvedValue({
+      models: [
+        { id: "llama3.2:3b", name: "Llama3.2 3B", provider: "local" },
+        { id: "docker.io/ai/gpt-oss:20B-F16", name: "Gpt-oss 20B F16", provider: "local" },
+      ],
+    });
+    const prisma = {
+      workspaceSetting: { findUnique: async () => ({ valueJson: "Gpt-oss 20B F16" }) },
+    } as never;
+    expect(await resolveFilingModel(prisma)).toEqual({
+      ok: true,
+      model: "docker.io/ai/gpt-oss:20B-F16",
     });
   });
 

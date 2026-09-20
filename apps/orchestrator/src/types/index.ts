@@ -185,6 +185,10 @@ export interface ModelInfo {
   provider: string;
   name: string;
   context_window: number | null;
+  // WARP-2882 (additive, optional): the length the model was TRAINED with,
+  // probed from Ollama `/api/show`. Display only — the served window for a
+  // local model is `OLLAMA_CONTEXT_LENGTH`; nothing budgets against this.
+  trained_context_window?: number | null;
   // Additive (optional for back-compat): modalities the model supports.
   // Populated by the ai-gateway; drives vision routing + the dashboard badge.
   capabilities?: ModelCapabilities;
@@ -345,3 +349,17 @@ export type {
   WanDetectionResult,
   CameraSetupResult,
 } from "./switch.js";
+
+/**
+ * WARP-2883 — GET /ai/latency on the ai-gateway: a round-trip per inference
+ * endpoint in ms, `null` for one that did not answer (unreachable, no
+ * box-wide key, timed out). Never 0 for "not measured".
+ */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+export interface LatencyResponse {
+  providers: EndpointLatencyMs;
+}

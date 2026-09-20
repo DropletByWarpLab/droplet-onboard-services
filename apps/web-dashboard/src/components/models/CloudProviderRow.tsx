@@ -1,81 +1,229 @@
 "use client";
 
 /**
- * WARP-836 — one opt-in cloud provider row on the Models page.
+ * WARP-2871 — one cloud provider row on the Models page.
  *
- * Read-only on this surface. The toggle reflects the provider's `enabled`
- * state but is DISABLED here — turning a provider on is a Settings action
- * (the off-LAN allowlist, which logs to Activity and requires admin), never a
- * one-click flip on a status page. We render it as a real `role="switch"` with
- * `aria-checked` so assistive tech reads the state, plus `disabled` so it's
- * non-operable and the copy points the user to where the switch actually lives.
+ * Replaces the WARP-836 shown-but-disabled switch. The row states the key
+ * situation honestly (saved / none / unknown), decides ONE badge from
+ * key × escape × role via `cloudProviderState`, and — for owners/admins only —
+ * carries the key actions that used to live on Settings (ProviderKeyForm,
+ * retired). Members get no buttons at all: read-only state, no disabled walls.
  */
 
-import { Cloud } from "lucide-react";
-import type { CloudProviderRow as CloudProviderRowData } from "@/lib/types";
+import { useState } from "react";
+import { Cloud, ExternalLink, Trash2 } from "lucide-react";
+import { saveProviderKey, deleteProviderKey } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
+import { formatRelativeTime } from "@/lib/relative-time";
+import { Badge, type BadgeKind } from "@/components/shell/primitives";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import type { CloudAccessInfo, CloudProviderRow as Row } from "@/lib/types";
 
 /** Provider id → display name + the headline model family shown as sub-text. */
-const PROVIDER_META: Record<
-  CloudProviderRowData["provider"],
-  { name: string; family: string }
+export const PROVIDER_META: Record<
+  Row["provider"],
+  { name: string; family: string; /** Where an admin mints a key. */ console: string }
 > = {
-  anthropic: { name: "Anthropic", family: "Claude" },
-  openai: { name: "OpenAI", family: "GPT" },
-  gemini: { name: "Gemini", family: "Google" },
+  anthropic: { name: "Anthropic", family: "Claude", console: "https://console.anthropic.com/settings/keys" },
+  openai: { name: "OpenAI", family: "GPT", console: "https://platform.openai.com/api-keys" },
 };
 
-export function CloudProviderRow({ provider }: { provider: CloudProviderRowData }) {
-  const meta = PROVIDER_META[provider.provider];
-  const stateLabel = provider.enabled ? "On" : "Off";
+/** The one badge per row. Order matters: an unknown key beats everything
+ *  (we can't claim anything), then no key, then the box-wide switch, then the
+ *  caller's role verdict. */
+export function cloudProviderState(
+  row: Row,
+  cloudAccess: CloudAccessInfo,
+): { kind: BadgeKind; label: string } {
+  if (row.hasKey === null) return { kind: "muted", label: "Unknown" };
+  if (row.hasKey === false) return { kind: "muted", label: "Not set up" };
+  if (!cloudAccess.escapeEnabled) return { kind: "info", label: "Key saved · cloud off" };
+  if (cloudAccess.allowedForYou === false) return { kind: "warn", label: "Blocked for your role" };
+  if (cloudAccess.allowedForYou === null) return { kind: "muted", label: "Key saved" };
+  return { kind: "ok", label: "Ready" };
+}
+
+function keyLine(row: Row): string {
+  if (row.hasKey === null) return "Key status unavailable";
+  if (!row.hasKey) return "No key yet";
+  return row.lastUsedAt
+    ? `Key saved · Last used ${formatRelativeTime(row.lastUsedAt)}`
+    : "Key saved · Never used";
+}
+
+// Aligns the inline editor under `.rt`: `.ri` 34px + the 13px row gap + 2px
+// row padding (droplet-shell.css `.lrow`).
+const EDITOR_INDENT = 49;
+
+export function CloudProviderRow({
+  row,
+  cloudAccess,
+  canManage,
+  onChanged,
+}: {
+  row: Row;
+  cloudAccess: CloudAccessInfo;
+  /** Owner/admin — only they see the key actions. */
+  canManage: boolean;
+  onChanged: () => void;
+}) {
+  const meta = PROVIDER_META[row.provider];
+  const state = cloudProviderState(row, cloudAccess);
+  const [editing, setEditing] = useState(false);
+  const [key, setKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const trimmed = key.trim();
+    if (!trimmed || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await saveProviderKey(row.provider, trimmed);
+      setKey("");
+      setEditing(false);
+      onChanged();
+    } catch (err) {
+      // WARP-294: never the raw orchestrator message.
+      setError(translateError(err, "provider-key"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    try {
+      await deleteProviderKey(row.provider);
+      setError(null);
+      onChanged();
+    } catch (err) {
+      setError(translateError(err, "provider-key"));
+      // Re-throw so ConfirmDialog stays open for a retry (its contract).
+      throw err;
+    }
+  }
 
   return (
-    <div className="flex items-center gap-3 px-4 py-3.5">
-      <span
-        className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
-        style={{ background: "var(--brand-subtle)", color: "var(--brand)" }}
-        aria-hidden
-      >
-        <Cloud size={16} strokeWidth={2} />
-      </span>
-
-      <div className="flex-1 min-w-0">
-        <p className="type-subheadline font-medium truncate" style={{ color: "var(--text)" }}>
-          {meta.name}
-        </p>
-        <p className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>
-          {meta.family} · opt-in, off by default
-        </p>
+    <>
+      <div className="lrow">
+        <span className={state.kind === "ok" ? "ri brand" : "ri"} aria-hidden>
+          <Cloud size={16} />
+        </span>
+        <span className="rt">
+          <span className="nm">{meta.name}</span>
+          <span className="sub">
+            {meta.family} · {keyLine(row)}
+          </span>
+        </span>
+        <Badge kind={state.kind}>{state.label}</Badge>
+        {canManage && row.hasKey === false && !editing && (
+          <button type="button" className="btn sm" onClick={() => setEditing(true)}>
+            Add key
+          </button>
+        )}
+        {canManage && row.hasKey === true && !editing && (
+          <>
+            <button type="button" className="btn sm" onClick={() => setEditing(true)}>
+              Replace key
+            </button>
+            <button
+              type="button"
+              className="btn sm ghost"
+              aria-label={`Remove ${meta.name} key`}
+              onClick={() => setConfirmRemove(true)}
+            >
+              <Trash2 size={14} aria-hidden />
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Plain-text state next to the switch so the (disabled) control isn't the
-          only signal of on/off — and so colour isn't load-bearing. */}
-      <span className="type-caption-1 tabular-nums" style={{ color: "var(--text-muted)" }}>
-        {stateLabel}
-      </span>
+      {editing && (
+        <div style={{ padding: `0 2px 12px ${EDITOR_INDENT}px` }}>
+          <label
+            className="type-caption-1"
+            htmlFor={`cloud-key-${row.provider}`}
+            style={{ display: "block", color: "var(--text-muted)", marginBottom: 6 }}
+          >
+            {meta.name} API key
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              id={`cloud-key-${row.provider}`}
+              type="password"
+              autoComplete="off"
+              placeholder="Paste the key"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+              }}
+              className="w-full px-3 outline-none"
+              style={{
+                height: 36,
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
+            />
+            <button
+              type="button"
+              className="btn primary sm"
+              disabled={saving || !key.trim()}
+              onClick={() => void save()}
+            >
+              {saving ? "Saving…" : "Save key"}
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={saving}
+              onClick={() => {
+                setEditing(false);
+                setKey("");
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="type-caption-1" style={{ color: "var(--text-muted)", marginTop: 6 }}>
+            Stored encrypted on your Droplet. Only admins can add, replace or remove keys.{" "}
+            <a
+              href={meta.console}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "var(--brand)", display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              Get a key from {meta.name}
+              <ExternalLink size={12} aria-hidden />
+            </a>
+          </p>
+        </div>
+      )}
 
-      {/* Disabled switch — present for a11y/state read-out, not operable here. */}
-      <button
-        type="button"
-        role="switch"
-        aria-checked={provider.enabled}
-        aria-label={`${meta.name} cloud model — ${stateLabel} (change in Settings)`}
-        disabled
-        title="Enable cloud models in Settings"
-        className={`
-          relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full
-          border cursor-not-allowed opacity-60
-          ${provider.enabled ? "bg-[var(--brand)] border-[var(--brand)]" : "bg-[var(--inset)] border-[var(--card-bd)]"}
-        `}
-      >
-        <span
-          className={`
-            inline-block h-4 w-4 rounded-full bg-white shadow
-            motion-safe:transition-transform motion-safe:duration-200 ease-smooth
-            ${provider.enabled ? "translate-x-6" : "translate-x-1"}
-          `}
-          aria-hidden
-        />
-      </button>
-    </div>
+      {error && (
+        <p
+          role="alert"
+          className="type-footnote"
+          style={{ color: "var(--system-red, #ff3b30)", padding: `0 2px 10px ${EDITOR_INDENT}px` }}
+        >
+          {error}
+        </p>
+      )}
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onConfirm={remove}
+        onCancel={() => setConfirmRemove(false)}
+        title={`Remove ${meta.name} key?`}
+        description={`Cloud models from ${meta.name} will stop working on this Droplet until an admin adds a new key. The saved key cannot be recovered.`}
+        confirmLabel="Remove key"
+        variant="destructive"
+      />
+    </>
   );
 }

@@ -35,6 +35,17 @@ describe("reportFromRun", () => {
     expect(reportFromRun(run())?.sources).toEqual(["get_system_health", "list_recent_files"]);
   });
 
+  it("lists only the sources that actually fed the report — a failed read is not provenance", () => {
+    const r = run({
+      trace: [
+        { idx: 0, tool: "get_system_health", ok: true, result: {} },
+        { idx: 1, tool: "get_camera_health", ok: false, error: "no cameras" },
+        { idx: 2, tool: SUMMARIZE_PSEUDO_TOOL, ok: true, result: "All quiet." },
+      ],
+    });
+    expect(reportFromRun(r)?.sources).toEqual(["get_system_health"]);
+  });
+
   it("does not count the summarize step as one of its own sources", () => {
     expect(reportFromRun(run())?.sources).not.toContain(SUMMARIZE_PSEUDO_TOOL);
   });
@@ -112,6 +123,7 @@ describe("reportFromRun", () => {
     });
     const out = reportFromRun(r);
     expect(out?.prose).toBe("No accounting system is connected.");
-    expect(out?.sources).toEqual(["erp_get_ar_summary"]);
+    // A source that could not be read fed nothing, so it is not provenance.
+    expect(out?.sources).toEqual([]);
   });
 });

@@ -14,13 +14,11 @@ import { render, screen, waitFor } from "@testing-library/react";
 import type { HealthResponse } from "@/lib/types";
 
 const fetchUsersMock = vi.fn();
-const listProviderKeysMock = vi.fn();
 
 /** Mutated per-test, read by the useDevice mock below. */
 let healthValue: HealthResponse | null = null;
 
 vi.mock("@/lib/api", () => ({
-  listProviderKeys: (...a: any[]) => listProviderKeysMock(...a),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: vi.fn(),
@@ -43,11 +41,6 @@ vi.mock("@/lib/hooks/useDevice", () => ({
   }),
 }));
 
-vi.mock("@/components/ProviderKeyForm", () => ({
-  ProviderKeyForm: ({ provider }: { provider: string }) => (
-    <div data-testid={`provider-key-${provider}`} />
-  ),
-}));
 vi.mock("@/components/ThemeToggle", () => ({ ThemeToggle: () => null }));
 
 import SettingsPage from "@/app/settings/page";
@@ -74,8 +67,6 @@ function health(runtime?: "dmr" | "ollama"): HealthResponse {
 beforeEach(() => {
   healthValue = null;
   fetchUsersMock.mockReset();
-  listProviderKeysMock.mockReset();
-  listProviderKeysMock.mockResolvedValue([]);
   fetchUsersMock.mockResolvedValue({ users: [] });
 });
 

@@ -12,6 +12,7 @@ import os
 import base64
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -82,39 +83,32 @@ _assert_device_secret_safe()
 _SALT_FILE = KEYS_DIR / ".salt"
 _KDF_ITERATIONS = 480_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 
-# WARP-561: per-user BYOK namespacing. Keys are stored under
-# `{user_id}/{provider}.enc` so one household member's cloud key is never
-# readable by another. `user_id is None` is the SHARED/device namespace
-# (`_shared/{provider}.enc`) — used by server-side callers that have no
-# per-request identity (model listing, gRPC EmbedText, router reload). The
-# segment is sanitised so a hostile id can never escape KEYS_DIR via
-# traversal or absolute paths.
+# WARP-561 introduced per-user BYOK namespacing (`{user_id}/{provider}.enc`)
+# so one household member's cloud key was not readable by another, with
+# `_shared/{provider}.enc` for identity-less server-side callers (model
+# listing, gRPC EmbedText, router reload).
+#
+# WARP-2871 RETIRES it. Cloud provider keys are admin-managed and BOX-WIDE:
+# the Models page saves and deletes them with no principal, and GET
+# /api/models reports one box-wide `hasKey` per provider. A surviving
+# per-user key would keep read precedence while being invisible to that
+# list and to the admin's delete — key material nobody can see or remove.
+#
+# So `_shared` is the ONLY namespace this module touches, for every
+# operation, whatever `user_id` a caller passes; `retire_per_user_keys()`
+# below deletes the legacy namespaces once at startup. The `user_id`
+# parameters are kept purely for signature compatibility — callers still
+# forward the principal — and are ignored.
 _SHARED_NAMESPACE = "_shared"
 
 
-def _user_namespace(user_id: str | None) -> str:
-    """Map a caller identity to a filesystem-safe key namespace.
-
-    None / blank → the shared device namespace. Otherwise the id is reduced
-    to a conservative `[A-Za-z0-9._-]` token (collapsing anything else to
-    `_`) so it can never contain a path separator, `..`, or a drive/root
-    prefix. This is the only place a user id touches the path.
-    """
-    if not user_id or not user_id.strip():
-        return _SHARED_NAMESPACE
-    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in user_id.strip())
-    # A token of only dots ("." / "..") would still be a traversal token.
-    if not safe or set(safe) <= {"."}:
-        return _SHARED_NAMESPACE
-    return safe
-
-
 # CodeQL py/path-injection: `provider` arrives straight from the URL
-# (`/ai/keys/{provider}`) and from `ChatRequest.provider`; only `user_id` was
-# sanitised, so `../x` or an absolute segment could have read, written or
-# unlinked an `.enc` outside the namespace. A bad provider is REJECTED rather
-# than collapsed the way `_user_namespace` does — silently remapping the name
-# would store a key the caller can never find again under the name they used.
+# (`/ai/keys/{provider}`) and from `ChatRequest.provider`, so `../x` or an
+# absolute segment could otherwise read, write or unlink an `.enc` outside
+# the namespace. A bad provider is REJECTED rather than collapsed to a safe
+# token — silently remapping the name would store a key the caller can never
+# find again under the name they used. (Since WARP-2871 this is the ONLY
+# caller-supplied value that reaches a path; user ids no longer do.)
 _PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -123,8 +117,14 @@ def _is_valid_provider(provider: object) -> bool:
     return isinstance(provider, str) and _PROVIDER_RE.match(provider) is not None
 
 
-def _key_path(provider: str, user_id: str | None) -> Path:
-    """Return the on-disk path for a provider key in a user's namespace.
+def _key_path(provider: str) -> Path:
+    """Return the on-disk path for a provider key in the shared namespace.
+
+    WARP-2871: takes no user id — no caller-supplied identity reaches a path
+    any more, which is also why the WARP-561 `_user_namespace` sanitiser is
+    gone. `provider` is still attacker-influenced (it arrives from
+    `/ai/keys/{provider}` and `ChatRequest.provider`), so it keeps its
+    token check and the containment barrier below.
 
     Raises ValueError for a provider name that is not a plain token.
     """
@@ -132,7 +132,7 @@ def _key_path(provider: str, user_id: str | None) -> Path:
         raise ValueError(f"invalid provider name: {provider!r}")
     base = os.path.abspath(KEYS_DIR)
     candidate = os.path.normpath(
-        os.path.join(base, _user_namespace(user_id), f"{provider}.enc")
+        os.path.join(base, _SHARED_NAMESPACE, f"{provider}.enc")
     )
     # Belt-and-braces containment check on the normalised path — the
     # documented py/path-injection barrier. Both segments are already
@@ -174,9 +174,20 @@ def _get_fernet() -> Fernet:
     return Fernet(key)
 
 
+# WARP-2871: `user_id` is accepted and IGNORED by every operation below.
+# Callers (auth/byok.py, main.py's /ai/keys routes, the router's per-turn key
+# lookup) still forward the request principal, so the parameter stays for
+# signature compatibility — but a cloud key is box-wide, so there is exactly
+# one of each and it lives in `_shared`.
+
+
 async def store_key(provider: str, api_key: str, user_id: str | None = None) -> None:
-    """Encrypt and store an API key for a provider in the caller's namespace."""
-    key_path = _key_path(provider, user_id)
+    """Encrypt and store the box-wide API key for a provider.
+
+    `user_id` is ignored (WARP-2871) — nothing can create a per-user key by
+    accident, so nothing new can become invisible to the admin's list.
+    """
+    key_path = _key_path(provider)
     key_path.parent.mkdir(parents=True, exist_ok=True)
     fernet = _get_fernet()
     encrypted = fernet.encrypt(api_key.encode())
@@ -185,10 +196,17 @@ async def store_key(provider: str, api_key: str, user_id: str | None = None) -> 
 
 
 async def get_key(provider: str, user_id: str | None = None) -> str | None:
-    """Retrieve and decrypt an API key for a provider in the caller's namespace."""
+    """Retrieve and decrypt the box-wide API key for a provider.
+
+    `user_id` is ignored (WARP-2871): the shared namespace is the only one
+    read. Under WARP-561 a per-user key took precedence, so a key left over
+    from the retired ProviderKeyForm would silently outrank the admin's
+    box-wide key while `GET /api/models` reported the box-wide one — the
+    user's calls succeeded against a key the badge did not describe.
+    """
     if not _is_valid_provider(provider):
         return None  # a name that can't be a key file has no key
-    key_path = _key_path(provider, user_id)
+    key_path = _key_path(provider)
     if not key_path.exists():
         return None
 
@@ -202,10 +220,14 @@ async def get_key(provider: str, user_id: str | None = None) -> str | None:
 
 
 async def delete_key(provider: str, user_id: str | None = None) -> bool:
-    """Remove a stored API key from the caller's namespace."""
+    """Remove the box-wide API key for a provider.
+
+    `user_id` is ignored (WARP-2871) so an admin's delete really removes the
+    box's cloud key material rather than no-op'ing on their own namespace.
+    """
     if not _is_valid_provider(provider):
         return False  # nothing can be stored under a non-token name
-    key_path = _key_path(provider, user_id)
+    key_path = _key_path(provider)
     if key_path.exists():
         key_path.unlink()
         logger.info("Deleted API key for provider: %s (namespace: %s)", provider, key_path.parent.name)
@@ -214,8 +236,63 @@ async def delete_key(provider: str, user_id: str | None = None) -> bool:
 
 
 async def list_providers_with_keys(user_id: str | None = None) -> list[str]:
-    """Return provider names that have stored keys in the caller's namespace."""
-    ns_dir = KEYS_DIR / _user_namespace(user_id)
+    """Return provider names that have a stored box-wide key.
+
+    `user_id` is ignored (WARP-2871) — this is what `GET /api/models` turns
+    into each row's `hasKey`, and it must describe the same key `get_key`
+    will actually use.
+    """
+    ns_dir = KEYS_DIR / _SHARED_NAMESPACE
     if not ns_dir.exists():
         return []
     return [p.stem for p in ns_dir.glob("*.enc")]
+
+
+def retire_per_user_keys() -> tuple[int, int]:
+    """Delete every legacy WARP-561 per-user key namespace. Idempotent.
+
+    WARP-2871: `ProviderKeyForm` is retired and nothing reads a per-user
+    namespace any more, so a key left in one is unreachable AND undeletable
+    — key material nobody can see or remove. Sweeping it at startup is the
+    only way the retirement is honest rather than merely invisible.
+
+    Removes every directory directly under KEYS_DIR other than `_shared`
+    (files at the top level, notably `.salt`, are left alone). Returns
+    (namespaces_removed, providers_removed) and logs ONE warning naming only
+    those counts — never a user id, never a key value (rule 19).
+
+    Never raises: a missing or unwritable KEYS_DIR must not stop the gateway
+    from serving, so a failure is logged and the sweep moves on.
+    """
+    try:
+        children = [p for p in KEYS_DIR.iterdir() if p.is_dir()]
+    except OSError as exc:
+        # Missing volume on a fresh box, or a read-only mount. Not fatal.
+        logger.info("Skipping per-user key retirement sweep: %s", exc)
+        return (0, 0)
+
+    namespaces = providers = 0
+    for ns_dir in children:
+        if ns_dir.name == _SHARED_NAMESPACE:
+            continue
+        count = len(list(ns_dir.glob("*.enc")))
+        try:
+            shutil.rmtree(ns_dir)
+        except OSError as exc:
+            logger.warning(
+                "Could not retire a legacy per-user key namespace: %s", exc
+            )
+            continue
+        namespaces += 1
+        providers += count
+
+    if namespaces:
+        logger.warning(
+            "WARP-2871: removed %d legacy per-user cloud-key namespace(s) "
+            "holding %d provider key(s). Cloud keys are box-wide and "
+            "admin-managed; any personal key saved under WARP-561 is gone and "
+            "must be re-saved on the Models page by an owner or admin.",
+            namespaces,
+            providers,
+        )
+    return (namespaces, providers)

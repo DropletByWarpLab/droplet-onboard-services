@@ -10,8 +10,8 @@ import {
   fetchDevices,
   fetchModels,
   saveProviderKey,
-  listProviderKeys,
   deleteProviderKey,
+  setCloudModelEscape,
   fetchNetworkOperation,
   uploadFiles,
   UploadBatchError,
@@ -98,18 +98,6 @@ describe("API client", () => {
     });
   });
 
-  describe("listProviderKeys", () => {
-    it("returns provider list", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ providers: ["anthropic"] }),
-      });
-
-      const result = await listProviderKeys();
-      expect(result).toEqual(["anthropic"]);
-    });
-  });
-
   describe("deleteProviderKey", () => {
     it("sends DELETE request", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true });
@@ -119,6 +107,31 @@ describe("API client", () => {
         "/api/llm/keys/openai",
         expect.objectContaining({ method: "DELETE" })
       );
+    });
+  });
+
+  // WARP-2871 — the Models-page cloud switch writes the workspace
+  // cloud_model_escape channel. The route requires a non-empty reason; the
+  // product chose a fixed one over asking the user.
+  describe("setCloudModelEscape", () => {
+    it("PATCHes the off-LAN channel with a fixed reason", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+      await setCloudModelEscape(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/settings/off-lan/cloud_model_escape",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ enabled: true, reason: "Turned on from the Models page" }),
+        }),
+      );
+    });
+
+    it("throws with the status attached so friendly-errors can map a 403", async () => {
+      // authFetch clones every 403 to peek for PASSWORD_CHANGE_REQUIRED.
+      const body = { error: "forbidden" };
+      const res = { ok: false, status: 403, json: () => Promise.resolve(body) };
+      mockFetch.mockResolvedValueOnce({ ...res, clone: () => res });
+      await expect(setCloudModelEscape(false)).rejects.toMatchObject({ status: 403 });
     });
   });
 

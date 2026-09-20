@@ -35,6 +35,12 @@ import {
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 import {
+  DAILY_REPORT_SLUG,
+  seedDailyReportSpec,
+} from "../services/daily-report-spec.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import type { McpCallContext } from "../services/mcp-client.service.js";
+import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveToolAccessScope,
@@ -149,6 +155,8 @@ const callStepSchema = z.object({
   tool: z.string().min(1).max(64),
   args: z.record(z.unknown()).optional(),
   as: outputNameSchema,
+  /** A failure of this step is recorded and the walk continues. */
+  optional: z.boolean().optional(),
 });
 
 const summarizeStepSchema = z.object({
@@ -180,7 +188,7 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
   if (s.kind === "summarize") {
     return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
   }
-  return { tool: s.tool, args: s.args ?? {}, ...named };
+  return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
 }
 
 /**
@@ -466,6 +474,39 @@ export function createToolsRouter(
 ): Router {
   const router = Router();
 
+  /**
+   * Every by-slug lookup goes through here. The `daily-report` spec is
+   * box-provided rather than user-authored, so when it is missing the fix is
+   * to create it, not to tell the person "Spec not found" about a thing they
+   * never made. Seed-then-retry; a genuinely unknown slug still returns null.
+   */
+  async function findSpec<T>(
+    slug: string,
+    query: (where: { slug: string }) => Promise<T | null>,
+  ): Promise<T | null> {
+    const found = await query({ slug });
+    if (found || slug !== DAILY_REPORT_SLUG) return found;
+    await seedDailyReportSpec(prisma);
+    return query({ slug });
+  }
+
+  /**
+   * The identity a run-now executes as — the same three fields chat forwards
+   * on every tool call, so a spec run can read what the person has connected
+   * (calendar, email, memory are all `ctx.userId`-gated in tools-core).
+   */
+  async function runCallContext(req: Request): Promise<McpCallContext | undefined> {
+    const userId = req.user?.username;
+    const role = req.user?.role;
+    const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+    if (!userId && !role && !ncToken) return undefined;
+    return {
+      ...(userId ? { userId } : {}),
+      ...(role ? { userRole: role } : {}),
+      ...(ncToken ? { ncToken } : {}),
+    };
+  }
+
   router.get(
     "/tools",
     // WARP-2894 — `routine_list` reaches this as the mcp principal.
@@ -538,10 +579,12 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -670,10 +713,12 @@ export function createToolsRouter(
         // patch that replaces the steps must re-derive even when it says
         // nothing about `writes` — that second case is how a read-only spec
         // silently grew a write step before this.
-        const existing = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const existing = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!existing) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -794,10 +839,12 @@ export function createToolsRouter(
       try {
         const actor = await actorOr403(prisma, req, res, req.body?.onBehalfOf ?? req.query.onBehalfOf);
         if (!actor) return;
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-          include: { steps: { orderBy: { idx: "asc" } } },
-        })) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({
+            where,
+            include: { steps: { orderBy: { idx: "asc" } } },
+          }),
+        )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -906,6 +953,7 @@ export function createToolsRouter(
           triggeredBy,
           scope,
           summarizer,
+          callContext: await runCallContext(req),
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
@@ -931,9 +979,9 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const spec = (await prisma.toolSpec.findUnique({
-          where: { slug: req.params.slug },
-        })) as unknown as SpecRow | null;
+        const spec = (await findSpec(req.params.slug, (where) =>
+          prisma.toolSpec.findUnique({ where }),
+        )) as unknown as SpecRow | null;
         if (!spec) {
           res.status(404).json({ error: "Spec not found" });
           return;
@@ -945,8 +993,16 @@ export function createToolsRouter(
             Number.parseInt(String(req.query.limit ?? "20"), 10) || 20,
           ),
         );
+        // A run executes AS the person who pressed Run, so its trace holds
+        // their calendar titles, meeting links and file paths. The archive is
+        // shared across owner/admin/family, so only the runs this person
+        // triggered — plus the ticker's, which run with no session and hold
+        // no per-user data — may come back. Never the newest run regardless.
         const rows = (await prisma.toolRun.findMany({
-          where: { specId: spec.id },
+          where: {
+            specId: spec.id,
+            triggeredBy: { in: [req.user?.username ?? "", "scheduler"] },
+          },
           orderBy: { startedAt: "desc" },
           take: limit,
         })) as unknown as RunRow[];
@@ -994,9 +1050,9 @@ export function createToolsRouter(
     req: Request,
     res: Response,
   ): Promise<{ spec: SpecRow; schedule: ScheduleRow | null } | null> {
-    const spec = (await prisma.toolSpec.findUnique({
-      where: { slug: req.params.slug },
-    })) as unknown as SpecRow | null;
+    const spec = (await findSpec(req.params.slug, (where) =>
+      prisma.toolSpec.findUnique({ where }),
+    )) as unknown as SpecRow | null;
     if (!spec) {
       res.status(404).json({ error: "Spec not found" });
       return null;

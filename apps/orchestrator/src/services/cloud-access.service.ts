@@ -175,11 +175,14 @@ function refusedBody(provider: string): CloudRefusalBody {
     channel: CHANNEL,
     provider,
     scope: "per_person",
+    // WARP-2871: name the surfaces that actually exist — the escape switch
+    // lives on the Models page (owner/admin), the role permission in Roles &
+    // Access. Still does not say WHICH limb closed (see above).
     message:
       "Cloud models are not available for this account. Cloud access needs BOTH " +
-      "the box's off-LAN cloud_model_escape channel (Settings → Off-LAN " +
-      "allowlist) AND a role that permits cloud models (Settings → Access & " +
-      "Roles). This request was answered by neither — nothing was sent off the LAN.",
+      "the box's cloud-model switch (Models page, owner or admin) AND a role " +
+      "that permits cloud models (Roles & Access). This request was answered " +
+      "by neither — nothing was sent off the LAN.",
   };
 }
 

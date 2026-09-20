@@ -14,7 +14,7 @@
  * WARP-1306 — `projects` now mirrors the module-toggles EFFECTIVE state
  * (available && enabled, resolved by modules.service), exactly as the
  * original contract note here prescribed. The module-toggles layer landed
- * with the projects module `defaultEnabled: false` and its `/api/pm/projects`
+ * with the projects module `defaultEnabled: false` and its `/api/pm/*`
  * routes behind the module gate, but this probe kept answering a hardcoded
  * `true` — so the dashboard rendered the full Projects workspace and let the
  * customer fill the New-project dialog only for the POST to die on the

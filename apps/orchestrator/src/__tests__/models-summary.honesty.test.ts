@@ -24,8 +24,10 @@ vi.mock("../services/cache.service.js", () => ({
 }));
 
 const listModelsMock = vi.fn();
+const fetchLatencyMock = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
+  fetchLatency: () => fetchLatencyMock(),
 }));
 
 // Stub only the network probe; `metricsFor` stays real so the name matching is
@@ -43,20 +45,21 @@ import { getModelsPagePayload } from "../services/models-summary.service.js";
 
 const TWO_MODELS = {
   models: [
-    { id: "a", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
-    { id: "b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
+    { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: 131072 },
+    { id: "llama3.2:3b", provider: "ollama", name: "llama3.2:3b", context_window: 131072 },
   ],
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   fetchLocalModelMetricsMock.mockResolvedValue(new Map());
+  fetchLatencyMock.mockResolvedValue(null);
 });
 
 describe("WARP-1749 — metric state on the wire", () => {
   it("carries `unsupported` through to the payload (a DMR box's VRAM)", async () => {
     listModelsMock.mockResolvedValue({
-      models: [{ id: "a", provider: "ollama", name: "ai/smollm2", context_window: 8192 }],
+      models: [{ id: "ai/smollm2", provider: "ollama", name: "ai/smollm2", context_window: 8192 }],
     });
     fetchLocalModelMetricsMock.mockResolvedValue(
       new Map([
@@ -143,5 +146,66 @@ describe("WARP-1749 — diskBarPct is only drawn when the whole store is known",
     for (const row of payload.local) {
       expect(row.diskBarPct).toBeNull();
     }
+  });
+});
+
+// ── WARP-2883 — avg latency is a mean over the endpoints IN USE ─────────────
+//
+// The tile hardcoded 0 because nothing measured anything. Now the gateway
+// reports one round-trip per endpoint, and the average is taken over the local
+// runtime plus each cloud provider that is switched on and keyed — which only
+// the route's overlay knows. Null samples are left out, never counted as 0.
+import { averageLatencyMs, overlayCloudState } from "../services/models-summary.service.js";
+
+describe("WARP-2883 — endpoint latency on the wire", () => {
+  const LATENCY = { local: 4, anthropic: 312, openai: 250 };
+
+  it("averageLatencyMs ignores endpoints that did not answer and is 0 for none", () => {
+    expect(averageLatencyMs(null, [])).toBe(0);
+    expect(averageLatencyMs({ local: null, anthropic: null, openai: null }, ["anthropic"])).toBe(0);
+    expect(averageLatencyMs({ local: 4, anthropic: null, openai: null }, ["anthropic"])).toBe(4);
+    expect(averageLatencyMs(LATENCY, [])).toBe(4);
+    expect(averageLatencyMs(LATENCY, ["anthropic"])).toBe(158);
+    expect(averageLatencyMs(LATENCY, ["anthropic", "openai"])).toBe(189);
+  });
+
+  it("the cached build carries the samples and averages local only", async () => {
+    listModelsMock.mockResolvedValue(TWO_MODELS);
+    fetchLatencyMock.mockResolvedValue({ providers: LATENCY });
+    const payload = await getModelsPagePayload();
+    expect(payload.endpointLatencyMs).toEqual(LATENCY);
+    expect(payload.avgLatencyMs).toBe(4);
+  });
+
+  it("a gateway that could not be asked yields null samples and 0, never a throw", async () => {
+    listModelsMock.mockResolvedValue(TWO_MODELS);
+    fetchLatencyMock.mockResolvedValue(null);
+    const payload = await getModelsPagePayload();
+    expect(payload.endpointLatencyMs).toBeNull();
+    expect(payload.avgLatencyMs).toBe(0);
+  });
+
+  it("the overlay re-averages over the cloud providers that are ENABLED", async () => {
+    listModelsMock.mockResolvedValue(TWO_MODELS);
+    fetchLatencyMock.mockResolvedValue({ providers: LATENCY });
+    const payload = await getModelsPagePayload();
+    const now = new Date();
+    const on = overlayCloudState(payload, {
+      keys: ["anthropic"],
+      escapeRow: { enabled: true, lastChangedBy: "romain", lastChangedAt: now },
+      allowedForYou: true,
+    });
+    expect(on.cloud.map((c) => [c.provider, c.enabled])).toEqual([
+      ["anthropic", true],
+      ["openai", false],
+    ]);
+    expect(on.avgLatencyMs).toBe(158);
+    // Switch off: a keyed provider that is not enabled is not in use.
+    const off = overlayCloudState(payload, {
+      keys: ["anthropic"],
+      escapeRow: { enabled: false, lastChangedBy: null, lastChangedAt: now },
+      allowedForYou: false,
+    });
+    expect(off.avgLatencyMs).toBe(4);
   });
 });
