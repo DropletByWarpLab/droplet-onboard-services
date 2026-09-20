@@ -949,6 +949,11 @@ class TFTDisplay:
             # the INSTALL disk, and calling it the owner's storage is the whole
             # of WARP-2098.
             "storage": {},
+            # WARP-2944 — the certificate lifecycle from the orchestrator's
+            # public /api/tls/status (state, daysLeft). Empty until polled;
+            # the footer only speaks when renewal is failing and time is
+            # short, so an unpolled box says nothing — never a false alarm.
+            "tls": {},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.
             "services": {"up": None, "total": None, "status": None,
@@ -1118,6 +1123,8 @@ class TFTDisplay:
                 self.update_storage(data)
             elif mode == "qr":
                 self.update_wifi_join(data)
+            elif mode == "tls":
+                self.update_tls(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -2089,6 +2096,13 @@ class TFTDisplay:
         equivalent of WARP-1643's frozen sensor reading."""
         if isinstance(data, dict):
             self._v3["wifi_join"] = data
+
+    def update_tls(self, data: dict) -> None:
+        """WARP-2944. Replaced wholesale: a later answer that no longer says
+        "failing" must take the footer's warning down, and a merge would keep
+        a stale `daysLeft` next to a fresh `state`."""
+        if isinstance(data, dict):
+            self._v3["tls"] = data
 
     def update_services(self, data: dict) -> None:
         """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
@@ -3751,6 +3765,25 @@ class TFTDisplay:
         make the panel forget what it knew."""
         return self._bridge_get("/services", timeout)
 
+    def fetch_tls_status(self, timeout: float = 6.0) -> Optional[dict]:
+        """WARP-2944 — the certificate lifecycle for the footer's one-line
+        warning. The orchestrator's PUBLIC /api/tls/status (no token: it is
+        the pre-login minimum the gateway's status page already polls) now
+        carries `daysLeft`; the panel needs nothing more. None on any
+        failure — the footer then keeps its last event."""
+        req = urllib.request.Request(PANEL_ORCHESTRATOR_URL + "/api/tls/status")
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout, context=_GATEWAY_SSL_CTX) as r:
+                body = json.loads(r.read().decode("utf-8"))
+        except Exception as e:                                       # noqa: BLE001
+            logger.debug("tls status fetch failed: %s", e)
+            return None
+        if not isinstance(body, dict):
+            return None
+        return {"state": body.get("state"), "daysLeft": body.get("daysLeft"),
+                "fqdn": body.get("fqdn")}
+
     def fetch_storage(self, timeout: float = 6.0) -> Optional[dict]:
         """WARP-2668 — the box's DATA-drive capacity, for the STORAGE cell.
 
@@ -4192,6 +4225,12 @@ class TFTDisplay:
                 store = self.fetch_storage()
                 if store is not None:
                     self._pyportal_send("storage", store)
+                # WARP-2944 — the certificate lifecycle, same cadence and the
+                # same wide-panel gate (the footer is layout_wide's). Mirrored
+                # straight into _v3: no firmware knows a "tls" mode.
+                tls = self.fetch_tls_status()
+                if tls is not None:
+                    self._mirror_to_v3("tls", tls)
                 last_storage_push = now
             # WARP-1800 — the household join code for the rail's Wi-Fi face.
             #

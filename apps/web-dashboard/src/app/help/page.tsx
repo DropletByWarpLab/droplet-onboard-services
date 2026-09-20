@@ -368,6 +368,33 @@ const SECTIONS: Section[] = [
           <strong>Nothing to configure:</strong> no dynamic-DNS account, no
           subdomain or token, and no changes to your office router.
         </p>
+        <p>
+          <strong>The Droplet apps and the padlock are two different things.</strong>{" "}
+          The Droplet apps (Windows, iPhone, Android) pair to your box by its
+          own key, from the pairing QR on its screen or on Devices &rarr; Pair.
+          They keep working whatever the certificate below is doing. A{" "}
+          <em>browser</em> shows the padlock only with the box&rsquo;s public
+          certificate.
+        </p>
+        <p>
+          <strong>Keeping the padlock:</strong> the public certificate is
+          renewed by the box itself, about every two months, and it needs to
+          reach the internet to do that. The rule is simple:{" "}
+          <strong>your Droplet needs an outbound internet connection at least
+          once every 60 days.</strong> If it can&rsquo;t renew, Settings &rarr;
+          Device information shows <em>renewal failing</em> with the days left,
+          the screen&rsquo;s footer says the same when under two weeks remain,
+          and the owner gets a notification — first when renewal starts
+          failing, then once more a week before expiry. Restore the internet
+          connection and it renews on its own; nothing to click.
+        </p>
+        <p>
+          <strong>Air-gapped installs</strong> (no internet on purpose) are the
+          documented exception: the box serves its own self-signed certificate
+          for its whole life, the apps pair to it exactly the same way, and
+          browsers show a warning you can accept once per device. Nothing is
+          broken — that is what a box without a certificate service looks like.
+        </p>
       </>
     ),
   },
