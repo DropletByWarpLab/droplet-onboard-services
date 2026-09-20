@@ -901,3 +901,72 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
     expect(advertised).toContain("cloud_query_dataset");
   });
 });
+
+describe("WARP-2894 — routines are reachable from a fresh turn", () => {
+  const ROUTINES_POOL = [...POOL, "routine_draft", "routine_list", "routine_run"];
+
+  const advertisedFor = (userMessage: string, pool: string[] = ROUTINES_POOL) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // Whole sentences, never a word lifted out of the pattern (the WARP-2454
+  // tautology). Every one runs with an EMPTY `conversationToolNames`.
+  //
+  // MUTATION: delete the `domains: ["routines"]` rule from
+  // tool-selection.service.ts and every positive below goes red. This is the
+  // fifth DOMAIN_RULES entry to ship; the WARP-2058 / 2454 / 2546 / 2719
+  // class shipped a dead rule four times before, so the door is measured
+  // here rather than argued.
+  describe("positives — how a person asks for something recurring", () => {
+    it.each([
+      "every morning, tell me which scans came in overnight",
+      "can you do that each Friday afternoon?",
+      "automate the end-of-day file tidy",
+      "set this up to run at 6pm",
+      "schedule this so I don't have to ask",
+      "I want a daily summary of what changed in Documents",
+      "give me a weekly digest of the camera events",
+      "what routines do we have set up?",
+      "turn that into a recurring job",
+      "do this every 2 hours",
+    ])("%s advertises the routine tools", (message) => {
+      const advertised = advertisedFor(message);
+      expect(advertised).toContain("routine_draft");
+      expect(advertised).toContain("routine_list");
+    });
+  });
+
+  // The DELIBERATELY unclaimed shapes. Each belongs to a domain that answers
+  // it better; a widening that takes the bare word turns these red on purpose.
+  //
+  // MUTATION: drop the cadence-noun requirement after `every|each`, or let
+  // bare `schedule` through, and the matching case below goes red.
+  describe("negatives — the words other domains own", () => {
+    it.each([
+      // `every` without a cadence noun is enumeration, not recurrence.
+      "show me every file in the scans folder",
+      "is every camera still online?",
+      // bare `schedule` is the calendar's word.
+      "what is on my schedule tomorrow?",
+      "when is the next free slot in the schedule?",
+      // a one-off ask is a one-off ask.
+      "tidy up the Documents folder",
+    ])("%s does not advertise the routine tools", (message) => {
+      expect(advertisedFor(message)).not.toContain("routine_draft");
+    });
+  });
+
+  it("still reaches the domain by continuity once a routine tool has been used", () => {
+    const advertised = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the other one?",
+      pool: ROUTINES_POOL,
+      conversationToolNames: ["routine_list"],
+    }).advertised;
+    expect(advertised).toContain("routine_list");
+  });
+});

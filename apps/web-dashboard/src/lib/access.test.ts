@@ -892,7 +892,7 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
 
   // ── Trap: the four domains no UI group covers ───────────────────────────
   describe("ungrouped tool domains (the silent-drop trap)", () => {
-    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat nor agent_runs", () => {
+    it("TOOL_DOMAIN_GROUPS covers neither money, team_chat, agent_runs nor routines", () => {
       // The premise the whole seeding strategy rests on. If a group ever adopts
       // one of these, this pin fails and `templateToDraft` needs re-reading — a
       // grouped domain is fanned out, not passed through.
@@ -903,7 +903,9 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       // grouped so a grant stored before the move still renders somewhere. That
       // is the adoption this pin exists to announce, so it is stated here
       // rather than silently dropped.
-      for (const ungrouped of ["money", "team_chat", "agent_runs"]) {
+      // WARP-2894 — `routines` joins the list the same way `agent_runs` did:
+      // an unclaimed domain (no module owns it) that no row adopts yet.
+      for (const ungrouped of ["money", "team_chat", "agent_runs", "routines"]) {
         expect(GROUPED_DOMAINS.has(ungrouped)).toBe(false);
       }
       // ...and the other half of the same fact, so a future ungrouping is just

@@ -236,6 +236,9 @@ import currencyConvert from "./handlers/data/currency-convert.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
+import routineDraft from "./handlers/routines/routine-draft.js";
+import routineList from "./handlers/routines/routine-list.js";
+import routineRun from "./handlers/routines/routine-run.js";
 
 const allTools: Tool[] = [
   // network
@@ -424,6 +427,14 @@ const allTools: Tool[] = [
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
   listAgentRuns,
+  // WARP-2894 (ADR-056 §5.1): routines — the model DRAFTS, a person PROMOTES.
+  // draft is Write-tier with no confirmation (a draft is inert: POST
+  // /api/tools has no status field, the row is born `draft`); list is
+  // Tier-1; run is Tier-2 and runs only a LIVE spec, as the acting person,
+  // through the route's whole-spec pre-flight.
+  routineDraft,
+  routineList,
+  routineRun,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
