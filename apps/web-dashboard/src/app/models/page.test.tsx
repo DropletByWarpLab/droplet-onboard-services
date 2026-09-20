@@ -593,6 +593,21 @@ describe("<ModelsPage /> cloud section (WARP-2871)", () => {
     expect(screen.getByText(/Turned off by romain ·/)).toBeInTheDocument();
   });
 
+  // WARP-2955: the change line is part of the switch row, not a second list
+  // row — a sibling `.lrow` inherits the inter-row divider + 12px row padding
+  // and sat in its own band under a hairline.
+  it("renders the change line inside the switch row, not as a second row", () => {
+    asAdmin();
+    ready();
+    render(<ModelsPage />);
+    const line = screen.getByText(/Off since setup · Nothing has left this Droplet/);
+    const row = line.closest(".lrow");
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent("Allow cloud models on this Droplet");
+    const card = row!.closest(".card")!;
+    expect(card.querySelectorAll(".lrow")).toHaveLength(1);
+  });
+
   it("add-key flow: expand → type → Save → saveProviderKey → refresh", async () => {
     asAdmin();
     saveProviderKeyMock.mockResolvedValue(undefined);
