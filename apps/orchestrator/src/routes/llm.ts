@@ -64,8 +64,7 @@ import { decryptChunkRows } from "../services/file-search.service.js";
 import { probeColdModel } from "../services/model-readiness.service.js";
 import {
   readActiveChatModel,
-  resolveActiveChatModel,
-  localModelIdentifiers,
+  resolveStoredChatModel,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
 import {
@@ -855,9 +854,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         degraded = false,
       ): Promise<ModelsResponse> => {
         try {
-          const active = resolveActiveChatModel(
+          // WARP-2882: through the same resolver as GET /api/models, so
+          // `defaultModel` and `activeModel` agree on the runtime id even
+          // when the stored row holds a legacy display name.
+          const active = resolveStoredChatModel(
             await readActiveChatModel(prisma),
-            degraded ? null : localModelIdentifiers(resp.models),
+            degraded ? null : resp.models,
           );
           return { ...resp, defaultModel: active };
         } catch {
