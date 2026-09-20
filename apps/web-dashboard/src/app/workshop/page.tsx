@@ -95,6 +95,13 @@ function WorkshopInner() {
     }
   };
 
+  // Nothing renders before the role is known — the /admin/audit pattern. The
+  // form and AgentRunsPanel below are gated on `allowed`, which is false while
+  // auth loads; without this return they would mount for any role in that
+  // window and the panel's mount effects would hit GET /api/agent-runs and
+  // /api/agent-runs/schedules before anyone knows who is asking.
+  if (authLoading) return <WorkshopSkeleton />;
+
   if (!authLoading && !allowed) {
     return (
       <ShellPage icon={<Hammer size={15} />} label="Workshop" title="Workshop" sub={SUB}>

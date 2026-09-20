@@ -10,6 +10,10 @@
  *      now forwards here.
  *   4. A family member reaching the page by URL gets honest copy and no form.
  *   5. The Start button stays disabled until there is a goal to send.
+ *   6. While auth is still loading, nobody gets the form or the runs panel —
+ *      the page shows the same loading card /admin/audit does, and the panel's
+ *      mount fetches (GET /api/agent-runs, /api/agent-runs/schedules) never
+ *      fire before the role is known.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -17,8 +21,9 @@ import React from "react";
 
 const authFetchMock = vi.fn();
 let mockRole: string = "owner";
+let mockAuthLoading = false;
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "u1", username: "alice", role: mockRole }, isLoading: false }),
+  useAuth: () => ({ user: { id: "u1", username: "alice", role: mockRole }, isLoading: mockAuthLoading }),
   authFetch: (...args: unknown[]) => authFetchMock(...args),
 }));
 
@@ -75,6 +80,7 @@ function calls(prefix: string) {
 
 beforeEach(() => {
   mockRole = "owner";
+  mockAuthLoading = false;
   mockSearchParamsString = "";
   authFetchMock.mockReset();
   authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -148,4 +154,28 @@ describe("/workshop (WARP-2925)", () => {
     expect(screen.queryByLabelText("What should your Droplet do?")).toBeNull();
     expect(calls("/api/agent-runs").length).toBe(0);
   });
+
+  it.each(["family", "guest"])(
+    "while auth is still loading, a %s visitor sees the loading card — no form, no runs panel, no panel fetches",
+    (role) => {
+      mockRole = role;
+      mockAuthLoading = true;
+      render(<WorkshopPage />);
+
+      // The same loading card /admin/audit shows in its auth-loading window.
+      const loading = screen.getByText("Loading…");
+      expect(loading).toHaveAttribute("aria-busy", "true");
+      expect(loading).toHaveClass("card");
+
+      // Neither the form nor the denied copy — the role is not known yet.
+      expect(screen.queryByRole("form", { name: "Start a run" })).toBeNull();
+      expect(screen.queryByLabelText("What should your Droplet do?")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+
+      // AgentRunsPanel is not mounted, so its mount effects never hit the box.
+      expect(screen.queryByRole("list", { name: "Background runs" })).toBeNull();
+      expect(calls("/api/agent-runs").length).toBe(0);
+      expect(calls("/api/agent-runs/schedules").length).toBe(0);
+    },
+  );
 });
