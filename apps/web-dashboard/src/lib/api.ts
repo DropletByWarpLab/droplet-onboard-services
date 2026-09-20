@@ -4730,6 +4730,21 @@ export interface EmailChannelConfig {
   security: "starttls" | "tls" | "none";
   /** Whether a password is stored — the password itself is never returned. */
   hasPassword: boolean;
+  /**
+   * WARP-2957 — the last relay test. `lastTestedAt` null = never tested;
+   * `lastError` null with a `lastTestedAt` = the last test passed. The error
+   * is a closed-set sentence from the orchestrator, never the server's line.
+   */
+  lastError: string | null;
+  lastTestedAt: string | null;
+}
+
+/** WARP-2957 — outcome of `POST /api/settings/email/test`. */
+export interface EmailChannelTestResult {
+  ok: boolean;
+  reason: string | null;
+  error: string | null;
+  lastTestedAt: string;
 }
 
 /** What the operator submits. `password` is write-only: omit to keep existing. */
@@ -4747,6 +4762,16 @@ export interface EmailChannelUpdate {
 export async function getEmailChannel(): Promise<EmailChannelConfig> {
   const res = await authFetch(`${BASE}/api/settings/email`);
   if (!res.ok) throw new Error(`Failed to load email settings: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-2957 — dial the SAVED relay (connect, TLS, AUTH — no mail sent) and
+ * record the outcome. 200 either way; `ok` says which.
+ */
+export async function testEmailChannel(): Promise<EmailChannelTestResult> {
+  const res = await authFetch(`${BASE}/api/settings/email/test`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to test email settings: ${res.status}`);
   return res.json();
 }
 
