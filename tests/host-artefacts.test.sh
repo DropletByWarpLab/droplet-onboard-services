@@ -40,6 +40,10 @@ REPO_ROOT_REAL="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOST_UNITS="$REPO_ROOT_REAL/scripts/host/droplet-host-units.sh"
 MANIFEST="$REPO_ROOT_REAL/scripts/host/MANIFEST"
 SINGLE_BOX="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+# WARP-2574 delivery half — the re-apply-on-refresh chain (Phase 5).
+WRAPPER="$REPO_ROOT_REAL/scripts/host/usr-local-sbin/droplet-reapply-host-integration"
+REAPPLY_UNIT="$REPO_ROOT_REAL/scripts/host/etc-systemd-system/droplet-host-integration.service"
+SETUP="$REPO_ROOT_REAL/scripts/setup.sh"
 FAILURES=0
 TESTS=0
 
@@ -54,7 +58,7 @@ echo "  WARP-2574 — host artefact reconciliation"
 echo "  ================================================"
 echo ""
 
-for f in "$HOST_UNITS" "$MANIFEST" "$SINGLE_BOX"; do
+for f in "$HOST_UNITS" "$MANIFEST" "$SINGLE_BOX" "$WRAPPER" "$REAPPLY_UNIT" "$SETUP"; do
   if [ ! -f "$f" ]; then
     fail "missing: ${f#"$REPO_ROOT_REAL"/}"
     echo ""
@@ -292,6 +296,88 @@ reconcile() { # <manifest> <single-box.sh> <repo root>
   ' "$man")
 
   unset -f _has
+  [ "$problems" -eq 0 ]
+}
+
+# =============================================================================
+# THE DELIVERY-CHAIN GUARD — WARP-2574 delivery half
+# =============================================================================
+# `reconcile` above proves every INSTALLER artefact has a manifest row. This
+# proves the box actually GETS those artefacts on a refresh. The whole reason
+# the audit exists is that the refresh updated the checkout and NEVER re-ran the
+# installer — so the delivery path that finally closes that must itself be
+# guarded, or it silently rots and the gap re-opens exactly as before.
+#
+# The chain, each link asserted (and mutation-tested in Phase 5):
+#   droplet-host-integration.service   (User=root, Before=droplet.service)
+#     └─ ExecStart → /usr/local/sbin/droplet-reapply-host-integration
+#          └─ (gated on `droplet-host-units audit`) setup.sh --reapply-host-integration
+#               └─ install_single_box_host_integration     ← the ONE installer
+# Because the heal re-runs the WHOLE installer, EVERY track artefact is delivered
+# by it — guarding this one chain guards delivery of all of them at once.
+#
+# A function so Phase 5 can run it against deliberately-broken copies and prove
+# each assertion fires. Prints one `FAIL:` line per problem; returns 1 if any.
+check_delivery_chain() { # <wrapper> <unit> <setup.sh> <single-box.sh>
+  local wrapper="$1" unit="$2" setup="$3" sb="$4" problems=0
+
+  # 1. unit → wrapper: the boot/refresh unit runs the reapply wrapper.
+  grep -qxF 'ExecStart=/usr/local/sbin/droplet-reapply-host-integration' "$unit" || {
+    echo "FAIL: droplet-host-integration.service ExecStart does not run /usr/local/sbin/droplet-reapply-host-integration — the boot hook heals nothing"
+    problems=1
+  }
+
+  # 2. it is a LEGITIMATE ROOT PATH, before the stack. Not User=root means the
+  #    heal would lean on the droplet/docker-group path this must never widen.
+  grep -qxF 'User=root' "$unit" || {
+    echo "FAIL: droplet-host-integration.service is not User=root — the re-apply must run through a root systemd context, never the docker group"
+    problems=1
+  }
+  grep -qxF 'Before=droplet.service' "$unit" || {
+    echo "FAIL: droplet-host-integration.service is not ordered Before=droplet.service — the host layer must reconcile before the stack comes up"
+    problems=1
+  }
+
+  # 3. wrapper → setup.sh --reapply-host-integration: the heal actually re-applies.
+  grep -q -- '--reapply-host-integration' "$wrapper" || {
+    echo "FAIL: droplet-reapply-host-integration never invokes 'setup.sh --reapply-host-integration' — the heal is a no-op"
+    problems=1
+  }
+
+  # 4. it GATES on the audit — otherwise it re-provisions on every boot, the very
+  #    unattended-provision-on-a-cadence the watchdog check refuses to be.
+  grep -q 'audit' "$wrapper" || {
+    echo "FAIL: droplet-reapply-host-integration does not gate on 'droplet-host-units audit' — it would re-run the installer on every boot"
+    problems=1
+  }
+
+  # 5. setup.sh has the mode AND that mode re-runs the SINGLE source of truth.
+  grep -q -- '--reapply-host-integration' "$setup" || {
+    echo "FAIL: setup.sh has no --reapply-host-integration mode — the wrapper's heal cannot run"
+    problems=1
+  }
+  # The block itself must call install_single_box_host_integration — a re-apply
+  # that gates, logs, and installs nothing is worse than none (it looks fixed).
+  if ! awk '
+        /REAPPLY_HOST_INTEGRATION" = "true"/ { inblk = 1 }
+        inblk { print }
+        inblk && /^fi$/ { exit }
+      ' "$setup" | grep -q 'install_single_box_host_integration'; then
+    echo "FAIL: setup.sh --reapply-host-integration does not call install_single_box_host_integration — the heal re-applies nothing"
+    problems=1
+  fi
+
+  # 6. the installer ENABLES the unit but NEVER starts it. `--now`/start would
+  #    recurse: the wrapper re-enters setup.sh --reapply → this same installer.
+  grep -qE 'systemctl enable (--now )?droplet-host-integration\.service' "$sb" || {
+    echo "FAIL: install_single_box_host_integration does not enable droplet-host-integration.service — the boot re-apply never runs"
+    problems=1
+  }
+  if grep -qE 'enable --now droplet-host-integration|systemctl (start|restart) droplet-host-integration' "$sb"; then
+    echo "FAIL: install_single_box_host_integration starts droplet-host-integration.service during install — that recurses into the installer (must be 'enable', never '--now'/start)"
+    problems=1
+  fi
+
   [ "$problems" -eq 0 ]
 }
 
@@ -785,6 +871,109 @@ sed -e 's|\(^file  scripts/host/etc-default/droplet-watchdog .*\)presence|\1pres
   "$MANIFEST" > "$MUT/manifest-typo-policy"
 mutate_check "a misspelled policy is caught, not silently treated as track" \
   "$MUT/manifest-typo-policy" "$SINGLE_BOX" "unknown kind or policy"
+
+# =============================================================================
+# Phase 5: the delivery-chain guard (WARP-2574 delivery half)
+# =============================================================================
+# The reconcile above ensures a new artefact has a manifest row. This ensures a
+# new artefact actually REACHES existing boxes: the installer is re-run on the
+# refresh path, as root, audit-gated. Guard the chain, then prove it can fail.
+echo "--- Phase 5: delivery path (re-apply on refresh) ---"
+
+if bash -n "$WRAPPER" 2>/dev/null; then
+  pass "droplet-reapply-host-integration passes bash -n"
+else
+  fail "droplet-reapply-host-integration fails bash -n"
+fi
+
+# rule 9: the heal is a one-shot invoked by the unit/deploy path — no loop.
+if grep -qE 'while[[:space:]]+true|while[[:space:]]*:' "$WRAPPER"; then
+  fail "droplet-reapply-host-integration contains a while-true loop (architecture-guard rule 9)"
+else
+  pass "the re-apply wrapper has no scheduler of its own (architecture-guard rule 9)"
+fi
+
+if out="$(check_delivery_chain "$WRAPPER" "$REAPPLY_UNIT" "$SETUP" "$SINGLE_BOX")"; then
+  pass "the re-apply delivery chain is intact (unit → wrapper → setup.sh --reapply → installer)"
+else
+  fail "the re-apply delivery chain is broken:"
+  printf '%s\n' "$out" | sed 's/^/      /'
+fi
+
+# The delivery path is itself two track artefacts — pinned by name so removing
+# the heal cannot pass by simply dropping its manifest rows.
+for artefact in \
+  /usr/local/sbin/droplet-reapply-host-integration \
+  /etc/systemd/system/droplet-host-integration.service; do
+  if manifest_files "$MANIFEST" | awk '{ print $2 }' | grep -qxF "$artefact"; then
+    pass "manifest covers $artefact"
+  else
+    fail "manifest does not cover $artefact — the delivery path is itself undelivered"
+  fi
+done
+if manifest_units "$MANIFEST" | grep -qxF droplet-host-integration.service; then
+  pass "manifest expects droplet-host-integration.service enabled"
+else
+  fail "manifest does not expect droplet-host-integration.service enabled — a disabled boot re-apply never fires"
+fi
+
+# --- mutation tests: prove the delivery-chain guard can FAIL ------------------
+MUT5="$WORK/mut5"
+mkdir -p "$MUT5"
+
+mutate_delivery() { # <label> <wrapper> <unit> <setup> <single-box> <want substr>
+  local label="$1" out
+  if out="$(check_delivery_chain "$2" "$3" "$4" "$5" 2>&1)"; then
+    fail "$label — the guard PASSED on a deliberately broken chain"
+  elif printf '%s\n' "$out" | grep -qF "$6"; then
+    pass "$label"
+  else
+    fail "$label — guard failed, but not for the expected reason"
+    printf '%s\n' "$out" | sed 's/^/      /'
+  fi
+}
+
+# 1. the unit stops running the wrapper.
+sed -e 's|^ExecStart=/usr/local/sbin/droplet-reapply-host-integration|ExecStart=/bin/true|' \
+  "$REAPPLY_UNIT" > "$MUT5/unit-noexec.service"
+mutate_delivery "a unit that no longer runs the wrapper is caught" \
+  "$WRAPPER" "$MUT5/unit-noexec.service" "$SETUP" "$SINGLE_BOX" "ExecStart does not run"
+
+# 2. the unit drops root — the heal would fall back to the docker-group path.
+sed -e 's|^User=root|User=droplet|' "$REAPPLY_UNIT" > "$MUT5/unit-nonroot.service"
+mutate_delivery "a re-apply unit that is not User=root is caught" \
+  "$WRAPPER" "$MUT5/unit-nonroot.service" "$SETUP" "$SINGLE_BOX" "not User=root"
+
+# 3. the unit stops ordering before the stack.
+grep -v '^Before=droplet.service' "$REAPPLY_UNIT" > "$MUT5/unit-noorder.service"
+mutate_delivery "a re-apply unit not ordered before droplet.service is caught" \
+  "$WRAPPER" "$MUT5/unit-noorder.service" "$SETUP" "$SINGLE_BOX" "Before=droplet.service"
+
+# 4. the wrapper stops calling the heal.
+grep -v -- '--reapply-host-integration' "$WRAPPER" > "$MUT5/wrapper-noheal"
+mutate_delivery "a wrapper that never invokes setup.sh --reapply is caught" \
+  "$MUT5/wrapper-noheal" "$REAPPLY_UNIT" "$SETUP" "$SINGLE_BOX" "the heal is a no-op"
+
+# 5. the wrapper stops gating on the audit (would re-provision every boot).
+grep -v 'audit' "$WRAPPER" > "$MUT5/wrapper-nogate"
+mutate_delivery "a wrapper that does not gate on the audit is caught" \
+  "$MUT5/wrapper-nogate" "$REAPPLY_UNIT" "$SETUP" "$SINGLE_BOX" "gate on"
+
+# 6. the setup.sh mode stops re-running the installer.
+awk '
+  /REAPPLY_HOST_INTEGRATION" = "true"/ { skip = 1 }
+  skip && /install_single_box_host_integration/ { next }
+  { print }
+  skip && /^fi$/ { skip = 0 }
+' "$SETUP" > "$MUT5/setup-noinstaller"
+mutate_delivery "a --reapply mode that forgot the installer is caught" \
+  "$WRAPPER" "$REAPPLY_UNIT" "$MUT5/setup-noinstaller" "$SINGLE_BOX" "does not call install_single_box_host_integration"
+
+# 7. the installer starts the unit --now (re-entrancy / recursion).
+sed -e 's|^\(  sudo systemctl enable\) \(droplet-host-integration.service\).*$|\1 --now \2 >/dev/null 2>\&1|' \
+  "$SINGLE_BOX" > "$MUT5/single-box-now.sh"
+mutate_delivery "an installer that starts the re-apply unit --now (recursion) is caught" \
+  "$WRAPPER" "$REAPPLY_UNIT" "$SETUP" "$MUT5/single-box-now.sh" "recurses into the installer"
 
 # =============================================================================
 echo ""

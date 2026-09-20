@@ -69,10 +69,12 @@
  * unclaimed-domain note below), so `domainsForFeatures` passes it for ANY
  * feature set, and the route layer does not make up the difference: only
  * eight modules are in `FEATURE_GATED_MODULES` (module-mounts.ts) and
- * `projects` is not one of them, so `/api/pm/projects` carries the box-wide
- * toggle and no per-person check, while `/api/pm/work-items` is not a
- * registered `routePrefix` at all. A `business` grant therefore reaches
- * `business_find({entity:"work_item"})` with nothing narrowing it per person.
+ * `projects` is not one of them, so the whole `/api/pm` tree carries the
+ * box-wide toggle and no per-person check. A `business` grant therefore
+ * reaches `business_find({entity:"work_item"})` with nothing narrowing it per
+ * person. (WARP-2875 closed the other half of this note: `/api/pm/work-items`
+ * used to sit outside the registered `routePrefix` entirely, so it carried
+ * NEITHER gate. It now carries the box-wide one. The per-person gap stands.)
  *
  *   • `read-only-auditor` holds `projects: view` AND `crm: view`, so
  *     `business` is exactly the reach it already advertised — substituted.

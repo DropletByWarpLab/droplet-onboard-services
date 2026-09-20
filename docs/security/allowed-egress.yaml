@@ -1376,6 +1376,170 @@ entries:
     review_by: 2027-09-07
     code_refs: [services/erp-connector/src/rest/vendors/calcom.ts]
 
+  # WARP-2916 — `api.github.com` is ALSO registered above under
+  # `ota-github-releases` (the orchestrator's release-manifest fetch, data
+  # class `none`). This is a separate entry on purpose: a different service,
+  # a different data class, a different credential, and a different reason to
+  # exist — retiring OTA-over-GitHub must not silently un-register the
+  # connector, and vice versa. Same host, two contracts, two rows.
+  # 🔴 WARP-2916 — registered because a JSON PATH IN A FIELD MAP parses as a
+  # hostname. `.id` is a real ICANN TLD (Indonesia), so the WARP-2467 bare-host
+  # pass reads the profile's `project_id: "repository.id"` — the dotted path
+  # to the repository's numeric id on a GitHub issue row — as a destination.
+  # `rest/connector.ts`'s `readPath` docstring already records this trap for
+  # `hosts.0.id`, where bracket syntax (`hosts[0].id`) is the fix; a plain
+  # object key has no bracket spelling, and renaming GitHub's field is not an
+  # option. Same mechanism as `ref-cal-com-brand`: it states the true fact —
+  # this token appears in source as a path, and the box never dials it.
+  - id: ref-github-repository-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [repository.id]
+    purpose: the dotted JSON path `repository.id` in the GitHub REST profile's task field map (the repository's numeric id on an issue row) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-2916
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
+  - id: github-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.github.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GitHub REST API — the project-tracker cloud connector (WARP-2916), on
+      ADR-046's declarative REST track. Read-only, GET only, one dataset:
+      issues (and pull requests, which GitHub's API returns from the same
+      endpoint) across every repository the owner's token can see, with their
+      title, state, assignee and timestamps. Fetched on request and on a
+      scheduled incremental poll under a FINE-GRAINED personal access token
+      the account owner minted in their own GitHub settings (Settings →
+      Developer settings → Personal access tokens → Fine-grained tokens) with
+      Issues: Read-only over repositories they chose; works on GitHub Free;
+      never ambient, off until the owner connects. Paced against GitHub's
+      published 5,000-requests-per-hour PAT ceiling (720 ms), which is the
+      owner's budget and is shared with every other tool on that user. ONE
+      FIXED HOST — GitHub Enterprise Server and GHEC data-residency hosts are
+      NOT served by this profile and would be a separate kind: dynamic entry
+      with their own exact-host guard. Every request also carries a dated
+      `X-GitHub-Api-Version: 2022-11-28` header (an API-version pin, not a
+      destination) and a `User-Agent: droplet-erp-connector`, which GitHub
+      requires. Pagination follows RFC-5988 `Link: rel="next"` URLs taken
+      verbatim from the response and re-checked against this host before
+      each page.
+    ticket: WARP-2916
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
+  - id: gitlab-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [gitlab.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GitLab REST API v4 on gitlab.com — the project-tracker cloud connector
+      (WARP-2917), on ADR-046's declarative REST track. Read-only, GET only,
+      one dataset: issues, as `task` rows — every issue the token's user can
+      see across every project and group they belong to, with its state,
+      assignee and timing. Carries the customer's own tracker, fetched on
+      request under a personal access token the account owner minted in their
+      own GitLab profile (Edit profile → Access → Personal access tokens),
+      scoped read_api (or a fine-grained token with Work Item: Read and User:
+      Read), on any tier including Free; never ambient, off until the owner
+      connects. The token rides in GitLab's own PRIVATE-TOKEN header, never
+      as a query parameter. Paced against the announced Free-tier sustained
+      ceiling (5,000 requests an hour) rather than a guessed constant. ONE
+      FIXED HOST — the API lives under /api/v4 on the product's own host — so
+      a plain registered destination whose origin is a whole-string literal
+      the scanner reads directly. This registration is for gitlab.com ONLY:
+      self-managed GitLab is an arbitrary customer hostname, which is a
+      separate provider needing its own kind: dynamic entry and exact-host
+      guard, never a variable host on this one. Pagination follows the
+      RFC-5988 Link header GitLab returns, and every next-page URL is re-run
+      through the exact-host guard before it is dialled.
+    ticket: WARP-2917
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/gitlab.ts]
+
+  - id: todoist-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.todoist.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Todoist unified API v1 — the task-tracker cloud connector (WARP-2918),
+      on ADR-046's declarative REST track. Read-only, GET only, one dataset:
+      the owner's ACTIVE tasks with their project, priority, assignee and
+      dates, from a single endpoint. Completed tasks are deliberately not
+      read (their endpoint needs a moving time window the track cannot
+      express), and neither are projects, sections, labels or comments —
+      each omission written out in the profile, so this destination is never
+      asked for them. Carries the owner's own to-do list, fetched on request
+      under a personal API token the account owner copied from their own
+      Todoist settings (Settings → Integrations → Developer → Copy API token),
+      on any plan including the free one; never ambient, never a background
+      crawl beyond the scheduled tick of that one endpoint, and off until the
+      owner connects. ONE FIXED HOST, like Square and Cal.com — no region
+      code, no per-account subdomain, no self-hosted option — so a plain
+      registered destination whose origin is a whole-string literal the
+      scanner reads directly. No version header: v1 is versioned in the path.
+      The endpoint has no last-modified filter, so each read is a declared
+      full scan of active tasks in pages of 200 — a fact about volume, not
+      about destination.
+    ticket: WARP-2918
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/todoist.ts]
+
+  - id: loyverse-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.loyverse.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Loyverse POS API v1.0 — the point-of-sale cloud connector (WARP-2919), on
+      ADR-046's declarative REST track. Read-only, GET only, two datasets:
+      customers and catalogue items. NOT receipts: a Loyverse receipt carries
+      no currency (it is per merchant, on the probe), and the track refuses a
+      money dataset without its required currency column. Carries the
+      merchant's customer book and catalogue, fetched on request under a
+      personal access token the account owner minted in their own Loyverse
+      Back Office (Integrations → Access tokens); never ambient, off until
+      the owner connects. The token is UNLIMITED on Loyverse's side
+      (read and write — no read-only kind exists on this path), which is why
+      the track's redirect refusal and exact-host guard matter more here than
+      for a scoped key: the box never writes, but the credential it holds
+      could. Paced against Loyverse's published 300-requests-per-300-seconds
+      per-ACCOUNT ceiling rather than a guessed constant. ONE FIXED HOST, so a
+      plain registered destination whose origin is a whole-string literal the
+      scanner reads directly; the `/v1.0` API version is a PATH on every
+      request, never part of the host. The probe is `GET /v1.0/merchant/`,
+      which returns the merchant profile (business name, currency) and is not
+      stored as business data.
+    ticket: WARP-2919
+    added: 2026-09-18
+    review_by: 2027-09-18
+    code_refs: [services/erp-connector/src/rest/vendors/loyverse.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

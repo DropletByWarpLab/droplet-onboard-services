@@ -33,10 +33,19 @@ import {
 } from "./model-benchmark.service.js";
 
 export interface LocalModelInfo {
+  /** WARP-2882 — the RUNTIME id (ModelInfo.id, e.g.
+   *  `docker.io/ai/gpt-oss:20B-F16`). Every daemon probe, cache key and
+   *  write keys on this. `name` below is the gateway's DISPLAY string
+   *  ("Gpt-oss 20B F16") and must never be sent back as a model id. */
+  id: string;
   name: string;
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 — the context length the model was TRAINED with (Ollama
+   *  `/api/show`); null when the daemon doesn't report it (DMR). Display
+   *  only: the window actually served is `OLLAMA_CONTEXT_LENGTH`. */
+  trainedContextLength: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | etc — null until ai-gateway tags. */
@@ -259,10 +268,12 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // WARP-2871: once a cloud key is saved the gateway lists that vendor's
     // catalogue in the same response — "On your Droplet" is on-box only.
     local = resp.models.filter((m) => isLocalProvider(m.provider)).map((m) => ({
+      id: m.id,
       name: m.name,
       family: inferFamily(m.name),
       provider: m.provider,
       contextLength: m.context_window,
+      trainedContextLength: m.trained_context_window ?? null,
       gbOnDisk: null,
       role: null,
       status: "ready" as const,
@@ -294,7 +305,8 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       if (metrics.size > 0) {
         for (const row of local) {
           if (!isLocalProvider(row.provider)) continue;
-          const m = metricsFor(metrics, row.name);
+          // WARP-2882 — the daemon keys on ids, never on the display name.
+          const m = metricsFor(metrics, row.id);
           if (!m) continue;
           row.gbOnDisk = m.gbOnDisk;
           row.parameterSize = m.parameterSize;
@@ -346,7 +358,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     try {
       for (const row of local) {
         if (!isLocalProvider(row.provider)) continue;
-        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.name));
+        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.id));
         if (bench) {
           row.tokensPerSec = bench.tokensPerSec;
           row.benchmarkedAt = bench.measuredAt;

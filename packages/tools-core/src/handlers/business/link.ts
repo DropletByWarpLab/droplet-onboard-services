@@ -149,7 +149,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     // the write, not a constant: a future `project -> customer` edge is a
     // Projects call, and telling its caller to switch on the CRM would send
     // them to the wrong switch.
-    return businessError(err, write.subject);
+    return businessError(err);
   }
 }
 

@@ -124,6 +124,10 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **The scope cannot be changed after you create it.** Picking the wrong one means deleting the key and making a new one. | Klaviyo | [`klaviyo.md`](klaviyo.md) |
 | **The token carries the permissions of the person who made it**, so it stops seeing data if that person's access changes — and it is shared with every other tool that account has connected. | Pipedrive | [`pipedrive.md`](pipedrive.md) |
 | **You run your own copy of the product.** The hosted service and the self-hosted edition (cal.diy) answer different API contracts, so a self-hoster cannot connect at all yet — and nothing on the connect screen would tell them before they made a key. | Cal.com | [`calcom.md`](calcom.md) |
+| **The token can look valid and still see nothing.** A fine-grained token minted without *Issues: Read-only*, or one an organisation owner has not yet approved, passes the box's connection check and then returns only what public repositories offer — the dashboard shows a healthy connection either way. Also: Droplet refuses a *classic* (`ghp_`) token by shape; only a *fine-grained* (`github_pat_`) one is accepted, and pull requests come along with issues whether you want them or not. | GitHub | [`github.md`](github.md) |
+| **The token sees everything its owner sees** — every project and group they belong to, confidential issues included — and it **expires within a year** on a date GitLab makes you choose. Self-managed GitLab cannot connect yet, only gitlab.com. | GitLab | [`gitlab.md`](gitlab.md) |
+| **Rotating the token signs you out of every device.** Todoist has one token per account, and issuing a new one is also how it logs you out everywhere — so a rotation is a moment to plan, not a click. Also: the box reads **active** tasks only; a completed task disappears from the feed rather than arriving as done. | Todoist | [`todoist.md`](todoist.md) |
+| **The token you make can *write* to your account** — there is no read-only kind — so set an expiry on it. And **your sales are not read yet**: a Loyverse receipt carries no currency, and the box will not store an amount without one. Customers and items are read; connecting is free. | Loyverse | [`loyverse.md`](loyverse.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -142,12 +146,16 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **Pipedrive** | A personal API token **and** your company domain | [`pipedrive.md`](pipedrive.md) |
 | **Square** | A **production** access token from your own Developer Console application | [`square.md`](square.md) |
 | **Cal.com** | An API key from your own **My Settings → Developer** | [`calcom.md`](calcom.md) |
+| **GitHub** | A **fine-grained** personal access token (`github_pat_…`) with *Issues: Read-only* over the repositories you chose | [`github.md`](github.md) |
+| **GitLab** | A personal access token (`glpat-…`) from your own **Edit profile → Access**, scoped `read_api` | [`gitlab.md`](gitlab.md) |
+| **Todoist** | Your personal API token, copied from **Settings → Integrations → Developer** | [`todoist.md`](todoist.md) |
+| **Loyverse** | A personal access token from your own Back Office, **Integrations → Access tokens** | [`loyverse.md`](loyverse.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
 
-> Atlassian is still the odd one out on expiry: its token **expires** within 365 days, as a hard stop with no grace period and no renewal, which is a date the owner has to diary. Cal.com's key can expire too, but only because the owner chose a date at creation, and Brevo's expires from disuse — both covered in their guides.
+> Atlassian and GitLab are the odd ones out on expiry: each token **expires** within 365 days, as a hard stop with no grace period and no renewal, which is a date the owner has to diary. Cal.com's key and Loyverse's token can expire too, but only because the owner chose a date at creation; GitHub's defaults to 30 days unless the owner picks *No expiration*, and GitHub also deletes a token unused for a year; Brevo's expires from disuse — all covered in their guides.
 
-> **Not every credential in this table is scoped, and the unscoped ones are the majority.** Stripe, Klaviyo and Shopify let you narrow what the credential may do. Atlassian, Mailchimp, Brevo, Pipedrive, Square and Cal.com do not — each carries the full access of whoever created it, so on those *whose* account creates it is the access decision, and there is nothing to tick. Droplet limits itself instead, to reads only, from a list held in the product; each guide says plainly which of the two you are getting.
+> **Not every credential in this table is scoped, and the unscoped ones are the majority.** Stripe, Klaviyo, Shopify, GitHub and GitLab let you narrow what the credential may do — GitHub most finely of all, repository by repository. Atlassian, Mailchimp, Brevo, Pipedrive, Square, Cal.com, Todoist and Loyverse do not — each carries the full access of whoever created it (Loyverse says so in as many words: *unlimited*), so on those *whose* account creates it is the access decision, and there is nothing to tick. Droplet limits itself instead, to reads only, from a list held in the product; each guide says plainly which of the two you are getting.
 
 ### 3.4 What Droplet does with your credential
 
@@ -160,7 +168,13 @@ One page, shared by every vendor, rather than five paraphrases that could drift 
 1. **Read what will be read.** The connect screen states, before you paste anything, what the box will read and that the credential is copied onto the box. If that statement does not match what you expected, stop there.
 2. **Paste the credential.** One field for most vendors, two for the ones that issue a client id and a client secret. Droplet checks the shape before it stores anything — a credential of the wrong kind is refused at this point, with the reason, and is not written anywhere.
 3. **Choose what Droplet can see.** The same scope list as Track A, bounded by what you actually granted in the vendor's console. Asking here for something the credential does not permit surfaces as a named error, not as an empty screen.
-4. **Confirm and connect.** Droplet makes its first call. A credential that authenticates but cannot read a resource you asked for is reported as exactly that, naming the permission you need to go and tick.
+4. **Confirm and connect.** Droplet stores the credential, then makes its first call to the vendor with it and shows you the answer on the same screen. Until that call the connection reads *Setting up* — the credential is stored but not yet checked — and the outcome is one of:
+   - **Connected** — the vendor accepted the credential, and Droplet starts reading on its schedule.
+   - **Paste a new key** — the vendor turned the credential down. Check it is current and has read access, then paste it again; nothing else needs to change.
+   - **Can't connect** — the vendor refused for a reason a new credential will not fix, such as an IP access policy or a plan limit. The fix is in the vendor's own settings.
+   - **Connected · limited** — the credential works but one dataset is withheld by the plan or the permissions you granted. Everything else reads.
+
+   The same result shows on the connector's card, and the credentials page ([§3.6](#36-changing-a-credential-later-warp-2275)) re-checks in the same way after every change. A credential that authenticates but cannot read a resource you asked for is reported as exactly that, naming the permission you need to go and tick.
 
 ### 3.6 Changing a credential later (WARP-2275)
 
@@ -172,6 +186,8 @@ The form is generated from what each connector declares it needs, so it shows ex
 
 - **Leave a field blank to keep what is stored.** This is what lets you fix a region or an account id without going to find the original key again. A saved field reads *"Saved — replace to change"* rather than showing a masked value, because there is nothing to mask — the box cannot read it back either.
 - **Clear a field explicitly to remove it.** The connection then reports *Not connected* rather than continuing to claim it works.
+
+Saving is not the same as connecting. After a save the box checks the new credential with the vendor straight away and the state line shows the result — *Connected*, *Credential rejected — replace it*, or *Can't connect — check the vendor's settings* — rather than a bare "Saved". If the check itself could not be made (the box was busy, the vendor unreachable), the page says so and the line stays on *Checking the connection* until you save or check again — nothing retries it on a schedule, because a credential that has not been checked is never read from.
 
 Every save, replacement and clear is written to the audit log with **whether** a credential is set — never the value, a prefix, a length, or a hash. What is stored is encrypted and bound to the connection row it belongs to, so a credential blob copied to another connection fails to decrypt rather than authenticating as the wrong account. The full statement is in [`credential-handling.md`](credential-handling.md).
 

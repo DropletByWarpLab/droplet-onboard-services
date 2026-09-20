@@ -54,6 +54,7 @@ import {
   type IntegrationStatus as IntegrationStatusName,
 } from "@droplet/shared-types";
 import {
+  cloudMaterialFromRow,
   connectorForProvider,
   encodeApiCredentials,
   isConnectionProvider,
@@ -61,6 +62,7 @@ import {
   parseRouteMap,
   EAGLESOFT_PROVIDER,
   EAGLESOFT_API_PROVIDER,
+  type CloudConnectionRow,
   type ResolvedApiCredentials,
 } from "./erp-provider.js";
 // WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
@@ -252,11 +254,32 @@ export interface TestResult {
   message: string;
 }
 
+/**
+ * WARP-2842 — what `connect()`'s verdict write hands to the audit: the row as
+ * it stands after the write, the verdict the probe computed, and whether the
+ * write was DROPPED because the row's credential changed under the probe (in
+ * which case `row.status` is whatever the concurrent writer left, not
+ * `verdict`).
+ */
+interface LandedVerdict {
+  row: Awaited<ReturnType<PrismaClient["integrationConnection"]["findUnique"]>>;
+  verdict: IntegrationStatusName;
+  superseded: boolean;
+}
+
 /** Dependency seam so tests can inject a stubbed connector. Production builds
  *  the real `EaglesoftConnector` (whose live methods are themselves stubbed in
  *  this DB-independent slice). */
 export interface IntegrationsServiceDeps {
-  connectorFor?: (provider: string, input: ConnectInput) => Connector;
+  /**
+   * WARP-2842 — `row` is the PERSISTED connection row, handed over by
+   * `connect()` once `persistBase()` has committed it, and absent from
+   * `test()`, which has no row yet. A cloud / REST connector is built from it
+   * (`cloudMaterialFromRow`): the sealed credential is AAD-bound to the row
+   * id, so nothing on the `ConnectInput` could ever stand in for it. Existing
+   * injected stubs ignore the third argument and keep working.
+   */
+  connectorFor?: (provider: string, input: ConnectInput, row?: CloudConnectionRow) => Connector;
   /**
    * WARP-2659 — the remote MCP lifecycle, for the `mcp` track's disconnect.
    *
@@ -445,10 +468,33 @@ function requireWritableTrack(provider: string, enabled: boolean): void {
   );
 }
 
-function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
+/** True for the two tracks `connect()` PROBES and builds from the row. The
+ *  same pair `isKnownErpProvider` admits beyond `lan`, named once here so the
+ *  three places below that branch on it cannot drift apart. */
+function isProbedTrack(provider: string): boolean {
+  const track = providerDescriptor(provider)?.track;
+  return track === "cloud" || track === "rest";
+}
+
+function defaultConnectorFor(
+  provider: string,
+  input: ConnectInput,
+  row?: CloudConnectionRow,
+): Connector {
   // Dual-track selection lives in erp-provider.ts; the SQL branch is unchanged.
-  // The REST material comes straight off the ConnectInput here (rather than the
-  // row) so `test()` can validate credentials BEFORE anything is persisted.
+  // The Eaglesoft REST material comes straight off the ConnectInput here
+  // (rather than the row) so `test()` can validate credentials BEFORE anything
+  // is persisted.
+  //
+  // WARP-2842 — a cloud / REST track's material comes off the ROW, and only
+  // the row can supply it: `connectionId` keys the shared call budget,
+  // `providerConfig` is the parsed vendor config, and `cloudTokens` opens a
+  // blob that is AAD-bound to the row id. Without this merge every cloud
+  // factory kept its own blocked resolver, the probe rejected
+  // CONNECTOR_BLOCKED, and a freshly pasted key went PROVISIONING →
+  // NOT_CONFIGURED — the hop the `connect-probe` suite could not see because
+  // it injects its connector. Gated on the track rather than on `row` being
+  // present so a LAN row's columns are never read as cloud material.
   return connectorForProvider({
     provider,
     host: input.host,
@@ -459,6 +505,7 @@ function defaultConnectorFor(provider: string, input: ConnectInput): Connector {
     apiCredentials: input.apiCredentials,
     apiRouteMap: parseRouteMap(input.apiRouteMap),
     apiCaCert: input.apiCaCert,
+    ...(row && isProbedTrack(provider) ? cloudMaterialFromRow(row) : {}),
   });
 }
 
@@ -759,7 +806,7 @@ export function createIntegrationsService(
     async connect(input, ctx) {
       const provider = resolveProvider(input.provider);
       // Honor the wizard's connect-time write opt-in (default off / read-only).
-      const writeEnabled = !!input.enableWrites;
+      const writeOptIn = !!input.enableWrites;
       /**
        * WARP-2833 — the SECOND write-enable path, guarded at the same layer as
        * the PATCH verb below (see {@link requireWritableTrack}).
@@ -768,10 +815,26 @@ export function createIntegrationsService(
        * `writeEnabled` before the connector is constructed, so a refusal placed
        * any later would have already written the flag it exists to prevent.
        */
-      requireWritableTrack(provider, writeEnabled);
+      requireWritableTrack(provider, writeOptIn);
+      // WARP-2842 — the probed tracks. Named once, up here, because the row
+      // write, the connector build and the probe's catch all branch on it.
+      const isCloudTrack = isProbedTrack(provider);
       // Upsert-by-hand: reuse the existing row if present so we never orphan a
       // second connection for the same provider.
       const existing = await findRow(provider);
+      /**
+       * WARP-2842 — on a cloud / REST track an ABSENT opt-in leaves the column
+       * alone. The connect route for those tracks carries no body and is the
+       * dashboard's "check this key" — it is called after every paste and is
+       * safe to call again — so `writeEnabled: !!undefined` here would have
+       * silently cleared an opt-in the owner set through the toggle on every
+       * re-probe. A LAN connect keeps the wizard's explicit choice, default
+       * off, exactly as before.
+       */
+      const writeEnabled =
+        isCloudTrack && input.enableWrites === undefined
+          ? (existing?.writeEnabled ?? false)
+          : writeOptIn;
       const databaseName = input.databaseName || DEFAULT_DATABASE_NAME;
       // The backend owns the credential — mint a pointer if the client didn't
       // send one (the real secret is created during live provisioning).
@@ -788,18 +851,49 @@ export function createIntegrationsService(
           : {}),
         ...(input.apiCaCert !== undefined ? { apiCaCert: input.apiCaCert } : {}),
       };
-      const baseData = {
-        host: input.host,
-        port: input.port ?? null,
-        databaseName,
-        secretRef,
-        writeEnabled,
-        // `as const` because this object is no longer written inline: without
-        // it the literal widens to `string` and stops satisfying Prisma's
-        // `IntegrationStatus` enum input.
-        status: "PROVISIONING" as const,
-        ...apiMaterial,
-      };
+      /**
+       * WARP-2842 — what `connect()` writes BEFORE the probe, per track.
+       *
+       * LAN: the wizard's host / port / database and the minted `secretRef`
+       * pointer, as always.
+       *
+       * Cloud / REST, on an EXISTING row: `status` (and the opt-in, only when
+       * one was sent) and NOTHING else. The credential is already on the row
+       * — sealed by `PATCH /credentials` into `providerTokensEnc`, config
+       * parsed into `providerConfig` — and this call's job is to ask the
+       * vendor about it, not to re-describe the connection. The LAN shape
+       * used to be written here on every track, which put `host: ""`,
+       * `databaseName: "PattersonPM"` and `secretRef: "stripe:pending"` on a
+       * Stripe row; and had it ever grown a credential column it would have
+       * overwritten the blob the probe reads a moment later. The row-shape
+       * test pins both columns byte-identical across a connect.
+       *
+       * A cloud / REST row that does NOT exist yet is the `create` branch of
+       * `persistBase` below, which has to satisfy the schema's non-null LAN
+       * columns: it writes `host: ""`, `databaseName: ""`, the historical
+       * `secretRef: "<provider>:pending"` pointer and `writeEnabled` (false
+       * without an opt-in) — the same LAN-column shape
+       * `routes/saas-credentials.ts` creates on a first paste (that route
+       * lands NOT_CONFIGURED; this one PROVISIONING, and the probe below
+       * settles it). Still no credential column.
+       */
+      const baseData = isCloudTrack
+        ? {
+            // `as const` because this object is no longer written inline:
+            // without it the literal widens to `string` and stops satisfying
+            // Prisma's `IntegrationStatus` enum input.
+            status: "PROVISIONING" as const,
+            ...(input.enableWrites !== undefined ? { writeEnabled } : {}),
+          }
+        : {
+            host: input.host,
+            port: input.port ?? null,
+            databaseName,
+            secretRef,
+            writeEnabled,
+            status: "PROVISIONING" as const,
+            ...apiMaterial,
+          };
 
       /**
        * WARP-2482 — a reconnect FROM DISABLED starts from reset cursors.
@@ -829,17 +923,33 @@ export function createIntegrationsService(
       const persistBase = async () => {
         if (!existing) {
           return prisma.integrationConnection.create({
-            data: {
-              provider,
-              status: "PROVISIONING",
-              host: input.host,
-              port: input.port ?? null,
-              databaseName,
-              // POINTER only — see module docstring / invariant 10.
-              secretRef,
-              writeEnabled,
-              ...apiMaterial,
-            },
+            data: isCloudTrack
+              ? // A cloud row created by connect (before any paste) holds no
+                // credential; the probe below lands it NOT_CONFIGURED, which
+                // is what `PATCH /credentials` would have created anyway. The
+                // LAN columns take exactly what that route writes
+                // (`routes/saas-credentials.ts`): empty strings for the two
+                // that are meaningless here, and the historical pending
+                // pointer for `secretRef` — never "PattersonPM".
+                {
+                  provider,
+                  status: "PROVISIONING" as const,
+                  host: "",
+                  databaseName: "",
+                  secretRef,
+                  writeEnabled,
+                }
+              : {
+                  provider,
+                  status: "PROVISIONING" as const,
+                  host: input.host,
+                  port: input.port ?? null,
+                  databaseName,
+                  // POINTER only — see module docstring / invariant 10.
+                  secretRef,
+                  writeEnabled,
+                  ...apiMaterial,
+                },
           });
         }
         if (existing.status !== "DISABLED") {
@@ -876,29 +986,185 @@ export function createIntegrationsService(
        * is correct, since nothing was stored. Rows are written and the outcome
        * is known, so it is after the effect, never a prediction of it.
        */
-      const auditConnect = async (detail: IntegrationDetail): Promise<IntegrationDetail> => {
+      const auditConnect = async (landed: LandedVerdict): Promise<IntegrationDetail> => {
+        const detail = toDetail(landed.row);
+        /**
+         * WARP-2842 — on a cloud / REST track this call is the PROBE, not the
+         * consent event: the credential entered the box through
+         * `PATCH /credentials`, which wrote its own row. So the title names
+         * what the probe found. "Integration connected" is reserved for the
+         * one verdict that means it; every other verdict — and a verdict that
+         * was dropped because the row moved under the probe — is titled by
+         * outcome, at `warn`, because this route is the dashboard's "check
+         * again" and a rejected key re-checked ten times used to log ten INFO
+         * rows all called "Integration connected".
+         *
+         * A LAN track keeps the WARP-2283 shape unchanged: there the connect
+         * gesture IS the consent event (the credential was persisted by this
+         * very call), so the row is a consent record whatever the outcome,
+         * and a blocked LAN connector has not been probed at all.
+         */
+        const superseded = landed.superseded;
+        const ok = detail.status === "CONNECTED";
+        const what = superseded
+          ? "Integration probe: superseded"
+          : isCloudTrack && !ok
+            ? `Integration probe: ${detail.status}`
+            : "Integration connected";
+        const failed = isCloudTrack ? !ok : detail.status === "ERROR";
+        const severity = superseded || failed ? "warn" : "info";
         await recordActivity({
           kind: "system",
-          severity: detail.status === "ERROR" ? "warn" : "info",
+          severity,
           sourceIcon: "plug",
-          what: "Integration connected",
+          what,
           sub: provider,
           actor: ctx?.actor ?? { type: "system", id: null },
           refs: {
             provider,
             status: detail.status,
+            // The verdict the probe computed and could not land. Present only
+            // when it differs from `status`, so a reader never has to guess.
+            ...(superseded ? { verdict: landed.verdict } : {}),
             writeEnabled,
-            // WHETHER credentials were supplied — never the credentials. The
-            // triple is already sealed into `apiCredentialsEnc`; a second copy
-            // in an append-only, exportable audit row would be a durable
-            // cleartext leak that no rotation could recall.
-            hasSecret: input.apiCredentials !== undefined,
+            // WHETHER a credential was in play — never the credential. On a
+            // cloud / REST track that is the sealed column the probe dialed
+            // (`input.apiCredentials` is never set on that path, so the old
+            // expression answered false for every probe of a stored key). On
+            // a LAN track it is the body triple, already sealed into
+            // `apiCredentialsEnc`; a second copy in an append-only, exportable
+            // audit row would be a durable cleartext leak no rotation could
+            // recall.
+            hasSecret: isCloudTrack
+              ? landed.row?.providerTokensEnc != null
+              : input.apiCredentials !== undefined,
           },
         });
         return detail;
       };
 
-      const connector = connectorFor(provider, input);
+      /**
+       * WARP-2842 — the verdict lands ONLY on the (credential, config) pair it
+       * was computed for.
+       *
+       * `connector` is built from `base` — the row as it stood BEFORE the
+       * vendor round-trip — and the probe can take seconds. In that window a
+       * second tab (or a fast save-then-check) can `PATCH /credentials` and
+       * clear the key (status NOT_CONFIGURED, `providerTokensEnc` null) or
+       * replace it (PROVISIONING, a new blob), or `disconnect()` can purge it.
+       * An unconditional `update({ where: { id } })` then stamps key A's
+       * verdict onto whatever the row holds now: CONNECTED + `lastHealthyAt`
+       * on a row with NO credential — which is in
+       * `POLLABLE_CONNECTION_STATUSES`, so the scheduler polls it, the
+       * resolver throws CONNECTOR_BLOCKED and the cursors park. Or CONNECTED
+       * on key B, which nobody has checked.
+       *
+       * The credential is only half of what the connector was built from. The
+       * same PATCH can change a NON-secret connection fact in
+       * `providerConfig` and leave the ciphertext byte-identical — Mailchimp's
+       * datacenter, Shopify's shopDomain, HubSpot's portalId, Square's
+       * locationId, a REST track's baseUrl — and every one of those SELECTS
+       * THE HOST. A guard keyed on the credential alone lands "CONNECTED, as
+       * of now" on a row whose config names a destination nobody has dialed.
+       *
+       * So the write is an optimistic `updateMany` keyed on the row id, the
+       * exact ciphertext AND the exact `providerConfig` the connector was
+       * built from. Zero rows means the row moved under the probe: nothing is
+       * written, the drop is logged at `warn`, and the caller gets the row AS
+       * IT IS — the writer that moved it owes it the next verdict (the
+       * dashboard calls connect after every save, so a replaced key or a
+       * corrected datacenter gets its own probe moments later).
+       *
+       * `providerConfig` is `Json?`, so the key is Prisma's Json `equals`
+       * filter, which Postgres evaluates as jsonb equality — by value, key
+       * order ignored — against the JSON the row was read with. A null column
+       * is matched with `Prisma.AnyNull`, not `DbNull`: Prisma reads DB NULL
+       * and JSON null back as the same `null`, so `base` cannot say which one
+       * the column holds (`disconnect()` writes `DbNull`; nothing in-tree
+       * writes `JsonNull`, but the guard must not drop a verdict over a null
+       * flavour it has no way to see).
+       *
+       * NOT keyed on `updatedAt`, and this is deliberate — do not "simplify"
+       * it to a version stamp. The erp-sync scheduler writes `lastHealthyAt`
+       * on a connection whose cursor it claimed, and a tick that claimed one
+       * before a re-probe began lands that write mid-probe. That bumps
+       * `updatedAt` without touching credential or config, so an
+       * `updatedAt`-keyed guard would read a routine sync as "moved", drop
+       * the verdict and strand a LIVE row at the PROVISIONING `persistBase`
+       * just wrote — which is not in `POLLABLE_CONNECTION_STATUSES`, so the
+       * next tick would not even pick it up. The two columns the connector
+       * was actually built from are the only honest key.
+       *
+       * `?? null` guards the guard: Prisma reads an `undefined` filter value
+       * as "no condition", which would silently turn this back into the
+       * unconditional write it replaces. A full row can't produce one — the
+       * column types are `string | null` and `Json | null` — but a `select`
+       * that dropped a column, or a stub that never set it, would.
+       *
+       * Known residual, unreachable today: QuickBooks Online rotates its
+       * refresh token on use and `persistCloudTokens` writes the rotated blob
+       * back to this column mid-probe, which this guard would read as "moved".
+       * No in-tree writer seeds a QuickBooks token blob yet (there is no OAuth
+       * callback), so no QuickBooks row can carry a credential for the probe
+       * to rotate; when that writer lands, the guard has to admit the blob the
+       * probe itself persisted (e.g. `providerTokensEnc: { in: [captured,
+       * ...rotatedByThisProbe] }`) or the first check after an expired access
+       * token will report "superseded" and leave the row at PROVISIONING until
+       * the next check.
+       *
+       * LAN tracks keep the plain `update`: nothing on that path reads a
+       * credential column off the row, so there is no credential for a verdict
+       * to be about.
+       */
+      const landVerdict = async (data: {
+        status: IntegrationStatusName;
+        lastHealthyAt?: Date;
+      }): Promise<LandedVerdict> => {
+        if (!isCloudTrack) {
+          const row = await prisma.integrationConnection.update({
+            where: { id: base.id },
+            data,
+          });
+          return { row, verdict: data.status, superseded: false };
+        }
+        const builtFromConfig = base.providerConfig ?? null;
+        const { count } = await prisma.integrationConnection.updateMany({
+          where: {
+            id: base.id,
+            providerTokensEnc: base.providerTokensEnc ?? null,
+            providerConfig:
+              builtFromConfig === null
+                ? { equals: Prisma.AnyNull }
+                : { equals: builtFromConfig as Prisma.InputJsonValue },
+          },
+          data,
+        });
+        const row = await prisma.integrationConnection.findUnique({ where: { id: base.id } });
+        if (count === 0) {
+          logger.warn(
+            { provider, verdict: data.status, current: row?.status ?? null },
+            "connect probe verdict dropped: the row's credential or config changed while the probe was in flight",
+          );
+          return { row, verdict: data.status, superseded: true };
+        }
+        return { row, verdict: data.status, superseded: false };
+      };
+
+      // WARP-2842 — the persisted row goes with the input: it is the only
+      // thing that can supply a cloud track's sealed credential (see
+      // `defaultConnectorFor`). `base` rather than `existing` because the id
+      // the blob is bound to is the id the row has NOW, including a row this
+      // call just created.
+      //
+      // Declared here, ASSIGNED inside the try. A factory can throw
+      // synchronously — the QuickBooks factory refuses a row with no realm id
+      // with a ConnectorBlockedError — and above the try that was a 500 to the
+      // caller with the row stranded at the PROVISIONING `persistBase` had
+      // just written: unpollable, and on a re-probe of a live row it took a
+      // CONNECTED connection off the schedule. Inside the try it is classified
+      // like any other probe failure, so "a completed connect never leaves
+      // PROVISIONING" holds for the factory too.
+      let connector: Connector | undefined;
       /**
        * WARP-2466 — cloud tracks are PROBED; LAN tracks are not.
        *
@@ -921,10 +1187,10 @@ export function createIntegrationsService(
        */
       // WARP-2707 — `rest` takes the cloud path here too. Omit it and a REST
       // row follows the LAN branch, which probes a host it does not have and
-      // can leave the connection at PROVISIONING forever.
-      const connectTrack = providerDescriptor(provider)?.track;
-      const isCloudTrack = connectTrack === "cloud" || connectTrack === "rest";
+      // can leave the connection at PROVISIONING forever. (`isCloudTrack` is
+      // computed once at the top of `connect()` — WARP-2842.)
       try {
+        connector = connectorFor(provider, input, base);
         await connector.connect();
         await connector.introspect();
         // The probe itself. Rejecting rather than returning `{ ok: false }` is
@@ -932,11 +1198,17 @@ export function createIntegrationsService(
         // return value cannot ignore a rejection — so a successful call here
         // IS the evidence the credential works.
         await connector.health();
-        const connected = await prisma.integrationConnection.update({
-          where: { id: base.id },
-          data: { status: statusAfterHealthProbe(), lastHealthyAt: new Date() },
-        });
-        return await auditConnect(toDetail(connected));
+        // A passing `health()` lands CONNECTED even on a row that read
+        // CAPABILITY_LIMITED. That is not a downgrade: the ONLY writer of
+        // CAPABILITY_LIMITED to this column is this probe's own classifier
+        // below (`integrationStatusForHealthFailure`, on a capability-class
+        // rejection from `health()`) — the sync scheduler never writes
+        // `status`; it parks the refused cursor at BACKOFF and advances
+        // `lastHealthyAt` only. So a `health()` that now resolves is the same
+        // oracle reporting the limitation gone, and CONNECTED is its answer.
+        return await auditConnect(
+          await landVerdict({ status: statusAfterHealthProbe(), lastHealthyAt: new Date() }),
+        );
       } catch (err) {
         if (err instanceof ConnectorBlockedError && !isCloudTrack) {
           // HONEST degradation: the connector can't reach the ERP yet (SQL:
@@ -947,7 +1219,7 @@ export function createIntegrationsService(
             { provider },
             "connect blocked: connector not reachable / not yet wired; status stays PROVISIONING",
           );
-          return await auditConnect(toDetail(base));
+          return await auditConnect({ row: base, verdict: "PROVISIONING", superseded: false });
         }
         if (isCloudTrack) {
           // Classified, never guessed. A reauthorize-class rejection becomes
@@ -963,21 +1235,14 @@ export function createIntegrationsService(
           // fact; only its classification is in question.
           const status = integrationStatusForHealthFailure(err);
           logger.info({ provider, status }, "cloud connect probe failed; status classified");
-          const probed = await prisma.integrationConnection.update({
-            where: { id: base.id },
-            data: { status },
-          });
-          return await auditConnect(toDetail(probed));
+          return await auditConnect(await landVerdict({ status }));
         }
         // A genuine, unexpected failure on a LAN track → explicit ERROR status.
         logger.error({ err }, "eaglesoft connect failed");
-        const errored = await prisma.integrationConnection.update({
-          where: { id: base.id },
-          data: { status: "ERROR" },
-        });
-        return await auditConnect(toDetail(errored));
+        return await auditConnect(await landVerdict({ status: "ERROR" }));
       } finally {
-        await connector.close().catch(() => {});
+        // `?.` — a factory that threw built nothing to close.
+        await connector?.close().catch(() => {});
       }
     },
 

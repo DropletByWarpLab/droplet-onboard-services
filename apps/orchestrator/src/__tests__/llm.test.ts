@@ -106,7 +106,7 @@ vi.mock("../services/ai-gateway.client.js", () => ({
 
 // WARP-1511 — stub only the DB read (`readActiveChatModel`) so
 // GET /api/llm/models' `defaultModel` resolution is testable without a live
-// Postgres connection. `resolveActiveChatModel` / `localModelIdentifiers`
+// Postgres connection. `resolveStoredChatModel` / `resolveActiveChatModel`
 // stay real so the actual fallback logic under test runs for real.
 const { readActiveChatModelMock } = vi.hoisted(() => ({
   readActiveChatModelMock: vi.fn(),
@@ -377,6 +377,19 @@ describe("LLM routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.degraded).toBe(true);
       expect(res.body.defaultModel).toBe("gpt-oss:20b");
+    });
+
+    it("resolves a stored legacy DISPLAY name to the runtime id — agrees with GET /api/models (WARP-2882)", async () => {
+      readActiveChatModelMock.mockResolvedValue("Gpt-oss 20B F16");
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "llama3.2:3b", provider: "local", name: "Llama3.2 3B", context_window: null },
+          { id: "docker.io/ai/gpt-oss:20B-F16", provider: "local", name: "Gpt-oss 20B F16", context_window: null },
+        ],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBe("docker.io/ai/gpt-oss:20B-F16");
     });
 
     it("stays honestly null when nothing is installed", async () => {

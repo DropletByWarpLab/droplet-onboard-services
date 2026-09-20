@@ -10,6 +10,7 @@ import {
   Stethoscope,
   Database,
   Calculator,
+  ListChecks,
   Plug,
   CheckCircle2,
   AlertTriangle,
@@ -39,6 +40,9 @@ export function connectorIcon(id: string): LucideIcon {
       return Database;
     case "quickbooks":
       return Calculator;
+    // WARP-2918 — a task list, for the task-tracker card.
+    case "todoist":
+      return ListChecks;
     default:
       return Plug;
   }

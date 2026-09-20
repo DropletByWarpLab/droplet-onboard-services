@@ -2356,25 +2356,80 @@ class VPNApi:
             return False
         return bool(st.get("up")) and bool(st.get("l3_device"))
 
+    # WARP-2890 — how long to wait for netifd to finish re-running the proto
+    # setup after `down` + `up`. Measured on the RB5009: teardown + setup of
+    # wg0 completes in one to two seconds. The bound only matters on a wedged
+    # router; the callers' `live_peers` read is the real post-condition.
+    RELOAD_SETTLE_SECONDS = 10.0
+    RELOAD_POLL_SECONDS = 0.25
+
     def reload_interface(self, interface: str = "wg0") -> bool:
-        """Make staged peer changes take effect in the kernel. Best-effort.
+        """Re-run ``<interface>``'s proto setup so the committed peer set
+        reaches the kernel. True once netifd reports the interface up again.
 
-        ``uci.apply`` commits and nudges ucitrack; on the shapes we ship that
-        is NOT sufficient to reload a wireguard peer set, which is the whole
-        WARP-2686 defect. ``network.interface.<iface> up`` is the ifup the
-        peers actually need, and it is already granted by the droplet-ai ACL
-        (``network.interface.*: ["up", "down"]``) — no ACL change required, so
-        this half of the fix works on every router in the field today.
+        ``uci.apply`` commits and hands netifd the new config, but nothing
+        re-runs the wireguard proto handler — the ``wg set`` that installs the
+        peers — which is the WARP-2686 defect. The first fix called
+        ``network.interface.<iface> up``. Measured on a live RB5009 2026-09-18
+        (WARP-2890): that is a NO-OP on an interface that is already up, and so
+        is ``network reload`` — the ``wireguard_<iface>`` peer sections are read
+        by the proto handler at setup time, netifd does not diff them. Only
+        ``down`` followed by ``up`` re-runs the setup, which is exactly what
+        ``/sbin/ifup`` does. Both methods are in the ``droplet-ai`` ACL
+        (``network.interface.*: ["up", "down"]``); ``network reload`` is not,
+        and ``network restart`` would bounce every interface on the router.
 
-        Returns True if the call was accepted. That is not proof the reload
-        did what we wanted; only `live_peers` can say that.
+        ``up`` returns before the proto handler has run, so a ``live_peers``
+        read straight after it races the setup and can report the peer
+        missing. Wait, bounded, until netifd reports ``up`` and not
+        ``pending`` before returning; the status read is ACL-permitted.
+
+        The bounce drops every session on the interface for a second or two;
+        clients re-handshake on their own (persistent keepalive). That is the
+        cost of the peer set being real, and it is what the manual ``ifup``
+        operators have been running since 09-03 already did.
+
+        A failed ``down`` still attempts the ``up``: a transport error can land
+        after netifd processed the call, and leaving the interface down would
+        be worse than an unconfirmed reload. The return value only says
+        whether the reload was CONFIRMED; the callers read ``live_peers``
+        regardless, and that is the post-condition that counts.
         """
-        try:
-            self._r._call(f"network.interface.{interface}", "up")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("vpn: ifup %s failed: %s", interface, exc)
+        ok = True
+        for method in ("down", "up"):
+            try:
+                self._r._call(f"network.interface.{interface}", method)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("vpn: if%s %s failed: %s", method, interface, exc)
+                ok = False
+        if not ok:
             return False
+        return self._wait_until_up(interface)
+
+    def _wait_until_up(self, interface: str) -> bool:
+        """Poll ``network.interface.<iface> status`` until netifd reports the
+        interface up and no longer pending, or the settle window expires."""
+        # Bounded by construction: at most settle/poll reads, then give up.
+        polls = max(1, int(self.RELOAD_SETTLE_SECONDS / self.RELOAD_POLL_SECONDS))
+        for attempt in range(polls):
+            try:
+                st = self._r._call(f"network.interface.{interface}", "status")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "vpn: status read for %s failed while waiting for ifup: %s",
+                    interface, exc,
+                )
+                return False
+            if isinstance(st, dict) and st.get("up") is True and not st.get("pending"):
+                return True
+            if attempt < polls - 1:
+                time.sleep(self.RELOAD_POLL_SECONDS)
+        logger.warning(
+            "vpn: %s did not come back up within %.0fs of ifup — "
+            "the peer set may not be live",
+            interface, self.RELOAD_SETTLE_SECONDS,
+        )
+        return False
 
     def delete_peer(self, interface: str, public_key: str) -> int:
         """Delete every peer section matching `public_key`. Returns the count.

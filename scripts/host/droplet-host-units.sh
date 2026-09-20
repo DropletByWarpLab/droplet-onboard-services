@@ -69,9 +69,12 @@
 # uselessly.
 #
 # The cause is structural, not a one-off: the box refresh flow updates the git
-# checkout and restarts CONTAINERS, and nothing re-runs
-# install_single_box_host_integration (scripts/lib/single-box.sh). So any
-# host-unit feature can merge, be marked Done, and run on zero boxes.
+# checkout and restarts CONTAINERS, and nothing re-ran
+# install_single_box_host_integration (scripts/lib/single-box.sh) on that path.
+# So any host-unit feature could merge, be marked Done, and run on zero boxes —
+# until the WARP-2574 delivery half (droplet-host-integration.service) began
+# re-running that installer on the refresh path, root and audit-gated. `audit`
+# below is the detector that gates it: it decides whether a re-apply is needed.
 #
 # `audit` closes that by reconciling from the OTHER direction — from the tree's
 # declared expectation (scripts/host/MANIFEST) to the filesystem — rather than

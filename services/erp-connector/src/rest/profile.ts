@@ -49,7 +49,7 @@
  * `UnsafeBaseUrlError`. Ten of the thirty-four vendors need it, which is why it
  * is a shared guard here rather than a per-connector one.
  */
-import { CANONICAL_COLUMNS, type DatasetName } from "../export-drop/profiles.js";
+import { CANONICAL_COLUMNS, REQUIRED_CANONICAL, type DatasetName } from "../export-drop/profiles.js";
 
 /**
  * How the credential is presented on every request.
@@ -274,6 +274,17 @@ export type RestBaseUrl =
        * value is a WHOLE host (a self-hosted GitLab, a self-hosted Cal.com)
        * carries `allowedSuffixes: []` and relies on `allowedHosts` instead;
        * one of the two must be non-empty, checked at registration.
+       *
+       * 🔴 WARP-2920 — a bare label (a value with no dot, `acme`) is completed
+       * with the FIRST suffix here and no other; `assertSafeRestBaseUrl` does
+       * not try the rest. So a multi-region vendor that lists several suffixes
+       * (`.vendor.com`, `.vendor.eu`) would silently send an EU customer who
+       * typed `acme` to `acme.vendor.com` — a wrong destination that passes
+       * the allow-set. A profile with more than one suffix must therefore make
+       * the customer enter the WHOLE host: give the descriptor's
+       * `credentialFields` entry a `pattern` that requires a dot, and say so
+       * in its `help`. Ordering is meaningful only for a single-suffix profile,
+       * where it is the completion; do not reorder to "prefer" a region.
        */
       readonly allowedSuffixes: readonly string[];
       /** Exact hosts permitted in addition to the suffixes, e.g. a closed set
@@ -538,6 +549,35 @@ export function assertValidRestProfile(profile: RestVendorProfile): void {
           fail(
             `dataset "${spec.dataset}" maps "${column}", which is not one of its canonical ` +
               `columns (${columns.join(", ")}) — it would never be read`,
+          );
+        }
+      }
+
+      // 🔴 And every REQUIRED column of THIS dataset must be mapped (WARP-2919).
+      //
+      // The loop above refuses a key the vocabulary does not know; it says
+      // nothing about a key the vocabulary INSISTS on. `REQUIRED_CANONICAL` is
+      // the floor each dataset exists to stand on — the identity, the one
+      // column the dataset answers about, and for every money dataset the
+      // `currency` beside the amount, because "an amount without its currency
+      // is not a number, it is a rumour". A profile that maps `order_id` and
+      // `total_amount` and never mentions `currency` passed everything here,
+      // and `projectCanonicalRow` then wrote `undefined` into the required
+      // column on every row of every sync: `total_amount: 17.52, currency:
+      // undefined`, reaching the model as a dollar-shaped answer for a
+      // merchant in Tokyo. Loyverse's receipts shipped exactly so until a
+      // review caught it, because this check did not exist.
+      //
+      // Decidable from the profile alone, so it is decided here, and it is a
+      // REFUSAL: the honest options are to map the column or to not serve the
+      // dataset. (Whether the mapped PATH yields a value on real rows is the
+      // vendor tests' job, as above.)
+      const required = REQUIRED_CANONICAL[spec.dataset] as readonly string[];
+      for (const column of required) {
+        if (!(column in spec.fieldMap)) {
+          fail(
+            `dataset "${spec.dataset}" does not map "${column}", which REQUIRED_CANONICAL.${spec.dataset} ` +
+              `names — a row without it is not one`,
           );
         }
       }

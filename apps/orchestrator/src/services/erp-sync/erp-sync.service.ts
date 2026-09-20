@@ -68,6 +68,8 @@ import {
   ShopifyScopeMissingError,
   QuotaExhaustedError,
   ReauthorizationRequiredError,
+  // WARP-2916 — the declarative REST track's rate limit, which may wear a 403.
+  RestRateLimitedError,
   // WARP-2383 — the Xero track's three named states.
   XeroRateLimitedError,
   XeroReauthorizationRequiredError,
@@ -417,6 +419,17 @@ function asSyncFailure(err: unknown): {
     // reads it off the error, and `computeBackoffMs` obeys it exactly.
     // Retrying earlier than a vendor asked deepens the throttle it is escaping.
     return { code: "XERO_RATE_LIMITED", statusCode: 429, message: err.message };
+  }
+  if (err instanceof RestRateLimitedError) {
+    // WARP-2916 — TRANSIENT, and it carries the vendor's `Retry-After` for
+    // `retryAfterOf` exactly as Xero's does. The branch exists because the
+    // error's REAL status may be 403: GitHub answers rate-limit exhaustion
+    // with "a 403 or 429", and the fallthrough below would hand a 403 to
+    // `classifySyncFailure`, which reads it as AUTH — flipping
+    // `needsReconnect` and sending the owner to paste a new token because
+    // some other tool on the same GitHub user spent the hour's 5,000 calls.
+    // The credential is fine; the budget refills; the cursor backs off.
+    return { code: "REST_RATE_LIMITED", statusCode: 429, message: err.message };
   }
   if (err instanceof ConnectorBlockedError) {
     // Not configured, or the vendor is unreachable. Retrying is reasonable.

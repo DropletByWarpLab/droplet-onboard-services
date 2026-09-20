@@ -689,6 +689,7 @@ export {
 export {
   RestProfileConnector,
   RestPaginationContractError,
+  RestRateLimitedError,
   RestVendorError,
   REST_MAX_PAGES,
   REST_REQUEST_TIMEOUT_MS,
@@ -733,8 +734,12 @@ export {
 } from "./rest/read-semantics.js";
 export {
   CALCOM_PROVIDER,
+  GITHUB_PROVIDER,
+  GITLAB_PROVIDER,
+  LOYVERSE_PROVIDER,
   REST_VENDOR_PROFILES,
   restProfileFor,
   restProviderIds,
   SQUARE_PROVIDER,
+  TODOIST_PROVIDER,
 } from "./rest/profiles.js";

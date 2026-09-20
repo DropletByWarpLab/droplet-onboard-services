@@ -667,6 +667,18 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "show me the payouts that landed this month",
       "which deals did we win in Q2?",
       "how many subscribers do we have?",
+      // WARP-2916 — the GitHub profile serves `task`; the vendor's name and
+      // "pull request" are the words a person uses for it.
+      "what is still open on GitHub?",
+      "any pull requests waiting on me?",
+      // WARP-2917 — the vendor's name carries the turn even when the sentence
+      // uses GitLab's own word (`issue`), which is deliberately unclaimed.
+      "which issues are still open in GitLab?",
+      // WARP-2919 — the vendor name, exactly as `shopify` and `square` are.
+      // NOT `receipts?`: that word belongs to the `files` domain ("file this
+      // receipt"), and Loyverse serves no receipts dataset — see the
+      // negative below.
+      "what did Loyverse record yesterday?",
     ])("%s advertises the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).toContain("cloud_query_dataset");
     });
@@ -685,6 +697,8 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
     it.each([
       // `pm` owns `ticket` (WARP-2058).
       "is there an open support ticket for the printer?",
+      // WARP-2917 — bare `issue` stays unclaimed: this is not a tracker question.
+      "is there an issue with the printer?",
       // `business` owns `company` and `customers`.
       "what are our opening hours?",
       "which company do we buy the milk from?",
@@ -694,6 +708,12 @@ describe("WARP-2497 — the cloud SaaS datasets are reachable from a fresh turn"
       "find Dana's contact details",
       // Nothing to do with a SaaS account at all.
       "turn the living room lights off",
+      // WARP-2916 — bare `issue` stays unclaimed: the household sense.
+      "there's an issue with the printer again",
+      // WARP-2919 — `files` owns `receipt`: this is a filing turn, and no
+      // cloud dataset serves receipts (Loyverse's are not read — no per-row
+      // currency). MUTATION: add `receipts?` to the cloud pattern -> red.
+      "file this receipt under expenses",
     ])("%s does NOT advertise the cloud dataset reader", (message) => {
       expect(advertisedFor(message)).not.toContain("cloud_query_dataset");
     });

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# =============================================================================
+# WARP-2574 (delivery half) — re-apply host integration when the checkout moved
+# =============================================================================
+#
+# WARP-2574 gave the box a DETECTOR: `droplet-host-units audit` reconciles
+# scripts/host/MANIFEST against the filesystem and the droplet-watchdog
+# `host_artefacts` check reports the verdict. But detect was all it did. The
+# only remedy it could name was "re-run sudo ./scripts/setup.sh", and the box
+# refresh never does: it updates the git checkout and restarts CONTAINERS, and
+# nothing re-runs install_single_box_host_integration (scripts/lib/single-box.sh).
+#
+# So a host-artefact feature could merge, land in the box's checkout, be marked
+# Done — and run on ZERO existing boxes until each was hand-reprovisioned.
+# Measured 2026-08-31 on the bench box: WARP-2190 (droplet-power-restore) and
+# WARP-2192 (the hardware watchdog) sat in the checkout for five days, installed
+# on none of it, while the audit correctly and uselessly said so every ~3 min.
+#
+# This is the HEAL half. It is the exact symmetric partner of WARP-1829's
+# `droplet-host-units refresh` (which restarts host units running stale CODE):
+# that closes the stale-running-process gap on the refresh path, this closes the
+# never-installed / drifted-artefact gap on the same path.
+#
+# ── WHY A SEPARATE ROOT PATH, NOT THE WATCHDOG ───────────────────────────────
+# The watchdog's `host_artefacts` check is deliberately detect-only, and that is
+# not a judgement call: re-running the installer apt-installs packages, rewrites
+# unit files, re-enables services and (WARP-2192) daemon-reexecs PID1. Doing that
+# from a 3-minute timer is not a self-heal, it is an unattended provision on a
+# live appliance. So the heal belongs to the DEPLOY PATH — run once when a new
+# checkout is applied, as root, not on a cadence. This is that hook:
+#
+#   systemctl start droplet-host-integration.service   # the boot / on-demand unit
+#   /usr/local/sbin/droplet-reapply-host-integration   # or directly, by an operator
+#
+# ── WHY THIS IS A LEGITIMATE ROOT PATH (no privilege widening) ───────────────
+# The box's stack bring-up (droplet.service) runs as `User=droplet, Group=docker`
+# — the docker socket is root-equivalent, and re-running a host installer through
+# it would lean on exactly the docker-group→root path that is being closed
+# elsewhere. This script instead runs from droplet-host-integration.service,
+# which is `User=root` under systemd — a first-class root context that never
+# touches the droplet user or the docker group. The installer's own `sudo` calls
+# are no-ops when already root, exactly as they are when setup.sh runs under sudo.
+#
+# ── BOUNDED, IDEMPOTENT, NON-FATAL ───────────────────────────────────────────
+#   * The GATE is `droplet-host-units audit` (pure reads). Clean → this exits 0
+#     without touching anything, so on a healthy box the boot unit is cheap.
+#   * A heal is ONE `setup.sh --reapply-host-integration` run — the installer is
+#     idempotent (it re-copies files, re-enables units, and skips install-once
+#     tuning files), so re-applying an already-correct box is a no-op.
+#   * No loop, no scheduler of its own (architecture-guard rule 9) — one pass,
+#     invoked by the unit or an operator.
+#   * A heal that itself fails exits non-zero so it shows in `systemctl --failed`
+#     and the watchdog keeps reporting the gap; the unit is ordered Before= (not
+#     Requires=) droplet.service, so a failed reconcile never blocks bring-up.
+#
+# ── TEST HOOKS (tests/host-artefacts.test.sh — no root, no systemd) ──────────
+#   DROPLET_HOST_INTEGRATION_REPO_ROOT   the checkout (skips systemd discovery)
+#   DROPLET_HOST_UNITS_BIN               the auditor (default /usr/local/sbin/…)
+#   DROPLET_REAPPLY_DRY_RUN=1            print the heal command instead of running
+#                                        it (so the wiring is testable off a box)
+# Repo-tracked (architecture-guard rule 20): installs to
+# /usr/local/sbin/droplet-reapply-host-integration via install_single_box_host_
+# integration (scripts/lib/single-box.sh) — never hand-placed on a box.
+# =============================================================================
+# Deliberately NOT `set -e`: every step's failure is handled explicitly so the
+# reconcile always reaches a verdict instead of aborting mid-way.
+set -uo pipefail
+
+HU_BIN="${DROPLET_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
+DRY_RUN="${DROPLET_REAPPLY_DRY_RUN:-}"
+
+now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+log()      { printf '[reapply-host-integration] %s %s\n' "$(now_iso)" "$*" >&2; }
+log_crit() { printf '[reapply-host-integration] %s CRITICAL: %s\n' "$(now_iso)" "$*" >&2; }
+
+# Resolve the box's git checkout. Same derivation droplet-host-units uses: the
+# checkout is NOT at a host-specific default (architecture-guard) — droplet.service
+# names it in its own ExecStart (`docker compose -f <repo>/docker/...`), so any
+# provisioned box points here even when NOTHING from the manifest is installed,
+# which is precisely the state this exists for.
+resolve_checkout() {
+  if [ -n "${DROPLET_HOST_INTEGRATION_REPO_ROOT:-}" ]; then
+    printf '%s' "$DROPLET_HOST_INTEGRATION_REPO_ROOT"
+    return 0
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local execstart token dir
+  execstart="$(systemctl show droplet.service -p ExecStart 2>/dev/null)"
+  [ -n "$execstart" ] || return 1
+  # Pull absolute paths out of the property and walk up from each until one
+  # looks like this checkout (has BOTH the manifest and setup.sh — the two files
+  # the heal needs).
+  for token in $(printf '%s' "$execstart" | tr ' ;' '\n\n' | grep '^/'); do
+    [ -e "$token" ] || continue
+    dir="$(dirname "$token")"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+      if [ -f "$dir/scripts/host/MANIFEST" ] && [ -f "$dir/scripts/setup.sh" ]; then
+        printf '%s' "$dir"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+  done
+  return 1
+}
+
+# Run the heal: re-apply the host integration from the checkout, as root, via the
+# single source of truth (install_single_box_host_integration, reached through
+# setup.sh's focused --reapply-host-integration mode — NO rebuild, NO stack
+# restart). Returns the heal's exit code.
+run_heal() { # <checkout>
+  local repo="$1"
+  if [ -n "$DRY_RUN" ]; then
+    printf 'DRY-RUN: bash %q --reapply-host-integration\n' "$repo/scripts/setup.sh"
+    return 0
+  fi
+  log "re-applying host integration from $repo (setup.sh --reapply-host-integration)"
+  bash "$repo/scripts/setup.sh" --reapply-host-integration
+}
+
+main() {
+  local repo="" audit_rc=0
+
+  # --- The gate: is this box already running what its checkout declares? -------
+  # When the auditor is installed, its verdict decides whether we heal at all.
+  # When it is ABSENT, the host integration was (at least partly) never installed
+  # — the WARP-2574 scenario itself — so we heal unconditionally.
+  if [ -x "$HU_BIN" ]; then
+    "$HU_BIN" audit >/dev/null 2>&1 && audit_rc=0 || audit_rc=$?
+    case "$audit_rc" in
+      0)
+        log "host integration is in sync with the checkout — nothing to re-apply"
+        return 0 ;;
+      1)
+        log "host integration has drifted or is missing artefacts (audit exit 1) — re-applying"
+        ;;
+      4)
+        # audit could not locate the checkout's MANIFEST: no verdict, so there is
+        # nothing to act on. Saying so beats guessing (the WARP-2574 lesson).
+        log "droplet-host-units audit could not locate the checkout (exit 4) — no verdict, not re-applying. Inspect: $HU_BIN audit"
+        return 0 ;;
+      *)
+        log "droplet-host-units audit could not run (exit $audit_rc) — not re-applying blindly. Inspect: $HU_BIN audit"
+        return 0 ;;
+    esac
+  else
+    log "droplet-host-units is not installed at $HU_BIN — the host integration was never fully installed; re-applying"
+  fi
+
+  # --- Resolve the checkout and heal ------------------------------------------
+  if ! repo="$(resolve_checkout)" || [ -z "$repo" ]; then
+    log_crit "could not locate this box's checkout — cannot re-apply. Point at it with DROPLET_HOST_INTEGRATION_REPO_ROOT=<checkout>, or run 'sudo <checkout>/scripts/setup.sh --reapply-host-integration'."
+    return 1
+  fi
+
+  local heal_rc=0
+  run_heal "$repo" || heal_rc=$?
+  if [ "$heal_rc" -ne 0 ]; then
+    log_crit "re-apply FAILED (setup.sh --reapply-host-integration exit $heal_rc) — the box may still be running stale host artefacts. Inspect: $HU_BIN audit; sudo $repo/scripts/setup.sh --reapply-host-integration"
+    return "$heal_rc"
+  fi
+
+  # --- Verify the heal took (a provision must not assume its own work) ---------
+  if [ -z "$DRY_RUN" ] && [ -x "$HU_BIN" ]; then
+    if "$HU_BIN" audit >/dev/null 2>&1; then
+      log "re-apply complete — host integration now matches the checkout"
+    else
+      log_crit "re-apply ran but the audit still reports gaps — inspect: $HU_BIN audit"
+      return 1
+    fi
+  else
+    log "re-apply complete"
+  fi
+  return 0
+}
+
+main "$@"

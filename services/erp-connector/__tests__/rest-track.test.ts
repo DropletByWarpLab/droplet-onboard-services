@@ -48,13 +48,14 @@ import {
   readPath,
   RestPaginationContractError,
   RestProfileConnector,
+  RestRateLimitedError,
   RestVendorError,
   REST_MAX_PAGES,
   vendorErrorCode,
 } from "../src/rest/connector.js";
 import { ConnectorBlockedError, DatasetNotServedError } from "../src/connector.js";
 import { UnknownWriteCommandError } from "../src/write-commands.js";
-import { CANONICAL_COLUMNS } from "../src/export-drop/profiles.js";
+import { CANONICAL_COLUMNS, REQUIRED_CANONICAL } from "../src/export-drop/profiles.js";
 import { getReadQuery } from "../src/read-queries.js";
 import { REST_VENDOR_PROFILES } from "../src/rest/profiles.js";
 
@@ -252,6 +253,75 @@ describe("profile validation — a malformed profile fails to BUILD, not on firs
     }
   });
 
+  it("🔴 refuses a dataset whose fieldMap leaves a REQUIRED canonical column unmapped", () => {
+    // WARP-2919. `REQUIRED_CANONICAL[dataset]` is the vocabulary's floor: the
+    // identity plus the one column the dataset exists to answer about, and for
+    // every money dataset the `currency` beside the amount — "an amount
+    // without its currency is not a number, it is a rumour". The key check
+    // above proves nothing about coverage: a profile that maps `order_id` and
+    // `total_amount` and simply never mentions `currency` passes it, and
+    // `projectCanonicalRow` writes `undefined` into the required column on
+    // every row of every sync, which reaches the model as `total_amount:
+    // 17.52, currency: undefined` — a dollar-shaped answer for a merchant in
+    // Tokyo. Loyverse's receipts were exactly that profile until the verifier
+    // caught it, and nothing in the build refused it because this loop did
+    // not exist. Decidable from the profile alone, so it is decided here.
+    //
+    // The refusal names the column so the fix is obvious, and it is a
+    // REFUSAL rather than a warning: the honest options are to map the
+    // column, or to not serve the dataset. Shipping it anyway is not one.
+    // Mutation: delete the REQUIRED_CANONICAL loop in `assertValidRestProfile`
+    // -> red; hardcode `currency: "USD"` in the fixture below -> green, which
+    // is the vendor tests' job to refuse (a literal is not a path), not this
+    // one's.
+    expect(REQUIRED_CANONICAL.order).toEqual(["order_id", "total_amount", "currency"]);
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [
+            {
+              dataset: "order",
+              path: "/v1/receipts",
+              watermark: null,
+              pagination: { kind: "cursor", nextCursorPath: "cursor", cursorParam: "cursor" },
+              rowsPath: "receipts",
+              fieldMap: { order_id: "receipt_number", total_amount: "total_money" },
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/dataset "order" does not map "currency", which REQUIRED_CANONICAL\.order names/);
+
+    // A dataset with a one-column floor and the column mapped passes; the
+    // same dataset with the wrong identity mapped does not.
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [{ ...staticProfile().datasets[0]!, dataset: "contact", fieldMap: { contact_id: "id" } }],
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertValidRestProfile(
+        staticProfile({
+          datasets: [{ ...staticProfile().datasets[0]!, dataset: "contact", fieldMap: { email: "email" } }],
+        }),
+      ),
+    ).toThrow(/dataset "contact" does not map "contact_id"/);
+  });
+
+  it("🔴 every shipped profile maps EVERY required column — checked against the vocabulary directly", () => {
+    // The independent path to the same claim, exactly as the key check has
+    // one above: read REQUIRED_CANONICAL rather than trust the guard.
+    for (const profile of REST_VENDOR_PROFILES) {
+      for (const spec of profile.datasets) {
+        for (const column of REQUIRED_CANONICAL[spec.dataset]) {
+          expect(Object.keys(spec.fieldMap), `${profile.provider}.${spec.dataset}`).toContain(column);
+        }
+      }
+    }
+  });
+
   it("refuses a profile serving no datasets, and one declaring a dataset twice", () => {
     expect(() => assertValidRestProfile(staticProfile({ datasets: [] }))).toThrow(/no datasets/);
     const one = staticProfile().datasets[0]!;
@@ -270,6 +340,23 @@ describe("host guard — the ONLY enforcement for a dynamic destination", () => 
 
   it("completes a bare label with the declared suffix", () => {
     expect(assertSafeRestBaseUrl("v", dynamicProfile().baseUrl, "acme")).toBe("https://acme.example.com");
+  });
+
+  it("🔴 completes a bare label with the FIRST suffix only — the documented multi-region hazard", () => {
+    // WARP-2920 — pinned so the rule in `RestBaseUrl.dynamic.allowedSuffixes`
+    // ("a multi-suffix profile must have the customer enter the whole host")
+    // cannot go stale: if the completion ever tries every suffix or refuses a
+    // bare label under several, this goes red and that docstring is rewritten
+    // in the same change. Mutation: complete with the LAST suffix → red.
+    const multiRegion = {
+      kind: "dynamic" as const,
+      configField: "companyDomain",
+      allowedSuffixes: [".example.com", ".example.net"],
+      allowedHosts: [],
+    };
+    expect(assertSafeRestBaseUrl("v", multiRegion, "acme")).toBe("https://acme.example.com");
+    // The whole host is what selects the other region.
+    expect(assertSafeRestBaseUrl("v", multiRegion, "acme.example.net")).toBe("https://acme.example.net");
   });
 
   it("🔴 refuses a host that merely ENDS WITH the suffix", () => {
@@ -596,6 +683,12 @@ describe("RestProfileConnector", () => {
     // with new untracked files is a false green. This asserts the property
     // directly instead of relying on that run.
     // Mutation: change any fieldMap path back to `a.0.b` -> red here.
+    //
+    // ⚠ Scoped to NUMERIC segments. A plain object key can also end in a real
+    // TLD — GitHub's `repository.id` (WARP-2916) does, `.id` being Indonesia —
+    // and has no bracket spelling to escape into. That case is registered as
+    // `kind: reference` (`ref-github-repository-id-path`) rather than avoided,
+    // and only the scanner itself can catch the next one.
     for (const profile of REST_VENDOR_PROFILES) {
       for (const spec of profile.datasets) {
         for (const [column, source] of Object.entries(spec.fieldMap)) {
@@ -1041,6 +1134,108 @@ describe("RestProfileConnector", () => {
     await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
     await expect(c.runRead("get_company", {})).rejects.toThrow(RestVendorError);
     expect(resolves).toBe(1);
+  });
+
+  it("🔴 WARP-2916 — a 403 carrying a rate-limit header is a RATE LIMIT, not a rejected credential", async () => {
+    // The verified failure that admitted this branch (ADR-046 §2's bar for
+    // a change to the shared connector). GitHub documents that exceeding the
+    // primary OR a secondary rate limit answers "a 403 or 429 response" —
+    // with `retry-after` on secondary limits and `x-ratelimit-remaining: 0`
+    // on the primary (rate-limits-for-the-rest-api#exceeding-the-rate-limit).
+    // Until this branch every 403 was "the vendor rejected the credential":
+    // the cached token was evicted and the hub told the owner to paste a new
+    // key for a condition that clears itself within the hour. Worse, the
+    // owner's 5,000/h budget is shared with every other tool on that user, so
+    // this connector could be told its key was bad because a CI job elsewhere
+    // was busy.
+    //
+    // The two signals are the vendor's OWN rate-limit vocabulary (RFC 9110
+    // `Retry-After`; the de-facto `X-RateLimit-Remaining`), not a
+    // GitHub-specific branch — there is still no `if (provider === …)` here.
+    // Mutation: delete the `rateLimited` guard in `request()` -> red on both
+    // headers below, and `resolves` climbs to 2.
+    const rateLimited: Record<string, string>[] = [{ "retry-after": "60" }, { "x-ratelimit-remaining": "0" }];
+    for (const headers of rateLimited) {
+      let resolves = 0;
+      const { impl } = stubFetch([{ body: { message: "API rate limit exceeded" }, status: 403, headers }]);
+      const c = new RestProfileConnector(
+        staticProfile(),
+        { provider: "test-vendor" },
+        {
+          fetchImpl: impl,
+          resolveCredentials: async () => {
+            resolves += 1;
+            return { token: "k" };
+          },
+        },
+      );
+      const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as RestRateLimitedError;
+      // The SUBCLASS, so the orchestrator's sync loop can map it TRANSIENT by
+      // `instanceof` (its classifier would otherwise read the 403 as AUTH),
+      // and still a `RestVendorError` for every existing path.
+      expect(err, JSON.stringify(headers)).toBeInstanceOf(RestRateLimitedError);
+      expect(err, JSON.stringify(headers)).toBeInstanceOf(RestVendorError);
+      expect(err.status, JSON.stringify(headers)).toBe(403);
+      // The vendor's own wait, threaded through raw for `computeBackoffMs`
+      // to honour exactly; `undefined` when the vendor sent none.
+      expect(err.retryAfter, JSON.stringify(headers)).toBe(
+        "retry-after" in headers ? "60" : undefined,
+      );
+      // Not evicted: the SAME credential is replayed, because it was never
+      // the problem.
+      await c.runRead("get_company", {}).catch(() => undefined);
+      expect(resolves, JSON.stringify(headers)).toBe(1);
+    }
+
+    // A 403 with NEITHER header is still a rejected credential — that is the
+    // lockout GitHub documents after repeated bad auth, and it IS about the
+    // key. A 403 whose `x-ratelimit-remaining` is anything but 0 is not a
+    // rate limit either: the vendor sends that header on EVERY answer.
+    const notRateLimited: Record<string, string>[] = [{}, { "x-ratelimit-remaining": "4999" }];
+    for (const headers of notRateLimited) {
+      const { impl } = stubFetch([{ body: {}, status: 403, headers }]);
+      const c = new RestProfileConnector(
+        staticProfile(),
+        { provider: "test-vendor" },
+        { fetchImpl: impl, resolveCredentials: creds },
+      );
+      await expect(c.runRead("get_company", {}), JSON.stringify(headers)).rejects.toThrow(
+        ConnectorBlockedError,
+      );
+    }
+
+    // And a 401 is a rejected credential whatever headers ride on it: GitHub
+    // sends `x-ratelimit-*` on every response, including a 401 for a revoked
+    // token, and a `retry-after` on a 401 would be a vendor telling a caller
+    // to retry a credential it just refused.
+    const { impl } = stubFetch([{ body: {}, status: 401, headers: { "retry-after": "60", "x-ratelimit-remaining": "0" } }]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    await expect(c.runRead("get_company", {})).rejects.toThrow(ConnectorBlockedError);
+  });
+
+  it("WARP-2916 — a 429 is the same class, with the vendor's retry-after threaded through", async () => {
+    // Before WARP-2916 a 429 was a plain `RestVendorError` and the sync loop
+    // rode the jittered exponential ramp regardless of what the vendor asked.
+    // `retryAfterOf` reads `retryAfter` off the error, so a vendor that says
+    // "120 seconds" is waited for 120 seconds, not 15–30.
+    // Mutation: throw `RestVendorError` for a 429 -> red on the first line.
+    const { impl } = stubFetch([
+      { body: { code: "RATE_LIMITED" }, status: 429, headers: { "retry-after": "120" } },
+    ]);
+    const c = new RestProfileConnector(
+      staticProfile(),
+      { provider: "test-vendor" },
+      { fetchImpl: impl, resolveCredentials: creds },
+    );
+    const err = (await c.runRead("get_company", {}).catch((e: unknown) => e)) as RestRateLimitedError;
+    expect(err).toBeInstanceOf(RestRateLimitedError);
+    expect(err.status).toBe(429);
+    expect(err.retryAfter).toBe("120");
+    expect(err.message).toContain("RATE_LIMITED");
   });
 
   it("🔴 keeps the vendor's BODY out of the error that gets persisted", async () => {
