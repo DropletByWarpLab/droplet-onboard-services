@@ -3895,12 +3895,158 @@ def gpu_processes():
     return procs
 
 
+def _read_sysfs_str(path):
+    """First line of a sysfs text attribute, stripped, or None when unreadable
+    or blank. A blank is None because an empty product_name is not a name."""
+    try:
+        with open(path, "r") as fh:
+            return fh.readline().strip() or None
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+# WARP-2883 — per-tool subprocess budgets for the GPU snapshot. The
+# orchestrator aborts its GET /gpu at BRIDGE_GPU_TIMEOUT_MS = 3_000
+# (apps/orchestrator/src/lib/gpu-telemetry.ts); a stalled nvidia-smi at the
+# old 3 s therefore reported `gpuReason: "unreachable"` for a bridge that was
+# up. nvidia-smi and lspci can both run in one snapshot, so their sum plus
+# the sysfs reads must stay under that window with headroom.
+_GPU_TOOL_TIMEOUT_S = {"nvidia-smi": 1.5, "lspci": 1.0}
+
+
+def _pci_device_name(dev):
+    """Marketing name of the PCI device behind a DRM node, or None (WARP-2883).
+
+    The tile used to print the DRM node ("card2"), which names nothing an owner
+    recognises. Sources, in order: amdgpu's `product_name` (FRU EEPROM, so
+    server boards only), then `lspci -mm` on the node's PCI slot, whose device
+    column reads "Navi 33 [Radeon RX 7600/7600 XT/...]" — the bracket is the
+    marketing name, the prefix is the die. A card newer than the host's pci.ids
+    prints as "Device 2d04" (scripts/lib/gpu.sh hit exactly that on the RTX
+    5060 Ti); that is an id, not a name, so it yields None rather than a
+    string the tile would present as hardware.
+    """
+    name = _read_sysfs_str(os.path.join(dev, "product_name"))
+    if name:
+        return name
+    slot = None
+    try:
+        with open(os.path.join(dev, "uevent"), "r") as fh:
+            for line in fh:
+                if line.startswith("PCI_SLOT_NAME="):
+                    slot = line.split("=", 1)[1].strip()
+    except Exception:                                                # noqa: BLE001
+        return None
+    lspci = shutil.which("lspci")
+    if not slot or not lspci:
+        return None
+    try:
+        # Budget: see _GPU_TOOL_TIMEOUT_S — this runs after nvidia-smi inside
+        # the orchestrator's single 3 s window.
+        out = subprocess.run([lspci, "-mm", "-s", slot], capture_output=True,
+                             text=True, timeout=_GPU_TOOL_TIMEOUT_S["lspci"]).stdout
+        fields = shlex.split(out.strip())
+    except Exception:                                                # noqa: BLE001
+        return None
+    # slot, class, vendor, device, ...
+    if len(fields) < 4 or fields[3].startswith("Device "):
+        return None
+    m = re.search(r"\[([^\]]+)\]", fields[3])
+    return (m.group(1) if m else fields[3]).strip() or None
+
+
+_NVIDIA_SMI_QUERY = (
+    "index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw"
+)
+
+
+def _smi_num(value):
+    """nvidia-smi prints "[N/A]" / "[Not Supported]" for a counter it lacks —
+    None, never 0, same rule as `_read_sysfs_int`."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _drm_card_for_vendor(vendor_id):
+    """First DRM card node whose PCI vendor matches, or None."""
+    for name in _drm_cards():
+        vendor = _read_sysfs_str(os.path.join(_SYS_DRM, name, "device", "vendor"))
+        if vendor and vendor.lower() == vendor_id:
+            return name
+    return None
+
+
+def nvidia_snapshot():
+    """GPU telemetry for an NVIDIA card via nvidia-smi, or None (WARP-2883).
+
+    The nvidia driver publishes NO mem_info_vram_total under /sys/class/drm,
+    so `resolve_gpu_card()` cannot see an NVIDIA card at all — and on a Ryzen
+    host it then elects the 512 MiB Raphael iGPU carve-out, which is how the
+    bench box (RTX 5060 Ti fitted) reported "card2 · 0 / 0.5 GiB" as its AI
+    accelerator. Discrete-first, the same posture as scripts/lib/gpu.sh.
+
+    None when nvidia-smi is absent, fails, times out or lists no card, so the
+    amdgpu path below runs unchanged on every other box.
+
+    ponytail: `processes` is empty here — the kfd listing is AMD-only and the
+    nvidia-smi --query-compute-apps mapping is a follow-up if anyone asks
+    "who is holding it" on an NVIDIA box.
+    """
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return None
+    try:
+        out = subprocess.run(
+            [smi, f"--query-gpu={_NVIDIA_SMI_QUERY}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=_GPU_TOOL_TIMEOUT_S["nvidia-smi"]).stdout
+    except Exception:                                                # noqa: BLE001
+        return None
+    line = next((ln for ln in out.splitlines() if ln.strip()), None)
+    if not line:
+        return None
+    fields = [f.strip() for f in line.split(",")]
+    if len(fields) < 7:
+        return None
+    index, name, total_mib, used_mib, busy, temp, power = fields[:7]
+    total = _smi_num(total_mib)
+    used = _smi_num(used_mib)
+    total_bytes = int(total * 1024 * 1024) if total is not None else None
+    used_bytes = int(used * 1024 * 1024) if used is not None else None
+    fraction = round(used_bytes / total_bytes, 3) if total_bytes and used_bytes is not None else None
+    busy_pct = _smi_num(busy)
+    temp_c = _smi_num(temp)
+    power_w = _smi_num(power)
+    return {
+        "available": True,
+        "card": _drm_card_for_vendor("0x10de") or f"nvidia{index}",
+        "name": name or None,
+        "reason": None,
+        "busy_percent": int(busy_pct) if busy_pct is not None else None,
+        "vram_total_bytes": total_bytes,
+        "vram_used_bytes": used_bytes,
+        "vram_used_fraction": fraction,
+        "power_watts": round(power_w, 1) if power_w is not None else None,
+        "temp_c": round(temp_c, 1) if temp_c is not None else None,
+        "processes": [],
+    }
+
+
 def gpu_snapshot():
     """Read-only GPU telemetry: card counters plus who is holding it.
 
     `available: false` when no card resolves — with every counter null and a
     `reason`, so a caller can never mistake "nothing found" for "idle".
+
+    An operator pin (BRIDGE_GPU_CARD) names an amdgpu sysfs node and wins
+    outright; otherwise an NVIDIA card is tried first (WARP-2883, see
+    `nvidia_snapshot`), then the amdgpu resolver.
     """
+    if not os.environ.get("BRIDGE_GPU_CARD", "").strip():
+        nvidia = nvidia_snapshot()
+        if nvidia:
+            return nvidia
     card = resolve_gpu_card()
     if not card:
         pinned = os.environ.get("BRIDGE_GPU_CARD", "").strip()
@@ -3911,6 +4057,7 @@ def gpu_snapshot():
         return {
             "available": False,
             "card": None,
+            "name": None,
             "reason": reason,
             "busy_percent": None,
             "vram_total_bytes": None,
@@ -3936,6 +4083,9 @@ def gpu_snapshot():
     return {
         "available": True,
         "card": card,
+        # WARP-2883: what the owner bought, not the DRM node. None when no
+        # source can name it — the consumer falls back to `card`.
+        "name": _pci_device_name(dev),
         "reason": None,
         "busy_percent": _read_sysfs_int(os.path.join(dev, "gpu_busy_percent")),
         "vram_total_bytes": total,

@@ -5,6 +5,7 @@ import type {
   ChatRequest,
   ChatStreamChunk,
   ModelCapabilities,
+  LatencyResponse,
   ModelInfo,
   ModelsResponse,
 } from "../types/index.js";
@@ -358,3 +359,27 @@ export async function healthCheck(): Promise<boolean> {
 // orchestrator's own Postgres via WARP-304; direct callers of the
 // ai-gateway can still hit its session endpoints — the orchestrator
 // simply doesn't proxy them anymore.
+
+/**
+ * WARP-2883 — the gateway's per-endpoint round-trip probe. Best-effort: null
+ * on any failure (gateway down, non-2xx, malformed body, timeout), never a
+ * throw — this feeds a KPI tile, and the Models page must render without it.
+ * 10 s ceiling: the gateway's own probes cap at 3 s each and run in parallel.
+ */
+export async function fetchLatency(): Promise<LatencyResponse | null> {
+  try {
+    const res = await internalFetch(`${BASE_URL}/ai/latency`, {
+      headers: authHeaders(),
+      signal: timeout(),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as Partial<LatencyResponse> | null;
+    const p = body?.providers;
+    if (!p || typeof p !== "object") return null;
+    const ms = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+    return { providers: { local: ms(p.local), anthropic: ms(p.anthropic), openai: ms(p.openai) } };
+  } catch {
+    return null;
+  }
+}

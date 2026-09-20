@@ -425,6 +425,13 @@ export interface ModelsGpuInfo {
  */
 export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
+/** WARP-2883 — one round-trip per inference endpoint, ms; null = no answer. */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
@@ -435,7 +442,13 @@ export interface ModelsPagePayload {
    *  field still parses). Absent ⇒ we know nothing about why, and the tile
    *  must not guess — see `ModelsGpuReason`. */
   gpuReason?: ModelsGpuReason;
+  /** WARP-2883: mean round-trip over the enabled inference endpoints, ms;
+   *  0 = nothing answered (render "—", never "0 ms"). */
   avgLatencyMs: number;
+  /** WARP-2883 (additive; optional so an older orchestrator still parses):
+   *  the per-endpoint samples behind `avgLatencyMs`. null per endpoint =
+   *  did not answer; null/absent overall = the gateway could not be asked. */
+  endpointLatencyMs?: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
    *  default (`ai.model.chat`). null when unset or the stored tag is no longer

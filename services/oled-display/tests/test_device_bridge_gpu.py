@@ -30,6 +30,23 @@ import pytest
 _BRIDGE_PATH = Path(__file__).resolve().parent.parent / "device-bridge.py"
 
 
+@pytest.fixture(autouse=True)
+def _no_host_gpu_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gpu_snapshot() consults the REAL PATH for nvidia-smi before the patched
+    sysfs (WARP-2883 review): on a host with the binary (the bench box's
+    5060 Ti) the amdgpu fixtures lose to the live card and 6 tests fail while
+    CI, lacking the binary, stays green. Pin "no tools" for every test; the
+    `_with_tools` cases override both attributes with their canned outputs."""
+    import shutil
+    import subprocess
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("subprocess.run reached the host — use _with_tools")
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(subprocess, "run", _forbidden)
+
+
 def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
     monkeypatch.setenv("BRIDGE_AUTH_TOKEN", "pytest-bridge-token")
     for k, v in (env or {}).items():
@@ -399,3 +416,151 @@ def test_gpu_route_returns_snapshot_when_authed(
     assert status == 200
     assert body["card"] == "card1"
     assert body["busy_percent"] == 97
+
+
+# ─── WARP-2883: hardware name, and NVIDIA cards ─────────────────────────
+#
+# The bench box has an RTX 5060 Ti next to a Raphael iGPU. The nvidia driver
+# publishes no mem_info_vram_total, so the amdgpu resolver elected the 512 MiB
+# iGPU and the Models page named it "card2". These pin the two fixes: an
+# NVIDIA card is read through nvidia-smi first, and whichever card is read
+# carries a marketing name the owner recognises.
+
+_SMI_LINE = "0, NVIDIA GeForce RTX 5060 Ti, 16311, 13421, 97, 62, 164.30\n"
+
+
+class _Run:
+    """Stand-in for subprocess.run: canned stdout per argv[0] basename."""
+
+    def __init__(self, outputs: dict[str, str]):
+        self.outputs = outputs
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **_kw):
+        self.calls.append(list(argv))
+        import subprocess as _sp
+        stdout = self.outputs.get(Path(argv[0]).name, "")
+        return _sp.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+
+def _with_tools(monkeypatch, bridge, tools: dict[str, str]) -> _Run:
+    run = _Run(tools)
+    monkeypatch.setattr(bridge.shutil, "which",
+                        lambda name: f"/usr/bin/{name}" if name in tools else None)
+    monkeypatch.setattr(bridge.subprocess, "run", run)
+    return run
+
+
+def test_nvidia_card_wins_over_the_amd_igpu_carve_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The bench-box shape: only the iGPU is visible to the amdgpu resolver,
+    but nvidia-smi answers — and it must be what the snapshot reports."""
+    bridge = _load_bridge(monkeypatch)
+    drm = _make_drm(tmp_path, {
+        "card1": {"vendor": "0x10de"},            # nvidia-drm: no vram attrs
+        "card2": _LAB_BOX["card2"],               # 512 MiB Raphael carve-out
+    })
+    _write(drm / "card2" / "device" / "vendor", "0x1002\n")
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(drm))
+    _with_tools(monkeypatch, bridge, {"nvidia-smi": _SMI_LINE})
+    snap = bridge.gpu_snapshot()
+    assert snap["available"] is True
+    assert snap["card"] == "card1", "the NVIDIA DRM node, not the iGPU"
+    assert snap["name"] == "NVIDIA GeForce RTX 5060 Ti"
+    assert snap["vram_total_bytes"] == 16311 * 1024 * 1024
+    assert snap["vram_used_bytes"] == 13421 * 1024 * 1024
+    assert snap["vram_used_fraction"] == pytest.approx(0.823, abs=0.001)
+    assert snap["busy_percent"] == 97
+    assert snap["temp_c"] == pytest.approx(62.0)
+    assert snap["power_watts"] == pytest.approx(164.3)
+
+
+def test_nvidia_not_supported_counters_are_null_not_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(_make_drm(tmp_path, {})))
+    _with_tools(monkeypatch, bridge,
+                {"nvidia-smi": "0, NVIDIA T400, 2048, [N/A], [Not Supported], 40, [N/A]\n"})
+    snap = bridge.gpu_snapshot()
+    assert snap["available"] is True
+    assert snap["card"] == "nvidia0", "no DRM node bound → synthetic name"
+    assert snap["vram_used_bytes"] is None
+    assert snap["vram_used_fraction"] is None
+    assert snap["busy_percent"] is None
+    assert snap["power_watts"] is None
+
+
+def test_without_nvidia_smi_the_amdgpu_path_is_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(_make_drm(tmp_path, _LAB_BOX)))
+    run = _with_tools(monkeypatch, bridge, {})
+    snap = bridge.gpu_snapshot()
+    assert snap["card"] == "card1"
+    assert run.calls == [], "nothing shells out when no tool exists"
+
+
+def test_operator_pin_skips_the_nvidia_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pin names an amdgpu node on purpose; nvidia-smi must not override it."""
+    bridge = _load_bridge(monkeypatch, {"BRIDGE_GPU_CARD": "card2"})
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(_make_drm(tmp_path, _LAB_BOX)))
+    run = _with_tools(monkeypatch, bridge, {"nvidia-smi": _SMI_LINE})
+    assert bridge.gpu_snapshot()["card"] == "card2"
+    assert run.calls == []
+
+
+def test_amd_name_comes_from_lspci_marketing_bracket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bridge = _load_bridge(monkeypatch)
+    drm = _make_drm(tmp_path, _LAB_BOX)
+    _write(drm / "card1" / "device" / "uevent",
+           "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n")
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(drm))
+    run = _with_tools(monkeypatch, bridge, {"lspci": (
+        '03:00.0 "VGA compatible controller" "Advanced Micro Devices, Inc. [AMD/ATI]" '
+        '"Navi 33 [Radeon RX 7600/7600 XT/7600M XT/7600S/7700S / PRO W7600]" '
+        '-r c0 "Sapphire Technology Limited" "Device 4e0a"\n')})
+    snap = bridge.gpu_snapshot()
+    assert snap["card"] == "card1"
+    assert snap["name"] == "Radeon RX 7600/7600 XT/7600M XT/7600S/7700S / PRO W7600"
+    assert run.calls == [["/usr/bin/lspci", "-mm", "-s", "0000:03:00.0"]]
+
+
+def test_amd_name_prefers_the_fru_product_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bridge = _load_bridge(monkeypatch)
+    cards = {**_LAB_BOX, "card1": {**_LAB_BOX["card1"], "product_name": "AMD Instinct MI210"}}
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(_make_drm(tmp_path, cards)))
+    run = _with_tools(monkeypatch, bridge, {"lspci": "unused"})
+    assert bridge.gpu_snapshot()["name"] == "AMD Instinct MI210"
+    assert run.calls == []
+
+
+def test_unknown_pci_id_is_not_a_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale pci.ids prints "Device 2d04" — an id the tile must not present
+    as hardware. None, and the consumer falls back to the DRM node."""
+    bridge = _load_bridge(monkeypatch)
+    drm = _make_drm(tmp_path, _LAB_BOX)
+    _write(drm / "card1" / "device" / "uevent", "PCI_SLOT_NAME=0000:03:00.0\n")
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(drm))
+    _with_tools(monkeypatch, bridge, {"lspci": (
+        '03:00.0 "VGA compatible controller" "NVIDIA Corporation" "Device 2d04" -r a1\n')})
+    assert bridge.gpu_snapshot()["name"] is None
+
+
+def test_unavailable_snapshot_carries_a_null_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_SYS_DRM", str(_make_drm(tmp_path, {})))
+    _with_tools(monkeypatch, bridge, {})
+    assert bridge.gpu_snapshot()["name"] is None

@@ -345,3 +345,17 @@ export type {
   WanDetectionResult,
   CameraSetupResult,
 } from "./switch.js";
+
+/**
+ * WARP-2883 — GET /ai/latency on the ai-gateway: a round-trip per inference
+ * endpoint in ms, `null` for one that did not answer (unreachable, no
+ * box-wide key, timed out). Never 0 for "not measured".
+ */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+export interface LatencyResponse {
+  providers: EndpointLatencyMs;
+}
