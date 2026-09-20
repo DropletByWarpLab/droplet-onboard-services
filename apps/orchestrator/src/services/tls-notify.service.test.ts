@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const sendNotification = vi.fn(async () => ({ id: "n1", channels: ["toast"], delivered: true }));
+type Dispatch = { userId: string; kind: string; title: string; body?: string | null };
+const sendNotification = vi.fn(async (_prisma: unknown, _input: Dispatch) => ({
+  id: "n1",
+  channels: ["toast"],
+  delivered: true,
+}));
 vi.mock("./notifications.service.js", () => ({
-  sendNotification: (...args: unknown[]) => sendNotification(...(args as [])),
+  sendNotification: (prisma: unknown, input: Dispatch) => sendNotification(prisma, input),
 }));
 
 import {
@@ -45,10 +50,10 @@ describe("tls-notify — who hears it", () => {
   it("renewFailed reaches every owner and admin by username, and nobody else", async () => {
     const { prisma } = makePrisma();
     await createTlsNotifier(prisma).renewFailed({ fqdn: "mybox.droplet-us.com", notAfter: null, daysLeft: 12 });
-    const userIds = sendNotification.mock.calls.map((c) => (c[1] as { userId: string }).userId).sort();
+    const userIds = sendNotification.mock.calls.map((c) => c[1].userId).sort();
     expect(userIds).toEqual(["romain", "stefan"]);
     for (const call of sendNotification.mock.calls) {
-      const input = call[1] as { kind: string; title: string; body: string };
+      const input = call[1];
       expect(input.kind).toBe("system");
       expect(input.title).toBe(TLS_RENEW_FAILED_TITLE);
       expect(input.body).toContain("12 more days");
