@@ -101,7 +101,8 @@ function ProjectsWorkspace(): JSX.Element {
   const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
-  const { summary, mutate: mutateSummary } = useSummary();
+  // ProjectsWorkspace only mounts behind the `projects` capability gate above.
+  const { summary, mutate: mutateSummary } = useSummary(true);
   const { states } = useProjectStates(projectId);
   const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
   const { departments } = useDepartments();

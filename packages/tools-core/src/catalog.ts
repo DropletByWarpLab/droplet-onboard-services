@@ -247,7 +247,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // UNCLAIMED_DOMAINS: system / business / data / erp are not feature-gated),
   // so unlike `crm`/`pm` these two are advertised regardless of the module
   // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
-  // `/api/crm/*` and `/api/pm/projects*`), and `_graph.ts`'s `businessError`
+  // `/api/crm/*` and `/api/pm/*`), and `_graph.ts`'s `businessError`
   // turns that 404 into a sentence naming the switch — the same bargain
   // `cloud_query_dataset` makes with `DatasetNotServedError`.
   // ADR-045 — `business` is now the ONE door to the CRM and the tracker
