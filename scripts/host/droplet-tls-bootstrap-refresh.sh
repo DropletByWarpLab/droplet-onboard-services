@@ -14,6 +14,15 @@
 #
 # Idempotent: a certificate that already names every current address is left
 # untouched (no rewrite, no nginx reload). A public-CA leaf is never touched.
+#
+# REFRESH ONLY. This runs unattended, so it may do exactly one thing: re-issue
+# a matching, self-signed pair around its own key. It refuses a pair it cannot
+# read (a root-owned key after `sudo ./scripts/setup.sh` would otherwise read
+# as torn, and a torn pair gets a NEW key — a silent identity rotation on a
+# timer), and it refuses a torn pair outright (the LE issuance writes the key
+# first and the cert second; "healing" that window would pair the public cert
+# with the bootstrap key). Both are setup.sh --sync-secrets's job, by hand.
+# _generate_tls_cert is told so with DROPLET_TLS_NO_NEWKEY=1 as a second lock.
 # Installed to /usr/local/sbin by scripts/install-device-bridge.sh, removed by
 # scripts/factory-reset.sh; repo source is scripts/host/ (architecture-guard
 # rule 20). Mirrors droplet-tls-reload.sh in shape.
@@ -80,6 +89,13 @@ pin_of() {
     | openssl dgst -sha256 -binary 2>/dev/null | base64
 }
 
+# The pair must be OURS to read and rewrite, or this is not a refresh.
+if [ ! -r "$KEY" ] || [ ! -r "$CERT" ] || [ ! -w "$(dirname "$KEY")" ]; then
+  log "refusing: $KEY and $CERT must be readable, and $(dirname "$KEY") writable, by $(id -un) — a rewrite from here could mint a new key over one it cannot read"
+  printf '{"ok":false,"error":"certificate pair not readable/writable by %s"}\n' "$(id -un)"
+  exit 1
+fi
+
 before="$(sha256sum "$CERT" | cut -d' ' -f1)"
 pin_before="$(pin_of "$CERT")"
 
@@ -89,6 +105,32 @@ pin_before="$(pin_of "$CERT")"
 . "$LIB_DIR/tls-reload.sh"
 # shellcheck source=../lib/secrets.sh
 . "$LIB_DIR/secrets.sh"
+
+if ! _tls_pair_matches "$CERT" "$KEY"; then
+  log "refusing: certificate and key do not match — a torn pair is healed by setup.sh --sync-secrets, never unattended (this may be an issuance mid-write)"
+  printf '{"ok":false,"error":"certificate/key pair does not match"}\n'
+  exit 1
+fi
+if _cert_is_public_ca_leaf "$CERT"; then
+  printf '{"ok":true,"changed":false,"reason":"public-CA leaf","pin":"%s"}\n' "$pin_before"
+  exit 0
+fi
+
+# setup.sh learns the per-device FQDN (ADR-023 C2) by sourcing .env; the
+# bridge's environment does not carry it, and a regeneration without it would
+# drop the DNS SAN the issuance flow relies on. Read that one key, shaped
+# like a hostname, and nothing else from the file.
+if [ -z "${DROPLET_PUBLIC_FQDN:-}" ] && [ -r "$REPO_ROOT/.env" ]; then
+  fq="$(sed -n "s/^DROPLET_PUBLIC_FQDN=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}\$/\1/p" "$REPO_ROOT/.env" | tail -n1)"
+  case "$fq" in
+    ""|*[!A-Za-z0-9.-]*|-*|.*) ;;
+    *) export DROPLET_PUBLIC_FQDN="$fq" ;;
+  esac
+fi
+
+# Second lock: even if the checks above are wrong about the pair, the
+# generator itself will not mint a key for this caller.
+export DROPLET_TLS_NO_NEWKEY=1
 
 # _generate_tls_cert reloads the gateway itself when it regenerates.
 if ! _generate_tls_cert >&2; then
@@ -102,8 +144,11 @@ pin_after="$(pin_of "$CERT")"
 changed=false
 [ "$before" != "$after" ] && changed=true
 if [ "$changed" = "true" ] && [ "$pin_before" != "$pin_after" ]; then
-  # Possible only when the pair was torn (nothing genuine to keep). Say so:
-  # every pinned pairing will report "identity changed" and must re-scan.
-  log "WARNING: the served key changed ($pin_before -> $pin_after) — paired apps must re-pair by the QR"
+  # Should be impossible now (refused above, and the generator will not mint
+  # for this caller) — if it ever prints, every pinned pairing will report
+  # "identity changed", so it is a failure, not a note on a success line.
+  log "ERROR: the served key changed ($pin_before -> $pin_after) — paired apps must re-pair by the QR"
+  printf '{"ok":false,"error":"the served key changed","pin":"%s"}\n' "$pin_after"
+  exit 1
 fi
 printf '{"ok":true,"changed":%s,"pin":"%s"}\n' "$changed" "$pin_after"

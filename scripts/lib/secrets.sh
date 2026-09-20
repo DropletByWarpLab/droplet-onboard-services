@@ -2274,6 +2274,17 @@ _generate_tls_cert() {
     reuse_key=true
   fi
 
+  # WARP-2944: an UNATTENDED caller (the device-bridge's refresh wrapper, every
+  # ten minutes on every box) may only ever regenerate AROUND the key. A key it
+  # cannot read — root-owned 0600 after a `sudo ./scripts/setup.sh` — looks
+  # exactly like a torn pair from here, and minting fresh over it would rotate
+  # the identity every pinned app holds, silently, on a timer. Refuse instead;
+  # a human runs setup.sh --sync-secrets to heal a pair deliberately.
+  if [ "$reuse_key" != "true" ] && [ -n "${DROPLET_TLS_NO_NEWKEY:-}" ]; then
+    log_error "TLS: a fresh private key would be minted here and this caller may not mint one (DROPLET_TLS_NO_NEWKEY): the served key is the box's identity to every paired app — run setup.sh --sync-secrets to heal the pair deliberately"
+    return 1
+  fi
+
   log_info "Generating self-signed TLS certificate (valid 10 years)..."
   mkdir -p "$cert_dir"
 

@@ -201,5 +201,84 @@ grep -q "droplet-tls-bootstrap-refresh.sh" "$REPO_ROOT_REAL/scripts/install-devi
   && ok "wrapper is installed by install-device-bridge.sh and removed by factory-reset.sh" \
   || bad "wrapper is not wired into install / factory-reset"
 
+# --- 9. the wrapper is REFRESH ONLY: it never heals a pair and never mints a key -
+dns_sans_of() { openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null | grep -o 'DNS:[^, ]*' | sort | tr '\n' ' '; }
+WCERT="$W/docker/certs/droplet.crt"; WKEY="$W/docker/certs/droplet.key"
+wcert_sha="$(sha256sum "$WCERT" | cut -c1-16)"; wkey_sha="$(sha256sum "$WKEY" | cut -c1-16)"
+
+# 9a. a key this user cannot read — the shape a `sudo ./scripts/setup.sh` leaves
+# behind — must be refused, not "healed" with a fresh key.
+if [ "$(id -u)" -eq 0 ]; then
+  ok "running as root — the unreadable-key refusal cannot be exercised here (root reads everything)"
+else
+  chmod 000 "$WKEY"
+  out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.1" bash "$WRAPPER" 2>/dev/null)"; rc=$?
+  chmod 600 "$WKEY"
+  [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "not readable/writable" \
+    && ok "wrapper: an unreadable key is a non-zero, named refusal ($out)" \
+    || bad "wrapper with an unreadable key: rc=$rc $out"
+  [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] && [ "$(sha256sum "$WKEY" | cut -c1-16)" = "$wkey_sha" ] \
+    && ok "…and touched neither file — the pin is exactly what it was" \
+    || bad "…the wrapper rewrote the pair it could not read (identity rotated on a timer)"
+fi
+
+# 9b. a torn pair (which is also what the LE issuance looks like between its
+# two writes) is refused outright — setup.sh heals pairs, the timer does not.
+cp "$WKEY" "$TMP/wkey.good"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WKEY" >/dev/null 2>&1
+stray_sha="$(sha256sum "$WKEY" | cut -c1-16)"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.1" bash "$WRAPPER" 2>/dev/null)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "does not match" \
+  && ok "wrapper: a torn pair is a non-zero, named refusal ($out)" \
+  || bad "wrapper with a torn pair: rc=$rc $out"
+[ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] && [ "$(sha256sum "$WKEY" | cut -c1-16)" = "$stray_sha" ] \
+  && ok "…and left both files exactly as found (no restore, no new key, nothing for an issuance to trip over)" \
+  || bad "…the wrapper rewrote a torn pair unattended"
+cp "$TMP/wkey.good" "$WKEY"; chmod 600 "$WKEY"
+
+# 9c. the generator's own lock: with DROPLET_TLS_NO_NEWKEY set it refuses the
+# -newkey branch even when called directly on a torn pair with no bootstrap.
+L="$TMP/lock"; mkdir -p "$L/docker/certs"
+( REPO_ROOT="$L" DROPLET_TLS_SAN_IPS="10.1.1.1" _generate_tls_cert >/dev/null 2>&1 )
+rm -f "$L/docker/certs/droplet.crt.bootstrap" "$L/docker/certs/droplet.key.bootstrap"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$L/docker/certs/droplet.key" >/dev/null 2>&1
+lkey_sha="$(sha256sum "$L/docker/certs/droplet.key" | cut -c1-16)"; lcert_sha="$(sha256sum "$L/docker/certs/droplet.crt" | cut -c1-16)"
+: > "$TMP/warn.log"
+( REPO_ROOT="$L" DROPLET_TLS_SAN_IPS="10.1.1.1" DROPLET_TLS_NO_NEWKEY=1 _generate_tls_cert >/dev/null 2>&1 ); rc=$?
+[ "$rc" -ne 0 ] && grep -q "may not mint one" "$TMP/warn.log" \
+  && ok "_generate_tls_cert under DROPLET_TLS_NO_NEWKEY refuses to mint a key (non-zero, says why)" \
+  || bad "_generate_tls_cert minted or stayed silent under DROPLET_TLS_NO_NEWKEY: rc=$rc $(last_warn)"
+[ "$(sha256sum "$L/docker/certs/droplet.key" | cut -c1-16)" = "$lkey_sha" ] && [ "$(sha256sum "$L/docker/certs/droplet.crt" | cut -c1-16)" = "$lcert_sha" ] \
+  && ok "…and wrote nothing" || bad "…but rewrote the pair anyway"
+( REPO_ROOT="$L" DROPLET_TLS_SAN_IPS="10.1.1.1" _generate_tls_cert >/dev/null 2>&1 )
+[ "$(sha256sum "$L/docker/certs/droplet.key" | cut -c1-16)" != "$lkey_sha" ] \
+  && ok "…while the same call WITHOUT the lock (setup.sh's path) still heals the torn pair with a fresh key" \
+  || bad "…the lock leaked: setup.sh's path no longer heals a torn pair"
+
+# 9d. a refresh keeps the per-device FQDN SAN (read from .env, as setup.sh does).
+printf 'DROPLET_PUBLIC_FQDN="d-fixture.devices.warp-lab.ai"\nADMIN_TOKEN=not-a-real-token\n' > "$W/.env"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.2" bash "$WRAPPER" 2>/dev/null)"
+printf '%s' "$out" | grep -q '"changed":true' && ok "wrapper: a move with a .env present still refreshes ($out)" || bad "wrapper with a .env: $out"
+case "$(dns_sans_of "$WCERT")" in
+  *"DNS:d-fixture.devices.warp-lab.ai"*) ok "…and the regenerated SAN carries the per-device FQDN from .env" ;;
+  *) bad "…the refresh DROPPED the per-device FQDN SAN: $(dns_sans_of "$WCERT")" ;;
+esac
+printf 'DROPLET_PUBLIC_FQDN=bad host; rm -rf /\n' > "$W/.env"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.3" bash "$WRAPPER" 2>/dev/null)"
+case "$(dns_sans_of "$WCERT")" in
+  *"bad"*|*"rm"*) bad "…a malformed DROPLET_PUBLIC_FQDN reached the SAN" ;;
+  *) ok "…a value that is not shaped like a hostname is ignored, not sourced" ;;
+esac
+rm -f "$W/.env"
+
+# 9e. a public-CA leaf: the wrapper says so and stops before the generator.
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WKEY" -out "$TMP/ca/wleaf.csr" -subj "/CN=d-fixture.devices.warp-lab.ai" >/dev/null 2>&1
+openssl x509 -req -in "$TMP/ca/wleaf.csr" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$WCERT" -days 2 >/dev/null 2>&1
+wcert_sha="$(sha256sum "$WCERT" | cut -c1-16)"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.4" bash "$WRAPPER" 2>/dev/null)"; rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"reason":"public-CA leaf"' && [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] \
+  && ok "wrapper: a public-CA leaf is reported as such and never touched ($out)" \
+  || bad "wrapper on a public-CA leaf: rc=$rc $out"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
