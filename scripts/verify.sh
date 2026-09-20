@@ -253,6 +253,19 @@ else
   check_warn "Publicly-trusted TLS cert" _trusted_tls_cert_active
 fi
 
+# WARP-2938 / ADR-058: a box whose device id is the image default `droplet`
+# can never be registered at HQ (it is the fleet-global key for every default-
+# hostname box — WARP-2691), so it would sit on the bootstrap self-signed cert
+# for its whole life and greet every customer with a warning. Hard-fail
+# whenever HQ issuance is configured; a hostname-shaped id is registrable but
+# not hardware-anchored, so it only warns (see _derive_device_id).
+if [ -n "${HQ_ISSUANCE_URL:-}" ]; then
+  check "DROPLET_DEVICE_ID is registrable" \
+    bash -c '[ -n "${DROPLET_DEVICE_ID:-}" ] && [ "${DROPLET_DEVICE_ID:-}" != "droplet" ]' || true
+  check_warn "DROPLET_DEVICE_ID is hardware-anchored" \
+    bash -c '[ "${DROPLET_DEVICE_ID:-}" != "$(hostname 2>/dev/null)" ]'
+fi
+
 # WARP-235: the MQTT password file is retired — the broker mounts its TLS
 # bundle (issued by the WARP-236 internal CA) and the per-CN topic ACL file.
 check "MQTT broker TLS bundle" \
