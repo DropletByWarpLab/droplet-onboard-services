@@ -199,8 +199,10 @@ function NetworkPageInner() {
   // with that tab selected. `mode` and `activeTab` are independent, so this
   // must read `activeTab` — keying it off the persona instead (the old
   // `isBusiness`, statically true since WARP-1341) meant Simple never showed.
-  // The default re-syncs if a deep link arrives after mount, without
-  // clobbering an explicit user choice — see useNetworkViewMode. Switching to
+  // A deep link arriving after mount opens Advanced too, one-directionally:
+  // losing the `?tab=` never closes Advanced again (the Overview tab's href IS
+  // the bare /network path), and an explicit user choice wins over both — see
+  // useNetworkViewMode. Switching to
   // Simple snaps the active panel back to Overview so the hidden tab strip
   // can't leave a power-user panel showing.
   const { mode, choose: chooseMode } = useNetworkViewMode(activeTab !== "overview");

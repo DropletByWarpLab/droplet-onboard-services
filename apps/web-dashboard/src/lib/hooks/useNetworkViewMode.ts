@@ -14,18 +14,21 @@ export function defaultMode(deepLinkedTab: boolean): NetworkViewMode {
 /**
  * Simple ⟷ Advanced view mode for the Network page (WARP-612).
  *
- * Re-syncs the default if `deepLinkedTab` ever changes (a cross-tab jump or
- * browser back/forward rewrites `?tab=` after mount), but never clobbers an
- * explicit user choice: once the user picks a mode, that choice wins for the
- * session.
+ * The deep-link rule is ONE-DIRECTIONAL. A `?tab=` arriving after mount (a
+ * cross-tab jump, browser back/forward) opens Advanced, because the tab it
+ * names only exists there. Losing the `?tab=` does not close Advanced again:
+ * the Overview tab's own href is the bare /network path, so a symmetric
+ * re-sync would throw a user out of the tab surface they are working in the
+ * moment they clicked Overview. Only the Simple pill — an explicit choice,
+ * which also wins over every later re-sync — goes back.
  */
 export function useNetworkViewMode(deepLinkedTab: boolean) {
   const [mode, setMode] = useState<NetworkViewMode>(() => defaultMode(deepLinkedTab));
   const userChose = useRef(false);
 
   useEffect(() => {
-    if (userChose.current) return;
-    setMode(defaultMode(deepLinkedTab));
+    if (userChose.current || !deepLinkedTab) return;
+    setMode("advanced");
   }, [deepLinkedTab]);
 
   const choose = useCallback((next: NetworkViewMode) => {

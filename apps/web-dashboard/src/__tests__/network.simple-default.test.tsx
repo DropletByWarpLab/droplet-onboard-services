@@ -11,7 +11,7 @@
  * are stubbed — what's under test is which surface renders, not their content.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 
 const searchMock = vi.fn(() => new URLSearchParams());
 
@@ -84,6 +84,21 @@ describe("Network page — where it opens (WARP-2962)", () => {
 
     expect(screen.getByRole("tablist", { name: "Network view tabs" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /System/, selected: true })).toBeInTheDocument();
+    expect(screen.queryByTestId("network-simple")).toBeNull();
+  });
+
+  it("stays in Advanced when the Overview tab is clicked from a deep link", () => {
+    searchMock.mockReturnValue(new URLSearchParams("tab=system"));
+    const { rerender } = render(<NetworkPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: /Overview/ }));
+    // router.push is mocked, so play its landing by hand: the Overview tab's
+    // href IS the bare /network path. The deep-link rule is one-directional —
+    // losing the `?tab=` must not drop the user out of the tab surface.
+    searchMock.mockReturnValue(new URLSearchParams());
+    rerender(<NetworkPage />);
+
+    expect(screen.getByRole("tablist", { name: "Network view tabs" })).toBeInTheDocument();
     expect(screen.queryByTestId("network-simple")).toBeNull();
   });
 });

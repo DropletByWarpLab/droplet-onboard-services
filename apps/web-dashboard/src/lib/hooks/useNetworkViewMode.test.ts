@@ -36,6 +36,20 @@ describe("useNetworkViewMode", () => {
     expect(result.current.mode).toBe("advanced");
   });
 
+  it("never falls back to Simple on its own once a deep link opened Advanced", () => {
+    // One-directional: the URL may take you INTO Advanced, but leaving the
+    // tab behind (clicking Overview, whose href is the bare /network path)
+    // must not drop a user out of the tab surface they are working in. Only
+    // the Simple pill — an explicit choice — goes back.
+    const { result, rerender } = renderHook(({ d }) => useNetworkViewMode(d), {
+      initialProps: { d: false },
+    });
+    rerender({ d: true });
+    expect(result.current.mode).toBe("advanced");
+    rerender({ d: false });
+    expect(result.current.mode).toBe("advanced");
+  });
+
   it("does not clobber an explicit user choice on a later re-render", () => {
     const { result, rerender } = renderHook(({ d }) => useNetworkViewMode(d), {
       initialProps: { d: false },
