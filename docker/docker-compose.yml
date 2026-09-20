@@ -202,10 +202,20 @@ services:
     # Desktop) and lets URLs below target `host.docker.internal`.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # WARP-2895 — the orchestrator is the ONLY caller of the sandbox, so it
+    # joins `droplet-internal` in addition to the default bridge it has always
+    # been on. Listing `default` explicitly is load-bearing: a service with a
+    # `networks:` key is attached to exactly the networks it lists.
+    networks:
+      - default
+      - droplet-internal
     environment:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+      # WARP-2895: the code-execution service, reachable only over the
+      # internal network. SANDBOX_SERVICE_TOKEN arrives via env_file.
+      - SANDBOX_URL=http://sandbox:8030
       # WARP-2131: the model-catalog sidecar. SET EXPLICITLY — this is not
       # cosmetic. model-catalog.service.ts does NOT treat an unset value as
       # "no manager"; it falls back to http://host.docker.internal:8002, and
@@ -2097,6 +2107,84 @@ services:
     cpus: ${DOC_RENDER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  # --- Sandbox — the box's one code-execution substrate (WARP-2895) ---
+  # ADR-056 §6.3 / ADR-047 §4. Runs a routine's `transform` / `when` steps
+  # (customer-written Python) and, in later slices, workshop runs and
+  # extension processes. ONE service with ONE hardening table, on purpose —
+  # two sandboxes with two tables is how one of them drifts.
+  #
+  # THE FIRST SERVICE ON AN INTERNAL-ONLY NETWORK. This file had no
+  # `networks:` block at all before this entry: every service shares the
+  # default bridge and can reach the internet. This container is attached to
+  # `droplet-internal` (`internal: true`, bottom of the file) and NOTHING
+  # else — the orchestrator reaches it because the orchestrator is also on
+  # that network; the sandbox can route to no LAN address, no WAN address and
+  # no other container. `npm install` / `pip install` from inside reach
+  # nothing, by construction. Its registered egress is NONE
+  # (docs/security/allowed-egress.yaml), which is the whole reason
+  # customer-written code is safe to run here. test-security.sh asserts this
+  # service has exactly that one network, no `ports:` and no `network_mode`.
+  #
+  # Hardening (the ADR-047 §4.2 table, verbatim): non-root (USER sandbox in
+  # the image), read-only rootfs, every capability dropped, no privilege
+  # escalation, a small tmpfs /tmp as the only writable path, ADR-021 limits
+  # from SANDBOX_* with a tight pid ceiling (one child per transform). No
+  # Docker socket on any profile. No `env_file`: the only secret this
+  # container holds is its own bearer — a code-execution container must not
+  # carry the box's .env.
+  #
+  # NOT profile-gated: a routine with a transform step must work on the small
+  # box too, and the image is python:3.12-slim + node 20 + git (~250 MB).
+  sandbox:
+    build:
+      context: ..
+      dockerfile: services/sandbox/Dockerfile
+    expose:
+      - "8030"
+    networks:
+      - droplet-internal
+    environment:
+      # Not one of the six FIPS provider-carrying images — pin the boot gate +
+      # OpenSSL config to the literal OFF posture (`environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      # Shared with the orchestrator's SANDBOX_SERVICE_TOKEN (delivered to the
+      # orchestrator by its env_file). EMPTY fails CLOSED at BOTH ends: this
+      # service 503s every non-/health route and the orchestrator refuses
+      # without dialling. `${...}` substitution resolves against the file
+      # scripts/lib/compose.sh passes as --env-file (the repo's .env); an ad-hoc
+      # `docker compose` without it leaves the token empty and the service
+      # closed, which is the safe direction. Rotate both sides in lockstep —
+      # change .env, then `up -d --force-recreate orchestrator sandbox`.
+      - SANDBOX_SERVICE_TOKEN=${SANDBOX_SERVICE_TOKEN:-}
+      # Slice H's process-supervision seam. Off until an operator turns it on;
+      # off, its routes are 404 and nothing on the box can discover them.
+      - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
+      - PYTHONDONTWRITEBYTECODE=1
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /health is the one route served without a bearer.
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8030/health',timeout=5)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${SANDBOX_MEM_LIMIT:-512m}
+    cpus: ${SANDBOX_CPUS:-1.0}
+    # Tighter than CONTAINER_PIDS_LIMIT on purpose: one short-lived child per
+    # transform, plus the server. A routine that fans out under this ceiling
+    # fails a step legibly ("transform process failed") rather than
+    # exhausting the box.
+    pids_limit: ${SANDBOX_PIDS_LIMIT:-128}
+
   # --- ERP direct-SQL bridge (WARP-1106) ---
   # The DB-touching half of the direct-SQL Eaglesoft track: unixODBC + pyodbc
   # against a practice's SAP SQL Anywhere database. It exists because there is
@@ -3489,6 +3577,20 @@ services:
     mem_limit: ${FLEET_AGENT_MEM_LIMIT:-64m}
     cpus: ${FLEET_AGENT_CPUS:-0.25}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+# WARP-2895 — the first named network in this file.
+#
+# Every service not listing `networks:` stays on the implicit `default`
+# bridge exactly as before. `droplet-internal` is `internal: true`: Docker
+# creates it with no gateway to the host's network stack, so a container
+# attached ONLY to it can reach the other members of this network and nothing
+# else — no LAN, no WAN, no host — while a container attached to both (the
+# orchestrator) bridges nothing: Docker does not route between a container's
+# networks. The sandbox is the first and, in this ticket, the only
+# only-internal member. Reviewed on its own: WARP-2922.
+networks:
+  droplet-internal:
+    internal: true
 
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password

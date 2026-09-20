@@ -176,7 +176,7 @@ jobs:
             ["ai-gateway","camera-discovery","device-identity-svc",
             "doc-render","email-indexer","file-indexer","gateway",
             "matter-controller","mcp-server","orchestrator","rag-eval",
-            "routing","switch","web-dashboard"]
+            "routing","sandbox","switch","web-dashboard"]
         run: |
           set -eu
           if [ "$(jq -cS . <<<"$BUILDABLE")" != "$(jq -cS . <<<"$KNOWN")" ]; then
@@ -275,6 +275,9 @@ jobs:
             doc-render:
               - *py-shared
               - "services/doc-render/**"
+            sandbox:
+              - *py-shared
+              - "services/sandbox/**"
             email-indexer:
               - *py-shared
               - "services/email-indexer/**"

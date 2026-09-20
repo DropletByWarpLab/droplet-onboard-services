@@ -63,6 +63,8 @@
  * genuinely cannot decide — the §3 lock rule, whose args only exist after
  * `${prev}` substitution.
  */
+import type { Transformer } from "./sandbox.client.js";
+export type { Transformer } from "./sandbox.client.js";
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
 import {
@@ -115,6 +117,30 @@ export interface Summarizer {
 /** The trace's `tool` slot for a step that calls no tool. Reserved rather
  *  than blank so a reader (and the Activity row) can tell what ran. */
 export const SUMMARIZE_PSEUDO_TOOL = "(summarize)";
+/** WARP-2895 — the same reservation for the two sandbox-backed kinds. */
+export const TRANSFORM_PSEUDO_TOOL = "(transform)";
+export const WHEN_PSEUDO_TOOL = "(when)";
+
+/**
+ * WARP-2895 (ADR-047 §4) — the `transform` / `when` steps' seam.
+ *
+ * A `transform` is a PURE FUNCTION over the run's prior results: it reads
+ * the named outputs its `inputs` reference (`${steps.<name>}`), runs
+ * customer-written Python in services/sandbox — no network, no filesystem,
+ * no tool — and publishes what the code assigned to `output`. A `when` is
+ * the same call whose truthiness decides whether the walk CONTINUES; a
+ * falsy result ends the run cleanly with the remaining steps skipped.
+ *
+ * Neither dispatches a tool. That is what keeps them outside the §3 scope
+ * check and outside the `writes` derivation (`plannedToolNames` ignores
+ * them, and `tool-spec-runner.transform.test.ts` fails the moment one ever
+ * reaches the dispatcher) — the property ROUTINES brief §4.4 says to guard
+ * with a test, because the day "transform can call a tool" is added, the
+ * safety gate would go on trusting an inference that had become false.
+ *
+ * Injected like `Summarizer`; the production binding is
+ * `createSandboxTransformer()` (sandbox.client.ts).
+ */
 
 interface StoredStep {
   id: string;
@@ -134,6 +160,9 @@ export interface RunStepTrace {
    *  was given one. Present in the trace so the run-detail drawer can show
    *  which step a later `${steps.x}` was actually reading. */
   as?: string;
+  /** WARP-2895 — set on a `when` step whose condition was false: how many
+   *  later steps the walk did NOT run. The run's status stays `ok`. */
+  skippedRemaining?: number;
 }
 
 export interface RunOutcome {
@@ -160,6 +189,12 @@ interface RunArgs {
    * would look like a report with nothing to say.
    */
   summarizer?: Summarizer | null;
+  /**
+   * WARP-2895 — required only by specs containing a `transform` or `when`
+   * step. Absent, such a step fails honestly ("no sandbox configured")
+   * rather than silently passing its inputs through.
+   */
+  transformer?: Transformer | null;
   /**
    * WARP-1580 — the resolved §3 tool reach this run executes under. `null` /
    * omitted = no narrowing (owner, service, role-less). Never pass `null` to
@@ -384,6 +419,27 @@ function parseSummarizeStep(step: { kind: string; args: unknown }): { prompt: st
 }
 
 /**
+ * WARP-2895 — parse a `transform` or `when` step. `args.code` is the Python;
+ * `args.inputs` (optional) is an object whose values may carry `${steps.x}`
+ * references the walker resolves before the call. Returns null for any other
+ * kind, so the caller falls through to the malformed handling.
+ */
+function parseSandboxStep(step: {
+  kind: string;
+  args: unknown;
+}): { kind: "transform" | "when"; code: string; inputs: Record<string, unknown> } | null {
+  if (step.kind !== "transform" && step.kind !== "when") return null;
+  if (typeof step.args !== "object" || step.args === null) return null;
+  const a = step.args as Record<string, unknown>;
+  if (typeof a.code !== "string" || a.code.trim().length === 0) return null;
+  const inputs =
+    a.inputs !== undefined && typeof a.inputs === "object" && a.inputs !== null && !Array.isArray(a.inputs)
+      ? (a.inputs as Record<string, unknown>)
+      : {};
+  return { kind: step.kind, code: a.code, inputs };
+}
+
+/**
  * The default framing. Deliberately instructs the model to name gaps rather
  * than omit them — a report that silently drops the half it couldn't read is
  * the failure mode this whole surface is built against.
@@ -507,6 +563,68 @@ export async function runToolSpec(
           error: msg,
         });
         outcome = { status: "failed", trace, error: `step ${step.idx} (summarize): ${msg}` };
+        break;
+      }
+      continue;
+    }
+
+    // WARP-2895 — `transform` / `when`, checked BEFORE the malformed guard
+    // like `summarize`. They dispatch no tool, so they are outside the §3
+    // scope check by construction; what they read is the run's own named
+    // results, resolved here under the same reference rules a call step's
+    // args get.
+    const sandboxStep = parseSandboxStep(step);
+    if (sandboxStep) {
+      const pseudo = sandboxStep.kind === "when" ? WHEN_PSEUDO_TOOL : TRANSFORM_PSEUDO_TOOL;
+      if (!args.transformer) {
+        const msg = `step ${step.idx}: ${sandboxStep.kind} step but no sandbox configured`;
+        trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: msg });
+        outcome = { status: "failed", trace, error: msg };
+        break;
+      }
+      let resolvedInputs: Record<string, unknown>;
+      try {
+        resolvedInputs = resolveRefs(sandboxStep.inputs, { prev, named }) as Record<string, unknown>;
+      } catch (err) {
+        if (!(err instanceof StepReferenceError)) throw err;
+        trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: err.message });
+        outcome = { status: "failed", trace, error: `step ${step.idx} (${sandboxStep.kind}): ${err.message}` };
+        break;
+      }
+      try {
+        const result = await args.transformer.transform(sandboxStep.code, resolvedInputs);
+        const outName = stepOutputName(step);
+        if (sandboxStep.kind === "when") {
+          const proceed = Boolean(result);
+          const remaining = stepsToWalk.filter((s) => s.idx > step.idx).length;
+          trace.push({
+            idx: step.idx,
+            tool: pseudo,
+            args: { inputs: resolvedInputs },
+            ok: true,
+            result: proceed,
+            ...(outName ? { as: outName } : {}),
+            ...(proceed ? {} : { skippedRemaining: remaining }),
+          });
+          if (outName) named.set(outName, proceed);
+          prev = proceed;
+          if (!proceed) break; // a clean stop: status stays ok
+          continue;
+        }
+        trace.push({
+          idx: step.idx,
+          tool: pseudo,
+          args: { inputs: resolvedInputs },
+          ok: true,
+          result,
+          ...(outName ? { as: outName } : {}),
+        });
+        if (outName) named.set(outName, result);
+        prev = result;
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        trace.push({ idx: step.idx, tool: pseudo, args: { inputs: resolvedInputs }, ok: false, error: msg });
+        outcome = { status: "failed", trace, error: `step ${step.idx} (${sandboxStep.kind}): ${msg}` };
         break;
       }
       continue;

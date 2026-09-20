@@ -1,0 +1,60 @@
+# WARP-2895 — services/sandbox: the box's one code-execution substrate.
+#
+# Build context is the monorepo root (see docker-compose.yml). All COPY
+# paths are relative to the repo root.
+#
+# What is in the image and why:
+#   Python 3.12   — the `transform` step's interpreter (runner.py)
+#   Node 20       — the dev-tooling ceiling; extension processes (slice H) and
+#                   workshop runs (slice G) run TypeScript here
+#   git           — the workspace tools (slice G) commit against the store
+# Nothing installs at runtime: `npm install` / `pip install` from inside the
+# container reach nothing, by the network the compose file puts it on.
+#
+# Non-root, and the compose entry makes the rootfs read-only with a tmpfs
+# /tmp — the Dockerfile must therefore leave nothing the service needs to
+# write at runtime outside /tmp.
+
+# Node from the official image, copied in rather than apt-installed: Debian
+# bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069).
+FROM node:20-bookworm-slim AS node
+
+FROM python:3.12-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git openssl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    node --version && npm --version && python --version && git --version
+
+RUN groupadd --gid 1000 sandbox && \
+    useradd --uid 1000 --gid sandbox --shell /usr/sbin/nologin --create-home sandbox
+
+WORKDIR /app
+COPY services/sandbox/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY services/sandbox/ .
+
+# Sibling shape (doc-render / web-fetch): ship the FIPS-provider OpenSSL config
+# + shared helpers. NOT one of the provider-carrying images — compose pins
+# DROPLET_FIPS_REQUIRED=false / stock OPENSSL_CONF, so the boot self-test is a
+# no-op.
+COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
+COPY services/_shared/__init__.py /app/_shared/__init__.py
+COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
+COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
+COPY services/_shared/serve.py /app/_shared/serve.py
+COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER sandbox
+
+EXPOSE 8030
+CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]

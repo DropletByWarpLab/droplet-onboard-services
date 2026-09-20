@@ -1,0 +1,13 @@
+# Pinned to the fastapi/uvicorn line every sibling service uses (doc-render,
+# web-fetch, ai-gateway, routing, switch, ops-console).
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+
+# NOTHING ELSE, on purpose. The service is a thin HTTP front over
+# `subprocess`; user code runs in a child interpreter with a stdlib allowlist
+# and no third-party packages (ADR-047 §4.3). A package added here is a
+# package customer-written code can import — a curated set is a later
+# decision, never `pip install` from a routine.
+
+# OSV floor (same idiom as web-fetch / doc-render).
+idna>=3.15
