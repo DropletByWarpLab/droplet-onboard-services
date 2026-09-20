@@ -3,6 +3,7 @@
 // /api/files upload contract as write_file, with a pre-write existence
 // probe (GET /download) so an existing file is never clobbered.
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import { createHash } from "node:crypto";
 import createDocument, {
   DOCX_TEMPLATE_BASE64,
@@ -16,8 +17,8 @@ const userId = "alice";
 interface CtxOpts {
   userId?: string;
   ncToken?: string;
-  ncGet?: ReturnType<typeof vi.fn>;
-  ncPost?: ReturnType<typeof vi.fn>;
+  ncGet?: Mock;
+  ncPost?: Mock;
 }
 
 function makeCtx(opts: CtxOpts = {}) {

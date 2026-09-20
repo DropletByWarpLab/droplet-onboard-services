@@ -419,8 +419,11 @@ _write_host_dnsmasq_record() {
   local desired="host-record=${DROPLET_PUBLIC_FQDN},${DROPLET_PUBLIC_FQDN_IP}"
 
   # Already present + current? No-op (keeps re-runs clean — no dnsmasq restart).
+  # Still assert the listener: the record and the listen-address are two halves
+  # of one invariant, and only the record half is checked here (WARP-2189).
   if grep -qxF "$desired" "$_HOST_DNSMASQ_CONF" 2>/dev/null; then
     log_info "Host dnsmasq host-record already current for ${DROPLET_PUBLIC_FQDN}"
+    _assert_relay_dns_listener
     return 0
   fi
 
@@ -456,6 +459,38 @@ _write_host_dnsmasq_record() {
     sudo systemctl reload droplet-host-net.service 2>/dev/null \
       || sudo systemctl restart droplet-host-net.service 2>/dev/null || true
   fi
+
+  _assert_relay_dns_listener
+}
+
+# WARP-2189 — the OTHER half of the record written above.
+#
+# dnsmasq runs with `bind-interfaces`, so it binds ONLY the addresses named by
+# an explicit listen-address= line, and the shipped lan-dhcp.conf names one:
+# the 192.168.20.1 LAN leg. When DROPLET_PUBLIC_FQDN_IP is a different leg —
+# which it is on every box reached over the ADR-025 cloudflared relay — the
+# record above tells dnsmasq to ANSWER for the FQDN at an address it is not
+# LISTENING on. The connector then dials <ip>:53 for every off-site lookup and
+# gets connection refused: a healthy tunnel that cannot resolve the box's own
+# name, and (because the cert is name-only) no working fallback by IP either.
+#
+# droplet-relay-dns owns that pairing. Delegating keeps ONE implementation of
+# the managed listener block, shared with the runtime self-heal in
+# droplet-watchdog, instead of a second copy that can drift. Absent helper =>
+# skip: a shape without single-box host integration has no host dnsmasq plane
+# to fix, and the routing-service leg already covers its clients.
+_assert_relay_dns_listener() {
+  local helper="${DROPLET_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
+  [ -x "$helper" ] || return 0
+  sudo -n true 2>/dev/null || return 0
+  local out rc=0
+  out="$(sudo "$helper" repair 2>&1)" || rc=$?
+  case "$rc" in
+    0) [ -n "$out" ] && log_info "Relay DNS origin: ${out##*: }" ;;
+    3) : ;;  # not applicable on this shape — the helper explains why
+    *) log_warn "Relay DNS listener could not be asserted (exit ${rc}): ${out##*: }" ;;
+  esac
+  return 0
 }
 
 # =============================================================================

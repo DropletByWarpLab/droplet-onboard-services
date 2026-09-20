@@ -14,6 +14,7 @@ import { Router } from "express";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
+import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import {
   getCameras,
   getEventsFiltered,
@@ -1194,7 +1195,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // requireRole would 403 it before the scan could run (the phantom-target
   // class WARP-1439 fixed for the read tools). Same human set as before —
   // requiresWrite is enforced tool-side, and a discovery scan is non-destructive.
-  router.post("/cameras/scan", requireRoleOrMcpService("owner", "admin", "family"), async (_req, res) => {
+  // CodeQL js/missing-rate-limiting — inline per-IP ceilings on the handlers
+  // CodeQL flagged. Sensitive preset where the call is expensive or changes
+  // the host (a 30 s discovery scan, modprobe, subnet setup/teardown, a
+  // confirmation-token redemption); standard preset for the plain reads the
+  // cameras page loads once (drivers, subnet).
+  router.post("/cameras/scan", sensitiveRateLimit, requireRoleOrMcpService("owner", "admin", "family"), async (_req, res) => {
     try {
       // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
       // Forward it like /drivers/fix below, else this proxied call 403s and
@@ -1830,7 +1836,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Driver status (proxied from camera-discovery service) ---
-  router.get("/cameras/drivers", requireRole(...CAMERA_VIEW_ROLES), async (_req, res) => {
+  router.get("/cameras/drivers", standardRateLimit, requireRole(...CAMERA_VIEW_ROLES), async (_req, res) => {
     try {
       // NET-05: /drivers is now auth-gated on camera-discovery. Forward
       // DEVICE_SECRET (same pattern as /drivers/fix) so the driver status
@@ -1864,7 +1870,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // feature gate beside it narrows an Admin-BASED custom role that was granted
   // Cameras at `view`/`act` only. Registered per-route (not at the group) for
   // exactly the §3(b) reason: one floor route group serves two §9 levels.
-  router.post("/cameras/drivers/fix", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (_req, res, next) => {
+  router.post("/cameras/drivers/fix", sensitiveRateLimit, requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (_req, res, next) => {
     try {
       // Forward DEVICE_SECRET for authentication (the discovery service
       // requires it for kernel module operations like modprobe)
@@ -1884,7 +1890,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Camera subnet isolation ---
-  router.get("/cameras/subnet", requireRole(...CAMERA_VIEW_ROLES), async (_req, res) => {
+  router.get("/cameras/subnet", standardRateLimit, requireRole(...CAMERA_VIEW_ROLES), async (_req, res) => {
     try {
       const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras`, {
         headers: serviceAuthHeaders(),
@@ -1901,7 +1907,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   // WARP-171: per-route guard. owner + admin — subnet provisioning
   // is a network-layer write (carves out 192.168.100.0/24 isolation).
-  router.post("/cameras/subnet/setup", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
+  router.post("/cameras/subnet/setup", sensitiveRateLimit, requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -1945,7 +1951,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // WARP-171: per-route guard. owner + admin — same as subnet/setup.
-  router.delete("/cameras/subnet", requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
+  router.delete("/cameras/subnet", sensitiveRateLimit, requireRole("owner", "admin"), requireFeatureAccess("cameras", "manage"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -1992,7 +1998,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // can complete the WARP-41 disable handshake it starts on /disable — the
   // token-pinned-to-minting-user rule means `_service:mcp` can only ever
   // confirm tokens minted by its own 202.
-  router.post("/cameras/command/confirm", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/cameras/command/confirm", sensitiveRateLimit, requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const { confirmationToken, operation } = req.body ?? {};
@@ -3266,7 +3272,10 @@ function isSafeNcPath(input: string): { ok: true; path: string } | { ok: false; 
  */
 export function createCameraSharePublicRouter(): Router {
   const router = Router();
-  router.get("/cameras/clips/share/:filename", async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — this router is mounted BEFORE auth, so
+  // the per-IP ceiling is the only thing between the internet and token
+  // guessing / a clip-download loop. Sensitive preset (60/min/IP).
+  router.get("/cameras/clips/share/:filename", sensitiveRateLimit, async (req, res, next) => {
     try {
       const token = req.query.t as string | undefined;
       if (!token) return res.status(403).json({ error: "missing_token" });

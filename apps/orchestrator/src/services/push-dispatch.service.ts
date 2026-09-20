@@ -66,6 +66,89 @@ export function initPushDispatch(): void {
   configured = true;
 }
 
+/**
+ * WARP-2752 (ADR-051) — PERSIST the generated keypair, so a restart stops
+ * silently unsubscribing everyone.
+ *
+ * The sync `initPushDispatch` above generates an ephemeral pair when the env
+ * vars are absent and tells the operator to pin them. Nobody does: `VAPID` does
+ * not appear anywhere in `scripts/` or `docker/`, so no shipped box has ever
+ * had them set, which means every orchestrator restart rotates the keypair and
+ * invalidates every existing `PushSubscription`. Push has therefore never
+ * worked across a restart for anyone.
+ *
+ * This stores the generated pair in `SystemFlag` on first use and reads it back
+ * on every subsequent boot. ENV STILL WINS: an operator who pins the keys keeps
+ * exactly today's behaviour, and this only fills the gap where the alternative
+ * was a fresh key every boot.
+ *
+ * ON KEEPING A PRIVATE KEY IN THE DATABASE. It is consistent with what is
+ * already there — `PushSubscription` rows hold each subscriber's own keys in
+ * cleartext in the same database. The blast radius is bounded: a VAPID private
+ * key lets a holder SEND pushes to this box's subscribers, it does not decrypt
+ * anything (payload encryption uses the subscription's keys, not this one).
+ * Env remains the right place for an operator who wants it out of the DB.
+ */
+const VAPID_FLAG_KEY = "push.vapid";
+
+export async function ensurePushDispatch(prisma: PrismaClient): Promise<void> {
+  if (configured) return;
+
+  // An operator-pinned pair always wins, and needs no DB round trip.
+  if (config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY) {
+    initPushDispatch();
+    return;
+  }
+
+  const existing = await prisma.systemFlag.findUnique({ where: { key: VAPID_FLAG_KEY } });
+  const stored = existing?.valueJson as { publicKey?: string; privateKey?: string } | null;
+  if (stored?.publicKey && stored?.privateKey) {
+    webpush.setVapidDetails(
+      `mailto:${config.VAPID_CONTACT_EMAIL || "ops@droplet.local"}`,
+      stored.publicKey,
+      stored.privateKey,
+    );
+    publicKey = stored.publicKey;
+    configured = true;
+    return;
+  }
+
+  const keys = webpush.generateVAPIDKeys();
+  // `create` rather than `upsert`, and a caught conflict rather than a lock:
+  // two orchestrator instances racing on first boot must converge on ONE pair,
+  // and the loser has to adopt the winner's rather than overwrite it — an
+  // overwrite here would invalidate the subscriptions the winner just accepted.
+  try {
+    await prisma.systemFlag.create({
+      data: { key: VAPID_FLAG_KEY, valueJson: { publicKey: keys.publicKey, privateKey: keys.privateKey } },
+    });
+    publicKey = keys.publicKey;
+    webpush.setVapidDetails(
+      `mailto:${config.VAPID_CONTACT_EMAIL || "ops@droplet.local"}`,
+      keys.publicKey,
+      keys.privateKey,
+    );
+    configured = true;
+    logger.info("Generated and persisted a VAPID keypair; subscriptions now survive restarts.");
+  } catch {
+    const raced = await prisma.systemFlag.findUnique({ where: { key: VAPID_FLAG_KEY } });
+    const won = raced?.valueJson as { publicKey?: string; privateKey?: string } | null;
+    if (won?.publicKey && won?.privateKey) {
+      webpush.setVapidDetails(
+        `mailto:${config.VAPID_CONTACT_EMAIL || "ops@droplet.local"}`,
+        won.publicKey,
+        won.privateKey,
+      );
+      publicKey = won.publicKey;
+      configured = true;
+      return;
+    }
+    // Could not persist and could not read one back — fall through to the
+    // ephemeral path rather than leaving push unconfigured. Degraded, loudly.
+    initPushDispatch();
+  }
+}
+
 export function getPublicVapidKey(): string {
   if (!configured) initPushDispatch();
   if (!publicKey) throw new Error("VAPID not configured");

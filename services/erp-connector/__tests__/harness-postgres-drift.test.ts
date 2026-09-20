@@ -26,15 +26,14 @@
  * testing the CURRENT code, which is the part that was silently rotting.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { buildSchemaMap, type IntrospectedTable } from "../src/schema-map.js";
 import { READ_QUERIES } from "../src/read-queries.js";
 import { FORBIDDEN_WRITE_TABLES, WRITE_COMMANDS } from "../src/write-commands.js";
+import { readPackageFile } from "./helpers/test-paths.js";
 
-const HARNESS = join(dirname(fileURLToPath(import.meta.url)), "..", "harness");
-const read = (p: string) => readFileSync(join(HARNESS, p), "utf8");
+// Anchored to this test file, not the runner's cwd, through the one helper
+// this package's roots live in (WARP-2654).
+const read = (p: string) => readPackageFile("harness", p);
 
 const SCHEMA_SQL = read("init/01-schema.sql");
 const PROVISION_SQL = read("init/03-provision.sql");
@@ -52,7 +51,14 @@ const FLAT_SMOKE = flat(SMOKE_SQL);
  */
 function parseMockSchema(sql: string): IntrospectedTable[] {
   const tables: IntrospectedTable[] = [];
-  const tableRe = /CREATE TABLE\s+(\w+)\.(\w+)\s*\(([\s\S]*?)\n\);/g;
+  // Identifiers may be double-quoted: WARP-2280 added the `order` dataset, and
+  // `CREATE TABLE dba.order` is a syntax error in Postgres because `order` is
+  // reserved. The connector never has this problem — `resolveTable` quotes
+  // every identifier it emits — but the harness DDL is hand-written, so the
+  // parser has to read what valid DDL actually looks like. Without the optional
+  // quotes here the table is silently missing from the mock map and every read
+  // against it fails as "drift" that is really a parser gap.
+  const tableRe = /CREATE TABLE\s+"?(\w+)"?\."?(\w+)"?\s*\(([\s\S]*?)\n\);/g;
 
   for (const [, owner, name, body] of sql.matchAll(tableRe)) {
     const columns = body

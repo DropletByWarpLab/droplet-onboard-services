@@ -14,14 +14,15 @@
  * colon-separated (lib/mac.ts parity).
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setDeviceSchedule from "../../../src/handlers/network/set-device-schedule.js";
 import type { ToolContext } from "../../../src/types.js";
 
 type Mocks = {
-  get: ReturnType<typeof vi.fn>;
-  post: ReturnType<typeof vi.fn>;
-  patch: ReturnType<typeof vi.fn>;
-  del: ReturnType<typeof vi.fn>;
+  get: Mock;
+  post: Mock;
+  patch: Mock;
+  del: Mock;
 };
 
 function ctxWith(mocks: Partial<Mocks> = {}): { ctx: ToolContext; mocks: Mocks } {

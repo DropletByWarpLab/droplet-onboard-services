@@ -1,0 +1,380 @@
+/**
+ * WARP-2448 — the two-mechanism interaction, asserted.
+ *
+ * `EXCLUDED_FROM_CHAT_TOOLS` (policy: what chat may do at all) and per-turn
+ * selection (relevance: what this sentence needs) both shrink the prompt. The
+ * ticket's worry is that leaving them overlapping and undocumented guarantees
+ * the next engineer tunes one and is surprised by the other.
+ *
+ * The resolution taken is RETAIN + DOCUMENT (see chat-tool-scope.ts's header
+ * for why policy cannot be folded into relevance). This file is the half of
+ * that resolution a comment cannot provide: it recomputes the overlap on every
+ * run, so the documented state either stays true or CI says so.
+ */
+// add-llm-tool:gate — WARP-2496 / WARP-2612: this test asserts on a site an
+// agent edits when ADDING a tool, so the `add-llm-tool` skill must name every
+// repo file it reads. Drop the pragma and it stops being derived from.
+
+import { describe, it, expect } from "vitest";
+import { TOOLS, TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import {
+  selectAdvertisedTools,
+  RULED_DOMAINS,
+  CORE_TOOL_NAMES,
+} from "./tool-selection.service.js";
+import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+
+/** The default chat POOL: the registry minus the policy exclusions. */
+const chatPool = (): string[] =>
+  Array.from(TOOLS.values())
+    .map((t) => t.name)
+    .filter((n) => !EXCLUDED_FROM_CHAT_TOOLS.has(n));
+
+/** In-scope tool names per domain, after the policy layer has run. */
+function inScopeByDomain(): Map<ToolDomain, string[]> {
+  const pool = new Set(chatPool());
+  const m = new Map<ToolDomain, string[]>();
+  for (const e of TOOL_CATALOG) {
+    if (!pool.has(e.name)) continue;
+    const list = m.get(e.domain) ?? [];
+    list.push(e.name);
+    m.set(e.domain, list);
+  }
+  return m;
+}
+
+describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVANCE layer", () => {
+  it("an excluded tool is never selected, on any turn, in any domain", () => {
+    // The layering contract: the pool is selection's ceiling. Selection is
+    // handed the already-narrowed pool, so it CANNOT re-admit a policy
+    // exclusion — even on the turn most likely to want it.
+    //
+    // MUTATION: have the agent loop pass the full registry as `pool` instead
+    // of the chat-scoped pool and this goes red.
+    const pool = chatPool();
+    const turns = [
+      "delete the clip from the front door camera",
+      "show me the switch VLANs and set port 4 to VLAN 20",
+      "run a regex test and hash this text for me",
+      "apply the update and list the storage pools",
+      "send me a notification about it",
+    ];
+    for (const userMessage of turns) {
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage,
+        pool,
+        conversationToolNames: [],
+      });
+      for (const name of r.advertised) {
+        expect(EXCLUDED_FROM_CHAT_TOOLS.has(name)).toBe(false);
+      }
+    }
+    // Named specimens, so the assertion is not vacuous if `advertised` were
+    // ever empty.
+    expect(EXCLUDED_FROM_CHAT_TOOLS.has("delete_clip")).toBe(true);
+    expect(pool).not.toContain("delete_clip");
+  });
+
+  it("even an explicit prior call cannot re-admit an excluded tool", () => {
+    // Continuity re-opens a DOMAIN, which is the most plausible route by
+    // which an excluded tool might sneak back in.
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and now delete it",
+      pool: chatPool(),
+      conversationToolNames: ["list_clips", "delete_clip"],
+      });
+    expect(r.advertised).not.toContain("delete_clip");
+    // ...while the domain IS re-opened, proving continuity ran at all.
+    expect(r.matchedDomains).toContain("cameras");
+    expect(r.advertised).toContain("list_clips");
+  });
+
+  it("records exactly which domains have a rule that advertises no local tool", () => {
+    // WARP-2448 AC: "no tool is unreachable for two different reasons at once
+    // without that being documented." This computes the set rather than
+    // trusting the header comment, so the two cannot drift.
+    const inScope = inScopeByDomain();
+    const deadRules = [...RULED_DOMAINS]
+      .filter((d) => (inScope.get(d) ?? []).length === 0)
+      .sort();
+
+    // `notifications`: both send_notification and list_notifications are
+    // excluded, yet the notify/alerts rule matches. Documented in
+    // chat-tool-scope.ts. If this set GROWS, someone has added a rule for a
+    // domain the policy layer removes entirely — document it there or drop
+    // the rule.
+    //
+    // ADR-045 slice D added `pm`, deliberately and with the documentation
+    // this assertion demands (see the KNOWN OVERLAP block in
+    // chat-tool-scope.ts). Every local pm WRITE collapsed into `business_*`
+    // and the reads were already excluded, so the domain is empty LOCALLY.
+    // The rule is kept because it still does two jobs: remote Atlassian pm
+    // tools (WARP-2316) reach chat through it, and it now also claims
+    // `business`, so a tracker sentence advertises the collapsed writes.
+    // ADR-045 added BOTH `crm` and `pm`, deliberately and with the
+    // documentation this assertion demands (see chat-tool-scope.ts's KNOWN
+    // OVERLAP block). Slice C moved every CRM and PM read into `business_find`
+    // / `business_timeline`; slice D moved every write into
+    // `business_create` / `business_update`. Neither domain holds a local tool
+    // any more, and both rules are retained because they are the route a
+    // REMOTE Atlassian or HubSpot catalog becomes selectable, and because they
+    // now also claim the `business` domain — "add a ticket for the broken
+    // dishwasher" is a pm sentence that has to reach `business_create`.
+    expect(deadRules).toEqual(["crm", "notifications", "pm"]);
+  });
+
+  it("records exactly which domains have in-scope tools but NO rule to advertise them", () => {
+    // WARP-2552 — the INVERSE of the assertion above, and the half that was
+    // missing. The test before this one catches "a rule that reaches no tool";
+    // nothing caught "a tool no rule can reach", which is the strictly worse
+    // failure: the schemas are serialized into the pool, charged against the
+    // context budget on every turn, and advertised to the model on NONE.
+    //
+    // This has now happened three times — WARP-2058 for `pm`, WARP-2454 for
+    // `team_chat`, and WARP-2546 shipped seven `crm_*` tools with no `crm`
+    // rule. Each was found by hand, after the fact. This finds the fourth at
+    // commit time.
+    //
+    // Mutation: delete the `crm` entry from DOMAIN_RULES → `crm` appears in
+    // this set → red.
+    const inScope = inScopeByDomain();
+    const unreachable = [...inScope.entries()]
+      .filter(([domain, tools]) => tools.length > 0 && !RULED_DOMAINS.has(domain))
+      .map(([domain]) => domain)
+      .sort();
+
+    // Empty is the only correct answer. A domain whose tools are in the chat
+    // pool must have SOME rule that can advertise them — otherwise exclude the
+    // tools from the pool instead, so they stop costing budget for nothing.
+    expect(unreachable).toEqual([]);
+  });
+
+  it("the pm rule still reaches a write tool — it just is not a pm_* one any more", () => {
+    // ADR-045 slice D. The pm domain is empty LOCALLY (asserted above), so
+    // the danger is that someone reads that and deletes the rule. This is
+    // the test that goes red if they do: a tracker sentence must still put
+    // a write verb in front of the model, and after the collapse that verb
+    // lives in the `business` domain.
+    //
+    // MUTATION: drop `"business"` from the pm rule's `domains` → red, and
+    // the product regresses to an assistant that can talk about a tracker
+    // it cannot write to.
+    const inScope = inScopeByDomain();
+    expect(inScope.get("pm") ?? []).toEqual([]);
+    expect(inScope.get("business")).toContain("business_create");
+
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "start a new project for the kitchen remodel",
+      pool: chatPool(),
+      conversationToolNames: [],
+    });
+    expect(r.matchedDomains).toContain("pm");
+    expect(r.advertised).toContain("business_create");
+    expect(r.advertised).toContain("business_update");
+    // ...and the same for the CRM half of the collapse, through the crm rule.
+    const deal = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "move the Acme deal to negotiation",
+      pool: chatPool(),
+      conversationToolNames: [],
+    });
+    expect(deal.advertised).toContain("business_update");
+    // business_link is policy-excluded, so no turn may advertise it.
+    expect(deal.advertised).not.toContain("business_link");
+  });
+
+  it("fully-excluded domains have no rule promising what the pool cannot deliver", () => {
+    const inScope = inScopeByDomain();
+    const fullyExcluded = TOOL_CATALOG.map((e) => e.domain).filter(
+      (d, i, a) => a.indexOf(d) === i && (inScope.get(d) ?? []).length === 0,
+    );
+    // ADR-045 — `crm` and `pm` are NOT in this set, and the distinction is
+    // worth stating because it looks like an omission. `fullyExcluded` is
+    // derived from TOOL_CATALOG, so it can only name a domain that HAS local
+    // tools which are all excluded. `crm` and `pm` have no catalog entries at
+    // all now — they are EMPTY, which is a different condition, and the
+    // deadRules assertion above is the one that catches it.
+    expect([...fullyExcluded].sort()).toEqual([
+      "erp",
+      // WARP-2581 — money joins them: its one tool is excluded while the
+      // base-prompt budget tripwire stands (WARP-2547 owns the re-baseline),
+      // so a rule here would promise the model a tool it can never be offered.
+      "money",
+      "notifications",
+      "switch",
+    ]);
+    // switch, erp and money are ruleless, which is the coherent state.
+    expect(RULED_DOMAINS.has("switch")).toBe(false);
+    expect(RULED_DOMAINS.has("erp")).toBe(false);
+    expect(RULED_DOMAINS.has("money")).toBe(false);
+    // ADR-045 — `pm` is the deliberate exception: locally EMPTY and yet ruled,
+    // because the rule reaches remote tools and the `business` domain where
+    // the writes went. Asserting it here stops a future reader "tidying" the
+    // rule away on the strength of the emptiness above.
+    expect(RULED_DOMAINS.has("pm")).toBe(true);
+    expect(RULED_DOMAINS.has("business")).toBe(true);
+  });
+
+  it("the exclusion list governs LOCAL tools only — a remote tool in a stripped domain is still selectable", () => {
+    // This is why the notifications/pm rules are kept rather than deleted:
+    // they are the route by which a REMOTE catalog becomes reachable. A
+    // remote tool never passes through EXCLUDED_FROM_CHAT_TOOLS.
+    const remoteNotifier: RuntimeToolDescriptor = {
+      name: "pagerduty_list_alerts",
+      serverId: "pagerduty",
+      domain: "notifications",
+      domainSource: "server",
+      description: "List current alerts.",
+      inputSchema: { type: "object", properties: {} },
+    };
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "any alerts I should know about?",
+      pool: [...chatPool(), "pagerduty_list_alerts"],
+      conversationToolNames: [],
+      runtimeTools: [remoteNotifier],
+    });
+    expect(r.advertised).toContain("pagerduty_list_alerts");
+    // ...while the LOCAL notifications tools stay excluded on the same turn.
+    expect(r.advertised).not.toContain("send_notification");
+    expect(r.advertised).not.toContain("list_notifications");
+  });
+
+  it("every excluded name that is registered is genuinely out of the pool", () => {
+    // Names in the list that are not registered are inert by design; the ones
+    // that ARE registered must actually be removed.
+    const registered = new Set(TOOLS.keys());
+    const pool = new Set(chatPool());
+    const live = [...EXCLUDED_FROM_CHAT_TOOLS].filter((n) => registered.has(n));
+    expect(live.length).toBeGreaterThan(0);
+    for (const n of live) expect(pool.has(n)).toBe(false);
+  });
+
+  it("the floor survives the policy layer — no core tool is excluded", () => {
+    // A floor tool that the policy layer removes would be unreachable for two
+    // reasons at once, which is precisely the state this ticket forbids.
+    for (const name of CORE_TOOL_NAMES) {
+      expect(
+        EXCLUDED_FROM_CHAT_TOOLS.has(name),
+        `${name} is in the always-advertised floor AND excluded from chat`,
+      ).toBe(false);
+    }
+  });
+});
+
+/**
+ * WARP-2580 — the third failure mode of the two-layer design, and the one
+ * neither existing assertion could see.
+ *
+ * The two above ask whether a tool is REACHABLE. This one asks whether what a
+ * reachable tool SAYS is true for the caller reading it. A tool schema is
+ * prompt text: when `pm_create_project` told the model its workspace came
+ * "from pm_list_workspaces", that was an instruction to call a tool the same
+ * turn could never call — a dead end the model can only discover by trying,
+ * and then only if it gets a legible refusal.
+ *
+ * Found by sweeping, not by report, and it was not one tool:
+ *
+ *   read_document_text -> list_recent_files    (a CORE tool — every turn)
+ *   pm_create_project  -> pm_list_workspaces
+ *   pm_create_project  -> pm_create_work_item
+ *   get_update_status  -> apply_update         (reviewed, kept — see below)
+ *
+ * The rule: a tool in the chat pool may not NAME a tool the chat pool omits,
+ * unless the pair is on REVIEWED_CROSS_REFERENCES with a reason. The inverse
+ * is fine and deliberately not asserted — an excluded tool describing a
+ * reachable one (`crm_move_deal_stage` -> `crm_pipeline_summary`) is a
+ * dashboard/MCP caller being told something true.
+ *
+ * Mutation: delete the `get_update_status` entry below -> red; re-add
+ * `list_recent_files` to read_document_text's path description -> red.
+ */
+const REVIEWED_CROSS_REFERENCES: ReadonlyArray<{
+  tool: string;
+  names: string;
+  why: string;
+}> = [
+  {
+    tool: "get_update_status",
+    names: "apply_update",
+    // DESCRIPTIVE, not directive: "the companion to apply_update" tells the
+    // reader what this tool is FOR. It does not instruct a call, and it is
+    // simply true for the dashboard and MCP callers that have both. Rewording
+    // it to hide a sibling from chat would make the description worse for the
+    // callers who can act on it, to save a chat turn ~14 chars.
+    why: "descriptive pairing, true for the callers that have both; not an instruction to call",
+  },
+];
+
+/** Every description string a caller actually reads: the tool's own, plus
+ *  every `description` nested anywhere in its JSON Schema. */
+function describedText(tool: { description?: string; inputSchema?: unknown }): string {
+  const parts: string[] = [tool.description ?? ""];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const rec = node as Record<string, unknown>;
+    if (typeof rec.description === "string") parts.push(rec.description);
+    for (const v of Object.values(rec)) walk(v);
+  };
+  walk(tool.inputSchema);
+  return parts.join("\n");
+}
+
+describe("WARP-2580 — a chat tool must not instruct the model to call a tool chat cannot reach", () => {
+  it("no chat-scope tool names an excluded tool, outside the reviewed list", () => {
+    const pool = chatPool();
+    const excluded = [...TOOLS.keys()].filter((n) => EXCLUDED_FROM_CHAT_TOOLS.has(n));
+    const reviewed = new Set(REVIEWED_CROSS_REFERENCES.map((r) => `${r.tool}->${r.names}`));
+
+    const dangling: string[] = [];
+    for (const name of pool) {
+      const text = describedText(TOOLS.get(name)!);
+      for (const ex of excluded) {
+        // Word-boundary, not substring: `list_files` must not match inside
+        // `list_file_versions`. Tool names are [a-z_], so \b on both ends is
+        // the whole guard — and it is the same trap DOMAIN_RULES documents
+        // ("won" inside "wondering").
+        if (!new RegExp(`\\b${ex}\\b`).test(text)) continue;
+        if (reviewed.has(`${name}->${ex}`)) continue;
+        dangling.push(`${name} -> ${ex}`);
+      }
+    }
+
+    expect(
+      dangling.sort(),
+      "these chat-scope tools name a tool the chat pool omits, so the model is " +
+        "told to call something this turn cannot reach. Reword the description " +
+        "(preferred — it is usually shorter), or add the pair to " +
+        "REVIEWED_CROSS_REFERENCES with a reason. Do NOT widen the exclusion " +
+        "list to satisfy this, and do NOT delete the reference without checking " +
+        "whether the SENTENCE still makes sense to an MCP caller.",
+    ).toEqual([]);
+  });
+
+  it("every reviewed exception is still live — the list cannot rot", () => {
+    // An entry whose tool is gone, whose target is no longer excluded, or
+    // whose text no longer mentions it, is an exception nobody is using. It
+    // would sit here granting a licence that has quietly stopped applying.
+    for (const r of REVIEWED_CROSS_REFERENCES) {
+      const tool = TOOLS.get(r.tool);
+      expect(tool, `reviewed exception names an unregistered tool: ${r.tool}`).toBeDefined();
+      expect(
+        EXCLUDED_FROM_CHAT_TOOLS.has(r.tool),
+        `${r.tool} is itself excluded now — this exception is about chat-scope tools`,
+      ).toBe(false);
+      expect(
+        EXCLUDED_FROM_CHAT_TOOLS.has(r.names),
+        `${r.names} is no longer excluded, so ${r.tool} -> ${r.names} needs no exception`,
+      ).toBe(true);
+      expect(
+        new RegExp(`\\b${r.names}\\b`).test(describedText(tool!)),
+        `${r.tool} no longer mentions ${r.names} — drop the exception`,
+      ).toBe(true);
+      expect(r.why.length, `${r.tool} -> ${r.names} has no reason written down`).toBeGreaterThan(20);
+    }
+  });
+});

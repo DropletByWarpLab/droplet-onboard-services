@@ -248,6 +248,38 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set(
 );
 
 /**
+ * WARP-2665 — the one place a tool list is classified as writing.
+ *
+ * Three surfaces decide something from "does this spec call a write tool":
+ * the routes' authoring-time reconcile (which names the offending tools in
+ * its 400), the ticker's fire-time gate, and the pattern miner's `writes`
+ * column. Each used to re-derive it against `WRITE_TOOLS` inline, and one
+ * classification site drifting from another is exactly how the miner's
+ * copy came to be a hardcoded `false`. `writeToolsIn` is the predicate;
+ * `hasWriteTool` is the boolean the two gates read.
+ */
+export function writeToolsIn(names: ReadonlyArray<string>): string[] {
+  return names.filter((name) => WRITE_TOOLS.has(name));
+}
+
+export function hasWriteTool(names: ReadonlyArray<string>): boolean {
+  return writeToolsIn(names).length > 0;
+}
+
+/**
+ * WARP-2894 — the names in `names` that no compiled tool answers to.
+ *
+ * A routine the model drafts is only as good as the tools it names, and the
+ * model will name tools that do not exist. Catching that at draft time turns
+ * a run-time "unknown tool" three weeks later into a 400 the model can fix
+ * on the next turn. Compiled catalog only, on purpose: the ToolSpec walker
+ * dispatches through the local MCP child, which is exactly this catalog.
+ */
+export function unknownToolsIn(names: ReadonlyArray<string>): string[] {
+  return names.filter((name) => !CATALOG_BY_NAME.has(name));
+}
+
+/**
  * WARP-1398 — the always-on voice assistant runs as the `_service:voice`
  * principal. ADR-004 §3 makes service principals read-only by DEFAULT; this is
  * the one documented, scoped exception (ADR-004 amendment, approved
@@ -315,6 +347,32 @@ export function narrowToolNamesToScope(
   scope: ToolAccessScope,
 ): string[] {
   return names.filter((n) => toolAllowedInScope(n, scope));
+}
+
+/**
+ * The object-shaped sibling of `narrowToolNamesToScope`: filter a candidate
+ * list of tool-like objects to what `scope` may invoke (order kept).
+ *
+ * An absent scope (`null`/`undefined`) — the owner bypass, service principals,
+ * anyone with no AccessRole — narrows nothing, and the list is returned
+ * unchanged. Carrying that case HERE is the point: both call sites need it,
+ * and expressing it twice is how the two can disagree. Both nullish forms are
+ * accepted because the request field is `ToolAccessScope | null | undefined`.
+ *
+ * WARP-2556 follow-up. The "is this tool in scope" rule had drifted into three
+ * independent expressions — the estimate's pool filter in `routes/llm.ts`, the
+ * dispatch filter in `llm-agent.service.ts`, and this module's name-list
+ * helper. That is precisely the shape that let the estimate-side copy be lost
+ * in the WARP-2497 × WARP-2552 conflict resolution with no compiler signal,
+ * which is the defect WARP-2556 exists to fix. A new access axis added to
+ * `toolAllowedInScope` now reaches every narrowing site by construction.
+ */
+export function narrowToolsToScope<T extends { name: string }>(
+  tools: readonly T[],
+  scope: ToolAccessScope | null | undefined,
+): readonly T[] {
+  if (!scope) return tools;
+  return tools.filter((t) => toolAllowedInScope(t.name, scope));
 }
 
 /**

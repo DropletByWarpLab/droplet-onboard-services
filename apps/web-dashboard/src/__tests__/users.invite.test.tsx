@@ -40,6 +40,11 @@ vi.mock("@/lib/api", () => ({
   // WARP-1532 (T8): the page now pulls the access-roles surface — resolve
   // benign empties so this file keeps exercising its own concern only.
   listAccessRoles: vi.fn().mockResolvedValue({ roles: [] }),
+  // WARP-2738 role templates. Panel-mounting suites need BOTH: a named
+  // export missing from this factory throws the moment the component reads
+  // it, so the mock has to move with the imports.
+  listRoleTemplates: vi.fn().mockResolvedValue({ roleTemplates: [], enforcedModuleIds: [] }),
+  createRoleFromTemplate: vi.fn(),
   createAccessRole: vi.fn(),
   updateAccessRole: vi.fn(),
   deleteAccessRole: vi.fn(),

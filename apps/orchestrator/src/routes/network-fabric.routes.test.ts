@@ -76,10 +76,10 @@ const ROWS = [
 
 /** `findMany` is deliberately loosely typed so a case can hand in an empty
  *  list or a thrower without fighting the inferred row-union. */
-type FindManyStub = ReturnType<typeof vi.fn<[], Promise<unknown[]>>>;
+type FindManyStub = ReturnType<typeof vi.fn<() => Promise<unknown[]>>>;
 
 function buildApp(
-  findMany: FindManyStub = vi.fn<[], Promise<unknown[]>>(async () => ROWS),
+  findMany: FindManyStub = vi.fn<() => Promise<unknown[]>>(async () => ROWS),
 ) {
   const app = express();
   app.use(express.json());
@@ -142,7 +142,7 @@ describe("GET /api/network/fabric/members (WARP-1732)", () => {
   });
 
   it("an empty fabric returns an empty list, not a 404", async () => {
-    const { app } = buildApp(vi.fn<[], Promise<unknown[]>>(async () => []));
+    const { app } = buildApp(vi.fn<() => Promise<unknown[]>>(async () => []));
     const res = await request(app)
       .get("/api/network/fabric/members")
       .set("Authorization", MCP_BEARER);
@@ -153,7 +153,7 @@ describe("GET /api/network/fabric/members (WARP-1732)", () => {
 
   it("a database failure surfaces through the shared error handler, not as a hang", async () => {
     const { app } = buildApp(
-      vi.fn<[], Promise<unknown[]>>(async () => {
+      vi.fn<() => Promise<unknown[]>>(async () => {
         throw new Error("connection terminated");
       }),
     );

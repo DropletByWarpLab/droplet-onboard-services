@@ -4,6 +4,7 @@
 import useSWR from "swr";
 import { useCallback, useMemo } from "react";
 import { authFetch } from "@/lib/auth";
+import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
 import type {
   PmProject,
@@ -77,8 +78,13 @@ export function useProjects(includeArchived: boolean) {
   return { projects: data?.projects, error, isLoading, mutate };
 }
 
-export function useSummary() {
-  const { data, error, isLoading, mutate } = useSWR("/api/pm/summary", (u: string) =>
+/**
+ * WARP-2875 — `enabled` is the `projects` capability flag. A null key when the
+ * module is off is how useSWR is told not to fetch (same as useCrmSummary);
+ * /business mounts this hook on every box, and Projects is off by default.
+ */
+export function useSummary(enabled: boolean) {
+  const { data, error, isLoading, mutate } = useSWR(enabled ? "/api/pm/summary" : null, (u: string) =>
     getJson<{ summary: PmSummary }>(u),
   );
   return { summary: data?.summary, error, isLoading, mutate };
@@ -90,6 +96,28 @@ export function useProjectStates(projectId: string | null) {
     (u: string) => getJson<{ states: PmState[] }>(u),
   );
   return { states: data?.states, error, isLoading };
+}
+
+/** ADR-045 §5.3 — the departments the CALLER may pick from in the board filter.
+ *
+ *  `GET /api/departments` is SERVER-SCOPED: owner/admin see every unit
+ *  (archived included), everyone else sees only units they hold a
+ *  `DepartmentMembership` on, archived hidden. That is the right scope for a
+ *  picker and the WRONG scope for a LABEL — PM is household-shared, so a work
+ *  item owned by a department the caller is not a member of would render blank.
+ *  Which is why the label travels on the work item (`item.department`) and this
+ *  hook only feeds the picker; `departmentOptions` unions the two so an
+ *  out-of-scope or archived department that owns visible work is still
+ *  filterable.
+ *
+ *  Fails soft: a 403 or a 500 leaves `departments` undefined and the picker
+ *  falls back to whatever the board itself shows. A department read must never
+ *  be able to error a board. */
+export function useDepartments() {
+  const { data } = useSWR("/api/departments", (u: string) =>
+    getJson<{ departments: Department[] }>(u),
+  );
+  return { departments: data?.departments };
 }
 
 export function useProjectLabels(projectId: string | null) {

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import renameCamera from "../../../src/handlers/cameras/rename-camera.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -15,8 +16,8 @@ import type { ToolContext } from "../../../src/types.js";
  *     asserts the PATCH was never issued.
  */
 function ctxWith(
-  get: ReturnType<typeof vi.fn>,
-  patch: ReturnType<typeof vi.fn>,
+  get: Mock,
+  patch: Mock,
 ): ToolContext {
   return {
     http: {

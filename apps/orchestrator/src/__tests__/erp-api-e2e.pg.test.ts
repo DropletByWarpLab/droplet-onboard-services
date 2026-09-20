@@ -33,13 +33,46 @@ vi.unmock("@prisma/client");
 // @ts-expect-error -- plain ESM JS harness, outside any tsconfig rootDir.
 import { startMockEaglesoftApi } from "../../../../services/erp-connector/harness/eaglesoft-api/mock-server.mjs";
 // @ts-expect-error -- see above.
-import { opensslAvailable } from "../../../../services/erp-connector/harness/eaglesoft-api/certs.mjs";
+import { liveBoxSkipReason, announceLiveBoxSkip } from "../../../../services/erp-connector/harness/eaglesoft-api/preflight.mjs";
 
-const RUN =
+const PG_LANE =
   process.env.RUN_PG_INTEGRATION === "1" &&
   typeof process.env.DATABASE_URL === "string" &&
-  process.env.DATABASE_URL.length > 0 &&
-  opensslAvailable();
+  process.env.DATABASE_URL.length > 0;
+
+/** Same live-box prerequisites as the other two harness suites — the `openssl`
+ *  CLI, and a Node whose built-in fetch takes the CA-trusting undici dispatcher
+ *  (WARP-2611) — on top of this lane's own database gate. Only probed inside the
+ *  pg lane, so the DB-less run neither pays for it nor reports a second reason
+ *  for a suite it was already skipping. */
+const LIVE_BOX_SKIP_REASON: string | null = PG_LANE ? liveBoxSkipReason() : null;
+
+const RUN = PG_LANE && LIVE_BOX_SKIP_REASON === null;
+
+/** The same assertion its two siblings carry (`erp-api-live.test.ts`,
+ *  `api-connector.live.test.ts`): skipping is the honest answer on a machine
+ *  that cannot reach the box, and the WRONG one on a runner that can — so CI
+ *  fails rather than lose the coverage silently.
+ *
+ *  This copy is load-bearing on its own rather than a third of the same thing.
+ *  `.github/workflows/orchestrator-tests.yml` pins its own `node-version`
+ *  independently of `ci.yml`, and its `pg-integration` job runs ONLY `pg.test`
+ *  files — so neither sibling's guard executes in the job that runs this suite.
+ *  Without this, bumping that one workflow's Node turns the whole ERP REST
+ *  end-to-end lane (real Express → real Postgres → real TLS) into a skip with
+ *  nothing red anywhere.
+ *
+ *  Scoped to the pg lane because that is the only lane where this file's
+ *  coverage exists: outside it the suite is skipped on the database gate by
+ *  design, and `LIVE_BOX_SKIP_REASON` was never probed. */
+it("CI runs this live-box suite rather than skipping it", () => {
+  if (!process.env.CI) return; // local dev without the prerequisites: the skip below is fine
+  if (!PG_LANE) return; // the DB-less lane skips this whole file on RUN_PG_INTEGRATION, by design
+  expect(
+    LIVE_BOX_SKIP_REASON,
+    "the live ERP e2e suite would skip in CI and prove nothing",
+  ).toBeNull();
+});
 
 /**
  * Boot an Express app on a real loopback port and return a fetch-based client.
@@ -73,6 +106,8 @@ async function serve(app: any) {
     close: () => new Promise<void>((res) => server.close(() => res())),
   };
 }
+
+announceLiveBoxSkip("ERP REST track — HTTP → Postgres → live Eaglesoft box", LIVE_BOX_SKIP_REASON);
 
 describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft box", () => {
   let prisma: any;
@@ -116,10 +151,40 @@ describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft b
     await prisma?.$disconnect();
   });
 
+  // Namespaced like every sibling pg suite (party-link, crm-activity-cascade,
+  // landing-provenance): the pg-gated files share ONE throwaway database and
+  // run serially (--no-file-parallelism), so a `deleteMany({})` here is this
+  // file claiming rows it never created.
+  //
+  // `connect()` resolves the provider BEFORE it writes anything, so
+  // "eaglesoft-api" is the COMPLETE set of IntegrationConnection rows this
+  // suite can land -- including the `port: 1` row that stays PROVISIONING. The
+  // "not-a-real-erp" post is rejected 4xx and lands nothing at all.
+  const OURS = { provider: "eaglesoft-api" } as const;
+
   beforeEach(async () => {
-    await prisma.erpAuditLog.deleteMany({});
-    await prisma.erpWriteRequest.deleteMany({});
-    await prisma.integrationConnection.deleteMany({});
+    // Ids first: ErpAuditLog.connectionId and ErpWriteRequest.connectionId are
+    // plain columns with no relation and no foreign key, so they cannot be
+    // scoped by a relation filter -- they have to be scoped by id.
+    const ours = await prisma.integrationConnection.findMany({
+      where: OURS,
+      select: { id: true },
+    });
+    const connectionIds = ours.map((r: { id: string }) => r.id);
+    await prisma.erpAuditLog.deleteMany({
+      where: { connectionId: { in: connectionIds } },
+    });
+    await prisma.erpWriteRequest.deleteMany({
+      where: { connectionId: { in: connectionIds } },
+    });
+    // Last, and scoped. `PartyLink.connectionId` is onDelete: Restrict
+    // (WARP-2562) on purpose -- nothing may sweep away a human's confirmed
+    // customer match. Unscoped, this line reached the connection that
+    // party-link.pg.test.ts deliberately leaves behind (it runs just before
+    // this file: vitest orders the serial pg lane largest-file-first) and died
+    // on `PartyLink_connectionId_fkey`. That FK was doing its job; deleting
+    // another suite's rows was never this file's job.
+    await prisma.integrationConnection.deleteMany({ where: OURS });
   });
 
   /** The connect payload an installer would POST, pointed at the harness box. */

@@ -68,7 +68,12 @@ const { checkSpaceAccessMock, resolveFileDepartmentMock } = vi.hoisted(() => ({
   resolveFileDepartmentMock: vi.fn(),
 }));
 
-vi.mock("../middleware/space.js", () => ({
+vi.mock("../middleware/space.js", async (importOriginal) => ({
+  // Partial: `departmentSpaceToken` (the HOUSEHOLD → "shared" wire-token rule,
+  // WARP-2585 moved it here from this router) must stay real so the
+  // registry-space cases below exercise the shipped translation against the
+  // in-memory `department` rows, not a stub of it.
+  ...(await importOriginal<typeof import("../middleware/space.js")>()),
   checkSpaceAccess: checkSpaceAccessMock,
 }));
 vi.mock("../services/file-registry.service.js", () => ({

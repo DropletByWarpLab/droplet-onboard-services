@@ -61,8 +61,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // WARP-817 — WifiStep reads the host topology on mount to decide its
   // default disclosure state; null (best-effort) leaves the collapsed default.
   // These tests just wander to Home Wi-Fi via the rail and back, never
@@ -387,7 +385,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "studio.droplet-us.com",
       // WARP-1391: the one-tap toggle is a HOME-mode mint, so it appears only
       // once the box has discovered its home-facing LAN IP.
       homeEndpointHost: "192.168.1.87",
@@ -413,7 +411,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "studio.droplet-us.com",
       homeEndpointHost: "192.168.1.87",
     });
     createVpnPeerMock.mockResolvedValue({

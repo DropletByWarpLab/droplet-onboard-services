@@ -2,8 +2,9 @@ name: oled-display-panel-tests
 
 # WARP-1640 — the rack panel's pure-software half.
 #
-# services/oled-display is listed in .github/ci-coverage-exempt as
-# "hardware-only", and its pytest suite consequently runs in NO workflow. That
+# When this workflow was written, services/oled-display was listed in
+# .github/ci-coverage-exempt as "hardware-only", and its pytest suite
+# consequently ran in NO workflow. That
 # was defensible while every backend needed a physical PyPortal on USB. It is
 # not defensible for the framebuffer panel: fb.py's stride/pixel-order handling
 # and the display.py data-gate wiring are ordinary software with ordinary bugs,
@@ -22,6 +23,19 @@ name: oled-display-panel-tests
 # So the whole directory runs now, with ONE exclusion (see the run step) that
 # is about the runner's disk layout rather than the tests. A service this size
 # having zero CI was never defensible; it was just unmeasured.
+#
+# WARP-2685 — THE EXEMPTION IS GONE. It outlived its truth by two months,
+# because scripts/check-ci-coverage.sh resolved a service's workflow by
+# FILENAME: it wanted `oled-display-tests.yml` and could not see the `-panel-`
+# infix here, so deleting the exemption line failed the gate for a service this
+# workflow already covered. The checker now matches on a workflow's actual
+# trigger `paths:` filter and finds this file, and
+# .github/ci-coverage-exempt holds no entries at all.
+#
+# Which means: DO NOT rename this file to satisfy a tool. Its name is accurate
+# — the suite is the panel's software half, and `paths:` below deliberately
+# excludes pyportal/**. Renaming would also reset the workflow's run history,
+# which GitHub keys by file path.
 #
 # Bring-up of the panel itself (does it light up, is the image sheared, does
 # touch land where you tapped) is verified on the box; nothing here needs a

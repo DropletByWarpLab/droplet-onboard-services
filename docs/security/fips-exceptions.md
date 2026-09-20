@@ -65,6 +65,38 @@ exceptions:
     review: annual
     owner: droplet-onboard-services / fips-selftest
     remove_by: null
+
+  - id: mailchimp-subscriber-hash
+    algorithm: md5
+    protocol: Mailchimp Marketing API v3 — `GET /lists/{list_id}/members/{subscriber_hash}`, where `subscriber_hash` is defined as the MD5 of the lowercased email address
+    files:
+      - services/erp-connector/src/mailchimp/md5.ts
+      - services/erp-connector/__tests__/mailchimp.test.ts
+      - services/erp-connector/__tests__/mailchimp-md5.test.ts
+    rationale: >-
+      Mailchimp addresses an individual list member by the MD5 of their
+      lowercased email address. The digest is the vendor's MANDATED URL
+      ADDRESSING SCHEME, not a security primitive: it authenticates nothing,
+      protects nothing, and is not secret — the same address deliberately
+      always yields the same hash, because that is how the URL is formed.
+      The API exposes no other way to key a member, so the alternative to MD5
+      is not a stronger digest, it is losing single-member lookups entirely.
+      Because MD5 is not FIPS-approved, `node:crypto` cannot serve this use on
+      a box running `DROPLET_FIPS_MODE=1` — the FIPS provider does not
+      implement MD5 and `createHash("md5")` throws ERR_OSSL_EVP_UNSUPPORTED
+      before any request is made (WARP-2460). `src/mailchimp/md5.ts` is
+      therefore an arithmetic RFC 1321 implementation with no imports at all,
+      so it reaches no OpenSSL provider and behaves identically with the knob
+      on or off. It is registered here, rather than left silent, precisely
+      because the static lint CANNOT see it: the lint matches call sites such
+      as `createHash("md5")`, and a hand-rolled digest matches no pattern. An
+      auditor grepping this registry must still find it. The two test files
+      additionally call `node:crypto` MD5 as the independent reference oracle
+      the pure implementation is differentially tested against; those runs are
+      never FIPS.
+    review: annual
+    owner: droplet-onboard-services / erp-connector
+    remove_by: null
 ---
 
 # FIPS 140-3 — Exceptions Registry
@@ -134,6 +166,37 @@ NIST published FIPS 186-5 in 2023 approving Curve25519 (X25519/Ed25519) for fede
 The boot self-test helpers (`packages/fips-selftest/`, `services/_shared/fips_selftest.py`) deliberately call MD5 at startup and assert the call raises a FIPS-disabled error. If MD5 succeeds the helper fails closed — the provider is loaded but not actually enforcing.
 
 These files are also added to the lint scan's exclusion list (their entire purpose is to negative-probe forbidden primitives), but this registry entry exists so an auditor reading `fips-exceptions.md` cold has the rationale documented in the same place as everything else.
+
+---
+
+### `mailchimp-subscriber-hash`
+
+**Algorithm:** MD5
+**Protocol:** Mailchimp Marketing API v3 — `subscriber_hash` path segment
+**Status:** active, perpetual (no `remove_by`)
+**Review:** annual (next review: 2027-08-27)
+**Owner:** droplet-onboard-services / erp-connector
+
+Mailchimp addresses a single list member by the MD5 of their lowercased email address:
+
+```
+GET /3.0/lists/{list_id}/members/{subscriber_hash}
+     where subscriber_hash = MD5(lowercase(email_address))
+```
+
+The digest is an **addressing scheme**, not a cryptographic control. It authenticates nothing and protects nothing, and it is not secret — the same address must always produce the same hash, because that is how the URL is constructed. There is no negotiation available: the API offers no other way to key a member, so the alternative to MD5 is not a stronger digest but the loss of single-member lookups altogether.
+
+**Why this is not a `node:crypto` call.** MD5 is not FIPS 140-3 approved, so the OpenSSL FIPS provider does not implement it. On a box running with `DROPLET_FIPS_MODE=1`, `createHash("md5")` throws `ERR_OSSL_EVP_UNSUPPORTED` *before any request is made*, and `erp-connector` ships inside the `orchestrator` image — one of the six provider-carrying images that enforce FIPS. A FIPS customer would get a connector where list and campaign reads work but every contact read fails, with an error that reads like a crypto bug (WARP-2460). Node exposes no per-call provider selection, so loading the default provider alongside FIPS for this one call is not an available option.
+
+`services/erp-connector/src/mailchimp/md5.ts` is therefore a ~100-line arithmetic implementation of RFC 1321 with **no imports at all**. It reaches no OpenSSL provider and behaves identically with the knob on or off. It is verified against the RFC's own §A.5 test vectors, against `node:crypto` MD5 at every message length from 0 to 200 bytes (which is where padding bugs live), and against `node:crypto` MD5 on 1,000 random inputs.
+
+**Why it is registered even though the lint cannot see it.** The static lint matches *call sites* — `createHash("md5")`, `hashlib.md5(` — so a hand-rolled digest matches no pattern and would pass silently. That is exactly why this entry exists: an auditor grepping this registry for uses of MD5 must find it. Registering an invisible use is the point, not a formality.
+
+The two Mailchimp test files also call `node:crypto` MD5, purely as the independent reference oracle the pure implementation is differentially tested against — comparing the implementation to itself would be vacuous. Those runs are never FIPS.
+
+**Risk acceptance:** the digest derives one URL path segment from an email address the operator already holds. It guards nothing. Its known collision weakness has no bearing here: a collision would mean two different addresses sharing a member URL, which is Mailchimp's own addressing property and identical whichever implementation computes it. Note the hash is *not* a privacy control either — MD5 of an email is trivially reversible by dictionary attack, so `subscriberHash()` output must be treated as equivalent to the address itself in logs and exports.
+
+**Retire when:** Mailchimp publishes an alternative member-addressing scheme (e.g. keying by `contact_id`) that covers the endpoints this connector reads.
 
 ---
 

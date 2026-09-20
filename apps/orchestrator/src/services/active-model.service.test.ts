@@ -8,13 +8,13 @@
  * already promised "the orchestrator + dashboard then fall back to
  * LLM_MODEL / the single installed model". This file locks the fallback
  * that promise never actually implemented, plus the pre-existing
- * (unchanged) `readActiveChatModel` / `localModelIdentifiers` contracts.
+ * (unchanged) `readActiveChatModel` contract.
  */
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import {
   ACTIVE_CHAT_MODEL_KEY,
-  localModelIdentifiers,
+  resolveStoredChatModel,
   readActiveChatModel,
   resolveActiveChatModel,
 } from "./active-model.service.js";
@@ -61,17 +61,33 @@ describe("readActiveChatModel (WARP-1112, unchanged by WARP-1511)", () => {
   });
 });
 
-describe("localModelIdentifiers (unchanged by WARP-1511)", () => {
-  it("collects id + name for ollama-provider entries only", () => {
-    const models: ModelInfo[] = [
-      { id: "gpt-oss:20b", provider: "ollama", name: "gpt-oss:20b", context_window: null },
-      { id: "claude-sonnet", provider: "anthropic", name: "claude-sonnet", context_window: null },
-    ];
-    expect(localModelIdentifiers(models)).toEqual(new Set(["gpt-oss:20b"]));
+describe("resolveStoredChatModel (WARP-2882 — legacy display name → runtime id)", () => {
+  const models: ModelInfo[] = [
+    { id: "llama3.2:3b", provider: "local", name: "Llama3.2 3B", context_window: null },
+    { id: "docker.io/ai/gpt-oss:20B-F16", provider: "local", name: "Gpt-oss 20B F16", context_window: null },
+    { id: "claude-sonnet", provider: "anthropic", name: "Claude Sonnet", context_window: 200000 },
+  ];
+
+  it("maps a stored DISPLAY name to the id instead of falling back to the first model", () => {
+    expect(resolveStoredChatModel("Gpt-oss 20B F16", models)).toBe("docker.io/ai/gpt-oss:20B-F16");
   });
 
-  it("returns an empty set for an empty models list", () => {
-    expect(localModelIdentifiers([])).toEqual(new Set());
+  it("leaves a stored id unchanged", () => {
+    expect(resolveStoredChatModel("docker.io/ai/gpt-oss:20B-F16", models)).toBe("docker.io/ai/gpt-oss:20B-F16");
+  });
+
+  it("stale / blank → first installed LOCAL id (WARP-1511 fallback kept)", () => {
+    expect(resolveStoredChatModel("gemma4:26b", models)).toBe("llama3.2:3b");
+    expect(resolveStoredChatModel(null, models)).toBe("llama3.2:3b");
+  });
+
+  it("never resolves to a cloud model, even by its display name", () => {
+    expect(resolveStoredChatModel("Claude Sonnet", models)).toBe("llama3.2:3b");
+    expect(resolveStoredChatModel("Claude Sonnet", [models[2]])).toBeNull();
+  });
+
+  it("passes the stored value through when the installed set is unknown", () => {
+    expect(resolveStoredChatModel("Gpt-oss 20B F16", null)).toBe("Gpt-oss 20B F16");
   });
 });
 

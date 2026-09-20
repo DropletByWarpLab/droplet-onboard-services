@@ -2,7 +2,7 @@
 
 Deployment-shape-aware: targets the bundled `ollama` container (single-box),
 a separate Ollama host over LAN (multi-box), or a host-installed Ollama
-(local dev) — driven entirely by OLLAMA_URL. The provider has no
+(local dev) — driven entirely by INFERENCE_RUNTIME_URL (formerly OLLAMA_URL). The provider has no
 opinion about the underlying hardware (discrete GPU, integrated GPU,
 NPU, CPU fallback, etc.) — it just talks HTTP.
 """
@@ -18,7 +18,11 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
-from capabilities import ollama_capabilities_from_show, static_capabilities
+from capabilities import (
+    ollama_capabilities_from_show,
+    ollama_context_window_from_show,
+    static_capabilities,
+)
 from providers.base import BaseProvider
 from request_context import get_request_id
 from schemas import ChatMessage, ModelCapabilities, ModelInfo
@@ -38,10 +42,99 @@ logger = logging.getLogger(__name__)
 # orchestrator runs with OLLAMA_URL=http://droplet-ollama:11434 (the
 # bundled Ollama container on the compose default network); on a
 # multi-box deployment with a separate inference host, point at its
-# static IP. Override via OLLAMA_URL to opt into the /proxy if you want
+# static IP. Override via INFERENCE_RUNTIME_URL to opt into the /proxy if you want
 # the tool-call repair + circuit-breaker for a specific deploy.
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+#
+# WARP-2857 — the variable is `INFERENCE_RUNTIME_URL`; `OLLAMA_URL` is the
+# deprecated name and is still honored. This is the LAST consumer to migrate:
+# the orchestrator (`services/inference-runtime.ts`) and the inference-manager
+# (`runtime/factory.py`) already read the canonical name first. While this
+# module read only the old one, finishing the rename anywhere else pointed
+# lifecycle and metrics at the new name and left CHAT falling through to
+# `_DEFAULT_RUNTIME_URL` — a host-installed Ollama that does not exist on the
+# appliance. Dead chat behind a green Models page; see `_resolve_runtime_url`.
+_RUNTIME_URL_ENV = "INFERENCE_RUNTIME_URL"
+_LEGACY_RUNTIME_URL_ENV = "OLLAMA_URL"
+_DEFAULT_RUNTIME_URL = "http://host.docker.internal:11434"
+
+
+def _resolve_runtime_url() -> str:
+    """Resolve the inference daemon's base URL from the environment.
+
+    Precedence (WARP-2857), the same shape as `_resolve_manager_url` below:
+      1. ``INFERENCE_RUNTIME_URL`` — the canonical name, wins outright.
+      2. ``OLLAMA_URL`` — deprecated; honored with a WARNING so a field box
+         whose .env has not been migrated keeps serving chat.
+      3. ``_DEFAULT_RUNTIME_URL`` — unchanged; the Docker Desktop dev default.
+
+    An explicitly-EMPTY value counts as UNSET at every step: docker-compose
+    passes optional settings through as ``${VAR:-}``, which delivers ``""``
+    (not "unset") into the container, and a blank canonical name must not
+    shadow the working legacy value that every deployed box still carries.
+
+    ONE DELIBERATE DIVERGENCE from `_resolve_manager_url`: when both names are
+    set this warns only if they DISAGREE. That resolver warns unconditionally,
+    which is right for it — `INFERENCE_MANAGER_URL` is not written for every
+    box, so both-set really is an operator editing one line of two. Here the
+    opposite is true: compose writes the canonical name and every field .env
+    still carries the legacy one, so both-set is the EXPECTED steady state for
+    the whole migration window. Warning on it would fire on every healthy box
+    and train the reader to ignore the line that matters. Disagreement is the
+    signal — that is the drift this can actually catch.
+
+    No default changes: "nothing configured" still resolves to the same URL
+    this module has always fallen back to.
+    """
+    # Trailing slashes carry no meaning in a base URL, and the two names are
+    # routinely written by different hands — compose emits
+    # ``http://dmr:12434`` while a pasted or hand-edited .env line may carry
+    # ``http://dmr:12434/``. Comparing the raw strings would call that pair a
+    # DISAGREEMENT and tell the operator to delete a line that points at the
+    # identical endpoint. Normalize BEFORE comparing, not just on the way out.
+    canonical = (os.getenv(_RUNTIME_URL_ENV) or "").strip().rstrip("/")
+    legacy = (os.getenv(_LEGACY_RUNTIME_URL_ENV) or "").strip().rstrip("/")
+
+    if canonical:
+        if legacy and legacy != canonical:
+            # Two names, two different endpoints. Values ARE logged here (unlike
+            # the manager resolver): the whole point is to show WHICH pair
+            # disagrees, and this URL is a compose service name, not a secret.
+            logger.warning(
+                "%s=%r and the deprecated %s=%r DISAGREE — using %s. Chat, "
+                "lifecycle and metrics would otherwise split across two "
+                "daemons. Delete the %s line from the repo-root .env (the file "
+                "docker/docker-compose.yml passes to ai-gateway via env_file).",
+                _RUNTIME_URL_ENV,
+                canonical,
+                _LEGACY_RUNTIME_URL_ENV,
+                legacy,
+                _RUNTIME_URL_ENV,
+                _LEGACY_RUNTIME_URL_ENV,
+            )
+        return canonical
+
+    if legacy:
+        logger.warning(
+            "%s is DEPRECATED — rename it to %s in the repo-root .env (the file "
+            "docker/docker-compose.yml passes to ai-gateway via env_file), then "
+            "recreate the ai-gateway container (`docker restart` re-reads no "
+            "env). The name predates ADR-036: the endpoint serves Docker Model "
+            "Runner on a default box, so the OLLAMA_ prefix names an "
+            "implementation detail rather than the contract. Honoring the "
+            "deprecated name for now; a future ticket removes this fallback "
+            "once every deployed box has migrated.",
+            _LEGACY_RUNTIME_URL_ENV,
+            _RUNTIME_URL_ENV,
+        )
+        return legacy
+
+    return _DEFAULT_RUNTIME_URL
+
+
+# Resolved ONCE at import, like INFERENCE_MANAGER_URL below, so the deprecation
+# warning is emitted once per process rather than once per request.
+INFERENCE_RUNTIME_URL = _resolve_runtime_url()
 
 # XR-05: /health (the appliance limits + readiness contract) lives on the
 # model-lifecycle manager (:8002), NOT on Ollama (:11434). On the canonical
@@ -224,7 +317,7 @@ _TAGS_TIMEOUT_S = 5.0
 # form, not because the migration needs it. The desk analysis originally
 # assumed the `/engines` prefix was mandatory; measurement said otherwise.
 #
-# The path is resolved RELATIVE to OLLAMA_URL, so it composes with the opt-in
+# The path is resolved RELATIVE to the inference URL, so it composes with the opt-in
 # `/proxy` base the same way the hardcoded literal did.
 _DEFAULT_CHAT_PATH = "/v1/chat/completions"
 
@@ -267,7 +360,7 @@ def _resolve_inference_runtime(runtime: str | None = None, url: str | None = Non
     off. Every DMR model then reports `tools=false` with no error anywhere, and
     the WARP-1839 grammar outage returns.
 
-    The contradiction is cheap to spot: `OLLAMA_URL` still points at DMR.
+    The contradiction is cheap to spot: the inference URL still points at DMR.
     Runtime "ollama" plus a DMR chat URL cannot both be true, and the only way
     to reach it is a lost variable. Log it at ERROR rather than degrade in
     silence — a box serving without tools looks "up" from every angle except
@@ -280,17 +373,20 @@ def _resolve_inference_runtime(runtime: str | None = None, url: str | None = Non
     """
     resolved = (runtime if runtime is not None else os.getenv("INFERENCE_RUNTIME", "ollama"))
     resolved = (resolved or "").strip().lower() or "ollama"
-    chat_url = (url if url is not None else OLLAMA_URL) or ""
+    chat_url = (url if url is not None else INFERENCE_RUNTIME_URL) or ""
     looks_like_dmr = "dmr" in chat_url.lower() or ":12434" in chat_url
     if resolved != "dmr" and looks_like_dmr:
         logger.error(
-            "INFERENCE_RUNTIME=%r but OLLAMA_URL=%r points at the Docker Model "
+            "INFERENCE_RUNTIME=%r but the inference URL (%s / the deprecated "
+            "%s) is %r, which points at the Docker Model "
             "Runner. The runtime variable was almost certainly lost (a compose "
             "${VAR:-} resolving against the wrong env file, or a `docker "
             "restart`, which re-reads nothing — use --force-recreate). Serving "
             "with DMR support OFF: every model will report tools=false and "
             "tool schemas will not be grammar-stripped (WARP-1839).",
             resolved,
+            _RUNTIME_URL_ENV,
+            _LEGACY_RUNTIME_URL_ENV,
             chat_url,
         )
     return resolved
@@ -550,7 +646,7 @@ class _LimitsCache:
                 # here can't strand anyone.
                 logger.info(
                     "appliance_limits_probe_skipped: no INFERENCE_MANAGER_URL and "
-                    "OLLAMA_URL is the direct path — using default limits "
+                    "the inference URL is the direct path — using default limits "
                     "(num_parallel=%d, max_queue=%d, max_loaded_models=%d). "
                     "Set INFERENCE_MANAGER_URL to size outbound concurrency.",
                     self.num_parallel,
@@ -643,13 +739,14 @@ def model_supports_reasoning_effort(model: str) -> bool:
 class OllamaLocalProvider(BaseProvider):
     """Provider for the local Ollama instance.
 
-    Endpoint is configured via OLLAMA_URL; works against the bundled
+    Endpoint is configured via INFERENCE_RUNTIME_URL (the deprecated
+    OLLAMA_URL still works); works against the bundled
     `ollama` compose service (single-box), a separate inference host
     over LAN (multi-box), or a host-installed Ollama (local dev).
     """
 
     def __init__(self, base_url: str | None = None):
-        self.base_url = (base_url or OLLAMA_URL).rstrip("/")
+        self.base_url = (base_url or INFERENCE_RUNTIME_URL).rstrip("/")
         self._limits = _LimitsCache(self.base_url)
         self._sema: asyncio.Semaphore | None = None
         # Track the size used to construct the current `_sema`. asyncio.Semaphore
@@ -673,6 +770,9 @@ class OllamaLocalProvider(BaseProvider):
         # else an `/api/show` probe — see _capabilities) and reuse the result
         # across list_models calls.
         self._caps_cache: dict[str, ModelCapabilities | None] = {}
+        # WARP-2882 — TRAINED context length read off the same `/api/show`
+        # probe. Not the served window (see list_models).
+        self._ctx_cache: dict[str, int | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
         """(Re)build the in-flight semaphore at the requested size."""
@@ -750,6 +850,7 @@ class OllamaLocalProvider(BaseProvider):
             resp.raise_for_status()
             show = resp.json()
             caps = ollama_capabilities_from_show(show)
+            self._ctx_cache[model] = ollama_context_window_from_show(show)
         except Exception as e:  # noqa: BLE001 — probe is best-effort
             logger.debug("ollama /api/show failed for %s: %s", model, e)
         # Gap-filler only. `show is None` = probe failed; a show without
@@ -786,6 +887,9 @@ class OllamaLocalProvider(BaseProvider):
         out: list[ModelInfo] = []
         for m in data.get("models", []):
             name = m["name"]
+            # WARP-2882 — probe first: the same `/api/show` call fills the
+            # trained-context cache the field below reads.
+            caps = await self._capabilities(name)
             out.append(
                 ModelInfo(
                     id=name,
@@ -796,8 +900,13 @@ class OllamaLocalProvider(BaseProvider):
                     # Runner served every token.
                     provider="local",
                     name=prettify_model_name(name),
+                    # Stays None: the SERVED window is OLLAMA_CONTEXT_LENGTH,
+                    # an operator setting the orchestrator already budgets
+                    # against. The probed value is the TRAINED length — display
+                    # only, never a budget (WARP-2882 review, WARP-854).
                     context_window=None,
-                    capabilities=await self._capabilities(name),
+                    trained_context_window=self._ctx_cache.get(name),
+                    capabilities=caps,
                 )
             )
         return out

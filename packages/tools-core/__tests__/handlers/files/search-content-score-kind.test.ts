@@ -23,11 +23,12 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { getTool } from "../../../src/index.js";
 import type { ScoreKind, ToolContext } from "../../../src/types.js";
 
-function makeCtx(searchHybrid: ReturnType<typeof vi.fn>): ToolContext {
+function makeCtx(searchHybrid: Mock): ToolContext {
   return {
     prisma: {} as PrismaClient,
     http: {} as ToolContext["http"],

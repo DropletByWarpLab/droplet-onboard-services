@@ -26,9 +26,14 @@
 #   frigate-env-scan      — WARP-446 class: committed docker/frigate/config.yml
 #                           referencing operator-specific env vars (KeyError
 #                           on first boot).
-#   shellcheck            — local-dns.sh class: bash bugs caught by static
+#   `shellcheck`          — local-dns.sh class: bash bugs caught by static
 #                           analysis (parse errors, quoting, declared-but-
-#                           unused vars).
+#                           unused vars). Backticked deliberately: a comment
+#                           whose first word is the bare token `shellcheck`
+#                           parses as a malformed ShellCheck DIRECTIVE
+#                           (SC1073/SC1072, error severity), which aborts the
+#                           parse and silently leaves the rest of this file
+#                           unlinted. WARP-2477.
 #   matter-env-allowlist  — architecture-guard rule 11: MATTER_* env vars
 #                           outside the allowlist crash matter.js controller
 #                           init. Delegates to scripts/test-security.sh.
@@ -68,10 +73,58 @@
 #   1  one or more checks failed
 #   2  invalid CLI args or required tool missing
 #   3  setup precondition failure (not in a git repo, etc.)
+#   4  the harness itself COULD NOT RUN (interpreter too old). Deliberately
+#      distinct from 1 so no caller can read "never executed" as "executed
+#      and passed" -- see the bash version floor below (WARP-2449).
+#  77  every check that ran passed, but at least one SKIPPED -- it could not
+#      evaluate its subject for an environmental reason it names on the SKIP
+#      line. Same "did not run is not a pass" principle as 4, and the same
+#      autotools convention scripts/test/ship-check.test.sh already uses for
+#      a skipping case (WARP-2646).
 #
 # WARP-482, WARP-487, WARP-494.
 # =============================================================================
 set -euo pipefail
+
+# --- Bash version floor (WARP-2449) ------------------------------------------
+# This script is written to the feature set of bash 3.2 -- the version macOS has
+# shipped since 2007 and, for GPLv3 licensing reasons, will never update. That
+# is a deliberate constraint, not an accident: this script IS the pre-PR gate
+# that .claude/skills/preflight/SKILL.md and docs/integrations/ADD-A-PROVIDER.md
+# mandate, so it has to be runnable on the primary dev Mac. For months it was
+# not: associative arrays (the bash-4-only `-A` option to `declare`) made it die
+# at line 115 with a raw `declare: -A: invalid option`, so the documented gate
+# was silently skipped by everyone who followed the docs exactly.
+#
+# The floor is ASSERTED rather than assumed, so the next edit that reaches for a
+# newer builtin fails with an actionable sentence instead of a builtin error. If
+# you introduce a dependency on a newer bash, raise MIN_BASH_MAJOR/MIN_BASH_MINOR
+# in the SAME commit -- never leave the floor lying about what the script needs.
+EXIT_CANNOT_RUN=4
+# WARP-2646 -- "ran, everything that ran passed, but something could not be
+# evaluated here". 77 is the autotools skip convention and is already what a
+# skipping case returns in scripts/test/ship-check.test.sh (WARP-2637), so the
+# gate and its harness now speak the same code for the same idea.
+EXIT_SKIPPED=77
+MIN_BASH_MAJOR=3
+MIN_BASH_MINOR=2
+_bash_major="${BASH_VERSINFO[0]:-0}"
+_bash_minor="${BASH_VERSINFO[1]:-0}"
+if [ "$_bash_major" -lt "$MIN_BASH_MAJOR" ] ||
+   { [ "$_bash_major" -eq "$MIN_BASH_MAJOR" ] && [ "$_bash_minor" -lt "$MIN_BASH_MINOR" ]; }; then
+  printf 'error: ship-check.sh COULD NOT RUN -- it requires bash %s.%s or newer.\n' \
+    "$MIN_BASH_MAJOR" "$MIN_BASH_MINOR" >&2
+  printf '       Interpreter in use: %s\n' "${BASH_VERSION:-not bash}" >&2
+  printf '       macOS ships bash 3.2.57 as /bin/bash and cannot upgrade it in place.\n' >&2
+  printf '       Install a current bash and put it ahead of /bin on PATH:\n' >&2
+  printf '\n' >&2
+  printf '         brew install bash\n' >&2
+  printf '\n' >&2
+  printf '       Exit code %s means COULD NOT RUN. It is deliberately different from\n' "$EXIT_CANNOT_RUN" >&2
+  printf '       exit 1 ("ran, a check failed"), so this can never be mistaken for a\n' >&2
+  printf '       gate that passed.\n' >&2
+  exit "$EXIT_CANNOT_RUN"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Honour REPO_ROOT if the caller (typically the test harness) has already
@@ -106,13 +159,46 @@ ALL_CHECKS=(
   lifecycle-naming
   image-pipeline
   tls-invariants
+  app-downloads
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
 )
 
-# Per-check result tracking. Keys = check name, values = "pass"/"fail"/"skip".
-declare -A CHECK_RESULTS=()
+# Per-check result tracking. Two parallel indexed arrays rather than one
+# associative array: bash 3.2 (the stock macOS interpreter, see the version
+# floor above) has no associative arrays, and this script has to run there.
+# CHECK_RESULT_NAMES[i] is the check name, CHECK_RESULT_VALUES[i] its
+# "pass"/"fail"/"skip". Iteration order is therefore insertion order, which is
+# ALL_CHECKS order -- deterministic, unlike an associative array's hash order.
+CHECK_RESULT_NAMES=()
+CHECK_RESULT_VALUES=()
+
+# Upsert one check's result. Linear scan: the registry is a dozen entries and
+# each check records exactly once, so the cost is noise next to running tsc.
+_record_result() {
+  local name="$1" value="$2" i
+  for ((i = 0; i < ${#CHECK_RESULT_NAMES[@]}; i++)); do
+    if [ "${CHECK_RESULT_NAMES[$i]}" = "$name" ]; then
+      CHECK_RESULT_VALUES[$i]="$value"
+      return 0
+    fi
+  done
+  CHECK_RESULT_NAMES+=("$name")
+  CHECK_RESULT_VALUES+=("$value")
+}
+
+# Membership test for the small per-line allowlists further down. $1 is the
+# key, $2 a newline-delimited list of keys. Whole-line, literal match (the key
+# is quoted inside the case pattern, so glob metacharacters in a path cannot
+# widen it), and an empty list correctly matches nothing.
+_allowlisted() {
+  local key="$1" list="$2"
+  case $'\n'"$list" in
+    *$'\n'"$key"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
 
 usage() {
   cat <<'USAGE'
@@ -124,6 +210,14 @@ push that touches Dockerfile / compose / scripts / orchestrator TypeScript.
 
 OPTIONS
   --full              Also run --full-only checks (docker-build-smoke, ~15min)
+  --list-scanned      Debug: print the surface set a scan-based check
+                      inspects, one repo-relative path per line, and exit
+                      without scanning. Diff two runs to prove a change to
+                      the scan machinery did not change coverage. Supported
+                      for stale-repo-names (the default) and
+                      lifecycle-naming; pass the check name as the
+                      subcommand, e.g.
+                      `ship-check.sh --list-scanned lifecycle-naming`.
   -h, --help          Show this help and the full check list
 
 SUBCOMMAND
@@ -144,18 +238,38 @@ EXAMPLES
 
 CHECKS
 
-  tsc-full              Run `npx tsc --noEmit` in every workspace that ships
-                        a Dockerfile (orchestrator, web-dashboard, tools-core,
-                        mcp-server, fips-selftest). Prisma generate runs first
-                        so orchestrator's `@prisma/client` import resolves.
+  tsc-full              Run `npx tsc --noEmit` in every TypeScript workspace
+                        (orchestrator, web-dashboard, auth-policy,
+                        fips-selftest, shared-types, tools-core, erp-connector,
+                        matter-controller, mcp-bridge, mcp-server). Prisma
+                        generate runs first so orchestrator's `@prisma/client`
+                        import resolves.
                         Prevents: WARP-329 class — test fixtures missing
                         required fields that `npm run dev` skips but the
                         Dockerfile's `npm run build` catches.
+                        Then runs a SECOND pass, `npx tsc --noEmit -p
+                        tsconfig.test.json`, in each of those workspaces that
+                        ships one. A workspace's `tsconfig.json` is a BUILD
+                        config and may legitimately exclude its tests — as
+                        `packages/tools-core` did, leaving all 133 of its
+                        `__tests__/` files unchecked by anything, since
+                        `vitest` strips types without checking them. A listed
+                        workspace joins this pass by adding the file; the one
+                        list both passes walk is `ws_list` in
+                        run_check_tsc_full, gated against the tree by the
+                        self-test (WARP-2617).
 
   compose-config        Run `docker compose config --quiet` against
                         docker/docker-compose.yml using .env.example (falls
                         back to .env). Catches YAML breakage, missing
                         required env var refs, and malformed service defs.
+                        SKIPs (exit 77, never a pass) when it could not
+                        evaluate the tree at all: no .env at the repo root —
+                        compose resolves the merged tree's `env_file: ../.env`
+                        regardless of --env-file, and .env is .gitignored, so
+                        a fresh worktree has none — or a Docker client that
+                        cannot reach its daemon. FAILs only when compose
+                        actually rejects the file it names. WARP-2646.
 
   frigate-env-scan      Parse docker/frigate/config.yml for every {VAR}
                         substitution outside comments and assert each one
@@ -166,10 +280,11 @@ CHECKS
                         was never seeded, KeyError-crashing Frigate at boot.
 
   shellcheck            Run shellcheck on scripts/setup.sh,
-                        scripts/factory-reset.sh, and scripts/lib/*.sh at
-                        warning severity. Requires shellcheck on PATH; the
-                        script FAILS (not skips) if it is missing — install
-                        it before you ship.
+                        scripts/factory-reset.sh, scripts/lib/*.sh, and this
+                        gate itself (scripts/test/ship-check.sh and its test
+                        harness) at warning severity. Requires shellcheck on
+                        PATH; the script FAILS (not skips) if it is missing —
+                        install it before you ship.
 
   matter-env-allowlist  Delegate to scripts/test-security.sh, which already
                         enforces the architecture-guard rule 11 (MATTER_*
@@ -272,6 +387,9 @@ CHECKS
                         WARP-456 (missing audit-key mount) and WARP-229
                         (missing FIPS opt-out env) because those manifest at
                         boot, not at build.
+                        SKIPs (exit 77) when the Docker daemon is unreachable
+                        — there is no container to smoke-test, so a stopped
+                        daemon says nothing about setup.sh. WARP-2646.
 
 WHY THIS SCRIPT EXISTS
 
@@ -309,50 +427,71 @@ run_check_tsc_full() {
   local rc=0
   local out
 
-  # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
-  # the current schema or every Prisma-typed call site shows TS2305).
+  # Phases 1 + 2 (prisma generate, then build the leaf workspaces so their
+  # dist + .d.ts exist for downstream type resolution) are DELEGATED to
+  # scripts/bootstrap.sh — the same `npm run bootstrap` a developer runs after
+  # `npm ci`. WARP-2620: the leaf list was duplicated between this function,
+  # CONTRIBUTING.md and ci.yml and had already drifted (this copy omitted
+  # @droplet/shared-types; CONTRIBUTING's copy omitted @droplet/mcp-server),
+  # so a fresh checkout failed differently depending on which list you
+  # followed. One list now, in one file.
   #
-  # Pinned to the orchestrator workspace's `db:generate` script (WARP-492).
-  # The script body is `prisma generate`; npm resolves it through the
-  # workspace's `node_modules/.bin/prisma`, which is the `^5.14.0` pin
-  # declared in apps/orchestrator/package.json. The earlier form
-  # (`npx prisma generate`) silently fetched the LATEST published prisma
-  # (7.x at time of writing) off the npm registry whenever no local
-  # node_modules tree was present — and prisma 7 rejects this schema with
-  # P1012 ("datasource property `url` is no longer supported"), wedging
-  # ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
-  # ("prisma is not recognized" / "Missing script") when node_modules is
-  # missing instead of misleading the operator with a phantom P1012.
-  if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
-    if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
-      printf '%s\n' "$out" | sed 's/^/    | /' >&2
-      CHECK_RESULTS[$label]=fail
-      return 1
-    fi
+  # Two behaviours that live in bootstrap.sh and matter here:
+  #   - prisma generate is pinned to the orchestrator workspace's
+  #     `db:generate` script (WARP-492) rather than `npx prisma generate`,
+  #     which silently fetches the LATEST published prisma off the registry
+  #     when no local binary resolves — and prisma 7 rejects this schema with
+  #     P1012 ("datasource property `url` is no longer supported"), wedging
+  #     ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
+  #     instead. The WARP-492 self-test case still discriminates on this.
+  #   - each leaf `dist/` is removed before its build. `tsc` emits but never
+  #     prunes, so a file moved out of `src/` survives in `dist/` forever —
+  #     that is how a clean checkout reds the WARP-2515 guard on a phantom
+  #     `handlers/pm/pm-orch.test.js`.
+  if ! out="$(cd "$REPO_ROOT" && bash scripts/bootstrap.sh 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — workspace bootstrap failed (npm run bootstrap)\n" "$label"
+    printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
+    _record_result "$label" fail
+    return 1
   fi
 
-  # Phase 2: build leaf workspaces so their dist + .d.ts exist for
-  # downstream type resolution. These are the same RUN steps the
-  # orchestrator Dockerfile executes.
-  local leaf_pkg
-  for leaf_pkg in @droplet/erp-connector @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
-    if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
-      printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
-      CHECK_RESULTS[$label]=fail
-      return 1
-    fi
-  done
+  # WARP-2617 — the ONE list of TypeScript workspaces phases 3 and 4 walk.
+  # It used to be written out twice, once per phase, and that was the bug: a
+  # workspace absent from the lists is skipped by BOTH passes, so
+  # `services/matter-controller` (6 test files, `__tests__` in its tsconfig
+  # `exclude`) and `packages/auth-policy` (3 test files) had neither their
+  # source nor their tests checked by anything — and adding a
+  # `tsconfig.test.json` to either would have changed nothing on its own.
+  # That is how the hole survived PR #1943, which closed the same class in
+  # four other workspaces.
+  #
+  # Kept explicit rather than globbed so the set under check is reviewable in
+  # the diff. `scripts/test/ship-check.test.sh` gates it against the tree: any
+  # apps/*, services/* or packages/* directory shipping a tsconfig.json that
+  # is missing here fails the self-test.
+  local ws_list=(
+    apps/orchestrator
+    apps/web-dashboard
+    packages/auth-policy
+    packages/fips-selftest
+    packages/shared-types
+    packages/tools-core
+    services/erp-connector
+    services/matter-controller
+    services/mcp-bridge
+    services/mcp-server
+  )
 
   # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
   # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
   local ws
+  local checked=0
   local failed_workspaces=()
-  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+  for ws in "${ws_list[@]}"; do
     if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
       continue
     fi
+    checked=$((checked + 1))
     if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit 2>&1)"; then
       failed_workspaces+=("$ws")
       printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s\n" "$label" "$ws"
@@ -367,13 +506,45 @@ run_check_tsc_full() {
     fi
   done
 
+  # Phase 4: SECOND pass over the same workspaces for the ones that ship a
+  # `tsconfig.test.json`. A workspace's own `tsconfig.json` is a BUILD config:
+  # it scopes to what gets emitted, so `packages/tools-core` excluded
+  # `__tests__` and phase 3 above therefore never type-checked a single one of
+  # its 133 test files. That is the exact hole PR #261 (WARP-329) shipped a
+  # TS2322 test fixture through, and `vitest` cannot close it because esbuild
+  # strips types without checking them.
+  #
+  # Opt-in by file existence, so a workspace ALREADY IN `ws_list` above joins
+  # this pass by adding the config — no edit here required. It has to be in
+  # that list first: WARP-2617 found `services/matter-controller` outside it,
+  # where a `tsconfig.test.json` would have been read by nobody.
+  local tested=0
+  for ws in "${ws_list[@]}"; do
+    if [ ! -f "$REPO_ROOT/$ws/tsconfig.test.json" ]; then
+      continue
+    fi
+    tested=$((tested + 1))
+    if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit -p tsconfig.test.json 2>&1)"; then
+      failed_workspaces+=("$ws (tests)")
+      printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s tests\n" "$label" "$ws"
+      printf '%s\n' "$out" | head -20 | sed 's/^/    | /' >&2
+      local extra_t
+      extra_t=$(printf '%s\n' "$out" | wc -l)
+      if [ "$extra_t" -gt 20 ]; then
+        printf "    | (... %d more lines suppressed; cd %s && npx tsc --noEmit -p tsconfig.test.json)\n" \
+          "$((extra_t - 20))" "$ws" >&2
+      fi
+      rc=1
+    fi
+  done
+
   if [ "$rc" -ne 0 ]; then
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
-  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces)\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  printf "  ${_GREEN}PASS${_RESET}  %s (%d workspaces, %d with tests)\n" "$label" "$checked" "$tested"
+  _record_result "$label" pass
   return 0
 }
 
@@ -383,12 +554,28 @@ run_check_compose_config() {
 
   if [ ! -f "$compose" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
   if ! command -v docker >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    # WARP-2645: the backticks that used to be here were inside a
+    # double-quoted printf, so bash ran `compose config` as a command
+    # substitution every time this branch was taken — a gate reporting
+    # "docker is missing" was shelling out to a docker subcommand to
+    # compose its own message.
+    #
+    # WARP-2620: single-quoting the whole FORMAT string fixed that but broke
+    # the colour. printf expands backslash escapes only in the FORMAT string,
+    # and `_RED` is the literal six characters `\033[0;31m` — so
+    # passing it as a %s ARGUMENT printed those characters verbatim instead of
+    # colouring anything. Invisible in CI, where `_RED=''` because stdout is
+    # not a tty, and a literal `\033[0;31m` in front of every FAIL banner on an
+    # operator's terminal. So: the colours go back in the format string, and
+    # the prose that carried the backticks moves out into a single-quoted
+    # ARGUMENT, where nothing it ever grows can be substituted.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s\n" "$label" \
+      'docker not on PATH (required for "docker compose config")'
+    _record_result "$label" fail
     return 1
   fi
 
@@ -401,21 +588,89 @@ run_check_compose_config() {
     env_file="$REPO_ROOT/.env"
   else
     printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   local out
   if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
-    printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
+    # WARP-2646 — a non-zero exit here is NOT yet evidence of a bad compose
+    # file. Two environmental causes reach this same branch, and until they
+    # are separated out a perfectly good tree reads as a broken one (which is
+    # also what let the self-test's YAML-break case pass on a machine where
+    # the gate could not evaluate the mutation at all — WARP-2645).
+    #
+    # Both are matched with `case`, not grep: no subprocess, no pipefail
+    # SIGPIPE hazard, and `*` spans newlines so a multi-line `out` matches.
+
+    # (1) No `.env` at the repo root. .env is .gitignored and written by
+    #     setup.sh, so a fresh clone or a new git worktree has none — but
+    #     `docker/docker-compose.yml` still declares `env_file: ../.env` and
+    #     compose resolves it while merging, independently of --env-file.
+    #     Confirmed two ways before skipping: compose named the file, AND the
+    #     file really is absent. CI seeds one (.github/workflows/ci.yml,
+    #     "Seed .env for the compose-config case").
+    #     The pattern stops at `.env`, not `/.env`: on Windows Git Bash
+    #     compose prints `env file C:\...\.env not found`, and the separator
+    #     would have turned this skip back into the bogus FAIL it replaces.
+    #     The `-f` check below is what confirms it is OUR .env either way.
+    case "$out" in
+      *"env file "*".env not found"*)
+        if [ ! -f "$REPO_ROOT/.env" ]; then
+          printf '  %sSKIP%s  %s — no .env in this worktree, so the merged tree cannot be resolved\n' \
+            "$_YELLOW" "$_RESET" "$label"
+          printf "    | %s declares \`env_file: ../.env\`; compose resolves that\n" \
+            "${compose#"$REPO_ROOT"/}" >&2
+          printf "    | while merging, whatever --env-file says.\n" >&2
+          printf "    | Fix: run ./scripts/setup.sh, or \`cp .env.example .env\`.\n" >&2
+          _record_result "$label" skip
+          return "$EXIT_SKIPPED"
+        fi
+        ;;
+    esac
+
+    # (2) The daemon is unreachable in a way compose surfaces. NOTE the guard
+    #     is deliberately here and not a `docker info` preflight like
+    #     docker-build-smoke's: `docker compose config` is a CLIENT-SIDE
+    #     merge and does not need a daemon. Measured on docker 29.5.2 /
+    #     compose v2 (2026-09-02): with DOCKER_HOST pointed at a dead socket,
+    #     and with `docker info` shimmed to fail, this check still runs and
+    #     still PASSES. A preflight would therefore skip a check that can run
+    #     — a gate made vacuous for a reason that was never true. This branch
+    #     only fires when compose ITSELF says it could not reach the daemon.
+    case "$out" in
+      *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*|*"docker daemon is not running"*)
+        printf '  %sSKIP%s  %s — Docker daemon not reachable (colima / Docker Desktop stopped?)\n' \
+          "$_YELLOW" "$_RESET" "$label"
+        printf '%s\n' "$out" | sed 's/^/    | /' >&2
+        printf "    | \`docker compose config\` does not normally need the daemon;\n" >&2
+        printf "    | this client could not reach it at all, so nothing was validated.\n" >&2
+        _record_result "$label" skip
+        return "$EXIT_SKIPPED"
+        ;;
+    esac
+
+    # The message also has to NAME the file it rejected. Every environmental
+    # way this branch can be reached — daemon down, missing .env, docker
+    # missing at exec time — produces the same banner otherwise, which is
+    # what let a self-test assert "compose-config failed" and call that proof
+    # the planted YAML break was caught.
+    #
+    # WARP-2620 / WARP-2645: colours in the format string, prose in a
+    # single-quoted argument — see the `docker not on PATH` branch above for
+    # why both. Backticks inside a double-quoted printf here once ran a SECOND,
+    # argument-less `docker compose config` in the caller's cwd, whose "no
+    # configuration file provided" landed one line ABOVE the real diagnostic.
+    printf "  ${_RED}FAIL${_RESET}  %s — %s %s\n" \
+      "$label" '"docker compose config" rejected' "${compose#"$REPO_ROOT"/}"
     printf '%s\n' "$out" | sed 's/^/    | /' >&2
     printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (env-file: %s)\n" "$label" "${env_file#$REPO_ROOT/}"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -445,7 +700,7 @@ run_check_compose_env_shadow() {
 
   if [ ! -f "$compose" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -473,12 +728,12 @@ run_check_compose_env_shadow() {
     printf "        Each resolves against the project .env, NOT the env_file above it.\n"
     printf "        If that file lacks the key the value becomes \"\" and OVERWRITES the\n"
     printf "        real one (WARP-1860). Delete the line — env_file already carries it.\n"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s — no credential is shadowed by an empty substitution\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
 }
 
@@ -505,12 +760,12 @@ run_check_frigate_env_scan() {
 
   if [ ! -f "$cfg" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$cfg"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
   if [ ! -f "$env_example" ] && [ ! -f "$REPO_ROOT/.env" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -533,7 +788,7 @@ run_check_frigate_env_scan() {
           | sed 's/=$//'
       fi
       # 2. scripts/lib/secrets.sh — the boot-time heredoc writes these
-      #    into .env every fresh provisioning, so they're always present
+      #    into .env every fresh provisioning, so they are always present
       #    at Frigate start time on a real device.
       if [ -f "$secrets_sh" ]; then
         sed 's/#.*$//' "$secrets_sh" \
@@ -582,7 +837,7 @@ run_check_frigate_env_scan() {
 
   if [ -z "$matches" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (no {VAR} substitutions in config)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -602,7 +857,7 @@ run_check_frigate_env_scan() {
     local ref_count
     ref_count="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
     printf "  ${_GREEN}PASS${_RESET}  %s (%d reference(s) all resolved)\n" "$label" "$ref_count"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -612,16 +867,23 @@ run_check_frigate_env_scan() {
   printf "    | refs raise KeyError and the container restart-loops the stack.\n" >&2
   printf "    | Either remove the offending block from docker/frigate/config.yml\n" >&2
   printf "    | or seed the variable in scripts/lib/secrets.sh / .env.example.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
 run_check_shellcheck() {
-  # Run shellcheck across the three high-blast-radius script sets:
+  # Run shellcheck across the high-blast-radius script sets:
   #   - scripts/setup.sh           (single-entry-point installer)
   #   - scripts/factory-reset.sh   (wipe-and-restart path)
   #   - scripts/lib/*.sh           (sourced helpers — every check pulls
   #                                 these in transitively)
+  #   - scripts/test/ship-check.sh + ship-check.test.sh  (WARP-2477 — the
+  #                                 gate and its harness. Until WARP-2477
+  #                                 these were the one pair of shell files
+  #                                 the gate never pointed at itself, so a
+  #                                 bug in the thing that catches bugs had
+  #                                 no catcher. They are ~3.3k lines of
+  #                                 bash that every PR depends on.)
   #
   # Severity is `warning`, which includes the `error` band (SC2168
   # "local outside function" — the very class of bug that escaped review
@@ -656,16 +918,27 @@ run_check_shellcheck() {
     printf "    | This check FAILS (not skips) by design — the gate must\n" >&2
     printf "    | catch the local-dns.sh class of regressions, and that\n" >&2
     printf "    | requires shellcheck running.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   # Build the target list. Glob expands lib/*.sh against the real tree;
   # if any of these files is missing it's a setup precondition issue and
-  # shellcheck will surface it loudly.
+  # ShellCheck will surface it loudly. (Capitalised so this line does not
+  # open with the bare token `shellcheck` — see WARP-2477 and the note at
+  # the head of this file.)
+  #
+  # WARP-2620 added scripts/bootstrap.sh. It is 238 lines of bash on the
+  # `tsc-full` critical path (this file runs it before every typecheck) and it
+  # is the command CLAUDE.md and CONTRIBUTING.md both tell a new implementer to
+  # run first — the same argument that put this gate's own two files on the
+  # list under WARP-2477. It is clean today; this is what keeps it that way.
   local targets=()
   local file
-  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh"; do
+  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/bootstrap.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.sh" \
+              "$REPO_ROOT/scripts/test/ship-check.test.sh"; do
     if [ -f "$file" ]; then
       targets+=("$file")
     fi
@@ -678,7 +951,7 @@ run_check_shellcheck() {
 
   if [ "${#targets[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no target scripts found\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -687,16 +960,24 @@ run_check_shellcheck() {
   # `source` directives so cross-file undeclared-var detection works AND
   # so the analyzer doesn't bail on dynamic-path sources we can't
   # statically resolve (the `source "$libdir/x"` pattern in setup.sh).
+  #
+  # WARP-2492: the `&& rc=0 || rc=$?` tail is load-bearing, not noise. This
+  # script runs `set -euo pipefail`, and shellcheck exits non-zero precisely
+  # when it has findings to report. As a BARE assignment the non-zero status
+  # propagates and `set -e` kills the script AT THIS LINE — before the FAIL
+  # banner, before the finding list. The operator got exit 1 and a header,
+  # and never learned which file or which code. An AND-OR list is exempt from
+  # `set -e`, so the status lands in rc and the reporting path below runs.
+  # Same shape the image-pipeline check already used for its own capture.
   local out rc
   out="$(shellcheck \
     --severity=warning \
     --external-sources \
-    "${targets[@]}" 2>&1)"
-  rc=$?
+    "${targets[@]}" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s))\n" "$label" "${#targets[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -708,7 +989,7 @@ run_check_shellcheck() {
     printf "    | (... %d more lines suppressed; run shellcheck --severity=warning directly)\n" \
       "$((total - 40))" >&2
   fi
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -734,7 +1015,7 @@ run_check_matter_env_allowlist() {
 
   if [ ! -f "$security_sh" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — scripts/test-security.sh not found\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -753,13 +1034,13 @@ run_check_matter_env_allowlist() {
   if [ -z "$matter_line" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — MATTER_* allowlist line missing from test-security.sh output\n" "$label"
     printf "    | (Has Test 7 changed shape? Check scripts/test-security.sh.)\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   if printf '%s' "$matter_line" | grep -q 'PASS'; then
     printf "  ${_GREEN}PASS${_RESET}  %s (delegated to scripts/test-security.sh)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -770,7 +1051,7 @@ run_check_matter_env_allowlist() {
   printf '%s\n' "$out" | tail -25 | sed 's/^/    | /' >&2
   printf "    | (Use DROPLET_MATTER_* prefix for new env vars — see\n" >&2
   printf "    |  apps/orchestrator/src/config.ts for full rationale.)\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -867,7 +1148,7 @@ run_check_exec_bits() {
     printf '%s' "$missing_files" >&2
     printf "    | Either restore the file(s) or update the required[] array\n" >&2
     printf "    | in run_check_exec_bits if the script was intentionally removed.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -877,12 +1158,68 @@ run_check_exec_bits() {
     printf "    | The working-tree bit is unreliable cross-platform; the INDEX\n" >&2
     printf "    | mode is the canonical signal. Run the suggested\n" >&2
     printf "    | git update-index --chmod=+x command(s) and re-commit.\n" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s) all 100755 in index)\n" "$label" "${#required[@]}"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
+  return 0
+}
+
+# Emit the curated surface set that `stale-repo-names` scans: one
+# repo-relative path per line, in the order the check inspects them. Each
+# entry is a path `grep` can ingest. Recursive trees are resolved with find
+# rather than bash globstar (which is opt-in via `shopt -s globstar` and not
+# guaranteed across operator shells).
+#
+# This is the SINGLE source of truth for the scanned set -- the check reads
+# it, and so does `--list-scanned`. The debug flag therefore cannot drift
+# from what is actually inspected, which is what makes a before/after diff
+# of the scanned set a real proof rather than a restatement (WARP-2456).
+# The surface list itself is documented, with rationale for every inclusion
+# and exemption, in run_check_stale_repo_names below.
+_stale_repo_names_surfaces() {
+  local f svc
+
+  # Top-level README + the compose file.
+  for f in "README.md" "docker/docker-compose.yml"; do
+    [ -f "$REPO_ROOT/$f" ] && printf '%s\n' "$f"
+  done
+
+  # services/*/README.md and services/*/TESTING.md (immediate children only).
+  if [ -d "$REPO_ROOT/services" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
+             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
+  fi
+
+  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
+  # exempt for the mDNS hostname allowlist).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # apps/orchestrator/src/**/*.ts (recursive, including *.test.ts — the
+  # canonical name should reach test fixtures too).
+  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
+  fi
+
+  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
+  for svc in services/ai-gateway services/voice-io; do
+    if [ -d "$REPO_ROOT/$svc" ]; then
+      while IFS= read -r f; do
+        printf '%s\n' "${f#$REPO_ROOT/}"
+      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
+    fi
+  done
+
   return 0
 }
 
@@ -952,107 +1289,104 @@ run_check_stale_repo_names() {
   # `.local` disqualifies it as a repo-name reference.
   local label="stale-repo-names"
 
-  # Surface walk — build the file list. Each entry is a repo-relative path
-  # that grep -nE can ingest. We resolve recursive trees with find rather
-  # than relying on bash globstar (which is opt-in via `shopt -s globstar`
-  # and not guaranteed across operator shells).
+  # Surface walk — see _stale_repo_names_surfaces above, which owns the
+  # walk so the check and `--list-scanned` can never disagree about what is
+  # in scope.
   local files=()
   local f
-
-  # Top-level README + the compose file.
-  for f in "README.md" "docker/docker-compose.yml"; do
-    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
-  done
-
-  # services/*/README.md and services/*/TESTING.md (immediate children only).
-  if [ -d "$REPO_ROOT/services" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
-             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
-  fi
-
-  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
-  # exempt for the mDNS hostname allowlist).
-  if [ -d "$REPO_ROOT/scripts" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
-
-  # apps/orchestrator/src/**/*.ts (recursive, but NOT *.test.ts — those
-  # are test-only and not user-facing). All .ts files are in scope per
-  # the ticket; we include .test.ts deliberately because the canonical
-  # name should reach test fixtures too.
-  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
-  fi
-
-  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
-  local svc
-  for svc in services/ai-gateway services/voice-io; do
-    if [ -d "$REPO_ROOT/$svc" ]; then
-      while IFS= read -r f; do
-        files+=("${f#$REPO_ROOT/}")
-      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
-    fi
-  done
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(_stale_repo_names_surfaces)
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
-  # Per-line allowlist. Keys are "<repo-relative-path>:<lineno>"; each
-  # value is documented above next to the corresponding rationale.
-  # Lookup is O(1) via an associative array.
-  declare -A allowlist
-  allowlist["docker/docker-compose.yml:7"]=1
-  allowlist["docker/docker-compose.yml:10"]=1
-  allowlist["scripts/verify.sh:161"]=1
-  allowlist["scripts/verify.sh:164"]=1
-  allowlist["services/voice-io/TESTING.md:171"]=1
-  allowlist["services/ops-console/README.md:58"]=1
+  # Per-line allowlist. Entries are "<repo-relative-path>:<lineno>"; each is
+  # documented above next to the corresponding rationale. Held as a
+  # newline-delimited list and matched by _allowlisted -- bash 3.2 has no
+  # associative arrays (see the version floor at the top of this file). Only
+  # lines that already matched the stale-name grep reach the lookup, so the
+  # linear scan over six entries costs nothing.
+  local allowlist=""
+  allowlist+="docker/docker-compose.yml:7"$'\n'
+  allowlist+="docker/docker-compose.yml:10"$'\n'
+  allowlist+="scripts/verify.sh:161"$'\n'
+  allowlist+="scripts/verify.sh:164"$'\n'
+  allowlist+="services/voice-io/TESTING.md:171"$'\n'
+  allowlist+="services/ops-console/README.md:58"$'\n'
 
-  # Run grep -nE per file, post-filter for the .local exemption and the
-  # per-line allowlist, collect violations.
+  # ONE multi-file grep over the whole surface set, post-processed by a
+  # SINGLE read loop.
+  #
+  # WARP-2456: this used to be `while read … done < <(grep …)` executed once
+  # PER FILE. bash 3.2.57 — the stock macOS /bin/bash, which this script's
+  # version floor commits to supporting — dies with SIGTRAP (exit 133) at
+  # around the 251st iteration of that shape. A synthetic tree of 100 files
+  # survived, 500 crashed; the real tree carries ~1.1k surfaces, so the check
+  # was simply un-runnable on the primary dev machine while CI's bash 5 stayed
+  # green — silent in the direction that hurts. An fd leak, `local` inside the
+  # loop and the inner command substitution were each ruled out standalone;
+  # what remained was the repeated loop-over-process-substitution shape
+  # itself. One grep sidesteps the class entirely, and is faster everywhere.
+  #
+  # Paths are NUL-delimited into xargs so the command line cannot overflow
+  # ARG_MAX as the tree grows; -H forces the `<path>:` prefix even when a
+  # chunk ends up holding a single file, so every output line parses the same
+  # way. grep runs with cwd = REPO_ROOT so the paths it echoes back are
+  # byte-identical to the ones _stale_repo_names_surfaces emitted, which is
+  # what keeps the allowlist keys (`<path>:<lineno>`) matching.
+  #
+  # The pattern is deliberately unanchored (the repo names appear inside
+  # markdown links, code blocks, etc.); the `.local` post-filter below handles
+  # the only ambiguous overlap.
   local violations=""
-  local line lineno content
+  local line rest lineno content residual
+
+  # A ':' in a scanned path would make "<path>:<lineno>:<text>" ambiguous. No
+  # path in this repo has one; fail loudly rather than mis-parse if that ever
+  # changes.
   for f in "${files[@]}"; do
-    # Match either bare repo name. grep -nE returns "<lineno>:<text>".
-    # We don't anchor the pattern (the repo names can appear inside
-    # markdown links, code blocks, etc.); the .local post-filter handles
-    # the only ambiguous overlap.
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-
-      # Post-filter 1: if the line's only stale-name occurrence is
-      # `inference-engine.local` (the mDNS hostname), skip it. We do
-      # this by removing every `.local` suffix occurrence and re-grepping
-      # the residual for either bare pattern.
-      local residual
-      residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
-      if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
-        continue
-      fi
-
-      # Post-filter 2: per-line allowlist.
-      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
-        continue
-      fi
-
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -nE 'inference-engine|droplet-jetson-ai' "$REPO_ROOT/$f" 2>/dev/null || true)
+    case "$f" in
+      *:*)
+        printf "  ${_RED}FAIL${_RESET}  %s — scanned path contains ':' (%s); scan output cannot be parsed unambiguously\n" "$label" "$f"
+        _record_result "$label" fail
+        return 1
+        ;;
+    esac
   done
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+
+    # Post-filter 1: if the line's only stale-name occurrence is
+    # `inference-engine.local` (the mDNS hostname), skip it. We do this by
+    # removing every `.local` suffix occurrence and re-grepping the residual
+    # for either bare pattern.
+    residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
+    if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
+      continue
+    fi
+
+    # Post-filter 2: per-line allowlist.
+    if _allowlisted "$f:$lineno" "$allowlist"; then
+      continue
+    fi
+
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -nHE 'inference-engine|droplet-jetson-ai' 2>/dev/null || true)
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no stale refs)\n" "$label" "${#files[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1069,8 +1403,46 @@ run_check_stale_repo_names() {
   printf "    | If your reference belongs in the allowlist (compose project\n" >&2
   printf "    | name / container labels / etc.), add it to the per-line\n" >&2
   printf "    | allowlist in run_check_stale_repo_names with rationale.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
+}
+
+# Emit the curated surface set that `lifecycle-naming` scans: one
+# repo-relative path per line, in the order the check inspects them. Each
+# entry is a path `grep` can ingest. Recursive trees are resolved with find
+# rather than bash globstar (which is opt-in via `shopt -s globstar` and not
+# guaranteed across operator shells).
+#
+# Deliberately the same shape as _stale_repo_names_surfaces above: this is
+# the SINGLE source of truth for the scanned set -- the check reads it, and
+# so does `--list-scanned lifecycle-naming`. Keeping the two helpers
+# structurally identical is the point, so a future change to one is an
+# obvious prompt to look at the other (WARP-2478). The surface list itself is
+# documented, with rationale for every inclusion and exemption, in
+# run_check_lifecycle_naming below.
+_lifecycle_naming_surfaces() {
+  local f
+
+  # The compose file + the operator-facing env catalogue.
+  for f in "docker/docker-compose.yml" ".env.example"; do
+    [ -f "$REPO_ROOT/$f" ] && printf '%s\n' "$f"
+  done
+
+  # Top-level scripts/*.sh only (NOT scripts/lib, scripts/test, scripts/host).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # scripts/lib/*.sh (sourced helpers).
+  if [ -d "$REPO_ROOT/scripts/lib" ]; then
+    while IFS= read -r f; do
+      printf '%s\n' "${f#$REPO_ROOT/}"
+    done < <(find "$REPO_ROOT/scripts/lib" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  return 0
 }
 
 run_check_lifecycle_naming() {
@@ -1144,31 +1516,19 @@ run_check_lifecycle_naming() {
   # only in those structural positions.
   local label="lifecycle-naming"
 
-  # --- Build the surface file list (find, not globstar — portable). --------
+  # Surface walk — see _lifecycle_naming_surfaces above, which owns the walk
+  # so the check and `--list-scanned lifecycle-naming` can never disagree
+  # about what is in scope.
   local files=()
   local f
-
-  for f in "docker/docker-compose.yml" ".env.example"; do
-    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
-  done
-
-  # Top-level scripts/*.sh only (NOT scripts/lib, scripts/test, scripts/host).
-  if [ -d "$REPO_ROOT/scripts" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
-
-  # scripts/lib/*.sh (sourced helpers).
-  if [ -d "$REPO_ROOT/scripts/lib" ]; then
-    while IFS= read -r f; do
-      files+=("${f#$REPO_ROOT/}")
-    done < <(find "$REPO_ROOT/scripts/lib" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
-  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(_lifecycle_naming_surfaces)
 
   if [ "${#files[@]}" -eq 0 ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -1176,7 +1536,10 @@ run_check_lifecycle_naming() {
   # Empty since WARP-850 retired the grandfathered prose mentions. The
   # declaration stays so the lookup below keeps working when a future
   # (owner-tracked) entry is added.
-  declare -A allowlist
+  # Newline-delimited rather than an associative array because bash 3.2 has
+  # none (see the version floor at the top of this file). Append a future
+  # entry with:  allowlist+="path/to/file.sh:123"$'\n'
+  local allowlist=""
 
   # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
   # the token re-scan, so they're allowed wherever they appear (robust to
@@ -1191,51 +1554,97 @@ run_check_lifecycle_naming() {
   )
 
   # --- Scan. -----------------------------------------------------------------
-  # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
-  # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
+  # TWO multi-file greps over the whole surface set (one per token class),
+  # each post-processed by a SINGLE read loop.
+  #
+  # WARP-2478: both scans used to be `while read … done < <(grep …)` executed
+  # once PER FILE — the exact shape WARP-2456 had to remove from
+  # stale-repo-names, where bash 3.2.57 (the stock macOS /bin/bash this
+  # script's version floor commits to supporting) dies with SIGTRAP, exit
+  # 133, at around the 251st iteration. This check was never red only because
+  # its surface set is smaller: 44 files here against stale-repo-names' ~1.1k
+  # at the time of that fix. Same shape, same growth curve, same wall — and
+  # every new top-level script or scripts/lib helper moved it closer, with
+  # CI's bash 5 structurally unable to see it coming. Converted before it
+  # arrived rather than after.
+  #
+  # Mechanics mirror run_check_stale_repo_names exactly: paths go
+  # NUL-delimited through xargs so the command line cannot overflow ARG_MAX
+  # as the tree grows; -H forces the `<path>:` prefix even when a chunk holds
+  # a single file, so every output line parses the same way; and grep runs
+  # with cwd = REPO_ROOT so the paths it echoes back are byte-identical to
+  # the ones _lifecycle_naming_surfaces emitted — which is what keeps the
+  # allowlist keys (`<path>:<lineno>`) matching.
   local violations=""
-  local line lineno content residual t
+  local line rest lineno content residual t
+
+  # A ':' in a scanned path would make "<path>:<lineno>:<text>" ambiguous. No
+  # path in this repo has one; fail loudly rather than mis-parse if that ever
+  # changes.
   for f in "${files[@]}"; do
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-
-      # Tier 1: strip every grandfathered legacy identifier, then re-test the
-      # residual for a lifecycle token. If nothing remains, this line's only
-      # hit was the known debt → allow.
-      residual="$content"
-      for t in "${grandfathered_tokens[@]}"; do
-        residual="${residual//$t/}"
-      done
-      if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
-        continue
-      fi
-
-      # Tier 2: explicit per-line comment allowlist.
-      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
-        continue
-      fi
-
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -niwE '(poc|prototype)' "$REPO_ROOT/$f" 2>/dev/null || true)
+    case "$f" in
+      *:*)
+        printf "  ${_RED}FAIL${_RESET}  %s — scanned path contains ':' (%s); scan output cannot be parsed unambiguously\n" "$label" "$f"
+        _record_result "$label" fail
+        return 1
+        ;;
+    esac
   done
+
+  # Primary token: whole-word poc|prototype, case-insensitive. We post-filter
+  # each hit through the grandfather tiers.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+
+    # Tier 1: strip every grandfathered legacy identifier, then re-test the
+    # residual for a lifecycle token. If nothing remains, this line's only
+    # hit was the known debt → allow.
+    residual="$content"
+    for t in "${grandfathered_tokens[@]}"; do
+      residual="${residual//$t/}"
+    done
+    if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
+      continue
+    fi
+
+    # Tier 2: explicit per-line comment allowlist.
+    if _allowlisted "$f:$lineno" "$allowlist"; then
+      continue
+    fi
+
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -niwHE '(poc|prototype)' 2>/dev/null || true)
 
   # Structural dev/test framing: only in compose profile entries, a
   # COMPOSE_PROFILES= value, or a --flag. No grandfather entries exist for
   # this class today, so any hit is a violation.
-  for f in "${files[@]}"; do
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lineno="${line%%:*}"
-      content="${line#*:}"
-      violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <({ grep -nE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; grep -nE 'profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; } | sort -t: -k1,1n -u || true)
-  done
+  #
+  # The per-file version ran TWO greps per file and merged them with
+  # `sort -t: -k1,1n -u`, whose only job was to drop the duplicate when a
+  # line matched both patterns. Folding the two patterns into one ERE
+  # alternation removes the duplicate at the source, so the merge sort goes
+  # away entirely — and with it the risk of reordering the report, since one
+  # grep already emits surface order then line order, exactly as before.
+  # `|` is the lowest-precedence ERE operator and each original pattern keeps
+  # its own grouping, so the union matches precisely what the two matched.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    content="${rest#*:}"
+    violations+="    ${f}:${lineno}: ${content}"$'\n'
+  done < <(cd "$REPO_ROOT" && printf '%s\0' "${files[@]}" |
+           xargs -0 grep -nHE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b|profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' 2>/dev/null || true)
 
   if [ -z "$violations" ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no NEW lifecycle-stage naming)\n" "$label" "${#files[@]}"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1253,7 +1662,7 @@ run_check_lifecycle_naming() {
   printf "    | from old boxes) or another tracked exception, add it to the\n" >&2
   printf "    | grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
   printf "    | retirement owner — never as a silent exception.\n" >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1351,10 +1760,10 @@ run_check_tls_invariants() {
 
   if [ "$failures" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ release/deregister)\n" "$label"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1404,7 +1813,7 @@ run_check_image_pipeline() {
   if [ -n "$missing" ]; then
     printf "  ${_RED}FAIL${_RESET}  %s — pipeline file(s) missing\n" "$label"
     printf '%b' "$missing" >&2
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
@@ -1475,13 +1884,83 @@ run_check_image_pipeline() {
   fi
 
   if [ "$failures" -gt 0 ]; then
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
 
   printf "  ${_GREEN}PASS${_RESET}  %s (build-image non-stub; schema + sample manifest valid; scripts clean)\n" "$label"
-  CHECK_RESULTS[$label]=pass
+  _record_result "$label" pass
   return 0
+}
+
+run_check_app_downloads() {
+  # WARP-2666. `/downloads` is where a customer gets the client app for the box
+  # in front of them. Every box that has ever shipped served it empty, and no
+  # gate said so: an empty catalog answers HTTP 200 with available:false, which
+  # is correct for the API and invisible to everything downstream of it.
+  #
+  # ship-check is the pre-ship gate, so this is where "we are about to ship a
+  # box that can give a customer nothing" becomes a sentence someone has to
+  # read. It reports what data/app-downloads/EXPECTED declares versus what is
+  # actually staged; it never fetches or builds anything.
+  local label="app-downloads"
+  local audit="$REPO_ROOT/scripts/app-downloads/audit.sh"
+
+  if [ ! -r "$audit" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s is missing, so nothing can say what this release should carry
+"       "$label" "scripts/app-downloads/audit.sh" >&2
+    _record_result "$label" fail
+    return 1
+  fi
+
+  local out rc=0
+  out="$(bash "$audit" --dir "$REPO_ROOT/data/app-downloads" 2>&1)" || rc=$?
+
+  case "$rc" in
+    0)
+      printf "  ${_GREEN}PASS${_RESET}  %s (every platform EXPECTED declares is staged and verified)
+" "$label"
+      _record_result "$label" pass
+      return 0
+      ;;
+    3)
+      # Declared-and-ticketed absence. A checkout is the normal place for this
+      # to be true (installers are git-ignored and staged on the box), so
+      # failing here would make ship-check permanently red for every developer
+      # and train people to ignore it. Skip — but PRINT the blocked list, so
+      # "nothing to download" is never silent.
+      printf "  ${_YELLOW}SKIP${_RESET}  %s — declared blocked, nothing staged in this checkout:
+" "$label"
+      printf '%s
+' "$out" | sed -n 's/^BLOCKED  */    | blocked: /p'
+      printf "    | These platforms will have NOTHING at /downloads on an image built
+"
+      printf "    | from this tree. scripts/image/build-iso.sh refuses unless you pass
+"
+      printf "    | --allow-blank-downloads.
+"
+      _record_result "$label" skip
+      return 0
+      ;;
+    4)
+      # "Could not look" is not "it is fine" — the exact collapse this work
+      # exists to end. EXIT_CANNOT_RUN is the script's own vocabulary for it.
+      printf "  ${_RED}FAIL${_RESET}  %s — the audit reached NO VERDICT (exit %s: missing EXPECTED, staging root or python3)
+"         "$label" "$EXIT_CANNOT_RUN" >&2
+      printf '%s
+' "$out" | head -10 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+    *)
+      printf "  ${_RED}FAIL${_RESET}  %s — this release does not carry what data/app-downloads/EXPECTED declares
+" "$label" >&2
+      printf '%s
+' "$out" | head -20 | sed 's/^/    | /' >&2
+      _record_result "$label" fail
+      return 1
+      ;;
+  esac
 }
 
 run_check_docker_build_smoke() {
@@ -1525,15 +2004,22 @@ run_check_docker_build_smoke() {
 
   if ! command -v docker >/dev/null 2>&1; then
     printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH\n" "$label"
-    CHECK_RESULTS[$label]=fail
+    _record_result "$label" fail
     return 1
   fi
+  # WARP-2646 — SKIP, not FAIL. Unlike compose-config, this check genuinely
+  # cannot run without a daemon (it starts an Ubuntu container), so a stopped
+  # daemon says nothing whatever about setup.sh. The line the two gates now
+  # hold in common: a missing TOOL is a FAIL, because the operator installs it
+  # once and the gate is meaningful thereafter (the same reason the shellcheck
+  # check fails rather than skips); a tool that is present but whose SUBJECT
+  # cannot be evaluated here is a SKIP, named and carrying exit 77.
   if ! docker info >/dev/null 2>&1; then
-    printf "  ${_RED}FAIL${_RESET}  %s — docker daemon not reachable\n" "$label"
-    printf "    | On macOS: start Docker Desktop.\n" >&2
+    printf "  ${_YELLOW}SKIP${_RESET}  %s — docker daemon not reachable, so nothing was smoke-tested\n" "$label"
+    printf "    | On macOS: start Docker Desktop, or \`colima start\`.\n" >&2
     printf "    | On Linux: ensure /var/run/docker.sock is accessible.\n" >&2
-    CHECK_RESULTS[$label]=fail
-    return 1
+    _record_result "$label" skip
+    return "$EXIT_SKIPPED"
   fi
 
   local image="ubuntu:24.04"
@@ -1561,7 +2047,14 @@ run_check_docker_build_smoke() {
   # --skip-build / --skip-drivers paths actually invokes docker
   # afterward.
   local inner_script
-  inner_script=$(cat <<'INNER'
+  # Read the heredoc straight into the variable instead of capturing `cat` in a
+  # command substitution: bash 3.2 cannot parse a `case` statement inside a
+  # command substitution -- not even one that is only heredoc text -- and the
+  # docker shim below is a `case`. macOS ships bash 3.2 and this script has to
+  # run there (WARP-2449). `read -d ''` consumes to EOF and returns 1 when it
+  # gets there, hence the `|| true` under `set -e`. Unlike `$()` it keeps the
+  # trailing newline; harmless, the value is only ever passed to `bash -c`.
+  IFS= read -r -d '' inner_script <<'INNER' || true
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -1664,7 +2157,6 @@ su - droplet-test -c '
     --skip-drivers
 '
 INNER
-)
 
   # Both-and cleanup: --rm on `docker run` is the SIGKILL safety net (the
   # RETURN trap above doesn't fire on SIGKILL or on a shell kill -9, so
@@ -1680,18 +2172,22 @@ INNER
   # which mangles the `-v <src>:<dst>:<opts>` syntax. On Linux/macOS
   # the variable is unset and ignored. See
   #   https://github.com/moby/moby/issues/24029#issuecomment-292499324
+  # WARP-2492: `&& rc=0 || rc=$?`, not a bare assignment. `docker run` exits
+  # non-zero exactly in the case this check exists to report, and under this
+  # script's `set -e` a bare assignment would abort here — losing the FAIL
+  # banner and the container output that says WHY setup.sh failed. This check
+  # is `--full` only, so that path is rarely walked and the loss went unseen.
   local out rc
   out="$(MSYS_NO_PATHCONV=1 docker run \
     --rm \
     --name "$container_name" \
     -v "$REPO_ROOT:/repo:ro" \
     "$image" \
-    bash -c "$inner_script" 2>&1)"
-  rc=$?
+    bash -c "$inner_script" 2>&1)" && rc=0 || rc=$?
 
   if [ "$rc" -eq 0 ]; then
     printf "  ${_GREEN}PASS${_RESET}  %s (setup.sh ran clean on %s)\n" "$label" "$image"
-    CHECK_RESULTS[$label]=pass
+    _record_result "$label" pass
     return 0
   fi
 
@@ -1699,7 +2195,7 @@ INNER
   # Tail the output (head 80 lines is enough to see the failure phase
   # and the immediate context; full output is reproducible by hand).
   printf '%s\n' "$out" | tail -80 | sed 's/^/    | /' >&2
-  CHECK_RESULTS[$label]=fail
+  _record_result "$label" fail
   return 1
 }
 
@@ -1722,6 +2218,7 @@ _dispatch_check() {
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;
+    app-downloads)        run_check_app_downloads ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
@@ -1731,13 +2228,20 @@ _dispatch_check() {
   esac
 }
 
-# Render the summary block. Exit code = number of FAIL results (capped at 1).
+# Render the summary block. Exit 1 if anything FAILED; else EXIT_SKIPPED (77)
+# if anything SKIPPED; else 0.
+#
+# WARP-2646 — a skip used to be invisible in the exit code, so `ship-check.sh
+# compose-config && git push` treated "could not evaluate the compose file at
+# all" as "the compose file is fine". That is the same false green WARP-2637
+# removed from the self-test, one level down. A failure still outranks a skip:
+# exit 1 is the louder signal and must not be masked.
 _summarize() {
-  local pass=0 fail=0 skip=0 name result
+  local pass=0 fail=0 skip=0 result i
   printf "\n"
   printf "  ──────────────────────────────────\n"
-  for name in "${!CHECK_RESULTS[@]}"; do
-    result="${CHECK_RESULTS[$name]}"
+  for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+    result="${CHECK_RESULT_VALUES[$i]}"
     case "$result" in
       pass) pass=$((pass + 1)) ;;
       fail) fail=$((fail + 1)) ;;
@@ -1756,12 +2260,22 @@ _summarize() {
 
   if [ "$fail" -gt 0 ]; then
     printf "${_RED}FAILED${_RESET} checks:\n" >&2
-    for name in "${!CHECK_RESULTS[@]}"; do
-      if [ "${CHECK_RESULTS[$name]}" = "fail" ]; then
-        printf "  - %s\n" "$name" >&2
+    for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+      if [ "${CHECK_RESULT_VALUES[$i]}" = "fail" ]; then
+        printf "  - %s\n" "${CHECK_RESULT_NAMES[$i]}" >&2
       fi
     done
     return 1
+  fi
+  if [ "$skip" -gt 0 ]; then
+    printf "${_YELLOW}SKIPPED${_RESET} checks (did NOT run — the SKIP line above each says why):\n" >&2
+    for ((i = 0; i < ${#CHECK_RESULT_VALUES[@]}; i++)); do
+      if [ "${CHECK_RESULT_VALUES[$i]}" = "skip" ]; then
+        printf "  - %s\n" "${CHECK_RESULT_NAMES[$i]}" >&2
+      fi
+    done
+    printf "Exit code %s means SKIPPED, not passed.\n" "$EXIT_SKIPPED" >&2
+    return "$EXIT_SKIPPED"
   fi
   return 0
 }
@@ -1770,6 +2284,7 @@ main() {
   # Parse args. Supports `--help`, `--full`, single subcommand, or nothing.
   local run_full=false
   local single_check=""
+  local list_scanned=false
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1779,6 +2294,10 @@ main() {
         ;;
       --full)
         run_full=true
+        shift
+        ;;
+      --list-scanned)
+        list_scanned=true
         shift
         ;;
       --)
@@ -1806,12 +2325,40 @@ main() {
     return 3
   fi
 
+  # Debug flag. Dump the surface set `stale-repo-names` scans and exit --
+  # nothing else is printed, so two runs can be diffed directly. This exists
+  # so a change to the scan machinery can be PROVEN not to change coverage
+  # (WARP-2456 restructured N per-file greps into one multi-file grep).
+  if [ "$list_scanned" = "true" ]; then
+    # Defaults to stale-repo-names when no subcommand is given, so the
+    # original WARP-2456 invocation keeps working unchanged.
+    case "${single_check:-stale-repo-names}" in
+      stale-repo-names) _stale_repo_names_surfaces ;;
+      lifecycle-naming) _lifecycle_naming_surfaces ;;
+      *)
+        printf "${_RED}error:${_RESET} --list-scanned is implemented for stale-repo-names and lifecycle-naming (got '%s')\n" \
+          "$single_check" >&2
+        return 2
+        ;;
+    esac
+    return 0
+  fi
+
   printf "\n  ${_BOLD}Droplet ship-check${_RESET}  (repo: %s)\n" "$REPO_ROOT"
   printf "  ──────────────────────────────────\n"
 
   if [ -n "$single_check" ]; then
-    _dispatch_check "$single_check"
-    local rc=$?
+    # `|| rc=$?`, not a bare call. `set -e` is in force, so a plain
+    # `_dispatch_check` that returned non-zero exited the script on the spot:
+    # the rc capture below, the invalid-name branch and _summarize were all
+    # unreachable for every failing single-check run, which is why
+    # `ship-check.sh <check>` printed a FAIL line and no summary block.
+    # WARP-2646 — the exit code now comes from _summarize in BOTH paths, so
+    # the skip verdict is decided in one place instead of arriving here by
+    # accident of errexit. Same codes as before: 2 invalid name, 1 a check
+    # failed, 77 a check skipped, 0 all clear.
+    local rc=0
+    _dispatch_check "$single_check" || rc=$?
     if [ "$rc" -eq 2 ]; then
       return 2
     fi

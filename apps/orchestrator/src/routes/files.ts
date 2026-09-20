@@ -39,6 +39,7 @@ import {
   ncGetShare,
   ncDirExists,
   NextcloudOcsError,
+  NcPreconditionFailedError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
 import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
@@ -64,6 +65,7 @@ import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
+import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
@@ -86,11 +88,49 @@ import {
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 import { getEffectiveUsage } from "../services/effective-usage.service.js";
+// WARP-2821 — the ONE corpus-visibility rule, shared with the mcp-server.
+// Both halves come from here: who a caller can see (`visibleDepartmentsFor`)
+// and what that resolves to in the chunk table (`deptCorpusKeys`). Neither is
+// re-typed below; a copy of either is how the assistant and this page came to
+// disagree in the first place.
+import {
+  visibleDepartmentsFor,
+  deptCorpusKeys,
+  maxAclVersion,
+} from "@droplet/tools-core";
+import type { VisibleDept } from "@droplet/tools-core";
 
 const logger = pino({ name: "files-route" });
 
+/**
+ * Strip trailing `=` padding for the strict-base64 round-trip check in
+ * POST /files/upload.
+ *
+ * CodeQL js/polynomial-redos: this was `/=+$/`. That pattern is unanchored on
+ * the left, so on a body like `"====…=a"` the engine restarts the `=+` run
+ * from every offset before failing at `$` — O(n²) over an attacker-sized
+ * `contentBase64`. A backward scan is linear and returns the identical
+ * string for every input.
+ */
+export function stripBase64Padding(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 0x3d /* "=" */) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 const CACHE_PREFIX = "files:list:";
 const CACHE_TTL = 10;
+
+// WARP-2211 — POST /files/render. Rendering is CPU-bound and local (no
+// egress), so the ceiling is generous next to web-fetch's 10 s: a large
+// workbook is slow, not stuck, and timing it out would fail a request that
+// was about to succeed.
+const DOC_RENDER_TIMEOUT_MS = 30_000;
+const DOC_RENDER_MIME: Record<"pdf" | "docx" | "xlsx", string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
 
 const MEMORY_STORAGE = multer.memoryStorage();
 
@@ -575,27 +615,6 @@ function unionContentAndNameHits(
   return out.slice(0, limit);
 }
 
-/**
- * WARP-1140 — index owner of shared "Household" (groupfolder) chunks.
- *
- * The file-indexer physically watches `__groupfolders/{id}/…` (groupfolder
- * content never lives under any user's home dir) and writes those chunks
- * under this sentinel userId with a `/<SHARED_FOLDER_NAME>/…` display path —
- * the same path each member sees in their own WebDAV home. Must match the
- * file-indexer's `HOUSEHOLD_USER_ID` (services/file-indexer/config.py).
- */
-const HOUSEHOLD_INDEX_USER = "__household__";
-
-/**
- * WARP-1264 — department chunk-corpus sentinel. The file-indexer emits
- * chunks for a non-household groupfolder-backed department under this
- * sentinel userId (services/file-indexer/watcher.py
- * `_lookup_department_for_groupfolder`).
- */
-function deptSentinel(departmentId: string): string {
-  return `__dept_${departmentId}__`;
-}
-
 /** Corpus resolution result: the FileContentChunk `userId` list this caller
  * may search, plus the max `aclVersion` across their visible departments
  * (folded into the search cache key so a rights/membership change can never
@@ -633,16 +652,14 @@ async function resolveSearchCaller(
   return { id, role };
 }
 
-/** One ACTIVE department the caller is visible into, with the `aclVersion`
- * that any cache key derived from it must carry. */
-interface VisibleDept {
-  id: string;
-  kind: string;
-  aclVersion: number;
-}
-
 /**
  * The caller's department visibility, as read from Prisma.
+ *
+ * `VisibleDept` — one ACTIVE department the caller is visible into, with the
+ * `aclVersion` any cache key derived from it must carry — is imported from
+ * `@droplet/tools-core` rather than restated here: it is the return shape of
+ * `visibleDepartmentsFor` and the argument shape of `deptCorpusKeys`, and a
+ * local structural copy would keep compiling against a stale shape.
  *
  * `resolved: false` is the FAIL-CLOSED sentinel (WARP-1556): the walk could
  * not be completed — no resolvable caller identity, or a DB hiccup — so
@@ -684,26 +701,14 @@ async function visibleDeptsForCaller(
     const caller = await resolveSearchCaller(req, prisma);
     if (!caller) return { depts: [], aclVersion: 0, resolved: false };
 
-    const isOwnerOrAdmin = caller.role === "owner" || caller.role === "admin";
-    let depts: VisibleDept[];
-    if (isOwnerOrAdmin) {
-      depts = await prisma.department.findMany({
-        where: { state: "active" },
-        select: { id: true, kind: true, aclVersion: true },
-      });
-    } else {
-      const memberships = await prisma.departmentMembership.findMany({
-        where: { userId: caller.id, department: { state: "active" } },
-        select: { department: { select: { id: true, kind: true, aclVersion: true } } },
-      });
-      depts = memberships.map((m) => m.department);
-    }
-
-    let aclVersion = 0;
-    for (const dept of depts) {
-      if (dept.aclVersion > aclVersion) aclVersion = dept.aclVersion;
-    }
-    return { depts, aclVersion, resolved: true };
+    // WARP-2821 — the rule itself lives in `@droplet/tools-core`, because the
+    // mcp-server asks the same question behind `search_content` and
+    // `read_document_text` and its own copy once disagreed with this one:
+    // it emitted no sentinel at all, so every shared and department document
+    // was listed by this page and invisible to the assistant. One
+    // implementation, two callers.
+    const depts = await visibleDepartmentsFor(prisma, caller);
+    return { depts, aclVersion: maxAclVersion(depts), resolved: true };
   } catch (err) {
     logger.debug(
       { err },
@@ -761,11 +766,17 @@ async function aclCacheTag(
  * per ACTIVE department the caller is visible into (see
  * `visibleDeptsForCaller` for the visibility rule).
  *
- * The HOUSEHOLD department is dual-sentinelled during rollout: when it is
- * among the caller's visible departments, BOTH the legacy `__household__`
- * sentinel AND its `__dept_<uuid>__` form are included, so content indexed
- * under either form (old watcher builds vs. WARP-1264 builds) stays
- * searchable without a reindex.
+ * Turning that department list into owner keys is `deptCorpusKeys`, in
+ * `@droplet/tools-core` — CALLED, not re-typed (WARP-2821). It is the same
+ * function the mcp-server's `resolveChunkOwnerIds` runs behind
+ * `search_content` and `read_document_text`, and it carries the HOUSEHOLD
+ * DUAL-SENTINEL: both the legacy `__household__` owner and its
+ * `__dept_<uuid>__` form, so content indexed by either watcher generation
+ * stays searchable without a reindex. A second copy of that rule here is how
+ * this page and the assistant answered the same question differently.
+ *
+ * The caller's own corpus stays FIRST and separate: it is the `$1` binding on
+ * the query side, and it is the one key that is never a sentinel.
  *
  * Best-effort by design: any failure (no session, DB hiccup) means
  * "personal only" — content search must never fail outright just because
@@ -779,14 +790,7 @@ async function deptSearchCorpora(
   user: string,
 ): Promise<DeptSearchCorpora> {
   const { depts, aclVersion } = await visibleDeptsForCaller(req, prisma);
-  const corpora = [user];
-  for (const dept of depts) {
-    if (dept.kind === "HOUSEHOLD") {
-      corpora.push(HOUSEHOLD_INDEX_USER);
-    }
-    corpora.push(deptSentinel(dept.id));
-  }
-  return { corpora, aclVersion };
+  return { corpora: [user, ...deptCorpusKeys(depts)], aclVersion };
 }
 
 /**
@@ -2201,7 +2205,7 @@ export function createFilesRouter(
         // write_file's INVALID_BASE64 posture (re-encode must round-trip).
         const cleaned = body.contentBase64.replace(/\s+/g, "");
         const buffer = Buffer.from(cleaned, "base64");
-        if (buffer.toString("base64").replace(/=+$/, "") !== cleaned.replace(/=+$/, "")) {
+        if (stripBase64Padding(buffer.toString("base64")) !== stripBase64Padding(cleaned)) {
           res.status(400).json({ error: "invalid base64 content" });
           return;
         }
@@ -2283,6 +2287,205 @@ export function createFilesRouter(
       handleFileError(err, res, next);
     }
   });
+
+  // ── Render a document (WARP-2211) ──
+  //
+  // The policy front for `services/doc-render`, the same shape routes/web.ts
+  // is for web-fetch. It exists because the box's model can emit at most 4096
+  // tokens (routes/llm.ts:247) — a minimum viable .xlsx is 2179 bytes of ZIP
+  // before any content, so the model CANNOT produce document bytes. It sends a
+  // compact spec; doc-render returns the file.
+  //
+  // The bytes never round-trip through the caller. An earlier shape had the
+  // route answer with base64 for the tool to forward to /files/upload, which
+  // would have capped a report at ~73 KB: `express.json()` carries no `limit`
+  // (app.ts:162), so body-parser's 100 kb default silently governs every JSON
+  // write path (the same root cause as WARP-2093). Rendering and uploading in
+  // one server-side hop sidesteps that entirely.
+  //
+  // Post-write bookkeeping mirrors /files/upload exactly — registry upsert,
+  // listing invalidation, MQTT — because a document that appears in the tree
+  // but not in the file registry is invisible to department accounting.
+  router.post(
+    "/files/render",
+    requireRoleOrMcpService("owner", "admin", "family"),
+    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const body = (req.body ?? {}) as {
+          path?: unknown;
+          format?: unknown;
+          title?: unknown;
+          body_markdown?: unknown;
+          sheets?: unknown;
+        };
+
+        const format = body.format;
+        if (format !== "pdf" && format !== "docx" && format !== "xlsx") {
+          res.status(400).json({ error: "format must be pdf, docx or xlsx" });
+          return;
+        }
+
+        const rawPath = typeof body.path === "string" ? body.path.trim() : "";
+        if (!rawPath) {
+          res.status(400).json({ error: "path is required" });
+          return;
+        }
+        const filename = path.posix.basename(rawPath);
+        // Pin the write to a single path segment, same posture as the JSON
+        // branch of /files/upload: the FILENAME may not traverse.
+        const segments = filename.split(/[\\/]/);
+        if (
+          filename.length === 0 ||
+          segments.length > 1 ||
+          segments.includes("..") ||
+          filename === "."
+        ) {
+          res.status(400).json({ error: "path must end in a filename" });
+          return;
+        }
+        // The extension is the caller's declared intent. Refuse a mismatch
+        // rather than silently renaming or re-formatting — "no guessing".
+        if (!filename.toLowerCase().endsWith(`.${format}`)) {
+          res.status(400).json({ error: `path must end in .${format}` });
+          return;
+        }
+
+        const space = resolveSpace(req.query.space);
+        const dir = path.posix.dirname(rawPath) || "/";
+        const targetPath = await rootForSpace(prisma, space, dir);
+        const token = await getToken(req);
+        const user = getUser(req);
+        const uploadedPath =
+          targetPath === "/" ? `/${filename}` : `${targetPath}/${filename}`;
+
+        // Refuse to overwrite. The plain upload path silently clobbers a
+        // same-name file (WARP-2096); a tool that generates "Q3-summary.pdf"
+        // twice must not destroy the first one, and the model has no way to
+        // know it already exists.
+        //
+        // WARP-2523 — this exists? check is a FAST PATH only (it saves a
+        // render when the answer is already knowable), NOT the guard:
+        // check-then-write races a concurrent render or user upload, and the
+        // loser would clobber the winner — WARP-2096 reopened. The
+        // authoritative guard is `If-None-Match: *` on the PUT below, which
+        // the server enforces atomically.
+        const existing = await ncGetFileId(token, user, uploadedPath);
+        if (existing !== null) {
+          res.status(409).json({ error: "file already exists", path: uploadedPath });
+          return;
+        }
+
+        if (!config.DOC_RENDER_SERVICE_TOKEN) {
+          // Fail closed rather than call the renderer unauthenticated.
+          logger.error("files/render: DOC_RENDER_SERVICE_TOKEN is not configured");
+          res.status(502).json({ error: "doc_render_unavailable" });
+          return;
+        }
+
+        let upstream: globalThis.Response;
+        try {
+          upstream = await fetch(`${config.DOC_RENDER_URL}/render`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${config.DOC_RENDER_SERVICE_TOKEN}`,
+            },
+            body: JSON.stringify({
+              format,
+              title: typeof body.title === "string" ? body.title : "",
+              body_markdown:
+                typeof body.body_markdown === "string" ? body.body_markdown : "",
+              sheets: Array.isArray(body.sheets) ? body.sheets : [],
+            }),
+            signal: AbortSignal.timeout(DOC_RENDER_TIMEOUT_MS),
+          });
+        } catch (err) {
+          logger.error({ err }, "files/render: doc-render unreachable");
+          res.status(502).json({ error: "doc_render_unavailable" });
+          return;
+        }
+
+        if (!upstream.ok) {
+          // 400 from the renderer is the CALLER's bad spec — pass the reason
+          // through so the tool can tell the model what to fix, instead of
+          // collapsing every refusal into one opaque failure.
+          const detail = await upstream
+            .json()
+            .then((j) => (j as { detail?: string }).detail)
+            .catch(() => undefined);
+          if (upstream.status === 400 || upstream.status === 413) {
+            res.status(upstream.status).json({ error: detail ?? "render_failed" });
+            return;
+          }
+          logger.error({ status: upstream.status, detail }, "files/render: renderer error");
+          res.status(502).json({ error: "doc_render_unavailable" });
+          return;
+        }
+
+        const buffer = Buffer.from(await upstream.arrayBuffer());
+        const MAX_RENDER_BYTES = 10 * 1024 * 1024;
+        if (buffer.byteLength > MAX_RENDER_BYTES) {
+          res.status(413).json({ error: "rendered document too large" });
+          return;
+        }
+
+        try {
+          // WARP-2523 — create-new-only PUT: the server refuses atomically
+          // (412) when the target exists, closing the pre-check's race.
+          await ncUploadFile(token, user, targetPath, filename, buffer, {
+            ifNoneMatch: true,
+          });
+        } catch (uploadErr) {
+          if (uploadErr instanceof NcPreconditionFailedError) {
+            // A concurrent writer won between the pre-check and the PUT —
+            // same outcome, same response as the fast path above.
+            res.status(409).json({ error: "file already exists", path: uploadedPath });
+            return;
+          }
+          throw uploadErr;
+        }
+
+        const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+        if (ownerUserId) {
+          // Best-effort, exactly as in /files/upload: a registry failure must
+          // not fail a write that already landed.
+          try {
+            const ncFileId = await ncGetFileId(token, user, uploadedPath);
+            if (ncFileId !== null) {
+              await upsertFileRegistryEntry(prisma, {
+                ncFileId,
+                ownerUserId,
+                path: uploadedPath,
+                departmentId: req.spaceDepartmentId ?? null,
+              });
+            }
+          } catch (registryErr) {
+            logger.warn(
+              { err: registryErr, path: uploadedPath },
+              "files/render: file-registry upsert failed (non-fatal)",
+            );
+          }
+        }
+
+        await invalidateListing(req, user, { space, path: targetPath });
+        safePublish(`droplet/files/${user}/uploaded`, {
+          path: targetPath,
+          files: [filename],
+          count: 1,
+        });
+
+        res.json({
+          path: uploadedPath,
+          filename,
+          bytes: buffer.byteLength,
+          mimeType: DOC_RENDER_MIME[format],
+        });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
 
   // ── Delete a file or directory ──
   // WARP-1262 (T10): `?space=` threading — path is space-relative, resolved
@@ -3354,7 +3557,11 @@ export function createFilesRouter(
   }
 
   // ── Update existing share (PUT /api/files/share/:id) ──
-  router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // CodeQL js/missing-rate-limiting — inline per-IP ceilings on the flagged
+  // handlers. Share update/revoke mint or tear down link tokens, so the
+  // sensitive preset; `/files/:id/content` is a plain authenticated read
+  // (citation previews), so the standard preset.
+  router.put("/files/share/:id", sensitiveRateLimit, requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -3409,7 +3616,7 @@ export function createFilesRouter(
   });
 
   // ── Revoke a share (DELETE /api/files/share/:id) ──
-  router.delete("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.delete("/files/share/:id", sensitiveRateLimit, requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -3979,7 +4186,7 @@ export function createFilesRouter(
   //
   // Registered LAST so the static sibling routes above (`/files/search/content`
   // in particular, which `:id` would otherwise shadow) keep winning.
-  router.get("/files/:id/content", async (req, res, next) => {
+  router.get("/files/:id/content", standardRateLimit, async (req, res, next) => {
     try {
       const classified = classifyFileContentId(req.params.id);
 

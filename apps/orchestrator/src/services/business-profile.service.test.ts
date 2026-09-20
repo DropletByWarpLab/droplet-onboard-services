@@ -27,6 +27,7 @@ import {
   BUSINESS_BLOCK_DELIMITER_OPEN,
   BUSINESS_BLOCK_DELIMITER_CLOSE,
   BUSINESS_CONTEXT_MAX_CHARS,
+  BusinessProfileRowInvalidError,
   type BusinessProfileRow,
 } from "./business-profile.service.js";
 
@@ -387,5 +388,148 @@ describe("markProfileCompletedFromManualFill — atomic conditional transition (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const changed = await markProfileCompletedFromManualFill(prisma as any);
     expect(changed).toBe(false);
+  });
+});
+
+/**
+ * WARP-2653 — the create-on-first-read boundary.
+ *
+ * `getBusinessProfile` hands whatever Prisma resolved with straight to
+ * `composeBusinessBlock`. It used to do that through a double type cast, so a
+ * `create` that resolved to `undefined` (a bare `vi.fn()`), a partial
+ * `select`, a renamed column or a client extension all reached the composer
+ * unchecked and surfaced as `Cannot read properties of undefined` inside the
+ * route's fail-open — a prompt silently missing its business context.
+ *
+ * The validated set is EXACTLY the seven fields `composeBusinessBlock` reads
+ * (`summary` + the six structured fields); `onboardingState`,
+ * `reviewNudgeState`, the timestamps and the provenance columns are
+ * deliberately not validated because the prompt path never reads them.
+ */
+describe("getBusinessProfile — row validation at the create boundary (WARP-2653)", () => {
+  const COMPOSER_FIELDS = [
+    "summary",
+    "whatWeDo",
+    "customers",
+    "teamShape",
+    "toolsUsed",
+    "typicalDay",
+    "goals",
+  ] as const;
+
+  it("validates exactly the fields composeBusinessBlock reads", () => {
+    const block = composeBusinessBlock("owner", profile(), "BUSINESS");
+    for (const field of COMPOSER_FIELDS) {
+      expect(block).toContain(String(FILLED_PROFILE[field]));
+    }
+    // Nothing outside the validated set reaches the block.
+    expect(block).not.toContain("completed"); // onboardingState
+    expect(block).not.toContain("onboarding"); // lastSource
+    expect(block).not.toContain("2026-07-08"); // updatedAt
+  });
+
+  it("throws a typed error naming the model when create resolves to undefined", async () => {
+    const prisma = {
+      businessProfile: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(), // a bare double — resolves to undefined
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const err = await getBusinessProfile(prisma as any).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BusinessProfileRowInvalidError);
+    expect((err as BusinessProfileRowInvalidError).message).toBe(
+      "BusinessProfile row invalid: expected a row object, got undefined",
+    );
+    expect((err as BusinessProfileRowInvalidError).field).toBeNull();
+  });
+
+  it.each(COMPOSER_FIELDS)(
+    "throws a typed error naming %s when the loaded row is missing it",
+    async (field) => {
+      const row: Record<string, unknown> = { ...profile() };
+      delete row[field];
+      const prisma = {
+        businessProfile: {
+          findUnique: vi.fn(async () => row),
+          create: vi.fn(),
+        },
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const err = await getBusinessProfile(prisma as any).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(BusinessProfileRowInvalidError);
+      expect((err as BusinessProfileRowInvalidError).field).toBe(field);
+      expect((err as BusinessProfileRowInvalidError).message).toContain(
+        "BusinessProfile",
+      );
+      expect((err as BusinessProfileRowInvalidError).message).toContain(
+        `"${field}"`,
+      );
+      expect(prisma.businessProfile.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("names the field and never quotes its value (rule 19)", async () => {
+    const owned = "Dr Reyes, 555-0100, the Bramble account";
+    const prisma = {
+      businessProfile: {
+        findUnique: vi.fn(async () => ({
+          ...profile(),
+          summary: { text: owned }, // wrong shape, real content
+        })),
+        create: vi.fn(),
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const err = await getBusinessProfile(prisma as any).catch((e: unknown) => e);
+    const message = (err as BusinessProfileRowInvalidError).message;
+    expect((err as BusinessProfileRowInvalidError).field).toBe("summary");
+    expect(message).not.toContain(owned);
+    expect(message).not.toContain("Bramble");
+    expect(message).not.toContain("555-0100");
+  });
+
+  it("returns a valid row unchanged — same object, unvalidated columns intact", async () => {
+    const existing = {
+      ...profile(),
+      aColumnNothingInThePromptPathReads: 7,
+    };
+    const prisma = {
+      businessProfile: {
+        findUnique: vi.fn(async () => existing),
+        create: vi.fn(),
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const row = await getBusinessProfile(prisma as any);
+    // Identity, not a rebuilt/narrowed copy: nothing is stripped or widened.
+    expect(row).toBe(existing);
+    expect(
+      (row as unknown as Record<string, unknown>)
+        .aColumnNothingInThePromptPathReads,
+    ).toBe(7);
+    expect(row.onboardingState).toBe("completed");
+    expect(composeBusinessBlock("owner", row, "BUSINESS")).toContain(
+      "SUMMARY_SENTINEL",
+    );
+  });
+
+  it("validates the CREATED row too, not only the loaded one", async () => {
+    const prisma = {
+      businessProfile: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async () => {
+          // A partial `select` that dropped one structured field.
+          const { goals: _goals, ...rest } = EMPTY_PROFILE;
+          return rest;
+        }),
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const err = await getBusinessProfile(prisma as any).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BusinessProfileRowInvalidError);
+    expect((err as BusinessProfileRowInvalidError).field).toBe("goals");
   });
 });

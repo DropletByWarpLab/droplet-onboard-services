@@ -3,11 +3,18 @@
 // Shared Projects primitives — safety chip, priority, state pill, labels,
 // avatars, due/count metas, empty + skeleton. All `pm-`-classed (scoped).
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, type JSX } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { PmIcon } from "./icons";
 import { PRIORITY, fmtDate, isOverdue } from "./config";
-import type { Person, Priority, PmState, PmLabel, PmWorkItem } from "./types";
+import type {
+  Person,
+  Priority,
+  PmState,
+  PmLabel,
+  PmWorkItem,
+  PmDepartmentRef,
+} from "./types";
 
 /** Resolves assignee/lead ids → Person. Provided at the page root. */
 export const PeopleContext = createContext<(id: string) => Person>((id) => ({
@@ -108,6 +115,31 @@ export function LabelTag({ label, small }: { label: PmLabel; small?: boolean }):
     <span className={"pm-tag" + (small ? " sm" : "")}>
       <span className="swatch" style={{ background: label.color ?? "var(--text-4)" }} />
       {label.name}
+    </span>
+  );
+}
+
+/** ADR-045 §5.3 — the owning department, as a chip. A building glyph rather
+ *  than a colour swatch: a department has no colour of its own, and inventing
+ *  one would put it in the same visual language as labels, which it is not. */
+export function DepartmentTag({
+  dept,
+  small,
+}: {
+  dept: PmDepartmentRef;
+  small?: boolean;
+}): JSX.Element {
+  return (
+    <span
+      className={"pm-tag" + (small ? " sm" : "")}
+      title={
+        dept.source === "item"
+          ? `Department: ${dept.name} — set on this item`
+          : `Department: ${dept.name} — from the project`
+      }
+    >
+      <PmIcon name="building" size={small ? 10 : 12} />
+      {dept.name}
     </span>
   );
 }

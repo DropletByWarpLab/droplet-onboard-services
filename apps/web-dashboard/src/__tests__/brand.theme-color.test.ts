@@ -9,8 +9,11 @@
  * without updating `lib/brand.ts`, this test fails — preventing the PWA chrome
  * color from silently drifting out of sync.
  *
- * Path resolution uses CommonJS `__dirname` (NOT `import.meta.url`), which is
- * the Windows-safe pattern other source-reading guards in this suite use.
+ * Path resolution uses `__dirname`, the one anchoring idiom this package uses
+ * (WARP-2654) — see `src/__tests__/helpers/test-paths.ts` for why it is
+ * spelled this way here. It is NOT that `import.meta.url` is unsafe on
+ * Windows: `fileURLToPath` converts it correctly, and only
+ * `new URL(...).pathname` yields the `/C:/...` that `path.resolve` doubles.
  */
 
 import { describe, it, expect } from "vitest";

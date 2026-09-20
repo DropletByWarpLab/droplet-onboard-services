@@ -74,6 +74,7 @@ export function createHardwareRouter(prisma: PrismaClient): Router {
             available: false,
             reason: "device-bridge unreachable or no auth token configured",
             card: null,
+            name: null,
             busyPercent: null,
             vramTotalBytes: null,
             vramUsedBytes: null,

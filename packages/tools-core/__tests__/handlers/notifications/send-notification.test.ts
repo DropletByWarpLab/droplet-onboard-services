@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import sendNotification from "../../../src/handlers/notifications/send-notification.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(create: ReturnType<typeof vi.fn>, userId = "alice"): ToolContext {
+function ctxWith(create: Mock, userId = "alice"): ToolContext {
   return {
     prisma: { notificationLog: { create } } as unknown as ToolContext["prisma"],
     http: {} as ToolContext["http"],

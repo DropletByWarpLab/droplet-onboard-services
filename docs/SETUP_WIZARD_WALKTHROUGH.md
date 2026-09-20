@@ -48,7 +48,7 @@ Each new walkthrough topic also has a *backend* already shipped:
 | Topic | Endpoints | Dashboard API helpers |
 |---|---|---|
 | Home Wi-Fi | `POST /api/network/wifi/ssid`, `POST /api/network/wifi/password` (Tier 2 → `POST /api/network/command/confirm`, `GET /api/network/operations/:id`) | `setWifiSsid`, `setWifiPassword`, `confirmNetworkCommand`, `fetchNetworkOperation` |
-| Storage | `GET /api/storage`, `GET /api/storage/drives` | `fetchStorageStats`, `fetchDrives` |
+| Storage | `GET /api/storage`, `GET /api/storage/drives` | `fetchStorage`, `fetchDrives` |
 | Cameras | `GET /api/cameras/discovered`, `GET/POST /api/cameras/groups`, `GET/POST /api/cameras/:name/settings` | (search `cameras` in lib/api.ts) |
 | VPN | `GET /api/vpn/status`, `GET/POST/DELETE /api/vpn/peers` | `fetchVpnStatus`, `fetchVpnPeers`, `createVpnPeer`, `deleteVpnPeer` |
 | AI | `GET /api/llm/models` | `fetchModels` |
@@ -65,7 +65,10 @@ welcome → account → internet → storage → discovery → cameras → vpn �
 
 Rationale:
 - `account` first because every other step needs an authenticated session
-  (Nextcloud OCS token is required for `/api/storage`, network/VPN RBAC is
+  (`/api/storage` reads the device-bridge for its headline figures and the
+  Nextcloud OCS token only for the `cloud` account-quota sibling — WARP-2098
+  moved the headline off that quota, which measured the install disk rather
+  than the owner's drives; network/VPN RBAC is
   admin-only, etc.).
 - `internet` before `vpn` because the VPN peer config must include a
   reachable `endpoint_host`; the box's named address

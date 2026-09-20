@@ -75,7 +75,11 @@ export interface ModelInfo {
 export interface EmbedRequest {
   /** Texts to embed. Max batch size is model-dependent (typically 256). */
   texts: string[];
-  /** Model override. Default: "all-MiniLM-L6-v2" (384-dim, CPU-friendly). */
+  /**
+   * Model override. Default: "bge-small-en-v1.5" (384-dim, 512-token
+   * window, CPU-friendly). Empty string means the gateway default; any
+   * other value must be in the gateway's EmbedText allow-list.
+   */
   model?: string | undefined;
 }
 

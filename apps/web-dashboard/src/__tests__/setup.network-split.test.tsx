@@ -2,7 +2,7 @@
  * Onboarding-Flow redesign — the network split's INTEGRATION contract.
  *
  * The old single `internet` step was split into two ordered client-only steps,
- * `wifi` (the Wi-Fi the box broadcasts) then `address` (the DuckDNS web
+ * `wifi` (the Wi-Fi the box broadcasts) then `address` (the box's web
  * address). This file used to be `setup.internet.test.tsx` and exercised the
  * single combined step in-flow; the per-component behaviour (validation, the
  * WARP-807/808/809 ladders, field shapes) now lives in
@@ -12,7 +12,7 @@
  * that the split is threaded into the state machine correctly:
  *   1. after `twofactor` the wizard lands on WifiStep ("Set up your Wi-Fi");
  *   2. advancing the Wi-Fi step (Continue/skip) lands on AddressStep ("Give your
- *      box a web address", with the `.duckdns.org` suffix visible);
+ *      box a web address", with the `.droplet-us.com` suffix visible);
  *   3. advancing/skipping the address step lands on `storage` (→ discovery);
  *   4. both sub-steps persist as the existing `internet` SetupStep — the Prisma
  *      enum is deliberately NOT migrated for a presentation-only split
@@ -41,7 +41,6 @@ vi.mock("@/lib/auth", () => ({
 // single `internet` SetupStep. The rest of the surface is stubbed so any step
 // we land on mounts quietly.
 const patchSetupStepMock = vi.fn(async (_setupStep: string) => undefined);
-const fetchDuckDnsStatusMock = vi.fn(async () => ({ configured: false }));
 
 vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
@@ -74,9 +73,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  // AddressStep calls fetchDuckDnsStatus on mount; WifiStep does not load.
-  fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // WARP-979 — the reworked AddressStep (Secured / name your box) imports
   // these; the split tests skip the step so they never actually fire.
   checkBoxName: vi.fn(async () => ({
@@ -172,7 +168,7 @@ async function advanceToWifi() {
 }
 
 /** Skip the Wi-Fi step (blank SSID → no write) to land on `address`. The
- *  Address step's fetchDuckDnsStatus effect resolves before we read it. */
+ *  Address step's fetchBoxName effect resolves before we read it. */
 async function skipWifiToAddress() {
   await act(async () => {
     await Promise.resolve();
@@ -190,8 +186,6 @@ async function skipWifiToAddress() {
 describe("setup network split — wifi → address integration (Onboarding-Flow redesign)", () => {
   beforeEach(() => {
     patchSetupStepMock.mockClear();
-    fetchDuckDnsStatusMock.mockClear();
-    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
   });
 
   afterEach(() => {

@@ -17,6 +17,7 @@
  *   - Cloud spend: 0 for v1 (E2 OffLanEgressSample dependency unbuilt).
  */
 import * as aiGateway from "./ai-gateway.client.js";
+import type { EndpointLatencyMs } from "../types/index.js";
 import { isLocalProvider } from "./cloud-access.service.js";
 import { bytesToGiB, fetchGpuTelemetry } from "../lib/gpu-telemetry.js";
 import { cacheGet } from "./cache.service.js";
@@ -32,10 +33,19 @@ import {
 } from "./model-benchmark.service.js";
 
 export interface LocalModelInfo {
+  /** WARP-2882 — the RUNTIME id (ModelInfo.id, e.g.
+   *  `docker.io/ai/gpt-oss:20B-F16`). Every daemon probe, cache key and
+   *  write keys on this. `name` below is the gateway's DISPLAY string
+   *  ("Gpt-oss 20B F16") and must never be sent back as a model id. */
+  id: string;
   name: string;
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 — the context length the model was TRAINED with (Ollama
+   *  `/api/show`); null when the daemon doesn't report it (DMR). Display
+   *  only: the window actually served is `OLLAMA_CONTEXT_LENGTH`. */
+  trainedContextLength: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | etc — null until ai-gateway tags. */
@@ -85,11 +95,19 @@ export interface LocalModelInfo {
 }
 
 export interface CloudProviderInfo {
-  provider: "anthropic" | "openai" | "gemini";
-  /** From `OffLanAllowlistChannel.cloud_model_escape` once Phase E1
-   *  lands. Today: always false (cloud escape default-off per
-   *  FEATURES.md §8). */
+  /** WARP-2871: no `gemini`. services/ai-gateway has no Gemini provider
+   *  (providers/ holds anthropic_cloud, openai_cloud, ollama_local only), so
+   *  listing one was a fabricated row under the honesty contract. */
+  provider: "anthropic" | "openai";
+  /** `escapeEnabled && hasKey === true` — usable ON THIS BOX (not per
+   *  person; the caller's own verdict is `cloudAccess.allowedForYou`).
+   *  Overlaid per request by `overlayCloudState`; the cached build carries
+   *  false. */
   enabled: boolean;
+  /** WARP-2871: a box-wide (shared-namespace) key is present. `null` = the
+   *  gateway could not be asked (unreachable / timeout) — never guessed. The
+   *  cached build carries null; the route overlays the real answer. */
+  hasKey: boolean | null;
   /** ISO timestamp of last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until E2 wires
@@ -97,7 +115,31 @@ export interface CloudProviderInfo {
   spendUsd: number;
 }
 
+/**
+ * WARP-2871 — the Models page's cloud-access state. Box-wide switch + the
+ * caller's own verdict, so the page can render the owner/admin switch AND
+ * tell a person whether cloud would work for THEM without re-deriving the
+ * AND-gate client-side.
+ */
+export interface CloudAccessInfo {
+  /** OffLanAllowlistChannel `cloud_model_escape.enabled` (absent row = false,
+   *  fail closed — the off-lan-gate posture). */
+  escapeEnabled: boolean;
+  /** `row.lastChangedBy`, or null when the row is absent / never attributed. */
+  escapeChangedBy: string | null;
+  /** `row.lastChangedAt` as ISO, or null when the row is absent. */
+  escapeChangedAt: string | null;
+  /** The CALLER's effective cloud verdict = `resolveEffectiveAccess(id).cloud`
+   *  (escape ∧ role; owner bypasses only the role limb). `null` when there is
+   *  no person to resolve (service principal / no id) or the resolver failed
+   *  — never a guessed boolean. */
+  allowedForYou: boolean | null;
+}
+
 export interface GpuInfo {
+  /** WARP-2883: the hardware's marketing name when the bridge resolved one
+   *  ("NVIDIA GeForce RTX 5060 Ti"); the DRM node ("card1") only as the
+   *  fallback. What the owner bought is what the tile should say. */
   name: string;
   // WARP-1861: EVERY counter is nullable, because the bridge legitimately
   // cannot always read each one and they fail independently. When nothing
@@ -148,7 +190,17 @@ export interface ModelsPagePayload {
   gpu: GpuInfo | null;
   /** Why `gpu` is null. Null when `gpu` is populated. */
   gpuReason: GpuReason | null;
+  /**
+   * WARP-2883 — mean round-trip over the ENABLED inference endpoints (local
+   * runtime + each cloud provider that is switched on and keyed), ms. 0 means
+   * nothing answered the probe; the tile renders that as "—", never "0 ms".
+   * The cached build averages local only; `overlayCloudState` recomputes it
+   * once it knows which cloud providers are enabled.
+   */
   avgLatencyMs: number;
+  /** WARP-2883 — the per-endpoint samples behind `avgLatencyMs`, so the tile
+   *  can list them. Null when the gateway could not be asked at all. */
+  endpointLatencyMs: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /**
    * WARP-1112 — the installed local model the box answers with by default
@@ -157,6 +209,13 @@ export interface ModelsPagePayload {
    * part of the cached payload), never fabricated here.
    */
   activeModel?: string | null;
+  /**
+   * WARP-2871 — box-wide cloud switch + the caller's verdict. Set by the
+   * /api/models route (`overlayCloudState`, merged fresh per request like
+   * `activeModel`), never part of the cached payload: the cache is
+   * caller-independent and a key save must show on the next GET.
+   */
+  cloudAccess?: CloudAccessInfo;
   /**
    * WARP-1289 — honesty flag, mirroring WARP-1284's `degraded` on
    * GET /api/llm/models: true when `local` can't be trusted as complete
@@ -206,11 +265,15 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   try {
     const resp = await aiGateway.listModels();
     degraded = resp.degraded_providers?.some(isLocalProvider) ?? false;
-    local = resp.models.map((m) => ({
+    // WARP-2871: once a cloud key is saved the gateway lists that vendor's
+    // catalogue in the same response — "On your Droplet" is on-box only.
+    local = resp.models.filter((m) => isLocalProvider(m.provider)).map((m) => ({
+      id: m.id,
       name: m.name,
       family: inferFamily(m.name),
       provider: m.provider,
       contextLength: m.context_window,
+      trainedContextLength: m.trained_context_window ?? null,
       gbOnDisk: null,
       role: null,
       status: "ready" as const,
@@ -242,7 +305,8 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
       if (metrics.size > 0) {
         for (const row of local) {
           if (!isLocalProvider(row.provider)) continue;
-          const m = metricsFor(metrics, row.name);
+          // WARP-2882 — the daemon keys on ids, never on the display name.
+          const m = metricsFor(metrics, row.id);
           if (!m) continue;
           row.gbOnDisk = m.gbOnDisk;
           row.parameterSize = m.parameterSize;
@@ -294,7 +358,7 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     try {
       for (const row of local) {
         if (!isLocalProvider(row.provider)) continue;
-        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.name));
+        const bench = await cacheGet<BenchmarkResult>(benchCacheKey(row.id));
         if (bench) {
           row.tokensPerSec = bench.tokensPerSec;
           row.benchmarkedAt = bench.measuredAt;
@@ -308,13 +372,14 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     degraded = true;
   }
 
-  // Cloud list — three providers per FEATURES.md §2.11. All
-  // default-off; Phase E1 wires real enabled flags via OffLan
-  // allowlist channel state.
+  // Cloud list — the two providers the gateway actually has (WARP-2871
+  // dropped the fabricated gemini row). `hasKey: null` / `enabled: false`
+  // here is the honest "not asked yet" state: this object is cached for 30 s
+  // and shared by every caller, so the live key + escape state is overlaid
+  // per request in the route via `overlayCloudState`, not read here.
   const cloud: CloudProviderInfo[] = [
-    { provider: "anthropic", enabled: false, lastUsedAt: null, spendUsd: 0 },
-    { provider: "openai", enabled: false, lastUsedAt: null, spendUsd: 0 },
-    { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
+    { provider: "anthropic", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
+    { provider: "openai", enabled: false, hasKey: null, lastUsedAt: null, spendUsd: 0 },
   ];
 
   // WARP-1861 — GPU counters via the host device-bridge. Never throws;
@@ -331,10 +396,10 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   const gpu: GpuInfo | null =
     telemetry?.available && telemetry.card
       ? {
-          // The DRM node name is what the operator can act on — it is the
-          // same identifier BRIDGE_GPU_CARD pins and the same one that
-          // appears in the flip script's resolver.
-          name: telemetry.card,
+          // WARP-2883: the marketing name when the bridge resolved one; the
+          // DRM node only as the fallback. `card` stays on GET
+          // /api/hardware/gpu for anyone who needs the pinnable identifier.
+          name: telemetry.name ?? telemetry.card,
           vramGiB: bytesToGiB(telemetry.vramTotalBytes),
           vramUsedGiB: bytesToGiB(telemetry.vramUsedBytes),
           // Nullable by design: a runtime-suspended card reports neither,
@@ -349,6 +414,11 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
   // bridge that answered gets to have its "no card" repeated as a fact.
   const gpuReason: GpuReason | null =
     gpu !== null ? null : telemetry === null ? "unreachable" : "no_card";
+
+  // WARP-2883 — one round-trip per inference endpoint, measured by the
+  // gateway. Best-effort (null when it could not be asked); re-measured every
+  // time this payload is rebuilt, i.e. behind the route's 30 s cache.
+  const endpointLatencyMs = (await aiGateway.fetchLatency())?.providers ?? null;
 
   return {
     local,
@@ -370,12 +440,81 @@ export async function getModelsPagePayload(): Promise<ModelsPagePayload> {
     // ...and WHY it is null, so the tile can tell "we asked and there is no
     // card" apart from "we never got to ask". See `GpuReason`.
     gpuReason,
-    // Avg latency: requires a metrics aggregation surface that doesn't
-    // exist yet. 0 until ai-gateway exports a /metrics summary.
-    avgLatencyMs: 0,
+    // WARP-2883 — local only here; the route's overlay adds the enabled
+    // cloud endpoints (this object is cached and knows nothing about keys).
+    avgLatencyMs: averageLatencyMs(endpointLatencyMs, []),
+    endpointLatencyMs,
     // Cloud spend: sum over OffLanEgressSample where channel =
     // cloud_model_escape. E2 dependency; placeholder 0.
     cloudSpendUsd: 0,
     degraded,
+  };
+}
+
+/** The `cloud_model_escape` row fields the overlay reads. */
+export interface CloudEscapeRow {
+  enabled: boolean;
+  lastChangedBy: string | null;
+  lastChangedAt: Date;
+}
+
+/**
+ * WARP-2871 — overlay the live, caller-dependent cloud state onto a (cached,
+ * caller-independent) page payload. Pure and non-mutating so it is
+ * unit-testable without HTTP and safe to run on the shared cache object.
+ *
+ *   keys      — `aiGateway.listKeys()` result (box-wide namespace), or null
+ *               when the gateway could not be asked ⇒ every `hasKey` is null
+ *               and nothing is `enabled` (a key we cannot confirm is not a
+ *               key we advertise).
+ *   escapeRow — the OffLanAllowlistChannel row, or null when absent ⇒ OFF.
+ *   allowedForYou — the caller's resolved verdict, or null (see the field).
+ */
+/**
+ * WARP-2883 — mean of the endpoints that are actually in use: the local
+ * runtime plus each ENABLED cloud provider. An endpoint that did not answer
+ * (null) is left out rather than counted as 0; when nothing answered the
+ * result is 0, which the tile renders as "—".
+ */
+export function averageLatencyMs(
+  latency: EndpointLatencyMs | null,
+  enabledCloud: ReadonlyArray<CloudProviderInfo["provider"]>,
+): number {
+  if (!latency) return 0;
+  const samples = [latency.local, ...enabledCloud.map((p) => latency[p])].filter(
+    (v): v is number => typeof v === "number",
+  );
+  if (samples.length === 0) return 0;
+  return Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+}
+
+export function overlayCloudState(
+  payload: ModelsPagePayload,
+  state: {
+    keys: readonly string[] | null;
+    escapeRow: CloudEscapeRow | null;
+    allowedForYou: boolean | null;
+  },
+): ModelsPagePayload & { cloudAccess: CloudAccessInfo } {
+  const escapeEnabled = state.escapeRow?.enabled === true;
+  const keySet = state.keys === null ? null : new Set(state.keys);
+  const cloud = payload.cloud.map((row) => {
+    const hasKey = keySet === null ? null : keySet.has(row.provider);
+    return { ...row, hasKey, enabled: escapeEnabled && hasKey === true };
+  });
+  return {
+    ...payload,
+    cloud,
+    // WARP-2883 — now that enabled is known, average over what is in use.
+    avgLatencyMs: averageLatencyMs(
+      payload.endpointLatencyMs ?? null,
+      cloud.filter((c) => c.enabled).map((c) => c.provider),
+    ),
+    cloudAccess: {
+      escapeEnabled,
+      escapeChangedBy: state.escapeRow?.lastChangedBy ?? null,
+      escapeChangedAt: state.escapeRow?.lastChangedAt.toISOString() ?? null,
+      allowedForYou: state.allowedForYou,
+    },
   };
 }

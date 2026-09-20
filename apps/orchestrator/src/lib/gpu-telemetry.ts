@@ -47,6 +47,9 @@ export interface GpuTelemetry {
   available: boolean;
   /** DRM node name (e.g. "card1"), or null when unavailable. */
   card: string | null;
+  /** WARP-2883: the hardware's marketing name ("NVIDIA GeForce RTX 5060 Ti",
+   *  "Radeon RX 7600/…") when the bridge could resolve one, else null. */
+  name: string | null;
   /** Why the card is unavailable; null when it is available. */
   reason: string | null;
   busyPercent: number | null;
@@ -122,6 +125,7 @@ export async function fetchGpuTelemetry(): Promise<GpuTelemetry | null> {
   return {
     available: body.available,
     card: typeof body.card === "string" ? body.card : null,
+    name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : null,
     reason: typeof body.reason === "string" ? body.reason : null,
     busyPercent: num(body.busy_percent),
     vramTotalBytes: num(body.vram_total_bytes),

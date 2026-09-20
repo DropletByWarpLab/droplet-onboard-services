@@ -1,0 +1,23 @@
+{
+  // WARP-329 class — `vitest` does not typecheck (esbuild strips types), and
+  // this package's two test files were invisible to `tsc`. Picked up
+  // automatically by `ship-check.sh tsc-full`'s second pass, which is opt-in by
+  // this file's existence.
+  //
+  // Unlike the other workspaces, shared-types keeps its tests INSIDE `src/`, so
+  // the entry that hid them is `"src/**/*.test.ts"` in the package config's
+  // `exclude`, not `"__tests__"`. `exclude` is therefore redeclared here
+  // WITHOUT that pattern — `include` alone would not have been enough, since
+  // `exclude` wins over `include`. There is no `__tests__/` directory to add.
+  //
+  // Extends the package config so tests are checked under the SAME flags the
+  // package actually builds with, rather than a looser set that would hide the
+  // errors this exists to catch. `rootDir` needs no widening (everything is
+  // already under `src/`), so `noEmit` is the only compiler option overridden.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

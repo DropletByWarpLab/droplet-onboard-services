@@ -36,6 +36,7 @@ import {
   resetWarmStateForTests,
   verifyListedModelServeable,
 } from "./model-readiness.service.js";
+import { resetRuntimeUrlWarnsForTests } from "./inference-runtime.js";
 
 const MODEL = "docker.io/ai/smollm2:latest";
 
@@ -124,6 +125,15 @@ beforeEach(() => {
   loggerError.mockReset();
   loggerDebug.mockReset();
   resetWarmStateForTests();
+  // WARP-2857 — `inference-runtime.ts` keeps its deprecation warnings
+  // once-per-PROCESS, and every test in this file resolves a runtime URL
+  // through it. Without this reset the first test to hit the legacy-only
+  // branch latches the flag, and later tests asserting `loggerWarn` was NOT
+  // called pass only because an earlier test already spent the warning.
+  // That makes them order-dependent: green in a full run, red under
+  // `-t`, `.only`, or a resharded/reordered run. Reset it here, next to
+  // the logger mocks whose state it shadows.
+  resetRuntimeUrlWarnsForTests();
 });
 afterEach(() => {
   global.fetch = realFetch;
@@ -207,7 +217,18 @@ describe("WARP-1870 — a self-contradicting runtime config must not claim healt
 
     await expect(verifyListedModelServeable(MODEL)).resolves.toBe("serveable");
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(loggerWarn).not.toHaveBeenCalled();
+    // WARP-2857 — this box's .env names the daemon with the deprecated
+    // OLLAMA_URL, so `inferenceRuntimeUrl()` warns about the NAME. That is
+    // orthogonal to what this test is about: whether the runtime config
+    // contradicts itself. Assert the incoherence signal specifically. A bare
+    // `not.toHaveBeenCalled()` passed only because an earlier `it()` in this
+    // file had already spent the once-per-process deprecation warning, which
+    // made it green in a full run and red under `-t` / `.only` / a resharded
+    // run.
+    const incoherenceWarnings = loggerWarn.mock.calls.filter(
+      (c) => !String(c[0] ?? "").includes("is DEPRECATED"),
+    );
+    expect(incoherenceWarnings).toEqual([]);
   });
 });
 

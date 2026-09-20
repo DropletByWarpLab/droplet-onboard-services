@@ -20,6 +20,7 @@ import {
   parseRetryAfter,
   type SyncFailureLike,
 } from "./sync-policy.js";
+import { redactDeltaTokens } from "./graph-resources.js";
 import { redactAuthError } from "./state.js";
 
 /** States the scheduler is allowed to pick up. */
@@ -129,8 +130,11 @@ export async function recordSuccess(
  *     early deepens the throttling.
  *   - **AUTH** — the grant is dead, which is a property of the CONNECTION, not
  *     this cursor. Park the cursor but **keep its delta link**: discarding it
- *     would force a full re-download once the person reconnects. The
- *     connection itself is moved to NEEDS_RECONNECT by the auth service.
+ *     would force a full re-download once the person reconnects. This
+ *     function does NOT touch the connection row: the auth service moves it
+ *     to NEEDS_RECONNECT when a refresh fails, and the sync service does the
+ *     same (`markNeedsReconnect`) when Graph answers a live call with 401/403
+ *     — the case a refresh never sees.
  *   - **FATAL** — stop. Retrying a malformed request forever helps nobody.
  */
 export async function recordFailure(
@@ -195,6 +199,15 @@ export async function recordFailure(
  * Reuses the connector's credential redaction, then strips delta tokens
  * specifically: a delta link is a URL, so it reads as harmless, but it carries
  * a token of its own and must not land in a field the dashboard shows.
+ *
+ * BOTH passes are required; neither is a superset of the other (WARP-2118).
+ *   - redactDeltaTokens() anchors on `?`/`&`, so it catches driveItem's bare
+ *     `token=` form that the local pattern below cannot see — the gap it was
+ *     written for.
+ *   - the local pattern takes `$deltatoken=`/`$skiptoken=` with NO `?`/`&`
+ *     before them, which a bare cursor value spliced into a message has.
+ * Collapsing this to redactDeltaTokens() alone re-opens the second case, so
+ * do not "simplify" it to one call without a test for a bare `$deltatoken=`.
  */
 function redactSyncError(err: SyncFailureLike): string {
   const base = redactAuthError({
@@ -202,5 +215,8 @@ function redactSyncError(err: SyncFailureLike): string {
     errorMessage: err.message,
     statusCode: err.statusCode,
   });
-  return base.replace(/\$(delta|skip)token=\S+/gi, "$$$1token=[redacted]");
+  return redactDeltaTokens(base).replace(
+    /\$(delta|skip)token=\S+/gi,
+    "$$$1token=[redacted]",
+  );
 }

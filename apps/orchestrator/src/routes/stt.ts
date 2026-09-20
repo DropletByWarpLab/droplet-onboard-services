@@ -50,12 +50,33 @@ export function createSttRouter(): Router {
       }
       inFlight++;
       try {
-        const pcm = req.body as Buffer;
-        if (!Buffer.isBuffer(pcm) || pcm.length < 2) {
+        // WARP-2873 / CodeQL js/type-confusion-through-parameter-tampering:
+        // `express.raw` only claims the body when nothing parsed it first —
+        // app.ts mounts `express.json()` ahead of this router, so a JSON
+        // request reaches here with `req.body` already a string, an array or
+        // an object. CodeQL does not model `Buffer.isBuffer` as a type guard,
+        // so it saw `.length` here (and downstream in stt.client's chunking
+        // loop) as a possible string/array confusion. `typeof === "string"`
+        // and `Array.isArray` ARE barriers the query recognises, so test them
+        // explicitly at the boundary before aliasing the body as a Buffer.
+        const body: unknown = req.body;
+        if (typeof body === "string" || Array.isArray(body) || !Buffer.isBuffer(body)) {
           res.status(400).json({ error: "empty_audio" });
           return;
         }
-        const rate = Number.parseInt(String(req.query.rate ?? "16000"), 10);
+        const pcm: Buffer = body;
+        if (pcm.length < 2) {
+          res.status(400).json({ error: "empty_audio" });
+          return;
+        }
+        // CodeQL js/type-confusion-through-parameter-tampering: `?rate=a&rate=b`
+        // arrives as an array — only a single string (or absence) is a rate.
+        const rawRate = req.query.rate;
+        if (rawRate !== undefined && typeof rawRate !== "string") {
+          res.status(400).json({ error: "invalid_rate" });
+          return;
+        }
+        const rate = Number.parseInt(rawRate ?? "16000", 10);
         if (!Number.isFinite(rate) || rate < 8000 || rate > 48000) {
           res.status(400).json({ error: "invalid_rate" });
           return;

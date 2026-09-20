@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { addComment, createWorkItem, updateWorkItem } from "./pm.service.js";
+// WARP-1570: pm.service.ts declares an isolation level, so this suite inherits
+// the shared seam instead of a hand-rolled $transaction stub.
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 /**
  * Stored-XSS regression tests (PR #684 findings 1 & 2). These exercise the real
@@ -67,7 +70,7 @@ describe("PM service sanitizes stored HTML (stored-XSS guards)", () => {
       pmWorkItem: { findUnique: async () => readBackRow(persisted?.descriptionHtml ?? null) },
       pmState: { findUnique: async () => null },
       pmLabel: { findMany: async () => [] },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await createWorkItem(prisma, null, "p1", { name: "x", descriptionHtml: XSS_DESC });
@@ -108,7 +111,7 @@ describe("PM service sanitizes stored HTML (stored-XSS guards)", () => {
       pmProject: { findUnique: async () => ({ id: "p1", identifier: "PRJ" }) },
       pmState: { findUnique: async () => null },
       pmLabel: { findMany: async () => [] },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateWorkItem(prisma, null, "wi-1", { descriptionHtml: XSS_DESC });
@@ -147,7 +150,7 @@ describe("PM service sanitizes stored HTML (stored-XSS guards)", () => {
       pmProject: { findUnique: async () => ({ id: "p1", identifier: "PRJ" }) },
       pmState: { findUnique: async () => null },
       pmLabel: { findMany: async () => [] },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await updateWorkItem(prisma, null, "wi-1", { descriptionHtml: null });
@@ -174,7 +177,7 @@ describe("PM service sanitizes stored HTML (stored-XSS guards)", () => {
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "wi-1" }) },
-      $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+      $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await addComment(prisma, null, "wi-1", XSS_COMMENT);

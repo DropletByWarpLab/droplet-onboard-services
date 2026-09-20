@@ -4,7 +4,20 @@ import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
-import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+
+import { PERSONA_BLOCK_PREFIX } from "../services/persona.service.js";
+import { BUSINESS_BLOCK_DELIMITER_OPEN } from "../services/business-profile.service.js";
+import {
+  guardComposerFailOpen,
+  withPromptBlockDelegates,
+} from "./helpers/prompt-block-fixtures.js";
+
+// WARP-2652 — `new PrismaClient()` here resolves to the shared in-memory
+// double from src/__tests__/setup.ts, which has no `assistantPersona`,
+// `businessProfile` or `workspace` model. Both block composers therefore threw
+// on every turn and the route's fail-open swallowed it. See the helper header.
+guardComposerFailOpen();
 
 // Stub auth middleware — pulls a role from `x-test-role` so tests can
 // exercise both authenticated and unauthenticated paths. Matches the
@@ -79,6 +92,10 @@ const mockListKeys = vi.fn().mockResolvedValue(["anthropic"]);
 const mockDeleteKey = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../services/ai-gateway.client.js", () => ({
+  // WARP-2851 — ollama publishes no window; `null` keeps these suites on
+  // the local default, i.e. byte-for-byte the window they budgeted against
+  // before per-model resolution existed.
+  getModelContextWindow: vi.fn().mockResolvedValue(null),
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: (...args: any[]) => mockListModels(...args),
   chat: (...args: any[]) => mockChat(...args),
@@ -89,7 +106,7 @@ vi.mock("../services/ai-gateway.client.js", () => ({
 
 // WARP-1511 — stub only the DB read (`readActiveChatModel`) so
 // GET /api/llm/models' `defaultModel` resolution is testable without a live
-// Postgres connection. `resolveActiveChatModel` / `localModelIdentifiers`
+// Postgres connection. `resolveStoredChatModel` / `resolveActiveChatModel`
 // stay real so the actual fallback logic under test runs for real.
 const { readActiveChatModelMock } = vi.hoisted(() => ({
   readActiveChatModelMock: vi.fn(),
@@ -118,6 +135,8 @@ vi.mock("../services/cache.service.js", async () => {
     ...actual,
     cacheGet: vi.fn().mockResolvedValue(null),
     cacheSet: vi.fn().mockResolvedValue(undefined),
+    // WARP-2871 — a key save/delete busts the chat selector + Models page.
+    cacheDel: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -135,6 +154,7 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
 
 const mockCacheGet = vi.mocked(cacheGet);
 const mockCacheSet = vi.mocked(cacheSet);
+const mockCacheDel = vi.mocked(cacheDel);
 
 describe("LLM routes", () => {
   let app: ReturnType<typeof createApp>;
@@ -142,7 +162,9 @@ describe("LLM routes", () => {
   beforeAll(() => {
     const prisma = new PrismaClient();
     initDeviceService(prisma);
-    app = createApp(prisma);
+    // WARP-2652 — the three delegates the prompt-block composers need,
+    // layered on for THIS suite only.
+    app = createApp(withPromptBlockDelegates(prisma));
   });
 
   beforeEach(() => {
@@ -357,6 +379,19 @@ describe("LLM routes", () => {
       expect(res.body.defaultModel).toBe("gpt-oss:20b");
     });
 
+    it("resolves a stored legacy DISPLAY name to the runtime id — agrees with GET /api/models (WARP-2882)", async () => {
+      readActiveChatModelMock.mockResolvedValue("Gpt-oss 20B F16");
+      mockListModels.mockResolvedValueOnce({
+        models: [
+          { id: "llama3.2:3b", provider: "local", name: "Llama3.2 3B", context_window: null },
+          { id: "docker.io/ai/gpt-oss:20B-F16", provider: "local", name: "Gpt-oss 20B F16", context_window: null },
+        ],
+      });
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body.defaultModel).toBe("docker.io/ai/gpt-oss:20B-F16");
+    });
+
     it("stays honestly null when nothing is installed", async () => {
       readActiveChatModelMock.mockResolvedValue(null);
       mockListModels.mockResolvedValueOnce({ models: [] });
@@ -436,6 +471,40 @@ describe("LLM routes", () => {
       expect(mockChat).toHaveBeenCalledOnce();
     });
 
+    // WARP-2652 — the fixture floor. Every chat case in this file ran against
+    // a prompt missing the persona and business blocks, because the shared
+    // Prisma double has no model for either singleton.
+    it("assembles a base prompt carrying both the persona and the business block", async () => {
+      let sys = "";
+      mockChat.mockImplementationOnce(
+        async (req: { messages?: { role: string; content: unknown }[] }) => {
+          const first = req.messages?.[0];
+          sys = first && typeof first.content === "string" ? first.content : "";
+          return {
+            ok: true,
+            json: vi.fn().mockResolvedValue({
+              choices: [
+                { index: 0, message: { role: "assistant", content: "Hi!" }, finish_reason: "stop" },
+              ],
+            }),
+          };
+        },
+      );
+
+      const res = await request(app)
+        .post("/api/llm/chat")
+        .set("x-test-role", "owner")
+        .send({
+          model: "llama3:8b",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        });
+
+      expect(res.status).toBe(200);
+      expect(sys).toContain(PERSONA_BLOCK_PREFIX);
+      expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    });
+
     it("persists an empty completion as a FAILED turn (WARP-854)", async () => {
       // Zero output + zero tool calls used to finalize `completed`, leaving
       // an invisible ghost turn in history. It must persist as `failed` so
@@ -466,13 +535,24 @@ describe("LLM routes", () => {
     });
   });
 
+  // WARP-2871 — cloud-provider keys are BOX-WIDE and admin-managed: every
+  // gateway call goes out with no user id (no X-Droplet-User ⇒ the shared
+  // namespace), and a save/delete busts both 30 s caches so the chat
+  // selector and the Models page reflect it now, not after a TTL. The role
+  // narrowing (owner/admin) is pinned in rbac.test.ts — requireRole is a
+  // no-op here.
   describe("Key management", () => {
-    it("POST /api/llm/keys/:provider stores key", async () => {
+    it("POST /api/llm/keys/:provider stores a box-wide key (no user id) and busts both caches", async () => {
       const res = await request(app)
         .post("/api/llm/keys/anthropic")
+        .set("x-test-role", "admin")
         .send({ api_key: "sk-ant-test" });
       expect(res.status).toBe(200);
       expect(res.body.provider).toBe("anthropic");
+      expect(mockSaveKey).toHaveBeenCalledTimes(1);
+      expect(mockSaveKey.mock.calls[0]).toEqual(["anthropic", "sk-ant-test"]);
+      expect(mockCacheDel).toHaveBeenCalledWith("llm:models");
+      expect(mockCacheDel).toHaveBeenCalledWith("models:page");
     });
 
     it("POST /api/llm/keys/:provider rejects missing key", async () => {
@@ -480,18 +560,42 @@ describe("LLM routes", () => {
         .post("/api/llm/keys/anthropic")
         .send({});
       expect(res.status).toBe(400);
+      expect(mockSaveKey).not.toHaveBeenCalled();
     });
 
-    it("GET /api/llm/keys lists configured providers", async () => {
+    it("POST /api/llm/keys/:provider 400s an unknown provider — the gateway has only anthropic + openai", async () => {
+      const res = await request(app)
+        .post("/api/llm/keys/gemini")
+        .send({ api_key: "AIza-test" });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "unknown_provider" });
+      expect(mockSaveKey).not.toHaveBeenCalled();
+      expect(mockCacheDel).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/llm/keys lists the box-wide providers (no user id)", async () => {
       const res = await request(app).get("/api/llm/keys");
       expect(res.status).toBe(200);
-      expect(res.body.providers).toBeDefined();
+      expect(res.body.providers).toEqual(["anthropic"]);
+      expect(mockListKeys).toHaveBeenCalledTimes(1);
+      expect(mockListKeys.mock.calls[0]).toEqual([]);
     });
 
-    it("DELETE /api/llm/keys/:provider removes key", async () => {
+    it("DELETE /api/llm/keys/:provider removes the box-wide key (no user id) and busts both caches", async () => {
       const res = await request(app).delete("/api/llm/keys/anthropic");
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("deleted");
+      expect(mockDeleteKey).toHaveBeenCalledTimes(1);
+      expect(mockDeleteKey.mock.calls[0]).toEqual(["anthropic"]);
+      expect(mockCacheDel).toHaveBeenCalledWith("llm:models");
+      expect(mockCacheDel).toHaveBeenCalledWith("models:page");
+    });
+
+    it("DELETE /api/llm/keys/:provider 400s an unknown provider", async () => {
+      const res = await request(app).delete("/api/llm/keys/gemini");
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "unknown_provider" });
+      expect(mockDeleteKey).not.toHaveBeenCalled();
     });
   });
 

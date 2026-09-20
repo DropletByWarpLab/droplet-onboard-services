@@ -66,6 +66,24 @@ export function getActivitySigner(): ActivityRowSigner | null {
   return signer;
 }
 
+/**
+ * Read the bound recorder itself (WARP-2218).
+ *
+ * `recordActivity` above wraps every emit in `recordSafely`, which swallows a
+ * recorder failure so the CALLER's flow is never blocked by the audit table.
+ * That is right for a chat turn — losing one audit row beats failing the
+ * reply — and wrong for a background cron leg, where there is no user-facing
+ * flow to protect and a silently-dropped row is simply an unaudited vendor
+ * call. A cron handler wants the throw: `cron-runtime.service.ts`'s `safeRun`
+ * turns it into a logged failure with the consecutive-failure canary attached,
+ * which is what downstream alerting reads.
+ *
+ * Null before `initActivityRecorder` has run, exactly like `getActivitySigner`.
+ */
+export function getActivityRecorder(): ActivityRowRecorder | null {
+  return recorder;
+}
+
 /** Exposed only for tests. */
 export function _setActivityRecorderForTests(
   newRecorder: ActivityRowRecorder | null,

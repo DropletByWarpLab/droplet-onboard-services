@@ -23,13 +23,38 @@ export interface ChatToolCall {
    * "Approve & run" button that re-POSTs with the single-use token to finish
    * the action. Absent for tools confirmed on a dedicated dashboard surface.
    */
+  /**
+   * WARP-2469 — `kind: "tool_confirmation"` is a WARP-2305 interceptor
+   * challenge, rendered as an in-chat approval prompt. It carries a
+   * `challengeId` and, deliberately, NO token: the interceptor's secret
+   * never leaves the orchestrator, so holding the SSE stream is not the
+   * same as holding the approval. Every other `kind` is the pre-existing
+   * WARP-640 one-click handle and still carries `confirmationToken` —
+   * read that field only after checking `kind`.
+   */
   confirmation?: {
     kind: string;
     sceneId?: string;
-    confirmationToken: string;
+    confirmationToken?: string;
+    challengeId?: string;
+    tool?: string;
+    status?: string;
+    /** Epoch ms. Past this the prompt renders as expired. */
+    expiresAt?: number;
+    /** PHI-free argument summary; never an argument VALUE. */
+    summary?: {
+      tool: string;
+      fields: { key: string; kind: string; detail: string; value?: boolean }[];
+      truncatedFields: number;
+    };
   };
-  /** Local approve-button state: undefined = idle, then running → ran/failed. */
-  confirmState?: "running" | "ran" | "failed";
+  /**
+   * Local approve-button state: undefined = idle, then running →
+   * ran/failed. WARP-2469 adds `denied` and `expired`, which are decided
+   * states rather than in-flight ones: a denied prompt must not read as
+   * a failure the user should retry.
+   */
+  confirmState?: "running" | "ran" | "failed" | "denied" | "expired";
 }
 
 export interface ChatMessage {
@@ -239,10 +264,19 @@ export interface ModelsResponse {
 
 /** One local LLM served on the box. */
 export interface LocalModelRow {
+  /** WARP-2882 — the runtime id ("docker.io/ai/gpt-oss:20B-F16"): what every
+   *  write and probe sends. Optional only for an orchestrator that predates
+   *  the field; then `name` doubles as the id, exactly as before. */
+  id?: string;
+  /** Display name ("Gpt-oss 20B F16") — for reading, never for sending. */
   name: string;
   family: string;
   provider: string;
   contextLength: number | null;
+  /** WARP-2882 (additive; optional so an older orchestrator still parses) —
+   *  the context length the model was TRAINED with. Display only: the window
+   *  the box actually serves is an operator setting, not this. */
+  trainedContextLength?: number | null;
   /** GB on disk — null until ai-gateway exposes per-model disk usage. */
   gbOnDisk: number | null;
   /** "chat" | "embed" | "vision" | … — null until ai-gateway tags models. */
@@ -334,16 +368,31 @@ export interface ModelsCatalogPayload {
   models: CatalogModelEntry[];
 }
 
-/** One opt-in cloud provider. Read-only on this surface — enabling a provider
- *  happens in Settings (the off-LAN allowlist), never here. */
+/** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
+ *  ONE place for cloud models: the escape switch and the keys live here. */
 export interface CloudProviderRow {
-  provider: "anthropic" | "openai" | "gemini";
-  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  /** WARP-2871: gemini removed — no gateway provider exists for it. */
+  provider: "anthropic" | "openai";
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
   enabled: boolean;
+  /** WARP-2871: null = the gateway could not be asked (render "Unknown",
+   *  never "Not set up" — absence of an answer is not absence of a key). */
+  hasKey: boolean | null;
   /** ISO timestamp of the last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until egress aggregation lands. */
   spendUsd: number;
+}
+
+/** WARP-2871 — the workspace `cloud_model_escape` channel as the caller sees
+ *  it. `allowedForYou` is the caller's EFFECTIVE verdict (escape && role);
+ *  null = unknown, and the page must not guess. */
+export interface CloudAccessInfo {
+  escapeEnabled: boolean;
+  escapeChangedBy: string | null;
+  /** ISO */
+  escapeChangedAt: string | null;
+  allowedForYou: boolean | null;
 }
 
 /**
@@ -385,15 +434,30 @@ export interface ModelsGpuInfo {
  */
 export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
+/** WARP-2883 — one round-trip per inference endpoint, ms; null = no answer. */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
+  /** WARP-2871 — escape state + the caller's verdict, for the Cloud section. */
+  cloudAccess: CloudAccessInfo;
   gpu: ModelsGpuInfo | null;
   /** WARP-1861 (additive; optional so an older orchestrator that predates the
    *  field still parses). Absent ⇒ we know nothing about why, and the tile
    *  must not guess — see `ModelsGpuReason`. */
   gpuReason?: ModelsGpuReason;
+  /** WARP-2883: mean round-trip over the enabled inference endpoints, ms;
+   *  0 = nothing answered (render "—", never "0 ms"). */
   avgLatencyMs: number;
+  /** WARP-2883 (additive; optional so an older orchestrator still parses):
+   *  the per-endpoint samples behind `avgLatencyMs`. null per endpoint =
+   *  did not answer; null/absent overall = the gateway could not be asked. */
+  endpointLatencyMs?: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
    *  default (`ai.model.chat`). null when unset or the stored tag is no longer
@@ -741,6 +805,16 @@ export interface VpnStatusInfo {
    *  at home yet" and show guidance instead of minting a dead config (mirrors
    *  the WARP-993 offLanReachable never-over-promise convention). */
   homeEndpointHost?: string | null;
+  /** WARP-2689: does the router's KERNEL hold the wg0 device, as opposed to
+   *  merely a uci section for it? `false` is an observation — the router has
+   *  no WireGuard support and no conf minted against it can handshake, so the
+   *  page must say so and stop offering to add devices. `null`/absent = the
+   *  router could not say (older routing build, no ubus grant); treat exactly
+   *  like "no information", never like false. */
+  interfaceLive?: boolean | null;
+  /** WARP-2689: peers the kernel actually holds (vs `peerCount`, the uci
+   *  intent). Null when the router cannot say. */
+  livePeerCount?: number | null;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
@@ -1149,6 +1223,13 @@ export interface RosterUser extends AuthUser {
   /** WARP-1532 — assigned custom role id (null = plain built-in tier).
    *  Optional for the same parallel-build reason as `role`. */
   accessRoleId?: string | null;
+  /** Directory account state, mirrored from Nextcloud's
+   *  `/cloud/users/details`. The roster used to drop this, so a deactivated
+   *  person looked identical to an active one and the only affordance on the
+   *  row was Disable — there was no way back. Optional: a box running an
+   *  orchestrator older than this field sends nothing, and `undefined` must
+   *  read as enabled rather than painting the whole roster deactivated. */
+  enabled?: boolean;
 }
 
 // ── WARP-217 invite types ──
@@ -1279,7 +1360,11 @@ export type AccessModuleId =
   | "smart_home"
   | "network"
   | "managed_switch"
-  | "team_chat";
+  | "team_chat"
+  | "contacts"
+  | "crm"
+  /** WARP-2581 — invoices and bills landed from a cloud ledger. */
+  | "money";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -1337,6 +1422,103 @@ export interface AccessRolePayload {
   featureGrants: AccessRoleFeatureGrant[];
   toolGrants: AccessRoleToolGrant[];
   connectorGrants: AccessRoleConnectorGrant[];
+}
+
+// ── WARP-2738: role templates (ADR-032's missing starting points) ──
+//
+// There is no shared access types package: every type in this block is a HAND
+// MIRROR of the server. The source of truth is
+// `apps/orchestrator/src/services/access-role-templates.ts` (the catalogue and
+// its grant shapes), projected onto the wire by `serializeRoleTemplate` in
+// `apps/orchestrator/src/routes/access.ts`. Change either and this block has to
+// move with it.
+//
+// A template is NOT a role and deliberately does not share {@link AccessRole}'s
+// shape: it has no database id, no people, no state and no timestamps. It is
+// what a card renders from and posts back as `{ templateId }` — the row it
+// produces is ordinary and fully editable from the moment it lands, and nothing
+// on that row remembers which template made it (provenance lives only in the
+// creation Activity's `refs`).
+
+/** The gateable half of the feature vocabulary — the server's
+ *  `GateableModuleId`, which is `ModuleId` minus `chat`. Chat is always-on and
+ *  a hard 400 on the grant axis, so no template can name it. Derived by
+ *  exclusion, so a new module id reaches this type for free. */
+export type AccessGateableModuleId = Exclude<AccessModuleId, "chat">;
+
+/** A template's feature grant. Same shape as {@link AccessRoleFeatureGrant},
+ *  with `chat` excluded at the type level rather than by convention. */
+export interface RoleTemplateFeatureGrant {
+  moduleId: AccessGateableModuleId;
+  level: FeatureAccessLevel;
+}
+
+/**
+ * One starting point in the code-resident catalogue
+ * (GET /api/access/role-templates).
+ *
+ * Grants are ADDITIVE FROM ZERO, which is why every axis is enumerated rather
+ * than defaulted: a role that carries grants resolves to chat@act plus ONLY its
+ * explicit grants — the tier's full catalogue is used exclusively for people on
+ * a plain built-in tier. Anything absent here is not held.
+ */
+export interface RoleTemplate {
+  /** Stable kebab-case identifier ("front-desk"), posted back as `templateId`.
+   *  Typed as `string`, NOT a union of the eight shipped ids: the catalogue
+   *  lives on the box and this app must render whatever it is served, including
+   *  a template added after this build shipped. The server owns the vocabulary
+   *  and answers 404 for an id it does not know. */
+  id: string;
+  /** Becomes AccessRole.name. The slug is ALWAYS derived server-side. */
+  name: string;
+  /** Operator-facing prose (≤ 500 chars) — what the profile is for and, where a
+   *  grant is a policy choice rather than a tier limit, that it is one. */
+  description: string;
+  startingPoint: AccessStartingPoint;
+  featureGrants: RoleTemplateFeatureGrant[];
+  toolGrants: AccessRoleToolGrant[];
+  /** ALWAYS empty. Provider slugs are per-box, so a template naming one this
+   *  box has not configured would store dead config that the roles list then
+   *  advertises as reach; connector access is added after creating, in the
+   *  builder, against the providers actually connected. */
+  connectorGrants: AccessRoleConnectorGrant[];
+  /** False on every shipped template. */
+  cloudModelsAllowed: boolean;
+  /** True on exactly one template, and legal there only because that same
+   *  payload grants `smart_home` — the server ANDs this away otherwise. */
+  mayOperateLocks: boolean;
+  /** All three usage caps are null on every template, deliberately: the daily
+   *  message cap is stored and rendered but never enforced, so a template
+   *  shipping one would advertise a limit the box does not keep. */
+  storageQuotaBytes: string | null;
+  maxUploadSizeMb: number | null;
+  llmDailyMessageCap: number | null;
+}
+
+/** GET /api/access/role-templates. Owner/admin only; served with
+ *  `Cache-Control: private, max-age=300` (the catalogue is static code, and
+ *  identical on every box). */
+export interface RoleTemplatesResponse {
+  /** In PRESENTATION order — the array order IS the product order. Render as
+   *  given; never sort. */
+  roleTemplates: RoleTemplate[];
+  /**
+   * THE HONESTY FIELD, and the reason this is an endpoint rather than a
+   * constant bundled into this app. Derived server-side from the layer-2 gate
+   * roster (`FEATURE_GATED_MODULES`), which has moved twice already.
+   *
+   * Treat it as a SET, read from the response — never hardcoded, never sorted
+   * into meaning. A feature grant on a module IN this set genuinely narrows what
+   * the person reaches: the route answers 404 `module_disabled`. A grant on any
+   * module NOT in it is nav-only — the menu entry hides and the API still
+   * answers.
+   *
+   * Copy rule for anything rendered off this: "they will not see it", NEVER
+   * "they will be told they lack permission". The denial is byte-identical to
+   * the box-wide module toggle, so the person cannot tell the two apart — and
+   * neither can this dashboard.
+   */
+  enforcedModuleIds: AccessModuleId[];
 }
 
 /** One per-person exception row (feature axis only in v1 — O-3). */
@@ -1468,11 +1650,29 @@ export interface ShareRecipient {
 
 // --- Storage types ---
 
+/** The four-scalar storage shape (GET /api/storage). WARP-2098: the top-level
+ *  quadruple is now the box's DATA drives — the OS/boot disk excluded — and the
+ *  same shape appears again under `cloud` for the Nextcloud account quota that
+ *  the top level used to carry. */
 export interface StorageStats {
   used: number;       // bytes
   total: number;      // bytes
   available: number;  // bytes
   percentage: number; // 0-100
+}
+
+/** GET /api/storage. The headline quadruple describes the data drives; the
+ *  install disk and the Nextcloud quota are reported alongside it rather than
+ *  mixed into it. */
+export interface StorageOverview extends StorageStats {
+  /** Provenance for the quadruple above; null when the device-bridge said
+   *  nothing (unreachable, or no data drives). */
+  totals: DataStorageTotals | null;
+  /** The box's own install disk. Absent when the bridge doesn't report it. */
+  system_disk?: SystemDiskInfo;
+  /** The signed-in user's Nextcloud account quota — a cloud-account figure,
+   *  NOT a description of the box's disks. null when it can't be read. */
+  cloud: StorageStats | null;
 }
 
 export interface DriveInfo {
@@ -1556,12 +1756,84 @@ export interface DiskInfo {
   md?: string;
 }
 
+/** WARP-2098: the appliance's OWN system/install disk — the disk the Droplet
+ *  boots from, runs its software on, and (because the docker data-root lives
+ *  there) stores uploaded files on.
+ *
+ *  Deliberately NOT a `DriveInfo` and NOT a member of `drives`/`disks`. Those
+ *  arrays feed the rename/eject/browse cards, the setup wizard's poolable and
+ *  reclaimable lists, and the Settings reformat picker; the system disk must
+ *  never appear in any of them (WARP-827 keeps it out, and that stays). A
+ *  distinct type is the guardrail: nothing that iterates drives can pick this
+ *  up by accident, and passing it where a DriveInfo is expected won't compile. */
+export interface SystemDiskInfo {
+  /** Whole-disk kernel name, e.g. "nvme0n1". */
+  name: string;
+  /** The PHYSICAL disk. `used_bytes` sums `filesystems`, so unallocated LVM
+   *  extents count as free rather than disappearing. */
+  size_bytes: number;
+  /** null whenever the bridge could not publish an honest total — see
+   *  `measurement` for which case. Render the capacity with no meter; 0 would
+   *  claim an empty disk. */
+  used_bytes: number | null;
+  free_bytes: number | null;
+  /** Why the pair above is or is not a number — the bridge's explicit state,
+   *  never re-derived from the nulls (a "partial" and an "unavailable" disk
+   *  both carry null, and the owner should be told which).
+   *    complete    — every filesystem measured; the pair is real.
+   *    partial     — some measured (listed in `filesystems`), not all; a
+   *                  total would undercount, so the pair is null.
+   *    unavailable — nothing measurable; the pair is null and `filesystems`
+   *                  is empty. */
+  measurement: "complete" | "partial" | "unavailable";
+  model: string;
+  serial: string;
+  bus: string;
+  /** Every mounted filesystem on the disk, one per backing device. `role` is
+   *  assigned server-side so no surface pattern-matches host paths. */
+  filesystems: SystemDiskFilesystem[];
+}
+
+export interface SystemDiskFilesystem {
+  mount: string;
+  role: "root" | "boot" | "data";
+  fs: string;
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+}
+
+/** WARP-2098: the box's real data-storage figure — summed over the SAME
+ *  post-filter `drives` array the response carries, so the OS disk is excluded
+ *  by construction and a pool contributes its one mounted filesystem rather
+ *  than its raw members.
+ *
+ *  Never label this pool capacity. ADR-019 deleted a client-side "Total pooled
+ *  storage" byte-sum precisely because it described no disk that existed, and
+ *  drives-panel.pools.test.tsx still guards the phrase. */
+export interface DataStorageTotals {
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  drive_count: number;
+  source: "data_drives";
+}
+
 export interface DrivesResponse {
   drives: DriveInfo[];
   count: number;
+  /** WARP-2098: totals over the returned data drives. `null` means "there is
+   *  nothing to total" (no data drives, or the bridge is unreachable) — render
+   *  the empty state, never a 0 B meter. ABSENT means an older orchestrator
+   *  that predates the field, which callers treat the same way. */
+  totals?: DataStorageTotals | null;
   /** WARP-936: whole-disk inventory. Absent on an older orchestrator/bridge —
    *  callers treat that as an empty list. */
   disks?: DiskInfo[];
+  /** WARP-2098: the box's own install disk. Absent on an older bridge, or when
+   *  the bridge could not identify the disk — the UI then omits the System
+   *  drive card entirely rather than rendering an empty one. */
+  system_disk?: SystemDiskInfo;
   snapshot_at?: string;
   error?: string;
   reason?: string;
@@ -2594,6 +2866,88 @@ export interface ToolCatalogEntry {
   requiresConfirmation: boolean;
 }
 
+// ── WARP-2823: the admin console's prompt + tool inspector ────────────────
+//
+// Mirrors the orchestrator's `tool-inspect.service.ts` / `prompt-inspect.service.ts`
+// response shapes. Deliberately structural rather than a re-derivation: the
+// dashboard renders these fields and never re-decides any of them.
+
+/** The gates a chat turn applies, in the order it applies them. */
+export type InspectGate =
+  | "write_tier"
+  | "role_grant"
+  | "interview_strip"
+  | "off_lan_withhold"
+  | "chat_policy"
+  | "turn_relevance";
+
+/** Why an identity could not be established. */
+export type AttributionFailure =
+  | "no_principal"
+  | "user_missing"
+  | "user_deactivated"
+  | "read_failed";
+
+export interface ToolInspectRow {
+  name: string;
+  domain: string;
+  homeDescription: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  advertised: boolean;
+  /** The FIRST gate that withheld it. Null when advertised. */
+  gate: InspectGate | null;
+  reason: string | null;
+  /** Every other gate that would also have withheld it. */
+  alsoWithheldBy: InspectGate[];
+  /** Present on a lock-capable tool the person may not use for locks. */
+  lockCaveat?: string;
+}
+
+export interface ToolInspectResponse {
+  targetUserId: string;
+  tier: string | null;
+  unresolved: AttributionFailure | null;
+  /** `true` = no role narrowing. NOT "unrestricted" — the tier gate still runs. */
+  noRoleNarrowing: boolean;
+  counts: {
+    registered: number;
+    advertised: number;
+    withheld: number;
+    byGate: Record<InspectGate, number>;
+  };
+  rows: ToolInspectRow[];
+}
+
+export type PromptBlockStatus =
+  | "present"
+  | "absent"
+  | "errored"
+  | "dropped"
+  | "not_modelled";
+
+export interface PromptBlockView {
+  key: string;
+  label: string;
+  status: PromptBlockStatus;
+  text: string | null;
+  chars: number;
+  cap: number | null;
+  neverDropped: boolean;
+  note?: string;
+}
+
+export interface PromptInspectResponse {
+  targetUserId: string;
+  tier: string | null;
+  unresolved: AttributionFailure | null;
+  blocks: PromptBlockView[];
+  /** The assembled system message, verbatim. */
+  assembled: string;
+  assembledChars: number;
+  erroredBlocks: string[];
+}
+
 export interface ToolCatalogResponse {
   tools: ToolCatalogEntry[];
   /** Domains in the orchestrator's canonical IA order — drives filter order. */
@@ -2617,7 +2971,48 @@ export interface ToolCatalogResponse {
  */
 export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 
-export interface PendingComposerPayload {
+/**
+ * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
+ * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
+ * contract and change together.
+ *
+ * Declared HERE rather than in api.ts because the dependency runs api.ts ->
+ * types.ts, and the hand-off payload below needs the business half of it.
+ */
+export type ContextPinKind =
+  | "folder"
+  | "file"
+  | "email_thread"
+  | "camera"
+  | "camera_window"
+  | "customer"
+  | "deal"
+  | "project"
+  | "work_item";
+
+/** The kinds whose `ref` is a RECORD ID rather than a path or a device name.
+ *  These are the ones the orchestrator resolves to a display name. */
+export type BusinessContextPinKind = "customer" | "deal" | "project" | "work_item";
+
+/**
+ * WARP-2582 — how the orchestrator reports a business pin's target on GET
+ * /api/llm/:sessionId/pins. An EXPLICIT enum, so a client never has to infer
+ * "deleted" from a null label.
+ *
+ * `unavailable` means the caller may not read this kind at all (the module is
+ * off, or their AccessRole does not grant the domain). It is shown in the
+ * Context panel only so the pin can be removed; it is never rendered into the
+ * system prompt.
+ */
+export type ContextPinTargetState = "active" | "archived" | "missing" | "unavailable";
+
+export interface ContextPinTarget {
+  state: ContextPinTargetState;
+  label: string | null;
+  sublabel: string | null;
+}
+
+export interface PendingComposerToolPayload {
   kind: "tool";
   /** Registry tool name, e.g. `block_network_device`. Identity for the chip. */
   toolName: string;
@@ -2629,6 +3024,32 @@ export interface PendingComposerPayload {
   /** Plain-language starter line dropped into the composer for the user to edit. */
   seedText: string;
 }
+
+/**
+ * WARP-2582 — the record hand-off from /customers, /projects and the CRM
+ * record drawer. The second seed source WARP-829's `kind` discriminant was
+ * built to allow.
+ *
+ * It carries BOTH halves for one reason: context pins are per-session and a
+ * session id does not exist until the first turn mints one. So `seedText`
+ * names the record on turn 1, and `pin` is applied once the id appears and
+ * covers every turn after. Neither half auto-sends.
+ *
+ * `pin` is `null` for a LIST-scoped action ("Ask AI about your customers") —
+ * a pin needs a `ref` and a list has none. Explicit null rather than an
+ * absent field, so "nothing to pin" is a stated case and not an oversight.
+ */
+export interface PendingComposerPinPayload {
+  kind: "pin";
+  /** Display name — the chip label. Never sent as `ref`. */
+  label: string;
+  pin: { kind: BusinessContextPinKind; ref: string } | null;
+  seedText: string;
+}
+
+export type PendingComposerPayload =
+  | PendingComposerToolPayload
+  | PendingComposerPinPayload;
 
 /* ─────────────────────── Client-app downloads ─────────────────────── */
 
@@ -2648,9 +3069,10 @@ export type AppDownloadAssetKind = "installer" | "signature" | "manifest";
 /**
  * How the catalog's authenticity was established.
  *
- * `digest-only` is the DEFAULT and is not a weakness: the artifacts ship
- * inside the appliance image, and the box re-hashes every byte against
- * the catalog's pinned sha256 before serving. `signed` additionally means
+ * `digest-only` is the DEFAULT and is not a weakness: an operator staged
+ * the artifacts onto the box (ADR-045 — nothing ships inside the image),
+ * and the box re-hashes every byte against the catalog's pinned sha256
+ * before serving. `signed` additionally means
  * a cosign signature over the catalog verified against a real trust
  * anchor — only claimed when it was actually checked.
  */
@@ -2691,4 +3113,65 @@ export interface AppDownloadCatalog {
   attestation: AppDownloadAttestation | null;
   generatedAt?: string | null;
   platforms: AppDownloadPlatformEntry[];
+}
+
+// --- Routines (WARP-2671) — the ToolSpec surface at /routines ---
+//
+// `ToolSpec` is the orchestrator's name for a stored, replayable sequence of
+// tool calls. The user-facing noun is "routine": `/tools` is already the
+// read-only catalog of the box's built-in capabilities, and a routine is
+// something a person composed out of them.
+
+export type RoutineStatus = "live" | "draft" | "suggested";
+
+export interface RoutineStep {
+  id: string;
+  idx: number;
+  /** "call" | "summarize" — a plain String column, extensible by design. */
+  kind: string;
+  /** `{tool, args}` for a call, `{prompt?}` for a summarize. */
+  args: Record<string, unknown> | null;
+}
+
+export interface Routine {
+  id: string;
+  slug: string;
+  name: string;
+  category: string | null;
+  description: string | null;
+  version: number;
+  status: RoutineStatus;
+  ownerId: string | null;
+  share: string | null;
+  safety: number;
+  /** Derived server-side from the steps since WARP-2665 — never self-declared. */
+  writes: boolean;
+  reversible: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Present on the detail fetch, absent from the list. */
+  steps?: RoutineStep[];
+}
+
+export interface RoutineRun {
+  id: string;
+  triggeredBy: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  status: "pending" | "running" | "ok" | "failed" | "cancelled";
+  error: string | null;
+  /** Per-step `{idx, tool, args, ok, result|error, as?}` records. */
+  trace: unknown;
+}
+
+export interface RoutineSchedule {
+  id: string;
+  specId: string;
+  rrule: string;
+  /** IANA zone the rrule's wall-clock is read in (WARP-2665). */
+  timezone: string;
+  nextFireAt: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }

@@ -40,7 +40,9 @@ export REDIS_PASSWORD_MCP="mcp-pw-1"
 # 1. Generation + permissions + hashed-only content
 _generate_redis_acl || fail "_generate_redis_acl exited non-zero"
 [ -s "$ACL" ] || fail "users.acl missing"
-mode="$(stat -f %Lp "$ACL" 2>/dev/null || stat -c %a "$ACL")"
+# GNU first, BSD fallback — see tests/internal-ca.test.sh for why the inverse
+# order silently never matches on Linux (WARP-2647).
+mode="$(stat -c %a "$ACL" 2>/dev/null || stat -f %Lp "$ACL" 2>/dev/null)"
 [ "$mode" = "644" ] || fail "users.acl mode $mode != 644 (redis uid 999 must read it; contents are hashes)"
 for pw in "$REDIS_PASSWORD" "$REDIS_HOST_PASSWORD" "$REDIS_PASSWORD_ORCHESTRATOR" \
           "$REDIS_PASSWORD_AI_GATEWAY" "$REDIS_PASSWORD_MCP"; do

@@ -185,6 +185,10 @@ export interface ModelInfo {
   provider: string;
   name: string;
   context_window: number | null;
+  // WARP-2882 (additive, optional): the length the model was TRAINED with,
+  // probed from Ollama `/api/show`. Display only — the served window for a
+  // local model is `OLLAMA_CONTEXT_LENGTH`; nothing budgets against this.
+  trained_context_window?: number | null;
   // Additive (optional for back-compat): modalities the model supports.
   // Populated by the ai-gateway; drives vision routing + the dashboard badge.
   capabilities?: ModelCapabilities;
@@ -279,6 +283,13 @@ export interface BulkOperationResult {
 
 // --- Storage types ---
 
+/**
+ * The four-scalar storage shape. Used for BOTH the GET /api/storage headline
+ * (WARP-2098: the box's DATA drives) and its `cloud` sibling (the signed-in
+ * user's Nextcloud account quota). The shape is identical; what differs is what
+ * it describes, which is why the endpoint now names each one explicitly instead
+ * of returning a bare quadruple that read as "your storage".
+ */
 export interface StorageStats {
   used: number;       // bytes
   total: number;      // bytes
@@ -338,3 +349,17 @@ export type {
   WanDetectionResult,
   CameraSetupResult,
 } from "./switch.js";
+
+/**
+ * WARP-2883 — GET /ai/latency on the ai-gateway: a round-trip per inference
+ * endpoint in ms, `null` for one that did not answer (unreachable, no
+ * box-wide key, timed out). Never 0 for "not measured".
+ */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+export interface LatencyResponse {
+  providers: EndpointLatencyMs;
+}

@@ -9,11 +9,12 @@
  * acting human as `X-Droplet-User` (AUTH_REQUIRED when absent).
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import emailSearch from "../../../src/handlers/email/search.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(opts: {
-  get?: ReturnType<typeof vi.fn>;
+  get?: Mock;
   role?: Role;
   userId?: string;
 }): ToolContext {
@@ -51,7 +52,7 @@ const THREADS = [
   },
 ];
 
-function okGet(): ReturnType<typeof vi.fn> {
+function okGet(): Mock {
   return vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ filter: "inbox", threads: THREADS }), {
       status: 200,

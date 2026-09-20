@@ -12,7 +12,7 @@
  * preserved here under their original names so the MCP contract is byte-stable)
  * are mapped from the orchestrator's rich camelCase shapes by the mappers below.
  *
- * Errors: a non-2xx orchestrator response becomes `OrchPmError(message, status)`;
+ * Errors: a non-2xx orchestrator response becomes `OrchPmError(message, status, path)`;
  * handlers map 404 → PM_WORK_ITEM_NOT_FOUND and everything else → PM_API_ERROR,
  * exactly as before. Non-OrchPmError throwables bubble to the agent loop.
  */
@@ -32,6 +32,10 @@ export interface PlaneProject {
   name: string;
   identifier: string;
   workspace: string;
+  /** WARP-2719 — who owns it, by NAME. The id is deliberately absent: a model
+   *  filters by the word a person says, and an id on every row is characters
+   *  spent against the result cap for something nothing reads. */
+  department?: string;
 }
 
 export interface PlaneWorkItem {
@@ -43,10 +47,25 @@ export interface PlaneWorkItem {
   labels?: string[];
   created_at: string;
   updated_at: string;
+  /** WARP-2719 — the department this item answers to, by NAME, ALREADY
+   *  RESOLVED by the orchestrator: an item with none inherits its project's,
+   *  and `ApiWorkItem.department` is the resolved value rather than the raw
+   *  column. Name only, for the same reason as `PlaneProject.department`. */
+  department?: string;
 }
 
 export class OrchPmError extends Error {
-  constructor(message: string, readonly status: number) {
+  /**
+   * @param path WARP-2875 — the orchestrator route that failed. Carried
+   *   because `businessError()` has to name the MODULE whose toggle is off,
+   *   and the route is the only thing that actually knows: it used to guess
+   *   from the entity, so `business_create({entity:"note",
+   *   parent_entity:"task"})` — a POST to `/api/pm/work-items/:id/comments` —
+   *   blamed the CRM for a Projects refusal and sent the owner to the wrong
+   *   switch. Set at every throw site so the mapping can never fall back to
+   *   guessing.
+   */
+  constructor(message: string, readonly status: number, readonly path: string) {
     super(message);
     this.name = "OrchPmError";
   }
@@ -54,11 +73,21 @@ export class OrchPmError extends Error {
 
 // ── Native (orchestrator) shapes we read ─────────────────────────────────────
 
+/** The department shape the orchestrator sends, trimmed to what a tool reads.
+ *  `kind`, `parentId` and `source` exist on the wire and are deliberately not
+ *  consumed here — they are org structure, and a tool answering "who is
+ *  working on this" has no question they answer. */
+interface ApiDepartmentRef {
+  id: string;
+  name: string;
+}
+
 interface ApiProject {
   id: string;
   name: string;
   identifier: string;
   workspaceSlug: string;
+  department?: ApiDepartmentRef | null;
 }
 
 interface ApiWorkItem {
@@ -71,12 +100,22 @@ interface ApiWorkItem {
   labels: Array<{ name: string }>;
   createdAt: string;
   updatedAt: string;
+  department?: ApiDepartmentRef | null;
 }
 
 // ── Mappers: native → wire ───────────────────────────────────────────────────
 
 export function toPlaneProject(p: ApiProject): PlaneProject {
-  return { id: p.id, name: p.name, identifier: p.identifier, workspace: p.workspaceSlug };
+  return {
+    id: p.id,
+    name: p.name,
+    identifier: p.identifier,
+    workspace: p.workspaceSlug,
+    // Omitted entirely when absent rather than sent as null: an unowned
+    // project should read as one that says nothing about a department, not one
+    // that asserts it has none.
+    ...(p.department ? { department: p.department.name } : {}),
+  };
 }
 
 export function toPlaneWorkItem(w: ApiWorkItem): PlaneWorkItem {
@@ -91,6 +130,7 @@ export function toPlaneWorkItem(w: ApiWorkItem): PlaneWorkItem {
     labels: (w.labels ?? []).map((l) => l.name),
     created_at: w.createdAt,
     updated_at: w.updatedAt,
+    ...(w.department ? { department: w.department.name } : {}),
   };
 }
 
@@ -121,7 +161,7 @@ export async function callOrch<T = unknown>(
   let timerId: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timerId = setTimeout(() => {
-      reject(new OrchPmError("orchestrator timeout", 504));
+      reject(new OrchPmError("orchestrator timeout", 504, path));
       controller.abort();
     }, ORCH_TIMEOUT_MS);
   });
@@ -147,7 +187,7 @@ export async function callOrch<T = unknown>(
   if (!res.ok) {
     const message =
       typeof json.error === "string" ? json.error : `orchestrator returned ${res.status}`;
-    throw new OrchPmError(message, res.status);
+    throw new OrchPmError(message, res.status, path);
   }
   return json as T;
 }

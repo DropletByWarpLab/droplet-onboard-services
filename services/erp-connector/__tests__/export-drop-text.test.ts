@@ -335,3 +335,39 @@ describe("parseMoney", () => {
     expect(parseMoney("--")).toBeUndefined();
   });
 });
+
+// CodeQL js/polynomial-redos: the CR/DR marker regex and the final
+// digits-and-one-dot check are linear now. Same accept set, same numbers.
+describe("parseMoney — linear-time regexes (CodeQL js/polynomial-redos)", () => {
+  it("keeps the CR/DR marker semantics across the whitespace shapes a report prints", () => {
+    expect(parseMoney("1,250.00\tCR")).toBe(-1250);
+    expect(parseMoney("1,250.00 \t CR.")).toBe(-1250);
+    expect(parseMoney("(1,234.56)CR")).toBe(-1234.56);
+    expect(parseMoney("150.00 dr")).toBe(150);
+    expect(parseMoney("100\nCR")).toBe(-100);
+    expect(parseMoney("100 SCR")).toBe(100);
+  });
+
+  it("keeps the digits-and-one-dot rule", () => {
+    expect(parseMoney("12.")).toBe(12);
+    expect(parseMoney(".5")).toBe(0.5);
+    expect(parseMoney("1.2.3")).toBeUndefined();
+  });
+
+  it("decides 5,000-char pathological cells in well under 100 ms", () => {
+    // Interior tab run (a leading run is trimmed before the regex; the
+    // strip then leaves just the digit) and digit runs ending in a char
+    // that defeats `$`.
+    const cells: Array<[string, number | undefined]> = [
+      ["1" + "\t".repeat(5000) + "x", 1],
+      ["0".repeat(5000) + "+", undefined],
+      ["0".repeat(5000) + "(", undefined],
+    ];
+    for (const [cell, expected] of cells) {
+      const started = performance.now();
+      const value = parseMoney(cell);
+      expect(performance.now() - started).toBeLessThan(100);
+      expect(value).toBe(expected);
+    }
+  });
+});

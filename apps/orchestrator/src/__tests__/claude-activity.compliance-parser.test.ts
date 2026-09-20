@@ -15,15 +15,15 @@ import {
   parseComplianceMarkdown,
   readComplianceProgress,
 } from "../services/claude-activity/compliance-parser.js";
+import { repoPath } from "./helpers/test-paths.js";
 
 describe("compliance-parser", () => {
   describe("parseComplianceMarkdown", () => {
     it("parses the live docs/compliance-progress.md", async () => {
-      // The repo's own file is the canonical fixture. We resolve relative
-      // to the repo root via three-up-from-orchestrator (cwd in vitest
-      // is apps/orchestrator).
+      // The repo's own file is the canonical fixture, resolved from this
+      // test file rather than the runner's cwd (WARP-2654).
       const live = await readComplianceProgress(
-        path.resolve(process.cwd(), "../../docs/compliance-progress.md"),
+        repoPath("docs/compliance-progress.md"),
       );
       expect(live.parsed).toBe(true);
 

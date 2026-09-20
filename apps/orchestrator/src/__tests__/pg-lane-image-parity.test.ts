@@ -53,9 +53,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT } from "./helpers/test-paths.js";
 
-// vitest runs with cwd = apps/orchestrator; both files live at repo root.
-const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
+// Both files live at the repo root, reached from this test file rather than
+// from the runner's cwd (WARP-2654).
 const WORKFLOW_PATH = path.join(
   REPO_ROOT,
   ".github",

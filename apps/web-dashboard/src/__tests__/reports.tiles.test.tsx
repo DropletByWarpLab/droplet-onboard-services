@@ -27,6 +27,15 @@ vi.mock("@/app/reports/api", async (orig) => ({
   fetchArSummary: (...a: unknown[]) => fetchArSummaryMock(...a),
 }));
 
+// WARP-2581 — the paid-out half reads /api/money through SWR. Left unmocked it
+// simply fails in jsdom, which is precisely the state under test here: the
+// tile used to render a FAILED READ as "No accounting system connected".
+const useMoneySummaryMock = vi.fn();
+vi.mock("@/app/money/useMoney", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  useMoneySummary: () => useMoneySummaryMock(),
+}));
+
 import {
   ActivityBody,
   ChainChip,
@@ -64,8 +73,49 @@ const evt = (over: Partial<Record<string, unknown>> = {}) => ({
   ...over,
 });
 
+/** What `useMoneySummary()` hands back, in one of its four shapes. */
+const moneyRead = (over: Record<string, unknown> = {}) => ({
+  summary: undefined,
+  error: undefined,
+  isLoading: false,
+  ...over,
+});
+
+const moneyError = (status: number) =>
+  moneyRead({ error: Object.assign(new Error("nope"), { status }) });
+
+const payableSide = (ledgers: Array<Record<string, unknown>>, documentCount: number) => ({
+  documentCount,
+  overdueCount: 0,
+  ledgers,
+});
+
+const ledger = (over: Record<string, unknown> = {}) => ({
+  connectionId: "conn-1",
+  provider: "quickbooks-online",
+  currency: null,
+  balance: "980.00",
+  documentCount: 3,
+  overdueCount: 0,
+  overdueBalance: "0",
+  ...over,
+});
+
+const moneySummary = (payable: ReturnType<typeof payableSide>, lastReadAt: string | null) =>
+  moneyRead({
+    summary: {
+      receivable: payableSide([], 0),
+      payable,
+      lastReadAt,
+      oldestReadAt: lastReadAt,
+    },
+  });
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // The default for every test that is not about money going out: the module
+  // is off, which is `defaultEnabled: false` and so the ordinary box today.
+  useMoneySummaryMock.mockReturnValue(moneyError(404));
 });
 afterEach(cleanup);
 
@@ -399,9 +449,9 @@ describe("MoneyBody (WARP-1995)", () => {
     expect(fig).toBeTruthy();
   });
 
-  it("ALWAYS ships the paid-out half not-connected — there is no source", async () => {
-    // Brief §9.1: no accounts-payable, expense, payroll or accounting
-    // connector exists anywhere in the registry.
+  it("says not-connected for the paid-out half when the money module is off", async () => {
+    // `money` is `defaultEnabled: false`, so /api/money 404s on an ordinary
+    // box and there is genuinely nothing connected to read.
     fetchArSummaryMock.mockResolvedValue({
       connected: true,
       totalBalance: 48213.55,
@@ -413,17 +463,6 @@ describe("MoneyBody (WARP-1995)", () => {
     expect(screen.getByText("Connect one to see money going out.")).toBeTruthy();
   });
 
-  it("renders exactly one currency figure — the out half can never be populated", async () => {
-    fetchArSummaryMock.mockResolvedValue({
-      connected: true,
-      totalBalance: 48213.55,
-      accountCount: 132,
-    });
-    const { container } = render(<MoneyBody canRead now={NOW} />);
-    await screen.findByText("$48,213.55");
-    expect(container.querySelectorAll(".rp-money-fig")).toHaveLength(1);
-  });
-
   it("spells the figure out for assistive tech", async () => {
     fetchArSummaryMock.mockResolvedValue({
       connected: true,
@@ -432,6 +471,118 @@ describe("MoneyBody (WARP-1995)", () => {
     });
     render(<MoneyBody canRead now={NOW} />);
     expect(await screen.findByLabelText(/owed to you/i)).toBeTruthy();
+  });
+});
+
+// ── Money · the paid-out half (WARP-2581) ────────────────────────────────
+
+describe("MoneyOutHalf states", () => {
+  const NOW = new Date("2026-08-14T09:41:00.000Z");
+  const CONNECT_PROMPT = "No accounting system connected";
+
+  beforeEach(() => {
+    fetchIntegrationsMock.mockResolvedValue([]);
+    fetchArSummaryMock.mockResolvedValue({
+      connected: true,
+      totalBalance: 48213.55,
+      accountCount: 132,
+    });
+  });
+
+  async function renderTile() {
+    const view = render(<MoneyBody canRead now={NOW} />);
+    await screen.findByText("$48,213.55");
+    return view;
+  }
+
+  it("🔴 a failed read is NOT 'no accounting system connected'", async () => {
+    // The whole point of landing documents is that this survives the vendor
+    // being unreachable. Telling the owner their ledger is unconnected — when
+    // it is connected and the box simply could not read just now — sends them
+    // to /integrations to fix something that is not broken.
+    useMoneySummaryMock.mockReturnValue(moneyError(500));
+    await renderTile();
+
+    expect(screen.queryByText(CONNECT_PROMPT)).toBeNull();
+    expect(screen.getByText("Couldn't read what you owe")).toBeTruthy();
+  });
+
+  it("a network failure with no status reads as a failed read, not as absence", async () => {
+    useMoneySummaryMock.mockReturnValue(moneyRead({ error: new Error("Failed to fetch") }));
+    await renderTile();
+
+    expect(screen.queryByText(CONNECT_PROMPT)).toBeNull();
+    expect(screen.getByText("Couldn't read what you owe")).toBeTruthy();
+  });
+
+  it("locks on a 403, and leaks no count while it does", async () => {
+    useMoneySummaryMock.mockReturnValue(moneyError(403));
+    const { container } = await renderTile();
+
+    expect(screen.getAllByText("Your role doesn't include this.").length).toBeGreaterThan(0);
+    expect(screen.queryByText(CONNECT_PROMPT)).toBeNull();
+    // Describing the data to someone who may not see it leaks its shape.
+    expect(container.querySelector(".rp-money-half:last-of-type")?.textContent).not.toMatch(
+      /\d/,
+    );
+  });
+
+  it("🔴 shows nothing at all while it is still reading", async () => {
+    // A "not connected" that turns into a figure is a claim the reader has
+    // already acted on.
+    useMoneySummaryMock.mockReturnValue(moneyRead({ isLoading: true }));
+    const { container } = await renderTile();
+
+    expect(screen.queryByText(CONNECT_PROMPT)).toBeNull();
+    expect(container.querySelectorAll(".rp-money-half .rp-skel").length).toBeGreaterThan(0);
+  });
+
+  it("renders one ledger's balance", async () => {
+    useMoneySummaryMock.mockReturnValue(
+      moneySummary(payableSide([ledger({ currency: "USD" })], 3), "2026-08-14T09:00:00.000Z"),
+    );
+    await renderTile();
+
+    expect(screen.getByText("980.00 USD")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+  });
+
+  it("🔴 withholds the figure when two ledgers contribute", async () => {
+    useMoneySummaryMock.mockReturnValue(
+      moneySummary(
+        payableSide(
+          [ledger(), ledger({ connectionId: "conn-2", provider: "xero", balance: "40.00" })],
+          5,
+        ),
+        "2026-08-14T09:00:00.000Z",
+      ),
+    );
+    const { container } = await renderTile();
+
+    expect(screen.getByText("5 open bills in 2 ledgers")).toBeTruthy();
+    // Only the money-IN half carries a figure; adding two ledgers would be a
+    // confident wrong number.
+    expect(container.querySelectorAll(".rp-money-fig")).toHaveLength(1);
+  });
+
+  it("🔴 owing nothing is an answer, not an empty state", async () => {
+    // The box has read a ledger; there are simply no open bills. Reusing the
+    // connect prompt here would send the owner to reconnect a live connector.
+    useMoneySummaryMock.mockReturnValue(
+      moneySummary(payableSide([], 0), "2026-08-14T09:00:00.000Z"),
+    );
+    await renderTile();
+
+    expect(screen.getByText("Nothing owed")).toBeTruthy();
+    expect(screen.queryByText(CONNECT_PROMPT)).toBeNull();
+  });
+
+  it("still asks for a connector when the module is on but nothing has been read", async () => {
+    useMoneySummaryMock.mockReturnValue(moneySummary(payableSide([], 0), null));
+    await renderTile();
+
+    expect(screen.getByText(CONNECT_PROMPT)).toBeTruthy();
+    expect(screen.getByText("Browse connectors →")).toBeTruthy();
   });
 });
 

@@ -6,10 +6,11 @@
  * embeddings). Tier-1 read — no writes, no confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import searchCameraEvents from "../../../src/handlers/cameras/search-camera-events.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -74,7 +75,7 @@ const EVENTS = [
 const SEMANTIC_DISABLED_HINT =
   "Semantic search isn't enabled on this Frigate. Add `semantic_search.enabled: true` to config.yml under your model section, save from the System page, and try again.";
 
-function jsonGet(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+function jsonGet(body: unknown, status = 200): Mock {
   // Fresh Response per call — a Response body can only be read once.
   return vi
     .fn()

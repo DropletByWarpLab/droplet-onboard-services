@@ -72,8 +72,15 @@ function makeChainFake() {
       return fn(prisma);
     },
     user: {
+      // Ids and usernames are DELIBERATELY different here, the way they are in
+      // production (`User.id` is a uuid, `User.username` is the login name).
+      // A fake that conflated them would let the notification-key regression
+      // through — see the "keyed by username" test below.
       async findMany() {
-        return [{ id: "admin-1" }, { id: "owner-1" }];
+        return [
+          { id: "8c1f4e2a-uuid-admin", username: "admin-1" },
+          { id: "3b7d0195-uuid-owner", username: "owner-1" },
+        ];
       },
     },
   };
@@ -132,6 +139,25 @@ describe("verifyActivityChain / runNightlyChainVerification", () => {
       kind: "system",
       title: "Audit log integrity check failed",
     });
+  });
+
+  it("keys the alert by username, so the toast and the stored row actually reach an admin", async () => {
+    // Regression pin. `sendNotification` publishes to
+    // `droplet/notifications/${userId}`, ws-bridge subscribes
+    // `droplet/notifications/${user.username}`, and both readers of the
+    // persisted NotificationLog filter by username. Passing `User.id` here
+    // made the one alert that must never be missed reach nobody: the broker
+    // dropped the toast and no reader could see the row.
+    fake.rows[2]!.what = "tampered";
+    await runNightlyChainVerification(fake.prisma);
+
+    const keys = vi
+      .mocked(sendNotification)
+      .mock.calls.map((call) => (call[1] as { userId: string }).userId);
+    expect(keys).toEqual(["admin-1", "owner-1"]);
+    for (const key of keys) {
+      expect(key).not.toContain("uuid");
+    }
   });
 
   it("nightly job on an intact chain appends nothing and notifies nobody", async () => {

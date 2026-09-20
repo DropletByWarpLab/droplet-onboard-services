@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import deleteClip from "../../../src/handlers/cameras/delete-clip.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -9,7 +10,7 @@ import type { ToolContext } from "../../../src/types.js";
  * must answer confirmation_required WITHOUT any HTTP call — the agent
  * can never delete footage in a single unattended tool call.
  */
-function ctxWith(orchestratorDelete: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorDelete: Mock): ToolContext {
   return {
     http: {
       orchestrator: {

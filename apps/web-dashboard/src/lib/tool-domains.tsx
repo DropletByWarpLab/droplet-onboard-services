@@ -26,6 +26,7 @@ import {
   Network as SwitchIcon,
   Wrench,
   type LucideIcon,
+  Repeat,
 } from "lucide-react";
 
 interface DomainMeta {
@@ -53,6 +54,9 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-1685 — Messages send tools (team chat). Slug matches the
   // team_chat ModuleId / tools-core domain.
   team_chat: { label: "Messages", icon: MessagesSquare },
+  // WARP-2894 (ADR-056) — the routine tools. Label matches the /routines
+  // nav entry so the /tools filter chip and the sidebar say the same word.
+  routines: { label: "Routines", icon: Repeat },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

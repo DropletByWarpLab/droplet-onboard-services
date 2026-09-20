@@ -9,7 +9,19 @@
     "generator, because a hand-maintained digest is one that goes stale.",
     "",
     "A platform with no staged artifacts and no entry here simply does not",
-    "appear in the catalog, and the page says so honestly."
+    "appear in the catalog, and the page says so honestly.",
+    "",
+    "NO storeUrl APPEARS BELOW, AND THAT IS DELIBERATE. This file is copied",
+    "verbatim by anyone following README.md step 3, so a placeholder here",
+    "ships a customer a dead button — strictly worse than the honest empty",
+    "state. The two that used to live here were exactly that: a Play listing",
+    "for ai.warplab.droplet that 404s, and the literal string",
+    "'https://testflight.apple.com/join/REPLACE-ME'.",
+    "",
+    "Add a storeUrl only once the listing actually resolves in a browser.",
+    "For a Play internal test the correct shape is",
+    "https://play.google.com/apps/internaltest/<numeric-id> — Play generates",
+    "that id; it cannot be hand-constructed from the applicationId."
   ],
 
   "windows": {
@@ -18,14 +30,12 @@
   },
 
   "android": {
-    "version": "1.0.0",
-    "storeUrl": "https://play.google.com/store/apps/details?id=ai.warplab.droplet",
-    "note": "The Android app installs from Google Play, so it updates with the rest of your apps."
+    "version": "0.2.0",
+    "note": "The Android app installs from Google Play once it is listed; until then the box serves the APK directly."
   },
 
   "ios": {
-    "version": "1.0.0",
-    "storeUrl": "https://testflight.apple.com/join/REPLACE-ME",
-    "note": "iPhone and iPad builds are distributed through TestFlight — iOS does not allow installing apps directly from a local device."
+    "version": "1.0",
+    "note": "iPhone and iPad builds are distributed through Apple, not from this box — iOS does not allow installing apps from a local device."
   }
 }

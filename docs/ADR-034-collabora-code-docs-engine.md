@@ -83,8 +83,9 @@ unchanged by this ADR; what disappears is the *fee*.)
   slower per-document open, zero extra kernel surface. Security-first wins.
 - `allow_local_remote_servers=true` is set in Nextcloud (its HTTP client
   refuses private hosts by default; the richdocuments discovery fetch targets
-  `http://docserver:9980/docs` on the compose network). Appliance-internal
-  posture, applied by `nextcloud-init.sh`.
+  the gateway's compose-internal docs-discovery leg, `http://gateway:9981/docs`
+  — see Amendment 1). Appliance-internal posture, applied by
+  `nextcloud-init.sh`.
 
 ## Topology (collabora default)
 
@@ -94,15 +95,82 @@ browser ── https://<box>/docs/…  ──► gateway ──► docserver:998
    │         WS for the live document)                   │ WOPI callback
    └──────  https://<box>/nextcloud/… ─► gateway ─► nextcloud:80 ◄──────┘
                                      (connector page + WOPI host; aliasgroup pin)
+                                                         │
+nextcloud ── http://gateway:9981/docs/hosting/discovery ─┘ (docs-discovery
+             leg: proxies coolwsd, rewrites the advertised urlsrc to a
+             path-relative /docs/… — Amendment 1)
 ```
 
-- `wopi_url = http://docserver:9980/docs` (NC → engine, server-side)
-- `public_wopi_url = /docs` (browser → engine via gateway; RELATIVE keeps the
-  editor same-origin on the FQDN, `droplet-ai.local`, and `.lan` alike — no
-  cross-origin iframe, no cert coupling, works pre-cert-issuance; the value is
-  consumed verbatim by richdocuments)
+- `wopi_url = http://gateway:9981/docs` (NC → engine, server-side, THROUGH
+  the gateway's compose-internal docs-discovery leg — Amendment 1)
+- `public_wopi_url = /docs` (feeds only richdocuments' CSP / feature-policy
+  allow-list, the admin page and the capabilities blob; a relative value adds
+  no CSP domain, leaving `frame-src 'self'` — right for a same-origin iframe.
+  It is NOT the browser's editor URL; see Amendment 1)
 - `wopi_callback_url = http://nextcloud/` (engine → NC, compose-internal —
   matches `aliasgroup1` exactly; the OnlyOffice `StorageUrl` analogue)
+
+## Amendment 1 — WARP-2903 (2026-09-18): the editor never loaded; urlsrc is verbatim
+
+**What was wrong.** The topology above assumed `public_wopi_url` is the
+origin the browser loads the editor from. On richdocuments 8.4.16 it is not:
+the connector page's JS builds the editor form target as
+`urlsrc + "WOPISrc=…"`, and `urlsrc` is lifted **verbatim** from Collabora's
+`/hosting/discovery` XML (`lib/WOPI/Parser.php`, `js/richdocuments-document.js`
+— zero references to `public_wopi_url`, no `str_replace` of the internal URL
+anywhere in `lib/`). coolwsd derives that value from the Host header of
+whoever fetched discovery, so with Nextcloud fetching straight from
+`docserver:9980` every editor form on every box targeted
+`https://docserver:9980/docs/browser/…/cool.html` — a compose-internal name no
+browser resolves, and one Nextcloud's own CSP (`frame-src 'self'`,
+`form-action 'self'`) refuses regardless.
+
+Measured on the bench box (2026-09-19 05:18 UTC, a `.docx`): the orchestrator
+minted the session (200), the connector page and its bundles loaded (200), and
+**not one `/docs/browser/` request ever reached the gateway**; Collabora never
+called back into Nextcloud. The WARP-1694 "URL trio verified" line was green
+the whole time — a reassuring log line over a dead editor. docx, xlsx, pptx:
+all the same, because it is the engine path, not the file type.
+
+**Decision.** Keep the engine, keep the same-origin design — make the value
+richdocuments actually uses relative. The gateway gains a compose-internal
+listener (`server_name docs-discovery`, `listen 9981`, never published) that
+proxies coolwsd with the Host pinned to `docserver:9980` and `sub_filter`s
+`https://docserver:9980/docs` (and the `http://` form) to `/docs` on
+`text/xml` responses only. Nextcloud's `wopi_url` points at that leg. The
+browser then resolves `/docs/browser/…/cool.html?` against the connector
+page's own origin — whichever hostname the user browsed in on — and the public
+443 `/docs/` leg carries the editor exactly as the topology intended.
+
+- Verified compatible with the connector JS: its `new URL(urlsrc)` sits in a
+  try/catch, the postMessage receive guard accepts all origins while the
+  allow-list is empty, and `sendPostMessage` falls back to `"*"`. coolwsd's
+  `frame-ancestors` includes the request host, so dashboard → connector page
+  → `cool.html` nests cleanly. `PostMessageOrigin` (WOPI `CheckFileInfo`) is
+  derived from the connector-page request, so it is the browser-facing origin.
+- `convert-to` (previews), `get-thumbnail` and `extract-link-targets` ride the
+  same leg unmodified (application/json and binary bodies are never filtered).
+- The hook now **waits (bounded, 40 × 3 s) for the leg before
+  `activate-config`**. `activate-config` is `resetCache()` then `fetch()`;
+  when the fetch failed the cache was already gone and nothing refetches
+  lazily — only the next boot or the hourly `ObtainCapabilities` job. On a
+  cold stack start the fetch always failed, because `docserver` has
+  `depends_on: nextcloud` and is created after the hook is already running.
+- The WARP-1694 read-back now also fetches discovery over `wopi_url` and
+  requires a path-relative `urlsrc`; an absolute one is reported as drift.
+  Unreachable is deferred, not drift (engine still starting).
+- The rewrite is exercised for real at image build (`docker/nginx/Dockerfile`
+  runs the lifted server block against a stub upstream and asserts on the
+  bytes); `tests/nginx-docs-discovery.test.sh` guards the wiring.
+
+**Alternatives rejected.** Pin coolwsd's `server_name` (or point `wopi_url`
+at the public origin) to a single hostname: the appliance answers on the LAN
+IP, `droplet.local`, `.lan` and an FQDN, and a fixed absolute origin makes
+the editor cross-origin — and cert-blocked inside an iframe — on every other
+name. Have the orchestrator fetch and patch the connector page: correct, but
+it re-implements Nextcloud's page serving (cookies, the initial-state
+encoding) in the orchestrator for a one-string fix that belongs at the
+gateway.
 
 ## Known debt carried forward (explicitly NOT fixed here)
 
@@ -150,4 +218,5 @@ browser ── https://<box>/docs/…  ──► gateway ──► docserver:998
 - `apps/orchestrator/src/config.ts` — `DOCS_ENGINE`, `NEXTCLOUD_PUBLIC_PATH`
 - `scripts/lib/single-box.sh` — writes the `DOCS_ENGINE` / `DOCS_ENGINE_IMAGE` / `DOCS_INTERNAL_URL` trio
 - `docs/ADR-027-files-sharepoint-parity.md` — the WS-4 engine analysis this ADR flips
-- richdocuments settings ground truth: `wopi_url` / `public_wopi_url` (consumed verbatim) / `wopi_callback_url` — nextcloud/richdocuments `lib/AppConfig.php`
+- richdocuments settings ground truth: `wopi_url` / `public_wopi_url` (CSP allow-list only — NOT the editor URL, see Amendment 1) / `wopi_callback_url` — nextcloud/richdocuments `lib/AppConfig.php`; the browser's editor URL is discovery's `urlsrc`, used verbatim — `lib/WOPI/Parser.php`
+- `docker/nginx/nginx.conf` — the `docs-discovery` listener (:9981) that makes that urlsrc path-relative (Amendment 1); `tests/nginx-docs-discovery.test.sh`

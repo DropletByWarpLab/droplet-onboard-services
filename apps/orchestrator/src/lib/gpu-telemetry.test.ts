@@ -195,3 +195,23 @@ describe("bytesToGiB", () => {
     expect(bytesToGiB(1024 ** 3)).toBe(1);
   });
 });
+
+// WARP-2883 — the bridge now names the hardware; the client must carry it
+// through untouched and treat a blank as "could not name it" (null).
+describe("fetchGpuTelemetry — hardware name (WARP-2883)", () => {
+  it("carries the marketing name through", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonRes({ ...SNAPSHOT, name: "NVIDIA GeForce RTX 5060 Ti" })) as unknown as typeof fetch;
+    const t = await fetchGpuTelemetry();
+    expect(t?.name).toBe("NVIDIA GeForce RTX 5060 Ti");
+    expect(t?.card).toBe("card1");
+  });
+
+  it("a missing or blank name is null, never the empty string", async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonRes(SNAPSHOT)) as unknown as typeof fetch;
+    expect((await fetchGpuTelemetry())?.name).toBeNull();
+    global.fetch = vi.fn().mockResolvedValue(jsonRes({ ...SNAPSHOT, name: "  " })) as unknown as typeof fetch;
+    expect((await fetchGpuTelemetry())?.name).toBeNull();
+  });
+});

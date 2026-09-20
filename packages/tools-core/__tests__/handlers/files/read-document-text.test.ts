@@ -5,6 +5,7 @@
 // and a file with no extracted text must NOT look like an empty document.
 
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { getTool } from "../../../src/index.js";
 import type { ToolContext } from "../../../src/types.js";
@@ -17,7 +18,7 @@ type ReadResult = Awaited<ReturnType<ReadFn>>;
 // so `makeCtx(read, undefined)` would have silently kept "alice" and the
 // auth test would have exercised the authenticated path instead.
 function makeCtx(
-  readDocumentText?: ReadFn | ReturnType<typeof vi.fn>,
+  readDocumentText?: ReadFn | Mock,
   { userId }: { userId?: string } = { userId: "alice" },
 ): ToolContext {
   return {

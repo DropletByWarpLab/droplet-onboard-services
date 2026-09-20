@@ -49,6 +49,10 @@ const tool: Tool = {
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
+  // WARP-2472 — POST /api/network/firewall/block evaluates `block_device` as
+  // Tier 2 and answers 202 with its own dashboard-redeemable token, so the
+  // route is the single gate and the interceptor stands down.
+  confirmationOwner: "route",
   handler,
 };
 

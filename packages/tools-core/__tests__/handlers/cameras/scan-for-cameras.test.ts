@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import scanForCameras from "../../../src/handlers/cameras/scan-for-cameras.js";
 import type { ToolContext } from "../../../src/types.js";
 
@@ -9,8 +10,8 @@ import type { ToolContext } from "../../../src/types.js";
 // server-side), so the mocks below target ctx.http.orchestrator and the
 // camera-discovery client must never be touched.
 function ctxWith(
-  orchestratorPost: ReturnType<typeof vi.fn>,
-  camerasPost: ReturnType<typeof vi.fn> = vi.fn(),
+  orchestratorPost: Mock,
+  camerasPost: Mock = vi.fn(),
 ): ToolContext {
   return {
     http: {
@@ -78,6 +79,7 @@ describe("scan_for_cameras", () => {
     const post = vi.fn().mockResolvedValue(new Response("{}", { status: 502 }));
     const r = await scanForCameras.handler({}, ctxWith(post));
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("SCAN_FAILED");
   });
 });

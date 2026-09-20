@@ -220,3 +220,22 @@ reason = "ragas: no fixed release published; offline eval harness pinned in WARP
 [[IgnoredVulns]]
 id = "PYSEC-2026-76"
 reason = "langchain-openai: fix (1.1.14) conflicts with the WARP-1406 langchain 0.3-line caps the ragas pin requires; offline eval harness only (WARP-1949)"
+
+# ── uuid 8.3.2 (package-lock.json, via @azure/msal-node) ───────────────────
+# Not fixable from this repo: uuid 8.3.2 is a transitive of @azure/msal-node
+# 3.8.10 (apps/orchestrator), which hard-pins `uuid: ^8.3.0`. It is the only
+# uuid in the lockfile and msal-node is its only dependent, so there is no
+# in-range bump — clearing it would take an npm `overrides` jump across three
+# majors inside msal's own code path.
+#
+# We are not exposed. The advisory is a missing bounds check on the v3()/v5()/
+# v6() API methods when the CALLER passes an external output buffer; v4()
+# takes no buffer and is unaffected. msal-node's GuidGenerator imports only
+# `v4` and calls `v4()` with no arguments — verified against the published
+# 3.8.10 tarball (src/crypto/GuidGenerator.ts).
+#
+# RECHECK TRIGGER: an @azure/msal-node release that widens the uuid range.
+# Drop this entry then and let the bump land normally. (WARP-2188)
+[[IgnoredVulns]]
+id = "GHSA-w5hq-g745-h8pq"
+reason = "uuid: transitively pinned by @azure/msal-node ^8.3.0; advisory covers v3/v5/v6 with a caller-supplied buffer and msal-node only calls v4() (WARP-2188)"

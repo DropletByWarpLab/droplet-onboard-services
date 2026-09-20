@@ -10,10 +10,11 @@
  * the operation echo) exactly like the dashboard's `disableCamera()`.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setCameraDetection from "../../../src/handlers/cameras/set-camera-detection.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorPost: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorPost: Mock): ToolContext {
   return {
     http: {
       cameras: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },

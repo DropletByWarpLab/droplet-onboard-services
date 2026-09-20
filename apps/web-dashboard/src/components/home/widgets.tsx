@@ -20,7 +20,15 @@
  * tray) unless their `NEXT_PUBLIC_FEATURE_*` flag is enabled.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type JSX,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {

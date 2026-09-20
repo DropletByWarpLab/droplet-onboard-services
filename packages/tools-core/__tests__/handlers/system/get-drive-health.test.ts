@@ -9,10 +9,11 @@
  * SUCCESS (smartEnabled:false + hint), never an error. Tier-1 read.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import getDriveHealth from "../../../src/handlers/system/get-drive-health.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithGet(get: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

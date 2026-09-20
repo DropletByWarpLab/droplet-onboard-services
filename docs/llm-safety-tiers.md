@@ -47,6 +47,45 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 | `camera_subnet_setup` | 2 | Network infrastructure change |
 | `camera_subnet_teardown` | 2 | Removes security isolation |
 
+### Files (WARP-2669)
+
+The files domain was never placed in this document. It was ported wholesale in
+WARP-102, whose commit message enumerates the destructive flagging it applied to
+network, switch and smart-home and says nothing of the kind for files — so the
+domain arrived with no tier triage and this table had no Files section for it to
+be wrong in. That is how `delete_file` kept `requiresConfirmation: false` while
+`docs/tool-confirmation-contract.md` §3 used it as the worked example of a
+*gated* tool, and three orchestrator suites used it as their confirming fixture.
+
+| Operation | Tier | Why |
+|-----------|------|-----|
+| `delete_file` | 2 | Recursive: a directory goes with everything inside it |
+| `delete_files` | 2 | Bulk delete; refuses directories outright (WARP-2664) |
+| `organize_files` | 2 | Bulk move across a folder (WARP-2664) |
+| `restore_file_version` | 2 | Replaces current content (itself reversible) |
+| `share_file` | 2 | Creates an outward-facing link |
+| `write_file` | 1 | Write-tier, no confirmation — names its own target path |
+| `create_directory` / `rename_file` / `move_file` / `copy_file` | 1 | Write-tier, no confirmation — reversible in place |
+| Emptying the trash | **not a tool** | The only irreversible step; dashboard-only, on purpose |
+
+**Recoverable is not the same as unattended-safe.** Deletes here move the target
+to the Nextcloud trash (`DELETE /api/files` → `ncDeleteFile`, a WebDAV DELETE),
+and the LLM has no tool that empties it — so a wrong delete is recoverable. Tier
+2 is still the right answer, because Tier 2 in this repo has never meant "only
+permanent loss": `restore_file_version` is explicitly reversible and gated, and
+so is `unblock_network_device`. It means *a human would want to see this before
+it happens*. Note also that trash retention is not configured anywhere in this
+repo, so Nextcloud's own default expiry governs how long recovery stays possible.
+
+**Do not gate on a runtime type probe.** A tempting narrower rule — confirm only
+when the target is a directory — cannot be made sound at this layer. Deciding
+file-vs-directory needs a listing, and `GET /api/files` answers `200 []` when
+Nextcloud is unreachable (`handleFileError` degrades it), so an outage would make
+a full tree read as a single file and skip the prompt. WARP-2664 rejected an
+`allow_folders`-plus-emptiness guard on `delete_files` for exactly this reason.
+The confirmation interceptor also runs *before* the handler, so a per-target
+decision could not live there in any case.
+
 ### Router/Network
 | Operation | Tier | Why |
 |-----------|------|-----|

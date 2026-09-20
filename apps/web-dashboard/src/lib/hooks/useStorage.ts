@@ -2,10 +2,10 @@
 
 import useSWR from "swr";
 import { fetchStorage } from "../api";
-import type { StorageStats } from "../types";
+import type { StorageOverview } from "../types";
 
 export function useStorage() {
-  const { data, error, isLoading } = useSWR<StorageStats>(
+  const { data, error, isLoading } = useSWR<StorageOverview>(
     "/api/storage",
     fetchStorage,
     { refreshInterval: 30000 }

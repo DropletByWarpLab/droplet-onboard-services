@@ -7,10 +7,11 @@
  * network. Tier-1 read — no writes, no confirmation.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import currencyConvert from "../../../src/handlers/data/currency-convert.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWith(orchestratorGet: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -31,7 +32,7 @@ function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
   };
 }
 
-function jsonGet(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+function jsonGet(body: unknown, status = 200): Mock {
   // Fresh Response per call — a Response body can only be read once.
   return vi
     .fn()

@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldOff, Activity } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { authFetch } from "@/lib/auth";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ClaudeNow } from "@/components/claude-activity/ClaudeNow";
@@ -28,10 +29,6 @@ import type { ClaudeActivityResponse } from "@/components/claude-activity/types"
 import { relativeTime } from "@/components/claude-activity/time";
 
 const POLL_MS = 30_000;
-
-function isAdminRole(role?: string): boolean {
-  return role === "owner" || role === "admin";
-}
 
 export default function ClaudeActivityPage() {
   const { user, isLoading: authLoading } = useAuth();

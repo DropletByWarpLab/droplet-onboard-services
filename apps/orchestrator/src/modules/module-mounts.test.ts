@@ -37,7 +37,8 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-import { mountModuleGates } from "./module-mounts.js";
+import { mountModuleGates, FEATURE_GATED_MODULES } from "./module-mounts.js";
+import { GATEABLE_MODULE_IDS } from "../services/access-catalog.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "./module-registry.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -137,8 +138,47 @@ function appWith(opts: {
   app.get("/api/files/:filePath(*)/editor-session", (_q, res) => { res.json({ hit: "editor" }); });
   app.get("/api/files/:filePath(*)/comments", (_q, res) => { res.json({ hit: "comments" }); });
   app.get("/api/cameras/list", (_q, res) => { res.json({ hit: "cameras" }); });
+  // WARP-2875 — the PM surface, in the shapes routes/pm/{native,relations}.ts
+  // actually serve. `/api/pm/projects*` is only PART of it: work-items,
+  // workspaces, summary, states, labels and relations all sit OUTSIDE that
+  // prefix, and the `projects` module gate has to reach them too.
+  for (const [method, path] of PM_ROUTES) {
+    app[method](path, (_q, res) => { res.json({ hit: "pm" }); });
+  }
   return app;
 }
+
+/**
+ * Every PM route family, by the method the real router registers. WHY the
+ * whole list rather than the one the reviewer named (`/pm/work-items`): the
+ * defect class is "any PM route outside the gated prefix", so a new sibling
+ * added tomorrow is only caught if the test enumerates the surface.
+ */
+const PM_ROUTES = [
+  ["get", "/api/pm/projects"],
+  ["get", "/api/pm/projects/p1/work-items"],
+  ["get", "/api/pm/work-items"],
+  ["get", "/api/pm/work-items/w1"],
+  ["patch", "/api/pm/work-items/w1"],
+  ["delete", "/api/pm/work-items/w1"],
+  ["get", "/api/pm/work-items/w1/comments"],
+  ["post", "/api/pm/work-items/w1/comments"],
+  ["get", "/api/pm/work-items/w1/activity"],
+  ["post", "/api/pm/work-items/w1/transition"],
+  ["get", "/api/pm/work-items/w1/relations"],
+  ["delete", "/api/pm/relations/r1"],
+  ["get", "/api/pm/workspaces"],
+  ["get", "/api/pm/workspaces/default"],
+  ["get", "/api/pm/summary"],
+  ["patch", "/api/pm/states/s1"],
+  ["patch", "/api/pm/labels/l1"],
+  // routes/mobile/pm.ts — the same pm.service.ts reads behind a role check,
+  // on a prefix the segment-bounded `/api/pm` gate cannot reach.
+  ["get", "/api/mobile/pm/workspaces"],
+  ["get", "/api/mobile/pm/projects"],
+  ["get", "/api/mobile/pm/work-items"],
+  ["get", "/api/mobile/pm/work-items/w1"],
+] as const satisfies ReadonlyArray<readonly ["get" | "post" | "patch" | "delete", string]>;
 
 const KNOWLEDGE = "/api/files/knowledge/recent";
 const DOCS = "/api/files/docs/status";
@@ -316,6 +356,55 @@ describe("a nested namespace does not annex the enclosing module's data paths", 
   });
 });
 
+describe("WARP-2875 — the Projects toggle reaches the WHOLE PM surface", () => {
+  /**
+   * The bug: the registry gated `/api/pm/projects` only, but the native PM
+   * router mounts at `/api` and registers `/pm/work-items`, `/pm/summary`,
+   * `/pm/workspaces`, `/pm/states/:id`, `/pm/labels/:id` and the comment /
+   * activity / transition sub-routes OUTSIDE that prefix (and the relations
+   * router adds more). So an operator who switched Projects off in Settings
+   * kept serving `business_find({entity:"work_item"})`,
+   * `business_update({entity:"task"})` and
+   * `business_create({entity:"note", parent_entity:"task"})` — the module
+   * toggle was a partial lie.
+   *
+   * MUTATION that must fail here: narrow the prefix back to
+   * `/api/pm/projects` and every non-projects row below serves 200.
+   */
+  const send = (app: Express, [method, path]: (typeof PM_ROUTES)[number]) =>
+    request(app)[method](path);
+
+  it.each(PM_ROUTES.map((r) => [`${r[0].toUpperCase()} ${r[1]}`, r] as const))(
+    "%s is 404 module_disabled when Projects is off",
+    async (_label, route) => {
+      const app = appWith({ disabledModules: ["projects"], features: [] });
+      const res = await send(app, route);
+      expect(res.status).toBe(404);
+      // Byte-identical to the body `/api/pm/projects` has always returned —
+      // a caller must not be able to tell which PM route it asked for.
+      expect(res.body).toEqual({ error: "module_disabled", module: "projects" });
+    },
+  );
+
+  it.each(PM_ROUTES.map((r) => [`${r[0].toUpperCase()} ${r[1]}`, r] as const))(
+    "%s still serves when Projects is on",
+    async (_label, route) => {
+      const app = appWith({ features: [] });
+      const res = await send(app, route);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ hit: "pm" });
+    },
+  );
+
+  it("does not widen onto the sibling business modules", async () => {
+    // `/api/crm` and `/api/money` are their OWN toggles and their own §9
+    // grants. Gating them from the Projects switch would be the same class
+    // of bug pointing the other way.
+    const app = appWith({ disabledModules: ["projects"], features: [["cameras", "view"]] });
+    expect((await request(app).get("/api/cameras/list")).status).toBe(200);
+  });
+});
+
 describe("mount composition", () => {
   it("gates every non-core module and never gates a core one", async () => {
     const app = appWith({ disabledModules: ["chat"], features: [["cameras", "view"]] });
@@ -333,5 +422,66 @@ describe("mount composition", () => {
     );
     app.get(KNOWLEDGE, (_q, res) => { res.json({ hit: "knowledge" }); });
     expect((await request(app).get(KNOWLEDGE)).status).toBe(200);
+  });
+});
+
+describe("FEATURE_GATED_MODULES — every module whose grant the panel offers", () => {
+  it("is the EXACT set, so a module cannot silently leave the per-person layer", () => {
+    // An exact set rather than `toContain`: the direction that matters is a
+    // module LEAVING this list, which opens a surface rather than closing one,
+    // and a containment check cannot see it.
+    //
+    // `crm` and `money` were absent while `access-catalog.ts` shipped ladders
+    // for both and the Access panel offered them as grants — the box
+    // advertising a permission it did not enforce.
+    expect([...FEATURE_GATED_MODULES].sort()).toEqual([
+      "cameras",
+      "crm",
+      "docs",
+      "files",
+      "knowledge",
+      "money",
+      "network",
+      "smart_home",
+    ]);
+  });
+
+  it("documents the modules that still have a ladder and NO per-person gate", () => {
+    // A ladder in `access-catalog.ts` is a permission the Access panel shows.
+    // Enforcing it needs an entry in FEATURE_GATED_MODULES, and seven modules
+    // have the first without the second — the same class of gap `crm` and
+    // `money` had until this change, and that `files`/`knowledge`/`docs` had
+    // until WARP-1585.
+    //
+    // Asserted as an EXPLICIT list rather than fixed here, because each one
+    // needs its own check before it is gated: whether its prefix nests inside
+    // another module's (the WARP-1585 collision), and whether any tool
+    // dispatches through it. This change only covers the two whose paths were
+    // traced.
+    //
+    // Shrinking this list is the goal. GROWING it means a new module shipped a
+    // ladder the box does not enforce, which is what should be caught here.
+    const ungatedWithLadder = [...GATEABLE_MODULE_IDS]
+      .filter((id) => !FEATURE_GATED_MODULES.has(id))
+      .sort();
+    expect(ungatedWithLadder).toEqual([
+      "calendar",
+      "contacts",
+      "email",
+      "managed_switch",
+      "projects",
+      "team_chat",
+      "voice",
+    ]);
+  });
+
+  it("names only modules that declare a route prefix to gate", () => {
+    // A gated id with no prefix gates nothing and reads as protection that is
+    // not there.
+    for (const id of FEATURE_GATED_MODULES) {
+      const def = MODULES.find((m) => m.id === id);
+      expect(def, `${id} is gated but not in the registry`).toBeDefined();
+      expect(def!.routePrefixes.length, `${id} has no prefix to gate`).toBeGreaterThan(0);
+    }
   });
 });

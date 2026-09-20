@@ -60,7 +60,7 @@ function stateOf(
 }
 
 /** Humanise a context window: 131072 → "128k", 8192 → "8k", small → exact. */
-function formatContext(tokens: number | null): string {
+export function formatContext(tokens: number | null): string {
   if (tokens == null) return DASH;
   if (tokens >= 1000) {
     const k = tokens / 1024;
@@ -175,7 +175,8 @@ export function LocalModelCard({
     setMeasuring(true);
     setBenchError(null);
     try {
-      const { tokensPerSec } = await benchmarkModel(model.name);
+      // WARP-2882 — the runtime answers to `id`; `name` is display copy.
+      const { tokensPerSec } = await benchmarkModel(model.id ?? model.name);
       setLocalTps(tokensPerSec);
       onBenchmarked?.();
     } catch (e) {
@@ -262,9 +263,17 @@ export function LocalModelCard({
           <Layers size={12} strokeWidth={2} aria-hidden />
           <span className="tabular-nums">{spec}</span>
         </span>
-        <span className="inline-flex items-center gap-1" title="Context window">
+        {/* WARP-2882 — the TRAINED length, not the served window (that is an
+            operator setting the box never reports here). Labelled as such so
+            "128k" on a box serving 16k is not read as a promise. */}
+        <span
+          className="inline-flex items-center gap-1"
+          title="Context length the model was trained with — the window your Droplet serves is set separately"
+        >
           <BookOpen size={12} strokeWidth={2} aria-hidden />
-          <span className="tabular-nums">ctx {formatContext(model.contextLength)}</span>
+          <span className="tabular-nums">
+            trained ctx {formatContext(model.trainedContextLength ?? null)}
+          </span>
         </span>
         <span
           className="inline-flex items-center gap-1"

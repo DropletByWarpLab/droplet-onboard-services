@@ -82,8 +82,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // WARP-979 — the reworked AddressStep imports these (skipped here).
   checkBoxName: vi.fn(async () => ({
     available: true,

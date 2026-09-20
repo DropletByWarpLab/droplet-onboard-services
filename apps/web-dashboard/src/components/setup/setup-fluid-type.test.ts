@@ -10,15 +10,23 @@
  * and the BASE (unscoped) tokens stay fixed-px so the rest of the dashboard is
  * untouched.
  *
- * The file is read via `fs` from `process.cwd()` (the dashboard package root) —
- * NOT `new URL(import.meta.url)`, which yields a `C:\C:\…` ENOENT on Windows
- * (see the pre-existing a11y source-scrape suites).
+ * WARP-2613 — the file is read via `fs` relative to THIS FILE, not to
+ * `process.cwd()`. `process.cwd()` is only the dashboard package root when the
+ * runner was started from inside it; `vitest run --root apps/web-dashboard`
+ * from the repo root leaves cwd at the repo root (`--root` does not chdir) and
+ * the read became `<repo>/src/app/globals.css` → ENOENT before a single
+ * assertion ran.
+ *
+ * WARP-2632 — that anchoring now comes from the shared
+ * `__tests__/helpers/test-paths` helper, which every path-reading suite in
+ * this package uses, so there is one place that knows where the package and
+ * the repo are (and one place carrying the note on why the anchor is spelled
+ * `__dirname` here — WARP-2654).
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readPackageFile } from "@/__tests__/helpers/test-paths";
 
-const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+const css = readPackageFile("src/app/globals.css");
 
 /** Pull the first px value out of a `clamp(MIN, …)` declaration. */
 function clampMinPx(decl: string): number {

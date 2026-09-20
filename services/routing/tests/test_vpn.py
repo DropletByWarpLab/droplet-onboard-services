@@ -705,3 +705,167 @@ class TestVpnEndpointsRequireRouter:
         monkeypatch.setattr(main, "router_instance", None)
         resp = TestClient(main.app).get("/vpn/status", headers=AUTH)
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# 4. WARP-2686 / WARP-2687 — uci is intent, the interface is state
+#
+# Every test here fails against the pre-fix code, because the pre-fix code
+# answered from a read-back of the config it had just written. The defect was
+# measured on real hardware 2026-09-03: a peer that DELETE reported
+# `removed: 1` for completed a fresh handshake afterwards and reached the LAN.
+# ---------------------------------------------------------------------------
+
+
+def _mint(client: TestClient, desc: str = "laptop") -> str:
+    """Set up wg0, mint a peer, return its public key."""
+    client.post("/vpn/setup", json={}, headers=AUTH)
+    resp = client.post(
+        "/vpn/peers",
+        json={"description": desc, "allowed_ips": ["10.13.13.2/32"]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["public_key"]
+
+
+class TestRevocationReachesTheInterface:
+    """The security half. A revoke that only edits config is not a revoke."""
+
+    def test_revoked_peer_is_gone_from_the_interface(self, vpn_client: TestClient) -> None:
+        # The bug in one assertion: pre-fix, DELETE returned ok while the peer
+        # kept its session, so an owner revoking a stolen laptop was told the
+        # device was cut off while it still held a route into the LAN.
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+        assert pub in vpn._live["wg0"], "precondition: the peer is on the interface"
+
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"interface": "wg0", "public_key": pub}, headers=AUTH,
+        )
+        assert resp.status_code == 200, resp.text
+        assert pub not in vpn._live["wg0"], "revoked peer is STILL on the interface"
+
+    def test_revoke_that_does_not_take_effect_is_reported_as_staged(
+        self, vpn_client: TestClient
+    ) -> None:
+        # The router that motivated the ticket: ifup is accepted, the peer set
+        # never changes. `applied: false` is the contract the orchestrator keys
+        # on (isRevokeApplied) to keep the DB row active and show the retry.
+        pub = _mint(vpn_client)
+        main.router_instance.vpn._reload_effective = False
+
+        body = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"interface": "wg0", "public_key": pub}, headers=AUTH,
+        ).json()
+        assert body["applied"] is False
+        assert body["status"] == "staged"
+        assert body["revocation_verified"] is False
+        # It still did the config edit, and says so — the caller needs both facts.
+        assert body["removed"] == 1
+
+    def test_unverifiable_router_still_reports_applied(self, vpn_client: TestClient) -> None:
+        # A router with no rpcd-mod-wireguard / no ACL grant cannot be checked.
+        # Refusing every revoke there would trade a rare half-revoke for the
+        # total loss of revocation, so unknown must NOT downgrade `applied`.
+        pub = _mint(vpn_client)
+        main.router_instance.vpn._live_available = False
+
+        body = vpn_client.request(
+            "DELETE", "/vpn/peers",
+            json={"interface": "wg0", "public_key": pub}, headers=AUTH,
+        ).json()
+        assert body["applied"] is True
+        assert body["revocation_verified"] is None, "unknown must not masquerade as verified"
+
+
+class TestMintedPeerReachesTheInterface:
+    """The mirror failure: a config we hand the user that cannot connect."""
+
+    def test_minted_peer_is_on_the_interface(self, vpn_client: TestClient) -> None:
+        pub = _mint(vpn_client)
+        assert pub in main.router_instance.vpn._live["wg0"]
+
+    def test_peer_that_never_lands_is_not_reported_ok(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        main.router_instance.vpn._reload_effective = False
+        body = vpn_client.post(
+            "/vpn/peers",
+            json={"description": "phone", "allowed_ips": ["10.13.13.3/32"]},
+            headers=AUTH,
+        ).json()
+        assert body["applied"] is False
+        assert body["status"] == "staged"
+        assert body["peer_verified"] is False
+
+
+class TestSetupDoesNotInventAnInterface:
+    """WARP-2687 — `created: true` over a kernel device that does not exist."""
+
+    def test_setup_reports_a_live_interface(self, vpn_client: TestClient) -> None:
+        body = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert body["created"] is True
+        assert body["interface_live"] is True
+
+    def test_router_without_wireguard_is_reported_not_live(
+        self, vpn_client: TestClient
+    ) -> None:
+        # The house unit, 2026-09-03: uci carried a perfect wg0 with a real
+        # public key, and `ip link show wg0` said the device did not exist
+        # because the router had no wireguard kernel module (WARP-2689).
+        main.router_instance.vpn._kernel_device = False
+        body = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert body["created"] is True, "the config was written; that part is true"
+        assert body["interface_live"] is False, "but the tunnel cannot work and we must say so"
+
+    def test_idempotent_setup_reports_interface_live_too(
+        self, vpn_client: TestClient
+    ) -> None:
+        # WARP-2689 — the idempotent (`created: False`) branch is the one the
+        # field hits: a wg0 uci section exists on every box after its first
+        # setup. It MUST carry interface_live, or every orchestrator gate that
+        # reads `setup.interface_live === false` (mint 503, profile 503,
+        # provisionOverlayPeer, the reconciler) is dead on exactly the routers
+        # WARP-2689 is about.
+        first = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert first["created"] is True and first["interface_live"] is True
+        second = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert second["created"] is False, "interface already exists"
+        assert second["interface_live"] is True, "kernel truth reported on the idempotent branch too"
+
+    def test_idempotent_setup_reports_not_live_when_the_kernel_device_is_gone(
+        self, vpn_client: TestClient
+    ) -> None:
+        # A section exists (created: False) but the device does not — a router
+        # that lost WireGuard after the section was written. The idempotent
+        # branch must still say interface_live: False so the gates fire.
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        main.router_instance.vpn._kernel_device = False
+        body = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
+        assert body["created"] is False
+        assert body["interface_live"] is False
+
+    def test_status_separates_configured_peers_from_live_peers(
+        self, vpn_client: TestClient
+    ) -> None:
+        _mint(vpn_client)
+        # Stage a second peer that never reaches the interface.
+        main.router_instance.vpn._reload_effective = False
+        vpn_client.post(
+            "/vpn/peers",
+            json={"description": "tablet", "allowed_ips": ["10.13.13.4/32"]},
+            headers=AUTH,
+        )
+        body = vpn_client.get("/vpn/status", headers=AUTH).json()
+        assert body["peer_count"] == 2, "uci intends two peers"
+        assert body["live_peer_count"] == 1, "the interface holds one"
+        assert body["interface_live"] is True
+
+    def test_status_live_counts_are_none_when_unreadable(self, vpn_client: TestClient) -> None:
+        _mint(vpn_client)
+        main.router_instance.vpn._live_available = False
+        body = vpn_client.get("/vpn/status", headers=AUTH).json()
+        assert body["live_peer_count"] is None
+        assert body["interface_live"] is None

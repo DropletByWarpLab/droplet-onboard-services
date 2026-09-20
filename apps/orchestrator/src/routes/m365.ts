@@ -25,6 +25,9 @@ import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole } from "../middleware/auth.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import {
   beginDeviceCodeConnect,
   disconnect,
@@ -78,6 +81,9 @@ export function createM365Router(
 
   router.post(
     "/m365/connect",
+    // CodeQL js/missing-rate-limiting — each call opens a device-code flow
+    // against Microsoft and rewrites the connection row; sensitive preset.
+    sensitiveRateLimit,
     requireRole(...CONNECT_ROLES),
     async (req, res) => {
       const userId = (req as AuthedRequest).user?.id;
@@ -94,6 +100,31 @@ export function createM365Router(
 
       try {
         const started = await beginDeviceCodeConnect(prisma, entra, userId);
+
+        // WARP-2285 — the request half of the consent record. The SERVICE
+        // records the outcome (connected / needs-reconnect / disconnected);
+        // this records that a person deliberately started a sign-in, which is
+        // the gesture ADR-041 §2 treats as the consent itself. They are
+        // separate events on purpose: a sign-in that is started and never
+        // completed is exactly the thing an operator needs to be able to see,
+        // and a single row written at either end cannot show it.
+        //
+        // After `beginDeviceCodeConnect`, so a row is written only once
+        // Microsoft has actually issued a code — never for an attempt that
+        // failed before it began.
+        await recordActivity({
+          kind: "auth",
+          severity: "info",
+          sourceIcon: "cloud",
+          what: "Microsoft 365 sign-in started",
+          sub: "PENDING_CONSENT",
+          actor: actorFromRequest(req as never),
+          // No `userCode` and no `verificationUri`: the device code is a live
+          // bearer of the sign-in for its whole TTL, and the activity log is
+          // readable and exportable.
+          refs: { connector: "m365", userId, state: "PENDING_CONSENT" },
+        });
+
         return res.status(202).json({
           userCode: started.userCode,
           verificationUri: started.verificationUri,

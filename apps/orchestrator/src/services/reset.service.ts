@@ -41,12 +41,48 @@ import {
   isTimeoutOrAbort,
 } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "./activity.singleton.js";
 
 const logger = createLogger("reset-service");
 
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 const DOMAIN = "system";
 const SERVICE = "factory_reset";
+
+/**
+ * The refused/failed half of the dual-write. These are the branches that
+ * MATTER for forensics: the request was authorised and committed, the wipe
+ * never started, and the box is still here to be looked at. Without a row the
+ * only surviving trace is `GET /system/reset`, which returns the LATEST job
+ * only — so a second attempt erased the first one from view entirely.
+ *
+ * Deliberately best-effort: `recordActivity` swallows its own failures, and a
+ * reset that already failed must not fail differently because the chain
+ * append did not land. The fail-closed audit write is `writeResetAudit`,
+ * inside the transaction; this is the human-readable twin.
+ */
+async function recordResetFailure(
+  jobId: string,
+  userId: string | undefined,
+  reason: string,
+): Promise<void> {
+  await recordActivity({
+    kind: "system",
+    severity: "err",
+    sourceIcon: "trash-2",
+    what: "Factory reset failed",
+    sub: reason,
+    actor: userId ? { type: "user", id: userId } : { type: "system", id: null },
+    refs: {
+      surface: "system-reset",
+      jobId,
+      domain: DOMAIN,
+      service: SERVICE,
+      entityId: "system.factory_reset",
+      outcome: "failed",
+    },
+  });
+}
 
 /** Structured error codes the route maps to HTTP statuses. */
 export type ResetErrorCode =
@@ -225,6 +261,39 @@ export async function requestFactoryReset(
     throw err;
   }
 
+  // Dual-write into the signed activity chain (the WARP-456 pattern that
+  // network-safety.service.ts already follows). The CommandAuditLog row
+  // written inside the transaction above has no rendered surface anywhere,
+  // so the single most destructive action the product offers was absent
+  // from /admin/audit — the page sold as "the signed activity log, for
+  // humans".
+  //
+  // Placed AFTER the transaction commits: `recordActivity` is bound to the
+  // base client, not `tx`, so a row appended before the commit would survive
+  // a rollback and permanently claim a reset that never happened — in an
+  // append-only chain that can never be corrected. Here `job` exists and
+  // nothing destructive has been dispatched yet.
+  //
+  // Note this does NOT make a COMPLETED reset auditable afterwards: the wipe
+  // destroys the database and the signing key together, by design. What it
+  // buys is the refused/failed attempts below — where the box survives to be
+  // looked at — and a row that is externally shippable during the wipe window.
+  await recordActivity({
+    kind: "system",
+    severity: "warn",
+    sourceIcon: "trash-2",
+    what: "Factory reset requested",
+    sub: `job ${job.id}`,
+    actor: userId ? { type: "user", id: userId } : { type: "system", id: null },
+    refs: {
+      surface: "system-reset",
+      jobId: job.id,
+      domain: DOMAIN,
+      service: SERVICE,
+      entityId: "system.factory_reset",
+    },
+  });
+
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.
   const token = bridgeAuthToken();
@@ -237,6 +306,11 @@ export async function requestFactoryReset(
           "The device-bridge auth token is not configured; reset was not dispatched.",
       },
     });
+    await recordResetFailure(
+      job.id,
+      userId,
+      "The device-bridge auth token is not configured; reset was not dispatched.",
+    );
     throw new ResetError(
       "BRIDGE_AUTH_UNCONFIGURED",
       "Factory reset is unavailable — the device-bridge auth token is not configured.",
@@ -254,6 +328,7 @@ export async function requestFactoryReset(
         data: { status: "failed", failureReason: reason },
       });
       logger.warn({ jobId: job.id, status: res.status }, "factory reset refused by device-bridge");
+      await recordResetFailure(job.id, userId, reason);
       throw new ResetError("BRIDGE_REFUSED", reason, res.status);
     }
   } catch (err) {
@@ -276,6 +351,7 @@ export async function requestFactoryReset(
       data: { status: "failed", failureReason: reason },
     });
     logger.warn({ jobId: job.id, err }, "factory reset dispatch failed");
+    await recordResetFailure(job.id, userId, reason);
     throw new ResetError("BRIDGE_UNREACHABLE", reason);
   }
 

@@ -1,0 +1,174 @@
+# WARP-2732 (ADR-048) — extraction goldens.
+#
+# ── Sourcing ───────────────────────────────────────────────────────────────
+#
+# Every golden here is tagged [AUTHORED], and that is the point of the file.
+#
+# The RAGAS goldens next door carry [WARP-TESTING] / [INFERRED] / [TODO] tags
+# because half of them were derived from filenames and notes rather than read
+# off a fixture — and an INFERRED golden measures the annotator, not the model.
+# Worse, it measures them in the flattering direction: a golden written from
+# what you expect the model to say cannot catch the model saying it wrongly.
+#
+# [AUTHORED] means the FIXTURE WAS WRITTEN TO CONTAIN EXACTLY THIS. The
+# document and its golden were produced together, so there is no gap between
+# what the corpus says and what the answer key claims it says. That is the
+# strongest sourcing available and the only one worth gating auto mode on.
+#
+# ── The company of interest is the COUNTERPARTY ────────────────────────────
+#
+# Every fixture is addressed to Northgate Dental Practice, which is the box's
+# own business — `role: self`, dropped by `propose.ts` before anything is
+# filed. The company each golden names is the OTHER party, which is the one
+# that should become or match a customer. A run that extracted "Northgate
+# Dental Practice" as the counterparty has made the single most obvious wrong
+# filing there is, and scores zero on that fixture.
+#
+# ── Hostnames ──────────────────────────────────────────────────────────────
+#
+# Every domain is under RFC 2606 `.example`. Not decoration: `egress-gate`
+# reads a value-shaped hostname in any file as an unregistered outbound
+# destination, and a fixture corpus full of real-looking domains would deny
+# the PR. See `egress-gate-reads-rfc-section-as-ipv4`.
+#
+# ── Schema ─────────────────────────────────────────────────────────────────
+#
+#   id            fixture filename stem
+#   kind          business | phi | duplicate
+#   company_name  the counterparty, verbatim from the document
+#   domain        its domain, verbatim
+#   money_total   the document's headline total, as a decimal STRING
+#   currency      ISO-4217
+#   expect        what the pipeline should do with it
+#
+# `money_total` is a string in both the golden and the extraction, and is
+# compared through `Decimal` in minor units. Never a float: the column it
+# feeds is NUMERIC(20,6), and a float starts disagreeing with the database
+# somewhere past 2^53.
+
+goldens:
+  # ── business: the documents this feature exists for ──────────────────────
+
+  - id: b01-invoice-acme
+    kind: business
+    # [AUTHORED] the fixture's letterhead, contact line and TOTAL row.
+    company_name: "ACME Dental Supply Ltd"
+    domain: "acme-dental.example"
+    money_total: "4250.00"
+    currency: "USD"
+    expect: "a customer for ACME, with the invoice attached"
+
+  - id: b02-quote-fitout
+    kind: business
+    # [AUTHORED] "From:" block; the total is the EXCLUDING VAT line, which is
+    # the one the document labels TOTAL. A run that returned a VAT-inclusive
+    # figure it computed itself is wrong: nothing in the document says it.
+    company_name: "Barrow & Vane Surgical Interiors"
+    domain: "barrow-vane.example"
+    money_total: "41470.00"
+    currency: "GBP"
+    expect: "a customer for Barrow & Vane; a QUOTE money document"
+
+  - id: b03-contract-msa
+    kind: business
+    # [AUTHORED] party (1) of the agreement. Party (2) is the box itself.
+    company_name: "Pellew Analytics Limited"
+    domain: "pellew-analytics.example"
+    money_total: "18000.00"
+    currency: "GBP"
+    expect: "a customer for Pellew; the contract attached"
+
+  - id: b04-letter-terms
+    kind: business
+    # [AUTHORED] letterhead. The fee is the only figure in the document.
+    company_name: "Fenwick & Doyle"
+    domain: "fenwick-doyle.example"
+    money_total: "2400.00"
+    currency: "GBP"
+    expect: "a customer for Fenwick & Doyle"
+
+  - id: b05-email-order
+    kind: business
+    # [AUTHORED] From: domain and signature block.
+    company_name: "Harbeck Instruments"
+    domain: "harbeck-instruments.example"
+    money_total: "873.00"
+    currency: "GBP"
+    expect: "a customer for Harbeck; the email on its timeline"
+
+  - id: b06-email-renewal
+    kind: business
+    # [AUTHORED] the TOTAL PAYABLE line, not the premium line — the document
+    # gives both, and a run that returned 3150.00 read the first number it saw.
+    company_name: "Stellamere Insurance"
+    domain: "stellamere-insurance.example"
+    money_total: "3528.00"
+    currency: "GBP"
+    expect: "a customer for Stellamere"
+
+  - id: b07-email-chase
+    kind: business
+    # [AUTHORED] the SAME counterparty as b01, and deliberately so: two
+    # documents from one supplier must produce one customer and two links, not
+    # two customers. The amount is quoted back from invoice 1042.
+    company_name: "ACME Dental Supply Ltd"
+    domain: "acme-dental.example"
+    money_total: "4250.00"
+    currency: "USD"
+    same_company_as: b01-invoice-acme
+    expect: "MATCHES the customer b01 created; no second create"
+
+  # ── PHI decoys: the documents this feature exists to REFUSE ──────────────
+  #
+  # 🔴 Zero tolerance. Any proposal from any of these fails the whole run,
+  # regardless of every number above. Each is written to be genuinely clinical
+  # rather than a business document with a keyword sprinkled on it — a decoy
+  # that only trips the regex proves the regex, not the design.
+
+  - id: p01-treatment-note
+    kind: phi
+    # [AUTHORED] chart number, DOB, CDT codes, a prescription, a diagnosis.
+    # Should not survive layer 1: the text screen alone fires on five signals.
+    expect: "skipped/phi_record — no model extraction pass, no proposal"
+
+  - id: p02-referral-letter
+    kind: phi
+    # [AUTHORED] the harder one: a professional letter with no CDT code and no
+    # money. It carries a DOB and a chart number, and it is ABOUT a patient's
+    # care — which is the classifier's job, not the regex's.
+    expect: "skipped/phi_record — the classifier must call this a patient record"
+
+  - id: p03-insurance-claim
+    kind: phi
+    # [AUTHORED] the trap: it LOOKS like an invoice. Line items, fees, a total.
+    # A run that files this as a money document has passed every business
+    # metric and failed the only one that matters.
+    expect: "skipped/phi_record — an itemised claim is not a vendor invoice"
+
+  # ── near-duplicate pair: exactly ONE customer between them ───────────────
+  #
+  # The same supplier as two documents write it: "BRIGHTWELL LABORATORY LTD"
+  # and "Brightwell Laboratory", sharing a domain. Two creates is the duplicate
+  # the matcher exists to prevent; ZERO creates is the matcher refusing a real
+  # new customer, which is the failure that looks like success on a
+  # duplicate-detection metric.
+
+  - id: d01-northgate-invoice
+    kind: duplicate
+    # [AUTHORED] letterhead.
+    company_name: "BRIGHTWELL LABORATORY LTD"
+    domain: "brightwell-lab.example"
+    money_total: "425.00"
+    currency: "GBP"
+    expect: "creates the customer (first of the pair to be read)"
+
+  - id: d02-northgate-statement
+    kind: duplicate
+    # [AUTHORED] letterhead — same supplier, no legal suffix, same domain. The
+    # domain is the key that should carry this; the name normalisation is a
+    # second signal in the same fixture.
+    company_name: "Brightwell Laboratory"
+    domain: "brightwell-lab.example"
+    money_total: "735.00"
+    currency: "GBP"
+    expect: "MATCHES d01's customer; no second create"

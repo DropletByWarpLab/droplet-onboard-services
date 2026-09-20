@@ -50,6 +50,9 @@ import { tickToolSchedules } from "../services/tool-schedule-ticker.service.js";
 import { runToolSpec, type StepDispatcher } from "../services/tool-spec-runner.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
+/** The run-now route forwards the caller's identity to every tool call. */
+const AS_CALLER = expect.objectContaining({ userId: expect.any(String) });
+
 // ── fixtures ───────────────────────────────────────────────────────
 //
 // Real registry names, deliberately: the whole point of T5's design is that
@@ -315,7 +318,7 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     const res = await request(app).post("/api/tools/nightly-recap/runs");
 
     expect(res.status).toBe(200);
-    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" }, AS_CALLER);
   });
 
   it("leaves the owner's reach untouched — §3 owner bypass, no DB read", async () => {
@@ -329,7 +332,7 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
       node_id: "n1",
       command: "turn_on",
-    });
+    }, AS_CALLER);
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
@@ -362,7 +365,7 @@ describe("WARP-1580 — interactive ToolSpec run honours per-role tool narrowing
     const res = await request(app).post("/api/tools/nightly-recap/runs");
 
     expect(res.status).toBe(200);
-    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" }, AS_CALLER);
     // The §3 resolver is not even consulted on the role-less path.
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });

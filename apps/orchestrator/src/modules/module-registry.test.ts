@@ -89,6 +89,21 @@ describe("route prefixes — must match a real router mount", () => {
     expect(prefixes("smart_home")).toEqual(["/api/matter"]);
     expect(prefixes("smart_home")).not.toContain("/api/devices");
   });
+
+  it("projects claims the whole /api/pm tree, not just /api/pm/projects", () => {
+    // WARP-2875: routes/pm/native.ts and routes/pm/relations.ts mount at
+    // `/api` and serve `/pm/work-items`, `/pm/summary`, `/pm/workspaces`,
+    // `/pm/states/:id`, `/pm/labels/:id` and `/pm/relations/:id` — all
+    // OUTSIDE `/api/pm/projects`. The narrower prefix left the Projects
+    // toggle enforcing a fraction of the surface it advertises.
+    //
+    // `/api/mobile/pm` is the same surface through the mobile door:
+    // routes/mobile/pm.ts serves workspaces, projects and work-items off the
+    // same pm.service.ts with only a role check, and `pathIsUnder` is
+    // segment-bounded so `/api/pm` never reaches it. It is a sibling prefix,
+    // not a nested one — `gateScopeFor` stays null for both.
+    expect(MODULE_BY_ID.get("projects")!.routePrefixes).toEqual(["/api/pm", "/api/mobile/pm"]);
+  });
 });
 
 describe("nested route prefixes — the WARP-1585 collision", () => {

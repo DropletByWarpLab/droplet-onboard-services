@@ -12,10 +12,11 @@
  * 202 (network-safety Tier-2 arm) → confirmation passthrough.
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import setWifiPassword from "../../../src/handlers/network/set-wifi-password.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
+function ctxWithPost(post: Mock): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],

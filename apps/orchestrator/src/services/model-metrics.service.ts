@@ -4,7 +4,7 @@
  *
  * ai-gateway's model list is capability-only (name/provider/context/vision).
  * The real footprint lives in the daemon's own lifecycle endpoints, which the
- * orchestrator already reaches for model-readiness (same `OLLAMA_URL`):
+ * orchestrator already reaches for model-readiness (same `inferenceRuntimeUrl()`):
  *   - GET /api/tags — installed models → disk size, parameter size, quantization
  *   - GET /api/ps   — loaded models → graphics memory in use (size_vram)
  *
@@ -46,8 +46,8 @@ import {
 } from "./inference-runtime.js";
 
 const logger = createLogger("model-metrics");
-const OLLAMA_URL =
-  process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
+// WARP-2857 — see model-readiness: one resolver, read per call, so the
+// canonical INFERENCE_RUNTIME_URL is actually reachable from here.
 const PROBE_BUDGET_MS = 2000;
 
 interface OllamaTagEntry {
@@ -303,8 +303,8 @@ export async function fetchLocalModelMetrics(): Promise<
     // the same two fetches it has always been — no extra traffic, no changed
     // ordering, nothing for the default path to regress on.
     const [psSettled, tagsSettled, nativeSettled] = await Promise.allSettled([
-      fetch(`${OLLAMA_URL}/api/ps`, { signal }),
-      fetch(`${OLLAMA_URL}/api/tags`, { signal }),
+      fetch(`${inferenceRuntimeUrl()}/api/ps`, { signal }),
+      fetch(`${inferenceRuntimeUrl()}/api/tags`, { signal }),
       ...(isDmr
         ? [fetch(`${inferenceRuntimeUrl()}/models`, { signal })]
         : []),
@@ -409,7 +409,7 @@ export async function fetchLocalModelMetrics(): Promise<
     }
   } catch (err) {
     logger.debug(
-      { err: (err as Error).message, url: OLLAMA_URL, runtime },
+      { err: (err as Error).message, url: inferenceRuntimeUrl(), runtime },
       "model metrics probe failed (non-fatal — card keeps honest placeholders)",
     );
   }

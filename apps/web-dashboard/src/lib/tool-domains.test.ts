@@ -32,3 +32,10 @@ describe("tool-domains — team_chat domain (WARP-1685)", () => {
     expect(iconForDomain("team_chat")).not.toBe(Wrench);
   });
 });
+
+describe("tool-domains — routines domain (WARP-2894)", () => {
+  it("labels the routines domain 'Routines' with the nav entry's icon, not the fallback", () => {
+    expect(labelForDomain("routines")).toBe("Routines");
+    expect(iconForDomain("routines")).not.toBe(Wrench);
+  });
+});

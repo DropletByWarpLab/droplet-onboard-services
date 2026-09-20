@@ -4,11 +4,12 @@
 // pipeline + how the handler forwards (or drops) the field.
 
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { getTool } from "../../../src/index.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function makeCtx(searchHybrid: ReturnType<typeof vi.fn>): ToolContext {
+function makeCtx(searchHybrid: Mock): ToolContext {
   return {
     prisma: {} as PrismaClient,
     http: {
@@ -22,6 +23,7 @@ function makeCtx(searchHybrid: ReturnType<typeof vi.fn>): ToolContext {
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      orchestrator: {} as ToolContext["http"]["orchestrator"],
     } as ToolContext["http"],
     matter: {} as ToolContext["matter"],
     searchHybrid,

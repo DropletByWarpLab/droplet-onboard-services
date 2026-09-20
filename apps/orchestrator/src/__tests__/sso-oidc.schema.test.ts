@@ -30,9 +30,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import * as path from "node:path";
-
-const SCHEMA_PATH = path.resolve(process.cwd(), "prisma", "schema.prisma");
-const MIGRATIONS_DIR = path.resolve(process.cwd(), "prisma", "migrations");
+import { MIGRATIONS_DIR, SCHEMA_PATH } from "./helpers/test-paths.js";
 
 function readSchema(): string {
   return readFileSync(SCHEMA_PATH, "utf-8");

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import memoryForget from "../../../src/handlers/memory/forget.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(
-  findUnique: ReturnType<typeof vi.fn>,
-  update: ReturnType<typeof vi.fn>,
+  findUnique: Mock,
+  update: Mock,
   role?: ToolContext["role"],
 ): ToolContext {
   return {

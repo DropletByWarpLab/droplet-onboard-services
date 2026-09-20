@@ -3,13 +3,23 @@
  *
  * Soft-disables a remembered fact (`active=false`) so it stops
  * influencing the model; the row is retained for the evidence chain.
- * Tier 2 (write + requires confirmation), enforced BY THE HANDLER:
- * neither the MCP server nor the agent loop enforces the
- * `requiresConfirmation` flag generically, so the first call returns
- * `confirmation_required` (no write) with the fact echoed in the
- * message. The model relays it to the user and re-issues the call with
- * `confirmed: true` only after the user explicitly approves — same
- * handler-enforced two-phase contract as `memory_extract_fact`.
+ * Tier 2 (write + requires confirmation). Since WARP-2305 the
+ * `requiresConfirmation` flag IS enforced generically, in the dispatch
+ * path, by the interceptor in `../../interceptor.ts`: it refuses the
+ * first call, mints a single-use token bound to this tool name and these
+ * exact arguments, and runs this handler only once that token comes back.
+ * (Before WARP-2305 neither the MCP server nor the agent loop enforced
+ * the flag, and the four lines below were the only thing standing between
+ * this tool and an unconfirmed write. That is no longer true — do not
+ * copy the pattern into a new tool merely to satisfy the flag. See
+ * `docs/tool-confirmation-contract.md`.)
+ *
+ * The handler-side gate below is retained because its DECISION is
+ * domain-specific, not generic: it echoes the fact text so the user can
+ * see what they are approving. The interceptor does not double-prompt it
+ * — on a call whose token verified, the interceptor sets `confirmed:
+ * true` (this tool's schema declares it), so the gate passes and the
+ * write proceeds. Same two-phase contract as `memory_extract_fact`.
  *
  * WARP-845 audience gate: a fact whose `audience` is not visible to the
  * caller's role must be indistinguishable from a missing one — the

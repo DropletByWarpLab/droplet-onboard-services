@@ -11,11 +11,12 @@
 
 import { EmailWorkspace } from "@/components/email/EmailWorkspace";
 
-export default function EmailDeepLinkPage({
-  params,
-}: {
-  params: { account: string; thread?: string[] };
-}) {
+export default async function EmailDeepLinkPage(
+  props: {
+    params: Promise<{ account: string; thread?: string[] }>;
+  }
+) {
+  const params = await props.params;
   const initialThreadId = params.thread?.[0];
   return (
     <EmailWorkspace

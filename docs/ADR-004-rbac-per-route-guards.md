@@ -330,6 +330,8 @@ export function roleFromGroups(groups: string[]): Role {
 
 Group-name choices match what Nextcloud already provisions out of the box. Documented in the new `docs/RBAC.md` (created in Phase 8 brain-sync, not this ADR).
 
+> **Superseded in part by WARP-1636 — this mapping is a hint, not an authority.** The `admin` group above is Nextcloud's own *instance-administrator* group, which `buildNcGroups` grants to every owner/admin-tier user; reading it back as `owner` let a deliberately-narrowed admin mint the top tier through the Nextcloud OCS auth fallback. The mapping itself is unchanged, but the OCS fallback now mints through `resolveNcSessionRole`, which caps it at the holder's stored `User.role`. Never mint a session from `roleFromGroups` directly. See ADR-032 §7.1.
+
 ### 5. Tests
 
 `apps/orchestrator/src/__tests__/rbac.test.ts` — a single file driving the full role × route matrix:

@@ -25,14 +25,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw, FlaskConical, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { translateError } from "@/lib/friendly-errors";
 import { ShellPage } from "@/components/shell/ShellPage";
 
 const POLL_MS = 10_000;
-
-function isAdminRole(role?: string): boolean {
-  return role === "owner" || role === "admin";
-}
 
 type RunStatus = "running" | "succeeded" | "failed" | "unknown";
 

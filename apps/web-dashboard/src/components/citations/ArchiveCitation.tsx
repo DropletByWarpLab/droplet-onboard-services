@@ -19,6 +19,8 @@ import type { CitationHit } from "./CitationCard";
 import { CitationCard } from "./CitationCard";
 import { relevancePct } from "@/lib/relevance";
 
+import type { JSX } from "react";
+
 export interface ArchiveCitationProps {
   hit: CitationHit;
   anchor: ArchiveMemberAnchor;

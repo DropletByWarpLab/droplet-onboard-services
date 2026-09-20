@@ -5,7 +5,9 @@
  *   - POST /auth/users/:username/revoke-sessions — owner/admin denylists every
  *     live refresh token for the user (resolved username → local User.id),
  *     404 for an unknown user, 403 for a non-admin caller, 500 when the local
- *     directory isn't wired.
+ *     directory isn't wired. WARP-2820: the param resolves against
+ *     `nextcloudUsername` first and falls back to `username`, so accounts that
+ *     never had a Nextcloud mapping key (SCIM/SSO) can be signed out too.
  *   - POST /auth/users/:username/disable — also revokes the disabled user's
  *     live sessions so the disable propagates immediately.
  *
@@ -118,12 +120,18 @@ function createPrismaMock(seed: any[] = []) {
     // WARP-1526 (pr-reviewer #1229 B2): the routes resolve by
     // nextcloudUsername, then the guard RE-READS by id inside the
     // transaction — the stub must answer both keys.
+    // WARP-2820: `username` too. It is `@unique` like the other two, and the
+    // revoke route now falls back to it for rows that have no Nextcloud
+    // mapping key. Each clause is gated on its own key being present, so a
+    // `where: { nextcloudUsername }` probe still matches ONLY that column —
+    // a row whose nextcloudUsername is null must not answer it.
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
           (u) =>
             (where.nextcloudUsername !== undefined &&
               u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.username !== undefined && u.username === where.username) ||
             (where.id !== undefined && u.id === where.id),
         ) ?? null
       );
@@ -213,6 +221,40 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
           targetUserId: "u-alice",
           username: "alice",
         }),
+      }),
+    );
+  });
+
+  // WARP-2820 — the SCIM/SSO population. `provisionUser` and the SSO JIT
+  // create both seed `username` from the email and never write
+  // `nextcloudUsername` (schema: `String? @unique`, no default), so resolving
+  // ONLY by the mapping key meant every Okta-managed account 404'd here —
+  // while /admin/sessions listed them, correctly, as signed in. The list keys
+  // off `User.id`; the revoke has to be able to name the same row.
+  it("resolves a row with NO nextcloudUsername by its local username", async () => {
+    const prisma = createPrismaMock([
+      {
+        id: "u-dana",
+        username: "dana.chen",
+        nextcloudUsername: null, // Okta-provisioned: never had one.
+        displayName: "Dana Chen",
+        role: "family",
+        directoryStatus: "ACTIVE",
+      },
+    ]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/dana.chen/revoke-sessions");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ok", username: "dana.chen", revoked: 2 });
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-dana");
+    // The audit row still names the row that was actually revoked, not just
+    // the string the operator typed.
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Sessions revoked",
+        refs: expect.objectContaining({ targetUserId: "u-dana", username: "dana.chen" }),
       }),
     );
   });

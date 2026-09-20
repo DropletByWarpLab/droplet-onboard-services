@@ -6,11 +6,12 @@
  * ctx.userId is absent).
  */
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import emailRead from "../../../src/handlers/email/read.js";
 import type { Role, ToolContext } from "../../../src/types.js";
 
 function ctxWith(opts: {
-  get?: ReturnType<typeof vi.fn>;
+  get?: Mock;
   role?: Role;
   userId?: string;
 }): ToolContext {
@@ -43,7 +44,7 @@ const THREAD = {
   messages: [{ id: "m1", fromAddr: "a@b.com", bodyText: "hi" }],
 };
 
-function okGet(): ReturnType<typeof vi.fn> {
+function okGet(): Mock {
   return vi
     .fn()
     .mockResolvedValue(new Response(JSON.stringify(THREAD), { status: 200 }));

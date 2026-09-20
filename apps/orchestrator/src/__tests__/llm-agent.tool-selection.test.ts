@@ -143,6 +143,58 @@ describe("runAgent — tool selection (spec §3)", () => {
     expect(toolNames(chat.mock.calls[0]![0])).toEqual(["search_content"]);
   });
 
+  it("refuses the heal when the widened advertisement would blow the budget", async () => {
+    // WARP-2348 parity for the self-heal branch. `assertToolAdvertisementFitsBudget`
+    // ran ONCE before the loop against the initial selection; this branch
+    // admits a whole extra domain mid-loop and `keep` is monotonic, so the
+    // widened array used to reach the next wire request unmeasured. The
+    // in-loop context guard deliberately excludes tool schemas and the
+    // route-side degradeToFit ran before runAgent, so nothing downstream
+    // caught it — silent over-budget, the exact mode tool-budget.service.ts
+    // exists to eliminate.
+    //
+    // A tiny context_window makes the ceiling unreachable, so the heal is
+    // refused rather than committed.
+    //
+    // MUTATION: drop the re-assert and commit `candidate` unconditionally →
+    // the second call regains control_device and this goes red.
+    const callControl = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "c1",
+          type: "function",
+          function: { name: "control_device", arguments: "{}" },
+        },
+      ],
+    };
+    const { deps, chat, callTool } = makeDeps([
+      callControl,
+      { role: "assistant", content: "done" },
+    ]);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "hello there" }],
+      tool_selection_mode: "domains",
+      // Ceiling = window - OUTPUT_RESERVE(1024) - fixed blocks(11800 chars
+      // ~= 2950 tokens), so 4070 leaves ~96 tokens: comfortably above the
+      // 89-token core-only advertisement that opens the turn, and well below
+      // what admitting the smart-home domain would cost. That isolates the
+      // heal as the thing being refused — a smaller window would trip the
+      // PRE-loop assertion instead and prove nothing about this branch.
+      context_window: 4070,
+    });
+
+    // The advertisement did NOT widen: the refused heal leaves the turn on
+    // the tools it already had.
+    expect(toolNames(chat.mock.calls[0]![0])).not.toContain("control_device");
+    expect(toolNames(chat.mock.calls[1]![0])).not.toContain("control_device");
+    // And nothing was dispatched behind the budget's back.
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("model_done");
+  });
+
   it("a call outside allowed_tools stays UNKNOWN_TOOL — never self-heals", async () => {
     const callControl = {
       role: "assistant",

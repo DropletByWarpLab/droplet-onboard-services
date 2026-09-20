@@ -71,6 +71,11 @@ class TestDeviceSecretSafety:
         with caplog.at_level("ERROR", logger="auth.keystore"):
             keystore._assert_device_secret_safe()  # dev: warn, don't crash
         assert any("DEVICE_SECRET" in r.getMessage() for r in caplog.records)
+        # CodeQL py/clear-text-logging-sensitive-data: the line names the
+        # constant, it never prints its value.
+        assert not any(
+            keystore._DEV_DEFAULT_SECRET in r.getMessage() for r in caplog.records
+        )
 
     def test_dev_default_fails_closed_in_production(self, monkeypatch):
         monkeypatch.setattr(keystore, "DEVICE_SECRET", keystore._DEV_DEFAULT_SECRET)
@@ -84,3 +89,34 @@ class TestDeviceSecretSafety:
         monkeypatch.setenv("DROPLET_FIPS_REQUIRED", "true")
         with pytest.raises(RuntimeError, match="DEVICE_SECRET"):
             keystore._assert_device_secret_safe()
+
+
+class TestPathContainment:
+    """CodeQL py/path-injection: neither the provider (URL path segment) nor
+    the user id may steer the key file outside KEYS_DIR."""
+
+    @pytest.mark.parametrize(
+        "bad", ["../escape", "..", ".", "a/b", "/abs", "", "x" * 65, "open ai", "-dash"]
+    )
+    async def test_store_rejects_non_token_provider(self, keys_dir, bad):
+        with pytest.raises(ValueError):
+            await store_key(bad, "sk-test-key-1234567890")
+        assert not (keys_dir.parent / "escape.enc").exists()
+        assert not list(keys_dir.rglob("*.enc"))
+
+    async def test_get_and_delete_treat_bad_provider_as_absent(self, keys_dir):
+        assert await get_key("../escape") is None
+        assert await delete_key("../../escape") is False
+
+    async def test_dotted_and_dashed_provider_names_still_work(self, keys_dir):
+        await store_key("my-provider.v2", "sk-test-key-1234567890")
+        assert await get_key("my-provider.v2") == "sk-test-key-1234567890"
+        assert await delete_key("my-provider.v2") is True
+
+    async def test_user_id_traversal_stays_under_keys_dir(self, keys_dir):
+        await store_key("openai", "sk-test-key-1234567890", user_id="../../outside")
+        files = list(keys_dir.rglob("openai.enc"))
+        assert len(files) == 1
+        assert files[0].resolve().is_relative_to(keys_dir.resolve())
+        assert not (keys_dir.parent.parent / "outside").exists()
+        assert await get_key("openai", user_id="../../outside") == "sk-test-key-1234567890"

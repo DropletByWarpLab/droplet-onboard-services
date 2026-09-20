@@ -1,0 +1,54 @@
+[Unit]
+# WARP-2574 (delivery half) — re-apply host integration to match the checkout.
+#
+# The box refresh updates the git checkout and restarts CONTAINERS; nothing
+# re-runs install_single_box_host_integration (scripts/lib/single-box.sh), so a
+# merged host-artefact feature (a new /usr/local/sbin script, a new systemd
+# unit, a changed applier) landed in the checkout but on ZERO existing boxes
+# until each was hand-reprovisioned. Measured 2026-08-31: WARP-2190 + WARP-2192
+# sat in the checkout for five days, installed on none of it.
+#
+# This is the deploy-path HEAL the watchdog's detect-only host_artefacts check
+# points at — the symmetric partner of droplet-host-units.service (WARP-1829),
+# which restarts host units running stale CODE. This one re-applies host
+# artefacts the refresh delivered to the checkout but never installed.
+#
+# It runs the GATE FIRST (droplet-host-units audit, pure reads) and only
+# re-applies when the box is actually out of sync — so on a healthy box this is
+# a cheap no-op at boot, never an unattended provision on a cadence (which is
+# exactly why the 3-minute watchdog timer must NOT do this).
+#
+#   systemctl start droplet-host-integration.service   # the one-line refresh hook
+#
+# Ordered Before= (never Requires=) droplet.service: the host layer is
+# reconciled before the stack comes up, but a failed reconcile is loud in
+# `systemctl --failed` and NEVER blocks bring-up.
+Description=Droplet host-integration re-apply (install artefacts the refresh delivered but never installed)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services/blob/main/scripts/host/README.md
+# apt is a best-effort step of the installer (iw, conntrack, …), so give it the
+# network; the reconcile itself tolerates apt failing.
+After=network-online.target
+Wants=network-online.target
+# Reconcile the host layer BEFORE the stack starts. Pure ordering — droplet.service
+# does not depend on this unit, so a reconcile failure cannot keep the box down.
+Before=droplet.service
+
+[Service]
+Type=oneshot
+# Re-applying host artefacts needs root (install into /usr/local, systemctl
+# enable). This is a first-class root systemd context — it never touches the
+# droplet user or the docker group, so it widens no privilege (WARP-2574 heal note).
+User=root
+ExecStart=/usr/local/sbin/droplet-reapply-host-integration
+# Bounded: one pass. The heal is a single idempotent installer run (no rebuild,
+# no stack restart); the ceiling only covers a slow best-effort apt.
+TimeoutStartSec=600
+# Exit 1 means "a re-apply was needed and did not fully take" — that must show
+# as a failed unit in `systemctl --failed`, not be swallowed. The journal carries
+# the CRITICAL line naming the fix. A clean box exits 0 without acting.
+SuccessExitStatus=0
+
+[Install]
+# Runs at boot (after a refresh + reboot, or a `systemctl restart droplet.service`
+# preceded by a start of this unit). The refresh flow can also start it directly.
+WantedBy=multi-user.target

@@ -1143,9 +1143,11 @@ describe("presetForClass (WARP-437)", () => {
     expect(p.searchOverrides?.rerankCandidates).toBe(80);
   });
 
-  it("conversational → minSimilarity=0.5, perArmK=50, no enhance", () => {
+  it("conversational → minSimilarity=0.75, perArmK=50, no enhance", () => {
+    // WARP-2196 recalibrated the floor from 0.5 (MiniLM) to 0.75 (bge).
+    // The derivation is pinned in services/similarity-floors.test.ts.
     const p = presetForClass("conversational");
-    expect(p.searchOverrides?.minSimilarity).toBe(0.5);
+    expect(p.searchOverrides?.minSimilarity).toBe(0.75);
     expect(p.searchOverrides?.perArmK).toBe(50);
     expect(p.enhance).toBeUndefined();
   });

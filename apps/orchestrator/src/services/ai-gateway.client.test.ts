@@ -125,6 +125,28 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     expect(fetchMock.mock.calls[1][1].signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("saveKey and deleteKey keep a hostile provider inside one URL segment", async () => {
+    // CodeQL js/request-forgery: `provider` is `req.params.provider`. Without
+    // encoding, `../` or `?`/`#` could redirect the gateway call to another
+    // internal endpoint.
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    const hostile = "../../ocs/v2.php?x=1#frag";
+    const expectedPath = `/ai/keys/${encodeURIComponent(hostile)}`;
+
+    fetchMock.mockResolvedValueOnce(okResponse({}));
+    await saveKey(hostile, "sk-test");
+    fetchMock.mockResolvedValueOnce(okResponse({}));
+    await deleteKey(hostile);
+
+    for (const [rawUrl] of fetchMock.mock.calls) {
+      const url = new URL(String(rawUrl));
+      expect(url.origin).toBe("http://ai-gateway.test:8000");
+      expect(url.pathname).toBe(expectedPath);
+      expect(url.search).toBe("");
+      expect(url.hash).toBe("");
+    }
+  });
+
   it("isTimeoutError recognizes AbortSignal.timeout abort reasons", () => {
     expect(isTimeoutError(new DOMException("timed out", "TimeoutError"))).toBe(true);
     expect(isTimeoutError(new DOMException("aborted", "AbortError"))).toBe(true);

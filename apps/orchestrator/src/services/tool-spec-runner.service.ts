@@ -9,9 +9,13 @@
  * Semantics:
  *   - Steps walk in ascending `idx`.
  *   - Step N's parsed result is exposed to step N+1's args via simple
- *     `${prev.json_path}` template substitution. v1 supports the
- *     special variable `${prev}` (the entire previous result JSON);
- *     more elaborate JSONPath is C2 territory.
+ *     `${prev}` template substitution (the entire previous result JSON).
+ *   - WARP-2670: a step may also publish its result under a name
+ *     (`args.as`), which any LATER step reads as `${steps.<name>}` or
+ *     `${steps.<name>.<path>}` — dotted, with numeric segments indexing
+ *     arrays. This is what lets step 3 see step 1; with `${prev}` alone a
+ *     spec is a pipeline, and anything needing two earlier results had to
+ *     collapse into a single tool call.
  *   - A step failure stops the walk — step N+1 onwards is NOT
  *     attempted. The ToolRun row is written with `status=failed` and
  *     `error` populated from the failing step.
@@ -67,12 +71,24 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
+import type { McpCallContext } from "./mcp-client.service.js";
 
 const logger = createLogger("tool-spec-runner");
 
 export interface StepDispatcher {
-  /** Returns the parsed tool result (any JSON shape). Throws on failure. */
-  call(tool: string, args: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Returns the parsed tool result (any JSON shape). Throws on failure.
+   *
+   * `context` is the caller's identity, forwarded to the tool registry the
+   * same way chat forwards it. Without it every per-user tool (calendar,
+   * email, memory) answers AUTH_REQUIRED inside a spec run, which is how the
+   * daily report could never read anything the person had connected.
+   */
+  call(
+    tool: string,
+    args: Record<string, unknown>,
+    context?: McpCallContext,
+  ): Promise<unknown>;
 }
 
 /**
@@ -114,6 +130,10 @@ export interface RunStepTrace {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /** WARP-2670 — the name this step's result was published under, when it
+   *  was given one. Present in the trace so the run-detail drawer can show
+   *  which step a later `${steps.x}` was actually reading. */
+  as?: string;
 }
 
 export interface RunOutcome {
@@ -146,37 +166,179 @@ interface RunArgs {
    * mean "unknown"; pass `DENY_ALL_TOOL_SCOPE`.
    */
   scope?: ToolAccessScope | null;
+  /**
+   * The identity the run's tool calls execute as (username, role, Nextcloud
+   * token). Omitted for a scheduled fire, which has no session to speak of.
+   */
+  callContext?: McpCallContext;
 }
 
 /**
- * Resolve `${prev}` template references in the args of step N+1
- * against the parsed result of step N. v1 deliberately supports only
- * the bare `${prev}` substitution; richer JSONPath is C2 scope.
- *
- * Substitution is structural: a string value of exactly `${prev}`
- * becomes the previous result; any other string is returned as-is
- * (no partial-string substitution to avoid surprise stringification).
+ * WARP-2670 — a reference that named a step, or a path inside one, that the
+ * run cannot supply. Thrown by `resolveRefs` and caught by the walk, which
+ * records it as an ordinary failed step rather than letting it escape.
  */
-function resolvePrev(
-  raw: unknown,
-  prev: unknown,
-): unknown {
+export class StepReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepReferenceError";
+  }
+}
+
+/** `${steps.<name>}` / `${steps.<name>.<path>.<into>}`. */
+const STEP_REF_RE = /^\$\{steps\.([a-z][a-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}$/;
+
+/**
+ * Read a dotted path out of a step result.
+ *
+ * Numeric segments index arrays, so `${steps.invoices.0.id}` works without a
+ * second syntax. A missing key is distinguished from a present-but-null value
+ * with own-property / bounds checks: `null` is a legitimate result a spec may
+ * want to pass on, and treating it as "missing" would fail runs that are fine.
+ * Strict on both axes: a segment is an index only if it is ALL digits, and a
+ * key only if the object OWNS it — nothing inherited, nothing prefix-parsed.
+ */
+function readPath(
+  root: unknown,
+  segments: string[],
+): { ok: true; value: unknown } | { ok: false; at: string } {
+  let cur = root;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const here = segments.slice(0, i + 1).join(".");
+    if (Array.isArray(cur)) {
+      // The WHOLE segment must be digits. `Number.parseInt("5abc")` is 5, so
+      // a typo'd `${steps.r.rows.5abc}` would silently read row 5 — the exact
+      // "silent undefined reaching a tool" class this file refuses to
+      // tolerate, just one row over.
+      if (!/^\d+$/.test(seg)) return { ok: false, at: here };
+      const idx = Number(seg);
+      if (idx >= cur.length) return { ok: false, at: here };
+      cur = cur[idx];
+      continue;
+    }
+    if (
+      typeof cur === "object" &&
+      cur !== null &&
+      Object.prototype.hasOwnProperty.call(cur, seg)
+    ) {
+      // Own properties only. `"constructor" in {}` is true, so the `in`
+      // operator would resolve `${steps.r.constructor}` to a function and
+      // forward it into the next tool's args instead of failing the step.
+      cur = (cur as Record<string, unknown>)[seg];
+      continue;
+    }
+    return { ok: false, at: here };
+  }
+  return { ok: true, value: cur };
+}
+
+/**
+ * The results a step may refer to: the immediately previous one, and every
+ * earlier step that was given a name.
+ */
+export interface RefContext {
+  prev: unknown;
+  named: ReadonlyMap<string, unknown>;
+}
+
+/**
+ * WARP-2670 — resolve template references in a step's args.
+ *
+ * Two forms, and the distinction between them is deliberate:
+ *
+ *   `${prev}`               — the whole previous result. UNCHANGED from C1,
+ *                             including the fact that step 0 resolves it to
+ *                             `undefined` rather than failing. Existing specs
+ *                             keep behaving byte-for-byte; making the old form
+ *                             strict would break stored programs written
+ *                             against the documented v1 semantics.
+ *   `${steps.name.path}`    — a NAMED earlier result, optionally indexed into.
+ *                             Strict: an unknown name or an unreadable path
+ *                             fails the step. This form is new, so there is no
+ *                             history to preserve, and a silent `undefined`
+ *                             reaching a tool as an argument is exactly the
+ *                             class of bug the summarizer contract already
+ *                             refuses to tolerate elsewhere in this file.
+ *
+ * Named results are what lift a spec from a pipeline to a procedure: with
+ * `${prev}` alone, step 3 cannot see step 1, so anything that needs two
+ * earlier results has to be one giant tool call.
+ *
+ * Substitution stays STRUCTURAL — a string equal to exactly `${...}` becomes
+ * the value; any other string is returned as-is. No partial-string
+ * interpolation, for the same reason C1 gave: surprise stringification of an
+ * object into the middle of a sentence.
+ */
+function resolveRefs(raw: unknown, ctx: RefContext): unknown {
   if (raw === null || raw === undefined) return raw;
   if (typeof raw === "string") {
-    if (raw === "${prev}") return prev;
-    return raw;
+    if (raw === "${prev}") return ctx.prev;
+    const m = STEP_REF_RE.exec(raw);
+    if (!m) return raw;
+    const [, name, rest] = m;
+    if (!ctx.named.has(name)) {
+      throw new StepReferenceError(
+        `no earlier step is named "${name}" (referenced as ${raw})`,
+      );
+    }
+    const segments = rest ? rest.slice(1).split(".") : [];
+    const read = readPath(ctx.named.get(name), segments);
+    if (!read.ok) {
+      throw new StepReferenceError(
+        `step "${name}" has no value at "${read.at}" (referenced as ${raw})`,
+      );
+    }
+    return read.value;
   }
   if (Array.isArray(raw)) {
-    return raw.map((v) => resolvePrev(v, prev));
+    return raw.map((v) => resolveRefs(v, ctx));
   }
   if (typeof raw === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      out[k] = resolvePrev(v, prev);
+      out[k] = resolveRefs(v, ctx);
     }
     return out;
   }
   return raw;
+}
+
+/**
+ * WARP-2670 — every `${steps.X}` name a step's args refer to.
+ *
+ * Exported so the create/patch routes can refuse a forward or unknown
+ * reference at AUTHORING time. The runner would catch it too, but only on the
+ * first fire — which for a scheduled spec is at 03:00 with nobody reading.
+ */
+export function referencedStepNames(raw: unknown, into: Set<string> = new Set()): Set<string> {
+  if (typeof raw === "string") {
+    const m = STEP_REF_RE.exec(raw);
+    if (m) into.add(m[1]);
+    return into;
+  }
+  if (Array.isArray(raw)) {
+    for (const v of raw) referencedStepNames(v, into);
+    return into;
+  }
+  if (typeof raw === "object" && raw !== null) {
+    for (const v of Object.values(raw as Record<string, unknown>)) {
+      referencedStepNames(v, into);
+    }
+  }
+  return into;
+}
+
+/**
+ * The output name a stored step was given, if any. Lives inside `args` rather
+ * than in its own column: `ToolStep.args` is a Json blob and `kind` is a plain
+ * String, which the C1 schema comment already nominates as the extension seam
+ * ("future kinds may include branch, wait"). No migration.
+ */
+export function stepOutputName(step: { args: unknown }): string | null {
+  if (typeof step.args !== "object" || step.args === null) return null;
+  const as = (step.args as Record<string, unknown>).as;
+  return typeof as === "string" && as.length > 0 ? as : null;
 }
 
 /**
@@ -187,7 +349,7 @@ function resolvePrev(
  */
 function parseCallStep(
   step: { kind: string; args: unknown },
-): { tool: string; args: Record<string, unknown> } | null {
+): { tool: string; args: Record<string, unknown>; optional: boolean } | null {
   if (step.kind !== "call") return null;
   if (typeof step.args !== "object" || step.args === null) return null;
   const a = step.args as Record<string, unknown>;
@@ -196,7 +358,12 @@ function parseCallStep(
     a.args !== undefined && typeof a.args === "object" && a.args !== null
       ? (a.args as Record<string, unknown>)
       : {};
-  return { tool: a.tool, args: inner };
+  // `optional: true` — a failure of THIS step is recorded in the trace and
+  // the walk continues, instead of halting the run. For a report that reads
+  // many sources, one unreadable source is a fact for the narrative, not a
+  // reason to write no narrative at all. Access denials and malformed steps
+  // still halt regardless: those are authoring/authorization problems.
+  return { tool: a.tool, args: inner, optional: a.optional === true };
 }
 
 /**
@@ -225,8 +392,9 @@ export const DEFAULT_SUMMARY_PROMPT =
   "Write a short briefing, in the second person, from the results above. " +
   "Two to five short paragraphs of prose — no bullet points, no headings. " +
   "Use only figures that appear in the results; never estimate or infer a " +
-  "number. If something could not be read, say so plainly in one clause " +
-  "rather than leaving it out.";
+  "number. If a source is marked COULD NOT BE READ, say so plainly in one " +
+  "clause rather than leaving it out. If a source is marked NOT CONNECTED, " +
+  "leave it out entirely.";
 
 /**
  * WARP-1580 — the tool names a spec's steps will call, in step order.
@@ -259,6 +427,10 @@ export async function runToolSpec(
 ): Promise<{ runId: string; outcome: RunOutcome }> {
   const trace: RunStepTrace[] = [];
   let prev: unknown = undefined;
+  // WARP-2670 — results published by earlier steps that carried an `as` name.
+  // Only successful steps land here: a failed step halts the walk, so nothing
+  // downstream can read a result that was never produced.
+  const named = new Map<string, unknown>();
   let outcome: RunOutcome = { status: "ok", trace, error: null };
 
   // ── WARP-1580 pre-flight: refuse a forbidden spec WHOLE ──────────
@@ -314,13 +486,16 @@ export async function runToolSpec(
         // The facts are the trace SO FAR — a copy, so the summarizer cannot
         // mutate the run's own record of what happened.
         const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        const outName = stepOutputName(step);
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
           args: { prompt: summarizeStep.prompt },
           ok: true,
           result: prose,
+          ...(outName ? { as: outName } : {}),
         });
+        if (outName) named.set(outName, prose);
         prev = prose;
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
@@ -351,10 +526,29 @@ export async function runToolSpec(
       break;
     }
 
-    const resolvedArgs = resolvePrev(parsed.args, prev) as Record<
-      string,
-      unknown
-    >;
+    // WARP-2670 — a bad `${steps.x}` reference is a step failure, not a
+    // thrown request. It is recorded like any other so the run-detail drawer
+    // can say "step 2 of 5 failed: no earlier step is named ..." instead of
+    // surfacing a 500 with no trace at all.
+    let resolvedArgs: Record<string, unknown>;
+    try {
+      resolvedArgs = resolveRefs(parsed.args, { prev, named }) as Record<
+        string,
+        unknown
+      >;
+    } catch (err) {
+      if (!(err instanceof StepReferenceError)) throw err;
+      const msg = `step ${step.idx} (${parsed.tool}): ${err.message}`;
+      trace.push({
+        idx: step.idx,
+        tool: parsed.tool,
+        args: {},
+        ok: false,
+        error: err.message,
+      });
+      outcome = { status: "failed", trace, error: msg };
+      break;
+    }
 
     // WARP-1580 — the boundary. Same predicate the agent loop runs before
     // `mcp.callTool`, applied to the args this step will ACTUALLY send: only
@@ -378,14 +572,21 @@ export async function runToolSpec(
     }
 
     try {
-      const result = await dispatcher.call(parsed.tool, resolvedArgs);
+      // Arity preserved when there is no context: the ticker, and every
+      // existing dispatcher mock, still see the two-argument call.
+      const result = args.callContext
+        ? await dispatcher.call(parsed.tool, resolvedArgs, args.callContext)
+        : await dispatcher.call(parsed.tool, resolvedArgs);
+      const outName = stepOutputName(step);
       trace.push({
         idx: step.idx,
         tool: parsed.tool,
         args: resolvedArgs,
         ok: true,
         result,
+        ...(outName ? { as: outName } : {}),
       });
+      if (outName) named.set(outName, result);
       prev = result;
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
@@ -396,6 +597,13 @@ export async function runToolSpec(
         ok: false,
         error: msg,
       });
+      if (parsed.optional) {
+        // Recorded above as a failed step; a later summarize step renders it
+        // as "COULD NOT BE READ". `prev` is cleared so a `${prev}` reference
+        // in the next step reads null rather than a stale earlier result.
+        prev = null;
+        continue;
+      }
       outcome = {
         status: "failed",
         trace,
@@ -405,6 +613,13 @@ export async function runToolSpec(
       break;
     }
   }
+
+  // Optional steps that failed. The run is still `ok`, but a report written
+  // around a source that could not be read must leave a signal something
+  // other than the model's wording can act on: `warn` in the feed and the
+  // tool names in refs.
+  const failedSteps =
+    outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
 
   const endedAt = new Date();
   const run = (await prisma.toolRun.create({
@@ -424,14 +639,22 @@ export async function runToolSpec(
     // system did exactly what it was told to. Matches the ticker's own
     // skip-gate severity so the two refusal paths read alike in the feed.
     severity:
-      outcome.status === "ok" ? "ok" : outcome.denialCode ? "warn" : "err",
+      outcome.status === "ok"
+        ? failedSteps.length > 0
+          ? "warn"
+          : "ok"
+        : outcome.denialCode
+          ? "warn"
+          : "err",
     sourceIcon: outcome.denialCode ? "shield" : "play",
     // WARP-181: spec runs execute through the tool dispatcher (agent
     // surface); RunArgs carries no user UUID today, so id stays null.
     actor: { type: "ai", id: null },
     what:
       outcome.status === "ok"
-        ? "Spec run completed"
+        ? failedSteps.length > 0
+          ? "Spec run completed with gaps"
+          : "Spec run completed"
         : outcome.denialCode
           ? "Spec run refused (access)"
           : "Spec run failed",
@@ -445,6 +668,8 @@ export async function runToolSpec(
       // WARP-1580 — present only on an access refusal, so the Activity feed
       // distinguishes "your role does not permit this" from "the tool broke".
       ...(outcome.denialCode ? { reason: outcome.denialCode } : {}),
+      // Present only when an optional step failed inside an `ok` run.
+      ...(failedSteps.length > 0 ? { failedSteps } : {}),
     },
   });
 
