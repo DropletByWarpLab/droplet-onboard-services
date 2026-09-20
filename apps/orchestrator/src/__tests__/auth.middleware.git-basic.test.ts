@@ -2,7 +2,7 @@
  * authMiddleware — the git CLI's Basic credential on `/api/git/*` (WARP-2896).
  *
  * `git clone http://<box>/git/<ws>.git` speaks HTTP Basic only. On the
- * `/api/git/` prefix the middleware reads the PASSWORD half of a Basic
+ * `/api/git/` prefix the middleware reads the second half of a Basic
  * credential as the session JWT and verifies it exactly as a Bearer would
  * be. Everywhere else a Basic header stays what it always was — no
  * credential — and on the git prefix a missing credential answers with the
@@ -87,7 +87,7 @@ beforeEach(() => {
   cacheGet.mockClear();
 });
 
-describe("authMiddleware — Basic on /api/git/ carries the session JWT in the password slot", () => {
+describe("authMiddleware — Basic on /api/git/ carries the session JWT in its second slot", () => {
   it("verifies the password as a JWT and sets the user", async () => {
     verifyAccessToken.mockImplementation((token: string) => (token === "jwt-abc" ? JWT_USER : null));
     const req = buildReq({ headers: { authorization: basic("romain", "jwt-abc") } }) as unknown as Request;
@@ -100,7 +100,7 @@ describe("authMiddleware — Basic on /api/git/ carries the session JWT in the p
     expect((req as unknown as FakeReq).user).toMatchObject({ id: "u-owner", username: "romain", role: "owner" });
   });
 
-  it("the username half is ignored — only the password is a credential", async () => {
+  it("the first half is ignored — only the second slot is a credential", async () => {
     verifyAccessToken.mockImplementation((token: string) => (token === "jwt-abc" ? JWT_USER : null));
     const req = buildReq({ headers: { authorization: basic("whoever", "jwt-abc") } }) as unknown as Request;
     const next = vi.fn() as unknown as NextFunction;
@@ -138,7 +138,7 @@ describe("authMiddleware — Basic on /api/git/ carries the session JWT in the p
     expect(otherRes.headers["WWW-Authenticate"]).toBeUndefined();
   });
 
-  it("a malformed Basic value (no colon, empty password, bad base64) is no credential", async () => {
+  it("a malformed Basic value (no colon, empty second slot, bad base64) is no credential", async () => {
     for (const value of [
       `Basic ${Buffer.from("nocolon").toString("base64")}`,
       basic("romain", ""),

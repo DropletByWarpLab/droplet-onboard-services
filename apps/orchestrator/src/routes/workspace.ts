@@ -25,7 +25,7 @@
  *
  * `/api/git/<repo>.git/*` is `git http-backend` behind the gateway: nginx
  * rewrites `/git/` to it, the auth middleware accepts the git CLI's Basic
- * form on this prefix (the password slot carries the session JWT), and the
+ * form on this prefix (its second slot carries the session JWT), and the
  * push decision is made here — owner/admin push, every human role fetches,
  * the mcp principal gets nothing — and forwarded to the sandbox as a header.
  */
@@ -609,6 +609,12 @@ export function createWorkspaceRouter(
       }
       res.status(out.status);
       for (const [k, v] of Object.entries(out.headers)) res.setHeader(k, v);
+      // Packfile bytes for the git CLI, under git's own content types (or
+      // text/plain for http-backend's refusals) — never HTML, and nosniff so
+      // a browser cannot be talked into treating them as such.
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (!out.headers["content-type"]) res.setHeader("Content-Type", "application/octet-stream");
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
       res.send(out.body);
     } catch (err) {
       relaySandboxError(err, res, next);

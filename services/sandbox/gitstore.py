@@ -26,6 +26,7 @@ import io
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -127,7 +128,8 @@ def _rmtree(path: Path) -> None:
     """rmtree that copes with git's read-only object files (Windows dev checkouts)."""
 
     def _writable(func, target, _exc):
-        os.chmod(target, 0o700)
+        # Owner read+write is all an unlink needs; the entry is gone a line later.
+        os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
         func(target)
 
     shutil.rmtree(path, onexc=_writable)

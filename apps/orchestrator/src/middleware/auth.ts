@@ -113,14 +113,19 @@ export const REFRESH_COOKIE_NAME = "droplet_refresh";
  * JWT tokens are self-verifying (no Redis/Nextcloud call needed).
  * Legacy Nextcloud tokens fall through to OCS validation with Redis cache.
  */
-/** The password half of a Basic credential, or null when it does not decode. */
-function gitBasicPassword(b64: string): string | null {
+/**
+ * The session JWT the git CLI carries in a Basic credential's second slot
+ * (`<any name>:<jwt>`), or null when the header does not decode. It is a
+ * TOKEN — the same JWT the Bearer path verifies — never a password; nothing
+ * here hashes or stores a secret that is not already the session's own.
+ */
+function gitBasicSessionToken(b64: string): string | null {
   try {
     const decoded = Buffer.from(b64.trim(), "base64").toString("utf8");
     const colon = decoded.indexOf(":");
     if (colon < 0) return null;
-    const password = decoded.slice(colon + 1);
-    return password.length > 0 ? password : null;
+    const token = decoded.slice(colon + 1);
+    return token.length > 0 ? token : null;
   } catch {
     return null;
   }
@@ -235,14 +240,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
   const authHeader = req.headers.authorization;
   // WARP-2896 — the git smart-HTTP transport (`/api/git/<repo>.git/*`) is
-  // driven by the git CLI, which speaks HTTP Basic only: the password slot
-  // carries the person's session JWT (a personal access token to git). The
-  // Basic form is accepted ON THAT PREFIX ALONE — everywhere else a Basic
-  // header stays what it always was, no credential — and the value is then
-  // the same JWT the Bearer path verifies, never a password.
+  // driven by the git CLI, which speaks HTTP Basic only: the credential's
+  // second slot carries the person's session JWT (what git would call a
+  // personal access token). The Basic form is accepted ON THAT PREFIX ALONE
+  // — everywhere else a Basic header stays what it always was, no credential
+  // — and the value is then the same JWT the Bearer path verifies.
   const gitBasicToken =
     authHeader?.startsWith("Basic ") && req.path.startsWith("/api/git/")
-      ? gitBasicPassword(authHeader.slice(6))
+      ? gitBasicSessionToken(authHeader.slice(6))
       : null;
   const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : gitBasicToken;
   const token = cookieToken || headerToken;

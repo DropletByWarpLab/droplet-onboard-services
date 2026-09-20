@@ -444,7 +444,7 @@ made by the orchestrator (owner/admin push, family fetches, guest and the
 mcp principal nothing) and forwarded as a header — git's own default, which
 enables push the moment `REMOTE_USER` is set, is never relied on. The git
 CLI speaks Basic only, so on that prefix alone the auth middleware reads the
-password slot as the session JWT.
+credential's second slot as the session JWT.
 
 **Run owns workspace.** The eight `workspace_*` tools (four reads; `write`,
 `commit`, `run` as Write-tier with NO confirmation; `propose` Tier-2) reach

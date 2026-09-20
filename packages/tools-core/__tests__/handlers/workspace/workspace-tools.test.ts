@@ -81,7 +81,7 @@ describe("workspace_* refuse outside a workshop run, before any HTTP call", () =
 
 describe("workspace_* address the context's workspace and carry the run id", () => {
   it.each(ALL)("%s", async (tool, args) => {
-    const post = vi.fn(async () =>
+    const post = vi.fn(async (_path: string, _body: unknown, _init?: unknown) =>
       makeResponse(200, {
         // A superset every handler can read its own fields from.
         kind: "file", path: "p", content: "c", bytes: 1, truncated: false,
@@ -106,7 +106,7 @@ describe("workspace_* address the context's workspace and carry the run id", () 
 
 describe("workspace_run", () => {
   it("splits the command line into argv and forwards the timeout in ms", async () => {
-    const post = vi.fn(async () =>
+    const post = vi.fn(async (_path: string, _body: unknown, _init?: unknown) =>
       makeResponse(200, { argv: ["ruff", "check", "."], exitCode: 1, timedOut: false, durationMs: 5, stdout: "E501", stderr: "", truncated: false }),
     );
     const res = await workspaceRun.handler({ command: "  ruff   check . ", timeout_seconds: 30 }, ctxWith({ post }));
