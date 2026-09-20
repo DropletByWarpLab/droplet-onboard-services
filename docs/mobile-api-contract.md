@@ -137,7 +137,22 @@ in with no pair code and still use the app — Files goes through
 
 Sign-in + optional enrollment sequence:
 1. User enters the Droplet `server` URL + email + password. A scanned
-   `droplet://pair?server=<base>&code=<code>` QR pre-fills `server` (and `code`).
+   `droplet://pair?server=<base>&code=<code>&spki=<pin>` QR pre-fills `server`
+   (and `code`). `spki` (WARP-2954 / ADR-058) is the box's certificate key
+   fingerprint — base64 of SHA-256 over the DER SubjectPublicKeyInfo of the
+   leaf the box serves, byte-identical to
+   `openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64`.
+   It is the box saying "this is my key" through its own dashboard: a client
+   MAY accept the served certificate for `server`'s host iff its key hashes to
+   `spki`, the certificate names that host, and it is inside its validity
+   window — with no public CA, no HQ, and nothing installed in the OS trust
+   store. It is NOT trust-on-first-use: with no `spki` and no public chain the
+   client refuses as before, and a served key that does not match `spki` is an
+   identity error ("not the Droplet this QR came from"), never a retry. A
+   client that pins it keeps verifying every later connection (API, WebSocket,
+   WebView) against the same pin. Absent when the box cannot read its own
+   leaf; unknown parameters are ignored by older clients. Reference
+   implementation: droplet-windows `trust.rs` (WARP-2953).
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
