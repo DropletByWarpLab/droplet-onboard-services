@@ -19,6 +19,136 @@ _gen_fernet_key() {
   openssl rand -base64 32
 }
 
+# SHA-256 of stdin as lowercase hex. coreutils on Linux, perl's shasum on
+# macOS dev laptops; openssl as the last resort (always present — the
+# generators above already depend on it).
+_sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -c1-64
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | cut -c1-64
+  else
+    openssl dgst -sha256 -r | cut -c1-64
+  fi
+}
+
+# WARP-2938 / ADR-058 — the box's fleet identity, anchored to its hardware.
+#
+# DROPLET_DEVICE_ID is what HQ registers a box under (first-writer-wins, key
+# locked — fleet-hq README "Security model") and what the identity sidecar
+# bakes into its cert CN. Until this helper it was `$(hostname)`, and the
+# image hostname is `droplet`, so every box seeded the same id — one that
+# HQ can never register without stealing it from every other default-
+# hostname box forever (WARP-2691). A box with that id sits on the bootstrap
+# self-signed certificate for its whole life, and nothing says why.
+#
+# The id is `droplet-` + the first 12 hex of SHA-256 over `<kind>:<value>`,
+# where <value> is the first of these the host can read, in this order:
+#
+#   dmi      /sys/class/dmi/id/product_uuid — the mainboard's SMBIOS UUID.
+#            Root-only (0400): read directly when running as root, else via
+#            a NON-interactive `sudo -n` so setup never blocks on a prompt.
+#            Known vendor placeholders (all-zero, all-F, the
+#            03000200-0400-0500-0006-000700080009 "Default string") are
+#            rejected, because they are identical across every board that
+#            ships them.
+#   nic      the MAC of the first physical Ethernet interface (a
+#            /sys/class/net/<if>/device symlink, ARPHRD_ETHER, not wireless,
+#            not a bridge/veth/tunnel), world-readable — the same identity
+#            the fabric's DHCP reservations key on.
+#   machine  /etc/machine-id — per-install, not per-hardware: a reflash makes
+#            a new one, so it is the fallback, not the anchor.
+#   random   32 random bytes, logged loudly — a box with none of the above is
+#            a VM or a very odd host; it still gets a UNIQUE id rather than
+#            the shared default.
+#
+# Hardware-anchored on purpose: HQ locks the device KEY at first provision,
+# and the TPM key survives a reflash, so the same hardware must re-derive the
+# same id to re-provision idempotently (WARP-983). A different mainboard is
+# honestly a different device. Hashing (rather than using the MAC or UUID
+# verbatim) gives one shape regardless of source and keeps the raw hardware
+# identifier out of every log line and HQ row that carries the id.
+#
+# DROPLET_ID_SOURCE_ROOT (default `/`) is the filesystem root the sources are
+# read under — tests point it at a fixture tree. It is the ONLY test hook.
+#
+# Prints the id. Never fails: every branch ends in a usable value.
+_derive_device_id() {
+  local root="${DROPLET_ID_SOURCE_ROOT:-/}"
+  root="${root%/}"
+  local kind="" value=""
+
+  # 1. DMI product UUID (mainboard).
+  local dmi="$root/sys/class/dmi/id/product_uuid"
+  if [ -e "$dmi" ]; then
+    local uuid=""
+    if [ -r "$dmi" ]; then
+      uuid="$(cat "$dmi" 2>/dev/null || true)"
+    elif command -v sudo >/dev/null 2>&1; then
+      uuid="$(sudo -n cat "$dmi" 2>/dev/null || true)"
+    fi
+    uuid="$(printf '%s' "$uuid" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    case "$uuid" in
+      ""|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff|03000200-0400-0500-0006-000700080009) ;;
+      *)
+        if printf '%s' "$uuid" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+          kind="dmi"; value="$uuid"
+        fi
+        ;;
+    esac
+  fi
+
+  # 2. First physical Ethernet MAC.
+  if [ -z "$kind" ] && [ -d "$root/sys/class/net" ]; then
+    local ifdir ifname mac
+    for ifdir in "$root"/sys/class/net/*; do
+      [ -d "$ifdir" ] || continue
+      ifname="$(basename "$ifdir")"
+      case "$ifname" in
+        lo|docker*|veth*|br-*|virbr*|tailscale*|wg*|tun*|tap*|bond*|dummy*) continue ;;
+      esac
+      [ -e "$ifdir/device" ] || continue          # physical, not virtual
+      [ -d "$ifdir/wireless" ] && continue         # Wi-Fi radios move; cabled NICs don't
+      [ "$(cat "$ifdir/type" 2>/dev/null || echo 0)" = "1" ] || continue   # ARPHRD_ETHER
+      mac="$(cat "$ifdir/address" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+      case "$mac" in
+        ""|00:00:00:00:00:00) continue ;;
+      esac
+      if printf '%s' "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+        kind="nic"; value="$mac"
+        break
+      fi
+    done
+  fi
+
+  # 3. machine-id (per install).
+  if [ -z "$kind" ] && [ -r "$root/etc/machine-id" ]; then
+    local mid
+    mid="$(tr -d '[:space:]' < "$root/etc/machine-id" 2>/dev/null || true)"
+    if printf '%s' "$mid" | grep -qE '^[0-9a-f]{32}$'; then
+      kind="machine"; value="$mid"
+    fi
+  fi
+
+  # 4. Random — unique, but not re-derivable. Say so.
+  if [ -z "$kind" ]; then
+    kind="random"; value="$(openssl rand -hex 32)"
+    if command -v log_warn >/dev/null 2>&1; then
+      log_warn "DROPLET_DEVICE_ID: no hardware identifier readable under ${DROPLET_ID_SOURCE_ROOT:-/} — seeding a random id (a reflash will NOT re-derive it)"
+    fi
+  fi
+
+  printf 'droplet-%s\n' "$(printf '%s:%s' "$kind" "$value" | _sha256_hex | cut -c1-12)"
+}
+
+# True when `$1` is an id no box may ship with: empty, or the image-default
+# `droplet` that HQ can never register (WARP-2691). The hostname is NOT in
+# this set on purpose — a box registered at HQ under its hostname years ago
+# keeps working, and only an operator can say whether that is the case.
+_device_id_is_unregistrable() {
+  [ -z "${1:-}" ] || [ "${1:-}" = "droplet" ]
+}
+
 # WARP-318 / WARP-595: idempotent atomic upsert of a single KEY=VALUE into .env.
 # Shared primitive (the single-box.sh `upsert_env` body promoted here so both
 # callers share one implementation): strip any existing copy of the key, append
@@ -411,6 +541,18 @@ generate_env() {
   # the bearer is the second layer of defense. Rotates independently of
   # all other secrets so support can hand it off / revoke per-engagement.
   ops_token=$(openssl rand -hex 32)
+  # WARP-2938 / ADR-058: the fleet identity. A provisioning environment or
+  # manifest may hand one in (a factory-assigned id — the WARP-2067 seed-bake
+  # path, and how an already-registered id survives --regenerate-env), the same
+  # way HQ_ISSUANCE_URL and DROPLET_PROVISION_TOKEN are inherited below. It is
+  # honoured unless it is the unregistrable placeholder; otherwise the id is
+  # derived from the hardware (see _derive_device_id).
+  local device_id
+  if ! _device_id_is_unregistrable "${DROPLET_DEVICE_ID:-}"; then
+    device_id="$DROPLET_DEVICE_ID"
+  else
+    device_id="$(_derive_device_id)"
+  fi
   # WARP-2131: bearer the orchestrator and ai-gateway present to the
   # inference-manager sidecar. NOT optional in practice: auth.py treats an
   # EMPTY AUTH_TOKEN as permissive mode — every caller accepted on every route
@@ -872,7 +1014,11 @@ MAX_UPLOAD_SIZE_MB=100
 # knowingly running the scaffold sets DROPLET_TPM_BACKEND=real +
 # DROPLET_TPM_ALLOW_SCAFFOLD=1 by hand.
 DROPLET_TPM_BACKEND=mock
-DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
+# WARP-2938 / ADR-058: hardware-anchored (DMI UUID → first physical NIC MAC →
+# machine-id), never the hostname — the image hostname is 'droplet', an id HQ
+# can never register. Seeded ONCE here; migrate_env keeps an existing value.
+# See _derive_device_id in scripts/lib/secrets.sh for the derivation.
+DROPLET_DEVICE_ID=$device_id
 
 # --- Public-CA per-device TLS (ADR-023) ---
 # DROPLET_PUBLIC_FQDN: the opaque per-device subdomain
@@ -1292,7 +1438,26 @@ migrate_env() {
     normalized=true
     log_info "Migrated .env: DROPLET_TPM_BACKEND real→mock (IDX-002 scaffold fails closed; no DROPLET_TPM_ALLOW_SCAFFOLD opt-in)"
   fi
-  _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
+  # WARP-2938 / ADR-058: backfill a hardware-anchored id when the key is absent,
+  # and REPLACE the one value no box may carry — the literal `droplet` that the
+  # image hostname used to seed. HQ has no row for it and must never get one
+  # (WARP-2691), so replacing it orphans nothing. Any other existing id is kept
+  # verbatim: a box registered at HQ under its hostname would be orphaned by a
+  # rewrite, and only its operator can say whether it was. The identity
+  # sidecar's cert CN keeps the old string until it re-provisions; HQ binds on
+  # the key + fingerprint, not the CN, so issuance is unaffected.
+  _migrate_ensure_key DROPLET_DEVICE_ID "$(_derive_device_id)"
+  local _current_device_id
+  _current_device_id="$(grep -E '^DROPLET_DEVICE_ID=' "$stage" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  if _device_id_is_unregistrable "$_current_device_id"; then
+    local _derived_device_id
+    _derived_device_id="$(_derive_device_id)"
+    sed -i.bak -E "s|^DROPLET_DEVICE_ID=.*$|DROPLET_DEVICE_ID=${_derived_device_id}|" "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: DROPLET_DEVICE_ID '${_current_device_id:-<empty>}' → ${_derived_device_id} (the image default is not registrable at HQ — WARP-2938)"
+  elif [ "$_current_device_id" = "$(hostname 2>/dev/null || true)" ]; then
+    log_warn "DROPLET_DEVICE_ID equals this host's hostname ('${_current_device_id}') — kept, but a hostname is not a device identity. If this box was never provisioned at HQ, set DROPLET_DEVICE_ID=\$(_derive_device_id) before minting its token (ADR-058)."
+  fi
 
   # WARP-234: per-service Redis ACL identities for pre-existing installs.
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"

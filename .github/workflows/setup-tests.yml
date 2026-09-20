@@ -64,6 +64,9 @@ on:
       # other than the load-bearing `docker` one (never `lxd`), and the firstboot
       # teardown must drop the base-image lxd membership.
       - "tests/droplet-user-privileged-groups-invariant.test.sh"
+      # WARP-2938: the device id is derived from the hardware, never the
+      # hostname; the image default `droplet` is migrated and fails verify.
+      - "tests/device-id-seed.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -126,6 +129,9 @@ on:
       # other than the load-bearing `docker` one (never `lxd`), and the firstboot
       # teardown must drop the base-image lxd membership.
       - "tests/droplet-user-privileged-groups-invariant.test.sh"
+      # WARP-2938: the device id is derived from the hardware, never the
+      # hostname; the image default `droplet` is migrated and fails verify.
+      - "tests/device-id-seed.test.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -349,3 +355,11 @@ jobs:
         # (never lxd), that firstboot drops the unused lxd membership, and that
         # droplet.service stays the ONLY unit granted the docker group. Pure bash.
         run: bash tests/droplet-user-privileged-groups-invariant.test.sh
+
+      - name: Run device-id seed tests
+        # WARP-2938 / ADR-058: DROPLET_DEVICE_ID is seeded from the hardware
+        # (DMI UUID → physical NIC MAC → machine-id), the same hardware re-derives
+        # the same id, an existing real id is never rewritten, the image-default
+        # `droplet` is migrated, and verify.sh refuses it when HQ is configured.
+        # Pure bash over a fixture /sys tree; no Docker, no root.
+        run: bash tests/device-id-seed.test.sh

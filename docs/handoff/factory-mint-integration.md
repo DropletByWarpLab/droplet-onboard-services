@@ -27,7 +27,7 @@ a unique device id into the environment that `setup.sh` runs in on first boot.
 2. **onboard #1615 (the `HQ_ISSUANCE_URL` default flip, `scripts/lib/secrets.sh:756`)
    merged** — sequenced strictly after (1); a default pointing at NXDOMAIN
    silently strands boxes on the self-signed cert (`secrets.sh:747-750`).
-3. **The `DROPLET_DEVICE_ID` env-override fix (§2) — BLOCKING.** Verified
+3. **The `DROPLET_DEVICE_ID` env-override fix (§2) — LANDED (WARP-2938, 2026-09-19).** Verified
    defect: today the seed at `scripts/lib/secrets.sh:728` is
    `DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)` — it reads the
    hostname **unconditionally and ignores any environment value**, unlike its
@@ -59,6 +59,22 @@ a unique device id into the environment that `setup.sh` runs in on first boot.
   for every HQ audit row and support conversation.
 
 ## 2. secrets.sh fix (one line + its migrate twin)
+
+> **Landed 2026-09-19 — WARP-2938 (ADR-058 slice 1), a superset of the fix
+> below.** `generate_env` now honours an environment-supplied
+> `DROPLET_DEVICE_ID` exactly as this section asks (the `--device-id
+> droplet-<serial>` seed in §3 works unchanged), but the *fallback* is no
+> longer the hostname: with no environment value the id is derived from the
+> hardware by `_derive_device_id` (DMI product UUID → first physical NIC MAC
+> → machine-id → random-with-warning, as `droplet-<12 hex>`), so a box
+> provisioned without a seeded ISO still gets a unique, re-derivable id.
+> `migrate_env` backfills the same way, keeps any existing real id verbatim,
+> and replaces only the literal `droplet` (never registrable — WARP-2691).
+> `verify.sh` hard-fails `DROPLET_DEVICE_ID=droplet` whenever
+> `HQ_ISSUANCE_URL` is set. Suite: `tests/device-id-seed.test.sh`. The
+> hostname stays `droplet` (§1) — it is a deployment shape, not identity.
+
+The original proposal, for the record:
 
 ```sh
 # scripts/lib/secrets.sh:728  (seed block)
