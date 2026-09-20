@@ -1,5 +1,5 @@
 /**
- * WARP-2180 — the Background runs panel on the Activity surface.
+ * WARP-2180 — the Background runs panel; WARP-2925 moved it to /workshop.
  *
  *   1. A parked run shows the confirm prompt WITH PROVENANCE — which run
  *      asked (its goal), which tool, and the PHI-free argument summary —
@@ -25,8 +25,8 @@ vi.mock("@/lib/auth", () => ({
   authFetch: (...args: unknown[]) => authFetchMock(...args),
 }));
 
-import { AgentRunsPanel } from "@/components/audit/AgentRunsPanel";
-import type { AgentRunSummary, AgentRunSchedule } from "@/components/audit/agent-runs/api";
+import { AgentRunsPanel } from "@/components/workshop/AgentRunsPanel";
+import type { AgentRunSummary, AgentRunSchedule } from "@/components/workshop/agent-runs/api";
 
 function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };

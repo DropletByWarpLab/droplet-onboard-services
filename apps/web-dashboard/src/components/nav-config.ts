@@ -30,6 +30,7 @@ import {
   FolderLock,
   FolderOpen,
   Globe,
+  Hammer,
   HardDrive,
   HeartPulse,
   HelpCircle,
@@ -202,6 +203,26 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Routines",
         icon: Repeat,
         roles: ["owner", "admin", "family"],
+      },
+      // WARP-2925 (ADR-056): Workshop — where a person gives the box a goal
+      // and follows the background run that pursues it. The run panel lived
+      // at the bottom of /admin/audit and was deliberately not a nav item
+      // (WARP-2180); ADR-056 made the run the unit of every agentic slice
+      // that follows — workshop runs, extensions, toolset drafts all start as
+      // one — so it now has a surface with a door. Sits after Routines: a
+      // routine is a sequence a person composed; a run is a goal the box
+      // pursues on its own. Both are their work, so both are Workspace.
+      //
+      // owner/admin only — mirrors RUN_STARTER_ROLES on the agent-runs routes,
+      // the guard that actually decides; this only keeps the nav from
+      // offering a page that would 403. Not module-gated for the reason
+      // Routines gives: a run may touch any surface, so no single module's
+      // absence should hide the page.
+      {
+        href: "/workshop",
+        label: "Workshop",
+        icon: Hammer,
+        roles: ["owner", "admin"],
       },
       // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
       // are conversation surfaces); gated by the team_chat module and

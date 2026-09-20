@@ -166,7 +166,7 @@ network. Host-published ports and host-network services are called out.
   (durable background agent runs, WARP-2176: `AgentRun` rows claimed under a
   lease, checkpointed per iteration, parked on Tier-2 confirmations; RRULE
   schedules enqueue runs; design in [`agent-runs-design.md`](agent-runs-design.md);
-  surface `/api/agent-runs`, panel on `/admin/audit`), `openwrt.client.ts`,
+  surface `/api/agent-runs`, panel on `/workshop` — WARP-2925), `openwrt.client.ts`,
   `switch.client.ts`, `camera.service.ts`, `nextcloud.client.ts`, plus
   pollers/tickers (device-reconcile, AP discovery, schedule, reminders,
   tool-schedule, agent-run claim/heartbeat, agent-run-schedule, screen-QR).
