@@ -47,10 +47,16 @@ function payload(over: Partial<ModelsPagePayload> = {}): ModelsPagePayload {
       },
     ],
     cloud: [
-      { provider: "anthropic", enabled: false, lastUsedAt: null, spendUsd: 0 },
-      { provider: "openai", enabled: false, lastUsedAt: null, spendUsd: 0 },
-      { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "anthropic", enabled: false, hasKey: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: false, hasKey: false, lastUsedAt: null, spendUsd: 0 },
     ],
+    // WARP-2871 — escape state + the caller's verdict.
+    cloudAccess: {
+      escapeEnabled: false,
+      escapeChangedBy: null,
+      escapeChangedAt: null,
+      allowedForYou: false,
+    },
     gpu: null,
     avgLatencyMs: 0,
     cloudSpendUsd: 0,
@@ -73,7 +79,6 @@ describe("useModelsPage (WARP-836)", () => {
     expect(result.current.data?.cloud.map((c) => c.provider)).toEqual([
       "anthropic",
       "openai",
-      "gemini",
     ]);
     expect(result.current.data?.cloudSpendUsd).toBe(0);
     expect(result.current.error).toBeUndefined();
@@ -86,7 +91,7 @@ describe("useModelsPage (WARP-836)", () => {
 
     // The page must still render: empty local, cloud placeholders intact.
     expect(result.current.data?.local).toEqual([]);
-    expect(result.current.data?.cloud).toHaveLength(3);
+    expect(result.current.data?.cloud).toHaveLength(2);
     expect(result.current.error).toBeUndefined();
   });
 

@@ -46,6 +46,9 @@ export type ErrorDomain =
   | "calendar"
   | "subscription"
   | "provider-key"
+  // WARP-2871 — the Models-page switch for the workspace cloud_model_escape
+  // channel. Its own domain so a 403 names the roles that can flip it.
+  | "cloud-access"
   | "push"
   | "knowledge"
   | "media"
@@ -102,6 +105,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't reach that calendar subscription right now. Try again in a moment.",
   "provider-key":
     "We couldn't save that API key right now. Try again in a moment.",
+  "cloud-access":
+    "We couldn’t change cloud access right now. Try again in a moment.",
   push:
     "We couldn't update push notifications right now. Try again in a moment.",
   knowledge:
@@ -376,6 +381,14 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We couldn't save that API key right now. Try again in a moment.",
     DELETE_FAILED:
       "We couldn't remove that API key right now. Try again in a moment.",
+    // WARP-2871 — keys are admin-only on the wire.
+    "403": "Only owners and admins can manage keys.",
+  },
+  "cloud-access": {
+    "403": "Only owners and admins can change this.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   push: {
     PERMISSION_DENIED:

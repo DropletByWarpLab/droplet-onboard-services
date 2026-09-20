@@ -368,16 +368,31 @@ export interface ModelsCatalogPayload {
   models: CatalogModelEntry[];
 }
 
-/** One opt-in cloud provider. Read-only on this surface — enabling a provider
- *  happens in Settings (the off-LAN allowlist), never here. */
+/** One opt-in cloud provider on the Models page. WARP-2871 — the page is the
+ *  ONE place for cloud models: the escape switch and the keys live here. */
 export interface CloudProviderRow {
-  provider: "anthropic" | "openai" | "gemini";
-  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  /** WARP-2871: gemini removed — no gateway provider exists for it. */
+  provider: "anthropic" | "openai";
+  /** Box-wide usable: `escapeEnabled && hasKey === true`. */
   enabled: boolean;
+  /** WARP-2871: null = the gateway could not be asked (render "Unknown",
+   *  never "Not set up" — absence of an answer is not absence of a key). */
+  hasKey: boolean | null;
   /** ISO timestamp of the last cloud-escape call, or null. */
   lastUsedAt: string | null;
   /** Cumulative spend this billing period; 0 until egress aggregation lands. */
   spendUsd: number;
+}
+
+/** WARP-2871 — the workspace `cloud_model_escape` channel as the caller sees
+ *  it. `allowedForYou` is the caller's EFFECTIVE verdict (escape && role);
+ *  null = unknown, and the page must not guess. */
+export interface CloudAccessInfo {
+  escapeEnabled: boolean;
+  escapeChangedBy: string | null;
+  /** ISO */
+  escapeChangedAt: string | null;
+  allowedForYou: boolean | null;
 }
 
 /**
@@ -419,15 +434,30 @@ export interface ModelsGpuInfo {
  */
 export type ModelsGpuReason = "unreachable" | "no_card" | null;
 
+/** WARP-2883 — one round-trip per inference endpoint, ms; null = no answer. */
+export interface EndpointLatencyMs {
+  local: number | null;
+  anthropic: number | null;
+  openai: number | null;
+}
+
 export interface ModelsPagePayload {
   local: LocalModelRow[];
   cloud: CloudProviderRow[];
+  /** WARP-2871 — escape state + the caller's verdict, for the Cloud section. */
+  cloudAccess: CloudAccessInfo;
   gpu: ModelsGpuInfo | null;
   /** WARP-1861 (additive; optional so an older orchestrator that predates the
    *  field still parses). Absent ⇒ we know nothing about why, and the tile
    *  must not guess — see `ModelsGpuReason`. */
   gpuReason?: ModelsGpuReason;
+  /** WARP-2883: mean round-trip over the enabled inference endpoints, ms;
+   *  0 = nothing answered (render "—", never "0 ms"). */
   avgLatencyMs: number;
+  /** WARP-2883 (additive; optional so an older orchestrator still parses):
+   *  the per-endpoint samples behind `avgLatencyMs`. null per endpoint =
+   *  did not answer; null/absent overall = the gateway could not be asked. */
+  endpointLatencyMs?: EndpointLatencyMs | null;
   cloudSpendUsd: number;
   /** WARP-1112 (additive): the installed local model the box answers with by
    *  default (`ai.model.chat`). null when unset or the stored tag is no longer
