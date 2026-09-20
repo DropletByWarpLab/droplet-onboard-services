@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - "services/sandbox/**"
+      - "extensions/templates/**"
       - ".github/workflows/sandbox-tests.yml"
   workflow_dispatch:
 

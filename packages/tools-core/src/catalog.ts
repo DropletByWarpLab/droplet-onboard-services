@@ -81,7 +81,11 @@ export type ToolDomain =
   // should not grow a value for every non-business thing the model can
   // create. Unclaimed by any module (a routine may touch any surface), so
   // the grant axis holds it, exactly as `agent_runs`.
-  | "routines";
+  | "routines"
+  // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
+  // domain: they are reachable inside a workshop run only, and the run
+  // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
+  | "workspace";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -273,6 +277,16 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // WARP-2180 — durable background runs.
   agent_runs: ["start_agent_run", "list_agent_runs"],
   routines: ["routine_draft", "routine_list", "routine_run"],
+  workspace: [
+    "workspace_read",
+    "workspace_search",
+    "workspace_diff",
+    "workspace_log",
+    "workspace_write",
+    "workspace_commit",
+    "workspace_run",
+    "workspace_propose",
+  ],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -503,6 +517,14 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   routine_draft: "Write down a routine for you to review and turn on",
   routine_list: "See the routines on this box and whether they are on",
   routine_run: "Run one of your routines right now",
+  workspace_read: "Read a file in the extension being built",
+  workspace_search: "Search the files of the extension being built",
+  workspace_diff: "See what changed in the extension being built",
+  workspace_log: "See the history of the extension being built",
+  workspace_write: "Write a file in the extension being built",
+  workspace_commit: "Save a version of the extension being built",
+  workspace_run: "Run the extension's tests, build or checks",
+  workspace_propose: "Hand the finished extension to you for review",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

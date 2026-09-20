@@ -177,6 +177,14 @@ export interface ToolContext {
    * may not start a run.
    */
   agentRunId?: string;
+  /**
+   * WARP-2896 — the workshop workspace a run works in (forwarded by the
+   * worker via `_meta.workspaceId`, stdio-trusted only). The `workspace_*`
+   * handlers refuse without it; the orchestrator route checks the run named
+   * by `agentRunId` owns this workspace, so a handler cannot be steered to
+   * another one by argument.
+   */
+  workspaceId?: string;
   ncToken?: string;
   /**
    * WARP-437 — orchestrator-injected enhancement bundle plumbed through

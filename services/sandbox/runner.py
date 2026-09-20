@@ -159,10 +159,10 @@ class _Finder:
     ``importlib.import_module`` and friends even if a script somehow obtains a
     reference to them."""
 
-    def find_spec(self, fullname, path=None, target=None):  # noqa: D401
+    def find_spec(self, fullname, path=None, target=None):
         top = fullname.split(".", 1)[0]
         if top in ALLOWED_MODULES or fullname in _STDLIB_INTERNALS or top in _STDLIB_INTERNALS:
-            return None  # defer to the normal machinery
+            return  # defer to the normal machinery
         # Refuse only when a user frame is on the stack; the runner itself
         # imports json/resource/traceback above this line.
         frame = sys._getframe(1)
@@ -170,7 +170,7 @@ class _Finder:
             if frame.f_code.co_filename == USER_MODULE:
                 _refuse(fullname)
             frame = frame.f_back
-        return None
+        return
 
 
 def _apply_limits(max_bytes: int) -> None:

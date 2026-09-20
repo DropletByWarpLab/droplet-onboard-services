@@ -108,6 +108,9 @@ BACKUP_KEEP="${BACKUP_KEEP:-7}"
 # kept in lock-step with scripts/factory-reset.sh's wipe list — anything the
 # reset destroys and that holds customer/operator data must be captured here.
 # Postgres volumes are excluded (captured via pg_dump); caches are excluded.
+# workspace-git (WARP-2896) is the workshop's bare git store — every workspace
+# commit is pushed there, so it alone is the customer's extension work; the
+# working checkouts are excluded below as rebuildable.
 DATA_VOLUMES=(
   nextcloud-data
   aikeys
@@ -115,6 +118,7 @@ DATA_VOLUMES=(
   brain-memory-data
   nvrdata
   ops-audit
+  workspace-git
 )
 
 # Volumes that factory-reset's `down -v` ALSO wipes but that we deliberately do
@@ -133,6 +137,7 @@ EXCLUDED_VOLUMES=(
   openwrt-config     # single-box router config — re-provisioned
   openwrt-overlay    # single-box router overlay — re-provisioned
   switch-state       # managed-switch state — re-provisioned by setup
+  workspace-checkouts # WARP-2896: working trees — `git clone` from workspace-git rebuilds them
 )
 
 # --- Source logging library if present (matches setup.sh convention) ------

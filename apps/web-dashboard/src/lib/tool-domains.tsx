@@ -27,6 +27,7 @@ import {
   Wrench,
   type LucideIcon,
   Repeat,
+  Hammer,
 } from "lucide-react";
 
 interface DomainMeta {
@@ -57,6 +58,9 @@ const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2894 (ADR-056) — the routine tools. Label matches the /routines
   // nav entry so the /tools filter chip and the sidebar say the same word.
   routines: { label: "Routines", icon: Repeat },
+  // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
+  // /workshop nav entry for the same reason.
+  workspace: { label: "Workshop", icon: Hammer },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

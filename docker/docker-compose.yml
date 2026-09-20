@@ -2161,6 +2161,12 @@ services:
       # off, its routes are 404 and nothing on the box can discover them.
       - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
       - PYTHONDONTWRITEBYTECODE=1
+    # WARP-2896: the workspace git store. Bare repos (the truth, backed up)
+    # and working checkouts (rebuildable from the bare repos) on two volumes,
+    # the only writable paths besides /tmp on this read-only rootfs.
+    volumes:
+      - workspace-git:/var/lib/workspace-git
+      - workspace-checkouts:/var/lib/workspace
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -3649,6 +3655,15 @@ volumes:
   # RAG_EVAL_KEEP_RUNS (default 500) after each run (WARP-1192) — no
   # operator sweep needed.
   rag-eval-data:
+  # WARP-2896 (ADR-056 slice G) — the workshop's git store. workspace-git holds
+  # the bare repositories (<id>.git + templates.git): every workspace commit
+  # is pushed there straight away, so this volume alone is the customer's
+  # extension work and device-backup.sh captures it. workspace-checkouts holds
+  # the working trees a run edits and runs tests in — rebuildable by `git
+  # clone` from workspace-git, so excluded from backup like any cache. Both
+  # wiped by factory reset.
+  workspace-git:
+  workspace-checkouts:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.
