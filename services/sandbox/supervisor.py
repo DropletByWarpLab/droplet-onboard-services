@@ -24,6 +24,7 @@ inferred from a missing pid.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -38,15 +39,61 @@ SUPERVISION_ENABLED = os.getenv("SANDBOX_PROCESS_SUPERVISION", "0").strip() in {
 
 RestartPolicy = Literal["never", "on-failure", "always"]
 
-CHILD_MAX_MEMORY_BYTES = int(os.getenv("SANDBOX_CHILD_MAX_MEMORY_BYTES", str(256 * 1024 * 1024)))
-# A long-lived server may fork workers; give it a small allowance, not zero.
-CHILD_MAX_PROCS = int(os.getenv("SANDBOX_PROCESS_MAX_PROCS", "16"))
-
 
 class SupervisorError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status = status
+
+# What a supervised process may BE. The request names an interpreter by its
+# bare name and an entrypoint; this module resolves the interpreter to one of
+# the two the image ships and confines the entrypoint to the extensions root.
+# `shell=False` everywhere, so no argument is ever interpreted by a shell —
+# but a seam that would exec whatever it was handed is still the wrong shape
+# for a service whose callers include code the box's owner wrote, so the
+# shape is closed here and slice H's manifest verifier narrows it further.
+INTERPRETERS: dict[str, str] = {
+    "python": os.getenv("SANDBOX_PYTHON_BIN", "/usr/local/bin/python"),
+    "python3": os.getenv("SANDBOX_PYTHON_BIN", "/usr/local/bin/python"),
+    "node": os.getenv("SANDBOX_NODE_BIN", "/usr/local/bin/node"),
+}
+EXTENSIONS_DIR = os.path.realpath(os.getenv("SANDBOX_EXTENSIONS_DIR", "/ext"))
+_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_./=:@%+-]{1,256}$")
+
+
+def resolve_argv(argv: list[str], cwd: str | None) -> tuple[list[str], str]:
+    """Turn a request's argv into the one this module will run, or raise.
+
+    - argv[0] must be a bare interpreter name from INTERPRETERS (never a path);
+    - argv[1] (the entrypoint) must resolve under EXTENSIONS_DIR — a relative
+      path is taken from `cwd`, which must itself be under EXTENSIONS_DIR;
+    - every further argument must match a conservative charset (no
+      whitespace, no quotes, no shell metacharacters — not that a shell is
+      ever involved).
+    """
+    if not argv:
+        raise SupervisorError(400, "argv is empty")
+    interpreter = INTERPRETERS.get(argv[0])
+    if interpreter is None:
+        raise SupervisorError(400, f"argv[0] must be one of {sorted(INTERPRETERS)}")
+    base = os.path.realpath(cwd) if cwd else EXTENSIONS_DIR
+    if base != EXTENSIONS_DIR and not base.startswith(EXTENSIONS_DIR + os.sep):
+        raise SupervisorError(400, "cwd must be inside the extensions directory")
+    if len(argv) < 2:
+        raise SupervisorError(400, "argv needs an entrypoint after the interpreter")
+    entry = os.path.realpath(os.path.join(base, argv[1]))
+    if entry != EXTENSIONS_DIR and not entry.startswith(EXTENSIONS_DIR + os.sep):
+        raise SupervisorError(400, "the entrypoint must be inside the extensions directory")
+    for arg in argv[2:]:
+        if not _ARG_PATTERN.match(arg):
+            raise SupervisorError(400, "an argument carries characters this seam does not pass")
+    return [interpreter, entry, *argv[2:]], base
+
+CHILD_MAX_MEMORY_BYTES = int(os.getenv("SANDBOX_CHILD_MAX_MEMORY_BYTES", str(256 * 1024 * 1024)))
+# A long-lived server may fork workers; give it a small allowance, not zero.
+CHILD_MAX_PROCS = int(os.getenv("SANDBOX_PROCESS_MAX_PROCS", "16"))
+
+
 
 
 def _limits() -> None:
@@ -129,11 +176,12 @@ class Supervisor:
             entry.state = "exited" if code == 0 else "failed"
 
     def start(self, proc_id: str, argv: list[str], *, cwd: str | None, restart: RestartPolicy, max_restarts: int, env: dict) -> dict[str, Any]:
+        resolved_argv, resolved_cwd = resolve_argv(argv, cwd)
         with self._lock:
             existing = self._entries.get(proc_id)
             if existing and existing.state == "running":
                 raise SupervisorError(409, f"process {proc_id} is already running")
-            entry = _Entry(proc_id, argv, cwd, restart, max_restarts, env)
+            entry = _Entry(proc_id, resolved_argv, resolved_cwd, restart, max_restarts, env)
             try:
                 self._spawn(entry)
             except OSError as exc:
