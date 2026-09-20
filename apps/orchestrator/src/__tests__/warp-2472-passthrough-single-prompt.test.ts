@@ -276,9 +276,18 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // this branch's −4 (ADR-045, 43→39) are independent and both correct, so
     // the count is the UNION of both branches — 40 — not either side's number.
     //
-    // The pass-through roster below is again unchanged: none of the thirteen
-    // touched tools relays a 202.
-    expect(confirming).toHaveLength(40);
+    // WARP-2894 then added ONE: `routine_run` — Tier-2 because it fires a
+    // live routine's real tool calls as the acting person; the interceptor
+    // challenges it and chat approves it. NOT a pass-through: the run route's
+    // own 409 (a destructive, non-reversible spec) is deliberately relayed as
+    // an error that sends the person to the page, never echoed as a
+    // confirmation the model could satisfy. `routine_draft` is a write with
+    // no confirmation (a draft is inert) and `routine_list` a read, so
+    // neither moves this number. 40 + 1 = 41.
+    //
+    // The pass-through roster below is again unchanged: none of the tools
+    // touched since relays a 202.
+    expect(confirming).toHaveLength(41);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
