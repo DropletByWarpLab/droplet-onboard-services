@@ -171,11 +171,14 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
 
   it("has left the Integrations subtree, which keeps only the plumbing", () => {
     const ops = NAV_GROUPS.find((g) => g.label === "Operations");
-    const integrations = ops?.items.find((i) => i.href === "/integrations");
-    expect(integrations).toBeDefined();
-    expect((integrations?.children ?? []).map((c) => c.href)).toEqual([
-      "/integrations/credentials",
-    ]);
+    // WARP-2968 flattened the subtree — Credentials is a sibling now, not a
+    // child — so this reads every Integrations destination wherever it sits.
+    // ADR-044's pin is unchanged: no practice DATA surface hangs off it.
+    const reached = (ops?.items ?? [])
+      .flatMap((i) => [i, ...(i.children ?? [])])
+      .map((i) => i.href)
+      .filter((href) => href.startsWith("/integrations"));
+    expect(reached).toEqual(["/integrations", "/integrations/credentials"]);
   });
 });
 

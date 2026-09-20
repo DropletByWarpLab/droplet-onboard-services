@@ -297,6 +297,16 @@ export function partyNounForProviderKey(providerKey: string): string {
 }
 
 /**
+ * The category of a provider the catalog does not classify (WARP-2968).
+ *
+ * Exported because the hub groups its grid by category and this is the one
+ * value that is not a real one: it names where the connection came from, not
+ * what the provider is for, so the hub gathers these tiles under a single
+ * trailing heading instead of listing it beside Accounting and Payments.
+ */
+export const REPORTED_CATEGORY = "Reported by this box";
+
+/**
  * A tile for a provider the box reports that the catalog does not list —
  * `<vendor>-export` keys, M365, or anything a future box adds.
  *
@@ -312,7 +322,7 @@ export function descriptorForReportedProvider(
     meta: {
       id: provider,
       name: providerName(provider),
-      category: "Reported by this box",
+      category: REPORTED_CATEGORY,
       description:
         "This connection is configured on the box. It isn't in the dashboard's connector catalog yet.",
       availability: "available",
