@@ -1994,9 +1994,12 @@ _REQUIRED_DNS_SANS=(
 # WARP-2944 (ADR-058) — the box's current addresses, one per line: every
 # non-loopback IPv4 with global scope (LAN, docker bridges, the WireGuard
 # gateway when up). `DROPLET_TLS_SAN_IPS` (space-separated) overrides the
-# discovery so the suite can drive a "box moved" without a network namespace.
+# discovery so a suite can drive a "box moved" without a network namespace;
+# SET-BUT-EMPTY means "this box has no LAN address" (loopback only), which is
+# what a fixture certificate naming only 127.0.0.1 needs to count as covered.
 _current_lan_ipv4s() {
-  if [ -n "${DROPLET_TLS_SAN_IPS:-}" ]; then
+  if [ -n "${DROPLET_TLS_SAN_IPS+x}" ]; then
+    # shellcheck disable=SC2086  # word-splitting the list is the point
     printf '%s\n' ${DROPLET_TLS_SAN_IPS}
     return 0
   fi
