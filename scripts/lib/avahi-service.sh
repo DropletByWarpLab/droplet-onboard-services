@@ -43,18 +43,18 @@ fi
 AVAHI_SERVICE_DIR="${AVAHI_SERVICE_DIR:-/etc/avahi/services}"
 AVAHI_SERVICE_FILE="${AVAHI_SERVICE_FILE:-droplet.service}"
 
-# avahi_xml_escape — the five XML predefined entities, in the order that
-# keeps `&` from double-escaping. TXT values are operator-influenced (.env),
-# so they are escaped even though the validation below should never let a
+# avahi_xml_escape — the five XML predefined entities, `&` first so it is
+# never double-escaped. TXT values are operator-influenced (.env), so they
+# are escaped even though the validation below should never let a
 # metacharacter through.
+#
+# sed, not `${s//x/&lt;}`: bash 5.2 turned on `patsub_replacement`, under
+# which an unquoted `&` in the replacement means "the matched text" — the
+# same expression that escapes correctly on bash 5.1 (WSL, older images)
+# rendered `<` as `<lt;` on the 5.2 runner. sed's `\&` is portable.
 avahi_xml_escape() {
-  local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
-  s="${s//\'/&apos;}"
-  printf '%s' "$s"
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
 }
 
 # avahi_tls_state <cert_file> — `issued` when the served leaf was signed by a
