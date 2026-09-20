@@ -494,10 +494,20 @@ export function createToolsRouter(
    * The identity a run-now executes as — the same three fields chat forwards
    * on every tool call, so a spec run can read what the person has connected
    * (calendar, email, memory are all `ctx.userId`-gated in tools-core).
+   *
+   * WARP-2894 — `routine_run` reaches the route as the mcp principal acting
+   * for a person, so the identity is the resolved ACTOR, never `req.user`:
+   * the robot has no calendar, no mail and no memory, and role `service`
+   * would reach every `userRole`-keyed tool as nobody. The Nextcloud token is
+   * still the request's own — the robot carries none, and the person's is
+   * never borrowed on their behalf.
    */
-  async function runCallContext(req: Request): Promise<McpCallContext | undefined> {
-    const userId = req.user?.username;
-    const role = req.user?.role;
+  async function runCallContext(
+    req: Request,
+    actor: Pick<Actor, "username" | "role">,
+  ): Promise<McpCallContext | undefined> {
+    const userId = actor.username;
+    const role = actor.role;
     const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
     if (!userId && !role && !ncToken) return undefined;
     return {
@@ -953,7 +963,7 @@ export function createToolsRouter(
           triggeredBy,
           scope,
           summarizer,
-          callContext: await runCallContext(req),
+          callContext: await runCallContext(req, actor),
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({

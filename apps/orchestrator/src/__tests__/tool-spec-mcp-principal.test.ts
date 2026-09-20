@@ -258,4 +258,24 @@ describe("POST /api/tools/:slug/runs as the mcp principal (routine_run)", () => 
     expect(res.status).toBe(403);
     expect(prisma.toolSpec.findUnique).not.toHaveBeenCalled();
   });
+
+  it("runs every tool AS the acting person, never as the robot — their calendar, mail and memory, not nobody's", async () => {
+    // MUTATION: build the call context from `req.user` (the robot) instead of
+    // the actor and this goes red — `userId` would be `_service:mcp`, so the
+    // `ctx.userId`-gated tools inside the run would answer for a person who
+    // has connected nothing (the WARP-2884 defect, re-opened for one caller).
+    const prisma = createPrismaMock([liveSpec("daily-files", "list_files", false)]);
+    const res = await request(buildApp(prisma, mcp)).post("/api/tools/daily-files/runs").send({ onBehalfOf: "kid" });
+    expect(res.status).toBe(200);
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      "list_files",
+      expect.anything(),
+      expect.objectContaining({ userId: "kid", userRole: "family" }),
+    );
+    expect(dispatcher.call).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ userId: "_service:mcp" }),
+    );
+  });
 });
