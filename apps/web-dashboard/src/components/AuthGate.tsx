@@ -332,7 +332,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <main
         id="main"
         tabIndex={-1}
-        className="lg:ml-[260px] pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh"
+        className="lg:ml-[var(--sidebar-w)] sidebar-w-transition pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh"
       >
         <ModuleRouteGuard>{children}</ModuleRouteGuard>
       </main>

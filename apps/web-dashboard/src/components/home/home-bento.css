@@ -932,7 +932,7 @@ body:has(.droplet-home) {
    the (separately rendered) sidebar and tint its translucent surface. */
 @media (min-width: 1024px) {
   .dh-ambient {
-    left: 260px;
+    left: var(--sidebar-w, 260px);
   }
 }
 .dh-ambient .blob {

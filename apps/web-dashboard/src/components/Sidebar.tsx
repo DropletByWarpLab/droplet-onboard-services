@@ -3,7 +3,7 @@
 import { Suspense, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, MoreHorizontal, X } from "lucide-react";
+import { ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
@@ -13,6 +13,15 @@ import { useIntegrations } from "@/lib/hooks/useIntegrations";
 import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+// WARP-2956 — collapse (64px icon rail) + drag-resize (200–360px) state for
+// the desktop aside. The hook owns persistence and the `--sidebar-w` CSS
+// variable; this file only renders against `collapsed` / `width`.
+import {
+  SIDEBAR_DEFAULT,
+  SIDEBAR_MAX,
+  SIDEBAR_MIN,
+  useSidebarLayout,
+} from "@/lib/hooks/useSidebarLayout";
 // WARP-1548 — the Files places rail's Libraries group. Lives in its own
 // component because it is the one piece of this nav that is DATA, not
 // config: the libraries come from GET /api/files/spaces at render time.
@@ -70,6 +79,11 @@ export function Sidebar() {
   const badgeCounts: Record<NonNullable<NavItem["badgeKey"]>, number> = {
     teamChatUnread,
   };
+
+  // WARP-2956: desktop collapse / resize.
+  const { collapsed, width, setCollapsed, setWidth } = useSidebarLayout();
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef<{ x: number; width: number } | null>(null);
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -189,25 +203,60 @@ export function Sidebar() {
       <aside
         aria-label="Primary navigation"
         className="
-          hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[260px]
+          hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[var(--sidebar-w)]
+          sidebar-w-transition
           bg-[var(--color-sidebar-bg)] dp-material
           border-r border-separator z-40
         "
       >
-        {/* Logo + workspace badge */}
-        <div className="flex items-center gap-2.5 px-5 h-16">
+        {/* Logo + workspace badge + collapse control (WARP-2956). In the
+            rail the mark sits alone with the control centred beneath it. */}
+        <div
+          className={
+            collapsed
+              ? "flex flex-col items-center gap-1.5 pt-3 pb-1"
+              : "flex items-center gap-2.5 px-5 h-16"
+          }
+        >
           <DropletMark size={22} className="text-accent" />
-          <span className="type-headline text-label-primary tracking-tight">
-            Droplet
-          </span>
-          {/* Tiny chip — names the workspace mode. WARP-1341: business-only
-              build, so this is static. */}
-          <span
-            className="ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle"
-            title="Business workspace — full admin surfaces"
+          {!collapsed && (
+            <>
+              <span className="type-headline text-label-primary tracking-tight">
+                Droplet
+              </span>
+              {/* Tiny chip — names the workspace mode. WARP-1341: business-only
+                  build, so this is static. */}
+              <span
+                className="ml-auto type-caption-2 px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent-subtle"
+                title="Business workspace — full admin surfaces"
+              >
+                Business
+              </span>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => setCollapsed(!collapsed)}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className={`
+              inline-flex items-center justify-center h-7 w-7 rounded-lg
+              border border-separator bg-surface-primary
+              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+              transition-colors duration-200 ease-smooth
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              ${collapsed ? "" : "ml-2"}
+            `}
           >
-            Business
-          </span>
+            <ChevronLeft
+              size={14}
+              aria-hidden="true"
+              className={`transition-transform duration-200 ease-smooth motion-reduce:transition-none ${
+                collapsed ? "rotate-180" : ""
+              }`}
+            />
+          </button>
         </div>
 
         {/* Navigation */}
@@ -219,24 +268,27 @@ export function Sidebar() {
             <div key={group.label} className={groupIndex > 0 ? "mt-4" : ""}>
               {/* Section caption. Apple-HIG-style: uppercase + tracking
                   + tertiary label color. Kept tiny so groups read as
-                  organizational, not as primary nav. */}
-              <p
-                className="
-                  px-3 mb-1 type-caption-2 uppercase tracking-[0.18em]
-                  text-label-tertiary font-semibold
-                "
-              >
-                {group.label}
-              </p>
+                  organizational, not as primary nav. Hidden in the rail. */}
+              {!collapsed && (
+                <p
+                  className="
+                    px-3 mb-1 type-caption-2 uppercase tracking-[0.18em]
+                    text-label-tertiary font-semibold
+                  "
+                >
+                  {group.label}
+                </p>
+              )}
               <div className="space-y-0.5">
                 {group.items.map((item) => (
                   <NavLink
                     key={item.href}
                     item={item}
                     active={isItemActive(item)}
-                    showChildren={isSectionOpen(item)}
+                    showChildren={!collapsed && isSectionOpen(item)}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
+                    collapsed={collapsed}
                   />
                 ))}
               </div>
@@ -244,11 +296,28 @@ export function Sidebar() {
           ))}
         </nav>
 
-        {/* Footer */}
-        <div className="px-4 pb-4 pt-3 space-y-3 border-t border-separator">
-          <ThemeToggle />
+        {/* Footer. WARP-2956: in the rail only the avatar survives — the
+            three-segment ThemeToggle is ~90px wide and cannot fit 64px, so
+            it (with the names, sign-out and version line) waits for expand. */}
+        <div
+          className={`pb-4 pt-3 space-y-3 border-t border-separator ${
+            collapsed ? "px-2" : "px-4"
+          }`}
+        >
+          {!collapsed && <ThemeToggle />}
 
-          {user && (
+          {user && collapsed && (
+            <div
+              className="w-8 h-8 mx-auto rounded-full bg-accent-subtle flex items-center justify-center"
+              title={user.displayName || user.username}
+            >
+              <span className="type-caption-1 text-accent font-semibold">
+                {initials}
+              </span>
+            </div>
+          )}
+
+          {user && !collapsed && (
             <div className="flex items-center gap-2.5 px-1 py-1">
               <div className="w-8 h-8 rounded-full bg-accent-subtle flex items-center justify-center flex-shrink-0">
                 <span className="type-caption-1 text-accent font-semibold">
@@ -278,10 +347,63 @@ export function Sidebar() {
             </div>
           )}
 
-          <p className="type-caption-2 text-label-quaternary text-center">
-            Droplet v0.1.0
-          </p>
+          {!collapsed && (
+            <p className="type-caption-2 text-label-quaternary text-center">
+              Droplet v0.1.0
+            </p>
+          )}
         </div>
+
+        {/* WARP-2956 — drag handle over the right border. Pointer capture
+            keeps the drag alive when the pointer outruns the 6px strip;
+            `.sidebar-w-dragging` on <html> suspends the width transition so
+            the edge tracks the pointer. Not offered in the rail. */}
+        {!collapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuemin={SIDEBAR_MIN}
+            aria-valuemax={SIDEBAR_MAX}
+            aria-valuenow={width}
+            tabIndex={0}
+            title="Drag to resize · double-click to reset"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              dragStart.current = { x: e.clientX, width };
+              setDragging(true);
+              document.documentElement.classList.add("sidebar-w-dragging");
+            }}
+            onPointerMove={(e) => {
+              if (!dragStart.current) return;
+              setWidth(dragStart.current.width + (e.clientX - dragStart.current.x));
+            }}
+            onPointerUp={(e) => {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+              dragStart.current = null;
+              setDragging(false);
+              document.documentElement.classList.remove("sidebar-w-dragging");
+            }}
+            onDoubleClick={() => setWidth(SIDEBAR_DEFAULT)}
+            onKeyDown={(e) => {
+              const step: Record<string, number> = {
+                ArrowLeft: width - 8,
+                ArrowRight: width + 8,
+                Home: SIDEBAR_MIN,
+                End: SIDEBAR_MAX,
+              };
+              if (!(e.key in step)) return;
+              e.preventDefault();
+              setWidth(step[e.key]);
+            }}
+            className={`
+              absolute inset-y-0 -right-[3px] w-1.5 cursor-col-resize z-10
+              hover:bg-accent/70 transition-colors duration-200 ease-smooth
+              focus-visible:outline-none focus-visible:bg-accent/70
+              ${dragging ? "bg-accent/70" : ""}
+            `}
+          />
+        )}
       </aside>
 
       {/* ── Mobile Bottom Tab Bar — 4 + More ── */}
@@ -636,6 +758,7 @@ function NavLink({
   showChildren,
   pathname,
   badge = 0,
+  collapsed = false,
 }: {
   item: NavItem;
   active: boolean;
@@ -644,6 +767,11 @@ function NavLink({
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
+  /** WARP-2956 — icon-rail mode: glyph only, label as title + aria-label so
+   *  the accessible name survives; children and the badge pill wait for
+   *  expand (the sr-only badge text would otherwise be lost under the
+   *  aria-label anyway). */
+  collapsed?: boolean;
 }) {
   const Icon = item.icon;
   return (
@@ -651,9 +779,12 @@ function NavLink({
       <Link
         href={item.href}
         aria-current={active ? "page" : undefined}
+        aria-label={collapsed ? item.label : undefined}
+        title={collapsed ? item.label : undefined}
         className={`
-          flex items-center gap-3 px-3 h-9 rounded-lg
+          flex items-center h-9 rounded-lg
           type-subheadline transition-all duration-200 ease-smooth
+          ${collapsed ? "justify-center w-10 mx-auto" : "gap-3 px-3"}
           ${
             active
               ? "bg-accent-subtle text-accent font-medium"
@@ -662,8 +793,8 @@ function NavLink({
         `}
       >
         <Icon size={17} strokeWidth={active ? 2 : 1.5} />
-        {item.label}
-        <NavBadge count={badge} />
+        {!collapsed && item.label}
+        {!collapsed && <NavBadge count={badge} />}
       </Link>
 
       {showChildren && item.children && (

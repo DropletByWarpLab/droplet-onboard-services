@@ -14,6 +14,13 @@
      WARP-946. */
   color-scheme: light;
 
+  /* WARP-2956 — desktop sidebar width. The aside (`lg:w-[var(--sidebar-w)]`)
+     and the content column (`lg:ml-[var(--sidebar-w)]`) both read this one
+     variable; `useSidebarLayout` rewrites it on <html> (64px rail / 200–360px
+     resized) and the inline script in app/layout.tsx restores the persisted
+     value before hydration. Declared here so SSR paints at 260px. */
+  --sidebar-w: 260px;
+
   /* Surfaces */
   --color-surface-primary: #ffffff;
   --color-surface-secondary: #f2f2f7;
@@ -879,7 +886,24 @@
   }
 }
 
+/* WARP-2956 — the sidebar aside and the content column animate between the
+   rail and the expanded width together (shell `--ease`, ease-out-quint).
+   `.sidebar-w-dragging` suspends it while the handle is being dragged so the
+   edge tracks the pointer. Reduced motion: no width/margin transition. */
+.sidebar-w-transition {
+  transition:
+    width 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-left 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sidebar-w-dragging .sidebar-w-transition {
+  transition: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .sidebar-w-transition {
+    transition: none;
+  }
+
   *,
   *::before,
   *::after {
