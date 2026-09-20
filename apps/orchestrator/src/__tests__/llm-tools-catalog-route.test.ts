@@ -154,3 +154,72 @@ describe("GET /api/llm/tools/catalog (WARP-555)", () => {
     expect(names).toContain(WRITE_TOOL);
   });
 });
+
+/**
+ * WARP-2969 — per-tool `reach`.
+ *
+ * The catalog used to filter on ONE predicate (`requiresWrite`) and so
+ * reported every registered tool as if a chat turn could reach it. Two
+ * shipped gates say otherwise long before the model sees a schema: the
+ * module toggles (a tool whose domain belongs to a switched-off module is
+ * dropped) and the chat-scope policy list. `/tools` listed all 142; ~66
+ * reach a turn on a default box.
+ *
+ * `reach` annotates rather than filters — an MCP client can still call a
+ * module-off tool, so dropping it here would be a second, wrong answer.
+ * Both verdicts come from the SHIPPED predicates (`domainsForFeatures`,
+ * `EXCLUDED_FROM_CHAT_TOOLS`); neither is re-implemented in the route.
+ */
+describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
+  let app: ReturnType<typeof createApp>;
+
+  beforeAll(() => {
+    const prisma = new PrismaClient();
+    initDeviceService(prisma);
+    app = createApp(prisma);
+  });
+
+  async function reachFor(name: string) {
+    const res = await request(app)
+      .get("/api/llm/tools/catalog")
+      .set("x-test-role", "owner");
+    expect(res.status).toBe(200);
+    const tool = (res.body.tools as { name: string; reach?: unknown }[]).find(
+      (t) => t.name === name,
+    );
+    expect(tool, `${name} missing from the catalog`).toBeDefined();
+    return tool!.reach as { module: string; chat: string };
+  }
+
+  it("marks a tool in a default-off module domain as module:off", async () => {
+    // `cameras` is defaultEnabled:false in the module registry, so the
+    // whole domain is unreachable from a turn on a box nobody has toggled.
+    expect(await reachFor("list_cameras")).toMatchObject({ module: "off" });
+  });
+
+  it("marks a chat-excluded tool as chat:excluded", async () => {
+    // The switch fabric is a dashboard/installer surface — every one of its
+    // tools sits in EXCLUDED_FROM_CHAT_TOOLS.
+    expect(await reachFor("get_switch_ports")).toMatchObject({ chat: "excluded" });
+  });
+
+  it("marks a plain local tool as module:on / chat:allowed", async () => {
+    // `system` is an UNCLAIMED domain (no module owns it) and
+    // get_system_health is not on the chat-exclusion list.
+    expect(await reachFor("get_system_health")).toEqual({
+      module: "on",
+      chat: "allowed",
+    });
+  });
+
+  it("keeps the response additive — the WARP-555 fields are untouched", async () => {
+    const res = await request(app)
+      .get("/api/llm/tools/catalog")
+      .set("x-test-role", "owner");
+    expect(res.body.tools.length).toBe(TOOL_CATALOG.length);
+    const sample = res.body.tools[0];
+    for (const k of ["name", "description", "homeDescription", "domain", "requiresWrite", "requiresConfirmation"]) {
+      expect(sample).toHaveProperty(k);
+    }
+  });
+});

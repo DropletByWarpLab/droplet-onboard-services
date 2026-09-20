@@ -35,6 +35,7 @@
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
+    "@droplet/tools-core": "0.1.0",
     "@types/node": "^20.12.12",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

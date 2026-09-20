@@ -17,14 +17,20 @@
  * Data: `useToolCatalog` → `GET /api/llm/tools/catalog`. Re-skinned to the
  * indigo `.droplet-shell` design language (WARP design handoff); the catalog
  * logic and the SEED-not-run contract are unchanged.
+ *
+ * WARP-2969 — a tool a chat turn cannot reach gets a muted chip saying so.
+ * The page still lists EVERY tool: a module-off tool is callable from an MCP
+ * client, so hiding it would be a different, wrong answer. It used to list
+ * all 142 with no hint that ~76 of them would go nowhere if you asked.
  */
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Pencil, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { Badge } from "@/components/shell/primitives";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
-import { iconForDomain, labelForDomain } from "@/lib/tool-domains";
+import { iconForDomain, labelForDomain, reachNote } from "@/lib/tool-domains";
 import {
   PENDING_COMPOSER_KEY,
   type PendingComposerPayload,
@@ -255,6 +261,8 @@ function FilterChip({
 function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
   const router = useRouter();
   const title = humanizeToolName(tool.name);
+  // WARP-2969 — null unless a box-wide gate withholds this tool from chat.
+  const note = reachNote(tool);
 
   // WARP-829: picking a tool primes the chat composer — it never runs the tool.
   const useInChat = () => {
@@ -310,7 +318,7 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
       <p style={{ fontSize: 13, color: "var(--text)", opacity: 0.82, lineHeight: 1.5, flex: 1, margin: 0 }}>
         {tool.homeDescription}
       </p>
-      {(tool.requiresWrite || tool.requiresConfirmation) && (
+      {(tool.requiresWrite || tool.requiresConfirmation || note) && (
         <div className="chiprow" style={{ gap: 6, paddingTop: 2 }}>
           {tool.requiresWrite && (
             <span className="badge warn" title="This tool can change something on your Droplet.">
@@ -322,6 +330,7 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
               <ShieldCheck size={11} aria-hidden /> Asks first
             </span>
           )}
+          {note && <Badge kind="muted">{note}</Badge>}
         </div>
       )}
     </button>

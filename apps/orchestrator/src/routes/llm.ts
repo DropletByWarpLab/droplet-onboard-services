@@ -17,6 +17,12 @@ import {
   type AgentResult,
 } from "../services/llm-agent.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+// WARP-2969 — the two shipped predicates the tool catalog annotates with.
+// Imported, never restated: an answer this route derived for itself would be
+// a second implementation of the module gate.
+import { domainsForFeatures } from "../services/access-catalog.js";
+import { getEffectiveModuleIds } from "../services/modules.service.js";
+import { createLogger } from "../lib/logger.js";
 // WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
 // and the wire payload cannot disagree.
 import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
@@ -450,6 +456,8 @@ const TOOL_REPLAY_STRIPPED_TOOL_CALL_IDS_HEADER =
 // where ChatSession.userId is still the Nextcloud username). Both
 // fields populate the `candidates` array in `loadOwnedSession`.
 type AuthedRequest = { user?: { id?: string; username?: string; role?: string } };
+
+const logger = createLogger("llm-route");
 
 export { VOICE_WRITE_TOOLS };
 
@@ -2978,11 +2986,47 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // RBAC matches GET /llm/tools: owner/admin see every tool; everyone else
   // (family, guest, unauthenticated) sees read-only tools only, closing
   // the same information-disclosure gap on the destructive surface.
-  router.get("/llm/tools/catalog", (req, res) => {
+  //
+  // WARP-2969 — every entry also carries `reach`, saying whether the two
+  // BOX-WIDE gates would let it reach a chat turn: the module toggles
+  // (`domainsForFeatures`) and the chat-scope policy list
+  // (`EXCLUDED_FROM_CHAT_TOOLS`). Without it this page listed all 142
+  // registry tools as if asking for any of them would work, while ~66 do on
+  // a box nobody has toggled — and named no reason for the other 76.
+  //
+  // ANNOTATES, NEVER FILTERS. A module-off tool is still callable by an MCP
+  // client, so dropping it here would be a second, wrong answer to a
+  // different question. The field is additive; every WARP-555 field is
+  // untouched.
+  //
+  // Both verdicts are the SHIPPED predicates, called — not re-derived. Same
+  // rule `tool-inspect.service.ts` runs on (its `chat_policy` gate is this
+  // `chat: "excluded"`). Two axes rather than one enum because they are
+  // independent and a person fixes them in different places: one is a
+  // toggle on /settings, the other is a product decision in the code. The
+  // inspector has no module axis at all, so there was no existing field
+  // shape to borrow.
+  //
+  // The PER-PERSON axes (role grants, off-LAN withholding, turn relevance)
+  // are deliberately NOT here — they need a resolved principal and a modelled
+  // turn, which is what `GET /api/admin/tool-inspect/:userId` is for.
+  router.get("/llm/tools/catalog", async (req, res) => {
     const role = (req as AuthedRequest).user?.role;
     const tools = isPrivilegedRole(role)
       ? TOOL_CATALOG
       : TOOL_CATALOG.filter((t) => !t.requiresWrite);
+
+    // Fails OPEN (null ⇒ every domain reads "on"): this route exists to
+    // always render, and an unreadable toggle table is no evidence that a
+    // tool is withheld. Saying "Module off" on a hunch would be the one way
+    // this annotation could lie.
+    let moduleDomains: Set<string> | null = null;
+    try {
+      moduleDomains = domainsForFeatures(await getEffectiveModuleIds(prisma, config));
+    } catch (err) {
+      logger.error({ err }, "tools_catalog_module_reach_read_failed");
+    }
+
     res.json({
       tools: tools.map((t) => ({
         name: t.name,
@@ -2991,6 +3035,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         domain: t.domain,
         requiresWrite: t.requiresWrite,
         requiresConfirmation: t.requiresConfirmation,
+        reach: {
+          module: !moduleDomains || moduleDomains.has(t.domain) ? "on" : "off",
+          chat: EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
+        },
       })),
       domains: TOOL_DOMAINS,
     });

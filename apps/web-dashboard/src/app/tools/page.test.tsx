@@ -13,6 +13,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import {
   PENDING_COMPOSER_KEY,
   type ToolCatalogEntry,
+  type ToolReach,
   // WARP-2582 — PendingComposerPayload became a union (tool | pin). The
   // /tools surface only ever writes the TOOL variant, so these assertions
   // name it directly instead of narrowing a union they cannot produce.
@@ -40,6 +41,7 @@ function entry(
   homeDescription: string,
   requiresWrite = false,
   requiresConfirmation = false,
+  reach?: ToolReach,
 ): ToolCatalogEntry {
   // The page renders `homeDescription` (plain-language). `description` is the
   // agent-facing string and is never shown, so the 3rd arg is the friendly
@@ -51,6 +53,7 @@ function entry(
     homeDescription,
     requiresWrite,
     requiresConfirmation,
+    ...(reach ? { reach } : {}),
   };
 }
 
@@ -241,5 +244,52 @@ describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
     expect(payload.toolName).toBe("list_network_devices");
     expect(payload.requiresWrite).toBe(false);
     expect(payload.requiresConfirmation).toBe(false);
+  });
+});
+
+// ── WARP-2969: say why a tool is unavailable ──
+
+describe("<ToolsPage /> reach chips (WARP-2969)", () => {
+  const REACH_SAMPLE: ToolCatalogEntry[] = [
+    entry("list_network_devices", "network", "See every device on your network", false, false, {
+      module: "on",
+      chat: "allowed",
+    }),
+    entry("list_cameras", "cameras", "See your cameras", false, false, {
+      module: "off",
+      chat: "allowed",
+    }),
+    entry("get_switch_ports", "switch", "Look at the switch ports", false, false, {
+      module: "on",
+      chat: "excluded",
+    }),
+  ];
+
+  it("chips a module-off tool so the page names the reason", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    expect(screen.getByText(/module off/i)).toBeInTheDocument();
+  });
+
+  it("chips a chat-excluded tool as reachable from elsewhere, not gone", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    expect(screen.getByText(/dashboard & mcp only/i)).toBeInTheDocument();
+  });
+
+  it("puts no chip on a tool a chat turn can reach", () => {
+    ready([REACH_SAMPLE[0]]);
+    render(<ToolsPage />);
+    expect(screen.queryByText(/module off/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/dashboard & mcp only/i)).not.toBeInTheDocument();
+  });
+
+  it("still LISTS every tool — reach annotates, it never filters", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    // An MCP client can still call a module-off tool, so /tools remains the
+    // full catalog; the chip is the whole of the change.
+    expect(screen.getByRole("button", { name: /^all 3$/i })).toBeInTheDocument();
+    expect(screen.getByText(/See your cameras/i)).toBeInTheDocument();
   });
 });
