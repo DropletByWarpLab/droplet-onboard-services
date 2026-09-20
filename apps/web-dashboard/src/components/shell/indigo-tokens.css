@@ -18,7 +18,12 @@
    scoped under it so nothing leaks into the violet dashboard.
    ============================================================ */
 
-.droplet-shell {
+/* WARP-2971: `.droplet-workspace` (the Workspace navigation layout) shares
+   this ramp — it is a second SCOPE for the same tokens, not a second ramp.
+   Only the custom properties are shared; the descendant-scoped primitives
+   in droplet-shell.css stay `.droplet-shell`-only. */
+.droplet-shell,
+.droplet-workspace {
   /* ── Indigo identity — LIGHT (default) ─────────────────── */
   --bg: #f5f6fb;
   --surface: #ffffff;
@@ -84,7 +89,8 @@
   font-family: var(--font-ui);
 }
 
-.dark .droplet-shell {
+.dark .droplet-shell,
+.dark .droplet-workspace {
   /* ── Indigo identity — DARK (the original handoff ramp) ── */
   --bg: #0f1117;
   --surface: #1a1d27;
