@@ -61,6 +61,9 @@ ALLOWED_MODULES = frozenset(
 # ``fractions``, ``numbers``, ``random``; ``collections`` pulls ``operator``,
 # ``keyword``, ``reprlib``). Reachable ONLY as a side effect of an allowed
 # import, never by name from user code — the finder checks the importer.
+# Top-level names only: a submodule of an allowed package (``json.decoder``,
+# ``collections.abc``) is covered by its top-level entry, and a dotted literal
+# here reads as a hostname to the egress scanner.
 _STDLIB_INTERNALS = frozenset(
     {
         "enum",
@@ -82,7 +85,6 @@ _STDLIB_INTERNALS = frozenset(
         "string",
         "warnings",
         "_collections_abc",
-        "collections.abc",
         "math",
         "itertools",
         "re",
@@ -99,9 +101,6 @@ _STDLIB_INTERNALS = frozenset(
         "statistics",
         "_statistics",
         "json",
-        "json.decoder",
-        "json.encoder",
-        "json.scanner",
         "_json",
         "textwrap",
         "collections",
