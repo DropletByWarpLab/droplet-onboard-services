@@ -884,7 +884,7 @@ describe("daily-report — a missing box-provided spec is created, not reported"
     const prisma = createPrismaMock([]);
     const app = reportApp(prisma);
     await request(app).get(`/api/tools/${DAILY_REPORT_SLUG}/runs`); // seeds the spec
-    const specId = (prisma.toolSpec.create as ReturnType<typeof vi.fn>).mock.results[0].value.id;
+    const specId = (await (prisma.toolSpec.create as ReturnType<typeof vi.fn>).mock.results[0].value).id;
     await prisma.toolRun.create({
       data: { specId, triggeredBy: "scheduler", endedAt: new Date(), status: "ok", error: null, trace: [] },
     });
