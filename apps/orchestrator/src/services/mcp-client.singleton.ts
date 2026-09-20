@@ -26,6 +26,10 @@ import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
 import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
+  composeRemoteCallPolicy,
+  remoteToolClassificationCache,
+} from "./remote-tool-classification.service.js";
+import {
   ATLASSIAN_REMOTE_SERVER_ID,
   attachAtlassianRemote,
   detachRemoteServer,
@@ -99,14 +103,23 @@ const remoteAllowlist = parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLI
 
 export const mcpClient = new McpToolMultiplexer(localClient, {
   isServerAllowed: (serverId) => remoteAllowlist.has(serverId),
-  // `api-token` because that is the only credential a v1 box can hold: ADR-043
-  // §7 classifies Atlassian as the customer-created-credential model and the
-  // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
-  // parameter rather than an assumption so the Compass half of the auth-mode
-  // matrix is expressible and testable.
-  remoteCallPolicy: createAtlassianRemoteCallPolicy({
-    authMode: "api-token",
-    fallback: DENY_ALL_REMOTE_TOOLS,
+  // WARP-2426 — the operator-owned classification record, layered over the
+  // reviewed Atlassian table: the record's `denied` wins over everything; its
+  // reviewed reads fill only the table's holes; the table's write-blocks are
+  // a floor no demotion reaches around. Read from a cache the attach path and
+  // the owner route refresh — a row the cache has not seen is "not
+  // classified", never "allowed".
+  remoteCallPolicy: composeRemoteCallPolicy({
+    lookup: remoteToolClassificationCache.lookup,
+    // `api-token` because that is the only credential a v1 box can hold: ADR-043
+    // §7 classifies Atlassian as the customer-created-credential model and the
+    // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
+    // parameter rather than an assumption so the Compass half of the auth-mode
+    // matrix is expressible and testable.
+    table: createAtlassianRemoteCallPolicy({
+      authMode: "api-token",
+      fallback: DENY_ALL_REMOTE_TOOLS,
+    }),
   }),
 });
 
@@ -156,10 +169,24 @@ export async function ensureRemoteMcpAttached(
     prisma,
     allowlist: remoteAllowlist,
     createClient: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID),
+    // WARP-2426 — the same client, seen through the classification surface.
+    // `prisma` here is typed to the gate's narrow row shape; at runtime it is
+    // the process-wide PrismaClient, which carries the model.
+    classificationPrisma: prisma as unknown as Parameters<typeof attachAtlassianRemote>[0]["classificationPrisma"],
     ...(knownTools !== undefined ? { knownTools } : {}),
   });
   if (result.attached) {
     attachedClients.set(result.serverId, result.client);
+    // The rows just recorded (and any operator decision since the last
+    // refresh) become visible to the policy now, not on the next boot.
+    try {
+      const rows = await remoteToolClassificationCache.refresh(
+        prisma as unknown as Parameters<typeof remoteToolClassificationCache.refresh>[0],
+      );
+      logger.info({ serverId: result.serverId, rows }, "remote_tool_classification_cache_refreshed");
+    } catch (err) {
+      logger.error({ err, serverId: result.serverId }, "remote_tool_classification_cache_refresh_failed");
+    }
     logger.info(
       { serverId: result.serverId, tools: result.sync.registered.length },
       "remote_mcp_attached",

@@ -116,17 +116,22 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
   });
   const registry = new RuntimeToolRegistry();
   const prisma = prismaWith(over.row === undefined ? connectedRow : over.row);
+  // WARP-2426 — the classification recorder, spied: the attach is the ONE
+  // import path into the record, and the test below says which names cross it.
+  const recordClassifications = vi.fn(async () => undefined);
   return {
     bridge,
     mux,
     registry,
     prisma,
+    recordClassifications,
     attach: () =>
       attachAtlassianRemote({
         mux,
         prisma,
         allowlist: new Set(over.allowlist ?? []),
         registry,
+        recordClassifications,
         createClient: () =>
           new McpBridgeClient({
             baseUrl: BRIDGE_URL,
@@ -187,6 +192,28 @@ describe("allowlisted + a CONNECTED row with a credential", () => {
     expect(
       result.attached && result.sync.registered.every((t) => t.domainSource === "operator"),
     ).toBe(true);
+  });
+
+  it("records every advertised tool in the classification record, by WIRE name, on the attach (WARP-2426)", async () => {
+    const h = harness({ allowlist: ["atlassian"] });
+    const result = await h.attach();
+    expect(result.attached).toBe(true);
+    // MUTATION: drop the record step from attachAtlassianRemote and this goes
+    // red — the tools would be advertised with no row, and refused at dispatch
+    // as unclassified forever, with nothing for an operator to demote.
+    expect(h.recordClassifications).toHaveBeenCalledTimes(1);
+    const [serverId, tools] = h.recordClassifications.mock.calls[0] as unknown as [
+      string,
+      Array<{ name: string }>,
+    ];
+    expect(serverId).toBe("atlassian");
+    expect(tools.map((t) => t.name)).toEqual(["getJiraIssue", "getConfluencePage"]);
+  });
+
+  it("does not record anything when the attach is refused", async () => {
+    const h = harness({ allowlist: [] });
+    await h.attach();
+    expect(h.recordClassifications).not.toHaveBeenCalled();
   });
 
   it("sends the credential to the bridge and NOTHING else", async () => {

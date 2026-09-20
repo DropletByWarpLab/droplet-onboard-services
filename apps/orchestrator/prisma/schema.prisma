@@ -8007,3 +8007,40 @@ model EntityLink {
   @@index([projectId, isArchived])
   @@index([workItemId, isArchived])
 }
+
+/// WARP-2426 (ADR-043 §2, ADR-056 I4) — the operator-owned classification
+/// record for a tool this box did not author: a remote MCP server's today, a
+/// desktop-hosted server's or a customer extension's tomorrow.
+///
+/// One row per (server, wire tool name), written by exactly ONE import path
+/// (`remote-tool-classification.service.ts` `recordDiscoveredRemoteTools`),
+/// and every row that path creates is a CONFIRMING WRITE — `requiresWrite`
+/// and `requiresConfirmation` both true — whatever the wire says the tool is.
+/// A server can declare `search_issues` with `readOnlyHint: true` and thereby
+/// choose its own privilege level; this row is what refuses to let it. The
+/// default costs a click, never data.
+///
+/// Demoting a tool (to a read, or to blocked) is a person's act: `reviewedBy`
+/// and `reviewedAt` are set by the owner route and nothing else. A row with
+/// no reviewer is the import default and reads as one. `denied` is explicit
+/// state, never inferred from a missing row — a missing row means "never
+/// seen", which the call policy refuses with its own code.
+///
+/// `wireDescription` is recorded for the operator's eyes and is never read as
+/// truth by any policy (ADR-043 §2: the wire's annotations are not read).
+model RemoteToolClassification {
+  id                   String    @id @default(uuid())
+  serverId             String
+  toolName             String
+  requiresWrite        Boolean   @default(true)
+  requiresConfirmation Boolean   @default(true)
+  denied               Boolean   @default(false)
+  reviewedBy           String?
+  reviewedAt           DateTime?
+  wireDescription      String?
+  firstSeenAt          DateTime  @default(now())
+  lastSeenAt           DateTime  @default(now())
+
+  @@unique([serverId, toolName])
+  @@index([serverId])
+}

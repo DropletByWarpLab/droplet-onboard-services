@@ -86,6 +86,7 @@ import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createAdminChatFeedbackRouter } from "./routes/admin-chat-feedback.js";
 import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
+import { createRemoteToolClassificationsRouter } from "./routes/remote-tool-classifications.js";
 import { createCapabilitiesRouter } from "./routes/capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
@@ -527,6 +528,9 @@ export function createApp(
   // Admin capabilities probe — drives nav-gating for optional admin surfaces
   // (Activity, RAG eval) so they hide when their integration is unconfigured.
   app.use("/api", createAdminCapabilitiesRouter());
+  // WARP-2426 — the operator-owned classification record for remote tools:
+  // owner/admin read it, the owner alone demotes or blocks a tool.
+  app.use("/api", createRemoteToolClassificationsRouter(prisma));
   // WARP-1154/WARP-1155 — module-capability probe for every authenticated
   // principal. The dashboard drives the Projects nav entry + /projects route
   // off this explicit flag (never off request errors). WARP-1306: the flag
