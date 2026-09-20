@@ -211,6 +211,32 @@ describe("summarize step (WARP-1996)", () => {
     expect(outcome.trace).toHaveLength(1);
   });
 
+  it("carries the summarizer's attributed message verbatim into the trace and the row", async () => {
+    // WARP-2964 — the summarizer now names WHY the answer was empty
+    // (finish_reason, reasoning size). That string is the whole diagnostic,
+    // and it reaches the owner through these two fields with no schema
+    // change, so nothing along the way may reword or truncate it.
+    const attributed =
+      "the model returned an empty summary (model=gpt-oss:20b finish_reason=length reasoning_chars=2518)";
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => {
+        throw new Error(attributed);
+      }),
+    };
+    const p = fakePrisma();
+
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(7)],
+      triggeredBy: null,
+      summarizer,
+    });
+
+    expect(outcome.trace[0].error).toBe(attributed);
+    expect(p.created[0].error).toBe(`step 7 (summarize): ${attributed}`);
+  });
+
   it("contributes NO tool name to the pre-flight — there is nothing to authorize", () => {
     // If a summarize step leaked a name into this list, the §3 pre-flight
     // would try to authorize a tool that does not exist and refuse the spec.
