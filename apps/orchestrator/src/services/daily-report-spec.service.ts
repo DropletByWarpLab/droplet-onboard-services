@@ -24,16 +24,31 @@ export const DAILY_REPORT_SLUG = "daily-report";
  * Read-only by construction — nothing here writes, which is what lets the
  * spec run unattended on any box without a confirmation step.
  */
+/**
+ * Every read is `optional: true`. The runner halts a run on the first failed
+ * step by default (its C1 contract), which for a report meant one source a
+ * box does not have — no cameras, no ERP — killed the narrative outright
+ * and the tile showed "Couldn't write the report". Optional steps are still
+ * recorded as failed in the trace and reach the summarizer as
+ * "COULD NOT BE READ"; sources that are simply not connected are omitted
+ * from the prose (see the summarizer's rules), so only the sources the
+ * person actually has appear in the report.
+ */
+const read = (tool: string, args: Record<string, unknown> = {}) =>
+  ({ kind: "call", args: { tool, args, optional: true } }) as const;
+
 const STEPS: Array<{ kind: "call" | "summarize"; args: Record<string, unknown> }> = [
-  { kind: "call", args: { tool: "get_system_health", args: {} } },
-  { kind: "call", args: { tool: "list_recent_files", args: {} } },
-  { kind: "call", args: { tool: "network_summary", args: {} } },
-  { kind: "call", args: { tool: "get_camera_health", args: {} } },
-  // The ERP read is expected to fail on most boxes (no connector, or the
-  // direct-SQL track which is stubbed). That is fine and deliberate: a failed
-  // step reaches the summarizer as "COULD NOT BE READ" and the narrative says
-  // so, which is more useful than a report that silently omits the money.
-  { kind: "call", args: { tool: "erp_get_ar_summary", args: {} } },
+  read("get_system_health"),
+  read("list_recent_files"),
+  read("network_summary"),
+  read("get_camera_health"),
+  // Per-user sources — these are `ctx.userId`-gated in tools-core and only
+  // work because the run-now route forwards the caller's identity.
+  read("list_events", { limit: 10 }),
+  // The ERP reads answer ERP_NOT_CONNECTED on a box with no connector; that
+  // is a not-connected source and the narrative leaves it out.
+  read("erp_get_ar_summary"),
+  read("erp_get_schedule_today"),
   { kind: "summarize", args: {} },
 ];
 
