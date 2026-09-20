@@ -23,7 +23,6 @@ import {
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/lib/auth";
-import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
@@ -192,15 +191,19 @@ function NetworkPageInner() {
   // state during that window instead of flashing the alarming full-page error.
   const [rebooting, setRebooting] = useState(false);
 
-  // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Most installs
-  // default to Simple — the everyday Overview only — while Business installs
-  // default to Advanced (the full OpenWrt tab surface). The persona default
-  // re-syncs once `isBusiness` resolves (useWorkspace hydrates it from the
-  // orchestrator after first paint) without clobbering an explicit user choice
-  // — see useNetworkViewMode. Switching to Simple snaps the active panel back to
-  // Overview so the hidden tab strip can't leave a power-user panel showing.
-  const { isBusiness } = useWorkspace();
-  const { mode, choose: chooseMode } = useNetworkViewMode(isBusiness);
+  // WARP-612 / WARP-2962: Simple ⟷ Advanced mode (Droplet Design System). The
+  // page opens in Simple — the everyday Overview only — because that is what
+  // people come to /network for. The URL decides the exception: a link that
+  // names a tab (`?tab=system`, a cross-tab jump, browser back/forward) is
+  // asking for a surface that only exists in Advanced, so it opens Advanced
+  // with that tab selected. `mode` and `activeTab` are independent, so this
+  // must read `activeTab` — keying it off the persona instead (the old
+  // `isBusiness`, statically true since WARP-1341) meant Simple never showed.
+  // The default re-syncs if a deep link arrives after mount, without
+  // clobbering an explicit user choice — see useNetworkViewMode. Switching to
+  // Simple snaps the active panel back to Overview so the hidden tab strip
+  // can't leave a power-user panel showing.
+  const { mode, choose: chooseMode } = useNetworkViewMode(activeTab !== "overview");
   function switchMode(next: "simple" | "advanced") {
     chooseMode(next);
     if (next === "simple") setActiveTab("overview");

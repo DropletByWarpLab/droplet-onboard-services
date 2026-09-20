@@ -1,47 +1,48 @@
 import { describe, it, expect } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useNetworkViewMode, personaDefaultMode } from "@/lib/hooks/useNetworkViewMode";
+import { useNetworkViewMode, defaultMode } from "@/lib/hooks/useNetworkViewMode";
 
-describe("personaDefaultMode", () => {
-  it("business → advanced, non-business → simple", () => {
-    expect(personaDefaultMode(true)).toBe("advanced");
-    expect(personaDefaultMode(false)).toBe("simple");
+describe("defaultMode", () => {
+  it("a deep-linked tab → advanced, the bare /network path → simple", () => {
+    expect(defaultMode(true)).toBe("advanced");
+    expect(defaultMode(false)).toBe("simple");
   });
 });
 
 describe("useNetworkViewMode", () => {
-  it("defaults to simple when isBusiness is false", () => {
-    const { result } = renderHook(({ b }) => useNetworkViewMode(b), {
-      initialProps: { b: false },
+  it("opens bare /network in Simple", () => {
+    const { result } = renderHook(({ d }) => useNetworkViewMode(d), {
+      initialProps: { d: false },
     });
     expect(result.current.mode).toBe("simple");
   });
 
-  it("defaults to advanced for a Business install known at mount", () => {
-    const { result } = renderHook(({ b }) => useNetworkViewMode(b), {
-      initialProps: { b: true },
+  it("opens a deep-linked tab (/network?tab=system) in Advanced", () => {
+    const { result } = renderHook(({ d }) => useNetworkViewMode(d), {
+      initialProps: { d: true },
     });
     expect(result.current.mode).toBe("advanced");
   });
 
-  it("re-syncs to advanced when isBusiness resolves asynchronously after mount", () => {
-    // The bug: workspace type hydrates from the orchestrator after first paint,
-    // so a Business install mounts with isBusiness=false and must self-correct.
-    const { result, rerender } = renderHook(({ b }) => useNetworkViewMode(b), {
-      initialProps: { b: false },
+  it("flips to Advanced when a deep link arrives after mount", () => {
+    // A cross-tab jump (DeviceDetailPanel → Schedules) or browser back/forward
+    // changes `?tab=` after first paint — the page must follow it into Advanced
+    // rather than leave the tab hidden behind Simple.
+    const { result, rerender } = renderHook(({ d }) => useNetworkViewMode(d), {
+      initialProps: { d: false },
     });
     expect(result.current.mode).toBe("simple");
-    rerender({ b: true });
+    rerender({ d: true });
     expect(result.current.mode).toBe("advanced");
   });
 
-  it("does not clobber an explicit user choice when isBusiness later resolves", () => {
-    const { result, rerender } = renderHook(({ b }) => useNetworkViewMode(b), {
-      initialProps: { b: false },
+  it("does not clobber an explicit user choice on a later re-render", () => {
+    const { result, rerender } = renderHook(({ d }) => useNetworkViewMode(d), {
+      initialProps: { d: false },
     });
-    act(() => result.current.choose("advanced")); // user opts into Advanced on a Home box
+    act(() => result.current.choose("advanced")); // user opts into Advanced from the Simple view
     expect(result.current.mode).toBe("advanced");
-    rerender({ b: false }); // a later workspace re-hydrate must not flip it back
+    rerender({ d: false }); // a later re-render must not flip it back
     expect(result.current.mode).toBe("advanced");
   });
 });
