@@ -3,7 +3,7 @@
 import { Suspense, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
+import { ArrowLeft, ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
@@ -33,6 +33,8 @@ import { FilesLibrariesNav } from "./nav/FilesLibrariesNav";
 import {
   MOBILE_PRIMARY_HREFS,
   NAV_GROUPS,
+  isSettingsContext,
+  settingsGroups,
   visibleItems,
   type AuthRole,
   type NavItem,
@@ -142,9 +144,9 @@ export function Sidebar() {
         .slice(0, 2)
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
-  // Compute the rendered groups once. Empty groups (e.g. Admin when the
-  // user is family/guest without the Activity entry) are filtered out so
-  // we don't render a lone caption.
+  // Compute the rendered groups once. Empty groups (e.g. Business when every
+  // one of its modules is off) are filtered out so we don't render a lone
+  // caption.
   const renderedGroups = NAV_GROUPS.map((g) => ({
     label: g.label,
     items: visibleItems(
@@ -154,6 +156,27 @@ export function Sidebar() {
       isModuleOn,
     ),
   })).filter((g) => g.items.length > 0);
+
+  // WARP-2967 — the contextual Settings panel. Inside Settings (and on every
+  // destination tucked behind it) the aside swaps the working tree for a
+  // focused list of what Settings leads to, headed by a way back.
+  //
+  // The override is keyed on the pathname rather than a boolean, so it needs
+  // no effect and cannot go stale: pressing "Back to main menu" shows the main
+  // tree for THIS route, and the moment you navigate anywhere — including
+  // deeper into Settings — the panel is back. A plain boolean would have to be
+  // reset by an effect watching the pathname, which is the same state stored
+  // twice.
+  const settingsContext = isSettingsContext(pathname);
+  const [mainTreeAt, setMainTreeAt] = useState<string | null>(null);
+  const showSettingsPanel = settingsContext && mainTreeAt !== pathname;
+  const settingsSections = showSettingsPanel
+    ? settingsGroups(
+        user?.role as AuthRole | undefined,
+        capabilities,
+        isModuleOn,
+      )
+    : [];
 
   // Flatten for the "More" drawer — anything not in the bottom-bar
   // primary set lands here in group order. Nested children (e.g. Events
@@ -273,17 +296,63 @@ export function Sidebar() {
           </button>
         </div>
 
+        {/* WARP-2967 — the contextual panel's way out. Above the nav rather
+            than inside it: it is not a destination, it is the control that
+            puts the destinations back, and the reference (rule 4) places it
+            at the TOP of the panel.
+
+            A button and not a link, deliberately. "Back to main menu" is
+            about which NAV you are looking at, not where you are — sending
+            the user to Overview would lose the settings page they came to
+            read. */}
+        {showSettingsPanel && (
+          <div className={collapsed ? "px-2 pt-1" : "px-3 pt-1"}>
+            <button
+              type="button"
+              onClick={() => setMainTreeAt(pathname)}
+              aria-label={collapsed ? "Back to main menu" : undefined}
+              title="Back to main menu"
+              className={`
+                flex items-center h-9 rounded-lg w-full
+                type-subheadline text-label-secondary
+                hover:bg-surface-secondary hover:text-label-primary
+                transition-all duration-200 ease-smooth
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                ${collapsed ? "justify-center w-10 mx-auto" : "gap-3 px-3"}
+              `}
+            >
+              <ArrowLeft size={17} strokeWidth={1.5} aria-hidden="true" />
+              {!collapsed && "Back to main menu"}
+            </button>
+          </div>
+        )}
+
         {/* Navigation */}
         <nav
-          aria-label="Sections"
+          aria-label={showSettingsPanel ? "Settings" : "Sections"}
           className="flex-1 px-3 py-1 overflow-y-auto"
         >
-          {renderedGroups.map((group, groupIndex) => (
+          {(showSettingsPanel ? settingsSections : renderedGroups).map(
+            (group, groupIndex) => (
             <div key={group.label} className={groupIndex > 0 ? "mt-4" : ""}>
               {/* Section caption. Apple-HIG-style: uppercase + tracking
                   + tertiary label color. Kept tiny so groups read as
-                  organizational, not as primary nav. Hidden in the rail. */}
-              {!collapsed && (
+                  organizational, not as primary nav. Hidden in the rail.
+
+                  WARP-2967: and hidden over a LONE item. A caption names what
+                  several rows have in common; over one row it names nothing
+                  the row does not already say, and the reference's practice 8
+                  is about separating groups, not labelling singletons. This is
+                  what keeps ADMIN from captioning its single Settings row, and
+                  what keeps Business from captioning Insights alone on a
+                  family account with every business module off.
+
+                  The Settings panel is exempt: its five sections are the only
+                  structure a sixteen-row list has, and they are fixed names a
+                  person learns rather than a scan aid over a short tree. A
+                  lone Account row still reads as "this is the account part".
+                  */}
+              {!collapsed && (showSettingsPanel || group.items.length > 1) && (
                 <p
                   className="
                     px-3 mb-1 type-caption-2 uppercase tracking-[0.18em]
@@ -299,7 +368,9 @@ export function Sidebar() {
                     key={item.href}
                     item={item}
                     active={isItemActive(item)}
-                    showChildren={!collapsed && isSectionOpen(item)}
+                    showChildren={
+                      !collapsed && !showSettingsPanel && isSectionOpen(item)
+                    }
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -307,7 +378,8 @@ export function Sidebar() {
                 ))}
               </div>
             </div>
-          ))}
+            ),
+          )}
         </nav>
 
         {/* Footer. WARP-2956: in the rail only the avatar survives — the

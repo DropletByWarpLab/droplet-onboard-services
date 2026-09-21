@@ -74,6 +74,27 @@ describe("workspace-nav-config — the map is complete and single-homed", () => 
     expect(orphans).toEqual([]);
   });
 
+  // WARP-2967 — the sidebar's re-cut must not reach this layout's reach. Two
+  // ways it could: a destination tucked behind Settings losing its chip (rule
+  // 2 says `hidden` is a surface decision), or a destination that merely
+  // changed indent in the sidebar losing its home here.
+  it("keeps every tucked destination as a first-class chip (WARP-2967)", () => {
+    const spaces = resolveSpaces("owner", ALL_CAPS, allOn);
+    const chips = new Set(
+      spaces.flatMap((s) => s.destinations.map((d) => d.item.href)),
+    );
+    const tucked = NAV_GROUPS.flatMap((g) => g.items).filter((i) => i.hidden);
+    expect(tucked.length).toBeGreaterThan(0);
+    for (const item of tucked)
+      expect(chips.has(item.href), `${item.href} lost its chip`).toBe(true);
+  });
+
+  it("keeps the newly nested routes homed (WARP-2967)", () => {
+    const set = new Set(spaceHrefs);
+    for (const href of ["/brief", "/reports", "/money", "/voice", "/remote-access"])
+      expect(set.has(href), `${href} has no home`).toBe(true);
+  });
+
   it("has six spaces, Business between Work and Operations (ADR-044)", () => {
     expect(SPACES.map((s) => s.id)).toEqual([
       "home",

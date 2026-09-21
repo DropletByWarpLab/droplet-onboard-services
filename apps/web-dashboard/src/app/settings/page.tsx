@@ -34,6 +34,10 @@ import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
+import { useCapabilities } from "@/lib/hooks/useCapabilities";
+// WARP-2967 — the Settings front door's rows are DERIVED from the one nav
+// definition, the same function the sidebar's contextual panel renders from.
+import { settingsGroups, type AuthRole } from "@/components/nav-config";
 import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
@@ -49,9 +53,16 @@ import { inferenceRuntimeLabel } from "@/lib/provider";
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
-  // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
-  // (fail-open — hidden only on a positive "off").
+  // WARP-1807 / WARP-2967: the tucked rows below mirror the nav's own gates.
+  // The module gate is fail-open (hidden only on a positive "off"); the
+  // capability probe fails closed, exactly as it does in the sidebar.
   const isModuleOn = useModuleGate();
+  const adminCapabilities = useCapabilities();
+  const settingsSections = settingsGroups(
+    currentUser?.role as AuthRole | undefined,
+    { ...adminCapabilities, medicalConnector: false },
+    isModuleOn,
+  );
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
   const [newEmail, setNewEmail] = useState("");
@@ -175,75 +186,62 @@ export default function SettingsPage() {
             owner/admin like the cards below. */}
         <FeaturesCard />
 
-        {/* Advanced (WARP-1807) — the way in to the tucked Knowledge + Context
-            surfaces. Not daily operation, so they left the primary nav
-            (hidden: true in nav-config), but they must stay reachable.
-            Knowledge mirrors the nav's fail-open module gate; Context carries
-            no module and always renders. */}
-        <Sect title="Advanced" />
-        <div className="card" style={{ padding: 0 }}>
-          <div className="rows">
-            {isModuleOn("knowledge") && (
-              <Link
-                href="/knowledge"
-                className="lrow"
-                style={{ padding: "12px 16px", alignItems: "center" }}
-              >
-                <span className="ri">
-                  <BookOpen size={16} />
-                </span>
-                <span className="rt">
-                  <span className="nm">Knowledge</span>
-                  <span className="sub">
-                    What&apos;s indexed for retrieval
-                  </span>
-                </span>
-                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
-              </Link>
-            )}
-            <Link
-              href="/context"
-              className="lrow"
-              style={{ padding: "12px 16px", alignItems: "center" }}
-            >
-              <span className="ri">
-                <Sparkles size={16} />
-              </span>
-              <span className="rt">
-                <span className="nm">Context</span>
-                <span className="sub">
-                  Indexing coverage and pipeline health
-                </span>
-              </span>
-              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
-            </Link>
-            {/* WARP-2966 (files-surface addendum §2.3) — Sync devices left the
-                Files sub-nav: it pairs a desktop machine, it is not a place a
-                file can be, and a rail of locations that also held it meant
-                two things at once. The route is unchanged; this row is the
-                only way in now, which is why it ships in the same change.
-                Gated on the files module for the same reason the nav entry is,
-                with the same fail-open posture as Knowledge above. */}
-            {isModuleOn("files") && (
-              <Link
-                href="/files/devices"
-                className="lrow"
-                style={{ padding: "12px 16px", alignItems: "center" }}
-              >
-                <span className="ri">
-                  <Laptop size={16} />
-                </span>
-                <span className="rt">
-                  <span className="nm">Sync devices</span>
-                  <span className="sub">
-                    Computers mirroring a folder with this Droplet
-                  </span>
-                </span>
-                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
-              </Link>
-            )}
+        {/* WARP-2967 — the Settings front door.
+            ────────────────────────────────────────────────────────────────
+            Sixteen destinations left the main nav tree when it was cut to
+            four groups, plus the WARP-1807 pair (Knowledge, Context) and
+            WARP-2966's Sync devices. Every one of them keeps its route, and
+            THIS is where they are reachable from — the same `settingsGroups`
+            the sidebar's contextual panel renders, so the two surfaces cannot
+            disagree about what exists or who may see it.
+
+            Derived, not hand-listed. The rows this replaces were hand-written,
+            and that is exactly how a tucked surface goes missing: nothing
+            breaks, builds or type-checks when a row is forgotten — the page
+            just quietly stops leading anywhere. Adding `hidden: true` +
+            `settingsSection` in nav-config is now the whole edit.
+
+            `capabilities` comes from /api/admin/capabilities, which fails
+            CLOSED (hidden until positively known) — correct here, since
+            Activity and RAG eval genuinely do not exist without their backing
+            integration. `medicalConnector` is the Sidebar's own
+            /api/integrations probe and no tucked item uses it (pinned in
+            nav-config.four-groups.test.ts), so this page does not run that
+            second probe. The MODULE gate stays fail-OPEN via `useModuleGate`,
+            which is the WARP-1807 posture: a probe blip must never hide the
+            last path in. */}
+        {settingsSections.map((section) => (
+          <div key={section.label}>
+            <Sect title={section.label} />
+            <div className="card" style={{ padding: 0 }}>
+              <div className="rows">
+                {section.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className="lrow"
+                      style={{ padding: "12px 16px", alignItems: "center" }}
+                    >
+                      <span className="ri">
+                        <Icon size={16} />
+                      </span>
+                      <span className="rt">
+                        <span className="nm">{item.label}</span>
+                        <span className="sub">{item.settingsBlurb}</span>
+                      </span>
+                      <ChevronRight
+                        size={16}
+                        style={{ marginLeft: "auto", opacity: 0.5 }}
+                      />
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
           </div>
-        </div>
+        ))}
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
