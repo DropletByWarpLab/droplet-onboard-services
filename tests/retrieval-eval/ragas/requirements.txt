@@ -31,7 +31,7 @@ langchain-community>=0.3,<0.4
 langchain-openai>=0.2,<0.4
 openai>=1.0
 datasets>=5.0.1
-pandas>=3.0.5
+pandas>=3.0.6
 pyyaml>=6.0.3
 
 # WARP-1948 — OSV floors, kept in LOCKSTEP with services/rag-eval/
