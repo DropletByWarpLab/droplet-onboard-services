@@ -249,10 +249,16 @@ export function LoginHero({ className = "" }: { className?: string }) {
     const ro = new ResizeObserver(() => resize());
     ro.observe(rootRef.current!);
 
-    if (reduced.current) {
-      drawGem(0); // one static frame; dt is 0, so the solid sits at angle 0
-    } else {
+    // No 2D backend at all — a locked-down browser, or jsdom without the
+    // canvas package. Nothing can be painted, so don't spin a frame loop
+    // that could only bail on every tick: the hero degrades to its CSS
+    // layers (copy, chips, halo) rather than taking the login page down.
+    const canPaint = !!fieldRef.current?.getContext("2d");
+
+    if (canPaint && !reduced.current) {
       raf = window.requestAnimationFrame(loop);
+    } else if (canPaint) {
+      drawGem(0); // one static frame; dt is 0, so the solid sits at angle 0
     }
 
     return () => {
