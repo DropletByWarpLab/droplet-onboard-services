@@ -106,6 +106,10 @@ export const SPACES: SpaceDef[] = [
       "/voice",
       "/remote-access",
       "/integrations",
+      // WARP-2968 — Credentials is a SIBLING of Integrations in nav-config,
+      // not a child, so it is a chip here exactly as it is a rail item there.
+      // Rule 1 of this file at work: the map only says where an href lives.
+      "/integrations/credentials",
     ],
   },
   {
@@ -230,10 +234,12 @@ function viewsFor(
       passesGates(child, role, capabilities, isModuleOn),
   );
   if (children.length === 0) return [];
-  // Integrations' only child is Credentials; a pill row of one is a title.
-  // Lead with the section itself so the row reads "Integrations · Credentials"
-  // and the parent route stays reachable from the row. Files already lists
-  // its own index ("All files") as a child, so nothing is prepended there.
+  // Files lists its own index ("All files") among its children, so its row
+  // already leads with the section and nothing is prepended. A section that
+  // does not gets the parent prepended instead, so the row stays at least two
+  // pills wide and the parent route stays reachable from it — a pill row of
+  // one is a title, not a row. (Integrations was that case until WARP-2968
+  // made Credentials a chip of its own; no shipped section prepends today.)
   const views = children.some((c) => c.href === item.href)
     ? children
     : [{ ...item, exact: true }, ...children];

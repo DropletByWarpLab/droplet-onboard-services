@@ -164,13 +164,16 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(labels).toContain("Sync Devices");
   });
 
-  it("Integrations leads its single child with the section itself", () => {
-    const views = dest("/integrations")?.views ?? [];
-    expect(views.map((v) => v.href)).toEqual([
-      "/integrations",
-      "/integrations/credentials",
-    ]);
-    expect(views[0].exact).toBe(true);
+  /**
+   * WARP-2968 crossed WARP-2971 on stage: Credentials stopped being a child of
+   * Integrations in `nav-config.ts` (#2241) while this map still expected one.
+   * It is a chip of its own now, so Integrations has no view pills at all —
+   * and the fact worth pinning is that the destination did not go missing in
+   * the move.
+   */
+  it("Integrations has no views — Credentials is a chip of its own (WARP-2968)", () => {
+    expect(dest("/integrations")?.views).toEqual([]);
+    expect(dest("/integrations/credentials")?.item.label).toBe("Credentials");
   });
 
   it("Cameras has no views — its only child (Events) is a chip", () => {
@@ -192,7 +195,9 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/files/recents", "work", "/files", "/files/recents"],
     ["/events", "ops", "/events", null],
     ["/cameras/front-door", "ops", "/cameras", null],
-    ["/integrations/credentials", "ops", "/integrations", "/integrations/credentials"],
+    // WARP-2968 — its own chip, so the longest-match destination IS
+    // /integrations/credentials and there is no view pill under it.
+    ["/integrations/credentials", "ops", "/integrations/credentials", null],
     ["/admin", "admin", "/admin", null],
     ["/admin/audit", "admin", "/admin/audit", null],
     ["/admin/prompt", "ai", "/admin/prompt", null],
