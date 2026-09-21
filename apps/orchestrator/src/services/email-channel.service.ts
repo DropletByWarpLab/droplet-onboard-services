@@ -118,7 +118,24 @@ export interface TransportOptions {
    */
   requireTLS?: boolean;
   auth?: { user: string; pass: string };
+  /**
+   * WARP-2957 — bounded dials. nodemailer's defaults are two minutes each,
+   * which is how long a relay that silently drops SYNs could hold a request
+   * path open (the invite resend route and the settings test both await the
+   * dial). A relay that has not greeted in ten seconds is not one an owner
+   * should be left waiting on behind a button.
+   */
+  connectionTimeout: number;
+  greetingTimeout: number;
+  socketTimeout: number;
 }
+
+/** Milliseconds. See `TransportOptions` — bounded, not nodemailer's 120 s. */
+export const TRANSPORT_TIMEOUTS = {
+  connectionTimeout: 10_000,
+  greetingTimeout: 10_000,
+  socketTimeout: 20_000,
+} as const;
 
 /**
  * Derive nodemailer transport options from the config + the already-decrypted
@@ -136,6 +153,7 @@ export function buildTransportOptions(
     host: cfg.host,
     port: cfg.port,
     secure: cfg.security === "tls",
+    ...TRANSPORT_TIMEOUTS,
   };
   // Enforce STARTTLS for `starttls` mode so SMTP-AUTH is never sent in cleartext
   // if the server doesn't advertise STARTTLS (or a MITM strips it). `none` stays
@@ -284,10 +302,19 @@ export interface SendInviteInput {
   role: string;
 }
 
+/**
+ * The slice of a nodemailer transport this service drives. `verify` is what
+ * `verifyChannel` calls — it connects, greets, upgrades to TLS and AUTHs, and
+ * sends no mail — so a test transport that only stubs `sendMail` is still
+ * usable for the send paths.
+ */
+export type ChannelTransport = Pick<Transporter, "sendMail"> &
+  Partial<Pick<Transporter, "verify">>;
+
 /** Overridable seams so tests never dial a real relay. */
 export interface SendOptions {
   /** Builds the transport. Defaults to a real nodemailer SMTP transport. */
-  transportFactory?: (opts: TransportOptions) => Pick<Transporter, "sendMail">;
+  transportFactory?: (opts: TransportOptions) => ChannelTransport;
 }
 
 /** Outcome of an invite send attempt. */
@@ -296,10 +323,168 @@ export interface SendResult {
   error?: string;
 }
 
-function defaultTransportFactory(
-  opts: TransportOptions,
-): Pick<Transporter, "sendMail"> {
+function defaultTransportFactory(opts: TransportOptions): ChannelTransport {
   return nodemailer.createTransport(opts);
+}
+
+// ── WARP-2957 — verifying the relay ──────────────────────────────────────────
+//
+// Until this existed the relay was save-only. `EmailChannelSetting.lastTestedAt`
+// and `lastError` were in the schema, rendered by the dashboard, and written by
+// NOTHING — so an owner who pasted a Gmail App Password was told "Saved" and
+// never "connected", and the first evidence the relay was wrong was a failed
+// invite days later.
+
+/**
+ * Why a relay test failed, as a closed set.
+ *
+ * 🔴 Closed on purpose. An SMTP server's rejection line is attacker-influenced
+ * and routinely names the account ("535 5.7.8 Username and Password not
+ * accepted for user@…"), so the server's own words never reach the row or the
+ * dashboard. The nodemailer error `code` and the SMTP reply code decide the
+ * member; the raw message goes to the log at debug and nowhere else.
+ */
+export type ChannelVerifyReason =
+  | "not_configured"
+  | "auth_failed"
+  | "unreachable"
+  | "tls_failed"
+  | "timeout"
+  | "unknown";
+
+/** One operator-facing sentence per reason — what `lastError` stores. */
+export const CHANNEL_VERIFY_MESSAGES: Record<ChannelVerifyReason, string> = {
+  not_configured: "No mail server is configured yet.",
+  auth_failed:
+    "The mail server rejected the username or password. Gmail and Microsoft 365 need an app password here, not your sign-in password.",
+  unreachable: "Couldn't reach the mail server. Check the host name and port.",
+  tls_failed:
+    "Couldn't start a secure connection. Try TLS on port 465 or STARTTLS on port 587.",
+  timeout: "The mail server didn't answer in time.",
+  unknown: "The mail server refused the connection.",
+};
+
+interface TransportErrorShape {
+  code?: unknown;
+  responseCode?: unknown;
+  message?: unknown;
+}
+
+/**
+ * Map a nodemailer / socket error onto {@link ChannelVerifyReason}.
+ *
+ * nodemailer sets `code` to EAUTH for a rejected AUTH, ECONNECTION for a dial
+ * that failed (sometimes with the underlying ENOTFOUND / ECONNREFUSED in its
+ * place), ETIMEDOUT / ESOCKET for timeouts and socket drops, and leaves
+ * `responseCode` carrying the SMTP reply when there was one. A TLS handshake
+ * failure arrives as ESOCKET with an OpenSSL message, or as a 5xx to STARTTLS
+ * when `requireTLS` found no STARTTLS to require. Order matters: the reply
+ * code and EAUTH are checked before the message-sniffing branches, because a
+ * 535 line can mention "TLS" in passing.
+ */
+export function classifyTransportError(err: unknown): ChannelVerifyReason {
+  const e = (err ?? {}) as TransportErrorShape;
+  const code = typeof e.code === "string" ? e.code : "";
+  const reply = typeof e.responseCode === "number" ? e.responseCode : 0;
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+
+  if (code === "EAUTH" || reply === 535 || reply === 534) return "auth_failed";
+  if (code === "ETIMEDOUT" || message.includes("timeout") || message.includes("timed out")) {
+    return "timeout";
+  }
+  if (
+    message.includes("starttls") ||
+    message.includes("certificate") ||
+    message.includes("ssl") ||
+    message.includes("tls") ||
+    message.includes("wrong version number")
+  ) {
+    return "tls_failed";
+  }
+  if (
+    code === "ECONNECTION" ||
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "EDNS" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ECONNRESET" ||
+    code === "ESOCKET"
+  ) {
+    return "unreachable";
+  }
+  return "unknown";
+}
+
+/** Outcome of {@link verifyChannel}. Never carries server text. */
+export interface ChannelVerifyResult {
+  ok: boolean;
+  reason?: ChannelVerifyReason;
+  /** The sentence written to `lastError` (null on success). */
+  error: string | null;
+  testedAt: Date;
+}
+
+/**
+ * Dial the configured relay, greet, upgrade, AUTH — and record the outcome on
+ * the singleton row. Sends nothing.
+ *
+ * Runs regardless of `enabled`: an owner tests a relay BEFORE switching it on,
+ * and a disabled-but-broken relay is still worth knowing about. What it does
+ * need is a host; without one there is nothing to dial and the row is left
+ * alone rather than stamped with a failure for a form nobody has filled in.
+ *
+ * The password is decrypted in memory for the dial and discarded. Like the
+ * send paths, this never throws — the outcome IS the result.
+ */
+export async function verifyChannel(
+  prisma: PrismaClient,
+  options: SendOptions = {},
+): Promise<ChannelVerifyResult> {
+  const factory = options.transportFactory ?? defaultTransportFactory;
+  const testedAt = new Date();
+
+  const cfg = await loadChannelConfig(prisma);
+  if (!cfg || cfg.host.trim().length === 0) {
+    return {
+      ok: false,
+      reason: "not_configured",
+      error: CHANNEL_VERIFY_MESSAGES.not_configured,
+      testedAt,
+    };
+  }
+
+  let reason: ChannelVerifyReason | null = null;
+  try {
+    let password = "";
+    if (cfg.passwordEnc.length > 0) {
+      password = decryptSecret(cfg.passwordEnc);
+    }
+    const transport = factory(buildTransportOptions(cfg, password));
+    if (typeof transport.verify !== "function") {
+      // A transport with no verify (a send-only stub) cannot be probed. Say
+      // so rather than claim success for a dial that never happened.
+      throw Object.assign(new Error("transport has no verify()"), { code: "EVERIFY" });
+    }
+    await transport.verify();
+  } catch (err) {
+    reason = classifyTransportError(err);
+    // The nodemailer code at debug only: an operator tracing a relay wants
+    // it; the row and the dashboard get the closed-set sentence.
+    logger.debug(
+      { reason, code: (err as TransportErrorShape)?.code },
+      "outbound email channel verify failed",
+    );
+  }
+
+  const error = reason ? CHANNEL_VERIFY_MESSAGES[reason] : null;
+  await prisma.emailChannelSetting.update({
+    where: { id: EMAIL_CHANNEL_SINGLETON_ID },
+    data: { lastTestedAt: testedAt, lastError: error },
+  });
+  logger.info({ ok: reason === null, reason }, "outbound email channel verified");
+
+  return reason ? { ok: false, reason, error, testedAt } : { ok: true, error: null, testedAt };
 }
 
 /**

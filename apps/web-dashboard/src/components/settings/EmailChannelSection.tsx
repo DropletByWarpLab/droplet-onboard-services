@@ -1,14 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Mail } from "lucide-react";
+import { AlertCircle, Check, Mail } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import {
   getEmailChannel,
   saveEmailChannel,
+  testEmailChannel,
   type EmailChannelConfig,
   type EmailChannelUpdate,
 } from "@/lib/api";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 /**
  * BUG-11 — "Outbound email" settings section.
@@ -22,6 +24,14 @@ import {
  * existing password (the API treats omitted-password as keep-existing). The raw
  * SMTP transport error is never rendered — only a friendly line — so a 535/auth
  * string never lands in the DOM.
+ *
+ * WARP-2957 — the relay is VERIFIED, not just saved. Saving an enabled relay
+ * dials it in the same request and the response carries `lastTestedAt` /
+ * `lastError`; "Test connection" does the same on demand. Before this the
+ * only signal was "Saved", and the first evidence a pasted app password was
+ * wrong was a failed invite days later. `lastError` is a closed-set sentence
+ * the orchestrator chose — never the server's own reply — so rendering it is
+ * safe by construction.
  *
  * Tokens only (.card / indigo inputs / .btn primary, type-*, indigo CSS
  * vars, system-red/green). No hardcoded colors.
@@ -44,6 +54,7 @@ export function EmailChannelSection() {
   const [security, setSecurity] = useState<EmailChannelUpdate["security"]>("starttls");
 
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,6 +96,8 @@ export function EmailChannelSection() {
         ...(password.length > 0 ? { password } : {}),
       };
       const saved = await saveEmailChannel(update);
+      // An enabled save carries the verify outcome (lastTestedAt/lastError);
+      // the status line below renders it. Nothing else to do here.
       setCfg(saved);
       setPassword("");
       setSavedAt(Date.now());
@@ -96,6 +109,29 @@ export function EmailChannelSection() {
       setSaving(false);
     }
   };
+
+  const handleTest = async () => {
+    setError(null);
+    setSavedAt(null);
+    setTesting(true);
+    try {
+      const result = await testEmailChannel();
+      setCfg((prev) =>
+        prev
+          ? { ...prev, lastTestedAt: result.lastTestedAt, lastError: result.error }
+          : prev,
+      );
+    } catch {
+      setError("Couldn't test the relay right now. Try again in a moment.");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // The relay's verified state, from the row — not from anything typed in the
+  // form. A test is against what is SAVED, and the copy says so.
+  const verified = cfg?.lastTestedAt ? (cfg.lastError ? "failed" : "ok") : "untested";
+  const canTest = Boolean(cfg && cfg.host.trim().length > 0) && !saving && !testing;
 
   return (
     <section className="mb-10">
@@ -112,12 +148,34 @@ export function EmailChannelSection() {
               </p>
             </div>
           </div>
-          {cfg?.hasPassword && (
-            <span className="flex items-center gap-1 type-caption-1 text-system-green">
-              <Check size={14} /> Configured
+          {verified === "ok" && cfg?.lastTestedAt && (
+            <span
+              className="flex items-center gap-1 type-caption-1 text-system-green"
+              role="status"
+            >
+              <Check size={14} /> Connected · checked {formatRelativeTime(cfg.lastTestedAt)}
+            </span>
+          )}
+          {verified === "failed" && (
+            <span className="flex items-center gap-1 type-caption-1 text-system-red" role="status">
+              <AlertCircle size={14} /> Not connected
+            </span>
+          )}
+          {verified === "untested" && cfg?.hasPassword && (
+            <span className="type-caption-1" style={{ color: "var(--text-muted)" }} role="status">
+              Saved, not tested yet
             </span>
           )}
         </div>
+
+        {verified === "failed" && cfg?.lastError && (
+          <p
+            className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+            role="alert"
+          >
+            {cfg.lastError}
+          </p>
+        )}
 
         {/* Enable toggle */}
         <label className="flex items-center gap-2.5 cursor-pointer">
@@ -266,10 +324,19 @@ export function EmailChannelSection() {
         <div className="flex items-center gap-2 pt-1">
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || testing}
             className="btn primary type-subheadline !min-h-[40px]"
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? (enabled ? "Saving and checking…" : "Saving…") : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={handleTest}
+            disabled={!canTest}
+            className="btn type-subheadline !min-h-[40px]"
+            title="Dials the saved relay and signs in. Sends nothing."
+          >
+            {testing ? "Checking…" : "Test connection"}
           </button>
         </div>
       </div>

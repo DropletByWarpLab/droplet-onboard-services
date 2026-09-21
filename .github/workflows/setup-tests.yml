@@ -67,6 +67,12 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
+      # that follow the served certificate through every reload.
+      - "tests/local-dns-avahi.test.sh"
+      - "scripts/lib/avahi-service.sh"
+      - "scripts/lib/local-dns.sh"
+      - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -132,6 +138,12 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
+      # that follow the served certificate through every reload.
+      - "tests/local-dns-avahi.test.sh"
+      - "scripts/lib/avahi-service.sh"
+      - "scripts/lib/local-dns.sh"
+      - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
       - "docker/mosquitto.conf"
@@ -363,3 +375,13 @@ jobs:
         # `droplet` is migrated, and verify.sh refuses it when HQ is configured.
         # Pure bash over a fixture /sys tree; no Docker, no root.
         run: bash tests/device-id-seed.test.sh
+
+      - name: Run avahi _droplet._tcp advertisement tests
+        # WARP-2941 / ADR-008 §4: the apps find a Droplet by TYPE. The rendered
+        # service file carries _droplet._tcp with fqdn=/state= TXT hints, the
+        # hints follow the served certificate (self-signed → bootstrap, CA-
+        # signed leaf → issued, FQDN from env or .env, XML-escaped, nothing
+        # non-public), the install is idempotent, and tls-reload's hook alone
+        # re-renders it. Real functions, sudo stubbed, openssl fixtures; no
+        # Docker, no root.
+        run: bash tests/local-dns-avahi.test.sh

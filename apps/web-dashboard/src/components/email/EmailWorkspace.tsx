@@ -123,6 +123,17 @@ export function EmailWorkspace({
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
   const lastSyncLabel = relativeSync(activeAccount?.lastIdleAt ?? null);
+  // WARP-2957 — an empty list has three different meanings now, and the
+  // account row can tell them apart: never synced yet, last sync failed, or
+  // genuinely nothing in the view.
+  const syncState: "first-sync" | "error" | null = !activeAccount
+    ? null
+    : activeAccount.imapStatus === "error"
+      ? "error"
+      : activeAccount.lastIdleAt === null &&
+          (activeAccount.imapStatus === "idle" || activeAccount.imapStatus === "reconnecting")
+        ? "first-sync"
+        : null;
 
   function selectThread(threadId: string) {
     setActiveThreadId(threadId);
@@ -180,6 +191,8 @@ export function EmailWorkspace({
           isLoading={accountsLoading || threadsLoading}
           error={threadsError}
           lastSyncLabel={lastSyncLabel}
+          syncState={syncState}
+          syncError={activeAccount?.lastError ?? null}
           onRetry={() => {
             refreshAccounts();
             refreshThreads();
