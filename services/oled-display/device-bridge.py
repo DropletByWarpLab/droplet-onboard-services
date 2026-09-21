@@ -3574,6 +3574,125 @@ def run_tls_reload():
     return True, {"message": (out or "").strip() or "gateway reloaded"}
 
 
+# --- WARP-2944 (ADR-058): bootstrap-certificate refresh on address change ----
+# The self-signed bootstrap cert freezes its IP SANs at generation. When the
+# box moves (new LAN, new lease) the served cert stops naming the box's own
+# address, and every app that pinned the box's key (WARP-2953/2954) is refused
+# BY NAME while the pin is right. The host script regenerates the cert around
+# the SAME key so the SAN follows the box; this is what calls it OUTSIDE
+# setup.sh: once at boot, and whenever the uplink address it already samples
+# for the panel changes. Idempotent on the script side (a cert that names
+# every current address is untouched), rate-limited here.
+#
+# Mirrors run_tls_reload(): allow-listed shape (no args), host-script only,
+# synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+TLS_BOOTSTRAP_REFRESH_SCRIPT = os.environ.get(
+    "DROPLET_TLS_BOOTSTRAP_REFRESH_SCRIPT",
+    "/usr/local/sbin/droplet-tls-bootstrap-refresh.sh").strip()
+# How often the watcher samples the uplink address. Cheap (one `ip route`
+# call), and a minute is the "heals about as fast as DHCP settles" cadence.
+TLS_REFRESH_WATCH_SECONDS = float(os.environ.get("DROPLET_TLS_REFRESH_WATCH_SECONDS", "60"))
+# Never run the host script more often than this without an address change
+# — the script is idempotent, but openssl + a possible nginx reload is not
+# free, and a flapping interface must not turn into a reload storm.
+TLS_REFRESH_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("DROPLET_TLS_REFRESH_MIN_INTERVAL_SECONDS", "600"))
+
+
+def run_tls_bootstrap_refresh():
+    """Regenerate the self-signed bootstrap cert's SAN around the same key if
+    it no longer names the box's current address. Returns (ok, info); never
+    raises — mirrors run_tls_reload()."""
+    try:
+        # openssl x2 + a possible `docker compose exec` reload.
+        rc, out, err = _run([TLS_BOOTSTRAP_REFRESH_SCRIPT], timeout=60)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("tls bootstrap refresh failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("tls bootstrap refresh refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    line = (out or "").strip().splitlines()
+    try:
+        body = json.loads(line[-1]) if line else {}
+    except ValueError:
+        body = {"message": (out or "").strip()}
+    if not isinstance(body, dict):
+        body = {"message": str(body)}
+    return True, body
+
+
+class TlsRefreshWatcher:
+    """The decision half of the watcher, pure so it is tested without threads:
+    given what the uplink looks like now, should the host script run?
+
+    Runs when (a) an address is seen for the first time since start (boot, or
+    the box just got a lease), or (b) the address CHANGED and has held for two
+    consecutive samples (a DHCP flap must not trigger twice), or (c) the
+    minimum interval has passed (a safety net for an address change the
+    sampler missed). Never runs while the box has no usable address."""
+
+    def __init__(self, min_interval=TLS_REFRESH_MIN_INTERVAL_SECONDS):
+        self.min_interval = min_interval
+        self.last_ip = None        # the address the last refresh ran for
+        self.pending_ip = None     # a new address seen once, awaiting confirmation
+        self.last_run_at = None
+
+    def decide(self, ip, now):
+        if not _usable_uplink_ip(ip):
+            self.pending_ip = None
+            return False
+        if self.last_ip is None:
+            return True
+        if ip != self.last_ip:
+            if self.pending_ip == ip:
+                return True
+            self.pending_ip = ip
+            return False
+        self.pending_ip = None
+        if self.last_run_at is None:
+            return True
+        return (now - self.last_run_at) >= self.min_interval
+
+    def ran(self, ip, now):
+        self.last_ip = ip
+        self.pending_ip = None
+        self.last_run_at = now
+
+
+def _tls_refresh_watch_loop():
+    watcher = TlsRefreshWatcher()
+    while True:
+        try:
+            ip = uplink_ip_snapshot().get("uplinkIp")
+            now = time.monotonic()
+            if watcher.decide(ip, now):
+                ok, info = run_tls_bootstrap_refresh()
+                watcher.ran(ip, now)
+                if ok and isinstance(info, dict) and info.get("changed"):
+                    logger.info("tls bootstrap refresh: certificate now names %s (pin %s)",
+                                ip, info.get("pin"))
+                elif not ok:
+                    logger.warning("tls bootstrap refresh: %s", info)
+        except Exception as e:                                          # noqa: BLE001
+            logger.debug("tls refresh watcher: %s", e)
+        time.sleep(TLS_REFRESH_WATCH_SECONDS)
+
+
+def start_tls_refresh_watcher():
+    """Daemon thread; DROPLET_TLS_REFRESH_WATCH_SECONDS=0 disables it
+    (dev laptops, the test harness)."""
+    if TLS_REFRESH_WATCH_SECONDS <= 0:
+        logger.info("tls refresh watcher disabled (DROPLET_TLS_REFRESH_WATCH_SECONDS=0)")
+        return None
+    t = threading.Thread(target=_tls_refresh_watch_loop,
+                         name="tls-refresh-watcher", daemon=True)
+    t.start()
+    return t
+
+
 # --- WARP-1639: rack-panel console handback ---------------------------------
 # THE DEBUG BUTTON'S PRIVILEGED HALF.
 #
@@ -4625,6 +4744,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/tls/bootstrap-refresh":
+            # WARP-2944: regenerate the self-signed cert's SAN around the same
+            # key if the box's address moved. Auth-gated like /tls/reload;
+            # idempotent, so an operator (or the orchestrator's tick) may call
+            # it freely. Synchronous + bounded like the reload.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_tls_bootstrap_refresh()
+            if not ok:
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/tls/reload":
             # ADR-023 (C2): reload the gateway nginx so a freshly-installed LE
             # cert is served immediately. Auth-gated exactly like the other
@@ -4818,4 +4949,7 @@ def _boot_banner():
 
 if __name__ == "__main__":
     _boot_banner()
+    # WARP-2944: heal a moved box's bootstrap certificate without waiting for
+    # a setup.sh re-run — once now, then on every uplink-address change.
+    start_tls_refresh_watcher()
     ThreadingHTTPServer((BRIDGE_BIND, BRIDGE_PORT), Handler).serve_forever()
