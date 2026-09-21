@@ -13,6 +13,7 @@ import { useIntegrations } from "@/lib/hooks/useIntegrations";
 import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+import { VERSION_LABEL } from "@/lib/brand";
 // WARP-1548 — the Files places rail's Libraries group. Lives in its own
 // component because it is the one piece of this nav that is DATA, not
 // config: the libraries come from GET /api/files/spaces at render time.
@@ -279,7 +280,7 @@ export function Sidebar() {
           )}
 
           <p className="type-caption-2 text-label-quaternary text-center">
-            Droplet v0.1.0
+            {VERSION_LABEL}
           </p>
         </div>
       </aside>
