@@ -480,6 +480,7 @@ body:has(.droplet-workspace) {
   display: none;
 }
 .droplet-workspace .droplet-home .dh-greet,
+.droplet-workspace .droplet-home .dh-m-greet,
 .droplet-workspace .droplet-home .dh-status-chip {
   display: none;
 }
