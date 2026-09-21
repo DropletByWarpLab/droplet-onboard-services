@@ -202,3 +202,61 @@ describe("<Sidebar> Cameras → Events nesting (mobile drawer)", () => {
     );
   });
 });
+
+/**
+ * WARP-2966 — the rendered Files section, at the surface the user sees.
+ *
+ * `Sidebar.files-section.test.tsx` pins the nav DEFINITION; this pins what
+ * reaches the DOM, because the two can disagree (a `hidden` item is in the
+ * definition and on no surface, which is exactly the mechanism used here).
+ */
+describe("<Sidebar> Files section reads as one idea (WARP-2966)", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/files";
+    capsRef.current = { claudeActivity: false, ragEval: false };
+  });
+
+  it("reveals exactly three sub-rows — Recent, Shared, Trash", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    for (const [name, href] of [
+      ["Recent", "/files/recents"],
+      ["Shared", "/files/shared"],
+      ["Trash", "/files/trash"],
+    ] as const) {
+      expect(
+        within(aside).getByRole("link", { name: new RegExp(`^${name}$`, "i") }),
+      ).toHaveAttribute("href", href);
+    }
+  });
+
+  it("offers no row that repeats the section's own destination", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    // The Files link IS Browse. "All files" beneath it said the same word
+    // twice and made the section a container of itself.
+    expect(aside.querySelectorAll("a[href='/files']")).toHaveLength(1);
+    expect(
+      within(aside).queryByRole("link", { name: /^all files$/i }),
+    ).toBeNull();
+  });
+
+  it("no longer offers Favorites or Sync devices from Files", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    expect(aside.querySelector("a[href='/files/favorites']")).toBeNull();
+    expect(aside.querySelector("a[href='/files/devices']")).toBeNull();
+  });
+
+  it("keeps the section revealed on a deeper Files route", () => {
+    pathnameRef.current = "/files/trash";
+    render(<Sidebar />);
+    const aside = desktopAside();
+    expect(
+      within(aside).getByRole("link", { name: /^trash$/i }),
+    ).toHaveAttribute("aria-current", "page");
+    expect(
+      within(aside).getByRole("link", { name: /^recent$/i }),
+    ).toBeInTheDocument();
+  });
+});

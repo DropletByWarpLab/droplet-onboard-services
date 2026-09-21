@@ -83,7 +83,21 @@ export const SPACES: SpaceDef[] = [
     icon: Briefcase,
     // Files · Email · Calendar · Messages, then the two post-handoff Workspace
     // routes (Routines, Workshop) — nav-config files both as "their work".
-    hrefs: ["/files", "/email", "/calendar", "/messages", "/routines", "/workshop"],
+    //
+    // WARP-2966 promoted Sync devices out of Files' children and tucked it
+    // (`hidden: true`) so the sidebar's Files section reads as one idea. Rule
+    // 2 above applies exactly as it does to Knowledge and Context: the tuck is
+    // a SURFACE decision, so this layout keeps it as a first-class chip — next
+    // to Files, whose `files` module gate it still carries.
+    hrefs: [
+      "/files",
+      "/files/devices",
+      "/email",
+      "/calendar",
+      "/messages",
+      "/routines",
+      "/workshop",
+    ],
   },
   {
     id: "business",

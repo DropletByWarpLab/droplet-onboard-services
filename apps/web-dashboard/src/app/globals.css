@@ -1032,6 +1032,18 @@ html {
   outline-offset: 2px;
 }
 
+/* WARP-2966 — the hairline that separates the Libraries group from the three
+   sub-nav rows above it. Same indent, same type scale, one row apart: without
+   a rule "LIBRARIES" read as a fourth row of that list instead of the head of
+   a different kind of list — places you can be, then libraries you can be in.
+   In the sheet rather than as `border-separator` on the element for the reason
+   the block header gives: the sidebar renders above every page scope, and the
+   `border-separator` utility is a pre-DESIGN.md token the class ratchet
+   refuses in new code (scripts/check-dashboard-classes.sh). */
+.files-rail-group {
+  border-top: 1px solid var(--color-separator);
+}
+
 /* The neutral, text-first rights chip (departments packet §1, D-4) — never the
    `--role-*` ramp. */
 .files-rail-chip {
