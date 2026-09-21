@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { NavLayoutToggle } from "@/components/NavLayoutToggle";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
@@ -152,6 +153,18 @@ export default function SettingsPage() {
                   and clipped "Light" to "Li…"; content sizing lets the labels
                   set the width and takes the indigo shell surface. */}
               <ThemeToggle fit="content" />
+            </div>
+            {/* WARP-2971 — which navigation shell this person sees. A display
+                preference like Theme (same storage, same radiogroup), never a
+                permission: both layouts resolve the same nav-config gates. */}
+            <div className="lrow" style={{ padding: "12px 16px" }}>
+              <span className="rt">
+                <span className="nm">Navigation</span>
+                <span className="sub">
+                  Sidebar, or the Workspace tabs across the top
+                </span>
+              </span>
+              <NavLayoutToggle />
             </div>
           </div>
         </div>

@@ -586,25 +586,53 @@ export const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as cons
 export function visibleItems(
   items: NavItem[],
   role: AuthRole | undefined,
-  capabilities: Record<NonNullable<NavItem["requiresCapability"]>, boolean>,
+  capabilities: NavCapabilities,
   isModuleOn: (moduleId: string) => boolean,
 ): NavItem[] {
-  const allowed = (item: NavItem): boolean => {
+  const allowed = (item: NavItem): boolean =>
     // WARP-1807: a tucked item renders on no surface regardless of what its
     // other gates would say — Settings owns the way in. Children run this
     // same predicate, so a hidden child drops too.
-    if (item.hidden) return false;
-    if (item.roles && (!role || !item.roles.includes(role))) return false;
-    if (item.requiresCapability && !capabilities[item.requiresCapability])
-      return false;
-    // WARP-1397: hide a switched-off feature's nav entry (module not effective).
-    // WARP-1528: "effective" is now per person, not just per box.
-    if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
-    return true;
-  };
+    !item.hidden && passesGates(item, role, capabilities, isModuleOn);
   return items.filter(allowed).map((item) =>
     item.children ? { ...item, children: item.children.filter(allowed) } : item,
   );
+}
+
+/** The resolved capability flags a nav gate reads — the admin capabilities
+ *  endpoint's two plus the WARP-2880 `medicalConnector` the Sidebar derives
+ *  from /api/integrations. Named so a second nav surface can take the same
+ *  shape without restating the union. */
+export type NavCapabilities = Record<
+  NonNullable<NavItem["requiresCapability"]>,
+  boolean
+>;
+
+/**
+ * WARP-2971 — the three ACCESS gates on a nav item (role, capability, module),
+ * WITHOUT the WARP-1807 `hidden` tuck. Split out of `visibleItems` because the
+ * Workspace layout (`workspace/workspace-nav-config.ts`) renders Knowledge and
+ * Context as first-class destinations — the handoff lists them under
+ * Intelligence — while every access rule must still hold there exactly as it
+ * does in the sidebar. `hidden` is a SURFACE decision (which nav shows the
+ * item); these three are PERMISSION decisions (whether the viewer may see it
+ * at all), and only the surface is allowed to differ between layouts.
+ *
+ * `visibleItems` above is unchanged in behaviour: tuck, then these gates.
+ */
+export function passesGates(
+  item: NavItem,
+  role: AuthRole | undefined,
+  capabilities: NavCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
+): boolean {
+  if (item.roles && (!role || !item.roles.includes(role))) return false;
+  if (item.requiresCapability && !capabilities[item.requiresCapability])
+    return false;
+  // WARP-1397: hide a switched-off feature's nav entry (module not effective).
+  // WARP-1528: "effective" is now per person, not just per box.
+  if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
+  return true;
 }
 
 /**
@@ -624,7 +652,9 @@ export function visibleItems(
  */
 const ALWAYS_ON_PATHS = ["/", "/chat", "/settings"] as const;
 
-function pathMatches(pathname: string, href: string): boolean {
+// Exported (WARP-2971) so the Workspace layout derives the active space with
+// the SAME segment-aware rule `moduleForPath` uses, not a second prefix test.
+export function pathMatches(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
 }

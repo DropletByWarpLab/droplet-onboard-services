@@ -4,6 +4,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
+import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
+import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
@@ -43,6 +45,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
   } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  // WARP-2971 — which shell wraps a protected page. Read unconditionally (a
+  // hook), consumed only on the authenticated branch at the bottom.
+  const { layout: navLayout } = useNavLayout();
 
   const isPublicPage = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
 
@@ -326,6 +331,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // renders fully and then fails request by request. It sits below every
   // earlier takeover branch on purpose: setup, tour and change-password own
   // their own routing and must never be second-guessed by a feature gate.
+  //
+  // WARP-2971: the person's nav layout picks the shell. The Workspace shell
+  // owns its own <main id="main"> (the skip link's target) and sits at the
+  // same point in this ladder, so every takeover above and the module guard
+  // inside apply to both layouts identically.
+  if (navLayout === "workspace") {
+    return (
+      <>
+        <WorkspaceShell>
+          <ModuleRouteGuard>{children}</ModuleRouteGuard>
+        </WorkspaceShell>
+        <HelpLauncher />
+      </>
+    );
+  }
   return (
     <>
       <Sidebar />
