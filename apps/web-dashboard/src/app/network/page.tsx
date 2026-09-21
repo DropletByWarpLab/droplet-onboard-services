@@ -60,6 +60,7 @@ import { networkTabHref, parseNetworkTab, type Tab } from "./tab-url";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
+  scrollTabToTop,
 } from "./schedule-anchor-scroll";
 import type {
   FirewallConfig,
@@ -296,6 +297,17 @@ function NetworkPageInner() {
       cleanup();
     };
   }, [activeTab, mode]);
+
+  // WARP-2963: a tab arrival starts at the top of that tab's options. Nothing
+  // scrolled on `?tab=<id>`, so a deep link or a tab switch inherited whatever
+  // scroll position the browser restored across the Suspense → skeleton →
+  // content swap — with ~300px of chrome above the first card, the tab opened
+  // showing its middle. scrollTabToTop stands aside for a `#schedule-` deep
+  // link, whose own anchor scroll (above) owns that jump. This does override
+  // back/forward scroll restoration on /network.
+  useEffect(() => {
+    scrollTabToTop();
+  }, [activeTab]);
 
   // WARP-298 / PR #720 review (a11y): once `activeTab` reflects the key-driven
   // selection, move focus to that tab button. Running this after activation
