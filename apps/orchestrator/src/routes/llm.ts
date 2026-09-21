@@ -2469,7 +2469,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // lookup. Still forwarded as the request principal.
           userId: (req as AuthedRequest).user?.id,
         });
-        res.json(result);
+        // Projected, not spread: WARP-2964 grew `CompleteOnceResult` with the
+        // provider's `reasoning` / `finishReason` for in-box callers. This is
+        // a published wire contract (the translate_text / summarize_file MCP
+        // tools), so it stays exactly `{content, model}`.
+        res.json({ content: result.content, model: result.model });
       } catch (err) {
         // Gateway down, non-OK, or the 120 s belt-and-braces timeout in
         // completeOnce fired (CPU inference can be slow, but past that the

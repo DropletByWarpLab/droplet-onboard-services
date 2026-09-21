@@ -328,6 +328,11 @@ RAIL_WIFI_SECONDS = float(os.environ.get("PANEL_RAIL_WIFI_SECONDS", "45"))
 # response to that is to not arm the face at all rather than to paint a card
 # nobody can scan.
 RAIL_QR_BYTE_BUDGET = 62
+# WARP-2954 — the rail's app-pairing face encodes at ECC L, where the same
+# version-4 code at the 4px floor holds 78 bytes (layout_wide's table); the
+# compact pin-only link is 63. Its own constant so the Wi-Fi face's budget
+# (ECC M, the scan-robust level for a credential) is untouched.
+RAIL_PAIR_QR_BYTE_BUDGET = 78
 
 # ---------------------------------------------------------------------------
 # Boot readiness (WARP-624; redirect/TLS fix WARP-638)
@@ -934,6 +939,10 @@ class TFTDisplay:
             # carried an SSID+key pair. Conflating them is what left the
             # rail's Wi-Fi face permanently dark.
             "wifi_join": {},
+            # WARP-2954 — the app-pairing link from the bridge's /pair/qr
+            # (the served certificate's key pin, compact form). The rail's
+            # default face once it is known; empty until the first poll.
+            "pair_join": {},
             "cameras": {"online": 0, "total": 0},
             # WARP-2668 (WARP-2098 LEG 5) — the wide panel's STORAGE cell,
             # filled by fetch_storage() from the orchestrator's data-drive
@@ -1118,6 +1127,8 @@ class TFTDisplay:
                 self.update_storage(data)
             elif mode == "qr":
                 self.update_wifi_join(data)
+            elif mode == "pair":
+                self.update_pair_join(data)
         except Exception as e:                                  # noqa: BLE001
             logger.debug("v3 mirror (%s) failed: %s", mode, e)
 
@@ -2089,6 +2100,16 @@ class TFTDisplay:
         equivalent of WARP-1643's frozen sensor reading."""
         if isinstance(data, dict):
             self._v3["wifi_join"] = data
+
+    def update_pair_join(self, data: dict) -> None:
+        """WARP-2954. Replaces wholesale, like update_wifi_join and for the
+        same reason: `ok` going False (no usable address, unreadable
+        certificate) must take the pairing face back down rather than leave
+        a link with a stale key on the glass — a phone that scanned it would
+        be told "identity changed" by the app, which is right, but the panel
+        should not offer it in the first place."""
+        if isinstance(data, dict):
+            self._v3["pair_join"] = data
 
     def update_services(self, data: dict) -> None:
         """WARP-1645. Replaces wholesale rather than merging: `degraded` is a
@@ -3337,6 +3358,38 @@ class TFTDisplay:
             return ""
         return payload
 
+    def pair_qr_payload(self) -> str:
+        """The compact `droplet://pair?spki=<pin>` link for the rail's default
+        face (WARP-2954), or "" when the bridge has not vouched for one.
+
+        Only the bridge's own payload is used — never composed here from
+        pieces — so the pin on the glass is exactly the one the host computed
+        from the served certificate. The shape is checked so that a bridge
+        answering something unexpected cannot put an arbitrary QR on the
+        front of the rack; the byte budget is the pair face's own (ECC L).
+        The app finds the box on the LAN itself and pairs to whichever
+        address proves this key — the link carries no address on purpose:
+        it would not fit, and the key is the identity, not the address.
+        """
+        join = self._v3.get("pair_join") or {}
+        if join.get("ok") is False:
+            return ""
+        payload = str(join.get("payload") or "")
+        # The compact, pin-only form the bridge mints (device-bridge.py
+        # pair_link): the scheme + one base64url pin, nothing else. Anything
+        # with an address or another parameter is not what the rail shows.
+        prefix = "droplet://pair?spki="
+        pin = payload[len(prefix):] if payload.startswith(prefix) else ""
+        if len(pin) != 43 or not all(c.isalnum() or c in "-_" for c in pin):
+            return ""
+        if len(payload) > RAIL_PAIR_QR_BYTE_BUDGET:
+            logger.warning(
+                "pairing QR payload is %d bytes, over the %d-byte rail budget — "
+                "the rail keeps the dashboard link.", len(payload),
+                RAIL_PAIR_QR_BYTE_BUDGET)
+            return ""
+        return payload
+
     def rail_face(self) -> str:
         """Which QR the rail is showing: "wifi" or "dashboard".
 
@@ -3703,6 +3756,10 @@ class TFTDisplay:
 
     def fetch_qr(self, timeout: float = 12.0) -> Optional[dict]:
         return self._bridge_get("/openwrt/qr", timeout)
+
+    def fetch_pair_qr(self, timeout: float = 12.0) -> Optional[dict]:
+        """WARP-2954: the app-pairing link (the served certificate's key pin)."""
+        return self._bridge_get("/pair/qr", timeout)
 
     def rotate_wifi_key(self, timeout: float = 30.0) -> Optional[dict]:
         """Ask device-bridge to roll the Droplet-AI WPA key. Used by the
@@ -4208,6 +4265,13 @@ class TFTDisplay:
                     # Carries data, so this does NOT navigate a display — only
                     # a BARE {"mode": ...} frame is a nav (pyportal/code.py).
                     self._pyportal_send("qr", qr)
+                # WARP-2954 — the app-pairing link, same cadence. Mirrored
+                # straight into the host preview store rather than sent as a
+                # frame: no firmware knows a "pair" mode, and the wide panel
+                # renders from _v3 anyway.
+                pair = self.fetch_pair_qr()
+                if pair is not None:
+                    self._mirror_to_v3("pair", pair)
                 last_join_push = now
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._wants_data():

@@ -344,6 +344,34 @@ function RoutineDetail({
         >
           {readback.impactLine}
         </p>
+        {/* WARP-2895 — a routine that runs code shows the code. The readback
+            says "runs code you wrote" and the person reads exactly what,
+            before turning it on; the sandbox it runs in reaches no network,
+            no file and no tool. */}
+        {readback.code.length > 0 ? (
+          <div style={{ marginTop: 10, display: "grid", gap: 8 }} data-testid="routine-code">
+            <p className="muted" style={{ margin: 0 }}>
+              Runs code you wrote, in a sandbox that reaches no network, no file and no tool.
+            </p>
+            {readback.code.map((c, i) => (
+              <pre
+                key={i}
+                aria-label={c.kind === "when" ? "Condition code" : "Transform code"}
+                style={{
+                  margin: 0,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: "var(--inset)",
+                  fontSize: 12,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {c.code}
+              </pre>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <StepList routine={full ?? routine} />
@@ -434,9 +462,13 @@ function StepList({ routine }: { routine: Routine }) {
           const tool =
             s.kind === "summarize"
               ? "Write a summary"
-              : typeof args?.tool === "string"
-                ? args.tool
-                : "(unreadable step)";
+              : s.kind === "transform"
+                ? "Run code (shape the results)"
+                : s.kind === "when"
+                  ? "Run code (continue only if true)"
+                  : typeof args?.tool === "string"
+                    ? args.tool
+                    : "(unreadable step)";
           const as = typeof args?.as === "string" ? args.as : null;
           return (
             <li key={s.id}>

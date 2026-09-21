@@ -3154,9 +3154,11 @@ export type RoutineStatus = "live" | "draft" | "suggested";
 export interface RoutineStep {
   id: string;
   idx: number;
-  /** "call" | "summarize" — a plain String column, extensible by design. */
+  /** "call" | "summarize" | "transform" | "when" — a plain String column,
+   *  extensible by design (WARP-2895 added the two sandbox kinds). */
   kind: string;
-  /** `{tool, args}` for a call, `{prompt?}` for a summarize. */
+  /** `{tool, args}` for a call, `{prompt?}` for a summarize, `{code, inputs?}`
+   *  for a transform / when. */
   args: Record<string, unknown> | null;
 }
 

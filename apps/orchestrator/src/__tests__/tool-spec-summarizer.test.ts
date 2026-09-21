@@ -37,7 +37,12 @@ const failed = (tool: string, error: string): RunStepTrace => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  completeOnceMock.mockResolvedValue({ content: "A quiet morning.", model: "m" });
+  completeOnceMock.mockResolvedValue({
+    content: "A quiet morning.",
+    model: "m",
+    reasoning: "",
+    finishReason: "stop",
+  });
 });
 
 describe("renderFacts", () => {
@@ -110,17 +115,67 @@ describe("renderFacts", () => {
 
 describe("createToolSpecSummarizer", () => {
   it("returns the model's prose, trimmed", async () => {
-    completeOnceMock.mockResolvedValue({ content: "  Nine files landed.  ", model: "m" });
+    completeOnceMock.mockResolvedValue({
+      content: "  Nine files landed.  ",
+      model: "m",
+      reasoning: "",
+      finishReason: "stop",
+    });
     const s = createToolSpecSummarizer();
     await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("Nine files landed.");
+  });
+
+  it("budgets the FIRST call for a reasoning model's analysis channel", async () => {
+    // WARP-2964 — gpt-oss burns the whole budget in the harmony analysis
+    // channel before it writes a word of prose. 700 tokens never reached
+    // `content`; the replay needed ~1150 completion tokens to finish.
+    const s = createToolSpecSummarizer();
+    await s.summarize("Write it up.", [ok("t", 1)]);
+    expect(completeOnceMock.mock.calls[0][0].maxTokens).toBe(2100);
+  });
+
+  it("makes exactly ONE call when the first answer is not blank", async () => {
+    const s = createToolSpecSummarizer();
+    await s.summarize("Write it up.", [ok("t", 1)]);
+    expect(completeOnceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("RETRIES once on a blank answer with a doubled budget and low effort", async () => {
+    // WARP-2964 — a blank answer with finish_reason=length is a budget
+    // failure, not a quiet day. Give it room once before giving up.
+    completeOnceMock
+      .mockResolvedValueOnce({ content: "   ", model: "m", reasoning: "…", finishReason: "length" })
+      .mockResolvedValueOnce({ content: "Nine files landed.", model: "m", reasoning: "", finishReason: "stop" });
+    const s = createToolSpecSummarizer();
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("Nine files landed.");
+    expect(completeOnceMock).toHaveBeenCalledTimes(2);
+    expect(completeOnceMock.mock.calls[1][0].maxTokens).toBe(4200);
+    expect(completeOnceMock.mock.calls[1][0].reasoningEffort).toBe("low");
   });
 
   it("THROWS on an empty completion rather than returning an empty report", async () => {
     // completeOnce treats empty content as a non-error. Here it is one: an
     // empty narrative is indistinguishable from a quiet day.
-    completeOnceMock.mockResolvedValue({ content: "   ", model: "m" });
+    completeOnceMock.mockResolvedValue({ content: "   ", model: "m", reasoning: "", finishReason: "stop" });
     const s = createToolSpecSummarizer();
     await expect(s.summarize("Write it up.", [ok("t", 1)])).rejects.toThrow(/empty summary/);
+  });
+
+  it("ATTRIBUTES a twice-blank answer — the provider's verdict, not just 'empty'", async () => {
+    // WARP-2964 — "the model returned an empty summary" told the owner
+    // nothing and told whoever debugged it less. finish_reason=length plus
+    // a fat reasoning channel names the budget as the cause on sight.
+    completeOnceMock.mockResolvedValue({
+      content: "",
+      model: "m",
+      reasoning: "x".repeat(2518),
+      finishReason: "length",
+    });
+    const s = createToolSpecSummarizer();
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).rejects.toThrow(
+      /empty summary \(model=.* finish_reason=length reasoning_chars=2518\)/,
+    );
+    expect(completeOnceMock).toHaveBeenCalledTimes(2);
   });
 
   it("sends the facts and the spec's prompt to the model", async () => {

@@ -1,12 +1,12 @@
 fastapi>=0.141.1
-uvicorn>=0.52.1
+uvicorn>=0.53.0
 litellm>=1.100.1
 cryptography>=50.0.1
 pydantic>=2.13.5
 httpx>=0.28.1
 sse-starlette>=3.4.11
 redis>=8.1.0
-grpcio>=1.83.1
+grpcio>=1.84.0
 grpcio-tools>=1.83.1
 sentence-transformers>=5.7.0
 # NOTE (WARP-1948): keep this torch line EXACTLY as-is. Appending a version

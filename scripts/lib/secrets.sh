@@ -607,6 +607,8 @@ generate_env() {
   # added to this function, which is why /api/web/* fails closed on a box
   # nobody hand-edited.
   doc_render_service_token=$(openssl rand -hex 32)
+  # WARP-2895: bearer for the code-execution sandbox (orchestrator → sandbox).
+  sandbox_service_token=$(openssl rand -hex 32)
   # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
   # container — the one component allowed to open an outbound MCP session
   # (ADR-043 §5). Minted unconditionally even though the `remote-mcp` compose
@@ -958,6 +960,15 @@ RAGAS_EVAL_USER=eval-fixtures
 # its side is empty.
 DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
 
+# --- Sandbox bearer (orchestrator → sandbox) ---
+# WARP-2895. The orchestrator presents this on POST /transform to the sandbox
+# container, which runs a routine's transform / when steps in a child
+# interpreter on the internal-only network. The sandbox carries NO env_file —
+# this key reaches it by compose substitution and is the only secret it
+# holds. Both ends fail CLOSED when it is empty (sandbox 503s, orchestrator
+# refuses without dialling). Rotate in lockstep and recreate both.
+SANDBOX_SERVICE_TOKEN=$sandbox_service_token
+
 # --- Outbound MCP bridge bearer (orchestrator -> mcp-bridge) ---
 # WARP-2627 / ADR-043 §5. The orchestrator presents this to the mcp-bridge
 # container, which is the ONLY component that opens a session to a remote MCP
@@ -1265,6 +1276,9 @@ migrate_env() {
   # refuse until someone hand-edited .env. Backfill is only-when-missing, so
   # an operator who already set one keeps it.
   _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # WARP-2895: same backfill for the sandbox's bearer — without one every
+  # transform step fails closed until someone hand-edits .env.
+  _migrate_ensure_key SANDBOX_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
   # missing, so an operator who already set one keeps it.
   _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
