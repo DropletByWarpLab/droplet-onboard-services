@@ -1276,6 +1276,23 @@ def _rail_content(disp, v: dict) -> dict:
     faces = 2 if (d.RAIL_WIFI_QR and wifi_payload) else 1
 
     if faces == 1 or disp.rail_face() != "wifi":
+        # WARP-2954 / ADR-058: once the bridge has vouched for the box's
+        # certificate key, the default face is the APP-PAIRING link — the
+        # box's own key, from the one channel no network attacker can reach.
+        # Scanned with the Droplet app (or the phone camera, which hands the
+        # droplet:// link to the app) it pairs to exactly this box with no
+        # public certificate and nothing installed. The typed fallback stays
+        # the address, so a browser user is no worse off than before; the
+        # dashboard link returns only while the bridge has no pin to offer.
+        pair_payload = disp.pair_qr_payload()
+        if pair_payload:
+            # ECC L: the 63-byte pin-only link is a version-4 code only at
+            # L (v5 at M — 45 modules, 3px, below the floor). A clean render
+            # on glass, not a printed label, so 7% correction is enough; the
+            # Wi-Fi face keeps M.
+            return dict(payload=pair_payload, ecc="L",
+                        caption="SCAN TO PAIR", headline="Droplet app",
+                        fallback=host, faces=faces, face_index=0)
         return dict(payload=f"https://{host}/dashboard",
                     caption="SCAN TO OPEN", headline="Dashboard",
                     fallback=host, faces=faces, face_index=0)

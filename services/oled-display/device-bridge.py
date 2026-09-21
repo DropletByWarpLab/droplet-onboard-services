@@ -18,7 +18,9 @@ upstream being down never takes the bridge down; the display UI shows
 a "waiting for X" state instead.
 """
 
+import base64
 import datetime
+import hashlib
 import hmac
 import json
 import logging
@@ -2523,6 +2525,135 @@ def uplink_ip_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# WARP-2954 / ADR-058 — the app-pairing link for the panel's rail
+# ---------------------------------------------------------------------------
+# The Droplet apps pair to a box by the box's OWN certificate key (droplet-
+# windows WARP-2953): a `droplet://pair?…spki=<pin>` link carries the
+# standard SPKI pin of the leaf the gateway serves, and the app then verifies
+# every connection against that key — no public CA, no HQ, nothing installed
+# on the phone or PC. The dashboard's pairing QR already carries it
+# (orchestrator lib/served-cert-pin.ts); the rack panel's rail is the channel
+# no network attacker can reach at all, so it shows the same key, in the
+# compact pin-only form that fits the rail's card (pair_link below).
+#
+# Runs here, on the host, because the panel container has no view of
+# docker/certs. The pin is computed with the openssl CLI over the SAME file
+# the gateway mounts, so it is byte-identical to what the orchestrator mints
+# and what the apps compute (`openssl x509 -pubkey | openssl pkey -pubin
+# -outform DER | sha256 | base64`). Cached by the file's mtime: a cert swap
+# (tls-issuance install, tls-reload) yields a new pin on the next poll.
+#
+# `server` (reported alongside, not encoded in the link) is the box's
+# default-route source address — the same address the panel prints under IP
+# and the one a phone on this LAN can reach. It doubles as the readiness
+# gate: a box with no LAN address yet has nothing a phone could pair to, so
+# the rail keeps its dashboard face until DHCP has answered.
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PAIR_CERT_PATH = os.environ.get(
+    "DROPLET_TLS_CERT", os.path.join(_REPO_ROOT, "docker", "certs", "droplet.crt")).strip()
+
+_pair_pin_cache = {"path": None, "mtime": None, "pin": None}
+
+
+def _first_pem_certificate(text):
+    """The first `-----BEGIN CERTIFICATE-----` block of a PEM bundle (the
+    leaf — an LE fullchain writes the leaf first), re-wrapped canonically.
+    None when there is none.
+
+    Canonical because openssl on stdin refuses anything but clean 64-column
+    LF lines ("Could not find certificate"), and a cert file can arrive with
+    CRLF, doubled CRs or odd wrapping after a trip through Windows tooling.
+    Only the base64 body carries the certificate, so that is all we keep."""
+    begin = text.find("-----BEGIN CERTIFICATE-----")
+    if begin < 0:
+        return None
+    body_start = begin + len("-----BEGIN CERTIFICATE-----")
+    end = text.find("-----END CERTIFICATE-----", body_start)
+    if end < 0:
+        return None
+    b64 = "".join(text[body_start:end].split())
+    if not b64:
+        return None
+    lines = [b64[i:i + 64] for i in range(0, len(b64), 64)]
+    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+
+def served_cert_pin(cert_path=None):
+    """base64(SHA-256(DER SubjectPublicKeyInfo)) of the served leaf, or None.
+
+    Never raises: a missing/unreadable leaf, or an openssl that cannot parse
+    it, yields None and the panel simply keeps its dashboard-link face."""
+    path = cert_path or PAIR_CERT_PATH
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return None
+    c = _pair_pin_cache
+    if c["path"] == path and c["mtime"] == mtime and c["pin"]:
+        return c["pin"]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            leaf = _first_pem_certificate(fh.read())
+        if not leaf:
+            return None
+        pub = subprocess.run(
+            ["openssl", "x509", "-pubkey", "-noout"],
+            input=leaf.encode("utf-8"), capture_output=True, timeout=10, check=False)
+        if pub.returncode != 0 or not pub.stdout:
+            return None
+        der = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-outform", "DER"],
+            input=pub.stdout, capture_output=True, timeout=10, check=False)
+        if der.returncode != 0 or not der.stdout:
+            return None
+        pin = base64.b64encode(hashlib.sha256(der.stdout).digest()).decode("ascii")
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("served-cert pin failed for %s: %s", path, e)
+        return None
+    _pair_pin_cache.update(path=path, mtime=mtime, pin=pin)
+    return pin
+
+
+def pair_link(pin):
+    """`droplet://pair?spki=<pin, base64url unpadded>` — the COMPACT form of
+    the link the orchestrator mints for the dashboard QR (lib/served-cert-pin.ts
+    buildPairUrl: `server=…&code=…&spki=<standard base64, URL-encoded>`).
+
+    Compact on purpose, and pin-ONLY: the rail's QR card holds a version-4
+    code at the 4px/module scan floor (layout_wide.QR_BYTE_BUDGET), which is
+    78 bytes at ECC L. The full link is ~100 bytes and cannot be scanned from
+    the glass; 63 bytes can. The box's address is deliberately not in it —
+    a phone that scanned the front of the rack is on the box's LAN, where the
+    app finds the box by mDNS (WARP-2926) and keeps the one whose served key
+    IS this pin. That also survives a DHCP address change, which a baked-in
+    address would not. base64url (`-`/`_`, no `=`) needs no URL-encoding;
+    the apps accept both encodings (droplet-windows trust.rs normalize_pin)."""
+    raw = base64.b64decode(pin)
+    return "droplet://pair?spki={}".format(
+        base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="))
+
+
+def pair_qr_snapshot():
+    """{"ok": True, "server", "spki", "payload"} for the rail, or
+    {"ok": False, "error"} — honest about WHY there is nothing to show, so the
+    panel can keep its dashboard link rather than a broken QR."""
+    ip = None
+    try:
+        ip = uplink_ip_snapshot().get("uplinkIp")
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pair-qr: uplink ip probe failed: %s", e)
+    if not _usable_uplink_ip(ip):
+        return {"ok": False, "error": "no usable LAN address for the box yet"}
+    pin = served_cert_pin()
+    if not pin:
+        return {"ok": False, "error": "served certificate not readable"}
+    server = "https://{}".format(ip)
+    return {"ok": True, "server": server, "spki": pin,
+            "payload": pair_link(pin)}
+
+
+# ---------------------------------------------------------------------------
 # STUN reflexive-mapping probe (WARP-1385) — the box's own public UDP mapping
 # ---------------------------------------------------------------------------
 # The direct-punch remote-access overlay (ADR-030) needs the box to learn the
@@ -4150,6 +4281,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, qr_snapshot())
+            if path == "/pair/qr":
+                # WARP-2954: the app-pairing link (served-cert pin) for the
+                # panel's rail, with the LAN address alongside. The pin is
+                # public (any TLS client sees the certificate) but the LAN
+                # address is box-internal topology — gate like /openwrt/qr;
+                # the panel sends the token on every GET.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, pair_qr_snapshot())
             if path == "/openwrt/wifi/guest":
                 # Guest Wi-Fi status (the body carries the guest PSK for the join
                 # QR) — auth-gated like /openwrt/qr. Only meaningful on the
