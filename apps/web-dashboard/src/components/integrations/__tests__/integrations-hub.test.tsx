@@ -108,7 +108,10 @@ vi.mock("@/components/integrations/provider-descriptors", async (importOriginal)
 });
 
 import { fetchIntegrations } from "@/lib/api.erp";
-import type { ProviderDescriptor } from "@/components/integrations/provider-descriptors";
+import {
+  PROVIDER_DESCRIPTORS,
+  type ProviderDescriptor,
+} from "@/components/integrations/provider-descriptors";
 import IntegrationsPage from "@/app/integrations/page";
 
 /** A second connectable vendor, so dispatch is tested off data, not off a name. */
@@ -573,49 +576,49 @@ describe("entries are the union of the catalog and the response", () => {
     await waitFor(() => expect(renderedNames(container)).toContain("Open Dental"));
 
     expect(renderedNames(container)).toEqual([
+      // WARP-2968 — the grid is grouped by category, so the run below is
+      // catalog order REGROUPED: a category sits where its first provider
+      // does, and its later ones join it there. Xero after QuickBooks is the
+      // clearest example — `catalog.order` 11 rendered under the Accounting
+      // heading opened by `catalog.order` 2.
+      // Practice management
       "Eaglesoft",
       "Dentrix",
-      "QuickBooks",
       "Open Dental",
-      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
-      // hub code change at all: the grid is DERIVED from the descriptor
-      // catalog (#1809 + #1808), so registering a descriptor is what puts a
-      // tile on the page. Mutation: delete a `catalog` block from one of the
-      // three descriptors → red.
+      // Accounting
+      "QuickBooks",
+      "Xero",
+      // Payments
       "Stripe",
+      "Square",
+      // CRM
       "HubSpot",
+      "Pipedrive",
+      // Marketing. WARP-2466 — these arrive with no hub code change at all:
+      // the grid is DERIVED from the descriptor catalog (#1809 + #1808), so
+      // registering a descriptor is what puts a tile on the page. Mutation:
+      // delete a `catalog` block from one of them → red.
       "Mailchimp",
-      // WARP-2296 / WARP-2383 — Shopify and Xero, same story: one descriptor,
-      // one tile. Xero sits last because its `catalog.order` is 11, not because
-      // of where its descriptor is declared.
-      "Shopify",
-      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, same story again: one
-      // descriptor each, one tile each, no hub code change.
       "Brevo",
       "Klaviyo",
-      "Pipedrive",
-      "Xero",
-      // WARP-2707 / ADR-046 — the first two DECLARATIVE REST vendors. Same
-      // story a fourth time, and it is the strongest version of it: these two
-      // register no connector factory at all, only a profile, and they still
-      // reach the grid with no hub code change. They sit after Xero because
-      // their `catalog.order` is 12 and 13.
-      "Square",
+      // Commerce
+      "Shopify",
+      // Scheduling
       "Cal.com",
-      // WARP-2916 — GitHub, at `catalog.order` 14.
+      // Project management. WARP-2707 / ADR-046 — GitHub, GitLab and Todoist
+      // are DECLARATIVE REST vendors: they register no connector factory at
+      // all, only a profile, and they still reach the grid.
       "GitHub",
-      // WARP-2917 — GitLab, the fourth REST vendor, at catalog.order 15.
       "GitLab",
-      // WARP-2918 — the fifth REST vendor, at `catalog.order` 16.
       "Todoist",
-      // WARP-2919 — the sixth REST card, at `catalog.order` 17.
-      "Loyverse",
-      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
-      // has NO `catalog` block and no `ConnectorId` literal: it is derived
-      // from the descriptor's track by `hubCardFor`, which is why it lands
-      // last rather than at a `catalog.order`. Mutation: delete the `case
-      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      // WARP-2659 — the MCP-track card. It has NO `catalog` block and no
+      // `ConnectorId` literal: it is derived from the descriptor's track by
+      // `hubCardFor`, and it lands under the category the TRACK declares
+      // rather than at a `catalog.order`. Mutation: delete the `case "mcp"`
+      // arm → `tsc` red; delete the descriptor → red here.
       "Atlassian (Jira & Confluence)",
+      // Point of sale — WARP-2919's card, whose category opens last.
+      "Loyverse",
     ]);
   });
 
@@ -636,46 +639,52 @@ describe("entries are the union of the catalog and the response", () => {
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
     expect(renderedNames(container)).toEqual([
+      // WARP-2968 — the grid is grouped by category, so the run below is
+      // catalog order REGROUPED: a category sits where its first provider
+      // does, and its later ones join it there. Xero after QuickBooks is the
+      // clearest example — `catalog.order` 11 rendered under the Accounting
+      // heading opened by `catalog.order` 2.
+      // Practice management
       "Eaglesoft",
       "Dentrix",
-      "QuickBooks",
       "Open Dental",
-      // WARP-2466 — the three WARP-2214 SaaS vendors. They appear here with no
-      // hub code change at all: the grid is DERIVED from the descriptor
-      // catalog (#1809 + #1808), so registering a descriptor is what puts a
-      // tile on the page. Mutation: delete a `catalog` block from one of the
-      // three descriptors → red.
+      // Accounting
+      "QuickBooks",
+      "Xero",
+      // Payments
       "Stripe",
+      "Square",
+      // CRM
       "HubSpot",
+      "Pipedrive",
+      // Marketing. WARP-2466 — these arrive with no hub code change at all:
+      // the grid is DERIVED from the descriptor catalog (#1809 + #1808), so
+      // registering a descriptor is what puts a tile on the page. Mutation:
+      // delete a `catalog` block from one of them → red.
       "Mailchimp",
-      "Shopify",
-      // WARP-2708 / WARP-2709 / WARP-2710 — wave 1, same story again: one
-      // descriptor each, one tile each, no hub code change.
       "Brevo",
       "Klaviyo",
-      "Pipedrive",
-      "Xero",
-      // WARP-2707 / ADR-046 — the first two DECLARATIVE REST vendors. Same
-      // story a fourth time, and it is the strongest version of it: these two
-      // register no connector factory at all, only a profile, and they still
-      // reach the grid with no hub code change. They sit after Xero because
-      // their `catalog.order` is 12 and 13.
-      "Square",
+      // Commerce
+      "Shopify",
+      // Scheduling
       "Cal.com",
-      // WARP-2916 — GitHub, at `catalog.order` 14.
+      // Project management. WARP-2707 / ADR-046 — GitHub, GitLab and Todoist
+      // are DECLARATIVE REST vendors: they register no connector factory at
+      // all, only a profile, and they still reach the grid.
       "GitHub",
-      // WARP-2917 — GitLab, the fourth REST vendor, at catalog.order 15.
       "GitLab",
-      // WARP-2918 — the fifth REST vendor, at `catalog.order` 16.
       "Todoist",
-      // WARP-2919 — the sixth REST card, at `catalog.order` 17.
-      "Loyverse",
-      // WARP-2659 — the MCP-track card, appended after the catalog cards. It
-      // has NO `catalog` block and no `ConnectorId` literal: it is derived
-      // from the descriptor's track by `hubCardFor`, which is why it lands
-      // last rather than at a `catalog.order`. Mutation: delete the `case
-      // "mcp"` arm → `tsc` red; delete the descriptor → red here.
+      // WARP-2659 — the MCP-track card. It has NO `catalog` block and no
+      // `ConnectorId` literal: it is derived from the descriptor's track by
+      // `hubCardFor`, and it lands under the category the TRACK declares
+      // rather than at a `catalog.order`. Mutation: delete the `case "mcp"`
+      // arm → `tsc` red; delete the descriptor → red here.
       "Atlassian (Jira & Confluence)",
+      // Point of sale — WARP-2919's card, whose category opens last.
+      "Loyverse",
+      // WARP-2968 — a provider the catalog does not classify shares one final
+      // "Other" heading, still after every catalog card and still sorted by
+      // key, which is what keeps the grid stable across responses.
       "Generic Export",
       "M365",
     ]);
@@ -1268,5 +1277,86 @@ describe("a connected tile can be disconnected from the hub", () => {
     // …and the tile's own action is untouched, so the gate hides one control
     // rather than breaking the card.
     expect(primaryButton(tile(container, "Acme PMS")).textContent).toContain("Open");
+  });
+});
+
+/**
+ * WARP-2968 — every provider on one page, under a heading for its category.
+ *
+ * The grid was one flat run of 19 tiles whose only statement of what a tile
+ * was *for* was a caption inside the card, so the categories existed in the
+ * data and nowhere on the page. Headings say it once, above the tiles they
+ * describe, and nothing is put behind an accordion or a drill-in to do it:
+ * the count below is the whole catalog, still rendered at once.
+ */
+describe("the catalog is grouped under category headings (WARP-2968)", () => {
+  /** Each `.sect` heading paired with the tiles of the grid directly below it. */
+  function sections(container: HTMLElement) {
+    return Array.from(container.querySelectorAll<HTMLElement>(".sect")).map((s) => ({
+      heading: s.querySelector("h2")?.textContent ?? "",
+      names: Array.from(
+        s.nextElementSibling?.querySelectorAll<HTMLElement>(":scope > .card .type-headline") ?? [],
+      ).map((n) => n.textContent ?? ""),
+    }));
+  }
+
+  /**
+   * Mutation: order the headings alphabetically → red. Catalog order is what
+   * keeps the grid from reshuffling when a vendor is added mid-catalog.
+   */
+  it("renders one heading per category, in catalog order", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Eaglesoft"));
+
+    expect(sections(container).map((s) => s.heading)).toEqual([
+      "Practice management",
+      "Accounting",
+      "Payments",
+      "CRM",
+      "Marketing",
+      "Commerce",
+      "Scheduling",
+      "Project management",
+      "Point of sale",
+    ]);
+  });
+
+  /**
+   * Derived from the descriptors rather than listed, so a vendor added to the
+   * registry is covered here the day it lands — and, more to the point, a
+   * grouping that DROPPED a provider (the failure mode of every group-by) goes
+   * red without anyone remembering to update a literal.
+   */
+  it("renders every provider under its own category, hiding none", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("Eaglesoft"));
+
+    const expected = new Map<string, string[]>();
+    for (const d of PROVIDER_DESCRIPTORS) {
+      expected.set(d.meta.category, [...(expected.get(d.meta.category) ?? []), d.meta.name]);
+    }
+
+    expect(sections(container)).toEqual(
+      [...expected].map(([heading, names]) => ({ heading, names })),
+    );
+    expect(renderedNames(container)).toHaveLength(PROVIDER_DESCRIPTORS.length);
+  });
+
+  /**
+   * A provider the box reports and the catalog does not list has no category
+   * of its own. It gets one final heading rather than a made-up one — naming a
+   * vertical for a vendor nobody wrote a tile for is exactly the copy
+   * `descriptorForReportedProvider` refuses to invent.
+   */
+  it("puts a provider the catalog does not classify under a final Other heading", async () => {
+    vi.mocked(fetchIntegrations).mockResolvedValue([conn("m365", "ERROR")]);
+    const { container } = renderHub();
+    await waitFor(() => expect(renderedNames(container)).toContain("M365"));
+
+    const last = sections(container).at(-1);
+    expect(last?.heading).toBe("Other");
+    expect(last?.names).toEqual(["M365"]);
   });
 });

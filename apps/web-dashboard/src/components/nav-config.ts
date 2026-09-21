@@ -440,28 +440,26 @@ export const NAV_GROUPS: NavGroup[] = [
       // server guard, exactly like /admin/files does. There is no `integrations`
       // module in the registry (connector reach is ADR-032's §5.4 connectors
       // axis, not the feature axis), so `roles` — not `requiresModule` — is the
-      // honest gate; the child carries it too, so a future role widening on one
-      // can't silently widen the other.
+      // honest gate; the Credentials sibling below carries it too, so a future
+      // role widening on one can't silently widen the other.
+      { href: "/integrations", label: "Integrations", icon: Blocks, roles: ["owner", "admin"] },
+      // WARP-2275: the SaaS credential configurator. WARP-2968 made it a
+      // SIBLING rather than a child of Integrations: `isSectionOpen` reveals a
+      // section's children only once that section is open, so as a child this
+      // page was invisible in the rail and in the mobile drawer until the
+      // owner had already clicked Integrations — a destination you can only
+      // reach by guessing what it is behind is not in the nav.
+      //
+      // `roles` on both entries, for the same reason it was on both before —
+      // a future widening of one must not silently widen the other. It
+      // mirrors the orchestrator's own `requireRole("owner","admin")` on
+      // /api/integrations/*/credentials, which is the guard that actually
+      // decides; this only keeps the nav from offering a page that would 403.
       {
-        href: "/integrations",
-        label: "Integrations",
-        icon: Blocks,
+        href: "/integrations/credentials",
+        label: "Credentials",
+        icon: KeyRound,
         roles: ["owner", "admin"],
-        children: [
-          // WARP-2275: the SaaS credential configurator. `roles` on the child
-          // as well as the parent, for the same reason the sibling above
-          // carries it — a future widening of one must not silently widen the
-          // other. It mirrors the orchestrator's own
-          // `requireRole("owner","admin")` on /api/integrations/*/credentials,
-          // which is the guard that actually decides; this only keeps the nav
-          // from offering a page that would 403.
-          {
-            href: "/integrations/credentials",
-            label: "Credentials",
-            icon: KeyRound,
-            roles: ["owner", "admin"],
-          },
-        ],
       },
     ],
   },
