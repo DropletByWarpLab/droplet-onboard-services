@@ -98,6 +98,9 @@ export const SPACES: SpaceDef[] = [
     icon: Radar,
     // Events is a CHILD of Cameras in the sidebar; the handoff promotes it to
     // its own chip (they read as two destinations, not one section).
+    // WARP-2968 (#2241) made Credentials a top-level entry beside Integrations
+    // rather than its child, so it is its own chip here too — the pin in
+    // workspace-nav-config.test.ts caught the two PRs crossing on stage.
     hrefs: [
       "/cameras",
       "/events",
@@ -106,6 +109,7 @@ export const SPACES: SpaceDef[] = [
       "/voice",
       "/remote-access",
       "/integrations",
+      "/integrations/credentials",
     ],
   },
   {

@@ -164,13 +164,16 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(labels).toContain("Sync Devices");
   });
 
-  it("Integrations leads its single child with the section itself", () => {
-    const views = dest("/integrations")?.views ?? [];
-    expect(views.map((v) => v.href)).toEqual([
-      "/integrations",
-      "/integrations/credentials",
-    ]);
-    expect(views[0].exact).toBe(true);
+  it("Integrations and Credentials are sibling chips, neither has views (WARP-2968)", () => {
+    expect(dest("/integrations")?.views).toEqual([]);
+    expect(dest("/integrations/credentials")?.views).toEqual([]);
+  });
+
+  it("a view row is never a single pill", () => {
+    // A lone pill is a title, not a choice: `viewsFor` returns [] below two.
+    for (const s of spaces)
+      for (const d of s.destinations)
+        expect(d.views.length === 0 || d.views.length >= 2).toBe(true);
   });
 
   it("Cameras has no views — its only child (Events) is a chip", () => {
@@ -192,7 +195,8 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/files/recents", "work", "/files", "/files/recents"],
     ["/events", "ops", "/events", null],
     ["/cameras/front-door", "ops", "/cameras", null],
-    ["/integrations/credentials", "ops", "/integrations", "/integrations/credentials"],
+    ["/integrations/credentials", "ops", "/integrations/credentials", null],
+    ["/integrations", "ops", "/integrations", null],
     ["/admin", "admin", "/admin", null],
     ["/admin/audit", "admin", "/admin/audit", null],
     ["/admin/prompt", "ai", "/admin/prompt", null],
