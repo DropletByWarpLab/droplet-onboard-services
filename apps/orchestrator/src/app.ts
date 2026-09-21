@@ -107,6 +107,7 @@ import {
 } from "./services/scope-loader.service.js";
 import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
+import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -589,6 +590,11 @@ export function createApp(
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+
+  // WARP-2944: the certificate lifecycle for Settings → Device information
+  // (days left, when the box renews, whether renewal is failing). Owner +
+  // admin, read-only; the public /api/tls/status stays the pre-login minimum.
+  app.use("/api", createTlsCertificateRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.

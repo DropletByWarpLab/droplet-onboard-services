@@ -91,6 +91,7 @@ import { createHostComposeRunner } from "./services/update-agent/host-compose-ru
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import { createTlsNotifier } from "./services/tls-notify.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
@@ -1617,6 +1618,10 @@ async function main() {
     // (POST /api/issuance/provision) on the 404 and retries issuance once. Empty
     // = self-provision disabled (dev/CI + boxes provisioned by another path).
     provisionToken: config.DROPLET_PROVISION_TOKEN,
+    // WARP-2944 — the owner hears when renewal starts failing and when the
+    // certificate is a week from expiry (owner + admin, system notifications;
+    // once per transition / per certificate, never per tick).
+    notifier: createTlsNotifier(prisma),
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",

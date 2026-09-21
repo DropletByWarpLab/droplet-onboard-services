@@ -25,6 +25,7 @@ import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
 import { LogsSection } from "@/components/settings/LogsSection";
+import { CertificateRows } from "@/components/settings/CertificateRows";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -455,6 +456,10 @@ export default function SettingsPage() {
               }
             />
             <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
+            {/* WARP-2944 — the certificate lifecycle (days left, renewal,
+                the one action when renewal is failing). Owner/admin only;
+                reads the state row the daily tick maintains, no new poll. */}
+            <CertificateRows />
           </div>
         </div>
 
