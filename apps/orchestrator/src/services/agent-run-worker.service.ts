@@ -155,7 +155,7 @@ export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run
  * only network, not the box. So these are the one family of ungated writes
  * a run may carry (see {@link runToolPool}), and only a run that HAS a
  * workspace carries them. A tool that adds a hop elsewhere leaves the set
- * by itself; `agent-run-worker.pool.test.ts` enumerates the members.
+ * by itself; `agent-run-worker.workshop.test.ts` enumerates the members.
  */
 export const WORKSPACE_TOOLS: ReadonlySet<string> = new Set(
   TOOL_ROUTES.filter(

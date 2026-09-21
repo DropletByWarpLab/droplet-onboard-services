@@ -46,5 +46,19 @@ ALTER TABLE "AgentRun" ADD COLUMN     "workspaceId" TEXT;
 -- CreateIndex
 CREATE INDEX "AgentRun_workspaceId_createdAt_idx" ON "AgentRun"("workspaceId", "createdAt" DESC);
 
+-- One live run per workspace, held by the database and not by the route's
+-- count-then-create: two starts racing through `POST /api/agent-runs` could
+-- both see zero active runs and both land on one checkout — exactly the
+-- "commit over each other" the route exists to prevent. Partial: a NULL
+-- workspaceId is every ordinary run, and a run that ends (succeeded / failed
+-- / cancelled) releases the workspace. The status list is
+-- ACTIVE_AGENT_RUN_STATUSES in agent-run-worker.service.ts. Prisma has no
+-- datamodel syntax for a WHERE-filtered unique index, so this lives in SQL
+-- only — `PmCycle_projectId_active_key` is the precedent — and the drift
+-- gate does not report partial indexes (schema-drift-baseline.sql, "NOT AN
+-- ENTRY"). The route maps the P2002 this raises onto its own 409.
+CREATE UNIQUE INDEX "AgentRun_workspaceId_active_key" ON "AgentRun"("workspaceId")
+  WHERE "workspaceId" IS NOT NULL AND "status" IN ('queued', 'running', 'awaiting_confirmation');
+
 -- AddForeignKey
 ALTER TABLE "AgentRun" ADD CONSTRAINT "AgentRun_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "WorkshopWorkspace"("id") ON DELETE SET NULL ON UPDATE CASCADE;

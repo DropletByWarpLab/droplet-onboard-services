@@ -3951,6 +3951,15 @@ model AgentRun {
   /// carries THIS id ("run owns workspace"), so a run cannot reach any
   /// workspace but its own. `onDelete: SetNull` — deleting a workspace keeps
   /// the runs that worked in it, as the schedule FK above does.
+  ///
+  /// ONE LIVE RUN PER WORKSPACE is a partial unique index —
+  /// `AgentRun_workspaceId_active_key`, `UNIQUE ("workspaceId") WHERE
+  /// "workspaceId" IS NOT NULL AND "status" IN (queued, running,
+  /// awaiting_confirmation)` — in the warp_2896_workspace migration's raw SQL,
+  /// because Prisma cannot express a WHERE-filtered unique index (the
+  /// `PmCycle_projectId_active_key` pattern). `POST /api/agent-runs` still
+  /// counts first for the friendlier 409, and maps the index's P2002 onto the
+  /// same 409 when two starts race past the count.
   workspaceId        String?
   workspace          WorkshopWorkspace?       @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   createdAt          DateTime                 @default(now())

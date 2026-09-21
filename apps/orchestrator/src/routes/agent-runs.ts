@@ -58,6 +58,13 @@ import {
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 
+/** Prisma's unique-constraint failure (`P2002`), without importing the class
+ *  — the unit suites stub the client, and a structural check is what a raw
+ *  `Prisma.PrismaClientKnownRequestError` satisfies too. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
+}
+
 const startRunSchema = z.object({
   goal: z.string().trim().min(1).max(4000),
   model: z.string().trim().min(1).max(200).optional(),
@@ -299,7 +306,11 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       // WARP-2896 — a workshop run needs a workspace that exists, is still
       // active (a proposed one is read-only until reviewed) and has no other
       // run working in it: two runs on one checkout would commit over each
-      // other. The binding is set once, here, and never changed.
+      // other. The binding is set once, here, and never changed. The count
+      // below is the friendly answer; the DURABLE guard is the partial unique
+      // index `AgentRun_workspaceId_active_key` (one active run per
+      // workspace), whose P2002 the create maps onto the same 409 when two
+      // starts race past the count.
       if (parsed.data.workspaceId) {
         const ws = await prisma.workshopWorkspace.findUnique({
           where: { id: parsed.data.workspaceId },
@@ -321,14 +332,26 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           return;
         }
       }
-      const { id } = await enqueueAgentRun(prisma, {
-        userId: actor.id,
-        goal: parsed.data.goal,
-        model,
-        sessionId: parsed.data.sessionId ?? null,
-        maxIter: parsed.data.maxIter,
-        workspaceId: parsed.data.workspaceId ?? null,
-      });
+      let id: string;
+      try {
+        ({ id } = await enqueueAgentRun(prisma, {
+          userId: actor.id,
+          goal: parsed.data.goal,
+          model,
+          sessionId: parsed.data.sessionId ?? null,
+          maxIter: parsed.data.maxIter,
+          workspaceId: parsed.data.workspaceId ?? null,
+        }));
+      } catch (err) {
+        // The only unique constraint a workshop run's create can trip is the
+        // one-active-run-per-workspace index: the row's own id is a fresh
+        // cuid. So a P2002 here IS the race the count above could not see.
+        if (parsed.data.workspaceId && isUniqueViolation(err)) {
+          res.status(409).json({ error: "A run is already working in this workspace" });
+          return;
+        }
+        throw err;
+      }
       await recordActivity({
         kind: "tool_run",
         severity: "info",

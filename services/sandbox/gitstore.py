@@ -43,12 +43,22 @@ WORK_BRANCH = "work"
 GIT_TIMEOUT_S = 60
 
 # Nothing from the service's environment reaches git: no token, no HOME
-# surprises (git would read ~/.gitconfig), no proxy variables. A Windows dev
-# checkout needs its own PATH and SYSTEMROOT for git.exe to start at all.
+# surprises, no proxy variables. A Windows dev checkout needs its own PATH and
+# SYSTEMROOT for git.exe to start at all.
+#
+# Both config files git would read on its own are closed, not just the system
+# one: HOME here is the SAME /tmp a `workspace_run` child gets (workspace.py
+# RUN_ENV), so an allow-listed `npm test` could write /tmp/.gitconfig and have
+# every later git call here honour it — `uploadpack.packObjectsHook` and
+# friends are exactly the keys that turn a fetch into code execution.
+# `http.receivepack` was already safe (GIT_CONFIG_* env beats every file);
+# GIT_CONFIG_GLOBAL=/dev/null makes the rest safe the same way. Git for
+# Windows maps /dev/null to NUL itself.
 GIT_ENV: dict[str, str] = {
     "PATH": os.environ.get("PATH", "") if sys.platform == "win32" else "/usr/local/bin:/usr/bin:/bin",
     "HOME": os.environ.get("TEMP", "/tmp") if sys.platform == "win32" else "/tmp",
     "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "LC_ALL": "C.UTF-8",
 }

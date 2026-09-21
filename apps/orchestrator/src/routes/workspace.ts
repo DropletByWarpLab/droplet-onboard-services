@@ -55,9 +55,14 @@ import { ACTIVE_AGENT_RUN_STATUSES } from "../services/agent-run-worker.service.
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const WORKSHOP_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
-// Fetch for every authenticated HUMAN role (the ticket's AC — an extension's
-// source is not the box's data; the workshop's write path is what is gated);
-// push for owner/admin only.
+// Fetch for every authenticated HUMAN role; push for owner/admin only. This is
+// the ticket's AC verbatim — "read for any authenticated role; push for
+// owner/admin" (WARP-2896, first bullet) — and deliberate: an extension's
+// source is not the box's data (its files, mail, calendar), it is code a run
+// wrote from a template, and the workshop's WRITE path (`/api/workspace/*`,
+// owner/admin) is what protects the box. A guest cloning an in-progress
+// extension sees what the owner could hand them anyway; tightening this is a
+// product call to make on the ticket, not silently here.
 const GIT_FETCH_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family", "guest"]);
 const GIT_PUSH_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 export const AGENT_RUN_HEADER = "x-droplet-agent-run";

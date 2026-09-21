@@ -457,6 +457,20 @@ stdio-trusted like `agentRunId`), so a chat turn or an HTTP MCP client never
 reaches the route. The `run` allow-list is applied by the route BEFORE the
 sandbox is dialled, and again by the sandbox.
 
+**One live run per workspace, held by the database.** Two runs on one
+checkout would commit over each other, so `POST /api/agent-runs` refuses a
+`workspaceId` that already has a `queued` / `running` /
+`awaiting_confirmation` run (409). The count it does first is the friendly
+answer; the guard that survives two starts racing past that count is the
+partial unique index `AgentRun_workspaceId_active_key` — `UNIQUE
+("workspaceId") WHERE "workspaceId" IS NOT NULL AND status IN (the three
+active statuses)` — in the migration's raw SQL (Prisma cannot express a
+filtered unique index; `PmCycle_projectId_active_key` is the precedent). The
+route maps its P2002 onto the same 409. A finished run releases the
+workspace by leaving the predicate; ordinary runs (NULL `workspaceId`) never
+match it. `agent-run-claim.pg.test.ts` shows Postgres raising and releasing
+it.
+
 **The pool exemption is structural.** `WORKSPACE_TOOLS` is derived from
 `TOOL_ROUTES`: every tool whose every hop is under `/api/workspace/`. A run
 WITH a workspace carries them on top of the ordinary pool; a run without

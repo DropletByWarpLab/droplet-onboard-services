@@ -238,7 +238,15 @@ def resolve_run_argv(argv: list[str]) -> list[str]:
 # never touches (the pointer-compression cage), so an address-space cap that
 # would mean anything to a Python test kills `tsc` and `npm test` at start.
 # Memory is the container's `mem_limit`; this caps process fan-out and file
-# size, which the container does not.
+# size below what the container does (`pids_limit`, 128 by default).
+#
+# RLIMIT_NPROC is a per-UID ceiling, not a per-tree one: the kernel refuses a
+# fork when the UID's TOTAL task count (this service's own threads, its git
+# children, and the run's tree) is at the limit — but only for processes that
+# carry the limit, so it is the run's fan-out that fails, never the service.
+# 64 leaves a `npm test` at cpus=1 (node + one vitest worker + esbuild) tens
+# of tasks of headroom below the container's 128; a run that hits it sees
+# `EAGAIN` / "Resource temporarily unavailable" in its own output.
 _LIMIT_WRAPPER = """
 import os, resource, sys
 for r, v in ((resource.RLIMIT_NPROC, 64), (resource.RLIMIT_FSIZE, 64 * 1024 * 1024)):

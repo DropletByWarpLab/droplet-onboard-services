@@ -33,6 +33,22 @@ def test_templates_seed_once_and_never_overwrite(store):
     assert store.list_templates() == ["python-tool", "typescript-tool"]
 
 
+def test_git_reads_no_config_file_a_run_child_could_have_planted(store, tmp_path, monkeypatch):
+    # HOME for the store's git is the same /tmp a `workspace_run` child gets, so
+    # a planted $HOME/.gitconfig would otherwise steer every later git call —
+    # `uploadpack.packObjectsHook` turns a fetch into code execution. Both
+    # file layers are closed: GIT_CONFIG_NOSYSTEM for /etc, GIT_CONFIG_GLOBAL
+    # for ~/.gitconfig. Mutation: drop GIT_CONFIG_GLOBAL from GIT_ENV and the
+    # planted value is read back.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[uploadpack]\n\tpackObjectsHook = /tmp/planted\n", encoding="utf-8")
+    monkeypatch.setitem(store.GIT_ENV, "HOME", str(home))
+    cp = store.git(["config", "--get", "uploadpack.packObjectsHook"], cwd=store.REPOS_DIR)
+    assert cp.returncode == 1, cp.stdout
+    assert cp.stdout.strip() == ""
+
+
 def test_create_from_template_is_a_real_checkout_with_the_bare_as_origin(store):
     st = store.create_workspace("ws-a", "python-tool", ALICE)
     assert st["branch"] == "work" and st["dirty"] is False and st["tags"] == []
