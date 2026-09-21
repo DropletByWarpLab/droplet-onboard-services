@@ -49,7 +49,6 @@ import {
 } from "@/components/FileManager/dropped-entries";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
-import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
 import { volumeCrumbLabel } from "@/components/FileManager/drive-display";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useFiles } from "@/lib/hooks/useFiles";
@@ -430,8 +429,9 @@ export default function FilesPage() {
   // /<mount-tail>; for the live box's legacy pool that tail is the full fs
   // UUID, and the current-folder crumb rendered it raw — a GUID must never
   // be the primary location label (WARP-1337). Feed the breadcrumb the SAME
-  // display chain the tiles use for a first-segment volume match. SWR dedupes
-  // these keys with VolumesPanel's own subscriptions.
+  // display chain the storage cards use for a first-segment volume match.
+  // WARP-2959 moved those tiles off this screen into Settings -> Storage;
+  // the breadcrumb still needs the same chain, so these subscriptions stay.
   const { drives } = useDrives();
   const { pools } = usePools();
   const crumbLabelForSegment = useCallback(
@@ -1493,10 +1493,6 @@ export default function FilesPage() {
           </button>
         </div>
       )}
-
-      {/* Volumes — only on the personal root so it doesn't dominate deep
-          folder views or the shared space. */}
-      {space === "personal" && currentPath === "/" && <VolumesPanel />}
 
       {/* New folder dialog */}
       {showNewFolder && !isReaderSpace && (
