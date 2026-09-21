@@ -1,4 +1,18 @@
 /**
+ * ⚠ WARP-2969 — THIS FILE IS NOT TYPE-CHECKED. It is the one file in the
+ * dashboard that imports `@droplet/tools-core`, and `apps/web-dashboard/
+ * tsconfig.json` excludes it for that reason: tools-core's `types` resolve at
+ * `dist/`, which the dashboard CI lane never builds, and pointing tsc at
+ * tools-core's SOURCE instead makes it type-check that source — which needs a
+ * generated Prisma client the lane never generates (TS7031, #2244 CI red).
+ *
+ * vitest resolves the import from source through `resolve.alias` in
+ * `vitest.config.ts`, which is all a runtime drift gate needs. Keep the
+ * assertions here RUNTIME ones; a type-level assertion would be checked by
+ * nothing. If this file ever needs tsc, the fix is upstream — give tools-core
+ * a `types` that points at its source, the way `@droplet/shared-types` and
+ * `@droplet/auth-policy` already do.
+ *
  * WARP-899/WARP-900/WARP-901 — the `data` tool domain (encode/decode, hashing,
  * format conversion + misc dev utilities: timestamp_convert / uuid_generate /
  * regex_test) ships in tools-core's catalog, so the dashboard domain map must

@@ -78,12 +78,19 @@ export default defineConfig({
     alias: {
       "@": path.resolve(packageRoot, "./src"),
       // WARP-2969 — tools-core's `exports` map points at `dist/`, which the
-      // dashboard CI lane never builds, so an import of it resolved locally
-      // (where a previous `npm run bootstrap` left a dist behind) and failed
-      // in CI. Point at the SOURCE instead: no build-order dependency, and
-      // tools-core's only `@prisma/client` references are `import type`.
-      // `apps/web-dashboard/tsconfig.json` carries the same mapping in
-      // `paths` — move the two together.
+      // dashboard CI lane never builds, so `src/lib/tool-domains.test.ts`
+      // resolved locally (where a previous `npm run bootstrap` left a dist
+      // behind) and failed in CI. Point vitest at the SOURCE: no build-order
+      // dependency, and esbuild strips the types it cannot check anyway.
+      //
+      // 🔴 DELIBERATELY NOT MIRRORED IN `tsconfig.json`'s `paths`. It was, and
+      // it turned the CI red a different colour: a `paths` entry makes the
+      // dashboard's `tsc --noEmit` type-check tools-core's OWN source, which
+      // needs a generated Prisma client this lane never generates
+      // (`node_modules/.prisma/client` is a `PrismaClient: any` placeholder
+      // until `prisma generate` runs) — TS7006/TS7031 in `corpus-scope.ts` and
+      // `handlers/network/list-network-devices.ts`. The test file is excluded
+      // from tsc instead; see the note on `exclude` there.
       "@droplet/tools-core": path.resolve(repoRoot, "packages/tools-core/src/index.ts"),
     },
   },
