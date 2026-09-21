@@ -81,9 +81,23 @@ export function Sidebar() {
   };
 
   // WARP-2956: desktop collapse / resize.
-  const { collapsed, width, setCollapsed, setWidth } = useSidebarLayout();
+  const { collapsed, width, setCollapsed, setWidth, previewWidth } =
+    useSidebarLayout();
   const [dragging, setDragging] = useState(false);
-  const dragStart = useRef<{ x: number; width: number } | null>(null);
+  // `live` is the last previewed width — committed on release.
+  const dragStart = useRef<{ x: number; width: number; live: number } | null>(
+    null,
+  );
+  // Shared by pointerup AND pointercancel: a touch-drag the browser turns
+  // into a pan ends in pointercancel (capture does not prevent it), and
+  // without this the dragging state + <html> class stayed stuck until reload.
+  const endDrag = () => {
+    if (!dragStart.current) return;
+    setWidth(dragStart.current.live);
+    dragStart.current = null;
+    setDragging(false);
+    document.documentElement.classList.remove("sidebar-w-dragging");
+  };
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -370,20 +384,18 @@ export function Sidebar() {
             title="Drag to resize · double-click to reset"
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
-              dragStart.current = { x: e.clientX, width };
+              dragStart.current = { x: e.clientX, width, live: width };
               setDragging(true);
               document.documentElement.classList.add("sidebar-w-dragging");
             }}
             onPointerMove={(e) => {
               if (!dragStart.current) return;
-              setWidth(dragStart.current.width + (e.clientX - dragStart.current.x));
+              dragStart.current.live = previewWidth(
+                dragStart.current.width + (e.clientX - dragStart.current.x),
+              );
             }}
-            onPointerUp={(e) => {
-              e.currentTarget.releasePointerCapture(e.pointerId);
-              dragStart.current = null;
-              setDragging(false);
-              document.documentElement.classList.remove("sidebar-w-dragging");
-            }}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
             onDoubleClick={() => setWidth(SIDEBAR_DEFAULT)}
             onKeyDown={(e) => {
               const step: Record<string, number> = {
@@ -397,7 +409,7 @@ export function Sidebar() {
               setWidth(step[e.key]);
             }}
             className={`
-              absolute inset-y-0 -right-[3px] w-1.5 cursor-col-resize z-10
+              absolute inset-y-0 -right-[3px] w-1.5 cursor-col-resize touch-none z-10
               hover:bg-accent/70 transition-colors duration-200 ease-smooth
               focus-visible:outline-none focus-visible:bg-accent/70
               ${dragging ? "bg-accent/70" : ""}

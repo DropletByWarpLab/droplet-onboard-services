@@ -70,6 +70,21 @@ vi.mock("@/lib/hooks/useCapabilities", () => ({
 
 import { Sidebar } from "@/components/Sidebar";
 
+// jsdom 24 has no PointerEvent, so fireEvent.pointerMove degrades to a bare
+// Event and drops clientX/pointerId. A MouseEvent subclass carries both, and
+// the handle's setPointerCapture call needs a stub.
+if (typeof window.PointerEvent === "undefined") {
+  class PointerEventPolyfill extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  (window as any).PointerEvent = PointerEventPolyfill;
+}
+HTMLElement.prototype.setPointerCapture ??= () => {};
+
 const COLLAPSED_KEY = "droplet.sidebar.collapsed";
 const WIDTH_KEY = "droplet.sidebar.width";
 
@@ -187,6 +202,40 @@ describe("<Sidebar> resize handle (WARP-2956)", () => {
     expect(handle).toHaveAttribute("aria-valuenow", "260");
     expect(sidebarW()).toBe("260px");
     expect(localStorage.getItem(WIDTH_KEY)).toBe("260");
+  });
+
+  it("persists the width on release, not per pointer move, and pointercancel clears the drag", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    const handle = within(aside).getByRole("separator", {
+      name: "Resize sidebar",
+    });
+    const html = document.documentElement;
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100 });
+    expect(html.classList.contains("sidebar-w-dragging")).toBe(true);
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 140 });
+    // The CSS variable tracks the pointer; storage waits for release.
+    expect(sidebarW()).toBe("300px");
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 140 });
+    expect(html.classList.contains("sidebar-w-dragging")).toBe(false);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe("300");
+    expect(handle).toHaveAttribute("aria-valuenow", "300");
+
+    // A touch-drag the browser turns into a pan ends in pointercancel, never
+    // pointerup — the drag state must not stay stuck.
+    fireEvent.pointerDown(handle, { pointerId: 2, clientX: 300 });
+    fireEvent.pointerMove(handle, { pointerId: 2, clientX: 320 });
+    expect(html.classList.contains("sidebar-w-dragging")).toBe(true);
+    fireEvent.pointerCancel(handle, { pointerId: 2 });
+    expect(html.classList.contains("sidebar-w-dragging")).toBe(false);
+    // The unprefixed dragging tint is gone (hover:bg-accent/70 stays).
+    expect(handle.className.split(/\s+/)).not.toContain("bg-accent/70");
+    expect(localStorage.getItem(WIDTH_KEY)).toBe("320");
+    // touch-none so the browser never claims the gesture as a pan.
+    expect(handle.className).toMatch(/\btouch-none\b/);
   });
 
   it("clamps a stale persisted width on read", () => {

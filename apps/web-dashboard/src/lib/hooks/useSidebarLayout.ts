@@ -48,6 +48,10 @@ function write(key: string, value: string) {
   }
 }
 
+function applyWidthVar(px: number) {
+  document.documentElement.style.setProperty("--sidebar-w", `${px}px`);
+}
+
 export function useSidebarLayout() {
   // Server-matching defaults; storage is read in a layout effect so the tree
   // hydrates cleanly and the corrected state lands before the first paint.
@@ -61,16 +65,25 @@ export function useSidebarLayout() {
   }, []);
 
   useLayoutEffect(() => {
-    document.documentElement.style.setProperty(
-      "--sidebar-w",
-      `${collapsed ? SIDEBAR_RAIL : width}px`,
-    );
+    applyWidthVar(collapsed ? SIDEBAR_RAIL : width);
   }, [collapsed, width]);
 
+  /** Commit a width: state + storage (+ the CSS var via the effect). */
   const setWidth = useCallback((px: number) => {
     const next = clampSidebarWidth(px);
     setWidthState(next);
     write(SIDEBAR_WIDTH_KEY, String(next));
+  }, []);
+
+  /**
+   * Mid-drag: the CSS var only. A pointermove stream runs at 60–120 Hz —
+   * no React state and no localStorage write per move; the caller commits
+   * the returned value with `setWidth` on release.
+   */
+  const previewWidth = useCallback((px: number) => {
+    const next = clampSidebarWidth(px);
+    applyWidthVar(next);
+    return next;
   }, []);
 
   const setCollapsed = useCallback((next: boolean) => {
@@ -78,5 +91,5 @@ export function useSidebarLayout() {
     write(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
   }, []);
 
-  return { collapsed, width, setCollapsed, setWidth };
+  return { collapsed, width, setCollapsed, setWidth, previewWidth };
 }

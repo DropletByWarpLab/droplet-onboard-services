@@ -6,6 +6,20 @@
    Droplet Design System — Light & Dark Mode Tokens
    ============================================================ */
 
+/* WARP-2956 — desktop sidebar width. The aside (`lg:w-[var(--sidebar-w)]`)
+   and the content column (`lg:ml-[var(--sidebar-w)]`) both read this one
+   variable; `useSidebarLayout` rewrites it on <html> (64px rail / 200–360px
+   resized) and the inline script in app/layout.tsx restores the persisted
+   value before hydration. Declared here so SSR paints at 260px.
+
+   On `html`, NOT in the `:root` block below: that block is locked
+   byte-for-byte to the DropletByWarpLab/design-and-style canon (WARP-1277
+   drift gate) and this is runtime layout state, not a design token — the
+   same scoping `--color-accent-text` uses further down. */
+html {
+  --sidebar-w: 260px;
+}
+
 :root {
   /* Declare the active color scheme so the browser paints NATIVE chrome
      (the <select> popup list, date pickers, scrollbars, form controls) to
@@ -13,13 +27,6 @@
      in dark mode — only the *closed* control picks up our surface tokens.
      WARP-946. */
   color-scheme: light;
-
-  /* WARP-2956 — desktop sidebar width. The aside (`lg:w-[var(--sidebar-w)]`)
-     and the content column (`lg:ml-[var(--sidebar-w)]`) both read this one
-     variable; `useSidebarLayout` rewrites it on <html> (64px rail / 200–360px
-     resized) and the inline script in app/layout.tsx restores the persisted
-     value before hydration. Declared here so SSR paints at 260px. */
-  --sidebar-w: 260px;
 
   /* Surfaces */
   --color-surface-primary: #ffffff;
