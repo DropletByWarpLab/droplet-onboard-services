@@ -131,6 +131,33 @@ describe("EmailList", () => {
     expect(document.body.textContent).not.toMatch(/!/);
   });
 
+  // ── WARP-2957 — an empty list has three meanings ─────────────────────────
+  it("says 'Fetching your mail' instead of 'No messages' while the first sync is pending", () => {
+    render(<EmailList {...baseProps()} threads={[]} syncState="first-sync" />);
+    expect(screen.getByRole("status")).toHaveTextContent(/fetching your mail/i);
+    expect(screen.queryByText(/no messages here/i)).not.toBeInTheDocument();
+  });
+
+  it("names the mailbox failure and points at Settings when the last sync errored", () => {
+    render(
+      <EmailList
+        {...baseProps()}
+        threads={[]}
+        syncState="error"
+        syncError="The mail server rejected the username or password."
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(/can.t reach this mailbox/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/rejected the username or password/i);
+    expect(screen.getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+  });
+
+  it("does not show the sync states once rows exist — they explain emptiness only", () => {
+    render(<EmailList {...baseProps()} syncState="first-sync" />);
+    expect(screen.queryByText(/fetching your mail/i)).not.toBeInTheDocument();
+    expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+  });
+
   it("renders a loading skeleton when isLoading", () => {
     render(<EmailList {...baseProps()} threads={[]} isLoading />);
     expect(screen.getByLabelText(/loading/i)).toBeInTheDocument();

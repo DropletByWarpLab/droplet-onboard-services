@@ -120,7 +120,14 @@ describe("/login/passkey — waiting + cancel", () => {
     const heading = await screen.findByRole("heading", { name: /approve this sign-in/i });
     expect(heading).toBeInTheDocument();
     // A11y: focus moves to the status heading on the transition.
-    expect(heading).toHaveFocus();
+    //
+    // WARP-2958 — awaited, not synchronous. The page moves focus in a passive
+    // useEffect on state change (page.tsx `headingRef.current?.focus(...)`),
+    // and `findByRole` resolves as soon as the heading is in the DOM — under
+    // CI load that is BEFORE the effect flushes. The synchronous form failed
+    // ~1-2% of `ci` runs on three unrelated branches; waiting is the
+    // assertion's real contract.
+    await waitFor(() => expect(heading).toHaveFocus());
 
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(cancelCeremony).toHaveBeenCalledTimes(1);

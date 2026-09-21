@@ -85,6 +85,7 @@ import {
   plannedToolNames,
   runToolSpec,
   type StepDispatcher,
+  type Transformer,
 } from "./tool-spec-runner.service.js";
 import {
   firstToolDeniedForPrincipal,
@@ -140,6 +141,9 @@ export async function tickToolSchedules(
   prisma: PrismaClient,
   dispatcher: StepDispatcher,
   now: Date = new Date(),
+  /** WARP-2895 — the sandbox seam for scheduled `transform` / `when` steps.
+   *  Injected for the same reason the dispatcher is. */
+  transformer?: Transformer | null,
 ): Promise<TickResult> {
   const due = (await prisma.toolSchedule.findMany({
     where: { enabled: true, nextFireAt: { lte: now } },
@@ -287,6 +291,7 @@ export async function tickToolSchedules(
         // The runner re-checks per step: `${prev}` substitution means the §3
         // lock rule can only see a step's real args at dispatch.
         scope: attributed.scope,
+        ...(transformer ? { transformer } : {}),
       });
       fired += 1;
     } catch (err) {

@@ -1187,3 +1187,85 @@ def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
     """
     assert sim_display._v3["wifi"]["ssid"] == ""
     assert sim_display.household_ssid() == ""
+
+
+# --- WARP-2954 / ADR-058: the rail's default face is the app-pairing link ---
+
+BRIDGE_PAIR_OK = {
+    "ok": True,
+    "server": "https://192.168.9.195",
+    "spki": "8BevqGrXi+1KveZGkPBbe42742sm6cj0EOU2ph498lw=",
+    # The compact pin-only form (base64url, no padding) — 63 bytes, the only
+    # shape that encodes as a version-4 code on the rail card.
+    "payload": "droplet://pair?spki=8BevqGrXi-1KveZGkPBbe42742sm6cj0EOU2ph498lw",
+}
+
+
+@pytest.fixture
+def with_pair(populated):
+    """A box whose bridge has vouched for its certificate key. Fed through
+    the same mirror the poll loop uses, so the mode→_v3 path is under test."""
+    populated._mirror_to_v3("pair", dict(BRIDGE_PAIR_OK))
+    return populated
+
+
+def test_without_a_pin_the_rail_is_byte_for_byte_the_dashboard_link(populated):
+    """Nothing changes for a box whose bridge has no pin to offer."""
+    assert populated.pair_qr_payload() == ""
+    c = lw._rail_content(populated, populated._v3)
+    assert c["payload"] == "https://warp-lab.droplet-us.com/dashboard"
+    assert c["caption"] == "SCAN TO OPEN" and c["headline"] == "Dashboard"
+
+
+def test_the_bridge_pair_frame_becomes_the_rails_default_face(with_pair):
+    assert with_pair.pair_qr_payload() == BRIDGE_PAIR_OK["payload"]
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["payload"] == BRIDGE_PAIR_OK["payload"]
+    assert c["caption"] == "SCAN TO PAIR" and c["headline"] == "Droplet app"
+    # The typed fallback stays the address — a browser user is no worse off.
+    assert c["fallback"] == "warp-lab.droplet-us.com"
+    assert c["face_index"] == 0 and c["ecc"] == "L"
+    # And it really encodes on the rail card at the scan floor — the whole
+    # reason the link is compact: version 4 at ECC L, never a refused render.
+    qr_img, module_px = lw.render_qr(c["payload"], card=lw.QR_CARD, ecc="L")
+    assert qr_img is not None and module_px >= lw.QR_MIN_MODULE_PX
+    lw.render_status(with_pair)
+
+
+def test_the_pairing_face_yields_to_the_wifi_tap_and_comes_back(with_pair):
+    """The Wi-Fi face keeps its tap + time box; the pairing link is what the
+    rail returns to, not the dashboard link."""
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "wifi"
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"].startswith("WIFI:")
+    with_pair._rail_wifi_until = 0.0
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"] == BRIDGE_PAIR_OK["payload"]
+
+
+def test_a_bridge_refusal_takes_the_pairing_face_back_down(with_pair):
+    """`ok: False` (no address yet, unreadable certificate) must beat a
+    previously-good link — a merge would leave a link with a stale key on the
+    front of the rack."""
+    assert with_pair.pair_qr_payload()
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "served certificate not readable"})
+    assert with_pair.pair_qr_payload() == ""
+    assert lw._rail_content(with_pair, with_pair._v3)["headline"] == "Dashboard"
+    # And `ok: False` wins even when a (stale) well-formed link rides along:
+    # the bridge's verdict, not the payload's shape, decides.
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "certificate changed",
+                                     "payload": BRIDGE_PAIR_OK["payload"]})
+    assert with_pair.pair_qr_payload() == ""
+
+
+def test_only_a_well_shaped_pairing_link_reaches_the_glass(populated):
+    """The panel never composes the link and never trusts an odd one: a bridge
+    answering something unexpected cannot put an arbitrary QR on the rail."""
+    for payload in ("https://evil.example/",
+                    # the full dashboard form does not fit the rail and is not the compact contract
+                    "droplet://pair?server=https%3A%2F%2F192.168.9.195&spki=8BevqGrXi%2B1KveZGkPBbe42742sm6cj0EOU2ph498lw%3D",
+                    "droplet://pair?spki=tooshort", "droplet://pair?spki=" + "a" * 43 + "&x=1",
+                    "droplet://pair?spki=" + "!" * 43, ""):
+        populated._mirror_to_v3("pair", {"ok": True, "payload": payload})
+        assert populated.pair_qr_payload() == "", payload

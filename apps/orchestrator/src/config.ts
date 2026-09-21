@@ -1134,6 +1134,25 @@ const envSchema = z.object({
   // unauthenticated — and doc-render itself 503s, so both ends refuse.
   DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
 
+  // --- Sandbox (WARP-2895, ADR-056 §6.3) ---
+  // SANDBOX_URL — compose-internal base URL of services/sandbox, the box's
+  // one code-execution substrate: a routine's `transform` / `when` steps run
+  // there, in a child interpreter, on the internal-only network. The
+  // orchestrator is its only caller.
+  SANDBOX_URL: z.string().default("http://sandbox:8030"),
+  // SANDBOX_SERVICE_TOKEN — outbound bearer for the sandbox. Minted by
+  // scripts/lib/secrets.sh (generate_env + migrate_env backfill). Empty →
+  // the transformer fails CLOSED (every transform step fails honestly) and
+  // the sandbox 503s, so both ends refuse.
+  SANDBOX_SERVICE_TOKEN: z.string().default(""),
+  // The CALLER-side deadline for one transform. The sandbox enforces its own
+  // (from the same number, sent in the request) — a service-only timeout
+  // fails open if the service itself hangs, so this side has to hold too.
+  SANDBOX_TRANSFORM_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
+  // The output cap a transform may return. Exceeding it FAILS the step with
+  // "output exceeded N bytes" — never a silent slice (ROUTINES brief §4.4).
+  SANDBOX_OUTPUT_CAP_BYTES: z.coerce.number().int().min(1_024).max(4_194_304).default(262_144),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

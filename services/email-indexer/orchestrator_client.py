@@ -1,8 +1,10 @@
 """WARP-465 D1 follow-up — orchestrator HTTP client.
 
-Thin wrapper around httpx for the two write paths this service uses:
+Thin wrapper around httpx for the write paths this service uses:
   - POST /api/email/:accountId/messages-ingest (per inbound message)
   - PATCH /api/email/drafts/:id  (mark queued draft sent/failed)
+  - PATCH /api/email/accounts/:id/status (WARP-2957 — the IDLE loop's
+    cycle outcome; the orchestrator is the only writer of the row)
 
 Service-principal auth via ORCHESTRATOR_SERVICE_TOKEN bearer (same
 shape as routing service's ORCHESTRATOR_SAMPLER_TOKEN per WARP-470/468).
@@ -63,6 +65,38 @@ async def ingest_message(account_id: str, payload: dict[str, Any]) -> bool:
     logger.warning(
         "messages-ingest non-2xx: status=%d body=%s",
         resp.status_code, resp.text[:200],
+    )
+    return False
+
+
+async def report_account_status(
+    account_id: str, status: str, reason: Optional[str] = None
+) -> bool:
+    """WARP-2957 — tell the orchestrator how the last IDLE cycle went.
+
+    `status` is `idle` (a clean cycle: the row's `lastIdleAt` moves) or
+    `error` (the row's `lastErrorAt` moves and `lastError` is set from
+    `reason`). `reason` is a member of `idle.REASONS` — a closed set, never
+    the server's own words. Returns True on 2xx; a failed report is logged
+    and the next cycle reports again, so nothing here retries.
+    """
+    headers = _auth_headers()
+    if headers is None:
+        return False
+    url = f"{ORCHESTRATOR_URL}/api/email/accounts/{account_id}/status"
+    body: dict[str, Any] = {"imapStatus": status}
+    if reason is not None:
+        body["reason"] = reason
+    try:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
+            resp = await client.patch(url, json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("account status PATCH failed: %s", exc)
+        return False
+    if resp.status_code == 200:
+        return True
+    logger.warning(
+        "account status non-200: status=%d body=%s", resp.status_code, resp.text[:200],
     )
     return False
 

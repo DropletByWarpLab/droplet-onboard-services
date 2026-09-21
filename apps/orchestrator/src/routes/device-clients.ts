@@ -17,6 +17,7 @@ import {
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -248,7 +249,13 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
-      const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
+      // WARP-2954 / ADR-058: the link carries the served certificate's key
+      // fingerprint (`spki=`), so a native client can pair to THIS box with
+      // no public CA and no HQ — the box's own dashboard, shown to a logged-in
+      // owner, is the channel that makes the pin an anchor (a LAN host cannot
+      // rewrite it). Omitted (same link as before) when the leaf is unreadable.
+      // The unauthenticated /api/tls/status deliberately does not carry it.
+      const pairUrl = buildPairUrl(server, code, servedCertPin());
 
       // Stash pending metadata so /pair/claim knows what device the user
       // intended — the native client only sends the code + its own locally

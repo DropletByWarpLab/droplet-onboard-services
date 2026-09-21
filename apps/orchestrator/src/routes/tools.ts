@@ -34,6 +34,7 @@ import {
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
 import {
   DAILY_REPORT_SLUG,
   seedDailyReportSpec,
@@ -166,7 +167,32 @@ const summarizeStepSchema = z.object({
   as: outputNameSchema,
 });
 
-const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
+/**
+ * WARP-2895 — a `transform` step runs customer-written Python over the run's
+ * named results in services/sandbox and publishes `output`; a `when` step is
+ * the same call whose truthiness decides whether the walk continues. Neither
+ * names a tool: nothing for the §3 scope check to authorize, nothing for the
+ * `writes` derivation to count (`writeToolNamesIn` reads `plannedToolNames`,
+ * which ignores both kinds — pinned by tool-spec-runner.transform.test.ts).
+ *
+ * `code` is bounded here at 64 KB (the service refuses more); `inputs` is an
+ * object whose values may carry `${steps.x}` references.
+ */
+const transformStepSchema = z.object({
+  kind: z.literal("transform"),
+  code: z.string().min(1).max(64_000),
+  inputs: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
+});
+
+const whenStepSchema = z.object({
+  kind: z.literal("when"),
+  code: z.string().min(1).max(64_000),
+  inputs: z.record(z.unknown()).optional(),
+  as: outputNameSchema,
+});
+
+const stepSchema = z.union([callStepSchema, summarizeStepSchema, transformStepSchema, whenStepSchema]);
 
 type ParsedStep = z.infer<typeof stepSchema>;
 
@@ -187,6 +213,9 @@ function storedArgsFor(s: ParsedStep): Record<string, unknown> {
   const named = s.as ? { as: s.as } : {};
   if (s.kind === "summarize") {
     return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
+  }
+  if (s.kind === "transform" || s.kind === "when") {
+    return { code: s.code, inputs: s.inputs ?? {}, ...named };
   }
   return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
 }
@@ -471,6 +500,13 @@ export function createToolsRouter(
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
   summarizer: Summarizer = createToolSpecSummarizer(),
+  /**
+   * WARP-2895 — injected so tests can drive a `transform` / `when` step
+   * without a sandbox container, the same reason `summarizer` is a
+   * parameter. Defaults to the sandbox client; a spec with no such step
+   * never calls it.
+   */
+  transformer: Transformer = createSandboxTransformer(),
 ): Router {
   const router = Router();
 
@@ -964,6 +1000,7 @@ export function createToolsRouter(
           scope,
           summarizer,
           callContext: await runCallContext(req, actor),
+          transformer,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
