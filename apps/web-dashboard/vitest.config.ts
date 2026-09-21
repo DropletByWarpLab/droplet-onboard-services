@@ -77,6 +77,14 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(packageRoot, "./src"),
+      // WARP-2969 — tools-core's `exports` map points at `dist/`, which the
+      // dashboard CI lane never builds, so an import of it resolved locally
+      // (where a previous `npm run bootstrap` left a dist behind) and failed
+      // in CI. Point at the SOURCE instead: no build-order dependency, and
+      // tools-core's only `@prisma/client` references are `import type`.
+      // `apps/web-dashboard/tsconfig.json` carries the same mapping in
+      // `paths` — move the two together.
+      "@droplet/tools-core": path.resolve(repoRoot, "packages/tools-core/src/index.ts"),
     },
   },
 });

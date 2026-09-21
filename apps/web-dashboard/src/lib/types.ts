@@ -2856,21 +2856,22 @@ export interface ScheduleEvent {
 // orchestrator's declared tool domains; it arrives as a string so the
 // dashboard never has to stay in lockstep with the registry's union.
 /**
- * WARP-2969 — whether the two BOX-WIDE gates let this tool reach a chat turn.
+ * WARP-2969 — whether a chat turn can reach this tool at all.
  *
- * `module` is the module-toggle axis (a tool whose domain belongs to a
- * switched-off module never reaches the model); `chat` is the chat-scope
- * policy list, which withholds a tool from ASKING while leaving it callable
- * from its own screen or an MCP client. Two axes rather than one enum because
- * a person fixes them in different places — one is a toggle on /settings, the
- * other is a product decision in the code.
+ * `excluded` is the chat-scope policy list (`EXCLUDED_FROM_CHAT_TOOLS`),
+ * which withholds a tool from ASKING while leaving it callable from its own
+ * screen or by an MCP client. It is "not by asking", never "unavailable".
  *
- * NOT the whole story on purpose: the per-person axes (role grants, off-LAN
- * withholding, turn relevance) need a resolved principal and a modelled turn,
- * and live on `/admin/prompt`'s inspector instead.
+ * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
+ * not applied to the chat pool for an owner or anybody holding no AccessRole,
+ * so a "Module off" chip would have been a confident false statement on every
+ * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ *
+ * The per-person axes (role grants, off-LAN withholding, turn relevance) need
+ * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
+ * inspector instead.
  */
 export interface ToolReach {
-  module: "on" | "off";
   chat: "allowed" | "excluded";
 }
 

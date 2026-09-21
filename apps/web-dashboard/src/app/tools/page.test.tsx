@@ -247,49 +247,68 @@ describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
   });
 });
 
-// ── WARP-2969: say why a tool is unavailable ──
+// ── WARP-2969: say why a tool is unavailable, and stop offering it ──
 
-describe("<ToolsPage /> reach chips (WARP-2969)", () => {
-  const REACH_SAMPLE: ToolCatalogEntry[] = [
-    entry("list_network_devices", "network", "See every device on your network", false, false, {
-      module: "on",
-      chat: "allowed",
-    }),
-    entry("list_cameras", "cameras", "See your cameras", false, false, {
-      module: "off",
-      chat: "allowed",
-    }),
-    entry("get_switch_ports", "switch", "Look at the switch ports", false, false, {
-      module: "on",
-      chat: "excluded",
-    }),
-  ];
-
-  it("chips a module-off tool so the page names the reason", () => {
-    ready(REACH_SAMPLE);
-    render(<ToolsPage />);
-    expect(screen.getByText(/module off/i)).toBeInTheDocument();
-  });
+describe("<ToolsPage /> reach (WARP-2969)", () => {
+  const REACHABLE = entry(
+    "list_network_devices", "network", "See every device on your network",
+    false, false, { chat: "allowed" },
+  );
+  const WITHHELD = entry(
+    "get_switch_ports", "switch", "Look at the switch ports",
+    false, false, { chat: "excluded" },
+  );
+  const REACH_SAMPLE: ToolCatalogEntry[] = [REACHABLE, WITHHELD];
 
   it("chips a chat-excluded tool as reachable from elsewhere, not gone", () => {
     ready(REACH_SAMPLE);
     render(<ToolsPage />);
+    // "Dashboard & MCP only", never "Unavailable" — the tool works, it is
+    // just not reachable by asking.
     expect(screen.getByText(/dashboard & mcp only/i)).toBeInTheDocument();
   });
 
   it("puts no chip on a tool a chat turn can reach", () => {
-    ready([REACH_SAMPLE[0]]);
+    ready([REACHABLE]);
     render(<ToolsPage />);
-    expect(screen.queryByText(/module off/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/dashboard & mcp only/i)).not.toBeInTheDocument();
   });
 
   it("still LISTS every tool — reach annotates, it never filters", () => {
     ready(REACH_SAMPLE);
     render(<ToolsPage />);
-    // An MCP client can still call a module-off tool, so /tools remains the
-    // full catalog; the chip is the whole of the change.
-    expect(screen.getByRole("button", { name: /^all 3$/i })).toBeInTheDocument();
-    expect(screen.getByText(/See your cameras/i)).toBeInTheDocument();
+    // An MCP client can still call a withheld tool, so /tools remains the
+    // full catalog; the card just stops offering chat.
+    expect(screen.getByRole("button", { name: /^all 2$/i })).toBeInTheDocument();
+    expect(screen.getByText(/Look at the switch ports/i)).toBeInTheDocument();
+  });
+
+  it("keeps the withheld tool readable — name and description still render", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    expect(screen.getByText("Get switch ports")).toBeInTheDocument();
+    expect(screen.getByText(/Look at the switch ports/i)).toBeInTheDocument();
+  });
+
+  it("does not offer 'Use in chat' on a tool chat cannot reach", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    // The whole card used to be the button, so a withheld tool still seeded
+    // the composer with a request that could only come back refused.
+    expect(
+      screen.queryByRole("button", { name: /use get switch ports in chat/i }),
+    ).not.toBeInTheDocument();
+    // The reachable one is untouched.
+    expect(
+      screen.getByRole("button", { name: /use list network devices in chat/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking a withheld card seeds nothing and navigates nowhere", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    fireEvent.click(screen.getByText("Get switch ports"));
+    expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
+    expect(pushMock).not.toHaveBeenCalled();
   });
 });

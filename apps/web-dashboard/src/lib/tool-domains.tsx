@@ -42,7 +42,7 @@ interface DomainMeta {
 }
 
 /**
- * WARP-2969 — exported so `tool-domains.test.tsx` can pin it against
+ * WARP-2969 — exported so `tool-domains.test.ts` can pin it against
  * tools-core's `TOOL_DOMAINS`. It covered 16 of 21 domains for months and
  * nothing said so: the fallback below is silent by design, so `crm` rendered
  * as a wrench labelled "Crm" and looked like a styling bug rather than a
@@ -105,26 +105,22 @@ export function iconForDomain(domain: string): LucideIcon {
  * `true` ⇔ asking the assistant for this tool would actually reach it.
  *
  * ONE definition, read by the `/chat` slash menu (which filters on it) and by
- * `reachNote` (which explains it on `/tools`). A tool with no `reach` — an
- * orchestrator from before the field shipped — counts as reachable: absence
- * of evidence is not "withheld", and answering otherwise would empty the
- * slash menu on the one box that cannot tell us better.
+ * the `/tools` card (which explains it, and drops its chat hand-off). A tool
+ * with no `reach` — an orchestrator from before the field shipped — counts as
+ * reachable: absence of evidence is not "withheld", and answering otherwise
+ * would empty the slash menu on the one box that cannot tell us better.
  */
 export function reachableInChat(tool: ToolCatalogEntry): boolean {
-  if (!tool.reach) return true;
-  return tool.reach.chat === "allowed" && tool.reach.module === "on";
+  return tool.reach ? tool.reach.chat === "allowed" : true;
 }
 
 /**
  * The muted chip `/tools` puts on a tool a chat turn cannot reach, or null.
  *
- * Module-off wins when both apply: it is the one the reader can DO something
- * about (a toggle on /settings), where the chat exclusion is a product
- * decision they cannot change from the page they are looking at.
+ * "Dashboard & MCP only", not "Unavailable": the tool works, it is just not
+ * reachable by asking. Saying otherwise would send someone looking for a
+ * broken box.
  */
 export function reachNote(tool: ToolCatalogEntry): string | null {
-  if (!tool.reach) return null;
-  if (tool.reach.module === "off") return "Module off";
-  if (tool.reach.chat === "excluded") return "Dashboard & MCP only";
-  return null;
+  return reachableInChat(tool) ? null : "Dashboard & MCP only";
 }

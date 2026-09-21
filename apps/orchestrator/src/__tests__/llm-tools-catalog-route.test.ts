@@ -19,6 +19,8 @@ import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { TOOL_CATALOG } from "@droplet/tools-core";
+// WARP-2969 — asserted against the SHIPPED list, never a restated copy.
+import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 
 vi.mock("../middleware/auth.js", () => ({
   authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
@@ -158,17 +160,26 @@ describe("GET /api/llm/tools/catalog (WARP-555)", () => {
 /**
  * WARP-2969 — per-tool `reach`.
  *
- * The catalog used to filter on ONE predicate (`requiresWrite`) and so
- * reported every registered tool as if a chat turn could reach it. Two
- * shipped gates say otherwise long before the model sees a schema: the
- * module toggles (a tool whose domain belongs to a switched-off module is
- * dropped) and the chat-scope policy list. `/tools` listed all 142; ~66
- * reach a turn on a default box.
+ * The catalog filters on ONE predicate (`requiresWrite`) and so reported
+ * every registered tool as if a chat turn could reach it. The chat-scope
+ * policy list says otherwise for 54 of them long before the model sees a
+ * schema: they are reachable from their own screen or over MCP, never by
+ * asking. `/tools` listed all 142 and named no reason for any of it.
  *
- * `reach` annotates rather than filters — an MCP client can still call a
- * module-off tool, so dropping it here would be a second, wrong answer.
- * Both verdicts come from the SHIPPED predicates (`domainsForFeatures`,
- * `EXCLUDED_FROM_CHAT_TOOLS`); neither is re-implemented in the route.
+ * `reach` ANNOTATES, it never filters — an MCP client can still call a tool
+ * chat withholds, so dropping it here would be a second, wrong answer. The
+ * verdict is `EXCLUDED_FROM_CHAT_TOOLS` itself, called, not re-derived; the
+ * same list `tool-inspect.service.ts` reports as its `chat_policy` gate.
+ *
+ * ONE AXIS ON PURPOSE. An earlier cut of this shipped a `module` axis too,
+ * from `domainsForFeatures`. It would have LIED: §6 module gating is not
+ * applied to the chat pool for an owner or anybody holding no AccessRole —
+ * `resolveToolAccessScope` returns a null scope for them
+ * (tool-access.service.ts), `narrowToolsToScope` passes a null scope through
+ * untouched, and `llm-agent.service.ts` narrows the pool by
+ * EXCLUDED_FROM_CHAT_TOOLS alone. `list_cameras` reaches the model on a box
+ * with `cameras` switched off. Wiring that gate for everyone is WARP-2972;
+ * the axis comes back here once it is true.
  */
 describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
   let app: ReturnType<typeof createApp>;
@@ -188,28 +199,34 @@ describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
       (t) => t.name === name,
     );
     expect(tool, `${name} missing from the catalog`).toBeDefined();
-    return tool!.reach as { module: string; chat: string };
+    return tool!.reach as { chat: string };
   }
-
-  it("marks a tool in a default-off module domain as module:off", async () => {
-    // `cameras` is defaultEnabled:false in the module registry, so the
-    // whole domain is unreachable from a turn on a box nobody has toggled.
-    expect(await reachFor("list_cameras")).toMatchObject({ module: "off" });
-  });
 
   it("marks a chat-excluded tool as chat:excluded", async () => {
     // The switch fabric is a dashboard/installer surface — every one of its
     // tools sits in EXCLUDED_FROM_CHAT_TOOLS.
-    expect(await reachFor("get_switch_ports")).toMatchObject({ chat: "excluded" });
+    expect(await reachFor("get_switch_ports")).toEqual({ chat: "excluded" });
   });
 
-  it("marks a plain local tool as module:on / chat:allowed", async () => {
-    // `system` is an UNCLAIMED domain (no module owns it) and
-    // get_system_health is not on the chat-exclusion list.
-    expect(await reachFor("get_system_health")).toEqual({
-      module: "on",
-      chat: "allowed",
-    });
+  it("marks a tool a turn can reach as chat:allowed", async () => {
+    expect(await reachFor("get_system_health")).toEqual({ chat: "allowed" });
+  });
+
+  it("agrees with EXCLUDED_FROM_CHAT_TOOLS for every tool, not just the samples", async () => {
+    // The whole point is that the route calls the shipped list rather than
+    // keeping its own. Pin that for all 142 rather than trusting two names.
+    const res = await request(app)
+      .get("/api/llm/tools/catalog")
+      .set("x-test-role", "owner");
+    for (const t of res.body.tools as { name: string; reach: { chat: string } }[]) {
+      expect(t.reach.chat, t.name).toBe(
+        EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
+      );
+    }
+  });
+
+  it("carries NO module axis — that gate is not enforced on chat yet (WARP-2972)", async () => {
+    expect(await reachFor("list_cameras")).not.toHaveProperty("module");
   });
 
   it("keeps the response additive — the WARP-555 fields are untouched", async () => {

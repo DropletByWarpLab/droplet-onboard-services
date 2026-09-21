@@ -4,9 +4,9 @@
  *
  * The menu is fed by the same `GET /api/llm/tools/catalog` that backs
  * `/tools`, which used to report every registered tool through one predicate
- * (`requiresWrite`). So the menu offered tools in switched-off modules and
- * tools the chat-scope policy withholds — picking one seeded a message that
- * could only ever come back "I can't do that".
+ * (`requiresWrite`). So the menu offered the 54 tools the chat-scope policy
+ * withholds — picking one seeded a message that could only ever come back
+ * "I can't do that".
  *
  * `/tools` still LISTS those tools, with a chip saying why; the slash menu is
  * the one surface that filters, because everything in it is an offer to act.
@@ -75,22 +75,16 @@ function entry(
 }
 
 const REACHABLE = entry("list_network_devices", "network", "See every device", {
-  module: "on",
-  chat: "allowed",
-});
-const MODULE_OFF = entry("list_cameras", "cameras", "See your cameras", {
-  module: "off",
   chat: "allowed",
 });
 const CHAT_EXCLUDED = entry("get_switch_ports", "switch", "Look at switch ports", {
-  module: "on",
   chat: "excluded",
 });
 
 beforeEach(() => {
   useToolCatalogMock.mockReset().mockReturnValue({
-    tools: [REACHABLE, MODULE_OFF, CHAT_EXCLUDED],
-    domains: ["network", "cameras", "switch"],
+    tools: [REACHABLE, CHAT_EXCLUDED],
+    domains: ["network", "switch"],
     isLoading: false,
     error: undefined,
     refresh: vi.fn(),
@@ -110,10 +104,6 @@ describe("/chat slash menu offers only reachable tools (WARP-2969)", () => {
     expect(
       within(openSlashMenu()).getByText(/list network devices/i),
     ).toBeInTheDocument();
-  });
-
-  it("omits a tool whose module is switched off", () => {
-    expect(within(openSlashMenu()).queryByText(/list cameras/i)).toBeNull();
   });
 
   it("omits a tool the chat-scope policy withholds", () => {
