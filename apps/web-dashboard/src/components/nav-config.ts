@@ -31,7 +31,6 @@ import {
   FolderOpen,
   Globe,
   Hammer,
-  HardDrive,
   HeartPulse,
   HelpCircle,
   Laptop,
@@ -245,7 +244,6 @@ export const NAV_GROUPS: NavGroup[] = [
         // it doesn't stay lit while you're in a deeper Files view.
         children: [
           { href: "/files", label: "All files", icon: FolderOpen, exact: true },
-          { href: "/files/drives", label: "Drives", icon: HardDrive },
           { href: "/files/recents", label: "Recents", icon: Clock },
           { href: "/files/favorites", label: "Favorites", icon: Star },
           { href: "/files/shared", label: "Shared", icon: Share2 },

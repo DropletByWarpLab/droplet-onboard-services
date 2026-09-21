@@ -96,10 +96,11 @@ describe("HealthStatusView (PR #382)", () => {
     expect(banner).toHaveTextContent(/needs attention/i);
   });
 
-  it("surfaces a flagged storage pool with a link to Drives (WARP-1146)", () => {
+  it("surfaces a flagged storage pool with a link to Storage (WARP-1146)", () => {
     // The monitor's `storage` component goes down when a RAID pool is
     // degraded/failed. The row must render the friendly label AND point the
-    // owner at the Drives page that explains which pool dropped a member.
+    // owner at the Storage page that explains which pool dropped a member
+    // (WARP-2959 moved it from /files/drives to Settings -> Storage).
     const health = makeHealth({
       status: "degraded",
       components: [
@@ -111,7 +112,7 @@ describe("HealthStatusView (PR #382)", () => {
     const list = screen.getByRole("list", { name: /service health/i });
     expect(within(list).getByText(/storage pools/i)).toBeInTheDocument();
     const link = within(list).getByRole("link", { name: /view drives/i });
-    expect(link).toHaveAttribute("href", "/files/drives");
+    expect(link).toHaveAttribute("href", "/settings/storage");
   });
 
   it("renders a loading state without crashing when health is undefined", () => {
