@@ -1,0 +1,327 @@
+/*
+ * WARP-2974 (ADR-056) — the Workshop as a space.
+ *
+ * The chat surface's layout language, reused not restyled: `chat-app` /
+ * `conv-rail` / `chat-main` / `chat-head` / `chat-scroll` / `chat-wrap` /
+ * `chat-composer` / `msg-bubble` all come from chat-indigo.css. This file
+ * adds only what a run transcript and a workspace context pane need on top:
+ * the step rows, the decision card, the context pane, the composer's
+ * "Work in" chip. Every colour is a token from indigo-tokens.css; every
+ * sustained motion stops under prefers-reduced-motion.
+ */
+
+/* ── Context pane (right) ─────────────────────────────────── */
+/* The pane owns its own `display`; the `<aside>` around it owns WHEN it shows
+   (`hidden xl:flex`, the conv-rail pattern — see chat-indigo.css). */
+.droplet-shell .ws-ctx {
+  width: 320px;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--glass-2);
+  border-left: 1px solid var(--border);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+/* Inside a drawer the pane owns the whole sheet: no rail chrome. */
+.droplet-shell .ws-ctx.is-drawer {
+  width: 100%;
+  border-left: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.droplet-shell .ws-ctx-head {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.droplet-shell .ws-ctx-head .t {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-shell .ws-ctx-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 14px 24px;
+}
+.droplet-shell .ws-ctx-body::-webkit-scrollbar { width: 8px; }
+.droplet-shell .ws-ctx-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 5px; }
+
+.droplet-shell .ws-sect { margin-top: 14px; }
+.droplet-shell .ws-sect:first-child { margin-top: 4px; }
+.droplet-shell .ws-sect-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  padding: 6px 2px 5px;
+}
+.droplet-shell .ws-sect-h .sx { margin-left: auto; font-weight: 500; font-family: var(--font-mono); font-size: 11px; }
+
+.droplet-shell .ws-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+.droplet-shell .ws-facts dt { color: var(--text-muted); }
+.droplet-shell .ws-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.droplet-shell .ws-facts code,
+.droplet-shell .ws-mono { font-family: var(--font-mono); font-size: 12px; }
+
+.droplet-shell .ws-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-note { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+
+.droplet-shell .ws-commits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.droplet-shell .ws-commit { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 12.5px; }
+.droplet-shell .ws-commit .s { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.droplet-shell .ws-commit .m { color: var(--text-muted); font-size: 11.5px; display: flex; gap: 6px; align-items: center; min-width: 0; }
+
+.droplet-shell .ws-clone {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.droplet-shell .ws-clone code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+/* ── Transcript (center) ──────────────────────────────────── */
+.droplet-shell .ws-thread { display: flex; flex-direction: column; gap: 18px; }
+
+/* The steps a run took: one row per tool call, in order. */
+.droplet-shell .ws-steps { list-style: none; margin: 0; padding: 0 0 0 42px; display: flex; flex-direction: column; gap: 6px; }
+.droplet-shell .ws-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  min-width: 0;
+}
+.droplet-shell .ws-step-ic {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: var(--inset);
+  margin-top: 1px;
+}
+.droplet-shell .ws-step.is-ok .ws-step-ic { color: var(--success); background: rgba(34,197,94,0.14); }
+.droplet-shell .ws-step.is-error .ws-step-ic { color: #b91c1c; background: rgba(239,68,68,0.15); }
+.droplet-shell .ws-step.is-parked .ws-step-ic { color: #b45309; background: rgba(217,163,92,0.16); }
+.droplet-shell .ws-step.is-working .ws-step-ic { color: var(--brand); background: var(--brand-subtle); }
+.droplet-shell .ws-step-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; font-size: 13px; }
+.droplet-shell .ws-step-tool { font-family: var(--font-mono); font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.droplet-shell .ws-step-meta { color: var(--text-muted); font-size: 12px; }
+.droplet-shell .ws-step-meta.r { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; }
+.droplet-shell .ws-step-args {
+  grid-column: 2;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-step details { grid-column: 2; font-size: 12px; }
+.droplet-shell .ws-step summary { cursor: pointer; color: var(--text-muted); user-select: none; }
+.droplet-shell .ws-step summary:hover { color: var(--text); }
+.droplet-shell .ws-step .ws-pre { margin-top: 6px; max-height: 320px; }
+
+/* Where a parked run stops and asks. Orange = waiting, never colour alone. */
+.droplet-shell .ws-decision {
+  margin-left: 42px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, #d9a35c 45%, var(--border));
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.droplet-shell .ws-decision-h { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text); }
+.droplet-shell .ws-decision-h svg { color: #b45309; }
+.droplet-shell .ws-decision p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--text); }
+.droplet-shell .ws-decision .ws-facts { font-size: 12px; }
+.droplet-shell .ws-decision-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+
+/* The run's closing message and any stop. */
+.droplet-shell .ws-result { margin-left: 42px; }
+.droplet-shell .ws-result .msg-bubble { font-size: 14px; }
+.droplet-shell .ws-stop {
+  margin-left: 42px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(239,68,68,0.3);
+  background: rgba(239,68,68,0.06);
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.droplet-shell .ws-stop b { color: #b91c1c; }
+.droplet-shell .ws-empty-steps { margin-left: 42px; font-size: 13px; color: var(--text-muted); }
+
+/* The run's identity line under the goal: mono facts. */
+.droplet-shell .ws-runline {
+  margin-left: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Rail rows ────────────────────────────────────────────── */
+.droplet-shell .ws-rail-row { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.droplet-shell .ws-rail-row .l { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.droplet-shell .ws-rail-row .l .conv-it-t { flex: 1; }
+.droplet-shell .ws-rail-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--brand);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  transition: background 140ms var(--ease, ease), border-color 140ms var(--ease, ease);
+}
+.droplet-shell .ws-rail-new:hover { background: var(--brand-subtle); border-color: color-mix(in srgb, var(--brand) 40%, var(--border)); }
+.droplet-shell .ws-rail-filter { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 10px 6px; }
+.droplet-shell .ws-rail-filter button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.droplet-shell .ws-rail-filter button:hover { color: var(--text); }
+.droplet-shell .ws-rail-filter button.active { background: var(--brand-subtle); color: var(--brand); border-color: transparent; }
+.droplet-shell .ws-rail-act {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.droplet-shell .ws-rail-act:hover { background: var(--surface-2); color: var(--text); }
+
+/* Small chips (the shell's `.badge`, one size smaller for rails). */
+.droplet-shell .ws-chip { font-size: 10.5px; padding: 1px 7px; }
+.droplet-shell .badge .dot.is-live { animation: ws-breathe 2s ease-in-out infinite; }
+@keyframes ws-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .droplet-shell .badge .dot.is-live { animation: none; }
+}
+
+/* ── Composer additions ───────────────────────────────────── */
+.droplet-shell .ws-workin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 4px 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  max-width: 100%;
+  min-width: 0;
+}
+.droplet-shell .ws-workin select {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  height: 28px;
+  max-width: 220px;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+.droplet-shell .ws-safety { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.droplet-shell .ws-status { font-size: 12.5px; color: var(--text-muted); min-width: 0; overflow-wrap: anywhere; }
+
+/* ── Head chips + drawer toggles ──────────────────────────── */
+.droplet-shell .ws-head-chips { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+/* `.droplet-shell .chat-iconbtn` is (0,2,0) and sets `display`, so Tailwind's
+   `lg:hidden` (0,1,0) can never hide these — the WARP-1792 rule: one owner
+   for `display`. The toggles hide here, at the same breakpoints the rail
+   (`lg`) and the context pane (`xl`) appear. */
+@media (min-width: 1024px) { .droplet-shell .ws-rail-toggle { display: none; } }
+/* On a phone the head has room for the title or the tool chip, not both; the
+   context toggle beside it opens the same pane. */
+@media (max-width: 720px) { .droplet-shell .ws-head-ws { display: none; } }
+@media (min-width: 1280px) { .droplet-shell .ws-ctx-toggle { display: none; } }
+
+@media (max-width: 720px) {
+  .droplet-shell .ws-steps,
+  .droplet-shell .ws-decision,
+  .droplet-shell .ws-result,
+  .droplet-shell .ws-stop,
+  .droplet-shell .ws-empty-steps,
+  .droplet-shell .ws-runline { margin-left: 0; padding-left: 0; }
+  .droplet-shell .ws-workin select { max-width: 150px; }
+}
