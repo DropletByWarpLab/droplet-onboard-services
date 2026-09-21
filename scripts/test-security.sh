@@ -394,6 +394,90 @@ else
 fi
 
 # =============================================================================
+# Test 14b: WARP-2895 — the sandbox sits on the internal-only network and
+# nowhere else
+# =============================================================================
+# The first `internal: true` network in the compose file. Customer-written
+# code runs in the sandbox, and the ONLY thing that keeps it off the LAN and
+# the internet is this network posture — so it is asserted, not assumed:
+#   - a top-level `networks.droplet-internal` with `internal: true`;
+#   - the sandbox attached to exactly that network — no `ports:`, no
+#     `network_mode`, no `env_file`, no docker socket;
+#   - the hardening stanza (read-only, cap_drop ALL, no-new-privileges, tmpfs
+#     /tmp, non-root image) and the ADR-021 trio incl. `pids_limit`;
+#   - the orchestrator on BOTH `default` and `droplet-internal`, so the
+#     internal network cannot silently become the orchestrator's only one.
+# MUTATION: remove `internal: true` and this goes red.
+
+_sandbox_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+problems = []
+nets = data.get("networks") or {}
+internal = nets.get("droplet-internal")
+if not isinstance(internal, dict) or internal.get("internal") is not True:
+    problems.append("networks.droplet-internal must exist with `internal: true`")
+
+sb = (data.get("services") or {}).get("sandbox")
+if not isinstance(sb, dict):
+    problems.append("services.sandbox is missing")
+    sb = {}
+
+if sb.get("networks") != ["droplet-internal"]:
+    problems.append(f"sandbox.networks must be exactly ['droplet-internal'], got {sb.get('networks')!r}")
+for key in ("ports", "network_mode", "env_file", "privileged", "devices"):
+    if key in sb:
+        problems.append(f"sandbox must not carry `{key}`")
+for vol in sb.get("volumes") or []:
+    if "docker.sock" in str(vol):
+        problems.append("sandbox must never mount the docker socket")
+if sb.get("read_only") is not True:
+    problems.append("sandbox must be read_only: true")
+if sb.get("cap_drop") != ["ALL"]:
+    problems.append("sandbox must cap_drop: [ALL]")
+if "no-new-privileges:true" not in (sb.get("security_opt") or []):
+    problems.append("sandbox must set security_opt no-new-privileges:true")
+if not any(str(t).startswith("/tmp") for t in (sb.get("tmpfs") or [])):
+    problems.append("sandbox must mount a tmpfs /tmp")
+for key in ("mem_limit", "cpus", "pids_limit"):
+    if key not in sb:
+        problems.append(f"sandbox must set `{key}` (ADR-021)")
+env = sb.get("environment") or []
+env_keys = {str(e).split("=", 1)[0] for e in env} if isinstance(env, list) else set(env.keys())
+extra_secrets = {k for k in env_keys if k.endswith("_TOKEN") or k.endswith("_PASSWORD") or k.endswith("_SECRET")} - {"SANDBOX_SERVICE_TOKEN"}
+if extra_secrets:
+    problems.append(f"sandbox may hold only its own bearer, found {sorted(extra_secrets)}")
+
+orch = (data.get("services") or {}).get("orchestrator") or {}
+onets = orch.get("networks")
+if not isinstance(onets, list) or "default" not in onets or "droplet-internal" not in onets:
+    problems.append(f"orchestrator.networks must list both default and droplet-internal, got {onets!r}")
+
+for name, cfg in (data.get("services") or {}).items():
+    if name in ("sandbox", "orchestrator"):
+        continue
+    if "droplet-internal" in (cfg.get("networks") or []):
+        problems.append(f"{name} joined droplet-internal - every member is reachable from the sandbox; add it on purpose, here")
+
+if problems:
+    print("\n".join(problems), file=sys.stderr)
+    sys.exit(1)
+print("sandbox: internal-only network, hardened, ADR-021 limits; orchestrator on both networks")
+PYEOF
+)
+_sandbox_exit=$?
+
+if [ "$_sandbox_exit" -eq 0 ]; then
+  pass "docker-compose.yml: sandbox is on the internal-only network and nowhere else (WARP-2895)"
+else
+  fail "docker-compose.yml: sandbox network / hardening posture (WARP-2895)"
+  printf "${_RED}%s${_RESET}\n" "$_sandbox_output" >&2
+fi
+
+# =============================================================================
 # Test 14: WARP-573 — orchestrator migration-on-boot is guarded
 # =============================================================================
 # The orchestrator container must NOT boot via the old unguarded

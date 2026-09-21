@@ -250,6 +250,12 @@ jobs:
             # has to be a leg, not just a local run.
             doc-render:
               - "services/doc-render/**"
+            # WARP-2895: the code-execution sandbox. Its suite spawns the REAL
+            # child interpreter (runner.py) for every case — the import
+            # allowlist, the deadline and the output cap are what customer
+            # code meets, so they are exercised end to end, never mocked.
+            sandbox:
+              - "services/sandbox/**"
             # WARP-1988: the factory-reset bulk-storage wipe and the
             # storage-pool host script are default-ON data-destroying paths;
             # their shell unit suites (<10s, no root/disks/Docker) must run at
@@ -360,7 +366,7 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager","doc-render"]
+            "inference-manager","doc-render","sandbox"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'

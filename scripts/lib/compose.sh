@@ -235,6 +235,12 @@ prepare_and_build() {
     # and must be pre-built here. Built lazily at first `up`, the first
     # "make me a report" of a fresh box would stall behind an image build.
     doc-render
+    # WARP-2895: the code-execution sandbox behind a routine's transform /
+    # when steps. NOT profile-gated (a routine with a transform step must
+    # work on the small box too) and pre-built here for the same reason as
+    # doc-render: the first routine to run would otherwise stall behind an
+    # image build.
+    sandbox
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
