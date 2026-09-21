@@ -84,6 +84,26 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 .droplet-shell .sect h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; color: var(--text); margin: 0; }
 .droplet-shell .sect .sx { font-size: 12px; color: var(--text-muted); }
 
+/* ── Page rhythm (opt-in: `.page-inner.rhythm`) ────────── */
+/* Every direct child of `.page-inner` is a section, and ONE gap owns the whole
+   page — no component carries an outer margin of its own. Before this, spacing
+   was per-component opt-in (`card mb-6` here, a `div.mb-4` wrapper there), so
+   a child that forgot one sat flush against its neighbour and a `.sect` that
+   got wrapped lost its 34px to `:first-child` above.
+   Opt-in rather than global because 48 surfaces render into `.page-inner` and
+   each still carries its own hand-rolled `mb-*`; rolling one over = strip its
+   margin utilities, then pass `rhythm` to `<ShellPage>`. Cameras is the first.
+   WARP-2961. */
+.droplet-shell .page-inner.rhythm > * + *     { margin-top: 24px; }
+.droplet-shell .page-inner.rhythm > .sect + * { margin-top: 0; }
+/* `* +` and not a bare `.sect`, so a first-child `.sect` keeps the 0 above. */
+.droplet-shell .page-inner.rhythm > * + .sect { margin-top: 34px; }
+/* Out-of-flow children (toasts, the non-portalled modals) are positioned, not
+   stacked: a margin there offsets the pinned box instead of spacing anything. */
+.droplet-shell .page-inner.rhythm > .fixed,
+.droplet-shell .page-inner.rhythm > .absolute,
+.droplet-shell .page-inner.rhythm > [data-overlay] { margin-top: 0; }
+
 /* ── Buttons ───────────────────────────────────────────── */
 .droplet-shell .btn { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 15px; border-radius: var(--radius-input);
   font-size: 13.5px; font-weight: 500; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
@@ -137,7 +157,11 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 /* `.droplet-shell .card` (0,2,0) out-specifies Tailwind's position utilities
    (0,1,0), so `card fixed` (ContextMenu), `card absolute` (SearchBar results)
    and `card sticky` (files detail column, cameras save bar) silently rendered
-   `position: relative`. Restore utility semantics at (0,3,0). */
+   `position: relative`. Restore utility semantics at (0,3,0).
+   `.droplet-shell .grid` above has the same problem with Tailwind's `gap-*`:
+   its `gap: 16px` wins, so `grid gap-4` is a coincidence and `grid gap-8`
+   would silently render at 16px. Not restored here — nothing needs a non-16
+   grid yet, and an unused `.grid.gap-N` ladder is worse than this note. */
 .droplet-shell .card.fixed { position: fixed; }
 .droplet-shell .card.absolute { position: absolute; }
 .droplet-shell .card.sticky { position: sticky; }

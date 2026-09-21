@@ -102,7 +102,7 @@ export function NetworkCameraList({
   if (cameras.length === 0) {
     // Nothing to list — say which kind of nothing it is.
     return (
-      <div className="card mb-6">
+      <div className="card">
         <div className="empty" style={{ padding: "34px 20px" }}>
           <span className="ei">
             <Radar size={24} className={scanning ? "animate-pulse" : ""} />
@@ -141,7 +141,7 @@ export function NetworkCameraList({
   }
 
   return (
-    <div className="card mb-6">
+    <div className="card">
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
           <Radar size={18} style={{ color: "var(--brand)" }} className={scanning ? "animate-pulse" : ""} />

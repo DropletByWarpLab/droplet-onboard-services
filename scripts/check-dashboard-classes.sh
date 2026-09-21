@@ -239,6 +239,12 @@ echo "check-native-dialogs: OK (0 native confirm/alert/prompt calls across $SRC_
 #                        to near-black (#1d1d1f) in dark mode, so white
 #                        is a contrast failure there (shipped twice,
 #                        caught by hand at 2.98:1).
+#   6. card-outer-margin — a `.card` carrying its own `m[btxy]-N` margin
+#                        utility. Page spacing is the page's job
+#                        (`.page-inner.rhythm`, droplet-shell.css): a card
+#                        that ships its own outer margin spaces itself on
+#                        one page and double-spaces on the next, and a card
+#                        that forgets one sits flush. WARP-2961.
 #
 # This is a SHRINK-ONLY RATCHET, not a clean-tree guard. Today's debt is
 # grandfathered in `scripts/dashboard-token-allowlist.txt`; anything not
@@ -282,6 +288,15 @@ ACCENT_ALPHA_REGEX='(^|[^A-Za-z0-9_-])[a-z-]*-accent/[0-9]+'
 # note on false negatives in the failure message.
 ACCENT_FILL_REGEX='(^|[^A-Za-z0-9_-])(bg-accent|bg-brand|bg-\[var\(--brand\)\])([^A-Za-z0-9_-]|$)'
 WHITE_LITERAL_REGEX='(text-white|bg-white|#fff)'
+
+# A `card` class token followed, in the SAME className attribute, by a margin
+# utility token (`m-4`, `mb-6`, `mt-8`, `mx-2`, `my-3`). Both ends are token
+# anchored by the mandatory space: `dp-card`, `mx-card-meta`, `--card-bd` and
+# `scroll-mt-20` do not match. Card-first only — `"flex mb-4 card"` is a known
+# blind spot, not a loophole.
+CARD_MARGIN_REGEX='class(Name)?="([^"]* )?card ([^"]* )?m[btxy]?-[0-9]'
+# A positioned card's margin is an offset from its anchor, not page rhythm.
+POSITIONED_CARD_REGEX='class(Name)?="[^"]*card ([^"]* )?(absolute|fixed|sticky)([^A-Za-z0-9_-]|$)'
 
 # Emit `relpath:line:content` for every non-excluded match of $1.
 # Pure-comment lines are dropped the same way the dialog guard drops
@@ -364,6 +379,10 @@ check_ratchet_rule "white-on-accent" \
   "$(scan_src "$ACCENT_FILL_REGEX" | grep -E "$WHITE_LITERAL_REGEX" || true)" \
   "hardcoded white on an accent fill (On-Accent is #1d1d1f in dark mode)"
 
+check_ratchet_rule "card-outer-margin" \
+  "$(scan_src "$CARD_MARGIN_REGEX" | grep -vE "$POSITIONED_CARD_REGEX" || true)" \
+  "a .card carrying its own outer margin utility — page spacing is the page's job"
+
 if [ "$ratchet_exit_code" -ne 0 ]; then
   cat <<'EOF'
 
@@ -381,6 +400,11 @@ New violations: use the ratified system instead of the legacy token.
                       accent fill on the SAME line; splitting them
                       across lines is a known blind spot, not a
                       loophole to use.
+  - card-outer-margin → drop the margin utility and let the page own
+                      the gap: `<ShellPage rhythm>` + `.page-inner.rhythm`
+                      in droplet-shell.css spaces every direct child.
+                      Rolling a page over means stripping ALL of its
+                      `mb-*` wrappers at once — the two stack.
 
 Stale allowlist entries: a file was cleaned but its grandfather line was
   left behind. Delete the line from scripts/dashboard-token-allowlist.txt
@@ -392,4 +416,4 @@ EOF
   exit 1
 fi
 
-echo "check-dashboard-tokens: OK (0 new legacy-token / accent-alpha / white-on-accent sites)"
+echo "check-dashboard-tokens: OK (0 new legacy-token / accent-alpha / white-on-accent / card-outer-margin sites)"
