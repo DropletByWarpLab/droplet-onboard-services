@@ -457,6 +457,17 @@ stdio-trusted like `agentRunId`), so a chat turn or an HTTP MCP client never
 reaches the route. The `run` allow-list is applied by the route BEFORE the
 sandbox is dialled, and again by the sandbox.
 
+**The checkout follows the repository.** The bare repository is the truth:
+an owner may push to `<id>.git` over `/git/` at any time (the AC's "push for
+owner/admin"), with nothing in the sandbox watching. So every workspace
+operation first fast-forwards the checkout onto `origin/work` — a local
+fetch, the bare is a path on the same volume. Fast-forward only: a checkout
+that has moved ahead is left alone (its next commit pushes again), and a
+checkout with uncommitted work, or one that has diverged, while the
+repository also moved is a **409** the run hears about at its next call —
+never a merge nobody asked for, never a commit over the owner's push
+refused later as a non-fast-forward.
+
 **One live run per workspace, held by the database.** Two runs on one
 checkout would commit over each other, so `POST /api/agent-runs` refuses a
 `workspaceId` that already has a `queued` / `running` /

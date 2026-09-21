@@ -208,6 +208,9 @@ def test_run_executes_pytest_in_the_checkout_and_records_the_output(store):
     assert res["exitCode"] == 0, res["stdout"] + res["stderr"]
     assert "2 passed" in res["stdout"]
     assert res["timedOut"] is False and res["truncated"] is False
+    # The record names what ACTUALLY ran — the allow-list's executable, never
+    # a bare name PATH resolved.
+    assert res["executable"] == sys.executable
     assert workspace.last_run("ws-i")["argv"] == ["pytest", "-q"]
     # The record is not part of the tree: nothing to commit after a run.
     assert store.status("ws-i")["dirty"] is False
@@ -237,6 +240,63 @@ def test_run_refuses_a_disallowed_command_before_starting_anything(store):
     assert exc.value.status == 400
     assert not (store.work_path("ws-l") / "pwned").exists()
     assert workspace.last_run("ws-l") is None
+
+
+# ── the checkout follows the repository ─────────────────────────────────────
+
+
+def _push_from_outside(store, workspace_id: str, tmp_path, filename: str, content: str) -> str:
+    """What an owner does over /git/: clone the bare repo elsewhere, commit,
+    push `work`. Returns the new head. The sandbox's checkout knows nothing."""
+    clone = tmp_path / f"outside-{workspace_id}-{filename.replace('/', '_')}"
+    store.must(store.git(["clone", "-q", "-b", "work", str(store.bare_path(workspace_id)), str(clone)], tmp_path), "clone")
+    (clone / filename).write_text(content, encoding="utf-8", newline="")
+    store.must(store.git(["add", "-A"], clone), "add")
+    store.must(store.git(["commit", "-q", "-m", f"outside: {filename}"], clone, author=("Owner", "owner@example.test")), "commit")
+    store.must(store.git(["push", "-q", "origin", "work"], clone), "push")
+    return store.must(store.git(["rev-parse", "HEAD"], clone), "rev-parse").stdout.strip()
+
+
+def test_an_outside_push_is_seen_by_the_next_operation(store, tmp_path):
+    # Mutation: drop the fetch/fast-forward in _follow_repository → read 404s
+    # and the commit below is refused at push as a non-fast-forward.
+    store.create_workspace("ws-m", "python-tool", ALICE)
+    head = _push_from_outside(store, "ws-m", tmp_path, "PUSHED.md", "# from outside\n")
+    r = workspace.read("ws-m", "PUSHED.md")
+    assert r["content"] == "# from outside\n"
+    assert workspace.log("ws-m", 1)["entries"][0]["commit"].startswith(head[:12])
+    # And the run can keep committing on top of it.
+    workspace.write("ws-m", "AFTER.md", "after\n")
+    c = workspace.commit("ws-m", "after the outside push", ALICE)
+    assert c["changed"] is True
+    bare_head = store.git(["rev-parse", "work"], store.bare_path("ws-m")).stdout.strip()
+    assert bare_head == c["commit"]
+
+
+def test_an_outside_push_over_uncommitted_work_is_a_409_not_a_merge(store, tmp_path):
+    store.create_workspace("ws-n", "python-tool", ALICE)
+    workspace.write("ws-n", "draft.md", "half done\n")  # dirty checkout, a run mid-edit
+    _push_from_outside(store, "ws-n", tmp_path, "PUSHED.md", "# from outside\n")
+    with pytest.raises(StoreError) as exc:
+        workspace.read("ws-n", "draft.md")
+    assert exc.value.status == 409 and "moved under" in str(exc.value)
+    # Nothing was merged or lost: the draft is still there, untouched.
+    assert (store.work_path("ws-n") / "draft.md").read_text(encoding="utf-8") == "half done\n"
+    assert not (store.work_path("ws-n") / "PUSHED.md").exists()
+
+
+def test_a_checkout_ahead_of_the_repository_is_left_alone(store, monkeypatch):
+    # A commit whose push failed earlier: HEAD is ahead, origin/work is an
+    # ancestor. That is not divergence — the next commit pushes again.
+    store.create_workspace("ws-o", "python-tool", ALICE)
+    work = store.work_path("ws-o")
+    (work / "AHEAD.md").write_text("ahead\n", encoding="utf-8", newline="")
+    store.must(store.git(["add", "-A"], work), "add")
+    store.must(store.git(["commit", "-q", "-m", "local only"], work, author=ALICE), "commit")
+    r = workspace.read("ws-o", "AHEAD.md")
+    assert r["content"] == "ahead\n"
+    c = workspace.commit("ws-o", "nothing new", ALICE)
+    assert c["changed"] is False
 
 
 # ── propose ─────────────────────────────────────────────────────────────────

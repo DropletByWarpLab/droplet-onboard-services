@@ -80,7 +80,41 @@ def _checkout(workspace_id: str) -> Path:
     work = gitstore.work_path(workspace_id)
     if not work.is_dir():
         raise StoreError(404, f"no workspace {workspace_id}")
+    _follow_repository(work)
     return work
+
+
+def _follow_repository(work: Path) -> None:
+    """The bare repository is the truth and the checkout follows it.
+
+    An owner may push to `<id>.git` from outside over /git/ (the ticket's AC)
+    while nothing here is watching; without this, the checkout would keep
+    working from the commit it last saw and the run's next `commit` would be
+    refused at push time as a non-fast-forward — after the run had already
+    written on top of stale files. So every operation first fast-forwards the
+    checkout onto `origin/work`. Fast-forward ONLY: a checkout that has moved
+    ahead, or has uncommitted work, while the repository also moved is a
+    divergence the run must hear about as a 409, never a merge nobody asked
+    for. The fetch is local (origin is a path on the same volume).
+    """
+    must(git(["fetch", "-q", "origin", gitstore.WORK_BRANCH], work), "fetch")
+    head = must(git(["rev-parse", "HEAD"], work), "rev-parse").stdout.strip()
+    remote = must(git(["rev-parse", f"origin/{gitstore.WORK_BRANCH}"], work), "rev-parse").stdout.strip()
+    if head == remote:
+        return
+    # The checkout is ahead (a commit whose push failed earlier): nothing to
+    # follow; the next commit pushes again.
+    if git(["merge-base", "--is-ancestor", remote, head], work).returncode == 0:
+        return
+    behind = git(["merge-base", "--is-ancestor", head, remote], work).returncode == 0
+    dirty = bool(git(["status", "--porcelain"], work).stdout.strip())
+    if not behind or dirty:
+        raise StoreError(
+            409,
+            "the repository moved under this workspace (a push over /git/ while work was in progress); "
+            "the checkout is not fast-forwarded over uncommitted or diverged work — start a new run",
+        )
+    must(git(["merge", "-q", "--ff-only", f"origin/{gitstore.WORK_BRANCH}"], work), "fast-forward")
 
 
 def _inside(work: Path, rel: str) -> Path:
@@ -302,6 +336,10 @@ def run(workspace_id: str, argv: list[str], timeout_ms: int | None = None) -> di
     stderr, err_trunc = cap(err or b"")
     result = {
         "argv": argv,
+        # What actually ran — the allow-list's hardcoded executable, so a
+        # reader of the record (and the live proof) sees the path, not a name
+        # that PATH might have resolved elsewhere.
+        "executable": exe[0],
         "exitCode": None if timed_out else proc.returncode,
         "timedOut": timed_out,
         "durationMs": duration_ms,
