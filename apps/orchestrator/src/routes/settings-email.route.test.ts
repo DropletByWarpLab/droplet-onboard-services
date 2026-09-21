@@ -43,6 +43,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 
 import { createSettingsEmailRouter } from "./settings-email.js";
 import {
+  CHANNEL_VERIFY_MESSAGES,
   EMAIL_CHANNEL_SINGLETON_ID,
   type EmailChannelConfig,
 } from "../services/email-channel.service.js";
@@ -94,6 +95,12 @@ function createPrismaMock(initial: EmailChannelConfig | null) {
           return channel;
         },
       ),
+      // WARP-2957 — verifyChannel stamps lastTestedAt/lastError on the row.
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (!channel) throw new Error("P2025: no row");
+        channel = { ...channel, ...data } as EmailChannelConfig;
+        return channel;
+      }),
     },
     userInvite: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
@@ -127,6 +134,7 @@ function buildApp(
     role: "owner",
   },
   sendMail = vi.fn().mockResolvedValue({ accepted: ["x@acme.co"] }),
+  verify = vi.fn().mockResolvedValue(true),
 ) {
   const app = express();
   app.use(express.json());
@@ -137,10 +145,10 @@ function buildApp(
   app.use(
     "/api",
     createSettingsEmailRouter(prismaMock, {
-      transportFactory: () => ({ sendMail }) as never,
+      transportFactory: () => ({ sendMail, verify }) as never,
     }),
   );
-  return { app, sendMail };
+  return { app, sendMail, verify };
 }
 
 beforeEach(() => {
@@ -267,6 +275,59 @@ describe("PUT /api/settings/email", () => {
     expect(res.status).toBe(403);
   });
 
+  // ── WARP-2957 — a save of an ENABLED relay is a test of it ─────────────
+  it("verifies the relay on an enabled save and stamps lastTestedAt (a save IS a test)", async () => {
+    const prisma = createPrismaMock(seedConfig());
+    const { app, verify } = buildApp(prisma);
+    const res = await request(app).put("/api/settings/email").send({
+      enabled: true,
+      host: "smtp.acme.co",
+      fromAddress: "d@acme.co",
+      password: "app-pass",
+    });
+    expect(res.status).toBe(200);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(res.body.lastTestedAt).toBeTruthy();
+    expect(res.body.lastError).toBeNull();
+    expect(prisma._channel()!.lastTestedAt).toBeInstanceOf(Date);
+  });
+
+  it("reports a rejected password on save as the closed-set sentence, never the server line", async () => {
+    const prisma = createPrismaMock(seedConfig());
+    const verify = vi.fn().mockRejectedValue(
+      Object.assign(new Error("535-5.7.8 Username and Password not accepted for owner@acme.co"), {
+        code: "EAUTH",
+        responseCode: 535,
+      }),
+    );
+    const { app } = buildApp(prisma, undefined, undefined, verify);
+    const res = await request(app).put("/api/settings/email").send({
+      enabled: true,
+      host: "smtp.acme.co",
+      fromAddress: "d@acme.co",
+      password: "wrong",
+    });
+    // Still 200: the SAVE succeeded. The body carries the verdict.
+    expect(res.status).toBe(200);
+    expect(res.body.lastError).toBe(CHANNEL_VERIFY_MESSAGES.auth_failed);
+    expect(JSON.stringify(res.body)).not.toContain("owner@acme.co");
+    expect(JSON.stringify(res.body)).not.toContain("535");
+    expect(prisma._channel()!.lastError).toBe(CHANNEL_VERIFY_MESSAGES.auth_failed);
+  });
+
+  it("does NOT dial on a disabled save (a parked config is not stamped with a failure)", async () => {
+    const prisma = createPrismaMock(seedConfig({ lastError: null, lastTestedAt: null }));
+    const { app, verify } = buildApp(prisma);
+    const res = await request(app).put("/api/settings/email").send({
+      enabled: false,
+      host: "smtp.acme.co",
+      fromAddress: "d@acme.co",
+    });
+    expect(res.status).toBe(200);
+    expect(verify).not.toHaveBeenCalled();
+    expect(res.body.lastTestedAt).toBeNull();
+  });
+
   it("emits an audit row on a successful write that never contains the password", async () => {
     const prisma = createPrismaMock(seedConfig());
     const { app } = buildApp(prisma);
@@ -279,6 +340,63 @@ describe("PUT /api/settings/email", () => {
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const arg = recordActivityMock.mock.calls[0][0];
     expect(JSON.stringify(arg)).not.toContain("topsecret");
+  });
+});
+
+// ── WARP-2957 — POST /api/settings/email/test ─────────────────────────────
+describe("POST /api/settings/email/test", () => {
+  it("dials the saved relay, records success on the row, and audits it", async () => {
+    const prisma = createPrismaMock(
+      seedConfig({ host: "smtp.acme.co", fromAddress: "d@acme.co", lastError: "stale" }),
+    );
+    const { app, verify, sendMail } = buildApp(prisma);
+    const res = await request(app).post("/api/settings/email/test");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.error).toBeNull();
+    expect(verify).toHaveBeenCalledTimes(1);
+    // A test sends NOTHING.
+    expect(sendMail).not.toHaveBeenCalled();
+    // The stale failure is cleared by a passing test.
+    expect(prisma._channel()!.lastError).toBeNull();
+    expect(prisma._channel()!.lastTestedAt).toBeInstanceOf(Date);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0][0].severity).toBe("ok");
+  });
+
+  it("returns 200 + ok:false with the closed-set reason when the relay is unreachable", async () => {
+    const prisma = createPrismaMock(seedConfig({ host: "smtp.acme.co", fromAddress: "d@acme.co" }));
+    const verify = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("getaddrinfo ENOTFOUND smtp.acme.co"), { code: "EDNS" }));
+    const { app } = buildApp(prisma, undefined, undefined, verify);
+    const res = await request(app).post("/api/settings/email/test");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.reason).toBe("unreachable");
+    expect(res.body.error).toBe(CHANNEL_VERIFY_MESSAGES.unreachable);
+    expect(JSON.stringify(res.body)).not.toContain("getaddrinfo");
+    expect(prisma._channel()!.lastError).toBe(CHANNEL_VERIFY_MESSAGES.unreachable);
+    expect(recordActivityMock.mock.calls[0][0].severity).toBe("warn");
+  });
+
+  it("does not stamp the row when no host is configured (nothing to dial)", async () => {
+    const prisma = createPrismaMock(seedConfig({ host: "" }));
+    const { app, verify } = buildApp(prisma);
+    const res = await request(app).post("/api/settings/email/test");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.reason).toBe("not_configured");
+    expect(verify).not.toHaveBeenCalled();
+    expect(prisma.emailChannelSetting.update).not.toHaveBeenCalled();
+  });
+
+  it("403s a family-role caller (testing dials out with the household credential)", async () => {
+    const prisma = createPrismaMock(seedConfig({ host: "smtp.acme.co" }));
+    const { app, verify } = buildApp(prisma, { id: "f", username: "fam", role: "family" });
+    const res = await request(app).post("/api/settings/email/test");
+    expect(res.status).toBe(403);
+    expect(verify).not.toHaveBeenCalled();
   });
 });
 

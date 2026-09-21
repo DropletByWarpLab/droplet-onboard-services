@@ -8,6 +8,9 @@
  *   POST   /api/email/:accountId/drafts              — create draft
  *   PATCH  /api/email/drafts/:id                     — edit draft
  *   POST   /api/email/drafts/:id/send                — queue send
+ *   PATCH  /api/email/accounts/:id/status            — WARP-2957: the indexer
+ *                                                      reports a sync cycle
+ *                                                      (service principal)
  *
  * WARP-1453 — the five email LLM tools (email_search / email_read /
  * email_summarize_thread / email_draft_reply / email_send) reach the
@@ -37,7 +40,9 @@ import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 import {
   connectMailbox,
   disconnectMailbox,
+  MAILBOX_STATUS_REASONS,
   PROVISION_ERRORS,
+  recordMailboxStatus,
 } from "../services/email/provision.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -433,6 +438,49 @@ export function createEmailRouter(
           actor: actorFromRequest(req),
         });
         res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  /**
+   * WARP-2957 — the indexer reports how a sync cycle went.
+   *
+   * `requireRole("service")` exactly like `PATCH /email/drafts/:id/status`:
+   * the email-indexer presents the WARP-339 service bearer. A human session
+   * cannot mark a mailbox healthy, and the body is a closed set — an
+   * `imapStatus` outside the three cycle outcomes or a `reason` outside
+   * `MAILBOX_STATUS_REASONS` is a 400, so a server's own words can never be
+   * smuggled onto the row through this hop.
+   *
+   * This route, and `connectMailbox`, are the only writers of the health
+   * columns. `paused` is deliberately not reachable here — it is a schema
+   * default nothing sets, not a cycle outcome.
+   */
+  const accountStatusSchema = z
+    .object({
+      imapStatus: z.enum(["idle", "reconnecting", "error"]),
+      reason: z.enum(MAILBOX_STATUS_REASONS).optional(),
+    })
+    .strict();
+
+  router.patch(
+    "/email/accounts/:id/status",
+    requireRole("service"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = accountStatusSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+          return;
+        }
+        const { updated } = await recordMailboxStatus(prisma, req.params.id, parsed.data);
+        if (!updated) {
+          res.status(404).json({ error: "account_not_found" });
+          return;
+        }
+        res.json({ ok: true });
       } catch (err) {
         next(err);
       }

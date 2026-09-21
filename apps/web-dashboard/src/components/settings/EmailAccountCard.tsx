@@ -25,6 +25,15 @@
  * ="new-password"` keeps a browser from offering the operator's own saved
  * credentials for a third-party mailbox.
  *
+ * ── "Connected" is a fact, not a default (WARP-2957) ──────────────────────
+ *
+ * The row's `imapStatus` used to be written once, by the connect probe, and
+ * never again — so this card said "Connected" forever, including for a
+ * mailbox whose password had been rotated. The indexer now reports every sync
+ * cycle back and the orchestrator writes `lastIdleAt` / `lastError`; this card
+ * renders those. A mailbox that has not completed its first cycle says
+ * "Checking…" and this card polls until it has.
+ *
  * ── No example hostnames ───────────────────────────────────────────────────
  *
  * 🔴 The placeholders say "your mail server", not "imap.gmail.com". The
@@ -39,12 +48,47 @@ import { useCallback, useEffect, useState, type JSX } from "react";
 import { authFetch } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 interface MailboxAccount {
   id: string;
   address: string;
   displayName: string;
   imapStatus: string;
+  lastIdleAt: string | null;
+  lastErrorAt: string | null;
+  /** A closed-set sentence the orchestrator chose — never the server's line. */
+  lastError: string | null;
+}
+
+/** How often to re-read the list while a mailbox has not finished its first
+ *  sync. The indexer's first cycle starts within seconds of the connect. */
+const FIRST_SYNC_POLL_MS = 5_000;
+
+/** Has this mailbox not yet completed a sync cycle since it was connected? */
+function awaitingFirstSync(a: MailboxAccount): boolean {
+  return (a.imapStatus === "idle" && a.lastIdleAt === null) || a.imapStatus === "reconnecting";
+}
+
+/** One line per mailbox state. The tone token is a design-system class. */
+function describeMailbox(a: MailboxAccount): { label: string; tone: string } {
+  switch (a.imapStatus) {
+    case "error":
+      return {
+        label: a.lastError ?? "Droplet can't reach this mailbox.",
+        tone: "text-system-red",
+      };
+    case "reconnecting":
+      return { label: "Reconnecting…", tone: "text-system-orange" };
+    case "paused":
+      return { label: "Paused", tone: "" };
+    case "idle":
+      return a.lastIdleAt
+        ? { label: `Connected · checked ${formatRelativeTime(a.lastIdleAt)}`, tone: "text-system-green" }
+        : { label: "Checking…", tone: "" };
+    default:
+      return { label: a.imapStatus, tone: "" };
+  }
 }
 
 /** Default ports, offered rather than assumed — implicit TLS on both. */
@@ -84,6 +128,15 @@ export function EmailAccountCard(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Poll while any mailbox is between "connected" and "first cycle done", so
+  // "Checking…" turns into "Connected · checked just now" without a reload.
+  const pending = accounts.some(awaitingFirstSync);
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => void load(), FIRST_SYNC_POLL_MS);
+    return () => clearInterval(t);
+  }, [pending, load]);
 
   const reset = () => {
     setDisplayName("");
@@ -183,23 +236,30 @@ export function EmailAccountCard(): JSX.Element {
 
       {accounts.length > 0 && (
         <ul className="flex flex-col gap-2">
-          {accounts.map((a) => (
-            <li key={a.id} className="flex items-center justify-between gap-2">
-              <span>
-                {a.displayName} · {a.address}
-              </span>
-              <span className="type-caption-1 text-system-green">
-                {a.imapStatus === "idle" ? "Connected" : a.imapStatus}
-              </span>
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={() => setPendingDisconnect(a)}
-              >
-                Disconnect
-              </button>
-            </li>
-          ))}
+          {accounts.map((a) => {
+            const state = describeMailbox(a);
+            return (
+              <li key={a.id} className="flex items-center justify-between gap-2">
+                <span>
+                  {a.displayName} · {a.address}
+                </span>
+                <span
+                  className={`type-caption-1 ${state.tone}`}
+                  style={state.tone ? undefined : { color: "var(--text-muted)" }}
+                  role="status"
+                >
+                  {state.label}
+                </span>
+                <button
+                  className="btn"
+                  disabled={busy}
+                  onClick={() => setPendingDisconnect(a)}
+                >
+                  Disconnect
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -303,7 +363,8 @@ export function EmailAccountCard(): JSX.Element {
       )}
       {savedAt !== null && !error && (
         <p className="type-footnote text-system-green flex items-center gap-1" role="status">
-          Mailbox connected.
+          Mailbox connected. Droplet is fetching your recent mail — it shows up on the Email page
+          in a minute.
         </p>
       )}
 
