@@ -30,10 +30,16 @@ const SRC = path.resolve(here, "..");
  * Consumers whose Close control is rendered by another module. The /chat
  * drawer hosts the shared conversation rail, and the rail owns the header row
  * the button belongs in — so the page threads `onClose` down instead of
- * floating a second button over it.
+ * floating a second button over it. The Workshop (WARP-2974) does the same
+ * for TWO drawers — its rail and its workspace pane — so a consumer may name
+ * several owners, and every one of them must carry the control.
  */
-const DELEGATES: Record<string, string> = {
-  "app/chat/page.tsx": "components/chat/ChatHistoryPanel.tsx",
+const DELEGATES: Record<string, string[]> = {
+  "app/chat/page.tsx": ["components/chat/ChatHistoryPanel.tsx"],
+  "components/workshop/WorkshopSpace.tsx": [
+    "components/workshop/WorkshopRail.tsx",
+    "components/workshop/WorkspaceContext.tsx",
+  ],
 };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -65,16 +71,17 @@ describe("WARP-1787 a right-side panel is dismissible with no backdrop to tap", 
   });
 
   it.each(consumers)("%s exposes a labelled Close control", (rel) => {
-    const owner = DELEGATES[rel] ?? rel;
-    const src = readFileSync(path.join(SRC, owner), "utf-8");
-    // `Close\b` so the role builder's "Close role builder" counts — the
-    // requirement is a labelled control, not one exact string.
-    expect(
-      src,
-      `${owner} renders <Dialog placement="right"> with no aria-label="Close…" ` +
-        `button. Below 720px the panel is full-width, so the backdrop is gone ` +
-        `and this is the only way out.`,
-    ).toMatch(/aria-label="Close\b/);
+    for (const owner of DELEGATES[rel] ?? [rel]) {
+      const src = readFileSync(path.join(SRC, owner), "utf-8");
+      // `Close\b` so the role builder's "Close role builder" counts — the
+      // requirement is a labelled control, not one exact string.
+      expect(
+        src,
+        `${owner} renders <Dialog placement="right"> with no aria-label="Close…" ` +
+          `button. Below 720px the panel is full-width, so the backdrop is gone ` +
+          `and this is the only way out.`,
+      ).toMatch(/aria-label="Close\b/);
+    }
   });
 
   it("the /chat drawer actually hands its close down to the rail", () => {

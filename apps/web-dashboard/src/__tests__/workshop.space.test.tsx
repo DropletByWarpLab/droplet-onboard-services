@@ -24,6 +24,10 @@
  *  11. `?workspace=<id>` opens the context pane: branch, proposal, changes,
  *      last command, history, clone URL; one failing read blanks its own
  *      section only; a 404 says so.
+ * The drawers (WARP-1787):
+ *  12. Below `lg` the rail, and below `xl` the workspace pane, open as
+ *      right-side drawers — full-width on a phone, so no backdrop to tap —
+ *      and each one's own header Close button is the way out.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
@@ -458,5 +462,30 @@ describe("Workshop — custom tools", () => {
     render(<WorkshopSpace />);
     const pane = await screen.findByTestId("workspace-context");
     await waitFor(() => expect(pane.textContent).toContain("No workspace with that id."));
+  });
+});
+
+describe("Workshop — the drawers close from their own header (WARP-1787)", () => {
+  it("the rail drawer's Close button dismisses it", async () => {
+    wire({ runs: [parked] });
+    render(<WorkshopSpace />);
+    // The inline rail (lg+) has no dialog to leave, so no Close of its own.
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open the workshop rail" }));
+    const drawer = await screen.findByRole("dialog");
+    fireEvent.click(within(drawer).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("the workspace pane drawer's Close button dismisses it", async () => {
+    mockSearchParamsString = "workspace=ws-a";
+    wire({ workspaces: [WS] });
+    render(<WorkshopSpace />);
+    await screen.findByTestId("workspace-context");
+    expect(screen.queryByRole("button", { name: "Close the workspace pane" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open the workspace pane" }));
+    const drawer = await screen.findByRole("dialog");
+    fireEvent.click(within(drawer).getByRole("button", { name: "Close the workspace pane" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });
