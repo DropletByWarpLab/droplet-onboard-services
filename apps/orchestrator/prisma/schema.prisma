@@ -2963,6 +2963,21 @@ enum DepartmentRight {
   manager // + create shares on dept content, manage dept membership (absorbs WARP-1245)
 }
 
+/// WARP-2976 (ADR-059 P1): which arrangement a department's profile starts
+/// from. A template is DATA — default nav destinations and home widgets the
+/// dashboard seeds a profile with; the owner or the department's manager edits
+/// both afterwards. It grants nothing: what a person may reach is still ADR-032
+/// + CameraAccessGrant. `custom` is an explicit choice, not a fallback.
+enum DepartmentTemplate {
+  security
+  sales
+  finance
+  operations
+  front_desk
+  it
+  custom
+}
+
 /// WARP-1255: department hierarchy kind. Departments are top-level; teams nest
 /// one level deep inside them. Household is the legacy WS-5 system department.
 enum DepartmentKind {
@@ -6344,6 +6359,11 @@ model Department {
   // membership test, so an access key must never dangle.
   brainDigests      BrainDigest[]
   brainFindings     BrainFinding[]
+  /// WARP-2976 (ADR-059 P1): how this department is ARRANGED in the dashboard
+  /// (switcher, /d/<slug> home). Absent = "not set up" — a state the UI names,
+  /// never a template inferred from the department's name. Only DEPARTMENT rows
+  /// carry one: a TEAM reads its parent's, HOUSEHOLD has none.
+  profile           DepartmentProfile?
 
   @@index([state])
   /// WARP-2634: declared to match `Department_parentId_idx`, which
@@ -6355,6 +6375,27 @@ model Department {
 
 /// WARP-1255: department membership — explicit access rights for a user in a
 /// department. The sync state tracks whether NC group membership has converged.
+/// WARP-2976 (ADR-059 P1) — a department's dashboard arrangement. Shows,
+/// never grants: `navHrefs` is intersected with the viewer's existing nav gates
+/// (role / capability / module) on the client, so a destination the person may
+/// not reach stays hidden and an href that no longer exists renders nothing.
+/// The server validates SHAPE only; the nav definition lives in the dashboard.
+model DepartmentProfile {
+  departmentId String             @id
+  department   Department         @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  template     DepartmentTemplate
+  /// lucide icon name, lowercase-dash (validated by the route's zod schema)
+  icon         String
+  /// ordered dashboard hrefs, e.g. ["/cameras", "/events"]
+  navHrefs     String[]
+  /// ordered [{ widget, size }] — unknown widget ids are skipped by the client
+  homeWidgets  Json
+  /// local User.id of the last writer (the ActivityRow carries the audit)
+  updatedBy    String
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+}
+
 model DepartmentMembership {
   id               String          @id @default(uuid())
   departmentId     String
