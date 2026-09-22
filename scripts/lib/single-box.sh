@@ -312,6 +312,17 @@ EOF
   sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
     /usr/local/sbin/droplet-relay-dns
 
+  # --- bootstrap-certificate refresh (WARP-2944, ADR-058) -------------------
+  # The device-bridge's TlsRefreshWatcher execs this when the uplink address
+  # changes, so the self-signed cert's SAN follows the box around the SAME
+  # key. install-device-bridge.sh installs it on a full provision; landing it
+  # here too is what puts it on an EXISTING box — the WARP-2574 heal
+  # (droplet-host-integration.service → --reapply-host-integration) re-runs
+  # only this function, so a bridge-only install would leave every shipped
+  # box calling a wrapper that is not there, ten minutes at a time, forever.
+  sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
+    /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
+
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
   # no remote path in. Acts ONLY when nothing holds a usable address, so it is

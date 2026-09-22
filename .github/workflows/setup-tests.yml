@@ -67,6 +67,9 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2944: the bootstrap cert's SAN follows the box's address around
+      # the SAME key, so pinned pairings survive a move.
+      - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
       # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
       # that follow the served certificate through every reload.
       - "tests/local-dns-avahi.test.sh"
@@ -138,6 +141,9 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2944: the bootstrap cert's SAN follows the box's address around
+      # the SAME key, so pinned pairings survive a move.
+      - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
       # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
       # that follow the served certificate through every reload.
       - "tests/local-dns-avahi.test.sh"
@@ -376,6 +382,14 @@ jobs:
         # Pure bash over a fixture /sys tree; no Docker, no root.
         run: bash tests/device-id-seed.test.sh
 
+      - name: Run bootstrap-certificate key-reuse tests
+        # WARP-2944 / ADR-058: the self-signed bootstrap certificate names the
+        # box's CURRENT addresses (a moved box regenerates its SAN) around the
+        # SAME private key, so every app that pinned the key keeps working; a
+        # torn pair still mints fresh; a public-CA leaf is never touched. Runs
+        # the real _generate_tls_cert in a temp REPO_ROOT with the address
+        # discovery overridden; openssl only, no Docker, no root.
+        run: bash tests/tls-bootstrap-cert-follows-the-box.test.sh
       - name: Run avahi _droplet._tcp advertisement tests
         # WARP-2941 / ADR-008 §4: the apps find a Droplet by TYPE. The rendered
         # service file carries _droplet._tcp with fqdn=/state= TXT hints, the

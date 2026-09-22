@@ -23,7 +23,6 @@ import {
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/lib/auth";
-import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
@@ -61,6 +60,7 @@ import { networkTabHref, parseNetworkTab, type Tab } from "./tab-url";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
+  scrollTabToTop,
 } from "./schedule-anchor-scroll";
 import type {
   FirewallConfig,
@@ -192,15 +192,21 @@ function NetworkPageInner() {
   // state during that window instead of flashing the alarming full-page error.
   const [rebooting, setRebooting] = useState(false);
 
-  // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Most installs
-  // default to Simple — the everyday Overview only — while Business installs
-  // default to Advanced (the full OpenWrt tab surface). The persona default
-  // re-syncs once `isBusiness` resolves (useWorkspace hydrates it from the
-  // orchestrator after first paint) without clobbering an explicit user choice
-  // — see useNetworkViewMode. Switching to Simple snaps the active panel back to
-  // Overview so the hidden tab strip can't leave a power-user panel showing.
-  const { isBusiness } = useWorkspace();
-  const { mode, choose: chooseMode } = useNetworkViewMode(isBusiness);
+  // WARP-612 / WARP-2962: Simple ⟷ Advanced mode (Droplet Design System). The
+  // page opens in Simple — the everyday Overview only — because that is what
+  // people come to /network for. The URL decides the exception: a link that
+  // names a tab (`?tab=system`, a cross-tab jump, browser back/forward) is
+  // asking for a surface that only exists in Advanced, so it opens Advanced
+  // with that tab selected. `mode` and `activeTab` are independent, so this
+  // must read `activeTab` — keying it off the persona instead (the old
+  // `isBusiness`, statically true since WARP-1341) meant Simple never showed.
+  // A deep link arriving after mount opens Advanced too, one-directionally:
+  // losing the `?tab=` never closes Advanced again (the Overview tab's href IS
+  // the bare /network path), and an explicit user choice wins over both — see
+  // useNetworkViewMode. Switching to
+  // Simple snaps the active panel back to Overview so the hidden tab strip
+  // can't leave a power-user panel showing.
+  const { mode, choose: chooseMode } = useNetworkViewMode(activeTab !== "overview");
   function switchMode(next: "simple" | "advanced") {
     chooseMode(next);
     if (next === "simple") setActiveTab("overview");
@@ -291,6 +297,17 @@ function NetworkPageInner() {
       cleanup();
     };
   }, [activeTab, mode]);
+
+  // WARP-2963: a tab arrival starts at the top of that tab's options. Nothing
+  // scrolled on `?tab=<id>`, so a deep link or a tab switch inherited whatever
+  // scroll position the browser restored across the Suspense → skeleton →
+  // content swap — with ~300px of chrome above the first card, the tab opened
+  // showing its middle. scrollTabToTop stands aside for a `#schedule-` deep
+  // link, whose own anchor scroll (above) owns that jump. This does override
+  // back/forward scroll restoration on /network.
+  useEffect(() => {
+    scrollTabToTop();
+  }, [activeTab]);
 
   // WARP-298 / PR #720 review (a11y): once `activeTab` reflects the key-driven
   // selection, move focus to that tab button. Running this after activation

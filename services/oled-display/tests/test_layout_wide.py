@@ -1189,6 +1189,79 @@ def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
     assert sim_display.household_ssid() == ""
 
 
+# --- WARP-2944: the certificate lifecycle on the screen -------------------
+
+def test_tls_warning_line_speaks_only_when_renewal_is_failing_and_time_is_short():
+    """The rule, branch by branch: failing + under 14 days → the line with the
+    count and the action; failing with weeks to go, healthy, renewing, the
+    bootstrap self-signed cert, an unpolled box, and junk all say nothing."""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 5}) == (
+        "CERTIFICATE · renewal failing · 5 days left · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 1}) == (
+        "CERTIFICATE · renewal failing · 1 day left · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": -2}) == (
+        "CERTIFICATE EXPIRED · renewal failing · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 13}) != ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 14}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 25}) == ""
+    assert lw.tls_warning_line({"state": "LE_ISSUED", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEWING", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "BOOTSTRAP_SELF_SIGNED", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": "5"}) == ""
+    assert lw.tls_warning_line({}) == ""
+    assert lw.tls_warning_line(None) == ""
+
+
+def _chrome_state(monkeypatch, populated):
+    """The pill draws its label letter by letter (tracked), so the state is
+    read where it is decided: the argument render_status hands _render_chrome."""
+    seen = {}
+    real = lw._render_chrome
+    monkeypatch.setattr(lw, "_render_chrome",
+                        lambda disp, draw, now, state: (seen.__setitem__("state", state),
+                                                        real(disp, draw, now, state))[1])
+    lw.render_status(populated)
+    return seen.get("state")
+
+
+def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(populated, monkeypatch):
+    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 6,
+                                    "fqdn": "warp-lab.droplet-us.com"})
+    t = _texts(populated)
+    assert "CERTIFICATE · renewal failing · 6 days left · needs internet" in t
+    # It outranks the last event on the footer's right, rather than sharing it.
+    assert "12:04 · Backup completed" not in t
+    # DEGRADED, never ALERT: the box is doing its job; its padlock is not.
+    assert _chrome_state(monkeypatch, populated) == "degraded"
+
+
+def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, monkeypatch):
+    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 61,
+                                    "fqdn": "warp-lab.droplet-us.com"})
+    t = _texts(populated)
+    assert "12:04 · Backup completed" in t
+    assert not any(s.startswith("CERTIFICATE") for s in t)
+    assert _chrome_state(monkeypatch, populated) == "live"
+
+
+def test_a_later_answer_takes_the_warning_back_down(populated):
+    """update_tls replaces wholesale: renewal succeeded → no stale warning."""
+    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 3})
+    assert any(s.startswith("CERTIFICATE") for s in _texts(populated))
+    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 89})
+    assert not any(s.startswith("CERTIFICATE") for s in _texts(populated))
+    assert populated._v3["tls"].get("daysLeft") == 89
+
+
+def test_the_tls_pump_is_gated_on_a_wide_panel():
+    """The footer is layout_wide's; a PyPortal has no place to show the line
+    and must not be polled for it (same gate, same reason as STORAGE)."""
+    import inspect
+    src = inspect.getsource(display_module.TFTDisplay._cycle_loop)
+    pump = src.split("tls = self.fetch_tls_status()")[0]
+    guard = pump.rsplit("if (", 1)[-1]
+    assert "_is_wide_panel()" in guard
 # --- WARP-2954 / ADR-058: the rail's default face is the app-pairing link ---
 
 BRIDGE_PAIR_OK = {

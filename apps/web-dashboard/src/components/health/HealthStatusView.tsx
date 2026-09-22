@@ -174,11 +174,12 @@ function HealthBody({ health }: { health: SystemHealth }) {
                   <span className="nm">{serviceLabel(c.name)}</span>
                 </span>
                 {/* WARP-1146 — a flagged storage pool is actionable: point the
-                    owner straight at the Drives page that shows which pool
-                    dropped a member and what to do about it. */}
+                    owner straight at the storage page that shows which pool
+                    dropped a member and what to do about it. (WARP-2959 moved
+                    it to Settings → Storage.) */}
                 {c.name === "storage" && !up && (
                   <Link
-                    href="/files/drives"
+                    href="/settings/storage"
                     className="rmeta text-[var(--brand)]"
                     style={{ textDecoration: "none" }}
                   >

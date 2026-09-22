@@ -2005,6 +2005,54 @@ _REQUIRED_DNS_SANS=(
   droplet-ai.lan
 )
 
+# WARP-2944 (ADR-058) — the box's current addresses, one per line: every
+# non-loopback IPv4 with global scope (LAN, docker bridges, the WireGuard
+# gateway when up). `DROPLET_TLS_SAN_IPS` (space-separated) overrides the
+# discovery so a suite can drive a "box moved" without a network namespace;
+# SET-BUT-EMPTY means "this box has no LAN address" (loopback only), which is
+# what a fixture certificate naming only 127.0.0.1 needs to count as covered.
+_current_lan_ipv4s() {
+  if [ -n "${DROPLET_TLS_SAN_IPS+x}" ]; then
+    # shellcheck disable=SC2086  # word-splitting the list is the point
+    printf '%s\n' ${DROPLET_TLS_SAN_IPS}
+    return 0
+  fi
+  { ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[\d.]+' 2>/dev/null; } \
+    || { ifconfig 2>/dev/null \
+         | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+         | grep -v '^127\.'; } \
+    || true
+}
+
+# The `IP Address:` entries of a certificate's SAN, one per line.
+_cert_ip_sans() {
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+    | grep -oE 'IP Address:[0-9A-Fa-f.:]+' \
+    | sed 's/^IP Address://'
+}
+
+# WARP-2944 — does the certificate name EVERY address the box has right now?
+#
+# The self-signed bootstrap cert freezes its IP SANs at generation. A box that
+# moves networks (or takes a new lease) then serves a cert that no longer
+# names its own address, and a client that pinned the box's key still refuses
+# by NAME — the pin is right, the SAN is stale (droplet-windows trust.rs
+# `NameMismatch`). Regenerating around the SAME key (see _generate_tls_cert)
+# makes the SAN follow the box while every pinned pairing keeps working.
+# Only meaningful for a self-signed leaf: a public-CA leaf never carries IP
+# SANs and is never regenerated here.
+_cert_covers_current_ips() {
+  local cert_file="$1"
+  local have ip
+  have="$(_cert_ip_sans "$cert_file")"
+  while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    printf '%s\n' "$have" | grep -qxF "$ip" || return 1
+  done < <(_current_lan_ipv4s)
+  return 0
+}
+
 _cert_has_all_required_sans() {
   local cert_file="$1"
   local dns_list
@@ -2136,9 +2184,12 @@ _generate_tls_cert() {
     # WARP-595: the skip-guard must also verify the KEY belongs to the cert —
     # a torn pair (valid cert + unrelated/truncated key) previously passed
     # this check on every re-run and never converged.
+    # WARP-2944: a SELF-SIGNED leaf must also name every address the box has
+    # NOW (a public-CA leaf has no IP SANs and is preserved below).
     if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
        && _cert_has_all_required_sans "$cert_file" \
-       && _tls_pair_matches "$cert_file" "$key_file"; then
+       && _tls_pair_matches "$cert_file" "$key_file" \
+       && { _cert_is_public_ca_leaf "$cert_file" || _cert_covers_current_ips "$cert_file"; }; then
       log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
       return 0
     fi
@@ -2197,21 +2248,55 @@ _generate_tls_cert() {
       log_success "Restored TLS certificate from bootstrap copy:"
       log_info "  Cert: $cert_file"
       log_info "  Key:  $key_file"
-      if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
-        # shellcheck source=tls-reload.sh
-        source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+      # WARP-2944: the bootstrap copy names the addresses the box had at FIRST
+      # install. If the box has since moved, do not stop at the restore —
+      # fall through and regenerate around the restored (genuine) key so the
+      # served SAN names where the box is now. Same key, same pin.
+      if _cert_covers_current_ips "$cert_file"; then
+        if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+          # shellcheck source=tls-reload.sh
+          source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+        fi
+        reload_gateway_nginx || true
+        return 0
       fi
-      reload_gateway_nginx || true
-      return 0
+      log_warn "Restored bootstrap certificate does not name this box's current address(es) — regenerating around its key"
+      pair_broken=false
     fi
 
     if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
       log_warn "TLS certificate expired or invalid — regenerating"
     elif [ "$pair_broken" = "true" ]; then
       log_warn "TLS certificate and key do not match (torn write from an interrupted run) — regenerating"
-    else
+    elif ! _cert_has_all_required_sans "$cert_file"; then
       log_warn "TLS certificate is missing one or more required DNS SANs — regenerating"
+    else
+      log_warn "TLS certificate does not name this box's current address(es) ($(_current_lan_ipv4s | tr '\n' ' ' | sed 's/ $//')) — regenerating around the same key"
     fi
+  fi
+
+  # WARP-2944 — KEEP THE KEY whenever it is genuinely ours. The key is the
+  # box's identity to every client that pinned it (the pairing QR's `spki=`,
+  # WARP-2953/2954): a fresh -newkey would make each of them see "identity
+  # changed" for a SAN refresh that changed nothing about who the box is.
+  # Reuse only a key that loads AND belongs to the installed cert — a torn
+  # pair's key was never the served identity, so there minting fresh is right.
+  local reuse_key=false
+  if [ -f "$cert_file" ] && [ -f "$key_file" ] \
+     && _tls_pair_matches "$cert_file" "$key_file" \
+     && openssl pkey -in "$key_file" -noout >/dev/null 2>&1; then
+    reuse_key=true
+  fi
+
+  # WARP-2944: an UNATTENDED caller (the device-bridge's refresh wrapper, every
+  # ten minutes on every box) may only ever regenerate AROUND the key. A key it
+  # cannot read — root-owned 0600 after a `sudo ./scripts/setup.sh` — looks
+  # exactly like a torn pair from here, and minting fresh over it would rotate
+  # the identity every pinned app holds, silently, on a timer. Refuse instead;
+  # a human runs setup.sh --sync-secrets to heal a pair deliberately.
+  if [ "$reuse_key" != "true" ] && [ -n "${DROPLET_TLS_NO_NEWKEY:-}" ]; then
+    log_error "TLS: a fresh private key would be minted here and this caller may not mint one (DROPLET_TLS_NO_NEWKEY): the served key is the box's identity to every paired app — run setup.sh --sync-secrets to heal the pair deliberately"
+    return 1
   fi
 
   log_info "Generating self-signed TLS certificate (valid 10 years)..."
@@ -2246,14 +2331,10 @@ _generate_tls_cert() {
     log_info "  Including per-device FQDN in SAN: $public_fqdn"
   fi
 
-  # Add all non-loopback IPv4 addresses
+  # Add all non-loopback IPv4 addresses (the same list the skip-guard checks
+  # the installed cert against, so the two can never disagree).
   local ip
-  for ip in $(ip -4 addr show scope global 2>/dev/null \
-              | grep -oP 'inet \K[\d.]+' 2>/dev/null || \
-              ifconfig 2>/dev/null \
-              | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-              | grep -v '^127\.'); do
+  for ip in $(_current_lan_ipv4s); do
     san="$san,IP:$ip"
   done
   # Always include loopback
@@ -2263,18 +2344,30 @@ _generate_tls_cert() {
   # run never leaves a half-written cert or key at the live paths. A crash
   # between the two renames leaves a MISMATCHED pair — which the pair-match
   # guard above now detects and heals on the next run.
-  openssl req -x509 -nodes -newkey rsa:2048 \
-    -days 3650 \
-    -keyout "$key_file.tmp" \
-    -out "$cert_file.tmp" \
-    -subj "/CN=Droplet Edge Device" \
-    -addext "subjectAltName=$san" \
-    2>/dev/null
+  if [ "$reuse_key" = "true" ]; then
+    log_info "  Reusing the existing private key — pinned pairings (apps) stay valid"
+    openssl req -x509 -nodes -key "$key_file" \
+      -days 3650 \
+      -out "$cert_file.tmp" \
+      -subj "/CN=Droplet Edge Device" \
+      -addext "subjectAltName=$san" \
+      2>/dev/null
+    chmod 644 "$cert_file.tmp"
+    mv "$cert_file.tmp" "$cert_file"
+  else
+    openssl req -x509 -nodes -newkey rsa:2048 \
+      -days 3650 \
+      -keyout "$key_file.tmp" \
+      -out "$cert_file.tmp" \
+      -subj "/CN=Droplet Edge Device" \
+      -addext "subjectAltName=$san" \
+      2>/dev/null
 
-  chmod 600 "$key_file.tmp"
-  chmod 644 "$cert_file.tmp"
-  mv "$key_file.tmp" "$key_file"
-  mv "$cert_file.tmp" "$cert_file"
+    chmod 600 "$key_file.tmp"
+    chmod 644 "$cert_file.tmp"
+    mv "$key_file.tmp" "$key_file"
+    mv "$cert_file.tmp" "$cert_file"
+  fi
 
   log_success "TLS certificate generated:"
   log_info "  Cert: $cert_file"

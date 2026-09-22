@@ -142,3 +142,12 @@ describe("Network cross-tab link focus (WARP-1723)", () => {
     expect(src).toMatch(/setActiveTab\("wifi"\)/);
   });
 });
+
+// WARP-2963 — every tab arrival lands at the top of its options. Source-pinned
+// for the same reason as the rest of this file (the page is hook-heavy); the
+// helper's own behaviour is exercised in schedule-anchor-scroll.test.ts.
+describe("Network tab arrival scrolls to the top (WARP-2963)", () => {
+  it("runs scrollTabToTop on every activeTab change", () => {
+    expect(src).toMatch(/scrollTabToTop\(\);?\s*\n?\s*\},\s*\[activeTab\]\)/);
+  });
+});

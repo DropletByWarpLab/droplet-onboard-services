@@ -1340,6 +1340,31 @@ export async function fetchTlsStatus(): Promise<TlsStatus> {
   return res.json();
 }
 
+/** WARP-2944 — the certificate lifecycle for Settings → Device information
+ *  (owner/admin): days left, when the box renews on its own, whether the
+ *  last week has begun. Computed once server-side so the card and the screen
+ *  never disagree on the arithmetic. */
+export interface TlsCertificate {
+  state: string;
+  fqdn: string | null;
+  notAfter: string | null;
+  daysLeft: number | null;
+  renewsInDays: number | null;
+  expiringSoon: boolean;
+  hqConfigured: boolean;
+  checkedAt: string | null;
+}
+
+export async function fetchTlsCertificate(): Promise<TlsCertificate> {
+  const res = await fetch(`${BASE}/api/tls/certificate`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch certificate lifecycle: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Network / Router ---
 
 export type RouterErrorCode =

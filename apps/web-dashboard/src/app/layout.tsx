@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Instrument_Serif, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/lib/theme";
+import { NavLayoutProvider } from "@/lib/nav-layout";
 import { AuthProvider } from "@/lib/auth";
 import { WorkspaceProvider } from "@/lib/workspace";
 import { AuthGate } from "@/components/AuthGate";
@@ -80,6 +81,20 @@ const themeScript = `
 })();
 `;
 
+// WARP-2956: same no-flash trick for the desktop sidebar width — apply the
+// persisted collapse/width to --sidebar-w before hydration so the content
+// column doesn't jump from 260px on first paint. Mirrors useSidebarLayout's
+// clamp (200–360, rail 64); storage errors fall through to the CSS default.
+const sidebarScript = `
+(function(){
+  try{
+    var c=localStorage.getItem('droplet.sidebar.collapsed')==='1';
+    var w=Math.min(360,Math.max(200,Math.round(Number(localStorage.getItem('droplet.sidebar.width')))||260));
+    document.documentElement.style.setProperty('--sidebar-w',(c?64:w)+'px');
+  }catch(e){}
+})();
+`;
+
 export default function RootLayout({
   children,
 }: {
@@ -89,6 +104,7 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${instrumentSerif.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <script dangerouslySetInnerHTML={{ __html: sidebarScript }} />
       </head>
       <body className="font-[family-name:var(--font-inter)] antialiased">
         {/* Skip link — first focusable element so keyboard users can bypass
@@ -101,14 +117,18 @@ export default function RootLayout({
           Skip to content
         </a>
         <ThemeProvider>
-          <AuthProvider>
-            <WorkspaceProvider>
-              <ToastProvider>
-                <NotificationToaster />
-                <AuthGate>{children}</AuthGate>
-              </ToastProvider>
-            </WorkspaceProvider>
-          </AuthProvider>
+          {/* WARP-2971 — sidebar vs Workspace-tabs shell; a display preference
+              beside the theme, read by AuthGate. */}
+          <NavLayoutProvider>
+            <AuthProvider>
+              <WorkspaceProvider>
+                <ToastProvider>
+                  <NotificationToaster />
+                  <AuthGate>{children}</AuthGate>
+                </ToastProvider>
+              </WorkspaceProvider>
+            </AuthProvider>
+          </NavLayoutProvider>
         </ThemeProvider>
       </body>
     </html>

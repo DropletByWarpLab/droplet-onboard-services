@@ -171,7 +171,7 @@ export function EmailWorkspace({
   return (
     <div
       className="
-        droplet-shell
+        droplet-shell email-app
         grid min-h-0
         h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh
         grid-cols-1

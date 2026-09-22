@@ -72,6 +72,13 @@ export interface ShellPageProps {
   actions?: ReactNode;
   /** Render the decorative ambient layer (default true). */
   ambient?: boolean;
+  /**
+   * Opt into the page-rhythm rule (`.page-inner.rhythm`, droplet-shell.css):
+   * one 24px gap between every direct child, 34px above a `.sect`. Only pass
+   * it from a page whose children carry NO outer margin utilities of their
+   * own — the two stack. WARP-2961.
+   */
+  rhythm?: boolean;
   children: ReactNode;
 }
 
@@ -82,6 +89,7 @@ export function ShellPage({
   sub,
   actions,
   ambient = true,
+  rhythm = false,
   children,
 }: ShellPageProps) {
   return (
@@ -96,7 +104,7 @@ export function ShellPage({
         <ShellStatusChip />
       </header>
       <div className="page-body">
-        <div className="page-inner">
+        <div className={rhythm ? "page-inner rhythm" : "page-inner"}>
           {title ? <Phead title={title} sub={sub} actions={actions} /> : null}
           {children}
         </div>
