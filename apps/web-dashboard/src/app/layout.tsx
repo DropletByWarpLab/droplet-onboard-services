@@ -81,6 +81,20 @@ const themeScript = `
 })();
 `;
 
+// WARP-2956: same no-flash trick for the desktop sidebar width — apply the
+// persisted collapse/width to --sidebar-w before hydration so the content
+// column doesn't jump from 260px on first paint. Mirrors useSidebarLayout's
+// clamp (200–360, rail 64); storage errors fall through to the CSS default.
+const sidebarScript = `
+(function(){
+  try{
+    var c=localStorage.getItem('droplet.sidebar.collapsed')==='1';
+    var w=Math.min(360,Math.max(200,Math.round(Number(localStorage.getItem('droplet.sidebar.width')))||260));
+    document.documentElement.style.setProperty('--sidebar-w',(c?64:w)+'px');
+  }catch(e){}
+})();
+`;
+
 export default function RootLayout({
   children,
 }: {
@@ -90,6 +104,7 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${instrumentSerif.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <script dangerouslySetInnerHTML={{ __html: sidebarScript }} />
       </head>
       <body className="font-[family-name:var(--font-inter)] antialiased">
         {/* Skip link — first focusable element so keyboard users can bypass
