@@ -21,9 +21,15 @@
 /* WARP-2971: `.droplet-workspace` (the Workspace navigation layout) shares
    this ramp — it is a second SCOPE for the same tokens, not a second ramp.
    Only the custom properties are shared; the descendant-scoped primitives
-   in droplet-shell.css stay `.droplet-shell`-only. */
+   in droplet-shell.css stay `.droplet-shell`-only.
+
+   WARP-2976: `.dept-switcher` (the ADR-059 department switcher) is a third
+   scope, for the same reason. It renders at the top of the desktop sidebar,
+   which sits above every page scope, so without its own scope the ramp would
+   not resolve there. Tokens only, like `.droplet-workspace`. */
 .droplet-shell,
-.droplet-workspace {
+.droplet-workspace,
+.dept-switcher {
   /* ── Indigo identity — LIGHT (default) ─────────────────── */
   --bg: #f5f6fb;
   --surface: #ffffff;
@@ -90,7 +96,8 @@
 }
 
 .dark .droplet-shell,
-.dark .droplet-workspace {
+.dark .droplet-workspace,
+.dark .dept-switcher {
   /* ── Indigo identity — DARK (the original handoff ramp) ── */
   --bg: #0f1117;
   --surface: #1a1d27;

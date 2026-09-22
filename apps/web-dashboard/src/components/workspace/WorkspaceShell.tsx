@@ -56,6 +56,15 @@ import { useIntegrations } from "@/lib/hooks/useIntegrations";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
 import type { AuthRole, NavItem } from "@/components/nav-config";
+// WARP-2976 (ADR-059 §2.3) — the same switcher and the same department
+// filter as the sidebar. Here the filter is `resolveSpaces`' `restrictTo`,
+// applied alongside (never instead of) the gates it already runs.
+import { DepartmentSwitcher } from "@/components/Departments/DepartmentSwitcher";
+import { useActiveDepartment } from "@/lib/departments/active-department";
+import {
+  departmentHomeHref,
+  departmentRestrictSet,
+} from "@/lib/departments/department-nav";
 import {
   locate,
   resolveSpaces,
@@ -128,15 +137,32 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     teamChatUnread,
   };
 
+  // WARP-2976 — null for Whole business (and for a department that is not
+  // set up), which leaves resolveSpaces exactly as it was.
+  const { active: activeDepartment, activeProfile } = useActiveDepartment();
+  const restrictTo = useMemo(
+    () => (activeDepartment ? departmentRestrictSet(activeProfile) : null),
+    [activeDepartment, activeProfile],
+  );
+
   const spaces = useMemo(
     () =>
       resolveSpaces(
         role,
         { ...adminCapabilities, medicalConnector },
         isModuleOn,
+        restrictTo ?? undefined,
       ),
-    [role, adminCapabilities, medicalConnector, isModuleOn],
+    [role, adminCapabilities, medicalConnector, isModuleOn, restrictTo],
   );
+  // Inside a set-up department the mark leads to its home, the page the
+  // restricted chips hang off; otherwise to Overview, as it always has.
+  const markHref =
+    activeDepartment && restrictTo ? departmentHomeHref(activeDepartment.slug) : "/";
+  const markLabel =
+    activeDepartment && restrictTo
+      ? `Droplet — ${activeDepartment.name} home`
+      : "Droplet — Overview";
 
   // Derived every render. A route no chip leads to (e.g. /clips) keeps the
   // last space's chips on screen instead of an empty row, so the person can
@@ -225,9 +251,12 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     <div className="droplet-workspace" data-nav-layout="workspace">
       <div className="ws-chrome">
         <header className="ws-head">
-          <Link href="/" className="ws-mark" aria-label="Droplet — Overview">
+          <Link href={markHref} className="ws-mark" aria-label={markLabel}>
             <DropletMark size={22} />
           </Link>
+          {/* WARP-2976 — left of the header, before the tabs (ADR-059 §2.3).
+              Renders nothing below two choices. */}
+          <DepartmentSwitcher variant="header" />
           <div className="ws-greet">
             <span className="g">
               {greeting}

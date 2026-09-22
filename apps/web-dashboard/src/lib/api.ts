@@ -119,6 +119,9 @@ import type {
   DepartmentRight,
   CreateDepartmentPayload,
   DepartmentMembership,
+  DepartmentProfile,
+  DepartmentProfileResponse,
+  PutDepartmentProfilePayload,
   AccessRole,
   AccessRolePayload,
   AccessSyncState,
@@ -6254,6 +6257,49 @@ export async function getDepartment(id: string): Promise<DepartmentDetail> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const err = new Error(body.error || `Failed to load department: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+// A profile arranges what a department SHOWS; it never grants (§2.5). Errors
+// carry `status` + the orchestrator's stable `code` (NOT_A_MEMBER, NOT_FOUND,
+// VALIDATION_ERROR, TEAM_INHERITS_PROFILE, HOUSEHOLD_HAS_NO_PROFILE, ARCHIVED,
+// FORBIDDEN) so a page can tell "not yours" from "not there".
+
+export async function getDepartmentProfile(id: string): Promise<DepartmentProfileResponse> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to load department profile: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function putDepartmentProfile(
+  id: string,
+  payload: PutDepartmentProfilePayload,
+): Promise<{ profile: DepartmentProfile }> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to save department profile: ${res.status}`) as Error & {
       status?: number;
       code?: string;
     };
