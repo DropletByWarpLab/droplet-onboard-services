@@ -17,7 +17,12 @@
  *      does not run there, so there is no measured advertisement to report);
  *   5. `agent_run_id` only on a durable run;
  *   6. names and sizes only — never a spec, a schema, a description or a
- *      tool-name list.
+ *      tool-name list;
+ *   7. a heal on a later iteration reports that iteration;
+ *   8. the assert's own `tool_budget_exceeded` line carries the same
+ *      `turn_id` / `agent_run_id`, so an over-ceiling advertisement — which
+ *      never produces a pool line — still joins its turn and run;
+ *   9. no work at all when debug is off (the shipping `info` level).
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 
@@ -38,11 +43,14 @@ interface LoggedLine {
   msg: string;
 }
 const logged = vi.hoisted(() => [] as LoggedLine[]);
+// Whether the stub reports debug as enabled (pino's `isLevelEnabled`).
+const debugOn = vi.hoisted(() => ({ value: true }));
 vi.mock("../lib/logger.js", () => {
   const push = (level: string) => (obj: Record<string, unknown>, msg: string) => {
     logged.push({ level, obj, msg });
   };
   const stub = {
+    isLevelEnabled: (level: string) => (level === "debug" ? debugOn.value : true),
     warn: push("warn"),
     debug: push("debug"),
     info: push("info"),
@@ -131,9 +139,23 @@ const callControl = {
   ],
 };
 
+const callSearch = {
+  role: "assistant",
+  content: null,
+  tool_calls: [
+    {
+      id: "s1",
+      type: "function",
+      function: { name: "search_content", arguments: "{}" },
+    },
+  ],
+};
+
 afterEach(() => {
   logged.length = 0;
+  debugOn.value = true;
   runtimeToolRegistry.clear();
+  vi.restoreAllMocks();
 });
 
 describe("WARP-2921 — agent_tool_pool_size", () => {
@@ -302,6 +324,95 @@ describe("WARP-2921 — agent_tool_pool_size", () => {
     });
     expect(byPhase("initial")[0]!.obj.agent_run_id).toBe("run_1");
     expect(byPhase("self_heal")[0]!.obj.agent_run_id).toBe("run_1");
+  });
+
+  it("a heal on a LATER iteration reports that iteration, not 0", async () => {
+    // MUTATION: log the heal with `iter: 0` (or the initial line's iter) and
+    // this goes red — the iter-0 heal test above cannot tell the difference.
+    const { deps, chat } = makeDeps([
+      callSearch, // iter 0: a core tool, already advertised → dispatch, no heal
+      callControl, // iter 1: filtered → heal
+      callControl, // iter 2: now advertised → dispatch
+      { role: "assistant", content: "done" },
+    ]);
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "hello there" }],
+      tool_selection_mode: "domains",
+    });
+    const sentAtIter0 = chat.mock.calls[0]![0].tools.map((t) => t.function.name);
+    expect(sentAtIter0).toContain("search_content");
+    expect(sentAtIter0).not.toContain("control_device");
+    const heals = byPhase("self_heal");
+    expect(heals).toHaveLength(1);
+    expect(heals[0]!.obj).toMatchObject({ iter: 1, healed_tool: "control_device" });
+  });
+
+  it("tool_budget_exceeded carries the turn_id and agent_run_id the pool lines join on", async () => {
+    // MUTATION: drop `...budgetJoin` from the self-heal assert's logContext
+    // and the refused line loses its join keys — this goes red.
+    const { deps } = makeDeps([callControl, { role: "assistant", content: "done" }]);
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "hello there" }],
+      tool_selection_mode: "domains",
+      context_window: 4070,
+      toolCallContext: { agentRunId: "run_9" },
+    });
+    const initial = byPhase("initial")[0]!;
+    const refused = logged.find((l) => l.msg === "tool_budget_exceeded")!;
+    expect(refused).toBeTruthy();
+    expect(refused.obj.turn_id).toBe(initial.obj.turn_id);
+    expect(refused.obj.agent_run_id).toBe("run_9");
+  });
+
+  it("an over-ceiling INITIAL advertisement is joinable too, though it throws before any pool line", async () => {
+    // MUTATION: drop `...budgetJoin` from the initial assert's logContext and
+    // this goes red. A window this small cannot fit even the core floor.
+    const { deps } = makeDeps([{ role: "assistant", content: "done" }]);
+    await expect(
+      runAgent(deps, {
+        model: "m",
+        messages: [{ role: "user", content: "turn off the kitchen lights" }],
+        tool_selection_mode: "domains",
+        context_window: 1000,
+        toolCallContext: { agentRunId: "run_10" },
+      }),
+    ).rejects.toThrow();
+    expect(poolLines()).toHaveLength(0);
+    const refused = logged.find((l) => l.msg === "tool_budget_exceeded")!;
+    expect(refused).toBeTruthy();
+    expect(typeof refused.obj.turn_id).toBe("string");
+    expect((refused.obj.turn_id as string).length).toBeGreaterThan(0);
+    expect(refused.obj.agent_run_id).toBe("run_10");
+    expect(refused.obj).not.toHaveProperty("phase");
+  });
+
+  it("does no work when debug is off — no line, no registry walk", async () => {
+    // MUTATION: remove the isLevelEnabled early return and the registry is
+    // walked (and the line built) on every turn at the shipping level.
+    debugOn.value = false;
+    const list = vi.spyOn(runtimeToolRegistry, "list");
+    const { deps } = makeDeps([{ role: "assistant", content: "done" }]);
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "turn off the kitchen lights" }],
+      tool_selection_mode: "domains",
+    });
+    expect(poolLines()).toHaveLength(0);
+    // Selection itself lists the registry once per turn; the pool line must
+    // not add a second walk.
+    const callsWithDebugOff = list.mock.calls.length;
+    debugOn.value = true;
+    list.mockClear();
+    const again = makeDeps([{ role: "assistant", content: "done" }]);
+    await runAgent(again.deps, {
+      model: "m",
+      messages: [{ role: "user", content: "turn off the kitchen lights" }],
+      tool_selection_mode: "domains",
+    });
+    expect(poolLines()).toHaveLength(1);
+    expect(list.mock.calls.length).toBe(callsWithDebugOff + 1);
   });
 
   it("carries names and sizes only — never specs, schemas or a tool list", async () => {
