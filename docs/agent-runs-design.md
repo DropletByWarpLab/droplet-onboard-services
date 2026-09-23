@@ -262,6 +262,9 @@ run is never more expensive than the original at the same iteration
   level and aggregate by `tool`. The lab box was unreachable when this landed,
   so the numbers are recorded on WARP-2178 as they are gathered; until then
   the default stays at the historical value.
+  WARP-2921 takes those numbers on the bench box, together with the
+  per-turn `agent_tool_pool_size` line (the schema side of the same window),
+  and records them in the ADR-056 brief's measurement appendix.
 
 **Not done, deliberately.** History compaction (a sliding window or a
 summarising manager over *older* iterations, the Strands shape) is not built:

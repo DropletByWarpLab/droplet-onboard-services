@@ -74,7 +74,9 @@ import {
 } from "./tool-use-validation.js";
 import {
   assertToolAdvertisementFitsBudget,
+  toolAdvertisementCeilingTokens,
   ToolBudgetExceededError,
+  type ToolAdvertisementSize,
 } from "./tool-budget.service.js";
 import {
   ITERATION_MIN_HEADROOM,
@@ -1269,6 +1271,55 @@ async function consumeChatStream(
   return { asst, wireEmitted: emittedAny, contentReleased };
 }
 
+/**
+ * WARP-2921 — the ADR-056 §7/§12 window-budget gate: one debug line per
+ * COMMITTED tool advertisement, carrying the size
+ * `assertToolAdvertisementFitsBudget` already measured and used to discard.
+ * Run the orchestrator at LOG_LEVEL=debug (docs/ENVIRONMENT.md) and join it
+ * with `agent_tool_result_size` by `turn_id`: this line says how much of the
+ * window the schemas took, that one how much the results took. Silent at the
+ * shipping `info` level.
+ *
+ * Names and sizes only — never a spec, a schema, a description, or the list
+ * of advertised names. `runtime_count` intersects by NAME with the runtime
+ * registry; runtime names are server-namespaced in practice, so a collision
+ * with a local tool is not a live case.
+ */
+function logToolPoolSize(p: {
+  size: ToolAdvertisementSize;
+  specs: readonly { function: { name: string } }[];
+  contextWindow: number;
+  selectionMode: string | undefined;
+  turnId: string;
+  iter: number;
+  phase: "initial" | "self_heal";
+  healedTool?: string;
+  agentRunId?: string;
+}): void {
+  const runtimeNames = new Set(runtimeToolRegistry.list().map((t) => t.name));
+  logger.debug(
+    {
+      turn_id: p.turnId,
+      iter: p.iter,
+      phase: p.phase,
+      count: p.size.count,
+      chars: p.size.chars,
+      tokens: p.size.tokens,
+      // Same default fixed-block allowance the assert used, so the two agree.
+      ceiling_tokens: toolAdvertisementCeilingTokens({
+        contextWindow: p.contextWindow,
+      }),
+      context_window: p.contextWindow,
+      selection_mode: p.selectionMode,
+      runtime_count: p.specs.filter((s) => runtimeNames.has(s.function.name))
+        .length,
+      ...(p.healedTool ? { healed_tool: p.healedTool } : {}),
+      ...(p.agentRunId ? { agent_run_id: p.agentRunId } : {}),
+    },
+    "agent_tool_pool_size",
+  );
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
   // bound) read config.agentMaxIter, so they cannot drift. WARP-2749: a
@@ -1386,21 +1437,38 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // rollback lever rather than protect it. This gate polices SELECTION's
   // output; when there is no selection there is nothing for it to police.
   //
-  // Headroom, measured at this SHA: the worst single-domain turn is ~3.2K
-  // tokens and the worst four-domain turn ~8.0K, both far under the ceiling.
+  // Headroom, measured in-repo at the WARP-2445 SHA (fixture schemas, not a
+  // box): the worst single-domain turn is ~3.2K tokens and the worst
+  // four-domain turn ~8.0K, both far under the ceiling. Real per-turn numbers
+  // come from the `agent_tool_pool_size` debug line below (WARP-2921), which
+  // is what the ADR-056 §12 go/no-go is measured from.
   // The realistic route to tripping this is CONTINUITY ACCUMULATION — a long
   // conversation touching many domains grows `conversationToolNames` and so
   // the matched-domain set. That is precisely the case worth a loud failure
   // rather than a quiet one.
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
-    assertToolAdvertisementFitsBudget({
+    const poolContextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+    const poolSize = assertToolAdvertisementFitsBudget({
       specs: tools,
-      contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: poolContextWindow,
       logContext: {
         model: req.model,
         selectionMode: req.tool_selection_mode,
         poolSize: filtered.length,
       },
+    });
+    // WARP-2921 — `iter: 0` because this is the advertisement iteration 0
+    // ships; logged once here rather than per iteration, since an unchanged
+    // pool would only repeat itself. A heal re-logs below.
+    logToolPoolSize({
+      size: poolSize,
+      specs: tools,
+      contextWindow: poolContextWindow,
+      selectionMode: req.tool_selection_mode,
+      turnId,
+      iter: 0,
+      phase: "initial",
+      agentRunId: req.toolCallContext?.agentRunId,
     });
   }
   // WARP-642 — the exact set of tool names the model was advertised this
@@ -2081,9 +2149,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           let healed = true;
           if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
             try {
-              assertToolAdvertisementFitsBudget({
+              const healContextWindow =
+                req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+              const healedSize = assertToolAdvertisementFitsBudget({
                 specs: candidate,
-                contextWindow: req.context_window ?? DEFAULT_CONTEXT_WINDOW,
+                contextWindow: healContextWindow,
                 logContext: {
                   model: req.model,
                   selectionMode: req.tool_selection_mode,
@@ -2091,6 +2161,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
                   phase: "self_heal",
                   healedTool: call.function.name,
                 },
+              });
+              // WARP-2921 — reached only when the widened advertisement FITS
+              // and is about to be committed. A refused heal throws above and
+              // is already on record as `tool_budget_exceeded`.
+              logToolPoolSize({
+                size: healedSize,
+                specs: candidate,
+                contextWindow: healContextWindow,
+                selectionMode: req.tool_selection_mode,
+                turnId,
+                iter,
+                phase: "self_heal",
+                healedTool: call.function.name,
+                agentRunId: req.toolCallContext?.agentRunId,
               });
             } catch (err) {
               if (!(err instanceof ToolBudgetExceededError)) throw err;
