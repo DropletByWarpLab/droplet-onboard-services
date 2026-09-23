@@ -157,5 +157,21 @@ describe("parseReleaseManifest (WARP-537)", () => {
       const res = parseReleaseManifest(withTop({ kind: "release" }));
       expect(res.ok).toBe(true);
     });
+
+    // The fleet-agent port (release_verify.py) pins these exact strings too:
+    // both ports render a non-string kind byte-identically.
+    it.each([
+      [["extension", "release"], '["extension","release"]'],
+      [{ type: "extension", v: 1 }, '{"type":"extension","v":1}'],
+      [[{ a: [1, 2] }, null, true], '[{"a":[1,2]},null,true]'],
+      [{ k: "é" }, '{"k":"é"}'],
+    ])("a non-string kind %j renders as %s", (kind, rendered) => {
+      const res = parseReleaseManifest(withTop({ kind }));
+      expect(res).toMatchObject({ ok: false, failureReason: "schema_invalid" });
+      if (res.ok) return;
+      expect(res.detail).toBe(
+        `kind ${rendered} is not a release — an extension document never parses as a release manifest`,
+      );
+    });
   });
 });

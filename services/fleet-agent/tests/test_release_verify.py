@@ -270,6 +270,28 @@ def test_parse_accepts_an_explicit_kind_release():
     assert res.ok, res.detail
 
 
+# The detail is byte-identical to manifest.ts, which renders the kind with
+# JSON.stringify: no space after "," or ":" (json.dumps' default separators
+# add one) and non-ASCII left as-is. manifest.test.ts pins the same strings.
+@pytest.mark.parametrize(
+    ("kind", "rendered"),
+    [
+        (["extension", "release"], '["extension","release"]'),
+        ({"type": "extension", "v": 1}, '{"type":"extension","v":1}'),
+        ([{"a": [1, 2]}, None, True], '[{"a":[1,2]},null,true]'),
+        ({"k": "é"}, '{"k":"é"}'),
+    ],
+)
+def test_parse_renders_a_non_string_kind_as_json_stringify_does(kind, rendered):
+    res = parse_release_manifest(json.dumps({**_valid_doc(), "kind": kind}))
+    assert not res.ok
+    assert res.failure_reason == "schema_invalid"
+    assert res.detail == (
+        f"kind {rendered} is not a release — an extension document never "
+        "parses as a release manifest"
+    )
+
+
 def test_parse_does_not_gate_min_orchestrator_schema():
     """Deliberate divergence from the TS library (documented in the
     module + the WARP-1025 PR): the orchestrator-schema gate protects

@@ -257,9 +257,13 @@ _EXTENSION_SIGNING_FIELDS = ("usage", "keyUsage")
 
 
 def _non_release_kind_detail(doc: dict) -> str | None:
-    """Port of manifest.ts ``nonReleaseKindDetail`` (same detail strings)."""
+    """Port of manifest.ts ``nonReleaseKindDetail`` (same detail strings).
+
+    The kind is rendered as ``JSON.stringify`` renders it there: compact
+    separators (json.dumps' defaults add a space after "," and ":") and
+    non-ASCII left as-is."""
     if "kind" in doc and doc["kind"] != "release":
-        kind = json.dumps(doc["kind"], ensure_ascii=False)
+        kind = json.dumps(doc["kind"], ensure_ascii=False, separators=(",", ":"))
         return (
             f"kind {kind} is not a release — an extension document never "
             "parses as a release manifest"
