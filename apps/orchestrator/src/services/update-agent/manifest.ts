@@ -143,6 +143,13 @@ const manifestSchema = z.object({
 const EXTENSION_SIGNING_FIELDS = ["usage", "keyUsage"] as const;
 
 function nonReleaseKindDetail(doc: Record<string, unknown>): string | null {
+  // A document with NO `kind` passes on purpose, for back-compat: no
+  // published release.json carries one (gen-release-manifest.py does not
+  // emit it), so requiring it would refuse every release already on every
+  // channel. The fence refuses a wrong kind, never a missing one. Requiring
+  // `kind: "release"` waits until the generator emits it and every channel's
+  // latest release carries it; then this parser and the fleet-agent port
+  // (release_verify.py) tighten together.
   if (Object.prototype.hasOwnProperty.call(doc, "kind") && doc.kind !== "release") {
     return `kind ${JSON.stringify(doc.kind)} is not a release — an extension document never parses as a release manifest`;
   }

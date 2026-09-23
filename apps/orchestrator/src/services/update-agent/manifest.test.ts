@@ -158,6 +158,15 @@ describe("parseReleaseManifest (WARP-537)", () => {
       expect(res.ok).toBe(true);
     });
 
+    it("a document with no kind is still a release (back-compat with every published release)", () => {
+      // The fence refuses a WRONG kind, never a MISSING one, on purpose: no
+      // published release.json carries `kind`, so requiring it would refuse
+      // every release already on every channel.
+      const raw = fixture("release.valid.json");
+      expect(Object.prototype.hasOwnProperty.call(JSON.parse(raw), "kind")).toBe(false);
+      expect(parseReleaseManifest(raw).ok).toBe(true);
+    });
+
     // The fleet-agent port (release_verify.py) pins these exact strings too:
     // both ports render a non-string kind byte-identically.
     it.each([
