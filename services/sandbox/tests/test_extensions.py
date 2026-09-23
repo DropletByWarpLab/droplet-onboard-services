@@ -240,6 +240,56 @@ def test_the_memory_budget_is_enforced(ext, monkeypatch, tmp_path):
     assert extensions.budget()["source"] == "env"
 
 
+def test_a_stopped_extension_frees_its_budget(ext):
+    # MUTATION: count every _installed entry in budget() (the old sum) and a
+    # disabled extension keeps its memory until the sandbox restarts, so a
+    # promote is refused while nothing runs.
+    before = extensions.budget()["availableMb"]
+    found = _propose(ext, "ws-s", "python-tool")  # 64 MB
+    _install("ws-s", found)
+    assert extensions.budget()["availableMb"] == before - 64
+    extensions.stop("ws-s")
+    assert extensions.budget() == {**extensions.budget(), "installedMb": 0, "availableMb": before}
+    # Started again, it counts again.
+    _install("ws-s", found)
+    assert extensions.budget()["installedMb"] == 64
+
+
+def test_budget_is_not_an_extension_slug():
+    # GET /extensions/budget is declared before GET /extensions/{slug}: an
+    # extension called `budget` could never be asked for its status.
+    # MUTATION: drop the reserved check and this installs a shadowed slug.
+    with pytest.raises(StoreError) as exc:
+        extensions.check_slug("budget")
+    assert exc.value.status == 400
+    assert extensions.check_slug("budget-app") == "budget-app"
+
+
+@pytest.mark.parametrize(
+    ("upstream", "body"),
+    [(503, b'{"detail":"sandbox auth is not configured"}'), (404, b'{"detail":"Not found"}'), (401, b"")],
+)
+def test_the_relay_never_passes_an_extension_error_status_through(ext, monkeypatch, upstream, body):
+    # Extension code runs inside the shim, so it chooses the HTTP status. A
+    # 503 or a bare 404 relayed as-is reads, at the orchestrator, as "the
+    # sandbox bearer is not configured" or "supervision is off".
+    # MUTATION: return (status, data) unchanged and the forged status leaks.
+    found = _propose(ext, "ws-t", "python-tool")
+    _install("ws-t", found)
+    monkeypatch.setattr(extensions, "_post", lambda entry, b, t: (upstream, body, False))
+    with pytest.raises(StoreError) as exc:
+        extensions.relay("ws-t", b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+    assert exc.value.status == 502
+    assert f"answered HTTP {upstream}" in str(exc.value)
+
+
+def test_the_relay_passes_a_2xx_through(ext, monkeypatch):
+    found = _propose(ext, "ws-u", "python-tool")
+    _install("ws-u", found)
+    monkeypatch.setattr(extensions, "_post", lambda entry, b, t: (202, b"", False))
+    assert extensions.relay("ws-u", b'{"jsonrpc":"2.0","method":"notifications/initialized"}') == (202, b"")
+
+
 def test_the_relay_reports_an_answer_over_the_cap(ext, monkeypatch):
     # MUTATION: return the sliced bytes instead of raising and the relay
     # hands the orchestrator half a JSON document as if it were whole.

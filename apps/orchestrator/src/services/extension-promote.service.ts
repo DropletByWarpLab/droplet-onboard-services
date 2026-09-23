@@ -231,6 +231,20 @@ async function readProposal(deps: PromoteDeps, workspaceId: string) {
   return { tag, version, proposal, manifestBytes: proposal.manifest };
 }
 
+/**
+ * Phase 2's preflight → sign → store section runs one at a time in this
+ * process (the orchestrator is one process per box). Promotions are rare and
+ * owner-driven, so a queue costs nothing a person would notice.
+ */
+let promoteQueue: Promise<unknown> = Promise.resolve();
+
+function promoteExclusively<T>(fn: () => Promise<T>): Promise<T> {
+  const run = promoteQueue.then(fn);
+  // A refused or failed promotion must not wedge the ones behind it.
+  promoteQueue = run.catch(() => undefined);
+  return run;
+}
+
 /** Memory this slug's running version holds (a reinstall frees it). */
 async function runningMemoryMb(deps: PromoteDeps, slug: string): Promise<number> {
   const existing = await deps.prisma.extension.findUnique({
@@ -354,93 +368,99 @@ export async function confirmPromotion(
   ) {
     throw new PromoteError(409, "manifest_changed", "the proposal changed since you reviewed it; review it again");
   }
-  // What phase 1 checked may no longer hold: another proposal confirmed in
-  // between can have taken a tool name or the memory.
-  const reparsed = parseExtensionManifest(manifestBytes);
-  if (!reparsed.ok) throw new PromoteError(422, "manifest_invalid", reparsed.detail);
-  const preflight = await preflightNow(deps, deriveExtensionSlug(workspaceId), reparsed.manifest);
-  if (!preflight.ok) {
-    throw new PromoteError(
-      409,
-      "preflight_changed",
-      `the box changed since you reviewed it: ${preflight.blocking.map((b) => b.detail).join("; ")}`,
-      { preflight },
-    );
-  }
-
-  let signed;
-  try {
-    signed = await signPromotedExtension(deps.identity, {
-      workspaceId,
-      version,
-      commit: proposal.commit,
-      tree: proposal.tree,
-      manifestBytes,
-    });
-  } catch (err) {
-    if (err instanceof ExtensionSigningUnavailableError) {
-      throw new PromoteError(503, err.code, err.message);
+  // Preflight, sign and store run one promotion at a time: two confirms
+  // of different proposals that provide one tool name cannot both pass
+  // preflight before either is stored.
+  const { signed, slug } = await promoteExclusively(async () => {
+    // What phase 1 checked may no longer hold: another proposal confirmed in
+    // between can have taken a tool name or the memory.
+    const reparsed = parseExtensionManifest(manifestBytes);
+    if (!reparsed.ok) throw new PromoteError(422, "manifest_invalid", reparsed.detail);
+    const preflight = await preflightNow(deps, deriveExtensionSlug(workspaceId), reparsed.manifest);
+    if (!preflight.ok) {
+      throw new PromoteError(
+        409,
+        "preflight_changed",
+        `the box changed since you reviewed it: ${preflight.blocking.map((b) => b.detail).join("; ")}`,
+        { preflight },
+      );
     }
-    if (err instanceof ExtensionPromotionRefusedError) {
-      throw new PromoteError(422, err.code, err.message);
-    }
-    throw err;
-  }
 
-  const slug = signed.statement.extensionId;
-  try {
-    await deps.prisma.$transaction(async (tx) => {
-      const ext = await tx.extension.upsert({
-        where: { id: slug },
-        create: {
-          id: slug,
-          workspaceId,
-          name: signed.manifest.name,
-          installedByUserId: owner.id,
-          status: "signed",
-          operatorDomain: input.operatorDomain ?? null,
-        },
-        update: {
-          name: signed.manifest.name,
-          installedByUserId: owner.id,
-          status: "signed",
-          failureReason: null,
-          ...(input.operatorDomain != null ? { operatorDomain: input.operatorDomain } : {}),
-        },
+    let signed;
+    try {
+      signed = await signPromotedExtension(deps.identity, {
+        workspaceId,
+        version,
+        commit: proposal.commit,
+        tree: proposal.tree,
+        manifestBytes,
       });
-      // Phase 1 checked the slug; re-check inside the write, so two
-      // workspaces whose ids hash to one slug cannot both sign under it
-      // (the upsert's update would otherwise adopt the other's row).
-      if (ext.workspaceId !== workspaceId) {
-        throw new PromoteError(409, "slug_taken", `extension id ${slug} already belongs to another workspace`);
+    } catch (err) {
+      if (err instanceof ExtensionSigningUnavailableError) {
+        throw new PromoteError(503, err.code, err.message);
       }
-      const row = await tx.extensionVersion.create({
-        data: {
-          extensionId: slug,
-          version,
-          tag,
-          commit: signed.statement.commit,
-          tree: signed.statement.tree,
-          manifestBytes: Buffer.from(manifestBytes),
-          manifestSha256: signed.statement.manifestSha256,
-          statementBytes: signed.statementBytes,
-          signature: signed.signature,
-          signer: signed.signer,
-          keyFingerprint: signed.keyFingerprint,
-          promotedByUserId: owner.id,
-        },
-        select: { id: true },
-      });
-      await tx.extension.update({ where: { id: slug }, data: { currentVersionId: row.id } });
-    });
-  } catch (err) {
-    // Prisma's unique violation (the (extensionId, version) pair, or a slug
-    // another workspace won in a race): never a second signed row.
-    if ((err as { code?: unknown } | null)?.code === "P2002") {
-      throw new PromoteError(409, "already_promoted", `${slug}@${version} is already promoted`);
+      if (err instanceof ExtensionPromotionRefusedError) {
+        throw new PromoteError(422, err.code, err.message);
+      }
+      throw err;
     }
-    throw err;
-  }
+
+    const slug = signed.statement.extensionId;
+    try {
+      await deps.prisma.$transaction(async (tx) => {
+        const ext = await tx.extension.upsert({
+          where: { id: slug },
+          create: {
+            id: slug,
+            workspaceId,
+            name: signed.manifest.name,
+            installedByUserId: owner.id,
+            status: "signed",
+            operatorDomain: input.operatorDomain ?? null,
+          },
+          update: {
+            name: signed.manifest.name,
+            installedByUserId: owner.id,
+            status: "signed",
+            failureReason: null,
+            ...(input.operatorDomain != null ? { operatorDomain: input.operatorDomain } : {}),
+          },
+        });
+        // Phase 1 checked the slug; re-check inside the write, so two
+        // workspaces whose ids hash to one slug cannot both sign under it
+        // (the upsert's update would otherwise adopt the other's row).
+        if (ext.workspaceId !== workspaceId) {
+          throw new PromoteError(409, "slug_taken", `extension id ${slug} already belongs to another workspace`);
+        }
+        const row = await tx.extensionVersion.create({
+          data: {
+            extensionId: slug,
+            version,
+            tag,
+            commit: signed.statement.commit,
+            tree: signed.statement.tree,
+            manifestBytes: Buffer.from(manifestBytes),
+            manifestSha256: signed.statement.manifestSha256,
+            statementBytes: signed.statementBytes,
+            signature: signed.signature,
+            signer: signed.signer,
+            keyFingerprint: signed.keyFingerprint,
+            promotedByUserId: owner.id,
+          },
+          select: { id: true },
+        });
+        await tx.extension.update({ where: { id: slug }, data: { currentVersionId: row.id } });
+      });
+    } catch (err) {
+      // Prisma's unique violation (the (extensionId, version) pair, or a slug
+      // another workspace won in a race): never a second signed row.
+      if ((err as { code?: unknown } | null)?.code === "P2002") {
+        throw new PromoteError(409, "already_promoted", `${slug}@${version} is already promoted`);
+      }
+      throw err;
+    }
+    return { signed, slug };
+  });
 
   await audit({
     kind: "tool_run",

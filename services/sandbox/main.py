@@ -75,6 +75,42 @@ import workspace
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
 
+# prctl(2) option: PR_SET_DUMPABLE.
+PR_SET_DUMPABLE = 4
+
+
+def _make_undumpable(libc: Any = None) -> bool:
+    """Mark this server process non-dumpable (WARP-2900).
+
+    Installed extensions and workspace runs execute as this process's uid. A
+    dumpable server lets any of them read SANDBOX_SERVICE_TOKEN from
+    /proc/<pid>/environ (or /proc/<pid>/mem) and drive the whole sandbox API.
+    Non-dumpable, those entries are root-owned and ptrace-protected for the
+    same uid. Children are unaffected: execve resets the flag, so this does
+    not stop one extension reading another's environment (see
+    docs/security/extension-trust.md).
+    """
+    if libc is None:
+        if not sys.platform.startswith("linux"):
+            return False
+        import ctypes
+
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+        except OSError:
+            return False
+    try:
+        rc = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (AttributeError, OSError):
+        rc = -1
+    if rc != 0:
+        print("[sandbox] WARNING: could not mark the server non-dumpable; a same-uid child can read its bearer", flush=True)
+        return False
+    return True
+
+
+SERVER_UNDUMPABLE = _make_undumpable()
+
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 RUNNER = Path(__file__).resolve().parent / "runner.py"

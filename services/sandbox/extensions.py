@@ -160,9 +160,17 @@ def extensions_root() -> Path:
     return Path(supervisor.EXTENSIONS_DIR)
 
 
+# Words a fixed route under /extensions/ already owns: GET /extensions/budget
+# is declared before GET /extensions/{slug}, so an extension with this slug
+# could never be asked for its status (the orchestrator reserves it too).
+RESERVED_SLUGS = frozenset({"budget"})
+
+
 def check_slug(slug: str) -> str:
     if not SLUG.match(slug or ""):
         raise StoreError(400, "extension slug must match ^[a-z0-9][a-z0-9-]{0,26}$")
+    if slug in RESERVED_SLUGS:
+        raise StoreError(400, f"extension slug {slug!r} is reserved")
     return slug
 
 
@@ -185,11 +193,24 @@ def _cgroup_limit_mb() -> int | None:
     return None
 
 
+# Supervisor states whose process holds (or is about to hold) its memory.
+_LIVE_STATES = frozenset({"starting", "running"})
+
+
+def _holds_memory(slug: str) -> bool:
+    snap = supervisor.SUPERVISOR.status(proc_id(slug))
+    return bool(snap and snap["state"] in _LIVE_STATES)
+
+
 def budget(excluding: str | None = None) -> dict[str, Any]:
+    """Memory left for one more extension. Only a process that is running
+    counts: a disabled (stopped) or dead extension stays in ``_installed`` for
+    its status, but holds nothing."""
     cgroup = _cgroup_limit_mb()
     ceiling = cgroup if cgroup is not None else FALLBACK_MEMORY_MB
     with _lock:
-        installed = sum(e.memory_mb for s, e in _installed.items() if s != excluding)
+        entries = [(s, e.memory_mb) for s, e in _installed.items() if s != excluding]
+    installed = sum(mb for s, mb in entries if _holds_memory(s))
     available = max(0, ceiling - TRANSFORM_HEADROOM_MB - installed)
     return {
         "ceilingMb": ceiling,
@@ -436,6 +457,11 @@ def relay(slug: str, body: bytes, timeout_ms: int | None = None) -> tuple[int, b
         raise StoreError(502, f"extension {slug} is not answering: {exc}") from exc
     if over:
         raise StoreError(502, f"extension {slug} answered more than {RELAY_OUTPUT_CAP_BYTES} bytes; nothing was relayed")
+    if not 200 <= status < 300:
+        # The status is the extension's choice (its code runs in the shim).
+        # Relayed as-is, a 503 or a bare 404 would read at the orchestrator
+        # as the sandbox's own "bearer not configured" / "supervision off".
+        raise StoreError(502, f"extension {slug} answered HTTP {status}")
     return status, data
 
 

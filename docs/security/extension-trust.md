@@ -18,11 +18,21 @@ service principal can reach it, the assistant included.
    confirmation token (5 minutes) bound to the owner, the workspace, the
    tag, the commit and the manifest digest. Nothing is signed.
 2. **Phase 2** must echo that digest (`409 TOKEN_OPERATION_MISMATCH`
-   otherwise). The proposal is read again; if the bytes or the commit moved,
-   `409 manifest_changed`. Only then does `extension-promotion.service.ts`
-   (the one signer caller) ask the sidecar to sign. An unprovisioned or
-   unreachable sidecar is `503 device_identity_svc_unreachable` and nothing
-   is stored.
+   otherwise). The token is taken in the same tick it is checked, so a
+   double-click or a retried POST is `410` and never reaches the signer.
+   The proposal is read again; if the bytes or the commit moved,
+   `409 manifest_changed`. Preflight runs again against the box as it is
+   now: another proposal confirmed in between may have taken a tool name or
+   the memory (`409 preflight_changed`). Preflight, signing and storing run
+   one promotion at a time, so two confirmations at the same moment cannot
+   both pass. Only then does
+   `extension-promotion.service.ts` (the one signer caller) ask the sidecar
+   to sign. An unprovisioned or unreachable sidecar is
+   `503 device_identity_svc_unreachable` and nothing is stored.
+
+Enable runs the same preflight before it moves the row (`422
+preflight_blocked`). The reconciler does not: it restarts what was already
+running.
 
 The readback the owner confirms is derived from `provides`, `resources` and
 `egress` only. The manifest's `summary` and every `description` are the
@@ -46,7 +56,8 @@ marked `failed` and the owner re-promotes.
 - The sandbox exports exactly the signed commit, and refuses unless its tree
   is the tree the statement names. A `node20` extension with a
   `tsconfig.json` is compiled with the image's global `tsc` (no network).
-  The installed directory is read-only.
+  The installed directory is made read-only (0400 files, 0500 dirs), which
+  is advisory against the extension itself (see Known limitations).
 - The extension module is not an MCP server. The image's first-party host
   shim (`services/sandbox/ext_host/host.mjs` | `host.py`) is what runs: it
   serves the manifest's `provides.tools` (name, description, inputSchema;
@@ -59,12 +70,30 @@ marked `failed` and the owner re-promotes.
 - The child's environment is the sandbox's base environment plus an
   allowlist of keys (`DROPLET_EXT_ID`, `DROPLET_EXT_PORT`,
   `DROPLET_EXT_TOKEN`, `DROPLET_EXT_RELAY_KEY`, `DROPLET_ORCHESTRATOR_URL`).
-  The sandbox's own bearer never reaches it.
+  The sandbox's own bearer is not in it. The child runs as the server's uid,
+  so the server marks itself non-dumpable at start (`prctl(PR_SET_DUMPABLE,
+  0)`): its `/proc/<pid>/environ` and `/proc/<pid>/mem` are then closed to
+  a same-uid reader, and the child cannot lift the bearer from there. If
+  the kernel refuses the call, the server logs a warning and this
+  protection is absent (see Known limitations).
+- The relay passes only a 2xx answer through. Any other status the
+  extension answers is a `502` "extension answered HTTP N", so extension
+  code cannot pose as the sandbox's own `503` (bearer not configured) or
+  bare `404` (supervision off).
 - Every start mints a new `dxt_` call-back bearer. Only its sha256 is
   stored (`Extension.serviceTokenHash`), and a stop clears it. Resolving it
   to a principal is slice H3.
 - Everything is gated by `SANDBOX_PROCESS_SUPERVISION` (default `0`): off,
   every extension route in the sandbox is `404` and promote answers `503`.
+- Every install write is status-claimed. An owner's disable or uninstall
+  that lands during an install (up to four minutes of export, `tsc` and
+  start) wins: the install stops or removes what the sandbox started and
+  answers `409 wrong_state`.
+- The reconciler reinstalls an extension the sandbox has forgotten (after a
+  sandbox restart). One whose process died after its restarts is marked
+  `failed` with the exit code, not rebuilt every tick.
+- `budget` is a reserved slug: the sandbox's `GET /extensions/budget` is
+  declared before `GET /extensions/{slug}`.
 
 ### Why a sandbox relay and not the mcp-bridge
 
@@ -83,19 +112,42 @@ ADR-043 §5 asks for. **Needs Stefan/Romain confirmation.**
   manifest's budget cannot start a request thread (measured). No
   `RLIMIT_NPROC` by default: it is per-UID across containers and the host.
   Process fan-out is bounded by the container's `pids_limit`.
-- Memory: node's heap is capped at the manifest's `memoryMb`; every install
-  is accounted against the container's cgroup limit (minus the transform
-  child's ceiling and every other installed extension) before it starts;
-  `mem_limit` is the hard ceiling. A per-extension RSS cap needs cgroup
-  delegation, which this `cap_drop: ALL` container does not have.
+- Memory: node's `--max-old-space-size` caps only the V8 old space, not the
+  whole process. A `python312` extension has no per-process cap at all.
+  Every install is accounted against the container's cgroup limit (minus
+  the transform child's ceiling and every other RUNNING extension; a
+  stopped or dead one holds nothing) before it starts. The account does not
+  subtract the sandbox server's own RSS. `mem_limit` is the hard ceiling. A
+  per-extension RSS cap needs cgroup delegation, which this `cap_drop: ALL`
+  container does not have.
 
-### Known limitations (for the WARP-2923 review)
+### Known limitations (for the WARP-2923 review; WARP-2898 is the fix)
 
-- Every process in the sandbox runs as the same uid. A workspace `run`
-  child (an allow-listed `npm test` executing run-written code) can read
-  another process's environment under `/proc` and so learn an installed
-  extension's relay key and call-back bearer. The relay key stops a naive
-  connect, not a same-uid reader. Per-extension uids need privileges this
-  container drops; a separate container per extension is WARP-2898's path.
+Every process in the sandbox (the server, every installed extension, every
+workspace `run` child) runs as the one uid `sandbox`. Per-extension uids
+need privileges this container drops. A separate container per extension is
+WARP-2898's path. Until then, extension code (which runs at import time,
+inside the host shim) can do the following:
+
+- **Read other children's secrets.** Children are dumpable (`execve` resets
+  the flag), so any child can read another's environment under `/proc`,
+  including an installed extension's relay key and `dxt_` call-back
+  bearer. The relay key stops a naive connect, not a same-uid reader.
+- **Not the server's bearer, conditionally.** `SANDBOX_SERVICE_TOKEN` is in
+  the SERVER's environment only, and the server is non-dumpable (above).
+  If `prctl` fails (the log line says so), a child can read
+  `/proc/<server pid>/environ`, and with that bearer it can call the whole
+  sandbox API: any extension's `/rpc`, `/processes`, and other users'
+  `/workspaces/*`.
+- **Write the git store and other extensions' code.** The bare repositories
+  (`/var/lib/workspace-git`), the checkouts and every extension's install
+  dir belong to that uid. The install dir's `0400`/`0500` modes stop an
+  accidental write, not the extension: it owns the files and can `chmod`
+  them back, then rewrite its own code or a sibling's. The rewrite would
+  run from the next supervisor restart. A signed statement is re-verified
+  at every INSTALL, not at every supervisor restart. **Treat "read-only" as
+  advisory against the extension itself.**
+- Extension tools stay denied at dispatch until an owner reviews one as a
+  read, or WARP-2321's runtime confirmation lands (H3).
 - Extension tools stay denied at dispatch until an owner reviews one as a
   read, or WARP-2321's runtime confirmation lands (H3).

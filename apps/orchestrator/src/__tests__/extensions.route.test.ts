@@ -335,6 +335,42 @@ describe("phase 2 — confirm, sign, store, install", () => {
     expect(t.db.extensions.has(OTHER)).toBe(false);
   });
 
+  it("the same two confirmed at the same moment: one is signed, the other refused", async () => {
+    // MUTATION: run phase 2's preflight/sign/store outside the promote queue
+    // and both requests preflight before either stores: both 201.
+    const OTHER = "word-count-too";
+    const t = setup({ extra: { [OTHER]: manifestBytes({ id: OTHER }) } });
+    const a = (await phase1(t)).body;
+    const b = (await phase1(t, OTHER)).body;
+    // Hold each phase-2 budget read until both are inside it (or 300 ms,
+    // when the second waits in the queue), so unqueued they overlap.
+    const budget = vi.mocked(t.sandbox.client.budget);
+    const real = budget.getMockImplementation()!;
+    let waiting = 0;
+    let open: () => void = () => {};
+    const bothIn = new Promise<void>((r) => {
+      open = r;
+      setTimeout(r, 300);
+    });
+    budget.mockImplementation(async () => {
+      waiting += 1;
+      if (waiting === 2) open();
+      await bothIn;
+      return real();
+    });
+    const [ra, rb] = await Promise.all([
+      request(t.app)
+        .post(`/api/extensions/${WS}/promote`)
+        .send({ confirmationToken: a.confirmationToken, manifestSha256: a.manifestSha256 }),
+      request(t.app)
+        .post(`/api/extensions/${OTHER}/promote`)
+        .send({ confirmationToken: b.confirmationToken, manifestSha256: b.manifestSha256 }),
+    ]);
+    expect([ra.status, rb.status].sort()).toEqual([201, 409]);
+    expect([ra.body.error, rb.body.error]).toContain("preflight_changed");
+    expect(t.identity.signExtensionManifest).toHaveBeenCalledTimes(1);
+  });
+
   it("a double-submitted confirmation signs once: the token is taken in the same tick it is checked", async () => {
     // MUTATION: check without taking (consume after the awaited re-read) and
     // both requests reach the signer.
