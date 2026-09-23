@@ -13,7 +13,9 @@ security properties this file pins:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,7 @@ import workspace
 from gitstore import StoreError
 
 ALICE = ("Alice", "alice@example.test")
+TEMPLATES_SRC = Path(__file__).resolve().parents[3] / "extensions" / "templates"
 AUTHOR = {"name": ALICE[0], "email": ALICE[1]}
 
 
@@ -30,7 +33,62 @@ AUTHOR = {"name": ALICE[0], "email": ALICE[1]}
 def test_templates_seed_once_and_never_overwrite(store):
     # The fixture seeded. A second start finds the repo and leaves it alone.
     assert store.seed_templates() is False
-    assert store.list_templates() == ["python-tool", "typescript-tool"]
+    assert store.list_templates() == ["python-tool", "rest-profile", "typescript-tool"]
+
+
+def _templates_without(tmp_path, *names: str) -> Path:
+    """A copy of the image's templates with some directories left out — what
+    an older image shipped."""
+    src = tmp_path / "old-image-templates"
+    shutil.copytree(TEMPLATES_SRC, src, ignore=shutil.ignore_patterns(*names))
+    return src
+
+
+def test_sync_adds_a_template_the_image_has_and_never_touches_an_existing_one(tmp_path, monkeypatch):
+    # WARP-2899 (AC7): a box that seeded templates.git before rest-profile
+    # existed gains it on the next start, in its own commit; typescript-tool,
+    # which the operator has since changed, is left exactly as they left it.
+    # MUTATION: copy EVERY image directory in sync_templates (not just the
+    # missing ones) → the operator's typescript-tool tree changes → red.
+    import gitstore
+
+    monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
+    monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile"))
+    assert gitstore.seed_templates() is True
+    assert gitstore.list_templates() == ["python-tool", "typescript-tool"]
+    bare = gitstore.REPOS_DIR / "templates.git"
+
+    # The operator's own commit to an existing template.
+    op = tmp_path / "operator"
+    gitstore.must(gitstore.git(["clone", "-q", "-b", "main", str(bare), str(op)], tmp_path), "clone")
+    (op / "typescript-tool" / "README.md").write_text("# ours now\n", encoding="utf-8", newline="")
+    gitstore.must(gitstore.git(["commit", "-qam", "operator: our readme"], op, author=ALICE), "commit")
+    gitstore.must(gitstore.git(["push", "-q", "origin", "main"], op), "push")
+    before = gitstore.git(["rev-parse", "main:typescript-tool"], bare).stdout.strip()
+
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", TEMPLATES_SRC)
+    assert gitstore.seed_templates() is False  # present: never re-seeded
+    assert gitstore.sync_templates() == ["rest-profile"]
+    assert gitstore.list_templates() == ["python-tool", "rest-profile", "typescript-tool"]
+    assert gitstore.git(["rev-parse", "main:typescript-tool"], bare).stdout.strip() == before
+    subjects = gitstore.git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert subjects[0] == "templates: add rest-profile from the image"
+    assert subjects[1] == "operator: our readme"
+    # Idempotent: nothing missing, nothing committed.
+    assert gitstore.sync_templates() == []
+    assert gitstore.git(["log", "--format=%s", "main"], bare).stdout.splitlines() == subjects
+    # And a workspace can be created from the added template.
+    gitstore.create_workspace("ws-synced", "rest-profile", ALICE)
+    assert (gitstore.work_path("ws-synced") / "connector-draft.json").is_file()
+
+
+def test_sync_is_a_no_op_without_a_store(tmp_path, monkeypatch):
+    import gitstore
+
+    monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
+    monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
+    assert gitstore.sync_templates() == []
 
 
 def test_git_reads_no_config_file_a_run_child_could_have_planted(store, tmp_path, monkeypatch):
@@ -384,7 +442,9 @@ def test_http_backend_refuses_paths_outside_the_store(store):
 
 
 def test_routes_round_trip_through_the_service(client, auth, store):
-    assert client.get("/workspaces/templates", headers=auth).json() == {"templates": ["python-tool", "typescript-tool"]}
+    assert client.get("/workspaces/templates", headers=auth).json() == {
+        "templates": ["python-tool", "rest-profile", "typescript-tool"]
+    }
     r = client.post("/workspaces", json={"id": "ws-p", "template": "python-tool", "author": AUTHOR}, headers=auth)
     assert r.status_code == 200, r.text
     assert client.post("/workspaces", json={"id": "ws-p", "author": AUTHOR}, headers=auth).status_code == 409
@@ -415,6 +475,9 @@ def test_routes_round_trip_through_the_service(client, auth, store):
 def test_every_workspace_route_needs_the_bearer(client, store):
     assert client.get("/workspaces/templates").status_code == 401
     assert client.post("/workspaces", json={"id": "ws-q", "author": AUTHOR}).status_code == 401
+    store.create_workspace("ws-q", None, ALICE)
+    assert client.get("/workspaces/ws-q/bundle").status_code == 401
+    assert client.get("/workspaces/ws-q/connector-draft?ref=work").status_code == 401
     assert client.get("/git/ws-q.git/info/refs?service=git-upload-pack").status_code == 401
 
 
@@ -429,3 +492,75 @@ def test_git_route_needs_an_actor_and_forwards_the_push_decision(client, auth, s
     assert allowed.headers["content-type"] == "application/x-git-receive-pack-advertisement"
     fetch = client.get("/git/ws-r.git/info/refs?service=git-upload-pack", headers={**auth, "X-Droplet-Git-User": "bob"})
     assert fetch.status_code == 200 and fetch.content.startswith(b"001e# service=git-upload-pack")
+
+
+# ── export: the bundle (WARP-2899) ─────────────────────────────────────────
+
+
+def test_bundle_is_the_work_branch_and_every_proposal_tag_and_clones_offline(store, tmp_path):
+    # AC2: the bytes an owner downloads. Built from the local bare repo; a
+    # `git clone` of the file — a path, no network — reproduces the branch
+    # and the tag.
+    store.create_workspace("ws-x", "typescript-tool", ALICE)
+    workspace.write("ws-x", "NOTES.md", "# notes\n")
+    workspace.commit("ws-x", "notes", ALICE)
+    workspace.propose("ws-x", "Word counter", "0.1.0", "Counts.", ALICE)
+    body, head = store.bundle("ws-x")
+    assert head == store.git(["rev-parse", "refs/heads/work"], store.bare_path("ws-x")).stdout.strip()
+    assert body.startswith(b"# v2 git bundle") or body.startswith(b"# v3 git bundle")
+    bundle = tmp_path / "ws-x.bundle"
+    bundle.write_bytes(body)
+    clone = tmp_path / "clone"
+    store.must(store.git(["clone", "-q", str(bundle), str(clone)], tmp_path), "clone the bundle")
+    assert store.git(["rev-parse", "HEAD"], clone).stdout.strip() == head
+    assert store.git(["tag", "--list"], clone).stdout.split() == ["proposal/0.1.0"]
+    assert (clone / "NOTES.md").read_text(encoding="utf-8") == "# notes\n"
+
+
+def test_bundle_is_capped_and_an_unknown_workspace_is_404(store, monkeypatch):
+    store.create_workspace("ws-y", None, ALICE)
+    monkeypatch.setattr(store, "MAX_BUNDLE_BYTES", 64)
+    with pytest.raises(StoreError) as exc:
+        store.bundle("ws-y")
+    assert exc.value.status == 413
+    with pytest.raises(StoreError) as missing:
+        store.bundle("ws-nope")
+    assert missing.value.status == 404
+    with pytest.raises(StoreError) as bad:
+        store.bundle("../x")
+    assert bad.value.status == 400
+
+
+def test_show_at_reads_the_bare_repo_at_a_ref_with_a_closed_ref_grammar(store):
+    store.create_workspace("ws-s", "python-tool", ALICE)
+    assert "def run(" in store.show_at("ws-s", "work", "tool.py")
+    assert store.show_at("ws-s", "work", "no-such-file") is None
+    for ref in ("HEAD", "main", "refs/heads/work", "proposal/x", "work:tool.py", "--output=/tmp/x", "proposal/1.0"):
+        with pytest.raises(StoreError) as exc:
+            store.show_at("ws-s", ref, "tool.py")
+        assert exc.value.status == 400, ref
+    with pytest.raises(StoreError) as missing_ref:
+        store.show_at("ws-s", "proposal/9.9.9", "tool.py")
+    assert missing_ref.value.status == 404
+    workspace.propose("ws-s", "Tool", "0.1.0", "s", ALICE)
+    assert "def run(" in store.show_at("ws-s", "proposal/0.1.0", "tool.py")
+
+
+def test_bundle_and_connector_draft_routes(client, auth, store):
+    store.create_workspace("ws-r2", "typescript-tool", ALICE)
+    r = client.get("/workspaces/ws-r2/bundle", headers=auth)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["x-bundle-head"] == store.status("ws-r2")["head"]
+    assert r.content.startswith(b"# v")
+    assert client.get("/workspaces/ws-zz/bundle", headers=auth).status_code == 404
+
+    assert client.get("/workspaces/ws-r2/connector-draft?ref=work", headers=auth).json() == {"draft": None}
+    assert client.get("/workspaces/ws-r2/connector-draft", headers=auth).json() == {"draft": None}
+    assert client.get("/workspaces/ws-r2/connector-draft?ref=HEAD", headers=auth).status_code == 400
+    assert client.get("/workspaces/ws-zz/connector-draft?ref=work", headers=auth).status_code == 404
+
+    store.create_workspace("ws-r3", "rest-profile", ALICE)
+    draft = client.get("/workspaces/ws-r3/connector-draft?ref=work", headers=auth).json()["draft"]
+    # The untouched template: a draft, with problems — nothing rendered yet.
+    assert draft is not None and draft["problems"]
