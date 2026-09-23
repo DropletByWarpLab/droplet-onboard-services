@@ -119,7 +119,7 @@ import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
-import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
+import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -2047,12 +2047,10 @@ export function createPublicAuthRouter(
 
       try {
         await ncCreateUser(
-          // Use the configured admin token from env. No request-bound NC
-          // token is available since the invitee isn't logged in yet.
-          process.env.NEXTCLOUD_ADMIN_TOKEN ||
-            Buffer.from(
-              `${process.env.NEXTCLOUD_ADMIN_USER || "admin"}:${process.env.NEXTCLOUD_ADMIN_PASSWORD || ""}`,
-            ).toString("base64"),
+          // WARP-2993 — the box service account. The previous
+          // `NEXTCLOUD_ADMIN_TOKEN || <bare base64>` went out as a Bearer
+          // (no `basic:` prefix) and NEXTCLOUD_ADMIN_TOKEN is wired nowhere.
+          adminBasicToken(),
           invite.username,
           password,
           invite.displayName || undefined,
@@ -2902,11 +2900,10 @@ export function createProtectedAuthRouter(
   // PR #258 review (a "admin only" comment with no enforcing guard).
   router.get("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // Hide the Nextcloud system/database admin account — it exists for
       // internal orchestrator use only and must never appear in the UI.
@@ -3052,11 +3049,10 @@ export function createProtectedAuthRouter(
         throw err;
       }
 
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // WARP-485 follow-up (Romain PR #279 review): fail-CLOSED if
       // prisma isn't wired so we never create an NC user that we
@@ -3216,11 +3212,10 @@ export function createProtectedAuthRouter(
   // WARP-171: per-route guard. owner + admin only.
   router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // The target row, read ONCE and shared by both guarded branches below.
       // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
@@ -3482,11 +3477,10 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
 
         // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
         // the auth source of truth and the guard rails key off it.
@@ -3627,11 +3621,10 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
         // WARP-1526: dashboard-disable parks the LOCAL row on
         // directoryStatus=DEACTIVATED (see the disable handler) — re-enable
         // must flip it back or the account stays locally locked out
@@ -3805,11 +3798,10 @@ export function createProtectedAuthRouter(
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // WARP-1526 rails. This surface predated every people-surface
       // invariant — an admin could delete the owner's account here. Resolve

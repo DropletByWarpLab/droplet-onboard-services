@@ -70,7 +70,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -102,6 +102,10 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import type { Role } from "../services/jwt.service.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 /**
  * Prisma stub for the edit-user handler. `updateMany` mutates seeded rows
@@ -218,7 +222,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     expect(row.passwordHash).not.toBe("$argon2id$OLD-HASH"); // actually rotated
     expect(JSON.stringify(row)).not.toContain("New-secret123"); // plaintext never stored
     // Still provisions the WebDAV side with the plaintext.
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "password", "New-secret123");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "password", "New-secret123");
   });
 
   it("writes a normalized email to the local row and mirrors it to Nextcloud", async () => {
@@ -233,7 +237,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     const row = prisma._users.find((u: any) => u.username === "alice");
     // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
     expect(readUserEmail(row.email)).toBe("newalice@example.com");
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "email", "newalice@example.com");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "email", "newalice@example.com");
   });
 
   it("updates displayName on the local row and Nextcloud", async () => {
@@ -247,7 +251,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     expect(res.status).toBe(200);
     const row = prisma._users.find((u: any) => u.username === "alice");
     expect(row.displayName).toBe("Alice Cooper");
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "displayname", "Alice Cooper");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "displayname", "Alice Cooper");
   });
 
   it("404s when changing the email/password of a user with no local directory row", async () => {
@@ -346,7 +350,7 @@ describe("PUT /api/auth/users/:username — WARP-1523 ROLE_RANK cap", () => {
     expect(row.displayName).toBe("Alice B");
     expect(row.role).toBe("family"); // role untouched — schema strips it
     expect(nc.ncUpdateUser).toHaveBeenCalledTimes(1); // displayname only
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "displayname", "Alice B");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "displayname", "Alice B");
   });
 
   it("an unrecognized role string is not rank-checked — it falls through to schema validation (400)", async () => {
@@ -536,7 +540,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 owner-credential carve-out
     expect(row.passwordHash).toMatch(/^\$argon2id\$/);
     expect(row.passwordHash).not.toBe("$argon2id$OWNER-HASH"); // actually rotated
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "boss",
       "password",
       "Owner-newsecret123",
@@ -555,7 +559,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 owner-credential carve-out
     const row = prisma._users.find((u: any) => u.username === "alice");
     expect(row.passwordHash).not.toBe("$argon2id$OLD-HASH");
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "alice",
       "password",
       "Reset-secret123",
