@@ -340,7 +340,7 @@ export function WorkshopSpace() {
         {rail()}
       </aside>
 
-      <div className="chat-main">
+      <div className={`chat-main${selectedRunId ? "" : " is-empty"}`}>
         <header className="chat-head">
           <button ref={railTrigger} type="button" className="chat-iconbtn ws-rail-toggle" aria-label="Open the workshop rail" onClick={() => setRailOpen(true)}>
             <PanelLeft size={16} aria-hidden />
@@ -382,15 +382,15 @@ export function WorkshopSpace() {
 
         <div className="chat-scroll" aria-live="polite">
           <div className="chat-wrap">
+            {/* The centred greeting over the pill composer (the Mac app's
+                empty chat); the composer docks at the bottom once a run is
+                open — `is-empty` on .chat-main does the layout. */}
             {!selectedRunId && (
               <div className="chat-empty">
-                <span className="ico" aria-hidden>
-                  <Hammer size={28} />
-                </span>
                 {selectedWorkspace && composeWorkspaceId === selectedWorkspace.id ? (
                   <>
                     <div className="h">Tell {selectedWorkspace.name} what to build</div>
-                    <div>
+                    <div className="s">
                       The run reads, edits and tests inside its own workspace, commits as you, and ends by proposing the tool for your review.
                       Nothing it builds runs on the box until you accept it.
                     </div>
@@ -398,7 +398,7 @@ export function WorkshopSpace() {
                 ) : (
                   <>
                     <div className="h">Give your Droplet a goal</div>
-                    <div>
+                    <div className="s">
                       It works in the background on the box. Reads happen on their own; anything that changes something waits for your OK.
                       {workspaces && workspaces.length === 0 ? " Or create a custom tool and have it built for you." : ""}
                     </div>
@@ -443,6 +443,10 @@ export function WorkshopSpace() {
           }}
           busy={composerBusy}
           onSubmit={start}
+          onNewTool={(t) => {
+            newToolTrigger.current = t;
+            setNewToolOpen(true);
+          }}
           status={composerStatus}
         />
       </div>

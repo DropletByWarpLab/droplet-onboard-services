@@ -239,6 +239,25 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
     expect(screen.getByTitle("sweep last night's clips")).toBeInTheDocument();
   });
 
+  it("with no run open the pill sits under the greeting; opening one docks it, and a half-typed goal survives", async () => {
+    // The Mac app's empty chat (DropletAgent spec §5): `is-empty` on the
+    // column centres greeting + composer; the composer is the SAME element in
+    // both layouts, so switching never remounts it and loses the goal.
+    wire({ runs: [finished] });
+    const { container } = render(<WorkshopSpace />);
+    const column = container.querySelector(".chat-main")!;
+    expect(column.classList.contains("is-empty")).toBe(true);
+    fireEvent.change(goalField(), { target: { value: "half a thought" } });
+    const field = goalField();
+
+    const runsList = await screen.findByRole("list", { name: "Runs" });
+    fireEvent.click(await within(runsList).findByRole("button", { name: /sweep last night's clips/i }));
+    await screen.findByText("Reviewed 12 clips; nothing unusual.");
+    expect(column.classList.contains("is-empty")).toBe(false);
+    expect(goalField()).toBe(field);
+    expect(goalField().value).toBe("half a thought");
+  });
+
   it("drops a late detail response for a run that is no longer selected", async () => {
     const pending: Record<string, (v: unknown) => void> = {};
     wire({
@@ -421,6 +440,14 @@ describe("Workshop — custom tools", () => {
     await waitFor(() => expect((screen.getByTestId("workspace-select") as HTMLSelectElement).value).toBe("new-ws-abc123"));
     expect(screen.getByLabelText("What should Booking reminders do?")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Custom tools" }).textContent).toContain("Booking reminders");
+  });
+
+  it("the composer pill's + opens the same New custom tool dialog", async () => {
+    wire();
+    render(<WorkshopSpace />);
+    const pill = screen.getByRole("form", { name: "Start a run" });
+    fireEvent.click(within(pill).getByRole("button", { name: "New custom tool" }));
+    expect(await screen.findByRole("form", { name: "New custom tool" })).toBeInTheDocument();
   });
 
   it("?workspace=<id> opens the context pane: branch, proposal, changes, last command, history, clone", async () => {

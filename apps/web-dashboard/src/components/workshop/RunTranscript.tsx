@@ -14,7 +14,7 @@
  * persisted trace IS its progress. The parent re-reads a live run every few
  * seconds and hands the fresh detail down.
  */
-import { AlertTriangle, Check, CircleDashed, Hammer, ShieldAlert, ShieldCheck, ShieldX, User, X } from "lucide-react";
+import { AlertTriangle, Check, CircleDashed, Hammer, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
 import { LIVE_STATUSES, STATUS_LABELS, type AgentRunDetail, type AgentRunStatus, type TraceEntry } from "./agent-runs/api";
 
 const BADGE_KIND: Record<AgentRunStatus, string> = {
@@ -126,11 +126,9 @@ export function RunTranscript({ detail, busy, workspaceName, onApprove, onDeclin
 
   return (
     <article className="ws-thread" data-testid="agent-run-detail" aria-label="Run transcript">
-      {/* The person's message: the goal. */}
+      {/* The person's message: the goal, in the user bubble — no avatar, the
+          Mac app's transcript (DropletAgent spec §5). */}
       <div className="msg is-user">
-        <span className="msg-ava is-user" aria-hidden>
-          <User size={15} />
-        </span>
         <div className="msg-col">
           <div className="msg-bubble is-user">{detail.goal}</div>
         </div>
@@ -205,20 +203,8 @@ export function RunTranscript({ detail, busy, workspaceName, onApprove, onDeclin
         </div>
       )}
 
-      {detail.result && (
-        <div className="ws-result">
-          <div className="msg">
-            <span className="msg-ava is-assistant" aria-hidden>
-              <Hammer size={14} />
-            </span>
-            <div className="msg-col">
-              <div className="msg-bubble is-assistant" style={{ whiteSpace: "pre-wrap" }}>
-                {detail.result}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* The run's closing message: unboxed text in the reading column. */}
+      {detail.result && <div className="ws-answer">{detail.result}</div>}
 
       {proposed && (
         <p className="ws-empty-steps" data-testid="run-proposed">
