@@ -10,62 +10,84 @@
  * item even though the runs panel used to render on /admin/audit: the audit
  * log is where a run's rows are verified, not where a person goes to start
  * one.
+ *
+ * WARP-2967 moved it BEHIND SETTINGS rather than into Admin: the tree is four
+ * groups now and this is not daily operation. The placement argument above is
+ * intact — Workshop lands under Settings → **Automation** beside Routines,
+ * and still not under /admin/audit. The gates are unchanged, and that is what
+ * most of this file still pins.
  */
 import { describe, it, expect } from "vitest";
-import { NAV_GROUPS, visibleItems, moduleForPath } from "@/components/nav-config";
+import {
+  NAV_GROUPS,
+  settingsGroups,
+  visibleItems,
+  moduleForPath,
+} from "@/components/nav-config";
 
 const openCapabilities = { claudeActivity: true, ragEval: true, medicalConnector: true };
 const everyModuleOn = () => true;
 const everyModuleOff = () => false;
 
-function workspaceItems() {
-  const group = NAV_GROUPS.find((g) => g.label === "Workspace");
-  if (!group) throw new Error("Workspace nav group is gone");
+function workItems() {
+  const group = NAV_GROUPS.find((g) => g.label === "Work");
+  if (!group) throw new Error("Work nav group is gone");
   return group.items;
 }
 
+const workshop = () => workItems().find((i) => i.href === "/workshop");
+
+const settingsHrefs = (
+  role: Parameters<typeof visibleItems>[1],
+  isOn = everyModuleOn,
+) =>
+  settingsGroups(role, openCapabilities, isOn).flatMap((g) =>
+    g.items.map((i) => i.href),
+  );
+
 describe("Workshop nav entry (WARP-2925)", () => {
-  it("sits in Workspace, directly after Routines", () => {
-    const hrefs = workspaceItems().map((i) => i.href);
+  it("stays filed as the person's own work, directly after Routines", () => {
+    const hrefs = workItems().map((i) => i.href);
     expect(hrefs).toContain("/workshop");
     expect(hrefs.indexOf("/workshop")).toBe(hrefs.indexOf("/routines") + 1);
     const admin = NAV_GROUPS.find((g) => g.label === "Admin");
     expect(admin?.items.map((i) => i.href) ?? []).not.toContain("/workshop");
   });
 
-  it("does not disturb the WARP-1992 Overview → Reports → Ask AI adjacency", () => {
-    const hrefs = workspaceItems().map((i) => i.href);
-    expect(hrefs.indexOf("/reports")).toBe(hrefs.indexOf("/") + 1);
-    expect(hrefs.indexOf("/chat")).toBe(hrefs.indexOf("/reports") + 1);
+  it("is tucked behind Settings → Automation, beside Routines", () => {
+    expect(workshop()?.hidden).toBe(true);
+    expect(workshop()?.settingsSection).toBe("Automation");
+    const automation = settingsGroups("owner", openCapabilities, everyModuleOn).find(
+      (g) => g.label === "Automation",
+    );
+    expect(automation?.items.map((i) => i.href)).toContain("/workshop");
+    expect(automation?.items.map((i) => i.href)).toContain("/routines");
   });
 
-  it("is visible to owner and admin — the roles that may start a run", () => {
+  it("is offered to owner and admin — the roles that may start a run", () => {
     // Mirrors RUN_STARTER_ROLES on the orchestrator's agent-runs routes.
-    for (const role of ["owner", "admin"] as const) {
-      const visible = visibleItems(workspaceItems(), role, openCapabilities, everyModuleOn);
-      expect(visible.map((i) => i.href)).toContain("/workshop");
-    }
+    for (const role of ["owner", "admin"] as const)
+      expect(settingsHrefs(role), role).toContain("/workshop");
   });
 
   it("is hidden from family and guest — the routes would 403 them", () => {
     for (const role of ["family", "guest"] as const) {
-      const visible = visibleItems(workspaceItems(), role, openCapabilities, everyModuleOn);
+      expect(settingsHrefs(role), role).not.toContain("/workshop");
+      const visible = visibleItems(workItems(), role, openCapabilities, everyModuleOn);
       expect(visible.map((i) => i.href)).not.toContain("/workshop");
     }
   });
 
   it("survives every module being off — a run may touch any surface", () => {
-    const visible = visibleItems(workspaceItems(), "owner", openCapabilities, everyModuleOff);
-    expect(visible.map((i) => i.href)).toContain("/workshop");
+    expect(settingsHrefs("owner", everyModuleOff)).toContain("/workshop");
   });
 
   it("claims no module for its route, so the route gate can't 404 it", () => {
     expect(moduleForPath("/workshop")).toBeNull();
   });
 
-  it("is not tucked — it renders on the real nav surfaces", () => {
-    const item = workspaceItems().find((i) => i.href === "/workshop");
-    expect(item?.hidden).toBeFalsy();
-    expect(item?.label).toBe("Workshop");
+  it("keeps its label and a blurb through the tuck", () => {
+    expect(workshop()?.label).toBe("Workshop");
+    expect(workshop()?.settingsBlurb).toBeTruthy();
   });
 });
