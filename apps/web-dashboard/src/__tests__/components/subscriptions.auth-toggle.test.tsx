@@ -38,7 +38,9 @@ vi.mock("@/lib/hooks/useCalendar", () => ({
   createSource: createSourceMock,
   syncSource: vi.fn(),
   deleteSource: vi.fn(),
-  getPublishUrl: vi.fn(),
+  usePublishLinkStatus: () => ({ status: undefined, refresh: vi.fn() }),
+  rotatePublishLink: vi.fn(),
+  revokePublishLink: vi.fn(),
 }));
 
 import { SubscriptionsPanel } from "@/components/calendar/SubscriptionsPanel";

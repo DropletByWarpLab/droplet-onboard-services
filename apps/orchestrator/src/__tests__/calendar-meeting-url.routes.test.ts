@@ -12,7 +12,6 @@
  * — the link has to reach the client they actually use.
  */
 
-import crypto from "node:crypto";
 import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
 import express from "express";
@@ -24,6 +23,15 @@ vi.mock("../services/caldav.client.js", () => ({
 vi.mock("../services/encryption.service.js", () => ({
   encryptSecret: (s: string) => `enc:${s}`,
   decryptSecret: (s: string) => s,
+}));
+
+// WARP-2767 — the feed credential has its own suite
+// (calendar-feed-token.routes.test.ts). Here the token check is stubbed to
+// "valid for alice" so these cases stay about what the feed EMITS.
+vi.mock("../services/calendar-feed-token.service.js", () => ({
+  verifyFeedToken: vi.fn(async (_p: unknown, token: string, user: string) =>
+    token === "valid-alice-token" && user === "alice" ? "alice" : null,
+  ),
 }));
 
 import { createCalendarRouter, createCalendarPublicRouter } from "../routes/calendar.js";
@@ -225,15 +233,7 @@ describe("PATCH /calendar/events/:id — meetingUrl", () => {
 });
 
 describe("GET /calendar/publish/:user.ics — meetingUrl", () => {
-  // Same derivation as the route: no DEVICE_SECRET in tests, so the
-  // deterministic dev placeholder applies.
-  function tokenFor(username: string): string {
-    return crypto
-      .createHmac("sha256", "dev-only-not-secure")
-      .update(`calendar:${username}`)
-      .digest("hex")
-      .slice(0, 32);
-  }
+  const tokenFor = (_username: string) => "valid-alice-token";
 
   function buildPublicApp(stub: ReturnType<typeof makeStub>) {
     const app = express();
