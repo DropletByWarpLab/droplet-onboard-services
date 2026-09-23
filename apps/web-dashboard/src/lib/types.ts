@@ -1405,8 +1405,36 @@ export interface AccessRole {
   /** Present where the mutation cascades to NC / session revocation. */
   syncState?: AccessSyncState;
   featureGrants: AccessRoleFeatureGrant[];
-  toolGrants: AccessRoleToolGrant[];
+  toolGrants: AccessRoleToolGrantWithState[];
   connectorGrants: AccessRoleConnectorGrant[];
+}
+
+/**
+ * WARP-2897 — a tool grant as GET /api/access/roles serves it: the row plus
+ * whether it reaches anything. `dead` + `not_provided` = a runtime domain no
+ * attached tool carries (its extension disabled); `dead` + `empty_domain` =
+ * a compiled landing slot (crm/pm) with no tool yet. Optional so older boxes
+ * (and hand-built fixtures) still type-check; never sent back on a write.
+ */
+export interface AccessRoleToolGrantWithState extends AccessRoleToolGrant {
+  state?: "live" | "dead";
+  deadReason?: "empty_domain" | "not_provided" | null;
+}
+
+/** WARP-2897 — GET /api/access/tool-domains. */
+export interface AccessToolDomainsResponse {
+  /** The compiled grantable domains (server GRANTABLE_TOOL_DOMAINS). */
+  compiled: string[];
+  /** One entry per runtime-only domain some attached tool carries. */
+  runtime: Array<{
+    domain: string;
+    /** `runtime:<serverId>` per contributing server. */
+    sources: string[];
+    tools: number;
+    populated: boolean;
+    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    readable: boolean;
+  }>;
 }
 
 /** POST/PATCH body for /api/access/roles — §2 shape flattened. */
