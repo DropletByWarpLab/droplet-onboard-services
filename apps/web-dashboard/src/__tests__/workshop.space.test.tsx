@@ -223,6 +223,9 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/agent-runs/run-1/confirm");
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ decision: "denied" });
     });
+    // The Decline is still in flight until both reloads settle (`busyId`), and
+    // Cancel is `disabled={busy}` meanwhile: a click before then is a no-op.
+    await waitFor(() => expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
     await waitFor(() => expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/agent-runs/run-1/cancel")).toBe(true));
   });
@@ -301,6 +304,7 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
     });
     render(<WorkshopSpace />);
     await screen.findByRole("group", { name: /waiting for your OK/i });
+    await waitFor(() => expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
     await waitFor(() => expect(rejectCancel).toBeTruthy());
 
