@@ -25,17 +25,28 @@ Install, step by step
   3. the whole dir is made read-only and owner-only (files 0400, dirs 0500);
   4. a free loopback port from ``SANDBOX_EXTENSION_PORT_RANGE``;
   5. the runtime's first-party host shim (ext_host/) is started under the
-     supervisor: restart on failure, the manifest's memory budget, and an
+     supervisor: NEVER restarted by it, the manifest's memory budget, and an
      environment of the base CHILD_ENV plus the allowlisted extension keys
      (id, port, the orchestrator call-back bearer, the relay key);
   6. ready when the shim answers a relayed ``ping``.
+
+No supervisor restart (review #2323): the installed dir belongs to the uid
+every workspace ``run`` child also runs as, so a run could rewrite it and
+kill the process, and a supervisor restart would then run the rewrite under
+the extension's bearer without re-verifying anything. A dead extension comes
+back only through ``install`` — the orchestrator's reconciler calls it, a
+bounded number of times — which re-exports the signed commit, after the
+orchestrator has re-verified the statement and rotated the bearer.
 
 The orchestrator never dials an extension: ``relay`` does, on 127.0.0.1, with
 a timeout and an output cap that is REPORTED when hit, never a silent slice.
 
 What is installed lives in this process's memory. A sandbox restart forgets
 it; the orchestrator's reconciler notices (``status`` 404) and installs again
-from the store, re-verifying the statement and rotating the bearer first.
+from the store, re-verifying the statement and rotating the bearer first. The
+reconciler also reads ``listing`` and stops a process whose extension should
+not be running (a disable whose stop failed, an install that outlived the
+orchestrator's timeout).
 """
 
 from __future__ import annotations
@@ -78,7 +89,6 @@ READY_TIMEOUT_S = float(os.getenv("SANDBOX_EXTENSION_READY_TIMEOUT_S", "15"))
 RELAY_DEFAULT_TIMEOUT_MS = 30_000
 RELAY_MAX_TIMEOUT_MS = 120_000
 RELAY_OUTPUT_CAP_BYTES = int(os.getenv("SANDBOX_EXTENSION_OUTPUT_CAP_BYTES", str(1024 * 1024)))
-MAX_RESTARTS = 5
 
 
 def _port_range() -> range:
@@ -378,8 +388,9 @@ def install(
             proc_id(slug),
             [interpreter, os.path.join(supervisor.HOST_SHIMS_DIR, shim), "."],
             cwd=str(directory),
-            restart="on-failure",
-            max_restarts=MAX_RESTARTS,
+            # Never: a dead extension returns only through install() (above).
+            restart="never",
+            max_restarts=0,
             env=_dev_env(dict(base_env)),
             extra_env=extra_env,
             memory_mb=memory_mb,
@@ -489,3 +500,13 @@ def uninstall(slug: str) -> dict[str, Any]:
 def installed_slugs() -> list[str]:
     with _lock:
         return sorted(_installed)
+
+
+def listing() -> list[dict[str, Any]]:
+    """Every extension this sandbox holds, and whether its process runs. The
+    orchestrator's reconciler stops one whose row says it must not run."""
+    out = []
+    for slug in installed_slugs():
+        snap = supervisor.SUPERVISOR.status(proc_id(slug))
+        out.append({"slug": slug, "running": bool(snap and snap["state"] == "running")})
+    return out

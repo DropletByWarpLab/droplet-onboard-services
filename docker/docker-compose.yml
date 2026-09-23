@@ -2228,6 +2228,12 @@ services:
       - workspace-git:/var/lib/workspace-git
       - workspace-checkouts:/var/lib/workspace
       - extensions-installed:/var/lib/workspace-ext
+    # WARP-2900 / WARP-3012: a stopped extension's process group and a
+    # timed-out run's are killed with killpg; their orphans are reparented to
+    # PID 1. An init (Docker's tini) reaps them. Without it PID 1 is the
+    # Python server, which never does, and the zombies count against
+    # pids_limit until the container restarts. Pinned by test-security.sh 14b.
+    init: true
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

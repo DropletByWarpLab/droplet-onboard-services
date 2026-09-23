@@ -405,6 +405,10 @@ fi
 #     `network_mode`, no `env_file`, no docker socket;
 #   - the hardening stanza (read-only, cap_drop ALL, no-new-privileges, tmpfs
 #     /tmp, non-root image) and the ADR-021 trio incl. `pids_limit`;
+#   - `init: true` (WARP-2900 / WARP-3012): a stopped extension's or a timed-out
+#     run's process group is killed, and its orphans are reparented to PID 1.
+#     Without an init, PID 1 is the Python server, which never reaps them, and
+#     the zombies eat `pids_limit` until the container restarts;
 #   - the orchestrator on BOTH `default` and `droplet-internal`, so the
 #     internal network cannot silently become the orchestrator's only one.
 # MUTATION: remove `internal: true` and this goes red.
@@ -445,6 +449,8 @@ if not any(str(t).startswith("/tmp") for t in (sb.get("tmpfs") or [])):
 for key in ("mem_limit", "cpus", "pids_limit"):
     if key not in sb:
         problems.append(f"sandbox must set `{key}` (ADR-021)")
+if sb.get("init") is not True:
+    problems.append("sandbox must set init: true (orphans of a killed process group are reaped)")
 env = sb.get("environment") or []
 env_keys = {str(e).split("=", 1)[0] for e in env} if isinstance(env, list) else set(env.keys())
 extra_secrets = {k for k in env_keys if k.endswith("_TOKEN") or k.endswith("_PASSWORD") or k.endswith("_SECRET")} - {"SANDBOX_SERVICE_TOKEN"}
