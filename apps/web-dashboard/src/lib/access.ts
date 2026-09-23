@@ -278,6 +278,41 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       },
     ],
   },
+  // WARP-2977 (ADR-059 §6). Value-identical to the orchestrator's catalog:
+  // view and act floored at family (presence data — no guest tier), manage
+  // at admin (zones, hours and what counts as expected are business policy).
+  // Camera rows inside it still need a camera grant.
+  {
+    moduleId: "security",
+    label: "Security",
+    description: "One feed for cameras, camera health, and network warnings",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "The security feed, for the cameras they can already see",
+        minTier: FAMILY,
+        dropNoun: "See the security feed",
+        dropVerb: "see the security feed",
+      },
+      {
+        value: "act",
+        label: "Respond",
+        grants: "Everything in View, plus acknowledge and set the mode",
+        minTier: FAMILY,
+        dropNoun: "Respond to security events",
+        dropVerb: "respond to security events",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Zones, opening hours and what counts as expected",
+        minTier: ADMIN,
+        dropNoun: "Manage security",
+        dropVerb: "manage security",
+      },
+    ],
+  },
   {
     moduleId: "smart_home",
     label: "Devices",

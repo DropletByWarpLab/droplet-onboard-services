@@ -266,8 +266,8 @@ run is never more expensive than the original at the same iteration
   per-turn `agent_tool_pool_size` line (the schema side of the same window),
   and records them in the ADR-056 brief's measurement appendix.
   Two aggregation traps: an over-ceiling advertisement logs only the
-  error-level `tool_budget_exceeded` line (no pool line, no `turn_id`), so it
-  must be counted as the worst turn; and `iter` restarts at 0 when a run
+  error-level `tool_budget_exceeded` line (no pool line; it carries the same
+  `turn_id` / `agent_run_id` join keys), so it must be counted as the worst turn; and `iter` restarts at 0 when a run
   resumes, so a run's iteration count comes from the AgentRun row or trace.
 
 **Not done, deliberately.** History compaction (a sliding window or a

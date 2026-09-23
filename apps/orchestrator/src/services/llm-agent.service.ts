@@ -32,6 +32,7 @@
  */
 
 import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
+import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -1308,6 +1309,10 @@ function logToolPoolSize(p: {
   healedTool?: string;
   agentRunId?: string;
 }): void {
+  // Silent at the shipping `info` level — skip the registry walk and the
+  // ceiling derivation entirely rather than building a line pino drops.
+  // Feature-tested: many suites stub the logger without `isLevelEnabled`.
+  if (typeof logger.isLevelEnabled === "function" && !logger.isLevelEnabled("debug")) return;
   const runtimeNames = new Set(runtimeToolRegistry.list().map((t) => t.name));
   logger.debug(
     {
@@ -1349,6 +1354,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // to ALL be truthy (routes/llm.ts), so an ephemeral or service-token turn has
   // none and its failures would be unjoinable.
   const turnId = newAgentTurnId();
+  // WARP-2921 — the window both advertisement asserts (initial + self-heal)
+  // measure against, and the pool line reports. Derived once so they agree.
+  const poolContextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
+  // WARP-2921 — join keys for the assert's own `tool_budget_exceeded` line, so
+  // an over-ceiling advertisement (which throws before any pool line) is
+  // attributable to its turn and run like `agent_tool_pool_size` is.
+  const budgetJoin = {
+    turn_id: turnId,
+    ...(req.toolCallContext?.agentRunId ? { agent_run_id: req.toolCallContext.agentRunId } : {}),
+  };
   // Copy so we don't mutate the caller's array.
   const messages: ChatMessage[] = [...req.messages];
   const emit = deps.onEvent ?? (() => {});
@@ -1470,11 +1485,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // the matched-domain set. That is precisely the case worth a loud failure
   // rather than a quiet one.
   if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
-    const poolContextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
     const poolSize = assertToolAdvertisementFitsBudget({
       specs: tools,
       contextWindow: poolContextWindow,
       logContext: {
+        ...budgetJoin,
         model: req.model,
         selectionMode: req.tool_selection_mode,
         poolSize: filtered.length,
@@ -2173,12 +2188,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           let healed = true;
           if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
             try {
-              const healContextWindow =
-                req.context_window ?? DEFAULT_CONTEXT_WINDOW;
               const healedSize = assertToolAdvertisementFitsBudget({
                 specs: candidate,
-                contextWindow: healContextWindow,
+                contextWindow: poolContextWindow,
                 logContext: {
+                  ...budgetJoin,
                   model: req.model,
                   selectionMode: req.tool_selection_mode,
                   poolSize: filtered.length,
@@ -2192,7 +2206,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
               logToolPoolSize({
                 size: healedSize,
                 specs: candidate,
-                contextWindow: healContextWindow,
+                contextWindow: poolContextWindow,
                 selectionMode: req.tool_selection_mode,
                 turnId,
                 iter,
@@ -2609,7 +2623,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
       // the historical 8000), so it can be set from a measured distribution.
       const bounded = boundToolResultForModel(
-        text,
+        // WARP-2002 — the model never sees a confirmation token; see the helper.
+        isConfirmation ? redactConfirmationTokensForModel(text) : text,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:

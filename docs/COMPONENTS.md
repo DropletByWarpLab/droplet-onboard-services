@@ -174,7 +174,7 @@ network. Host-published ports and host-network services are called out.
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the
   orchestrator's own Postgres (ADR-026) — no external PM service.
-- **Auth:** Bearer JWT (HS256 access + refresh) with Nextcloud OCS fallback;
+- **Auth:** Bearer JWT (HS256 access + refresh) or a service-principal bearer; no Nextcloud-credential fallback (removed, WARP-2994);
   roles `owner | admin | family | guest | service`; per-route RBAC via
   `requireRole` / `requireScope` (see [ADR-004](ADR-004-rbac-per-route-guards.md)).
   `WRITE_TOOLS` in `src/routes/llm.ts` is **derived from `requiresWrite`** in
