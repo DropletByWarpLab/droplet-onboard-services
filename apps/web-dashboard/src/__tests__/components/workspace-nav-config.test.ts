@@ -185,6 +185,25 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(dest("/cameras")?.views).toEqual([]);
   });
 
+  it("Security's Areas and Opening hours are its views, the section itself first (WARP-2977 P2b)", () => {
+    const views = dest("/security")?.views ?? [];
+    expect(views.map((v) => v.label)).toEqual(["Security", "Areas", "Opening hours"]);
+    expect(views.map((v) => v.href)).toEqual(["/security", "/security/zones", "/security/settings"]);
+    // The section pill is exact, so it does not stay lit on its sub-pages.
+    expect(views[0]?.exact).toBe(true);
+    // Views, never chips of their own.
+    expect(spaceHrefs).not.toContain("/security/zones");
+    expect(spaceHrefs).not.toContain("/security/settings");
+  });
+
+  it("Security's views follow the security module, not a role (both pages read at view)", () => {
+    const family = resolveSpaces("family", NO_CAPS, allOn);
+    const sec = family.flatMap((s) => s.destinations).find((d) => d.item.href === "/security");
+    expect(sec?.views.map((v) => v.label)).toEqual(["Security", "Areas", "Opening hours"]);
+    const off = resolveSpaces("owner", ALL_CAPS, (m) => m !== "security");
+    expect(off.flatMap((s) => s.destinations).find((d) => d.item.href === "/security")).toBeUndefined();
+  });
+
   it("a destination without children has no views", () => {
     expect(dest("/network")?.views).toEqual([]);
   });
@@ -207,6 +226,10 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/admin/prompt", "ai", "/admin/prompt", null],
     ["/knowledge", "ai", "/knowledge", null],
     ["/network", "ops", "/network", null],
+    // WARP-2977 P2b — Security's sub-pages are views of the Security chip.
+    ["/security", "ops", "/security", "/security"],
+    ["/security/zones", "ops", "/security", "/security/zones"],
+    ["/security/settings", "ops", "/security", "/security/settings"],
   ])("%s → %s / %s (view %s)", (path, space, destHref, viewHref) => {
     const loc = locate(spaces, path);
     expect(loc?.space.def.id).toBe(space);

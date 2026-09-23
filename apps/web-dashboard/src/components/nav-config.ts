@@ -37,6 +37,7 @@ import {
   Lightbulb,
   LayoutDashboard,
   Mail,
+  MapPin,
   MessageSquare,
   MessagesSquare,
   Mic,
@@ -443,7 +444,24 @@ export const NAV_GROUPS: NavGroup[] = [
       // place camera detections, camera health and network warnings land,
       // and Cameras is one of its sources. Its own module, so a person can
       // hold it without holding cameras (and vice versa).
-      { href: "/security", label: "Security", icon: Shield, requiresModule: "security" },
+      //
+      // WARP-2977 P2b — Areas and Opening hours are part of the Security
+      // section: they inherit its module gate (moduleForPath), carry no
+      // `roles` (both pages are readable at view — manage only adds
+      // controls), and live under /security, never /settings (ALWAYS_ON,
+      // which would escape ModuleRouteGuard). Not destinations in SPACES, so
+      // the Workspace shell shows them as the view pills
+      // "Security · Areas · Opening hours".
+      {
+        href: "/security",
+        label: "Security",
+        icon: Shield,
+        requiresModule: "security",
+        children: [
+          { href: "/security/zones", label: "Areas", icon: MapPin },
+          { href: "/security/settings", label: "Opening hours", icon: Clock },
+        ],
+      },
       {
         href: "/cameras",
         label: "Cameras",

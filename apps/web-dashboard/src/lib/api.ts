@@ -139,7 +139,22 @@ import type {
   SecurityEventKind,
   SecurityEventsPage,
   SecurityHealthRow,
+  SecurityHoursBody,
+  SecurityHoursExceptionBody,
+  SecurityHoursView,
+  SecurityHoursWriteResult,
+  SecurityModeAction,
+  SecurityModeActionResult,
+  SecurityModeView,
+  SecuritySourcesView,
+  SecurityZoneCreateBody,
+  SecurityZoneCreated,
+  SecurityZoneLinksBody,
+  SecurityZonePatchBody,
+  SecurityZonesResponse,
+  SecurityZoneWriteResult,
 } from "./types";
+import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
   EmailAccount,
@@ -8838,6 +8853,8 @@ export interface SecurityEventsQuery {
   kinds?: SecurityEventKind[];
   camera?: string;
   includeLow?: boolean;
+  /** WARP-2977 P2b — an area id. A hidden or missing area answers an empty page, never an error. */
+  zone?: string;
 }
 
 export function securityEventsPath(q: SecurityEventsQuery = {}): string {
@@ -8847,6 +8864,7 @@ export function securityEventsPath(q: SecurityEventsQuery = {}): string {
   if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
   if (q.camera) p.set("camera", q.camera);
   if (q.includeLow) p.set("includeLow", "true");
+  if (q.zone) p.set("zone", q.zone);
   const qs = p.toString();
   return `/api/security/events${qs ? `?${qs}` : ""}`;
 }
@@ -8867,4 +8885,146 @@ export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[
     throw new Error(body.error || `Failed to load security health: ${res.status}`);
   }
   return res.json();
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+// Routes 3–15. Every call goes through `securityFetch`, so a failure throws with
+// `.code` (the server's `error.code`) and `.status` — render it with
+// `translateError(err, "security")`, never `err.message`. Reads are view-level
+// for every household role; writes are act (mode) or manage (areas, hours) and
+// the server 404s a person below that level, so the UI hides those controls.
+
+/**
+ * The P2b transport: `authFetch`, like the P2a feed and health helpers, so an
+ * expired 15-minute access token is refreshed and the request retried (and a
+ * session that really ended goes to /login) — `apiFetch` never refreshes, so a
+ * backgrounded /security tab came back to "can't tell the mode" and a save
+ * answered "session expired" while the session was fine. With `apiFetch`'s
+ * typed errors: `.code` (the server's `error.code`), `.status`, `.body`,
+ * `.requestId`; TIMEOUT / NETWORK_ERROR for a request that never answered.
+ */
+async function securityFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
+  let r: Response;
+  try {
+    r = await authFetch(path, { ...init, signal: timeout });
+  } catch (err) {
+    const e: TypedError = new Error(timeout.aborted ? `Request timed out: ${path}` : err instanceof Error ? err.message : "Network error");
+    e.code = timeout.aborted ? "TIMEOUT" : "NETWORK_ERROR";
+    e.status = 0;
+    throw e;
+  }
+  const body = await r.json().catch(() => ({}) as unknown);
+  if (!r.ok) {
+    const typed = (body as { error?: { code?: string; message?: string } })?.error ?? {
+      code: "UNKNOWN",
+      message: `HTTP ${r.status}`,
+    };
+    const e: TypedError = new Error(typed.message ?? `HTTP ${r.status}`);
+    e.code = typed.code;
+    e.status = r.status;
+    e.body = body;
+    e.requestId = r.headers?.get("x-request-id") ?? undefined;
+    throw e;
+  }
+  return body as T;
+}
+
+export const SECURITY_ZONES_PATH = "/api/security/zones";
+export const SECURITY_SOURCES_PATH = "/api/security/sources";
+export const SECURITY_MODE_PATH = "/api/security/mode";
+export const SECURITY_HOURS_PATH = "/api/security/hours";
+
+const jsonBody = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+/** 3 — visible areas with their visible links. `includeArchived` only takes effect at manage. */
+export function getSecurityZones(opts: { includeArchived?: boolean } = {}): Promise<SecurityZonesResponse> {
+  return securityFetch<SecurityZonesResponse>(
+    `${BASE}${SECURITY_ZONES_PATH}${opts.includeArchived ? "?include=archived" : ""}`,
+  );
+}
+
+/** 4 — cameras and their parts to link, plus each link's present/missing/unknown status. */
+export function getSecuritySources(): Promise<SecuritySourcesView> {
+  return securityFetch<SecuritySourcesView>(`${BASE}${SECURITY_SOURCES_PATH}`);
+}
+
+/** 5 — the effective site mode. */
+export function getSecurityMode(): Promise<SecurityModeView> {
+  return securityFetch<SecurityModeView>(`${BASE}${SECURITY_MODE_PATH}`);
+}
+
+/** 6 — the opening hours, special days, a 7-day preview and the timezone hint. */
+export function getSecurityHours(): Promise<SecurityHoursView> {
+  return securityFetch<SecurityHoursView>(`${BASE}${SECURITY_HOURS_PATH}`);
+}
+
+/** 7 (act) — Close up / Open up / Away / Back to opening hours. */
+export function postSecurityMode(action: SecurityModeAction): Promise<SecurityModeActionResult> {
+  return securityFetch<SecurityModeActionResult>(`${BASE}${SECURITY_MODE_PATH}`, jsonBody("POST", action));
+}
+
+/** 8 (manage) — 201. */
+export function createSecurityZone(body: SecurityZoneCreateBody): Promise<SecurityZoneCreated> {
+  return securityFetch<SecurityZoneCreated>(`${BASE}${SECURITY_ZONES_PATH}`, jsonBody("POST", body));
+}
+
+/** 9 (manage). */
+export function patchSecurityZone(id: string, body: SecurityZonePatchBody): Promise<SecurityZoneWriteResult> {
+  return securityFetch<SecurityZoneWriteResult>(
+    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}`,
+    jsonBody("PATCH", body),
+  );
+}
+
+/** 10 (manage) — "Remove area". Areas are archived, never deleted; their events stay in the feed. */
+export function archiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
+  return securityFetch<SecurityZoneWriteResult>(
+    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/archive`,
+    jsonBody("POST", { expectedVersion }),
+  );
+}
+
+/** 11 (manage) — "Restore". */
+export function unarchiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
+  return securityFetch<SecurityZoneWriteResult>(
+    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/unarchive`,
+    jsonBody("POST", { expectedVersion }),
+  );
+}
+
+/** 12 (manage) — replace the area's link set. */
+export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): Promise<SecurityZoneWriteResult> {
+  return securityFetch<SecurityZoneWriteResult>(
+    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/links`,
+    jsonBody("PUT", body),
+  );
+}
+
+/** 13 (manage) — set or clear the weekly hours. */
+export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
+  return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
+}
+
+/** 14 (manage) — add or replace one special day ('YYYY-MM-DD', site-local). */
+export function putSecurityHoursException(
+  date: string,
+  body: SecurityHoursExceptionBody,
+): Promise<SecurityHoursWriteResult> {
+  return securityFetch<SecurityHoursWriteResult>(
+    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}`,
+    jsonBody("PUT", body),
+  );
+}
+
+/** 15 (manage) — 204. `version` is the hours version the page read. */
+export async function deleteSecurityHoursException(date: string, version: number): Promise<void> {
+  await securityFetch<unknown>(
+    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
+    { method: "DELETE" },
+  );
 }
