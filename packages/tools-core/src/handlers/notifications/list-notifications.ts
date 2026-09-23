@@ -11,6 +11,7 @@ interface NotificationRow {
   kind: string;
   title: string;
   body: string | null;
+  url: string | null;
   deliveredAt: Date | null;
   createdAt: Date;
 }
@@ -38,6 +39,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         kind: n.kind,
         title: n.title,
         body: n.body,
+        // WARP-2909 — where the notification points (a dashboard path).
+        url: n.url ?? null,
         delivered: n.deliveredAt !== null,
         at: n.createdAt.toISOString(),
       })),

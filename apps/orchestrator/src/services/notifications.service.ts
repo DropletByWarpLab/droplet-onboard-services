@@ -45,6 +45,68 @@ export interface DispatchInput {
   kind: NotificationKind;
   title: string;
   body?: string | null;
+  /** WARP-2909 — where a tap/click should take the person: a same-origin
+   *  dashboard PATH (`/workshop?run=<id>`), never an absolute URL. Checked by
+   *  `assertNotificationLink`. Each native sender maps it to its own key
+   *  (iOS `deepLink`, Android `data["url"]`). */
+  url?: string;
+  /** WARP-2909 — small, FLAT, PHI-free context for clients. A notification
+   *  payload is copied to third-party push services and OS notification
+   *  stores, so this must never carry customer data, a token or a binding
+   *  hash — `assertNotificationData` refuses those keys, nesting, and > 1 KB. */
+  data?: Record<string, string | number | boolean>;
+  /** WARP-2909 — collapse key (web push `tag`): repeated notifications with
+   *  one tag replace each other in the tray. `^[A-Za-z0-9._:-]{1,128}$`. */
+  tag?: string;
+}
+
+// ── WARP-2909: the deep-link validators ─────────────────────────────────────
+
+const MAX_LINK_LENGTH = 512;
+const MAX_DATA_BYTES = 1024;
+const TAG_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+/** `url` is refused because the service worker merges `data` into the
+ *  notification data it opens on click — a `data.url` must never be able to
+ *  stand in for the validated `url` (sw.js also spreads it first, belt and
+ *  braces). The rest are the confirmation secrets a parked run must never leak. */
+const FORBIDDEN_DATA_KEYS = new Set(["url", "token", "confirmationToken", "bindingHash", "pendingBindingHash"]);
+
+/** Throws unless `url` is a same-origin path: one leading `/`, no scheme, no
+ *  protocol-relative `//host`, no backslash (browsers read `/\host` as
+ *  `//host`), no CR/LF/NUL, at most 512 chars. */
+export function assertNotificationLink(url: string): void {
+  if (
+    typeof url !== "string" ||
+    url.length === 0 ||
+    url.length > MAX_LINK_LENGTH ||
+    !url.startsWith("/") ||
+    url.startsWith("//") ||
+    /[\\\r\n\0]/.test(url)
+  ) {
+    throw new Error("invalid_notification_link");
+  }
+}
+
+export function assertNotificationData(data: Record<string, unknown>): void {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid_notification_data");
+  }
+  for (const [k, v] of Object.entries(data)) {
+    if (FORBIDDEN_DATA_KEYS.has(k)) throw new Error(`invalid_notification_data: forbidden key ${k}`);
+    if (!["string", "number", "boolean"].includes(typeof v)) {
+      throw new Error("invalid_notification_data: not flat");
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_DATA_BYTES) {
+    throw new Error("invalid_notification_data: too large");
+  }
+}
+
+/** The one check every entry point runs on the optional link fields. */
+function assertLinkFields(input: DispatchInput): void {
+  if (input.url !== undefined) assertNotificationLink(input.url);
+  if (input.data !== undefined) assertNotificationData(input.data);
+  if (input.tag !== undefined && !TAG_RE.test(input.tag)) throw new Error("invalid_notification_tag");
 }
 
 export interface DispatchResult {
@@ -80,6 +142,15 @@ export function publishNotificationToast(input: DispatchInput): {
 } {
   const channels: string[] = [];
   const errors: string[] = [];
+  // WARP-2909 — this function must not throw, so a bad link DEGRADES: the
+  // toast still goes out, without the link, and the row records why.
+  let link: Pick<DispatchInput, "url" | "data"> = { url: input.url, data: input.data };
+  try {
+    assertLinkFields(input);
+  } catch {
+    link = {};
+    errors.push("toast: invalid_link");
+  }
   // Channel 1: toast. Always attempted because the ws-bridge is the cheapest
   // delivery path and the user always has a dashboard tab nearby.
   const toastOk = safePublish(`droplet/notifications/${input.userId}`, {
@@ -87,6 +158,8 @@ export function publishNotificationToast(input: DispatchInput): {
     title: input.title,
     body: input.body ?? null,
     at: new Date().toISOString(),
+    ...(link.url !== undefined ? { url: link.url } : {}),
+    ...(link.data !== undefined ? { data: link.data } : {}),
   });
   if (toastOk) channels.push("toast");
   else errors.push("toast: mqtt_unavailable");
@@ -107,12 +180,17 @@ export async function recordNotification(
   db: NotificationDb,
   input: DispatchInput,
 ): Promise<{ id: string }> {
+  // WARP-2909 — before the write: inside a caller's transaction a throw here
+  // aborts it before anything commits.
+  assertLinkFields(input);
   const row = await db.notificationLog.create({
     data: {
       userId: input.userId,
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
+      url: input.url ?? null,
+      data: input.data ?? undefined,
       channels: "",
       deliveredAt: null,
       error: null,
@@ -126,6 +204,8 @@ export async function sendNotification(
   prisma: PrismaClient,
   input: DispatchInput,
 ): Promise<DispatchResult> {
+  // WARP-2909 — a bad link is the caller's bug: refuse before any transport.
+  assertLinkFields(input);
   const { channels, errors } = publishNotificationToast(input);
 
   // Channel 2: web push. The toast only exists while a tab is open, so without
@@ -156,6 +236,9 @@ export async function sendNotification(
     const { sent, attempted, refused } = await dispatchToUser(prisma, input.userId, {
       title: input.title,
       body: input.body ?? "",
+      url: input.url,
+      data: input.data,
+      tag: input.tag,
     });
     if (sent > 0) channels.push("push");
     pushOutcome = refused
@@ -180,6 +263,8 @@ export async function sendNotification(
       kind: input.kind,
       title: input.title,
       body: input.body ?? null,
+      url: input.url ?? null,
+      data: input.data ?? undefined,
       channels: channels.join(","),
       deliveredAt: delivered ? new Date() : null,
       error: errors.length > 0 ? errors.join(" | ") : null,
@@ -207,6 +292,8 @@ export async function listRecentNotifications(
     kind: string;
     title: string;
     body: string | null;
+    url: string | null;
+    data: Prisma.JsonValue | null;
     channels: string;
     deliveredAt: Date | null;
     error: string | null;

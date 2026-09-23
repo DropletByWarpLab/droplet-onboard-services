@@ -262,7 +262,9 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "deleted", username: "alice" });
     expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "alice");
-    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "alice");
+    // WARP-2858: brain memory keys on User.id (WARP-493) — the purge is
+    // handed the resolved row id, never the path param.
+    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
     // WARP-2115 — the removed person's Microsoft 365 refresh token must go
     // with them. Nothing cascades (userId is not an FK) and the /api/m365
     // routes scope to the requester's OWN connection, so a row left behind

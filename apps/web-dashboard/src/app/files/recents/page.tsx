@@ -114,7 +114,7 @@ export default function RecentsPage() {
               value={filterDay ?? ""}
               onChange={(e) => setFilterDay(e.target.value || null)}
               max={localDayKey(new Date().toISOString())}
-              className="h-9 px-3 type-subheadline outline-none focus:border-[var(--brand)]"
+              className="h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
