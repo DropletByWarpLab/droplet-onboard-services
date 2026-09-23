@@ -9,7 +9,11 @@
  * recorded at promote as the expectation. A statement that no longer
  * verifies — a rebuilt boot disk means a new box extension key
  * (extension_key_changed) — marks the extension `failed` with the reason and
- * starts nothing; the owner re-promotes.
+ * starts nothing; the owner re-promotes. The sandbox is then sent the
+ * SIGNED statement's workspace, version, commit and tree, never the row's
+ * columns, and a row whose columns disagree with its statement (or that
+ * carries another extension's statement) is refused the same way
+ * (statement_mismatch, review #2323).
  *
  * EVERY START ROTATES THE BEARER. The extension's call-back bearer (`dxt_`
  * + 32 random bytes) is minted here, its sha256 stored on the row, and the
@@ -43,6 +47,7 @@ import { recordActivity } from "./activity.singleton.js";
 import {
   parseExtensionManifest,
   type ExtensionManifest,
+  type ExtensionStatement,
 } from "./extension-manifest.js";
 import {
   ExtensionSandboxError,
@@ -256,6 +261,25 @@ const INSTALL_FROM: Record<InstallOp, readonly ExtensionStatusName[]> = {
   reconcile: ["installed", "live"],
 };
 
+/**
+ * Why the row is not what was signed, or null. The statement names the
+ * extension (its slug), the workspace, the version, the commit and the tree;
+ * the row's copies of them are plain columns no signature covers.
+ */
+export function statementMismatch(
+  slug: string,
+  workspaceId: string,
+  row: { version: string; commit: string; tree: string },
+  signed: Pick<ExtensionStatement, "extensionId" | "workspaceId" | "version" | "commit" | "tree">,
+): string | null {
+  if (signed.extensionId !== slug) return `the statement is for extension ${signed.extensionId}, not ${slug}`;
+  if (signed.workspaceId !== workspaceId) return "the stored workspaceId is not the signed workspaceId";
+  for (const field of ["version", "commit", "tree"] as const) {
+    if (row[field] !== signed[field]) return `the stored ${field} is not the signed ${field}`;
+  }
+  return null;
+}
+
 /** Supervisor states that mean the process died and stays dead (restarts spent). */
 const DEAD_PROCESS_STATES: ReadonlySet<string> = new Set(["failed", "exited"]);
 
@@ -374,17 +398,24 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       boxKey,
       recorded: { signer: v.signer, keyFingerprint: v.keyFingerprint },
     });
-    if (!check.ok) {
-      const reason = `${check.failureReason}: ${check.detail}`;
+    const refuse = async (failureReason: string, detail: string, what: string): Promise<never> => {
+      const reason = `${failureReason}: ${detail}`;
       if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
-      await record(op, slug, actor, {
-        severity: "warn",
-        what: "Extension refused: its signed statement no longer verifies",
-        refs: { version: v.version, failureReason: check.failureReason },
-      });
+      await record(op, slug, actor, { severity: "warn", what, refs: { version: v.version, failureReason } });
       throw new ExtensionLifecycleError("verify_failed", 409, reason);
+    };
+    if (!check.ok) {
+      return refuse(check.failureReason, check.detail, "Extension refused: its signed statement no longer verifies");
     }
     const manifest = check.manifest;
+    // The signature covers the statement, never the row's plain columns
+    // (review #2323). A row whose workspace, version, commit or tree says
+    // something the statement does not, or that carries another extension's
+    // statement, is refused. What the sandbox is sent comes from the
+    // statement alone.
+    const signed = check.statement;
+    const mismatch = statementMismatch(slug, ext.workspaceId, v, signed);
+    if (mismatch) return refuse("statement_mismatch", mismatch, "Extension refused: its row is not what was signed");
 
     // 2. Rotate the bearer BEFORE the start: the child may call back at once.
     const { token, hash } = mintExtensionToken();
@@ -397,10 +428,10 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     // 3. Start it.
     try {
       await sandbox.install(slug, {
-        workspaceId: ext.workspaceId,
-        version: v.version,
-        commit: v.commit,
-        tree: v.tree,
+        workspaceId: signed.workspaceId,
+        version: signed.version,
+        commit: signed.commit,
+        tree: signed.tree,
         runtime: manifest.runtime,
         entrypoint: manifest.entrypoint,
         memoryMb: manifest.resources.memoryMb,

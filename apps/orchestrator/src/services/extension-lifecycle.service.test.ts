@@ -217,6 +217,59 @@ describe("install re-verifies and rotates", () => {
     expect(k.sandbox.installs).toEqual([]);
   });
 
+  // Review #2323 blocker 2: the signature covers the statement, not the
+  // row's plain columns. The sandbox must run what was signed, and a row
+  // whose columns say otherwise is refused, not quietly corrected.
+  it.each([
+    ["commit", (k: ReturnType<typeof kit>) => { k.db.versions.get("v-wc")!.commit = "f".repeat(40); }],
+    ["tree", (k: ReturnType<typeof kit>) => { k.db.versions.get("v-wc")!.tree = "e".repeat(40); }],
+    ["version", (k: ReturnType<typeof kit>) => { k.db.versions.get("v-wc")!.version = "0.1.1"; }],
+    ["workspaceId", (k: ReturnType<typeof kit>) => { k.db.extensions.get("wc")!.workspaceId = "other"; }],
+  ])("a tampered %s column is refused, nothing starts", async (field, tamper) => {
+    // MUTATION: drop the statement-vs-row comparison in install() and the
+    // sandbox is asked to run whatever the columns now say (or, building
+    // from the statement, the tamper goes unnoticed).
+    const k = kit();
+    await seedSigned(k.db, k.identity);
+    tamper(k);
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "verify_failed", httpStatus: 409 });
+    expect(k.sandbox.installs).toEqual([]);
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "failed", serviceTokenHash: null });
+    expect(String(k.db.extensions.get("wc")?.failureReason)).toBe(
+      `statement_mismatch: the stored ${field} is not the signed ${field}`,
+    );
+  });
+
+  it("a row carrying another extension's validly signed statement is refused", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { slug: "wc" });
+    await seedSigned(k.db, k.identity, { slug: "other" });
+    const mine = k.db.versions.get("v-wc")!;
+    const theirs = k.db.versions.get("v-other")!;
+    // Everything signed comes from `other`; the row stays wc's.
+    for (const key of ["statementBytes", "signature", "manifestBytes", "manifestSha256", "keyFingerprint"]) {
+      mine[key] = theirs[key];
+    }
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "verify_failed" });
+    expect(k.sandbox.installs).toEqual([]);
+    expect(String(k.db.extensions.get("wc")?.failureReason)).toBe(
+      "statement_mismatch: the statement is for extension other, not wc",
+    );
+  });
+
+  it("the sandbox is sent the signed statement's workspace, version, commit and tree", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity);
+    await k.lifecycle.install("wc", OWNER);
+    const statement = JSON.parse(Buffer.from(k.db.versions.get("v-wc")!.statementBytes as Buffer).toString("utf8"));
+    expect(k.sandbox.installs[0].req).toMatchObject({
+      workspaceId: statement.workspaceId,
+      version: statement.version,
+      commit: statement.commit,
+      tree: statement.tree,
+    });
+  });
+
   it("an extension with no signed version is 409, unknown is 404", async () => {
     const k = kit();
     await expect(k.lifecycle.install("nope", OWNER)).rejects.toMatchObject({ code: "not_found", httpStatus: 404 });
