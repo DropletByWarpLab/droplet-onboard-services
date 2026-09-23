@@ -49,6 +49,7 @@ import { retainsFootage } from "./camera-retention-defaults.js";
 import { frigateEndToDraft } from "./security-event-ingest.js";
 import {
   createStatusTracker,
+  noteFrigateConnectionLost,
   noteFrigateMessage,
   noteFrigateSubscribeFailed,
   noteFrigateSubscription,
@@ -128,6 +129,12 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
     _mqttClient.on("error", (err) => {
       logger.error({ err }, "Camera MQTT error");
     });
+
+    // WARP-2977 — a dropped broker is an ingest that is down, not a quiet
+    // site. mqtt.js reconnects on its own; the next `connect` resubscribes and
+    // its SUBACK marks the feed live again.
+    _mqttClient.on("close", () => noteFrigateConnectionLost());
+    _mqttClient.on("offline", () => noteFrigateConnectionLost());
   } catch (err) {
     logger.warn("Camera MQTT connection failed: %s", err);
   }
@@ -164,14 +171,14 @@ function handleMqttMessage(
     noteFrigateMessage();
     void _statusTracker
       ?.observe(topic, raw)
-      .then((transition) => {
-        // Broadcast every transition, stored or not: a failed database
-        // write must not hide a camera going dark from the live surface.
-        const camera = transition?.draft.camera;
-        if (transition && camera) {
+      .then((observation) => {
+        // Broadcast every change, stored or not: a failed database write
+        // must not hide a camera going dark from the live surface.
+        const change = observation?.broadcast;
+        if (change?.camera) {
           broadcastSSE({
-            type: transition.draft.kind === "camera_online" ? "camera_online" : "camera_offline",
-            camera,
+            type: change.kind === "camera_online" ? "camera_online" : "camera_offline",
+            camera: change.camera,
             timestamp: Date.now(),
           });
         }

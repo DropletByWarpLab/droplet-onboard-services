@@ -160,6 +160,30 @@ describe("subscriptions — the topics Frigate 0.17 publishes", () => {
     expect(h.frigateSubscribeError).toContain("frigate/events");
   });
 
+  it("a dropped broker marks the ingest DOWN until the next SUBACK brings it back", () => {
+    const [topics, cb] = securitySubscribe();
+    cb(null, Object.keys(topics).map((topic) => ({ topic, qos: 1 })));
+    expect(securityIngestHealthState().frigateSubscribed).toBe(true);
+
+    (handlers.close as () => void)();
+    expect(securityIngestHealthState().frigateSubscribed).toBe(false);
+    expect(securityIngestHealthState().frigateSubscribeError).toMatch(/lost the connection/i);
+
+    // mqtt.js reconnects → `connect` → resubscribe → SUBACK.
+    fakeClient.subscribe.mockClear();
+    (handlers.connect as () => void)();
+    const [again, cb2] = securitySubscribe();
+    cb2(null, Object.keys(again).map((topic) => ({ topic, qos: 1 })));
+    expect(securityIngestHealthState().frigateSubscribed).toBe(true);
+  });
+
+  it("`offline` counts as a dropped broker too", () => {
+    const [topics, cb] = securitySubscribe();
+    cb(null, Object.keys(topics).map((topic) => ({ topic, qos: 1 })));
+    (handlers.offline as () => void)();
+    expect(securityIngestHealthState().frigateSubscribed).toBe(false);
+  });
+
   it("a subscribe error marks the ingest DOWN", () => {
     const [, cb] = securitySubscribe();
     cb(new Error("connection lost"));

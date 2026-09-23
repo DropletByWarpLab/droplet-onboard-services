@@ -85,7 +85,7 @@ describe("createStatusTracker — transitions only, previous read back from the 
 
   it("a restart does not re-announce a camera that was already offline", async () => {
     const { t, createMany } = tracker("camera_offline");
-    expect(await t.observe("frigate/cam1/status/detect", "offline", NOW)).toBeNull();
+    expect(await t.observe("frigate/cam1/status/detect", "offline", NOW)).toEqual({ broadcast: null, stored: null });
     expect(createMany).not.toHaveBeenCalled();
   });
 
@@ -106,7 +106,7 @@ describe("createStatusTracker — transitions only, previous read back from the 
     const { t, createMany, findFirst } = tracker(null);
     findFirst.mockRejectedValueOnce(new Error("db down"));
     const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
-    expect(r?.draft.kind).toBe("camera_offline");
+    expect(r?.broadcast?.kind).toBe("camera_offline");
     expect(r?.stored).toBe(true);
     expect(createMany).toHaveBeenCalledTimes(1);
   });
@@ -115,9 +115,30 @@ describe("createStatusTracker — transitions only, previous read back from the 
     const { t, createMany } = tracker("camera_online");
     createMany.mockRejectedValueOnce(new Error("db down"));
     const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
-    expect(r).toMatchObject({ draft: { kind: "camera_offline", camera: "cam1" }, stored: false });
-    // …and it is not reported twice when the same state repeats.
-    expect(await t.observe("frigate/cam1/status/detect", "offline", NOW)).toBeNull();
+    expect(r).toMatchObject({ broadcast: { kind: "camera_offline", camera: "cam1" }, stored: false });
+  });
+
+  it("a failed write is retried on the next reading, with its ORIGINAL time — and broadcast only once", async () => {
+    const { t, createMany } = tracker("camera_online");
+    createMany.mockRejectedValueOnce(new Error("db down"));
+    await t.observe("frigate/cam1/status/detect", "offline", NOW);
+    const later = new Date(NOW.getTime() + 60_000);
+    const again = await t.observe("frigate/cam1/status/detect", "offline", later);
+    expect(again).toEqual({ broadcast: null, stored: true });
+    const [first, retry] = createMany.mock.calls.map(([{ data }]) => data[0]);
+    expect(retry.dedupeKey).toBe(first.dedupeKey);
+    expect(retry.startedAt).toEqual(NOW);
+  });
+
+  it("an offline that never reached the store is not followed by a lone 'reporting again' row", async () => {
+    const { t, createMany } = tracker("camera_online");
+    createMany.mockRejectedValueOnce(new Error("db down"));
+    await t.observe("frigate/cam1/status/detect", "offline", NOW);
+    const back = await t.observe("frigate/cam1/status/detect", "online", new Date(NOW.getTime() + 1_000));
+    // The dashboard hears the recovery; the store, which never saw the
+    // outage, records nothing rather than a recovery from nothing.
+    expect(back).toEqual({ broadcast: expect.objectContaining({ kind: "camera_online" }), stored: null });
+    expect(createMany).toHaveBeenCalledTimes(1);
   });
 
   it("the snapshot carries the latest reading, including Frigate's own (null key)", async () => {
@@ -134,13 +155,16 @@ describe("createStatusTracker — transitions only, previous read back from the 
 });
 
 describe("mirrorThreatRows — the cursor, the filter, the horizon", () => {
-  function mirrorPrisma(rows: Array<{ id: bigint; kind: string; severity: string }>, cursor = 0n) {
+  /** `head` is the chain's max ActivityRow id (every kind, not only threats). */
+  function mirrorPrisma(rows: Array<{ id: bigint; kind: string; severity: string }>, cursor = 0n, head: bigint | null = null) {
+    const maxRead = rows.length > 0 ? rows[rows.length - 1].id : cursor;
     return {
       securityIngestState: {
         upsert: vi.fn().mockResolvedValue({ threatCursor: cursor }),
         update: vi.fn().mockResolvedValue({}),
       },
       activityRow: {
+        aggregate: vi.fn().mockResolvedValue({ _max: { id: head ?? maxRead } }),
         findMany: vi.fn().mockResolvedValue(rows.map((r) => ({ ...r, at: NOW, what: `row ${r.id}` }))),
       },
       securityEvent: { createMany: vi.fn().mockResolvedValue({ count: rows.length }) },
@@ -148,10 +172,11 @@ describe("mirrorThreatRows — the cursor, the filter, the horizon", () => {
   }
 
   it("reads only warn/err network/auth rows after the cursor and inside the retention horizon", async () => {
-    const p = mirrorPrisma([], 41n);
+    const p = mirrorPrisma([], 41n, 90n);
     await mirrorThreatRows(p as never, NOW);
     const { where, orderBy, take } = p.activityRow.findMany.mock.calls[0][0];
-    expect(where.id).toEqual({ gt: 41n });
+    // Bounded above by the head read BEFORE the scan.
+    expect(where.id).toEqual({ gt: 41n, lte: 90n });
     expect(where.kind).toEqual({ in: ["network", "auth"] });
     expect(where.severity).toEqual({ in: ["warn", "err"] });
     expect(where.at.gte.getTime()).toBe(NOW.getTime() - SECURITY_EVENT_RETENTION_DAYS * 86_400_000);
@@ -185,6 +210,28 @@ describe("mirrorThreatRows — the cursor, the filter, the horizon", () => {
       ["activity:42", "notice"],
       ["activity:57", "alert"],
     ]);
+  });
+
+  it("caught up: the cursor jumps to the chain head, so a quiet box stops rescanning 30 days every minute", async () => {
+    // One threat among thousands of ordinary rows: without this the cursor
+    // stayed at 42 and every tick rescanned everything after it.
+    const p = mirrorPrisma([{ id: 42n, kind: "auth", severity: "warn" }], 0n, 5_000n);
+    const r = await mirrorThreatRows(p as never, NOW);
+    expect(r.cursor).toBe(5_000n);
+  });
+
+  it("a FULL batch stops at its last row, not the head — there may be more matches behind it", async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => ({ id: BigInt(10 + i), kind: "auth", severity: "warn" }));
+    const p = mirrorPrisma(rows, 0n, 5_000n);
+    const r = await mirrorThreatRows(p as never, NOW, 3);
+    expect(r.cursor).toBe(12n);
+  });
+
+  it("an empty chain never moves the cursor backwards", async () => {
+    const p = mirrorPrisma([], 99n, null);
+    p.activityRow.aggregate.mockResolvedValue({ _max: { id: null } });
+    const r = await mirrorThreatRows(p as never, NOW);
+    expect(r.cursor).toBe(99n);
   });
 
   it("nothing new: no write, cursor unchanged, but the run is still stamped (health reads it)", async () => {
@@ -355,6 +402,12 @@ describe("parseFeedCursor", () => {
   it("round-trips `<ms>.<id>`", () => {
     expect(parseFeedCursor("1790000000000.42")).toEqual({ startedAt: new Date(1_790_000_000_000), id: 42n });
   });
+  it("rejects an id beyond Postgres BIGINT, so it is a 400 and not a 503", () => {
+    expect(parseFeedCursor("1790000000000.9223372036854775807")?.id).toBe(9_223_372_036_854_775_807n);
+    expect(parseFeedCursor("1790000000000.9223372036854775808")).toBeNull();
+    expect(parseFeedCursor("1790000000000.9999999999999999999")).toBeNull();
+  });
+
   it.each(["", "abc", "1.2.3", "-1.2", "1790000000000", "1e3.4"])("rejects %j", (raw) => {
     expect(parseFeedCursor(raw)).toBeNull();
   });

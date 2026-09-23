@@ -70,37 +70,50 @@ const HEALTH_BY_KIND: Partial<Record<string, SourceHealth>> = {
 };
 
 /**
- * A health change the tracker saw. `stored` says whether its row reached the
- * store — reported separately because the LIVE surface must not depend on
- * it: a camera going dark is shown to the dashboard even when the database
- * write failed (the detection path's rule, camera.service.ts).
+ * What one status reading meant. The two halves are separate on purpose:
+ *   · `broadcast` — a change the LIVE surface should hear about. It never
+ *     depends on the database: a camera going dark is shown even when its row
+ *     could not be written (the detection path's rule, camera.service.ts).
+ *   · `stored` — whether a row was written: true, false (the write failed; it
+ *     is retried with its original time on that camera's next reading), or
+ *     null (nothing to write).
  */
-export interface StatusTransition {
-  draft: SecurityEventDraft;
-  stored: boolean;
+export interface StatusObservation {
+  broadcast: SecurityEventDraft | null;
+  stored: boolean | null;
 }
 
 export interface StatusTracker {
   /**
    * Feed one `frigate/<camera>/status/detect` or `frigate/available`
-   * message. Returns the transition, or null when the message was not a
-   * status topic or changed nothing.
+   * message. Resolves to null when the message is not a status topic.
    */
-  observe(topic: string, payload: string, now?: Date): Promise<StatusTransition | null>;
+  observe(topic: string, payload: string, now?: Date): Promise<StatusObservation | null>;
   /** Latest reading per camera (null key = Frigate itself), for the health header. */
   snapshot(): ReadonlyMap<string | null, { health: SourceHealth; at: Date }>;
 }
 
 /**
- * The previous health of each camera is read back from the store the first
- * time that camera reports after boot, so a restart does not re-announce
- * every camera and a retained `online` on reconnect is not news. Readings
- * for one camera are applied in arrival order (a per-key promise chain):
- * `offline` then `online` a millisecond apart must not race their lookups.
+ * Two memories per camera, because "what the dashboard was told" and "what
+ * the store holds" diverge whenever a write fails:
+ *   · `told` — the last health broadcast. Dedupes the live surface.
+ *   · `persisted` — the health the store reflects, read back from it the
+ *     first time the camera reports after boot, so a restart does not
+ *     re-announce every camera and a retained `online` is not news.
+ * A transition whose write failed is kept in `pending` and retried, with its
+ * ORIGINAL time and dedupe key, on the camera's next reading — so the feed
+ * never shows "reporting again" without the offline row before it. If the
+ * camera returns to the stored state first, the pending row is dropped: the
+ * store then says nothing happened, which is consistent, not contradictory.
+ *
+ * Readings for one camera are applied in arrival order (a per-key promise
+ * chain): `offline` then `online` a millisecond apart must not race.
  */
 export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">): StatusTracker {
   const last = new Map<string | null, { health: SourceHealth; at: Date }>();
-  const recorded = new Map<string | null, SourceHealth | null>();
+  const told = new Map<string | null, SourceHealth>();
+  const persisted = new Map<string | null, SourceHealth | null>();
+  const pending = new Map<string | null, SecurityEventDraft>();
   const chains = new Map<string | null, Promise<unknown>>();
 
   async function previousFromStore(camera: string | null): Promise<SourceHealth | null> {
@@ -112,27 +125,45 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
     return row ? (HEALTH_BY_KIND[row.kind] ?? null) : null;
   }
 
-  async function apply(reading: StatusReading, now: Date): Promise<StatusTransition | null> {
-    last.set(reading.camera, { health: reading.health, at: now });
-    let previous: SourceHealth | null;
-    if (recorded.has(reading.camera)) {
-      previous = recorded.get(reading.camera) ?? null;
-    } else {
+  async function apply(reading: StatusReading, now: Date): Promise<StatusObservation> {
+    const key = reading.camera;
+    last.set(key, { health: reading.health, at: now });
+
+    if (!persisted.has(key)) {
       try {
-        previous = await previousFromStore(reading.camera);
+        persisted.set(key, await previousFromStore(key));
       } catch (err) {
         // No history to compare against — treat as first sight. The worst
         // case is one duplicate offline row; the alternative is a missed one.
-        logger.warn({ err, camera: reading.camera }, "security status lookup failed");
-        previous = null;
+        logger.warn({ err, camera: key }, "security status lookup failed");
+        persisted.set(key, null);
       }
     }
-    // `disabled` is remembered but never stored (the owner's choice, not a
-    // tamper signal), so it is tracked here rather than read back.
-    recorded.set(reading.camera, reading.health);
-    const draft = statusTransitionToDraft(reading, previous, now);
-    if (!draft) return null;
-    return { draft, stored: await recordSecurityEvent(prisma, draft) };
+    const inStore = persisted.get(key) ?? null;
+
+    // The live surface: compared with what it was last told (before the
+    // first reading after boot, the store's view).
+    const broadcast = statusTransitionToDraft(reading, told.has(key) ? told.get(key)! : inStore, now);
+    told.set(key, reading.health);
+
+    // The store: compared with what it holds. `disabled` and a first-sight
+    // `online` produce no row but still move the store's view forward.
+    const fresh = statusTransitionToDraft(reading, inStore, now);
+    if (!fresh) {
+      pending.delete(key);
+      persisted.set(key, reading.health);
+      return { broadcast, stored: null };
+    }
+    const retry = pending.get(key);
+    const draft = retry && retry.kind === fresh.kind ? retry : fresh;
+    const stored = await recordSecurityEvent(prisma, draft);
+    if (stored) {
+      pending.delete(key);
+      persisted.set(key, reading.health);
+    } else {
+      pending.set(key, draft);
+    }
+    return { broadcast, stored };
   }
 
   return {
@@ -180,9 +211,16 @@ export async function mirrorThreatRows(
     select: { threatCursor: true },
   });
   const horizon = new Date(now.getTime() - SECURITY_EVENT_RETENTION_DAYS * 86_400_000);
+  // Read the chain's head FIRST. Appends are serialised under the chain's
+  // advisory lock (activity.service.ts), so every id at or below a visible
+  // head is committed or rolled back — none can appear later. Scanning up to
+  // it and then advancing to it lets a box with rare threats stop rescanning
+  // its whole 30-day window every minute.
+  const { _max } = await prisma.activityRow.aggregate({ _max: { id: true } });
+  const head = _max.id ?? state.threatCursor;
   const rows = await prisma.activityRow.findMany({
     where: {
-      id: { gt: state.threatCursor },
+      id: { gt: state.threatCursor, lte: head },
       at: { gte: horizon },
       kind: { in: ["network", "auth"] },
       severity: { in: ["warn", "err"] },
@@ -205,7 +243,10 @@ export async function mirrorThreatRows(
     );
     ({ count: mirrored } = await prisma.securityEvent.createMany({ data: drafts, skipDuplicates: true }));
   }
-  const cursor = rows.length > 0 ? rows[rows.length - 1].id : state.threatCursor;
+  // A full batch may have more matches behind it: stop at the last one read.
+  // Otherwise this tick saw everything up to the head.
+  const cursor =
+    rows.length === batch ? rows[rows.length - 1].id : head > state.threatCursor ? head : state.threatCursor;
   await prisma.securityIngestState.update({
     where: { id: SINGLETON },
     data: { threatCursor: cursor, threatMirrorRanAt: now },
@@ -308,6 +349,18 @@ export function noteFrigateSubscribeFailed(err: unknown): void {
   ingestHealth.frigateSubscribed = false;
   ingestHealth.frigateSubscribeError = err instanceof Error ? err.message : String(err);
   logger.error({ err }, "security ingest subscribe failed — /security will show the camera feed as down");
+}
+
+/**
+ * The broker connection dropped (`close` / `offline`). Nothing is being
+ * heard until the next CONNECT and its SUBACK restore the flag — until then
+ * the header says the camera feed is down, never "Listening".
+ */
+export function noteFrigateConnectionLost(): void {
+  if (!ingestHealth.frigateSubscribed && ingestHealth.frigateSubscribeError) return;
+  ingestHealth.frigateSubscribed = false;
+  ingestHealth.frigateSubscribeError = "Lost the connection to the camera system's message broker";
+  logger.warn("security ingest lost its MQTT connection — /security shows the camera feed as down until it resubscribes");
 }
 
 export function noteFrigateMessage(now = new Date()): void {
@@ -500,8 +553,13 @@ export async function listSecurityEvents(
   };
 }
 
+/** Postgres BIGINT ceiling — a larger id would fail in the query as a 503, not a 400. */
+const INT8_MAX = 9_223_372_036_854_775_807n;
+
 export function parseFeedCursor(raw: string): { startedAt: Date; id: bigint } | null {
   const m = /^(\d{1,15})\.(\d{1,19})$/.exec(raw);
   if (!m) return null;
-  return { startedAt: new Date(Number(m[1])), id: BigInt(m[2]) };
+  const id = BigInt(m[2]);
+  if (id > INT8_MAX) return null;
+  return { startedAt: new Date(Number(m[1])), id };
 }
