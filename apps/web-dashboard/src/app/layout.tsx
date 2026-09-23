@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/lib/theme";
 import { NavLayoutProvider } from "@/lib/nav-layout";
 import { AuthProvider } from "@/lib/auth";
 import { WorkspaceProvider } from "@/lib/workspace";
+import { ActiveDepartmentProvider } from "@/lib/departments/active-department";
 import { AuthGate } from "@/components/AuthGate";
 import { ToastProvider } from "@/components/Toast";
 import { NotificationToaster } from "@/components/NotificationToaster";
@@ -122,10 +123,16 @@ export default function RootLayout({
           <NavLayoutProvider>
             <AuthProvider>
               <WorkspaceProvider>
-                <ToastProvider>
-                  <NotificationToaster />
-                  <AuthGate>{children}</AuthGate>
-                </ToastProvider>
+                {/* WARP-2976 (ADR-059) — which department the shell is
+                    arranged around. Inside AuthProvider: the choices depend
+                    on who is signed in. A display preference like the nav
+                    layout; it narrows the nav and never grants. */}
+                <ActiveDepartmentProvider>
+                  <ToastProvider>
+                    <NotificationToaster />
+                    <AuthGate>{children}</AuthGate>
+                  </ToastProvider>
+                </ActiveDepartmentProvider>
               </WorkspaceProvider>
             </AuthProvider>
           </NavLayoutProvider>

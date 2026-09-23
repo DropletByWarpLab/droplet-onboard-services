@@ -7,6 +7,10 @@
 # when a caller sources secrets.sh standalone (tests, --sync-secrets).
 # shellcheck source=internal-ca.sh
 . "$(dirname "${BASH_SOURCE[0]}")/internal-ca.sh"
+# WARP-2548 — repair + assert that every mounted secret is readable by the
+# container uid that opens it (called at the end of materialize_artifacts).
+# shellcheck source=secret-readers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/secret-readers.sh"
 
 # Generate a random alphanumeric password of given length.
 _gen_password() {
@@ -1012,7 +1016,7 @@ DROPLET_INTERNAL_TLS=0
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
 FILES_ROOT=/data/files
-MAX_UPLOAD_SIZE_MB=100
+MAX_UPLOAD_SIZE_MB=1024
 
 # --- WARP-230 device identity ---
 # Selects the device-identity-svc backend.
@@ -1481,6 +1485,29 @@ migrate_env() {
     log_warn "DROPLET_DEVICE_ID equals this host's hostname ('${_current_device_id}') — kept, but a hostname is not a device identity. If this box was never provisioned at HQ, set DROPLET_DEVICE_ID=\$(_derive_device_id) before minting its token (ADR-058)."
   fi
 
+  # WARP-2985: DEVICE_SECRET must be a per-device value — the orchestrator
+  # refuses to boot on DROPLET_ENV=production without one, and the claim-code
+  # HMAC / clip share signing / ai-gateway BYOK keystore refuse a missing or
+  # public value. Generate one when the key is absent, empty, or a
+  # publicly-known placeholder (the .env.example `change-me` and every literal
+  # a code path or dev compose ever fell back to). ANY OTHER VALUE IS KEPT:
+  # rotating a real secret would orphan unclaimed claim codes, live clip
+  # links and every stored BYOK cloud key. Replacing a public value orphans
+  # only material that was already keyed by a string anyone could read.
+  # Logs the key name only — never the value.
+  local _device_secret_now
+  _device_secret_now="$(grep -E '^DEVICE_SECRET=' "$stage" | tail -1 | cut -d= -f2- || true)"
+  case "$(printf '%s' "$_device_secret_now" | tr -d '[:space:]')" in
+    ""|change-me|dev-only-not-secure|dev-secret-change-in-production|dev-only-device-secret-do-not-ship)
+      if grep -qE '^DEVICE_SECRET=' "$stage"; then
+        { grep -vE '^DEVICE_SECRET=' "$stage" || true; } > "$stage.ds"
+        chmod 600 "$stage.ds"
+        mv "$stage.ds" "$stage"
+      fi
+      _migrate_ensure_key DEVICE_SECRET "$(_gen_fernet_key)"
+      ;;
+  esac
+
   # WARP-234: per-service Redis ACL identities for pre-existing installs.
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
@@ -1552,6 +1579,16 @@ migrate_env() {
     log_info "Migrated .env: DATABASE_URL now pins sslmode=require (WARP-233)"
   fi
 
+  # WARP-2093: uploads stream to Nextcloud now, so the 100 MB per-file cap —
+  # an OOM guard for the old buffered transport — rises to Nextcloud's own
+  # 1 GiB per-request limit. Rewrites ONLY the exact value every earlier
+  # generate_env wrote; an operator's own value is kept.
+  if grep -qE '^MAX_UPLOAD_SIZE_MB=100$' "$stage"; then
+    sed -i.bak -E 's|^MAX_UPLOAD_SIZE_MB=100$|MAX_UPLOAD_SIZE_MB=1024|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: MAX_UPLOAD_SIZE_MB 100 -> 1024 (WARP-2093 — uploads stream now)"
+  fi
+
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
     mv "$stage" "$env_target"
   else
@@ -1601,6 +1638,11 @@ materialize_artifacts() {
   sync_audit_signing_key
   sync_doc_kek_key
   sync_email_fernet_key
+  # WARP-2548: last, so it sees every file this function just wrote. Repairs
+  # pre-WARP-2154 key ownership/mode leftovers, then fails setup (set -e)
+  # when a non-root container reader can't open its secret — a loud setup
+  # error instead of a silent crash loop once the stack is up.
+  secret_readers_guard
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.

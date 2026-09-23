@@ -466,7 +466,7 @@ function ReplyComposer({
         onChange={(e) => setBody(e.target.value)}
         rows={4}
         placeholder="Write your reply…"
-        className="w-full p-2.5 resize-y type-footnote placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--brand)]"
+        className="w-full p-2.5 resize-y type-footnote placeholder:text-[var(--text-muted)] outline-none focus:ring-2 focus:ring-[var(--brand)]"
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",

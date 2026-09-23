@@ -471,6 +471,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     expect(readUserEmail(created.email)).toBe("newhire@warp.test");
     expect(created.role).toBe("family"); // least privilege
     expect(created.passwordHash ?? null).toBeNull(); // SSO-only, can't password-login
+    expect(created.provisionSource).toBe("SSO"); // WARP-2858: explicit origin
     expect(created.isLocal).toBe(true);
     // Linked.
     expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);

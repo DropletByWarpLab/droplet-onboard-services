@@ -51,7 +51,7 @@ export const BRAIN_ROOT =
 /**
  * CodeQL js/path-injection (#168–#171): `userId` / `itemId` reach the
  * filesystem straight from route params — `req.params.itemId` in
- * routes/files-brain.ts, `req.params.username` via `purgeUserData` in
+ * routes/files-brain.ts, the resolved `User.id` via `purgeUserData` in
  * routes/auth.ts. Both are opaque identifiers (a `User.id` UUID or a
  * pre-WARP-485 Nextcloud username; a `BrainMemoryItem.id` UUID), so a single
  * path segment is all they may ever be. The charset is Nextcloud's own

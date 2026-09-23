@@ -9,6 +9,7 @@
  * these specs keep the two from drifting on the load-bearing values.
  */
 import { describe, it, expect } from "vitest";
+import type { ModuleId } from "@prisma/client";
 import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   GATEABLE_MODULE_IDS,
@@ -20,14 +21,17 @@ import {
   fullCatalogFeatures,
   domainsForFeatures,
   tierReachableDomains,
+  FEATURE_UNGATED_TOOL_DOMAINS,
+  unmappedToolDomains,
 } from "./access-catalog.js";
+import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
-  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId
-  // cannot arrive without someone writing its §9 ladder — which is exactly
-  // what this test caught each time they did.
-  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
+  // WARP-2581 added `money` for 15; WARP-2977 added `security` for 16. The
+  // list is pinned so a new ModuleId cannot arrive without someone writing its
+  // §9 ladder — which is exactly what this test caught each time they did.
+  it("gates the 16 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -42,6 +46,7 @@ describe("access-catalog — module vocabulary", () => {
         "money",
         "network",
         "projects",
+        "security",
         "smart_home",
         "team_chat",
         "voice",
@@ -120,7 +125,7 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
 });
 
 describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () => {
-  it("maps features to tools-core domains; unclaimed domains always pass", () => {
+  it("maps features to tools-core domains; declared-ungated domains always pass", () => {
     const domains = domainsForFeatures(new Set(["calendar", "knowledge", "projects", "smart_home"]));
     // calendar claims its trio (the WARP-1532 grouping)
     expect(domains.has("calendar")).toBe(true);
@@ -134,19 +139,71 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
     expect(domains.has("files")).toBe(false);
     expect(domains.has("network")).toBe(false);
     expect(domains.has("switch")).toBe(false);
-    // domains no module claims (system/business/data/erp) are not module-gated
-    expect(domains.has("system")).toBe(true);
-    expect(domains.has("business")).toBe(true);
-    expect(domains.has("data")).toBe(true);
-    expect(domains.has("erp")).toBe(true);
+    expect(domains.has("money")).toBe(false);
+    // the declared-ungated domains pass regardless
+    for (const d of Object.keys(FEATURE_UNGATED_TOOL_DOMAINS)) expect(domains.has(d), d).toBe(true);
   });
 
-  it("feature set ∅ still passes the unclaimed domains only", () => {
-    const domains = domainsForFeatures(new Set());
-    expect(domains.has("files")).toBe(false);
-    expect(domains.has("system")).toBe(true);
+  it("feature set ∅ passes exactly the declared-ungated domains", () => {
+    expect([...domainsForFeatures(new Set())].sort()).toEqual(
+      Object.keys(FEATURE_UNGATED_TOOL_DOMAINS).sort(),
+    );
+  });
+});
+
+// WARP-2742 — the feature intersection is fail-CLOSED and exhaustive. Every
+// assertion here derives the domain list from tools-core's TOOL_DOMAINS and
+// the claims from MODULES; nothing is hand-copied, so a new domain or a new
+// module claim is covered the day it lands.
+describe("access-catalog — every tool domain has a feature decision (WARP-2742)", () => {
+  const claimedBy = new Map<string, string[]>();
+  for (const m of MODULES) {
+    for (const d of m.toolDomains) claimedBy.set(d, [...(claimedBy.get(d) ?? []), m.id]);
+  }
+
+  it.each([...TOOL_DOMAINS])(
+    "%s is claimed by exactly one module XOR declared feature-ungated",
+    (domain) => {
+      const owners = claimedBy.get(domain) ?? [];
+      const ungated = Object.prototype.hasOwnProperty.call(FEATURE_UNGATED_TOOL_DOMAINS, domain);
+      expect(owners.length, `${domain} claimed by ${owners.join(", ")}`).toBeLessThanOrEqual(1);
+      expect(
+        owners.length === 1 ? !ungated : ungated,
+        `${domain}: claim it in module-registry.ts toolDomains OR add it to ` +
+          "FEATURE_UNGATED_TOOL_DOMAINS with a reason — not both, not neither",
+      ).toBe(true);
+    },
+  );
+
+  it("unmappedToolDomains() is empty — the gate denies anything that lands there", () => {
+    expect(unmappedToolDomains()).toEqual([]);
   });
 
+  it("every declared-ungated domain is a real tools-core domain with a written reason", () => {
+    for (const [d, reason] of Object.entries(FEATURE_UNGATED_TOOL_DOMAINS)) {
+      expect(TOOL_DOMAINS as string[], d).toContain(d);
+      expect((reason ?? "").length, d).toBeGreaterThan(20);
+    }
+  });
+
+  it.each([...TOOL_DOMAINS].filter((d) => claimedBy.has(d)))(
+    "claimed domain %s passes only while its owning module is in the feature set",
+    (domain) => {
+      const owner = claimedBy.get(domain)![0] as ModuleId;
+      const all = new Set<ModuleId>(MODULES.map((m) => m.id));
+      expect(domainsForFeatures(all).has(domain)).toBe(true);
+      const without = new Set(all);
+      without.delete(owner);
+      expect(domainsForFeatures(without).has(domain)).toBe(false);
+    },
+  );
+
+  it("the Money module claims the money domain (the ticket's plain bug)", () => {
+    expect(claimedBy.get("money")).toEqual(["money"]);
+  });
+});
+
+describe("access-catalog — grantable tool domains", () => {
   it("GRANTABLE_TOOL_DOMAINS is the tools-core union minus erp (connector axis owns erp)", () => {
     expect(GRANTABLE_TOOL_DOMAINS).not.toContain("erp");
     for (const d of GRANTABLE_TOOL_DOMAINS) {

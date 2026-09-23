@@ -177,7 +177,9 @@ function createPrismaMock() {
         let count = 0;
         for (let i = 0; i < userRows.length; i += 1) {
           const u = userRows[i];
+          // WARP-2858: the edit-user route pins its write by the resolved id.
           const match =
+            (where?.id !== undefined && u.id === where.id) ||
             (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where?.username !== undefined && u.username === where.username);
           if (match) {
