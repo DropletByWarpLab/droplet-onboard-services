@@ -16,13 +16,25 @@
  *
  * P2 is a feed, not an alarm system — nothing here notifies. The `act` and
  * `manage` levels arrive with the first routes that need them (mode, zones:
- * P2b), each pinned by a test when it does.
+ * P2b), each pinned by a test when it does. Those live in their own routers
+ * (routes/security-zones.ts, routes/security-site.ts), mounted beside this
+ * one; who-sees-what for all three comes from services/security-access.ts.
+ *
+ * WARP-2977 P2b — areas on the feed (spec §6.1):
+ *   · `?zone=<uuid>` narrows to one area. The area's clause is ANDed AFTER
+ *     the camera clause; the DS-005 visibility clause stays `AND[0]`. An
+ *     area that is missing, removed, hidden from the viewer or has no
+ *     visible link answers an empty page WITHOUT a query — the P2a
+ *     ungranted-camera convention, never a 403/404 that confirms it exists.
+ *   · every row carries `zones: [{id, name}]`, resolved at read time from the
+ *     viewer's VISIBLE links of VISIBLE areas — a row never names an area the
+ *     viewer cannot see.
+ *   · `mode_changed` rows (the site mode's history) are a feed kind.
  */
 import { Router, type Request, type Response } from "express";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { requireRole } from "../middleware/auth.js";
-import { principalFromRequest, visibleCameraNames } from "../services/camera-access.service.js";
 import {
   buildSecurityHealth,
   feedVisibilityWhere,
@@ -31,6 +43,9 @@ import {
   securityIngestHealthState,
 } from "../services/security-events.service.js";
 import { securityStatusSnapshot } from "../services/camera.service.js";
+import { mayReadThreats, securityViewerScope, type SecurityRouteDeps } from "../services/security-access.js";
+import { securitySiteModeHealth } from "../services/security-mode.service.js";
+import { loadActiveLinks, viewerAreas, zoneFilterFor, zonesForEvent } from "../services/security-zones.service.js";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -47,6 +62,7 @@ const FEED_KINDS = [
   "source_offline",
   "source_online",
   "threat",
+  "mode_changed",
 ] as const;
 
 const feedQuerySchema = z
@@ -67,14 +83,16 @@ const feedQuerySchema = z
       .enum(["true", "false"])
       .optional()
       .transform((v) => v === "true"),
+    /** WARP-2977 P2b — one area (SecurityZone.id). */
+    zone: z.string().uuid().optional(),
   })
   .strict();
 
-function mayReadThreats(req: Request): boolean {
-  return req.user?.role === "owner" || req.user?.role === "admin";
-}
-
-export function createSecurityRouter(prisma: PrismaClient): Router {
+/**
+ * `deps` (WARP-2977 P2b) is the shared Security router deps shape: the feed
+ * reads `deps.resolve` for the viewer scope, the health header `deps.now`.
+ */
+export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDeps = {}): Router {
   const router = Router();
 
   router.get("/security/events", requireRole(...SECURITY_VIEW_ROLES), async (req: Request, res: Response) => {
@@ -90,21 +108,47 @@ export function createSecurityRouter(prisma: PrismaClient): Router {
       return;
     }
     try {
-      const visible = await visibleCameraNames(prisma, principalFromRequest(req));
+      const scope = await securityViewerScope(prisma, req, deps.resolve);
+      const visible = scope.visibleCameras;
       // A camera outside the grant answers exactly like a camera with no
       // events — an empty page, never a 403 that confirms it exists.
       if (q.camera && visible !== "all" && !visible.has(q.camera)) {
         res.json({ events: [], nextCursor: null });
         return;
       }
-      const page = await listSecurityEvents(prisma, feedVisibilityWhere(visible, mayReadThreats(req)), {
-        limit: q.limit,
-        cursor: cursor ?? undefined,
-        kinds: q.kind ? { in: q.kind } : undefined,
-        camera: q.camera,
-        includeLow: q.includeLow,
+      const links = await loadActiveLinks(prisma);
+      const extraWhere: Prisma.SecurityEventWhereInput[] = [];
+      if (q.zone) {
+        const clause = zoneFilterFor(links, q.zone, scope);
+        // Missing, removed, hidden or unlinked: the same empty page, no query.
+        if (clause === "none") {
+          res.json({ events: [], nextCursor: null });
+          return;
+        }
+        extraWhere.push(clause);
+      }
+      const page = await listSecurityEvents(
+        prisma,
+        feedVisibilityWhere(visible, scope.mayReadThreats),
+        {
+          limit: q.limit,
+          cursor: cursor ?? undefined,
+          kinds: q.kind ? { in: q.kind } : undefined,
+          camera: q.camera,
+          includeLow: q.includeLow,
+        },
+        extraWhere,
+      );
+      const areas = viewerAreas(links, scope);
+      res.json({
+        ...page,
+        events: page.events.map((e) => ({
+          ...e,
+          zones: zonesForEvent(e, areas.index)
+            .map((id) => ({ id, name: areas.names.get(id) ?? "" }))
+            .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+        })),
       });
-      res.json(page);
     } catch (err) {
       logger.error({ err }, "security feed read failed");
       // Never an empty 200 on an outage: an empty feed reads as a quiet site.
@@ -114,16 +158,22 @@ export function createSecurityRouter(prisma: PrismaClient): Router {
 
   router.get("/security/health", requireRole(...SECURITY_VIEW_ROLES), async (req: Request, res: Response) => {
     try {
-      const state = await prisma.securityIngestState.findUnique({
-        where: { id: "singleton" },
-        select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
-      });
+      const now = deps.now?.() ?? new Date();
+      const [state, siteMode] = await Promise.all([
+        prisma.securityIngestState.findUnique({
+          where: { id: "singleton" },
+          select: { threatMirrorRanAt: true, retentionRanAt: true, retentionDeleted: true },
+        }),
+        // Never throws: an unreadable mode is a `down` row, not a 503 of the header.
+        securitySiteModeHealth(prisma, now),
+      ]);
       const sources = buildSecurityHealth({
         frigateConfigured: Boolean(config.FRIGATE_URL && config.FRIGATE_URL.trim()),
         ingest: securityIngestHealthState(),
         frigate: securityStatusSnapshot().get(null),
         state,
-        now: new Date(),
+        siteMode,
+        now,
       });
       // The threat source is only a row for the people who can see threats.
       res.json({ sources: mayReadThreats(req) ? sources : sources.filter((s) => s.id !== "threat_mirror") });

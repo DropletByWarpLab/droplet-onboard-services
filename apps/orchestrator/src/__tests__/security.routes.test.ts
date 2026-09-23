@@ -9,6 +9,11 @@
  * DS-005 is the point of most of these cases: a camera the viewer is not
  * granted must be ABSENT — no row, no count, and asking for it by name gets
  * the same empty page as a camera that exists and saw nothing.
+ *
+ * WARP-2977 P2b adds areas to the feed (`?zone=`, `zones[]` on every row)
+ * and the site-mode row to the header. DS-005 applies to places too: an area
+ * made only of cameras the viewer cannot see is absent — its filter answers
+ * the empty page without a query, and no row ever names it.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -16,6 +21,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 
 const h = vi.hoisted(() => ({
   snapshot: new Map<string | null, { health: "online" | "offline" | "disabled"; at: Date }>(),
+  siteMode: { id: "site_mode", state: "ok", detail: "(slice A's copy)", lastSeenAt: null } as Record<string, unknown>,
+  siteModeHealth: vi.fn(),
 }));
 
 vi.mock("../config.js", () => ({
@@ -30,6 +37,12 @@ vi.mock("../services/camera.service.js", () => ({
   securityStatusSnapshot: () => h.snapshot,
 }));
 
+// Slice A owns the site_mode row's copy; this file pins only that the header
+// asks for it and where it lands.
+vi.mock("../services/security-mode.service.js", () => ({
+  securitySiteModeHealth: h.siteModeHealth,
+}));
+
 import { createSecurityRouter } from "../routes/security.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { MODULE_BY_ID } from "../modules/module-registry.js";
@@ -40,12 +53,14 @@ type Role = "owner" | "admin" | "family" | "guest";
 const findMany = vi.fn();
 const grants = vi.fn();
 const stateRow = vi.fn();
+const zoneLinks = vi.fn();
 
 function app(role: Role | null = "owner") {
   const prisma = {
     securityEvent: { findMany },
     cameraAccessGrant: { findMany: grants },
     securityIngestState: { findUnique: stateRow },
+    securityZoneLink: { findMany: zoneLinks },
   };
   const server = express();
   server.use((req: Request, _res: Response, next: NextFunction) => {
@@ -87,6 +102,8 @@ beforeEach(() => {
   findMany.mockReset().mockResolvedValue([]);
   grants.mockReset().mockResolvedValue([{ camera: { name: "front" } }]);
   stateRow.mockReset().mockResolvedValue(null);
+  zoneLinks.mockReset().mockResolvedValue([]);
+  h.siteModeHealth.mockReset().mockImplementation(async () => h.siteMode);
   h.snapshot.clear();
   _resetSecurityIngestHealthForTests();
 });
@@ -193,21 +210,35 @@ describe("GET /api/security/events — query and paging", () => {
 });
 
 describe("GET /api/security/health", () => {
-  it("owner sees every source row, including threats", async () => {
+  it("owner sees every source row, including threats, with the site-mode row before retention", async () => {
     registerSecurityJobs({ scheduleInterval: vi.fn(), scheduleCron: vi.fn() }, {} as never);
     const res = await request(app("owner")).get("/api/security/health");
     expect(res.status).toBe(200);
+    // WARP-2977 P2b: `site_mode` joins the pinned order — deliberately red against P2a's list.
     expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
       "camera_ingest",
       "camera_system",
       "threat_mirror",
+      "site_mode",
       "retention",
     ]);
   });
 
-  it("family does not get a threat row for a feed they cannot see", async () => {
+  it("the site_mode row is slice A's row, passed through verbatim (whatever its copy)", async () => {
+    const res = await request(app("owner")).get("/api/security/health");
+    expect(res.body.sources.find((s: { id: string }) => s.id === "site_mode")).toEqual(h.siteMode);
+    expect(h.siteModeHealth).toHaveBeenCalledTimes(1);
+    expect(h.siteModeHealth.mock.calls[0][1]).toBeInstanceOf(Date);
+  });
+
+  it("family does not get a threat row for a feed they cannot see, but does get the site mode", async () => {
     const res = await request(app("family")).get("/api/security/health");
-    expect(res.body.sources.map((s: { id: string }) => s.id)).not.toContain("threat_mirror");
+    expect(res.body.sources.map((s: { id: string }) => s.id)).toEqual([
+      "camera_ingest",
+      "camera_system",
+      "site_mode",
+      "retention",
+    ]);
   });
 
   it("an ingest that never subscribed says DOWN", async () => {
@@ -223,6 +254,141 @@ describe("GET /api/security/health", () => {
 
   it("guest → 403", async () => {
     expect((await request(app("guest")).get("/api/security/health")).status).toBe(403);
+  });
+});
+
+// ── WARP-2977 P2b: areas on the feed ─────────────────────────────────────
+
+const SHOP = "3f1c2a9e-0b7d-4c55-9a51-1c2d3e4f5a61"; // links front (whole) + back/porch
+const YARD = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c82"; // links back only
+const EMPTY = "9b8a7c6d-5e4f-4d3c-8b2a-1f0e9d8c7b63"; // an area with no links
+const GONE = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6"; // no such area
+
+/** loadActiveLinks rows as Prisma returns them for its select. */
+function linkRow(zoneId: string, name: string, sourceKind: "camera" | "camera_zone", sourceRef: string) {
+  return { id: `l-${zoneId.slice(0, 4)}-${sourceRef}`, zoneId, sourceKind, sourceRef, zone: { name, kind: "interior" } };
+}
+const AREA_LINKS = [
+  linkRow(SHOP, "Shop floor", "camera", "front"),
+  linkRow(SHOP, "Shop floor", "camera_zone", "back/porch"),
+  linkRow(YARD, "Yard", "camera", "back"),
+];
+
+describe("GET /api/security/events?zone= — DS-005 applied to places", () => {
+  beforeEach(() => {
+    zoneLinks.mockResolvedValue(AREA_LINKS);
+  });
+
+  it("loads only active links of active areas", async () => {
+    await request(app("family")).get("/api/security/events");
+    expect(zoneLinks.mock.calls[0][0].where).toEqual({ state: "active", zone: { state: "active" } });
+  });
+
+  it("family, an area made only of a camera they cannot see → the empty page and NO query", async () => {
+    const res = await request(app("family")).get(`/api/security/events?zone=${YARD}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ events: [], nextCursor: null });
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a missing (or removed) area", GONE],
+    ["an area with no links", EMPTY],
+  ])("%s → the same empty page and no query, even for the owner", async (_n, id) => {
+    const res = await request(app("owner")).get(`/api/security/events?zone=${id}`);
+    expect(res.body).toEqual({ events: [], nextCursor: null });
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("family, an area they can partly see: visibility stays AND[0], the area clause follows the camera clause, hidden links dropped", async () => {
+    await request(app("family")).get(`/api/security/events?zone=${SHOP}&camera=front`);
+    const and = findMany.mock.calls[0][0].where.AND;
+    expect(and[0]).toEqual({
+      AND: [{ OR: [{ camera: null }, { camera: { in: ["front"] } }] }, { source: { not: "activity_mirror" } }],
+    });
+    expect(and[3]).toEqual({ camera: "front" });
+    // back/porch is hidden from this viewer, so only the front camera arm remains.
+    expect(and[4]).toEqual({ OR: [{ camera: "front" }] });
+    expect(and).toHaveLength(6);
+  });
+
+  it("owner, the same area: the whole camera AND the part of the other camera's view, incl. its offline/online rows", async () => {
+    await request(app("owner")).get(`/api/security/events?zone=${SHOP}`);
+    const and = findMany.mock.calls[0][0].where.AND;
+    expect(and[0]).toEqual({});
+    expect(and[4]).toEqual({
+      OR: [
+        { camera: "front" },
+        {
+          camera: "back",
+          OR: [
+            { kind: { in: ["detection", "detection_low"] }, cameraZones: { hasSome: ["porch"] } },
+            { kind: { in: ["camera_offline", "camera_online"] } },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("rows name only the areas the viewer can see — never the hidden one", async () => {
+    findMany.mockResolvedValue([
+      dbRow(1, { camera: "front", cameraZones: [] }),
+      dbRow(2, { camera: "back", cameraZones: ["porch"], sourceRef: "back/1712.5-abc" }),
+      dbRow(3, { source: "activity_mirror", kind: "threat", camera: null, cameraZones: [] }),
+    ]);
+    const family = await request(app("family")).get("/api/security/events");
+    expect(family.body.events.map((e: { zones: unknown }) => e.zones)).toEqual([
+      [{ id: SHOP, name: "Shop floor" }],
+      [], // back is not granted: Shop floor's back/porch link and Yard are both hidden
+      [],
+    ]);
+    const owner = await request(app("owner")).get("/api/security/events");
+    expect(owner.body.events.map((e: { zones: unknown }) => e.zones)).toEqual([
+      [{ id: SHOP, name: "Shop floor" }],
+      [
+        { id: SHOP, name: "Shop floor" },
+        { id: YARD, name: "Yard" },
+      ],
+      [],
+    ]);
+  });
+
+  it("a row's areas come in name order, not id order", async () => {
+    const ZEBRA = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"; // sorts FIRST by id, LAST by name
+    zoneLinks.mockResolvedValue([...AREA_LINKS, linkRow(ZEBRA, "Zebra crossing", "camera", "back")]);
+    findMany.mockResolvedValue([dbRow(1, { camera: "back", cameraZones: ["porch"] })]);
+    const res = await request(app("owner")).get("/api/security/events");
+    expect(res.body.events[0].zones).toEqual([
+      { id: SHOP, name: "Shop floor" },
+      { id: YARD, name: "Yard" },
+      { id: ZEBRA, name: "Zebra crossing" },
+    ]);
+  });
+
+  it("a camera's offline row carries the areas watching any part of its view", async () => {
+    findMany.mockResolvedValue([
+      dbRow(1, { source: "frigate_status", kind: "camera_offline", camera: "back", cameraZones: [], score: null }),
+    ]);
+    const res = await request(app("owner")).get("/api/security/events");
+    expect(res.body.events[0].zones.map((z: { id: string }) => z.id)).toEqual([SHOP, YARD]);
+  });
+
+  it("mode_changed is a feed kind", async () => {
+    const res = await request(app()).get("/api/security/events?kind=mode_changed");
+    expect(res.status).toBe(200);
+    expect(findMany.mock.calls[0][0].where.AND).toContainEqual({ kind: { in: ["mode_changed"] } });
+  });
+
+  it("400 on a zone that is not an area id", async () => {
+    const res = await request(app()).get("/api/security/events?zone=front-door");
+    expect(res.status).toBe(400);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable link table is a 503, never a feed without its areas", async () => {
+    zoneLinks.mockRejectedValue(new Error("db down"));
+    const res = await request(app()).get("/api/security/events");
+    expect(res.status).toBe(503);
   });
 });
 
