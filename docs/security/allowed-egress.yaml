@@ -1770,6 +1770,37 @@ entries:
     review_by: 2027-09-02
     code_refs: [services/erp-connector/src/xero/connector.ts]
 
+  - id: ref-security-audit-identifiers
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT destinations. Two dotted identifiers whose last label is a
+      # delegated TLD (.open, .id), the same false positive that
+      # ref-dotted-identifier-keys describes:
+      #   * mode.open is a Security audit ACTION NAME: the `refs.action`
+      #     stored on the ActivityRow when a person switches the Security
+      #     mode to open (SecurityAuditAction in security-audit.ts, and
+      #     ACTION_AUDIT in security-mode.service.ts).
+      #   * prisma.client.transaction.id is a Symbol.for KEY: the
+      #     well-known symbol Prisma sets on an interactive-transaction
+      #     client, which the in-transaction chain append reads to refuse
+      #     a bare client and to serialise appends per transaction.
+      # Neither is ever resolved or dialled. Registered by EXACT name, so a
+      # real host under .open or .id is still denied.
+      hosts: [mode.open, prisma.client.transaction.id]
+    purpose: >-
+      Two orchestrator identifiers that parse as hostnames: the Security
+      audit action name mode.open and the Symbol.for key
+      prisma.client.transaction.id that Prisma's interactive-transaction
+      client carries. Neither is a destination, and the box never
+      resolves either.
+    ticket: WARP-2977
+    added: 2026-09-23
+    review_by: 2027-09-23
+    code_refs: [apps/orchestrator/src/services/security-audit.ts,
+                apps/orchestrator/src/services/security-mode.service.ts,
+                apps/orchestrator/src/services/activity.service.ts]
+
   - id: ref-xml-namespaces
     kind: reference
     service: repo
