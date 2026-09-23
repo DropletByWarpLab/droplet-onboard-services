@@ -170,14 +170,18 @@ describe("WARP-2988 — the MCP service path enforces the same OR", () => {
     expect(await mcpGet("/api/pm/work-items")).toBe(404);
   });
 
-  it("either feature: that module's routes answer, writes included (`use` grant); the other module's do not", async () => {
+  it("either feature: the routes answer as they do in the browser, writes included (`use` grant)", async () => {
+    // Projects only: /api/crm is feature-gated for humans, so it is for the
+    // assistant too; /api/pm answers.
     await scopeFor({ featureOff: ["crm"] });
     expect(await mcpGet("/api/pm/work-items", "post")).toBe(200);
     expect(await mcpGet("/api/crm/companies")).toBe(404);
+    // CRM only: /api/pm is NOT feature-gated for humans, so the assistant
+    // reaches it too (business_find's project enrichment of a customer).
     await scopeFor({ featureOff: ["projects"] });
     expect(await mcpGet("/api/crm/companies")).toBe(200);
     expect(await mcpGet("/api/crm/companies", "post")).toBe(200);
-    expect(await mcpGet("/api/pm/work-items")).toBe(404);
+    expect(await mcpGet("/api/pm/projects")).toBe(200);
   });
 
   it("names the acting user as either transport does: username (stdio) or User.id (HTTP)", async () => {

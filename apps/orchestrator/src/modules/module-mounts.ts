@@ -221,7 +221,13 @@ export function mountMcpActingUserGates(
         app.use(
           prefix,
           scopeToOwnedPaths(
-            requireMcpActingUserToolDomain(domain, def.id, resolve, features),
+            // Browser parity: the feature check only where humans get one.
+            requireMcpActingUserToolDomain(
+              domain,
+              def.id,
+              resolve,
+              FEATURE_GATED_MODULES.has(def.id) ? features : null,
+            ),
             gateScopeFor(def, prefix),
           ),
         );

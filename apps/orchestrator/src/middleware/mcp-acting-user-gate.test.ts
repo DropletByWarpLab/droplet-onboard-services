@@ -21,6 +21,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 
 import { MODULES } from "../modules/module-registry.js";
 import {
+  FEATURE_GATED_MODULES,
   MCP_ACTING_USER_GATED_DOMAINS,
   mountMcpActingUserGates,
 } from "../modules/module-mounts.js";
@@ -146,7 +147,11 @@ describe("mcp acting-user gate — the acting user's scope decides", () => {
 // Stefan's review of #2298: `business` passes on CRM OR Projects, but the data
 // under a prefix belongs to ONE module, and a person who cannot open that
 // module in the browser must not read it through the assistant either.
-describe("mcp acting-user gate — the module serving the prefix must be held", () => {
+// Browser parity (Romain: "the assistant never reaches more than the person
+// could in the browser"): the feature check runs exactly where
+// `mountModuleGates` puts `requireFeatureAccess` for a human —
+// FEATURE_GATED_MODULES — and nowhere else.
+describe("mcp acting-user gate — the feature check mirrors the browser's", () => {
   it("Projects only: PM routes answer, CRM routes are 404 module_disabled (crm)", async () => {
     resolveMock.mockResolvedValue(ok(scope(["business"], ["business"])));
     heldFeatures = ["projects"];
@@ -158,13 +163,24 @@ describe("mcp acting-user gate — the module serving the prefix must be held", 
     expect(crm.body).toEqual({ error: "module_disabled", module: "crm" });
   });
 
-  it("CRM only: CRM routes answer, PM routes are 404 module_disabled (projects)", async () => {
+  it("CRM only: CRM AND PM routes answer — projects is not feature-gated in the browser", async () => {
+    // Stefan's re-review: a per-module `projects` check here refused the
+    // `/api/pm/projects` enrichment of `business_find({entity:"customer"})`
+    // and failed the whole call for a CRM-only person who CAN open /api/pm
+    // in the browser. MUTATION: pass `features` for every module in
+    // mountMcpActingUserGates -> the PM calls are 404.
     resolveMock.mockResolvedValue(ok(scope(["business"], ["business"])));
     heldFeatures = ["crm"];
     const app = appAs(MCP);
     expect((await request(app).post("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
-    const pm = await request(app).post("/api/pm/work-items").set("X-Nextcloud-User", "sam");
-    expect(pm.body).toEqual({ error: "module_disabled", module: "projects" });
+    expect((await request(app).get("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).post("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).get("/api/mobile/pm/projects").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+
+  it("the feature check runs on exactly the business modules the browser feature-gates", () => {
+    const business = MODULES.filter((m) => m.toolDomains.includes("business")).map((m) => m.id);
+    expect(business.filter((id) => FEATURE_GATED_MODULES.has(id))).toEqual(["crm"]);
   });
 
   it("applies to a null tool scope too (the owner bypass is question 1 only)", async () => {

@@ -24,15 +24,25 @@
  *
  * Two questions, both about the acting person:
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
- *   2. the feature — may they open the module serving THIS prefix, at `view`?
- *      The same check `requireFeatureAccess` makes of a human on the same
- *      URL. `business` passes with CRM OR Projects (question 1), but the data
- *      under `/api/crm` is still CRM data: a Projects-only person gets a 404
- *      here for it, exactly as they do in the browser.
+ *   2. the feature — ONLY where the browser asks it: when the module serving
+ *      this prefix is in FEATURE_GATED_MODULES (module-mounts.ts), the acting
+ *      person must hold it, the same check `requireFeatureAccess` makes of a
+ *      human on that URL. Today that is `crm` (/api/crm); `projects` is not
+ *      feature-gated, so /api/pm asks question 1 only. The rule is browser
+ *      parity: the assistant never reaches more than the person could in the
+ *      browser, and never LESS either — a CRM-only person's `business_find`
+ *      on a customer reads that customer's projects, as their browser can.
+ *      The mount passes `features = null` for an ungated module.
  *
  *   - owner / no custom role  → null scope passes question 1 (same as chat);
- *     question 2 still applies, and resolves to the full catalog for owners.
+ *     question 2 still applies where it applies, and resolves to the full
+ *     catalog for owners.
  *   - unknown / deactivated user, or a read error → DENY (fail closed).
+ *     This includes a VOICE turn: the voice service's principal
+ *     (`_service:voice`) is what routes/llm.ts forwards as the acting user,
+ *     and no User row carries it, so voice `business_*` calls get the same
+ *     404 `module_disabled` ("switched off"). Deliberate — no person is
+ *     attributable, like cameras — until voice carries the speaker's identity.
  *   - NO header → pass. Only orchestrator-internal stdio calls with no user
  *     context omit it (the ToolSpec schedule ticker), and those already
  *     cleared `resolveAttributedToolAccess` in the runner's pre-flight. The
@@ -87,7 +97,8 @@ export function requireMcpActingUserToolDomain(
   domain: string,
   moduleId: ModuleId,
   resolve: ActingUserAccessResolver,
-  features: EffectiveAccessResolver = resolveEffectiveAccess,
+  /** Question 2's resolver; `null` when the module is not feature-gated for humans. */
+  features: EffectiveAccessResolver | null = resolveEffectiveAccess,
 ): RequestHandler {
   function deny(req: Request, res: Response, reason: string): void {
     recordAccessDenied(req, "mcp-acting-user-tool-domain-denied");
@@ -133,6 +144,10 @@ export function requireMcpActingUserToolDomain(
     }
     // Question 2 — the module serving this prefix, as `requireFeatureAccess`
     // asks it of a human (null = no local row, nothing to narrow).
+    if (features === null) {
+      next();
+      return;
+    }
     try {
       const effective = access.userId ? await features(access.userId) : null;
       if (effective && !effective.features.some((f) => f.moduleId === moduleId)) {
