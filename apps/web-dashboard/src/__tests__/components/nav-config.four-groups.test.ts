@@ -11,7 +11,10 @@
  *
  *   WORK      Overview · Ask AI · Files · Messages · Email · Calendar
  *   BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
- *   SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
+ *   SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
+ *
+ * Security (WARP-2977, ADR-059) landed on stage after this tree was cut and is
+ * its own module, so it is a fifteenth row rather than a child of Cameras.
  *   ADMIN     Settings
  *
  * Everything else keeps its route and moves behind Settings as the WARP-1807
@@ -61,15 +64,16 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
   });
 
-  it("renders at most fourteen top-level rows with everything switched on", () => {
+  it("renders at most fifteen top-level rows with everything switched on", () => {
+    // The ticket's ≤ 14 plus WARP-2977's Security row.
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
-    expect(rows).toBeLessThanOrEqual(14);
+    expect(rows).toBeLessThanOrEqual(15);
   });
 
   it.each([
     ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar"]],
     ["Business", ["/business", "/customers", "/projects", "/practice"]],
-    ["Systems", ["/cameras", "/network", "/devices"]],
+    ["Systems", ["/security", "/cameras", "/network", "/devices"]],
     ["Admin", ["/settings"]],
   ])("%s shows exactly %j", (label, hrefs) => {
     expect(visible(label).map((i) => i.href)).toEqual(hrefs);
@@ -92,6 +96,27 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
     const cameras = visible("Systems").find((i) => i.href === "/cameras")!;
     expect(cameras.children?.map((c) => c.href)).toEqual(["/events"]);
+  });
+
+  // Review of #2284: nesting is filing, not a gate. A parent that fails ONLY
+  // its module gate promotes a child that names a module of its own.
+  it.each([
+    ["Business", "money", "projects", "/money"],
+    ["Systems", "voice", "network", "/voice"],
+  ])("%s: %s on, %s off → %s is promoted to a top-level row", (label, _on, off, href) => {
+    const rows = visible(label, "owner", (id) => id !== off);
+    expect(rows.map((i) => i.href)).toContain(href);
+    expect(rows.map((i) => i.href)).not.toContain(`/${off}`);
+  });
+
+  it("promotes nothing without a module of its own, and never past a role gate", () => {
+    // Events is part of Cameras (no module), Remote access shares Network's.
+    const sys = visible("Systems", "owner", (id) => id !== "cameras" && id !== "network");
+    expect(sys.map((i) => i.href)).toEqual(["/security", "/voice", "/devices"]);
+    // Insights is role-gated: a guest gets neither it nor its children.
+    const biz = visible("Business", "guest").map((i) => i.href);
+    expect(biz).not.toContain("/reports");
+    expect(biz).not.toContain("/brief");
   });
 
   it("never nests more than two levels under any item", () => {

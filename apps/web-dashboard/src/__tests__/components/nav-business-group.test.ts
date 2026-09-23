@@ -110,21 +110,17 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     ]);
   });
 
-  it("drops Money on a books-on, Projects-OFF box — nesting adds the parent gate", () => {
-    // WARP-2581 gave /money its own module gate and this file pinned it as an
-    // independent entry: a box that keeps its books elsewhere lost the row,
-    // and a box with books but no PM kept it.
-    //
-    // WARP-2967 nested it under Projects, and `visibleItems` drops a parent
-    // BEFORE its children are considered — so books-on/PM-off now shows no
-    // Money row in the nav. That is a real narrowing, taken knowingly: the
-    // alternative is a top-level Money row reading as a peer of Customers,
-    // which is the flatness the ticket exists to remove. The route is
-    // unchanged and the Workspace tabs layout still chips it.
+  it("keeps Money on a books-on, Projects-OFF box — promoted into Projects' slot", () => {
+    // WARP-2967 nested Money under Projects. Nesting is filing, not a gate:
+    // books without PM is a supported box (the likely dental shape), so a
+    // parent that fails ONLY its module gate promotes a child with a module of
+    // its own (`passesParentGate`). Review of #2284 caught the earlier
+    // version dropping Money here from every shell.
     expect(flatHrefs("owner", openCapabilities, only("money"))).toEqual([
       "/business",
       "/brief",
       "/reports",
+      "/money",
       "/practice",
     ]);
   });

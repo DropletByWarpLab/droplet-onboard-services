@@ -138,6 +138,19 @@ describe("workspace-nav-config — gates are the sidebar's", () => {
     expect(hrefs).toContain("/network");
   });
 
+  it("keeps Money with Projects off and Voice with Network off (review of #2284)", () => {
+    // A parent failing only its MODULE gate does not take a child that names
+    // its own module — the sidebar's `passesParentGate`, mirrored here.
+    const chips = (off: string) =>
+      resolveSpaces("owner", ALL_CAPS, (id) => id !== off).flatMap((s) =>
+        s.destinations.map((d) => d.item.href),
+      );
+    expect(chips("projects")).toContain("/money");
+    expect(chips("projects")).not.toContain("/projects");
+    expect(chips("network")).toContain("/voice");
+    expect(chips("network")).not.toContain("/remote-access");
+  });
+
   it("a role gate hides the chip, and an emptied space loses its tab", () => {
     // Business is entirely role/module gated; a guest with every module off
     // has nothing there, so the tab must not render.

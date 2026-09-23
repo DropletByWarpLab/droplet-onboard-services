@@ -41,10 +41,11 @@
  * chip here, and the routes that merely changed INDENT in the sidebar (Brief,
  * Reports and Money; Voice and Remote access) were already chips of their own.
  *
- * What the nesting DOES reach: a child inherits its parent's gate here too
- * (`allowed()` below checks `entry.parent`), so Money now needs the `projects`
- * module and Voice needs `network`, matching the sidebar exactly. That is the
- * mirror this file promises, not a divergence.
+ * What the nesting reaches: a child inherits its parent's gate here too
+ * (`allowed()` below checks `entry.parent` through `passesParentGate`), with
+ * the sidebar's one exception — a parent failing only its MODULE gate does not
+ * take a child that names its own module. So Money survives `projects` off and
+ * Voice survives `network` off, matching the sidebar exactly.
  */
 import type { LucideIcon } from "lucide-react";
 import {
@@ -59,6 +60,7 @@ import {
 import {
   NAV_GROUPS,
   passesGates,
+  passesParentGate,
   pathMatches,
   type AuthRole,
   type NavCapabilities,
@@ -248,7 +250,7 @@ export function resolveSpaces(
   const allowed = (entry: Indexed): boolean =>
     passesGates(entry.item, role, capabilities, isModuleOn) &&
     (!entry.parent ||
-      passesGates(entry.parent, role, capabilities, isModuleOn));
+      passesParentGate(entry.parent, entry.item, role, capabilities, isModuleOn));
 
   return SPACES.map((def) => {
     const destinations: Destination[] = [];

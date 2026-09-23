@@ -445,13 +445,10 @@ export const NAV_GROUPS: NavGroup[] = [
           // WARP-2581 / WARP-2967 — what the business is owed and what it owes,
           // landed from a connected ledger. Keeps its own `money` module gate.
           //
-          // Nesting DOES add its parent's gate on top: `visibleItems` drops a
-          // parent before its children are considered, so a box with a ledger
-          // but no PM module now shows no Money row. That is a real narrowing,
-          // taken knowingly — the alternative is a top-level Money row that
-          // reads as a peer of Customers, which is the flatness this ticket
-          // exists to remove. Money without Projects is reachable from its
-          // route and from the Workspace tabs layout.
+          // Nesting does NOT add the `projects` module gate: books without
+          // PM is a supported box (the likely dental shape), so when Projects
+          // is off `visibleItems` promotes Money into its slot
+          // (`passesParentGate`). Every other gate still holds.
           { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
         ],
       },
@@ -517,9 +514,8 @@ export const NAV_GROUPS: NavGroup[] = [
           // brief §2) and it stays one — it is simply filed under the subsystem
           // it belongs to instead of beside it.
           //
-          // As with Money above, nesting adds the parent's gate: `voice` now
-          // also needs `network` on. Voice hardware on a box with networking
-          // switched off is not a state this product ships.
+          // As with Money above, nesting does not add the `network` module
+          // gate: with networking off, Voice is promoted into Network's slot.
           { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
           // Already carried `requiresModule: "network"` — the same gate as its
           // new parent, so nesting changes nothing for it.
@@ -777,8 +773,53 @@ export function visibleItems(
     // other gates would say — Settings owns the way in. Children run this
     // same predicate, so a hidden child drops too.
     !item.hidden && passesGates(item, role, capabilities, isModuleOn);
-  return items.filter(allowed).map((item) =>
-    item.children ? { ...item, children: item.children.filter(allowed) } : item,
+  return items.flatMap((item) => {
+    if (allowed(item))
+      return [
+        item.children
+          ? { ...item, children: item.children.filter(allowed) }
+          : item,
+      ];
+    // WARP-2967 review — a parent that fails ONLY its module gate does not
+    // take a child that names a module of its own with it: that child is
+    // promoted to the parent's slot. Money (books on, PM off) and Voice
+    // (voice on, network off) would otherwise have no row at all. A tucked
+    // parent promotes nothing — the tuck is a surface decision for the whole
+    // subtree.
+    if (item.hidden) return [];
+    return (item.children ?? []).filter(
+      (child) =>
+        allowed(child) &&
+        passesParentGate(item, child, role, capabilities, isModuleOn),
+    );
+  });
+}
+
+/**
+ * WARP-2967 review — does a child's PARENT let it through?
+ *
+ * Yes when the parent passes its own gates. Also yes when the parent fails
+ * ONLY its module gate and the child names its own, different module: nesting
+ * is filing, and filing Money under Projects must not make a ledger-without-PM
+ * box lose Money. A child with no module of its own (Events under Cameras) is
+ * part of its parent's section — `moduleForPath` says so too — and still
+ * drops with it. Role and capability gates on the parent always hold.
+ *
+ * The sidebar (`visibleItems`, which promotes such a child), the Workspace
+ * layout (`resolveSpaces`) and department navs all route through this.
+ */
+export function passesParentGate(
+  parent: NavItem,
+  child: NavItem,
+  role: AuthRole | undefined,
+  capabilities: NavCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
+): boolean {
+  if (passesGates(parent, role, capabilities, isModuleOn)) return true;
+  return (
+    !!child.requiresModule &&
+    child.requiresModule !== parent.requiresModule &&
+    passesGates({ ...parent, requiresModule: undefined }, role, capabilities, isModuleOn)
   );
 }
 
