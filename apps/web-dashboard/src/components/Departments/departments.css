@@ -1,0 +1,400 @@
+/* ============================================================
+   WARP-2976 (ADR-059 §2.4) — department homes (`/d/<slug>`) and the
+   Business overview (`/d`).
+
+   Scoped under `.droplet-departments`, inside `.droplet-shell` (ShellPage),
+   and drawing only on the indigo shell scope: --text, --text-muted,
+   --text-faint, --brand, --brand-subtle, --card-bg, --card-bd, --border,
+   --inset, --hover, --radius-card, --radius-input, --ease. No new tokens.
+   Tile chrome is the shell's own `.card` / `.card-h`, so these pages read as
+   the same product as every other shell page.
+   ============================================================ */
+
+.droplet-departments {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── The home board ─────────────────────────────────────────
+   Six columns: s spans two, m three, l the full row. Source order is
+   reading order at every width, and the phone is one column. */
+.dept-board {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.dept-board > [data-size="s"] { grid-column: span 2; }
+.dept-board > [data-size="m"] { grid-column: span 3; }
+.dept-board > [data-size="l"] { grid-column: span 6; }
+
+@media (max-width: 1080px) {
+  .dept-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dept-board > [data-size="s"],
+  .dept-board > [data-size="m"] { grid-column: span 1; }
+  .dept-board > [data-size="l"] { grid-column: span 2; }
+}
+
+@media (max-width: 720px) {
+  .dept-board { grid-template-columns: minmax(0, 1fr); }
+  .dept-board > [data-size="s"],
+  .dept-board > [data-size="m"],
+  .dept-board > [data-size="l"] { grid-column: span 1; }
+}
+
+.dept-widget { min-width: 0; }
+.droplet-departments .card-h h2.ct { margin: 0; }
+
+/* ── Widget bodies ──────────────────────────────────────── */
+.dept-skel {
+  height: 64px;
+  border-radius: 10px;
+  background: var(--brand-subtle);
+  opacity: 0.7;
+}
+
+.dept-skel-sm { height: 32px; }
+
+.dept-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.dept-invite {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.dept-inline-link,
+.dept-more {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+.dept-inline-link:hover,
+.dept-more:hover { text-decoration: underline; }
+
+.dept-more {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.dept-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dept-figure-n {
+  font-size: 24px;
+  line-height: 1.15;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.dept-figure-l {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.dept-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.dept-link {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-input);
+  background: var(--inset);
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+  transition: border-color 180ms var(--ease), background 180ms var(--ease);
+}
+
+.dept-link svg { color: var(--brand); flex: none; }
+.dept-link:hover { border-color: color-mix(in srgb, var(--brand) 36%, var(--card-bd)); }
+
+.dept-link:focus-visible,
+.dept-tile:focus-visible,
+.dept-template:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.dept-members,
+.dept-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dept-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.dept-member .ava { width: 28px; height: 28px; font-size: 11px; }
+
+.dept-member-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dept-member-right {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dept-row {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.dept-row-k {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dept-row-v {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.dept-work { display: flex; flex-direction: column; gap: 10px; }
+
+/* ── The Business overview ──────────────────────────────── */
+.dept-tiles {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .dept-tiles { grid-template-columns: minmax(0, 1fr); }
+}
+
+.dept-tile {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.dept-tile .card-h { margin-bottom: 0; }
+
+.dept-tile-meta {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.dept-caption {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Set-up: the template picker ────────────────────────── */
+.dept-templates {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .dept-templates { grid-template-columns: minmax(0, 1fr); }
+}
+
+.dept-template {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 180ms var(--ease), transform 180ms var(--ease);
+}
+
+.dept-template:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand) 36%, var(--card-bd));
+}
+
+.dept-template:disabled { cursor: progress; opacity: 0.7; }
+
+.dept-template-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.dept-template-name { font-size: 14px; font-weight: 600; }
+.dept-template-desc { font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
+
+.dept-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+/* ── Customize ──────────────────────────────────────────── */
+.dept-editor { display: flex; flex-direction: column; gap: 20px; }
+
+.dept-editor fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.dept-editor legend {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dept-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px 16px;
+}
+
+@media (max-width: 720px) {
+  .dept-checks { grid-template-columns: minmax(0, 1fr); }
+}
+
+.dept-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.dept-check[data-child="true"] { padding-left: 22px; }
+.dept-check svg { color: var(--text-muted); flex: none; }
+.dept-check input { accent-color: var(--brand); width: 16px; height: 16px; }
+
+.dept-icons { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.dept-icon-opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-input);
+  background: var(--card-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.dept-icon-opt[aria-checked="true"] {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--card-bd));
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.dept-icon-opt:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.dept-widget-list {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dept-widget-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-input);
+  background: var(--inset);
+  font-size: 13px;
+}
+
+.dept-widget-row-name { flex: 1; min-width: 120px; color: var(--text); }
+.dept-widget-row-note { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
+
+.dept-editor select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.dept-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }

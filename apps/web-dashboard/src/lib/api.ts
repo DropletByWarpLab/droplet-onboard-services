@@ -119,6 +119,9 @@ import type {
   DepartmentRight,
   CreateDepartmentPayload,
   DepartmentMembership,
+  DepartmentProfile,
+  DepartmentProfileResponse,
+  PutDepartmentProfilePayload,
   AccessRole,
   AccessRolePayload,
   AccessSyncState,
@@ -133,6 +136,9 @@ import type {
   RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
+  SecurityEventKind,
+  SecurityEventsPage,
+  SecurityHealthRow,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -6264,6 +6270,49 @@ export async function getDepartment(id: string): Promise<DepartmentDetail> {
   return res.json();
 }
 
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+// A profile arranges what a department SHOWS; it never grants (§2.5). Errors
+// carry `status` + the orchestrator's stable `code` (NOT_A_MEMBER, NOT_FOUND,
+// VALIDATION_ERROR, TEAM_INHERITS_PROFILE, HOUSEHOLD_HAS_NO_PROFILE, ARCHIVED,
+// FORBIDDEN) so a page can tell "not yours" from "not there".
+
+export async function getDepartmentProfile(id: string): Promise<DepartmentProfileResponse> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to load department profile: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function putDepartmentProfile(
+  id: string,
+  payload: PutDepartmentProfilePayload,
+): Promise<{ profile: DepartmentProfile }> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to save department profile: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
 export async function createDepartment(
   payload: CreateDepartmentPayload,
 ): Promise<{ department: Department; warning: string | null }> {
@@ -8777,4 +8826,45 @@ export async function deleteRoutineSchedule(
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
   }
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center ──
+// Read-only in P2. A 503 is an outage, never an empty feed — the page renders
+// it as "not reporting", because an empty list reads as a quiet site.
+
+export interface SecurityEventsQuery {
+  cursor?: string | null;
+  limit?: number;
+  kinds?: SecurityEventKind[];
+  camera?: string;
+  includeLow?: boolean;
+}
+
+export function securityEventsPath(q: SecurityEventsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
+  if (q.camera) p.set("camera", q.camera);
+  if (q.includeLow) p.set("includeLow", "true");
+  const qs = p.toString();
+  return `/api/security/events${qs ? `?${qs}` : ""}`;
+}
+
+export async function getSecurityEvents(q: SecurityEventsQuery = {}): Promise<SecurityEventsPage> {
+  const res = await authFetch(`${BASE}${securityEventsPath(q)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security events: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[] }> {
+  const res = await authFetch(`${BASE}/api/security/health`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security health: ${res.status}`);
+  }
+  return res.json();
 }

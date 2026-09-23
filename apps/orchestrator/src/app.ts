@@ -69,6 +69,7 @@ import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSecurityRouter } from "./routes/security.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
@@ -317,6 +318,20 @@ export function createApp(
   // prefix-matching `/api/files/knowledge` and `/api/files/docs`, collapsing
   // three independent toggles onto one enforcement), not in either gate.
   // Specs: docs/superpowers/specs/2026-07-07-module-toggles-design.md, ADR-032.
+  // WARP-268: runtime egress-audit collector pushes unlisted-destination /
+  // allowlist-unavailable anomalies here (service-principal only) → signed
+  // activity log → /admin/audit.
+  //
+  // Mounted BEFORE the module gates, on purpose (WARP-2977 review). Its path,
+  // POST /api/security/egress-anomaly, sits under the `security` module's
+  // prefix, and that module is off by default: behind the gate, every box
+  // without Security switched on would 404 the collector, the collector's
+  // sink suppresses repeats, and the egress audit — one of the threat
+  // mirror's own sources — would go silent. This is host plumbing that must
+  // never depend on a dashboard toggle. Pinned by
+  // src/__tests__/security-prefix-composition.test.ts.
+  app.use("/api", createEgressAuditRouter());
+
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
   // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
@@ -485,15 +500,15 @@ export function createApp(
   // WARP-468: Phase E2 — off-LAN egress byte counter read + sampler push.
   // GET aggregator is admin/family/guest read; sample push is service-only.
   app.use("/api", createOffLanNetworkRouter(prisma));
-  // WARP-268: runtime egress-audit collector pushes unlisted-destination /
-  // allowlist-unavailable anomalies here (service-principal only) → signed
-  // activity log → /admin/audit.
-  app.use("/api", createEgressAuditRouter());
   // WARP-1436: ambient web data (weather / currency rates). Gate on the
   // `ambient_data` off-LAN channel, Redis-cached, audited per request;
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
+  // WARP-2977 (ADR-059 P2) — the Security command center's feed. The
+  // `security` module gate (toggle + per-person view) is mounted above by
+  // mountModuleGates off the registry prefix /api/security.
+  app.use("/api", createSecurityRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));

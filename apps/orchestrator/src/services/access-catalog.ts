@@ -85,6 +85,17 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "admin" },
     { level: "manage", minTier: "admin" },
   ],
+  // WARP-2977 (ADR-059 §6). `view` is the feed; `act` is acknowledging, the
+  // expected/not-expected verdicts and the mode (P2b/P3); `manage` is zones,
+  // links, schedule, suppressions, routing and retention. Presence data about
+  // identifiable people, so even `view` is floored at family — no guest tier.
+  // `manage` is business policy (a suppression can hide a real intrusion), so
+  // it is floored at admin.
+  security: [
+    { level: "view", minTier: "family" },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "admin" },
+  ],
   smart_home: [
     { level: "view" },
     { level: "act", minTier: "family" },
