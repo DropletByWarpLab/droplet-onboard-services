@@ -659,11 +659,17 @@ export async function getRecentEvents(
   // user gets their `limit` newest events, not a slice of everyone's.
   const cameras = narrowCameraFilter(scope, camera ? [camera] : undefined);
   if (cameras?.length === 0) return [];
+  // Narrowed lists get their own namespace: under the bare
+  // `cameras:events:<names>` form, a camera named `recent` shared
+  // CACHE_KEY_EVENTS — the owner's all-camera list.
   const cacheKey = cameras
-    ? `cameras:events:${[...cameras].sort().join(",")}`
+    ? `cameras:events:only:${[...cameras].sort().join(",")}`
     : CACHE_KEY_EVENTS;
   const cached = await cacheGet<DetectionEvent[]>(cacheKey);
-  if (cached) return cached;
+  // The key names cameras, not a caller: whoever wrote the entry may have
+  // had a wider scope than this reader. Re-apply the scope on a hit, the
+  // same second check the fetch path below runs.
+  if (cached) return cached.filter((e) => inCameraScope(scope, e.camera));
 
   const rawEvents = await fetchEvents(limit, cameras);
   const events: DetectionEvent[] = (rawEvents as any[])
