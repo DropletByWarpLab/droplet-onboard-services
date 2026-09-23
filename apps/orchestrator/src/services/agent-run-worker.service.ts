@@ -99,7 +99,13 @@
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG, TOOL_ROUTES, confirmationBindingHash, confirmationOwnerOf } from "@droplet/tools-core";
+import {
+  TOOL_CATALOG,
+  TOOL_ROUTES,
+  confirmationBindingHash,
+  confirmationOwnerOf,
+  type ToolDomain,
+} from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import type { ChatMessage } from "../types/index.js";
@@ -162,6 +168,19 @@ export const WORKSPACE_TOOLS: ReadonlySet<string> = new Set(
     (e) => e.hops.length > 0 && e.hops.every((h) => h.pathPattern.startsWith("/api/workspace/")),
   ).map((e) => e.tool),
 );
+
+/**
+ * WARP-2896 — the selection domains of {@link WORKSPACE_TOOLS}, read off the
+ * catalog (today exactly `["workspace"]`). A workshop run hands them to the
+ * loop as `bound_tool_domains` so "domains" selection advertises the
+ * workshop's tools on every turn: no keyword rule reaches them (chat must
+ * never be promised them) and a workshop goal need not name them. Without
+ * this the bench-box live proof (2026-09-23) offered the model none of the
+ * eight and the run ended `model_done` with zero tool calls.
+ */
+export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
+  ...new Set(TOOL_CATALOG.filter((t) => WORKSPACE_TOOLS.has(t.name)).map((t) => t.domain)),
+];
 
 /**
  * WARP-2749 — a run's inference requests carry the gateway's "background"
@@ -1346,6 +1365,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           toolCallContext,
           context_window: contextWindow,
           tool_selection_mode: toolSelectionMode,
+          // WARP-2896 — the run's binding, not its sentence, admits the
+          // workshop's tools to every turn's advertisement.
+          ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
           signal: controller.signal,
           checkpoint,
         },

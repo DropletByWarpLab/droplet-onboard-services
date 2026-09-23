@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CORE_TOOL_NAMES,
+  effectiveAdvertisedToolNames,
   selectAdvertisedTools,
   domainOfTool,
   toolNamesForDomain,
@@ -968,5 +969,90 @@ describe("WARP-2894 — routines are reachable from a fresh turn", () => {
       conversationToolNames: ["routine_list"],
     }).advertised;
     expect(advertised).toContain("routine_list");
+  });
+});
+
+describe("WARP-2896 — a workshop run's binding admits the workspace domain; nothing else does", () => {
+  const WORKSPACE = [
+    "workspace_read",
+    "workspace_search",
+    "workspace_diff",
+    "workspace_log",
+    "workspace_write",
+    "workspace_commit",
+    "workspace_run",
+    "workspace_propose",
+  ];
+  // The goal the bench-box live proof ran (2026-09-23): a workshop sentence
+  // that never says "workspace" and matches no rule reaching the domain.
+  const GOAL =
+    "Extend the extension: in src/index.ts add a 'lines' field to Output that counts the lines of input.text. Add a test for it, then run the build and the tests and make sure they pass, commit, and propose version 0.2.0.";
+  const user = (content: string) => [{ role: "user", content }];
+
+  it("a bound domain advertises all eight, whatever the sentence says", () => {
+    // MUTATION: drop `...(opts.boundDomains ?? [])` from
+    // effectiveAdvertisedToolNames and this goes red — the live failure.
+    for (const text of [GOAL, "hello there", ""]) {
+      const advertised = effectiveAdvertisedToolNames({
+        mode: "domains",
+        messages: user(text),
+        pool: [...POOL, ...WORKSPACE],
+        boundDomains: ["workspace"],
+      });
+      for (const name of WORKSPACE) expect(advertised.has(name), `${name} for "${text}"`).toBe(true);
+    }
+  });
+
+  it("the same pool WITHOUT a binding advertises none — chat's explicit allowed_tools case", () => {
+    // routes/llm.ts narrows a client-supplied `allowed_tools` by role/scope
+    // only, so a chat request CAN put workspace_* in the pool. Pool membership
+    // must therefore never admit the domain: chat has no binding and passes none.
+    for (const text of [GOAL, "open my workspace and propose a change to the extension"]) {
+      const advertised = effectiveAdvertisedToolNames({
+        mode: "domains",
+        messages: user(text),
+        pool: [...POOL, ...WORKSPACE],
+      });
+      for (const name of WORKSPACE) expect(advertised.has(name), `${name} for "${text}"`).toBe(false);
+    }
+  });
+
+  it("no keyword rule reaches the domain", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: GOAL,
+      pool: [...POOL, ...WORKSPACE],
+      conversationToolNames: [],
+    });
+    expect(r.matchedDomains).not.toContain("workspace");
+  });
+
+  it("a binding never widens the pool", () => {
+    const one = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: user("hello there"),
+      pool: [...POOL, "workspace_read"],
+      boundDomains: ["workspace"],
+    });
+    expect([...one].filter((n) => n.startsWith("workspace_"))).toEqual(["workspace_read"]);
+    const none = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: user(GOAL),
+      pool: POOL,
+      boundDomains: ["workspace"],
+    });
+    for (const name of none) expect(POOL).toContain(name);
+  });
+
+  it("a binding composes with the sentence: matched domains still arrive", () => {
+    const advertised = effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: user("turn off the kitchen lights"),
+      pool: [...POOL, ...WORKSPACE],
+      boundDomains: ["workspace"],
+    });
+    expect(advertised.has("control_device")).toBe(true);
+    expect(advertised.has("workspace_write")).toBe(true);
+    expect(advertised.has("list_network_devices")).toBe(false);
   });
 });

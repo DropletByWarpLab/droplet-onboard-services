@@ -51,6 +51,7 @@ vi.mock("../services/notifications.service.js", () => ({ sendNotification: sendN
 import { TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
 import {
   WORKSPACE_TOOLS,
+  WORKSPACE_TOOL_DOMAINS,
   createAgentRunWorker,
   decideAgentRun,
   enqueueAgentRun,
@@ -194,14 +195,19 @@ function interceptingMcp(tier2: Set<string>) {
   };
 }
 
-function makeWorker(db: ReturnType<typeof createAgentRunPrismaMock>, mcp: ReturnType<typeof interceptingMcp>, workerId = "A") {
+function makeWorker(
+  db: ReturnType<typeof createAgentRunPrismaMock>,
+  mcp: ReturnType<typeof interceptingMcp>,
+  workerId = "A",
+  toolSelectionMode: "off" | "domains" = "off",
+) {
   const chat = scripted(writeThenPropose);
   const worker = createAgentRunWorker({
     prisma: db.prisma,
     agent: { mcp: mcp.mcp, aiGateway: { chat } as never },
     workerId,
     resolveAccess: ownerAccess as never,
-    toolSelectionMode: "off",
+    toolSelectionMode,
   });
   return { worker, chat };
 }
@@ -269,5 +275,71 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     for (const call of mcp.callTool.mock.calls) {
       expect((call[2] as Record<string, unknown> | undefined)?.workspaceId).toBeUndefined();
     }
+  });
+});
+
+// ── what the MODEL is offered, under the shipping selection mode ──────────
+//
+// Every test above runs with `toolSelectionMode: "off"`, which advertises the
+// whole pool — so they proved the POOL and never what reached the model. The
+// box ships `TOOL_SELECTION_MODE=domains` (config.ts default), where each
+// turn advertises the core floor plus the domains the sentence matches. The
+// `workspace` domain has no keyword rule (chat must never be promised it), so
+// on the bench box (2026-09-23) a workshop run was offered ZERO workspace
+// tools, answered that it had no way to edit or propose, and ended
+// `model_done` with no tool call. These pin the fix: the worker hands the
+// run's binding to the loop as `bound_tool_domains` (WORKSPACE_TOOL_DOMAINS),
+// and selection admits a bound domain on every turn.
+
+function advertisedOnFirstTurn(chat: ReturnType<typeof scripted>): string[] {
+  const req = chat.mock.calls[0]![0] as unknown as { tools?: Array<{ function: { name: string } }> };
+  return (req.tools ?? []).map((t) => t.function.name);
+}
+
+describe("a workshop run is OFFERED its tools under domain selection (WARP-2896, live-proof regression)", () => {
+  // The live proof's goal: names no workspace word and matches no rule that
+  // would reach the domain.
+  const GOAL =
+    "Extend the extension: in src/index.ts add a 'lines' field to Output that counts the lines of input.text. Add a test for it, then run the build and the tests, commit, and propose version 0.2.0.";
+
+  it("the first turn advertises all eight workspace tools, and the run reaches `proposed`", async () => {
+    // MUTATION: drop the worker's `bound_tool_domains` spread (or the
+    // `boundDomains` merge in effectiveAdvertisedToolNames) and the eight
+    // vanish from the first turn — the live failure.
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: GOAL, model: "m", workspaceId: "ws-d" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const a = makeWorker(db, mcp, "A", "domains");
+    await a.worker.tickOnce();
+    await settle(a.worker);
+
+    const offered = advertisedOnFirstTurn(a.chat);
+    for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).toContain(name);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    expect(db.row(id).pendingTool).toBe("workspace_propose");
+
+    expect(await decideAgentRun(db.prisma, { id, decision: "approved", decidedBy: { id: OWNER.id, username: "romain", role: "owner" } })).toMatchObject({ ok: true });
+    const b = makeWorker(db, mcp, "B", "domains");
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    expect(db.row(id).status).toBe("succeeded");
+    expect(db.row(id).stopReason).toBe("proposed");
+    expect(mcp.executed.map((e) => e.name)).toEqual(["workspace_write", "workspace_propose"]);
+  });
+
+  it("WORKSPACE_TOOL_DOMAINS is read off the catalog: exactly the workspace domain", () => {
+    expect([...WORKSPACE_TOOL_DOMAINS]).toEqual(["workspace"]);
+  });
+
+  it("an ordinary run under the same mode is offered none of them", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: GOAL, model: "m" });
+    const mcp = interceptingMcp(new Set());
+    const { worker, chat } = makeWorker(db, mcp, "A", "domains");
+    await worker.tickOnce();
+    await settle(worker);
+    const offered = advertisedOnFirstTurn(chat);
+    for (const name of EXPECTED_WORKSPACE_TOOLS) expect(offered, name).not.toContain(name);
+    expect(mcp.executed).toEqual([]);
   });
 });
