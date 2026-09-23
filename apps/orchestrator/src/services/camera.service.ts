@@ -164,11 +164,14 @@ function handleMqttMessage(
     noteFrigateMessage();
     void _statusTracker
       ?.observe(topic, raw)
-      .then((recorded) => {
-        if (recorded?.camera) {
+      .then((transition) => {
+        // Broadcast every transition, stored or not: a failed database
+        // write must not hide a camera going dark from the live surface.
+        const camera = transition?.draft.camera;
+        if (transition && camera) {
           broadcastSSE({
-            type: recorded.kind === "camera_online" ? "camera_online" : "camera_offline",
-            camera: recorded.camera,
+            type: transition.draft.kind === "camera_online" ? "camera_online" : "camera_offline",
+            camera,
             timestamp: Date.now(),
           });
         }

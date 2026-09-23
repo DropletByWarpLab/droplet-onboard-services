@@ -69,13 +69,24 @@ const HEALTH_BY_KIND: Partial<Record<string, SourceHealth>> = {
   source_online: "online",
 };
 
+/**
+ * A health change the tracker saw. `stored` says whether its row reached the
+ * store — reported separately because the LIVE surface must not depend on
+ * it: a camera going dark is shown to the dashboard even when the database
+ * write failed (the detection path's rule, camera.service.ts).
+ */
+export interface StatusTransition {
+  draft: SecurityEventDraft;
+  stored: boolean;
+}
+
 export interface StatusTracker {
   /**
    * Feed one `frigate/<camera>/status/detect` or `frigate/available`
-   * message. Returns the row it recorded, or null when the message was not
-   * a status topic or changed nothing.
+   * message. Returns the transition, or null when the message was not a
+   * status topic or changed nothing.
    */
-  observe(topic: string, payload: string, now?: Date): Promise<SecurityEventDraft | null>;
+  observe(topic: string, payload: string, now?: Date): Promise<StatusTransition | null>;
   /** Latest reading per camera (null key = Frigate itself), for the health header. */
   snapshot(): ReadonlyMap<string | null, { health: SourceHealth; at: Date }>;
 }
@@ -101,7 +112,7 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
     return row ? (HEALTH_BY_KIND[row.kind] ?? null) : null;
   }
 
-  async function apply(reading: StatusReading, now: Date): Promise<SecurityEventDraft | null> {
+  async function apply(reading: StatusReading, now: Date): Promise<StatusTransition | null> {
     last.set(reading.camera, { health: reading.health, at: now });
     let previous: SourceHealth | null;
     if (recorded.has(reading.camera)) {
@@ -121,7 +132,7 @@ export function createStatusTracker(prisma: Pick<PrismaClient, "securityEvent">)
     recorded.set(reading.camera, reading.health);
     const draft = statusTransitionToDraft(reading, previous, now);
     if (!draft) return null;
-    return (await recordSecurityEvent(prisma, draft)) ? draft : null;
+    return { draft, stored: await recordSecurityEvent(prisma, draft) };
   }
 
   return {

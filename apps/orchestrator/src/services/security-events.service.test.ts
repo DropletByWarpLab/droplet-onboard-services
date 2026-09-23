@@ -106,8 +106,18 @@ describe("createStatusTracker — transitions only, previous read back from the 
     const { t, createMany, findFirst } = tracker(null);
     findFirst.mockRejectedValueOnce(new Error("db down"));
     const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
-    expect(r?.kind).toBe("camera_offline");
+    expect(r?.draft.kind).toBe("camera_offline");
+    expect(r?.stored).toBe(true);
     expect(createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed store write still reports the transition — the live surface must not depend on the database", async () => {
+    const { t, createMany } = tracker("camera_online");
+    createMany.mockRejectedValueOnce(new Error("db down"));
+    const r = await t.observe("frigate/cam1/status/detect", "offline", NOW);
+    expect(r).toMatchObject({ draft: { kind: "camera_offline", camera: "cam1" }, stored: false });
+    // …and it is not reported twice when the same state repeats.
+    expect(await t.observe("frigate/cam1/status/detect", "offline", NOW)).toBeNull();
   });
 
   it("the snapshot carries the latest reading, including Frigate's own (null key)", async () => {

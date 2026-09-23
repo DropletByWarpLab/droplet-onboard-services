@@ -69,6 +69,7 @@ vi.mock("./push-dispatch.service.js", () => ({
 }));
 
 import { initCameraService, shutdownCameraService, subscribeCameraEvents } from "./camera.service.js";
+import type { CameraSSEEvent } from "../types/camera.js";
 import { resetCameraEventGateForTests } from "./camera-event-gate.js";
 import { _resetSecurityIngestHealthForTests, securityIngestHealthState } from "./security-events.service.js";
 
@@ -98,6 +99,18 @@ function frigate(type: "new" | "update" | "end", id: string, extra: Record<strin
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+/**
+ * Subscribe as an unrestricted viewer. WARP-2982 (#2297) adds a REQUIRED
+ * per-subscriber scope argument; before it lands the extra argument is
+ * ignored. Called through a widened signature so this file compiles and
+ * behaves the same whichever of the two PRs reaches stage first.
+ */
+const subscribeAll = (cb: (e: CameraSSEEvent) => void): (() => void) =>
+  (subscribeCameraEvents as unknown as (cb: (e: CameraSSEEvent) => void, scope: () => "all") => () => void)(
+    cb,
+    () => "all",
+  );
 
 beforeEach(async () => {
   resetCameraEventGateForTests();
@@ -170,7 +183,7 @@ describe("detections — one row per object, on end, never behind the gate", () 
 
   it("a second person the gate DROPS (drop_active → drop_stale on end) is still stored", async () => {
     const events: string[] = [];
-    const unsubscribe = subscribeCameraEvents((e) => events.push(`${e.type}:${"eventId" in e ? e.eventId : ""}`));
+    const unsubscribe = subscribeAll((e) => events.push(`${e.type}:${"eventId" in e ? e.eventId : ""}`));
     try {
       message("frigate/events", frigate("new", "first"));
       message("frigate/events", frigate("new", "second")); // gate: drop_active
@@ -198,7 +211,7 @@ describe("detections — one row per object, on end, never behind the gate", () 
   it("a store failure does not break the live surface", async () => {
     createMany.mockRejectedValue(new Error("db down"));
     const events: string[] = [];
-    const unsubscribe = subscribeCameraEvents((e) => events.push(e.type));
+    const unsubscribe = subscribeAll((e) => events.push(e.type));
     try {
       message("frigate/events", frigate("new", "x"));
       message("frigate/events", frigate("end", "x"));
@@ -212,10 +225,25 @@ describe("detections — one row per object, on end, never behind the gate", () 
 });
 
 describe("camera health — transitions only, and the dashboard hears them again", () => {
+  it("a camera going dark is broadcast even when its row cannot be saved", async () => {
+    findFirst.mockResolvedValue({ kind: "camera_online" });
+    createMany.mockRejectedValue(new Error("db down"));
+    const events: Array<{ type: string; camera?: string }> = [];
+    const unsubscribe = subscribeAll((e) => events.push({ type: e.type, camera: e.camera }));
+    try {
+      message("frigate/front_door/status/detect", "offline");
+      await flush();
+      await flush();
+      expect(events).toEqual([{ type: "camera_offline", camera: "front_door" }]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("online → offline stores a camera_offline and broadcasts it", async () => {
     findFirst.mockResolvedValue({ kind: "camera_online" });
     const events: Array<{ type: string; camera?: string }> = [];
-    const unsubscribe = subscribeCameraEvents((e) => events.push({ type: e.type, camera: e.camera }));
+    const unsubscribe = subscribeAll((e) => events.push({ type: e.type, camera: e.camera }));
     try {
       message("frigate/front_door/status/detect", "offline");
       await flush();
