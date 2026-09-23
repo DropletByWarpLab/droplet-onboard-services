@@ -157,11 +157,16 @@ describe("workspace-nav-config — Level 3 views", () => {
   const dest = (href: string) =>
     spaces.flatMap((s) => s.destinations).find((d) => d.item.href === href);
 
-  it("Files' routed children become its views, All files first", () => {
-    const labels = dest("/files")?.views.map((v) => v.label);
-    expect(labels?.[0]).toBe("All files");
-    expect(labels).toContain("Recents");
-    expect(labels).toContain("Sync Devices");
+  it("Files' routed children become its views, the section itself first", () => {
+    // WARP-2966 removed the "All files" child whose href was its parent's, so
+    // `viewsFor` now prepends the section entry itself (marked `exact`) — the
+    // documented branch for a section that does not list its own index.
+    const views = dest("/files")?.views ?? [];
+    expect(views[0]?.href).toBe("/files");
+    expect(views[0]?.exact).toBe(true);
+    expect(views.map((v) => v.label)).toEqual(["Files", "Recent", "Shared", "Trash"]);
+    // Sync devices left Files entirely — it is its own Work chip now.
+    expect(dest("/files/devices")?.item.label).toBe("Sync devices");
   });
 
   it("Integrations and Credentials are sibling chips, neither has views (WARP-2968)", () => {

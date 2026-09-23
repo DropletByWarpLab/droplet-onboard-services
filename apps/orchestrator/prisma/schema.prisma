@@ -1132,6 +1132,16 @@ enum DirectoryUserStatus {
   DEACTIVATED
 }
 
+// WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
+// create, invite accept (the box owns the credential). SSO: just-in-time
+// created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
+// sync (scim.service.ts provisionUser).
+enum UserProvisionSource {
+  LOCAL
+  SSO
+  SCIM
+}
+
 /// WARP-1202: explicit pairing-code lifecycle. Persistent state lives in this
 /// enum column, never inferred from a `used` boolean + `expiresAt` comparison
 /// + `claimedBy` nullability (CLAUDE.md "no guessing"; WARP-218
@@ -2283,6 +2293,10 @@ model NotificationLog {
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — deep link: a same-origin dashboard path (validated by
+  // assertNotificationLink) and small flat PHI-free client context.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
@@ -2671,6 +2685,13 @@ model User {
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
   directoryStatus    DirectoryUserStatus @default(ACTIVE)
+  // WARP-2858: where this account was CREATED — written once, by the path
+  // that minted the row, never inferred from a null `passwordHash` or
+  // `nextcloudUsername`. SSO / SCIM rows authenticate through the IdP only:
+  // the box refuses to set, change or verify a local password on them,
+  // because a local password is a login the IdP's disable/deprovision cannot
+  // reach. A LOCAL row that later links an SSO identity stays LOCAL.
+  provisionSource    UserProvisionSource @default(LOCAL)
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was

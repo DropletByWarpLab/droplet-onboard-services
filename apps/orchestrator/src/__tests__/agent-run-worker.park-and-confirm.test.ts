@@ -240,6 +240,18 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     expect(note.title).toContain("delete_file");
     expect(note.body).toContain("tidy up old files");
     expect(note.body).toContain("Nothing has been done yet");
+    // WARP-2909 — the park links to the run and says a decision is pending.
+    // `userId` is the USERNAME (the fake's id and username differ on purpose).
+    const link = note as unknown as { userId: string; url: string; tag: string; data: Record<string, unknown> };
+    expect(link.userId).toBe(OWNER.username);
+    expect(link.userId).not.toBe(OWNER.id);
+    expect(link.url).toBe(`/workshop?run=${id}`);
+    expect(link.tag).toBe(`agent-run:${id}`);
+    expect(link.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true });
+    // Nothing that could approve it, and no args (they can carry customer data).
+    expect(Object.keys(note).filter((k) => /token|hash|confirm/i.test(k))).toEqual([]);
+    expect(JSON.stringify({ url: link.url, tag: link.tag, data: link.data })).not.toMatch(/token|hash|confirm|old\.txt/i);
+    expect([...new URL(link.url, "https://box.local").searchParams.keys()]).toEqual(["run"]);
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "tool_call",
@@ -310,6 +322,14 @@ describe("agent runs — Tier-2 parks (WARP-2179)", () => {
     const titles = sendNotificationMock.mock.calls.map((c) => (c[1] as { title: string }).title);
     expect(titles.filter((t) => t.startsWith("Approval needed"))).toHaveLength(1);
     expect(titles.filter((t) => t.startsWith("Background run finished"))).toHaveLength(1);
+    // WARP-2909 — the finish carries the same link and tag, and NO needsDecision.
+    const finished = sendNotificationMock.mock.calls
+      .map((c) => c[1] as { title: string; userId: string; url: string; tag: string; data: Record<string, unknown> })
+      .find((n) => n.title.startsWith("Background run finished"))!;
+    expect(finished.userId).toBe(OWNER.username);
+    expect(finished.url).toBe(`/workshop?run=${id}`);
+    expect(finished.tag).toBe(`agent-run:${id}`);
+    expect(finished.data).toEqual({ agentRunId: id, status: "succeeded" });
   });
 
   it("deny → resume: the model gets CONFIRMATION_DENIED as a tool result, adapts, and the tool never runs", async () => {
