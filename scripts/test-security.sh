@@ -478,6 +478,60 @@ else
 fi
 
 # =============================================================================
+# Test 14c: WARP-2898 (ADR-056 slice K1) — no base service is named ext-*
+# =============================================================================
+# `ext-<id>` is the namespace an extension container runs in: its compose
+# override (update-agent/extension-fragment.ts) ADDS one service with that
+# name. If the base file ever defined an ext-* service, an extension override
+# would MERGE its keys into a first-party service instead of adding its own,
+# so the name space is reserved here, not by convention. The check first runs
+# against a throwaway fixture with an ext-foo service, so a vacuous check
+# (wrong key, empty parse) cannot pass.
+# MUTATION: drop the startswith("ext-") test and the fixture self-check goes red.
+
+_no_ext_services() {
+  python3 - "$1" <<'PYEOF'
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+services = (data or {}).get("services") or {}
+if not services:
+    print("no services parsed - refusing a vacuous pass", file=sys.stderr)
+    sys.exit(2)
+reserved = sorted(name for name in services if str(name).startswith("ext-"))
+if reserved:
+    print("base services in the reserved ext-* namespace: " + ", ".join(reserved), file=sys.stderr)
+    sys.exit(1)
+print(f"{len(services)} base services, none named ext-*")
+PYEOF
+}
+
+_ext_fixture_dir=$(mktemp -d)
+cat > "$_ext_fixture_dir/docker-compose.yml" <<'YAMLEOF'
+services:
+  orchestrator:
+    image: orchestrator
+  ext-foo:
+    image: foo
+YAMLEOF
+_ext_fixture_rc=0
+_no_ext_services "$_ext_fixture_dir/docker-compose.yml" >/dev/null 2>&1 || _ext_fixture_rc=$?
+rm -rf "$_ext_fixture_dir"
+
+_ext_rc=0
+_ext_output=$(_no_ext_services "$COMPOSE_FILE" 2>&1) || _ext_rc=$?
+
+if [ "$_ext_fixture_rc" -ne 1 ]; then
+  fail "Test 14c self-check: a fixture with an ext-foo service was not refused (rc=$_ext_fixture_rc)"
+elif [ "$_ext_rc" -eq 0 ]; then
+  pass "docker-compose.yml: no base service is named ext-* (the extension namespace, WARP-2898)"
+else
+  fail "docker-compose.yml: a base service sits in the reserved ext-* namespace (WARP-2898)"
+  printf "${_RED}%s${_RESET}\n" "$_ext_output" >&2
+fi
+
+# =============================================================================
 # Test 14: WARP-573 — orchestrator migration-on-boot is guarded
 # =============================================================================
 # The orchestrator container must NOT boot via the old unguarded

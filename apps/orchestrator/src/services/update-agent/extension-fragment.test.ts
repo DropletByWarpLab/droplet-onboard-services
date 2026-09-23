@@ -313,6 +313,16 @@ describe("renderExtensionOverride: the emitted override", () => {
     expect(BASE).toEqual(expect.arrayContaining(["orchestrator", "sandbox"]));
   });
 
+  it("re-parses its own output: a base that already defines ext-<id> is refused at render", () => {
+    // Only the shape check knows the base set, so this refusal proves render
+    // runs it before returning.
+    expectRefusal(
+      () => renderExtensionOverride({ extensionId: ID, target: "release", container: validContainer(), baseServices: [...BASE, "ext-word-count"] }),
+      "shape_invalid",
+      /is a base service/,
+    );
+  });
+
   it("omits the environment block when there is none", () => {
     const c = validContainer();
     delete c.environment;

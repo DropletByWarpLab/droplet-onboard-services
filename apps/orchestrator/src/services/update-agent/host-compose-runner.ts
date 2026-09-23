@@ -17,8 +17,15 @@
  *   - nothing in the codebase talks to the socket directly — every daemon
  *     op funnels through this runner → the one audited host script, whose
  *     surface is a fixed set of subcommands, not an arbitrary `docker` shim;
- *   - the script itself validates its inputs against the tracked compose
- *     file and refuses anything outside the manifest's service set.
+ *   - the script checks the SHAPE of its inputs only: `validate_services`
+ *     is a charset check on the service list and `require_pin_file` checks
+ *     that an override file exists. It does NOT validate against the
+ *     tracked compose file or the manifest's service set, and runs no
+ *     `compose config` step (corrected by WARP-2898). What gets recreated,
+ *     and from which image, is fenced HERE: the override YAML is generated
+ *     from the verified manifest by `composeOverrideYaml` (refuse, never
+ *     quote), and an extension document never parses as a release
+ *     (manifest.ts, WARP-2898).
  * The trust chain that got us here is already cryptographic: only a
  * cosign-verified (WARP-537) manifest whose configs.tar.gz sha256 matches
  * (apply.ts) ever reaches this runner. The socket is the blast radius; the
