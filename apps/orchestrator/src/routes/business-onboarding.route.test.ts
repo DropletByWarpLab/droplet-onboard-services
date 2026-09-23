@@ -22,6 +22,10 @@ import { _setActivityRecorderForTests } from "../services/activity.singleton.js"
 import { createActivityRecorder } from "../services/activity.service.js";
 import { createHmacSigner } from "../services/audit-signing.service.js";
 import {
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
+import {
   CLOSING_TURN,
   INTERVIEW_SESSION_TITLE,
   ONBOARDING_FACTS_ADDED_BY,
@@ -183,7 +187,12 @@ function makePrisma(initial: Partial<ProfileRow> | null = {}) {
       },
       updateMany: async () => ({ count: 0 }),
     },
-    async $queryRawUnsafe<T>(query: string): Promise<T> {
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]): Promise<T> {
+      if (isActivityRowInsert(query)) {
+        const stored: StoredActivityRow = activityRowFromInsert(nextId++, params);
+        activityRows.push(stored);
+        return [{ id: stored.id }] as unknown as T;
+      }
       if (query.includes("pg_advisory_xact_lock")) {
         return [{ locked: true }] as unknown as T;
       }
@@ -195,30 +204,6 @@ function makePrisma(initial: Partial<ProfileRow> | null = {}) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async $transaction(fn: (tx: any) => Promise<unknown>) {
       return fn(prisma);
-    },
-    activityRow: {
-      create: async ({ data }: { data: Record<string, unknown> }) => {
-        const stored: StoredActivityRow = {
-          id: nextId++,
-          kind: data.kind as string,
-          what: data.what as string,
-          severity: data.severity as string,
-          sourceIcon: data.sourceIcon as string,
-          sub: (data.sub as string | null) ?? null,
-          refs:
-            data.refs && (data.refs as { _tag?: string })._tag === "Prisma.DbNull"
-              ? null
-              : ((data.refs as Record<string, unknown> | null) ?? null),
-          signature: data.signature as string,
-          prevSignatureHash: data.prevSignatureHash as string,
-          actorType: (data.actorType as string | null) ?? null,
-          actorId: (data.actorId as string | null) ?? null,
-          schemaVersion: data.schemaVersion as number,
-          at: data.at as Date,
-        };
-        activityRows.push(stored);
-        return stored;
-      },
     },
   };
   return prisma;

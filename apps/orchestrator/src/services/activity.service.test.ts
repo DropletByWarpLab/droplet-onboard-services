@@ -15,17 +15,22 @@
  * replay correctness) lives in `activity-chain.test.ts` per AC7.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { Prisma } from "@prisma/client";
 import {
   actorFromRequest,
   createActivityRecorder,
   type ActivityRowRecorder,
 } from "./activity.service.js";
 import {
+  canonicalizeRowContent,
+  canonicalRefsJson,
   createHmacSigner,
   hashSignature,
   type ActivityRowSigner,
 } from "./audit-signing.service.js";
+import {
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "../__tests__/helpers/activity-row-insert.js";
 
 interface FakeActivityRow {
   id: bigint;
@@ -54,10 +59,7 @@ interface FakeActivityRow {
 }
 
 interface FakePrisma {
-  activityRow: {
-    create: (args: { data: Record<string, unknown> }) => Promise<FakeActivityRow>;
-  };
-  $queryRawUnsafe: <T>(query: string) => Promise<T>;
+  $queryRawUnsafe: <T>(query: string, ...params: unknown[]) => Promise<T>;
   $transaction: <T>(
     fn: (tx: FakePrisma) => Promise<T>,
   ) => Promise<T>;
@@ -68,50 +70,25 @@ function makePrismaFake(): {
   rows: FakeActivityRow[];
   transactionCount: { count: number };
   queries: string[];
-  rawRefs: unknown[];
+  insertParams: unknown[][];
 } {
   const rows: FakeActivityRow[] = [];
   const transactionCount = { count: 0 };
   const queries: string[] = [];
-  const rawRefs: unknown[] = [];
+  const insertParams: unknown[][] = [];
   let nextId = 1n;
 
   const prisma: FakePrisma = {
-    activityRow: {
-      async create({ data }) {
-        // Keep what the recorder actually handed us, before normalisation —
-        // the WARP-2484 case below asserts on the sentinel itself.
-        rawRefs.push(data.refs);
-        // Mirror the recorder's normalisation: `Prisma.DbNull` becomes a real
-        // `null` once it lands in the table. Since WARP-2484 the shared mock
-        // exports the genuine sentinel object, so this is a plain identity
-        // check — no more sniffing a `_tag` because the mock had no value to
-        // compare against.
-        const refsValue =
-          data.refs === Prisma.DbNull
-            ? null
-            : (data.refs as Record<string, unknown> | null);
-        const row: FakeActivityRow = {
-          id: nextId++,
-          at: data.at as Date,
-          severity: data.severity as FakeActivityRow["severity"],
-          sourceIcon: data.sourceIcon as string,
-          what: data.what as string,
-          sub: (data.sub as string | null) ?? null,
-          kind: data.kind as FakeActivityRow["kind"],
-          refs: refsValue,
-          signature: data.signature as string,
-          prevSignatureHash: data.prevSignatureHash as string,
-          actorType: (data.actorType as FakeActivityRow["actorType"]) ?? null,
-          actorId: (data.actorId as string | null) ?? null,
-          schemaVersion: data.schemaVersion as number,
-        };
-        rows.push(row);
-        return row;
-      },
-    },
-    async $queryRawUnsafe<T>(query: string) {
+    async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
       queries.push(query);
+      // WARP-3011: the append's INSERT. Keep exactly what the recorder bound
+      // — the refs cases below assert on the parameter itself.
+      if (isActivityRowInsert(query)) {
+        insertParams.push(params);
+        const row = activityRowFromInsert(nextId++, params) as FakeActivityRow;
+        rows.push(row);
+        return [{ id: row.id }] as unknown as T;
+      }
       // WARP-1026: first call per record() is the chain-append advisory
       // lock; its result is ignored by the recorder.
       if (query.includes("pg_advisory_xact_lock")) {
@@ -126,8 +103,11 @@ function makePrismaFake(): {
       return fn(prisma);
     },
   };
-  return { prisma, rows, transactionCount, queries, rawRefs };
+  return { prisma, rows, transactionCount, queries, insertParams };
 }
+
+/** The INSERT binds `refs` as its 7th parameter (`$7::jsonb`). */
+const REFS_PARAM = 6;
 
 const KEY = Buffer.from("warp-456-test-key-bytes-must-be-long", "utf8");
 
@@ -228,14 +208,17 @@ describe("activity.service.record", () => {
       'SELECT "signature" FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1',
     );
     expect(q[1]).not.toContain("FOR UPDATE");
+    // …and the row goes in with ONE raw INSERT, never Prisma's Json write
+    // (WARP-3011), in the same transaction, after the tail read.
+    expect(q).toHaveLength(3);
+    expect(q[2]).toMatch(/^INSERT INTO "ActivityRow" /);
+    expect(q[2]).toContain("$7::jsonb");
   });
 
-  it("writes Prisma.DbNull, not undefined, when there are no refs (WARP-2484)", async () => {
-    // The recorder deliberately sends the sentinel rather than `undefined`:
-    // Prisma OMITS an undefined field, so the column would keep its default
-    // instead of being set to SQL NULL. This used to be unassertable — the
-    // shared `@prisma/client` mock exported no `DbNull`, so the sentinel and
-    // `undefined` were the same value and every check on it passed vacuously.
+  it("binds SQL NULL, never undefined or the text 'null', when there are no refs (WARP-2484)", async () => {
+    // An absent refs must land as SQL NULL — the column's "no refs" — not as
+    // the JSON value `null`, and not as `undefined`, which the driver would
+    // not bind at all.
     const row = await recorder.record({
       kind: "auth",
       severity: "ok",
@@ -244,11 +227,99 @@ describe("activity.service.record", () => {
       actor: { type: "user", id: "11111111-1111-4111-8111-111111111111" },
     });
 
-    const written = prismaState.rawRefs[0];
-    expect(written).not.toBeUndefined();
-    expect(written).toBe(Prisma.DbNull);
-    // …and the fake normalises it to a real null on the way into the row.
+    const bound = prismaState.insertParams[0]!;
+    expect(bound).toHaveLength(12);
+    expect(bound[REFS_PARAM]).toBeNull();
     expect(row.refs).toBeNull();
+  });
+
+  it("binds refs as the exact canonical text the signer signed (WARP-3011)", async () => {
+    // 0.1 + 0.2 needs 17 significant digits; Prisma's Json write kept 16 and
+    // stored 0.3. The fix: the INSERT carries the very text the HMAC covered.
+    const refs = {
+      zeta: 0.1 + 0.2,
+      alpha: { score: Math.fround(0.123), list: [123.45600000000002, 1] },
+      huge: 1.7976931348623157e308,
+    };
+    const row = await recorder.record({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: "mic",
+      what: "Wake word heard",
+      refs,
+      actor: { type: "system" },
+    });
+
+    const bound = prismaState.insertParams[0]![REFS_PARAM];
+    expect(bound).toBe(canonicalRefsJson(refs));
+    // Byte-identical to the refs inside the string the signature covers.
+    const signed = canonicalizeRowContent({
+      at: row.at,
+      severity: row.severity,
+      sourceIcon: row.sourceIcon,
+      what: row.what,
+      sub: row.sub,
+      kind: row.kind,
+      refs,
+      actorType: row.actorType,
+      actorId: row.actorId,
+      schemaVersion: row.schemaVersion,
+    });
+    expect(signed).toContain(`"refs":${bound as string},`);
+    // Every digit survives into the bound text; no 16-digit rounding.
+    expect(bound).toContain("0.30000000000000004");
+    expect(bound).toContain("0.12300000339746475");
+    expect(bound).toContain("123.45600000000002");
+    expect(bound).toContain("1.7976931348623157e+308");
+    // What the row reports is the stored text parsed: the caller's values.
+    expect(row.refs).toEqual(refs);
+    expect((row.refs as { zeta: number }).zeta).toBe(0.1 + 0.2);
+  });
+
+  it("binds every other column from the signed content, `at` as ISO text", async () => {
+    const at = new Date("2026-09-23T12:34:56.789Z");
+    const row = await recorder.record({
+      kind: "auth",
+      severity: "warn",
+      sourceIcon: "log-in",
+      what: "Sign-in throttled",
+      sub: "from 192.168.50.42",
+      actor: { type: "user", id: "uuid-alice" },
+      at,
+    });
+    expect(prismaState.insertParams[0]).toEqual([
+      "2026-09-23T12:34:56.789Z",
+      "warn",
+      "log-in",
+      "Sign-in throttled",
+      "from 192.168.50.42",
+      "auth",
+      null,
+      row.signature,
+      "",
+      "user",
+      "uuid-alice",
+      2,
+    ]);
+    expect(row.id).toBe(1n);
+    expect(row.at.toISOString()).toBe("2026-09-23T12:34:56.789Z");
+  });
+
+  it("refuses to report a row the INSERT did not return an id for", async () => {
+    const prisma = makePrismaFake().prisma;
+    const inner = prisma.$queryRawUnsafe.bind(prisma);
+    prisma.$queryRawUnsafe = async <T>(query: string, ...params: unknown[]) =>
+      (isActivityRowInsert(query) ? [] : await inner(query, ...params)) as T;
+    const broken = createActivityRecorder({ prisma: prisma as never, signer });
+    await expect(
+      broken.record({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "info",
+        what: "Boot",
+        actor: { type: "system" },
+      }),
+    ).rejects.toThrow(/ActivityRow INSERT returned no id/);
   });
 
   it("refs are persisted and covered by the signature", async () => {

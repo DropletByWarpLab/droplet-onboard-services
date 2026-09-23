@@ -27,6 +27,10 @@ import {
   type ActivityRowContent,
   type ActivityRowSigner,
 } from "../services/audit-signing.service.js";
+import {
+  activityRowFromInsert,
+  isActivityRowInsert,
+} from "./helpers/activity-row-insert.js";
 
 interface StoredRow {
   id: bigint;
@@ -60,36 +64,12 @@ function makePrismaFake() {
   return {
     rows,
     prisma: {
-      activityRow: {
-        async create({ data }: { data: Record<string, unknown> }) {
-          const refsRaw = data.refs;
-          const refsValue =
-            refsRaw === undefined ||
-            (typeof refsRaw === "object" &&
-              refsRaw !== null &&
-              (refsRaw as { _tag?: string })._tag === "Prisma.DbNull")
-              ? null
-              : (refsRaw as Record<string, unknown> | null);
-          const row: StoredRow = {
-            id: nextId++,
-            at: data.at as Date,
-            severity: data.severity as StoredRow["severity"],
-            sourceIcon: data.sourceIcon as string,
-            what: data.what as string,
-            sub: (data.sub as string | null) ?? null,
-            kind: data.kind as StoredRow["kind"],
-            refs: refsValue,
-            signature: data.signature as string,
-            prevSignatureHash: data.prevSignatureHash as string,
-            actorType: (data.actorType as StoredRow["actorType"]) ?? null,
-            actorId: (data.actorId as string | null) ?? null,
-            schemaVersion: data.schemaVersion as number,
-          };
+      async $queryRawUnsafe<T>(query: string, ...params: unknown[]): Promise<T> {
+        if (isActivityRowInsert(query)) {
+          const row = activityRowFromInsert(nextId++, params) as StoredRow;
           rows.push(row);
-          return row;
-        },
-      },
-      async $queryRawUnsafe<T>(): Promise<T> {
+          return [{ id: row.id }] as unknown as T;
+        }
         if (rows.length === 0) return [] as unknown as T;
         return [
           { signature: rows[rows.length - 1]!.signature },
