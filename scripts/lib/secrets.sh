@@ -7,6 +7,10 @@
 # when a caller sources secrets.sh standalone (tests, --sync-secrets).
 # shellcheck source=internal-ca.sh
 . "$(dirname "${BASH_SOURCE[0]}")/internal-ca.sh"
+# WARP-2548 — repair + assert that every mounted secret is readable by the
+# container uid that opens it (called at the end of materialize_artifacts).
+# shellcheck source=secret-readers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/secret-readers.sh"
 
 # Generate a random alphanumeric password of given length.
 _gen_password() {
@@ -1593,6 +1597,11 @@ materialize_artifacts() {
   sync_audit_signing_key
   sync_doc_kek_key
   sync_email_fernet_key
+  # WARP-2548: last, so it sees every file this function just wrote. Repairs
+  # pre-WARP-2154 key ownership/mode leftovers, then fails setup (set -e)
+  # when a non-root container reader can't open its secret — a loud setup
+  # error instead of a silent crash loop once the stack is up.
+  secret_readers_guard
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.

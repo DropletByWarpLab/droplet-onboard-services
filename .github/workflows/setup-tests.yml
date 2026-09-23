@@ -25,6 +25,12 @@ on:
       # lane too — otherwise a wrapper-only edit lands unchecked and the pin
       # detonates on the next unrelated scripts/** PR
       - "tests/mqtt-mtls.integration.test.sh"
+      # WARP-2548: every secret mount's reader uid vs the modes setup writes.
+      # The reader uid of a built image comes from its Dockerfile USER, so a
+      # Dockerfile edit must fire this lane too (docker-compose.yml already
+      # does). Dockerfile edits are rare: < 50 runner-min/month.
+      - "tests/secret-readers.test.sh"
+      - "**/Dockerfile"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
@@ -99,6 +105,12 @@ on:
       # lane too — otherwise a wrapper-only edit lands unchecked and the pin
       # detonates on the next unrelated scripts/** PR
       - "tests/mqtt-mtls.integration.test.sh"
+      # WARP-2548: every secret mount's reader uid vs the modes setup writes.
+      # The reader uid of a built image comes from its Dockerfile USER, so a
+      # Dockerfile edit must fire this lane too (docker-compose.yml already
+      # does). Dockerfile edits are rare: < 50 runner-min/month.
+      - "tests/secret-readers.test.sh"
+      - "**/Dockerfile"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
@@ -186,6 +198,14 @@ jobs:
         # WARP-235: single :8883 mTLS listener, per-CN topic ACLs, generator/
         # tracked-file parity, shared-password retirement. Pure bash, no Docker.
         run: bash tests/mosquitto-conf.test.sh
+      - name: Run secret-reader uid guard (WARP-2548)
+        # Every data/secrets mount in compose: derived reader uid vs the modes
+        # the real setup writers produce; SECRET_READERS parity; the host-side
+        # repair + check; the db/cache/broker start-time secret-guard.
+        run: |
+          python3 -c 'import yaml' 2>/dev/null \
+            || sudo apt-get install -y -qq python3-yaml
+          bash tests/secret-readers.test.sh
       - name: Run internal-mTLS wiring guards
         # WARP-1061: setup writes the knob, compose mounts every mesh bundle +
         # passes the knob where env_file is absent, images use the TLS-aware
