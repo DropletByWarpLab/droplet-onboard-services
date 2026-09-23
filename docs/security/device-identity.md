@@ -177,8 +177,10 @@ the device-id key, and the device-id key never signs an extension.
 The verifier is `apps/orchestrator/src/services/update-agent/extension-verify.ts`.
 Keys are chosen by the statement's own `kind`: `extension` accepts the box
 extension key (over the prefixed envelope) or the Warp Lab release key
-(cosign, over the raw statement); any other kind accepts the release key
-only, and a box-key signature on it is `key_usage_mismatch`. The asymmetry
+(cosign, over the raw statement). Any other kind is refused, whoever
+signed it, and cosign is never spawned for it: a box-key signature on it is
+`key_usage_mismatch`, anything else `extension_schema_invalid`, because this
+verifier accepts extension statements only. The asymmetry
 is one-way: the release key may vouch for an extension, the box key may
 never vouch for a release, and the OTA release verifier does not know the
 box key exists.

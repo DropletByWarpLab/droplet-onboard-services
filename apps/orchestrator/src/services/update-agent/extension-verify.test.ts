@@ -112,6 +112,30 @@ describe("verifyExtensionStatement: the box extension key (WARP-2900)", () => {
     expect(res).toMatchObject({ ok: false, failureReason: "key_usage_mismatch" });
   });
 
+  it("a release-key-signed statement of kind 'release' is refused before any cosign spawn", async () => {
+    // Review #2312: the non-extension branch used to run cosign for a result
+    // that could never be ok (the statement schema pins kind "extension").
+    // It refuses right after the key_usage_mismatch check now. NO_COSIGN
+    // points at a binary that does not exist, so a spawn would answer
+    // cosign_unavailable instead.
+    // MUTATION: put the releaseKeyVerifies() call back in that branch ->
+    // cosign_unavailable, red.
+    const res = await verifyExtensionStatement(
+      opts("extension.kind-release.json", "extension.kind-release.json.release.sig"),
+    );
+    expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
+  });
+
+  it.each([
+    ["no box key on the box", { boxKey: undefined }],
+    ["a box key that did not sign it", {}],
+  ])("a non-extension kind signed by no known key is refused without cosign (%s)", async (_l, extra) => {
+    const res = await verifyExtensionStatement(
+      opts("extension.kind-release.json", "extension.valid.json.neither.sig", extra),
+    );
+    expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
+  });
+
   it("(c) a statement with no kind is extension_kind_missing, before any key is tried", async () => {
     // MUTATION: drop the kind check -> the box key verifies it and the
     // result becomes schema_invalid or ok.
