@@ -47,7 +47,10 @@ import {
 } from "./business-profile.service.js";
 import { buildBrainBlock, BRAIN_BLOCK_CHAR_BUDGET } from "./brain/brain-block.service.js";
 import { INTERVIEW_CONDUCTOR_BLOCK } from "./business-onboarding.service.js";
-import { OFF_LAN_WITHHELD_NOTICE } from "./stored-content-egress.service.js";
+import {
+  OFF_LAN_WITHHELD_NOTICE,
+  withholdPromptBlocksForOffLan,
+} from "./stored-content-egress.service.js";
 import { CONTEXT_PIN_BLOCK_MAX_CHARS } from "./context-pin-prompt.js";
 import { MEMORY_FACTS_CHAR_BUDGET } from "./tool-budget.service.js";
 import {
@@ -74,7 +77,9 @@ export type PromptBlockStatus =
   /** Present, but the budget gate would drop it on this turn. */
   | "dropped"
   /** Real, and outside what this inspector can reconstruct — see `note`. */
-  | "not_modelled";
+  | "not_modelled"
+  /** WARP-2746 — composed, but never sent on a cloud-model turn. */
+  | "withheld_off_lan";
 
 export interface PromptBlockView {
   /** Stable machine key. The UI's grouping and the tests both key on this. */
@@ -299,6 +304,19 @@ export async function inspectPromptForPerson(
       "Pins belong to a conversation, not to a person, and are prepended as " +
       "their own system message. This view is per person, so it does not show them.",
   };
+
+  // WARP-2746 — the route's off-LAN filter, not a copy of it: the same
+  // function decides, so this page cannot show a block the turn withholds.
+  const gate = withholdPromptBlocksForOffLan(
+    { memory: memory.text ?? "", brain: brain.text ?? "", business: business.text ?? "" },
+    offLan,
+  );
+  for (const view of [memory, brain, business]) {
+    if (!gate.withheld.includes(view.key as "memory" | "brain" | "business")) continue;
+    view.status = "withheld_off_lan";
+    view.text = null;
+    view.note = "Not sent on a cloud-model turn: stored content stays on the Droplet.";
+  }
 
   const blocks = [
     identity,
