@@ -63,6 +63,9 @@ export const UPDATE_EVENTS = {
   "update.env_reconciled": "apply",
   /** error — WARP-2995: host .env reconcile failed; release refused before any swap. */
   "update.env_reconcile_failed": "apply",
+  /** warn — the installed helper predates reconcile-env; step 3b skipped
+   *  (additive), so an OTA-only box is never stranded (#2320 review). */
+  "update.env_reconcile_skipped": "apply",
   /** info — step 4 done: `prisma migrate deploy` for this build ran. */
   "update.migrations_applied": "apply",
   /** info — verifying → applying committed; container swaps begin. */

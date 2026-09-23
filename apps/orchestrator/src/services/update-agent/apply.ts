@@ -218,6 +218,20 @@ export interface ApplyRunner {
   }): Promise<{ started: string[] }>;
 }
 
+/**
+ * WARP-2995 / #2320 review — the box's helper cannot reconcile at all (it is
+ * older than the subcommand). step 3b logs a skip instead of refusing the
+ * release: the reconcile is additive, and refusing would strand an OTA-only
+ * box forever, since the fix would itself have to arrive as a release.
+ */
+export class ReconcileUnsupportedError extends Error {
+  constructor(cause: unknown) {
+    super("the installed OTA helper has no reconcile-env subcommand");
+    this.name = "ReconcileUnsupportedError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
 /** One health-probe attempt; true = healthy. */
 export type HealthProbe = (service: ReleaseService) => Promise<boolean>;
 
@@ -801,7 +815,21 @@ export async function applyPendingUpdate(
   const selfService = manifest.services.find((s) => s.name === SELF_SERVICE_NAME);
   try {
     if (!selfService) throw new Error("manifest has no orchestrator image to run the reconcile from");
-    const report = await runner.reconcileEnv({ updateId: row.id, image: selfService.image });
+    const report = await runner.reconcileEnv({ updateId: row.id, image: selfService.image }).catch(
+      (err: unknown) => {
+        // The box's helper predates reconcile-env (only a helper OTA never
+        // updated). Skip — the reconcile is additive — rather than refuse
+        // every release from now on with no remote way out. Any other
+        // failure still refuses below.
+        if (!(err instanceof ReconcileUnsupportedError)) throw err;
+        log.warn(
+          { event: "update.env_reconcile_skipped", deviceUpdateId: row.id, reason: "helper_unsupported" },
+          "OTA step 3b skipped — the installed helper has no reconcile-env; .env left as it is",
+        );
+        return null;
+      },
+    );
+    if (report) {
     log.info(
       {
         event: "update.env_reconciled",
@@ -812,6 +840,7 @@ export async function applyPendingUpdate(
       },
       "OTA step 3b — host .env reconciled (additive; key names only)",
     );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     await runner.restoreConfigs({ updateId: row.id });
