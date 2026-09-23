@@ -1365,6 +1365,28 @@ export async function fetchTlsCertificate(): Promise<TlsCertificate> {
   return res.json();
 }
 
+/** WARP-1405 — backup health (GET /api/backup/status), computed server-side
+ *  from the host backup's explicit status file. */
+export type BackupHealth = "healthy" | "pending" | "failing" | "overdue" | "key_mismatch" | "not_reporting";
+export interface BackupStatus {
+  health: BackupHealth;
+  alerting: boolean;
+  reason: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastAttemptAt: string | null;
+  lastRekeyAt: string | null;
+  windowHours: number;
+}
+
+export async function fetchBackupStatus(): Promise<BackupStatus> {
+  const res = await fetch(`${BASE}/api/backup/status`, { credentials: "include" });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch backup status: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Network / Router ---
 
 export type RouterErrorCode =

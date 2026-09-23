@@ -474,6 +474,12 @@ services:
       # `intent` by mktemp+rename, and a single-FILE bind is detached from the
       # container the moment its inode is replaced (the WARP-1908 failure).
       - /var/lib/droplet-ssh-access/intent.d:/var/lib/droplet-ssh-access/intent.d
+      # WARP-1405: the host restic backup's explicit status file
+      # (scripts/host/droplet-backup.sh writes status.json on EVERY exit),
+      # READ-ONLY — the orchestrator only reports it (Settings card + the
+      # hourly backup-health notification). A dedicated directory, NOT the
+      # backup state dir, which holds the staged pg_dumps.
+      - /var/lib/droplet/backup-status:/var/lib/droplet/backup-status:ro
       # WARP-234/236: this service's internal-TLS bundle (cert/key/ca) at the
       # canonical /data/service-tls path — the Redis client reads ca.pem.
       - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro

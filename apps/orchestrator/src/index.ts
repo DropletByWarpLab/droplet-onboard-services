@@ -92,6 +92,7 @@ import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import { createTlsNotifier } from "./services/tls-notify.service.js";
+import { createBackupHealthCheck } from "./services/backup-health.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
@@ -1635,6 +1636,21 @@ async function main() {
   // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
   // the setup route reads it via reissueTlsNow() (a no-op until this runs).
   initTlsReissueHook(() => tlsIssuance.runOnce());
+
+  // WARP-1405 — backups can no longer fail silently. The host backup writes an
+  // explicit status file on every exit; this hourly check turns "no success in
+  // 48 h" or "repository no longer opens with this box's key" into ONE owner +
+  // admin notification per outage (deduped on NotificationLog, like
+  // tls-notify). lockKey: one replica per tick. Errors propagate to safeRun so
+  // the cron canary sees them.
+  const backupHealthCheck = createBackupHealthCheck({ prisma });
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      await backupHealthCheck.runOnce();
+    },
+    { lockKey: "droplet:backup-health" },
+  );
   // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
   // reflash gets its publicly-trusted cert within seconds instead of waiting up
   // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
