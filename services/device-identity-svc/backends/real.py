@@ -125,6 +125,18 @@ class RealBackend:
             finally:
                 esapi.flush_context(handle)
 
+    def sign_extension(self, statement: bytes) -> bytes:
+        """WARP-2900: the TPM backend has no extension key yet. Fail closed:
+        the gRPC handler maps this to FAILED_PRECONDITION and the promote route
+        to 503. Never fall back to the device-id key."""
+        raise NotImplementedError(
+            "the real (TPM) backend does not hold an extension-signing key yet"
+        )
+
+    def extension_public_key(self) -> tuple[bytes, str] | None:
+        """No extension key on the TPM backend yet (see sign_extension)."""
+        return None
+
     def get_cert_pem(self) -> bytes:
         if not self.is_provisioned():
             raise RuntimeError("not provisioned")
@@ -149,6 +161,8 @@ class RealBackend:
                 "seal_valid": False,
                 "last_reseal_at": "",
                 "current_pcr_snapshot": pcr_snapshot,
+                "extension_spki_der": b"",
+                "extension_key_fingerprint": "",
             }
         info = self._storage.read_provisioned() or {}
         cert = x509.load_pem_x509_certificate(self.get_cert_pem())
@@ -163,6 +177,8 @@ class RealBackend:
             "seal_valid": seal_valid,
             "last_reseal_at": self._last_reseal_at,
             "current_pcr_snapshot": pcr_snapshot,
+            "extension_spki_der": b"",
+            "extension_key_fingerprint": "",
         }
 
     def reseal(self) -> dict:

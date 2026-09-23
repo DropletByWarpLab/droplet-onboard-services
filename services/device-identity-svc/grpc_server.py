@@ -12,6 +12,12 @@ from typing import Optional
 
 import grpc
 
+from extension_signing import (
+    EXTENSION_KEY_USAGE,
+    EXTENSION_SIGNATURE_ALGORITHM,
+    StatementRefused,
+    validate_statement,
+)
 from grpc_generated import device_identity_pb2 as pb
 from grpc_generated import device_identity_pb2_grpc as pb_grpc
 
@@ -99,6 +105,8 @@ class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
             current_pcr_snapshot={
                 int(k): v for k, v in s["current_pcr_snapshot"].items()
             },
+            extension_spki_der=s["extension_spki_der"],
+            extension_key_fingerprint=s["extension_key_fingerprint"],
         )
 
     def Reseal(self, request, context):
@@ -115,4 +123,46 @@ class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
             resealed=result["resealed"],
             sealed_at=result["sealed_at"],
             new_pcr_snapshot_indices=result["new_pcr_snapshot_indices"],
+        )
+
+    def SignExtensionManifest(self, request, context):
+        """WARP-2900: sign an extension statement with the EXTENSION key.
+
+        Order matters: provisioned -> the statement is an extension statement
+        (INVALID_ARGUMENT otherwise) -> sign PREFIX || statement. A backend
+        that holds no extension key (the TPM scaffold) is FAILED_PRECONDITION,
+        which the orchestrator surfaces as a 503. The device-id key is never
+        a fallback."""
+        if not self._backend.is_provisioned():
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("device not provisioned")
+            return pb.SignExtensionManifestResponse()
+        try:
+            validate_statement(request.statement)
+        except StatementRefused as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"statement refused: {exc}")
+            return pb.SignExtensionManifestResponse()
+        try:
+            sig = self._backend.sign_extension(request.statement)
+            ext = self._backend.extension_public_key()
+        except NotImplementedError:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(
+                f"backend {self._backend.name!r} holds no extension-signing key"
+            )
+            return pb.SignExtensionManifestResponse()
+        if ext is None:
+            # A signature nobody can attribute to a recorded key is useless to
+            # the verifier; refuse instead of returning it.
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("extension key missing after signing")
+            return pb.SignExtensionManifestResponse()
+        spki_der, _fingerprint = ext
+        logger.info("extension statement signed (%d bytes)", len(request.statement))
+        return pb.SignExtensionManifestResponse(
+            signature=sig,
+            algorithm=EXTENSION_SIGNATURE_ALGORITHM,
+            extension_spki_der=spki_der,
+            key_usage=EXTENSION_KEY_USAGE,
         )
