@@ -2,10 +2,15 @@
  * WARP-539 — production ApplyRunner: the compose-over-socket implementation
  * of the port apply.ts owns. This is the ONLY module in the orchestrator
  * that drives the host Docker daemon, and it does so through exactly one
- * host helper — scripts/lib/apply-update.sh — invoked with an ARGV ARRAY
+ * host helper — docker/ota/apply-update.sh — invoked with an ARGV ARRAY
  * (never a shell string). A manifest field (service name, image ref) can
- * therefore never be reinterpreted as a shell command: `execFile` hands the
- * tokens straight to the script with no `/bin/sh -c` in between.
+ * therefore never be reinterpreted as a shell command.
+ *
+ * WARP-3007: in production the exec boundary is host-exec.ts — the helper
+ * runs ON THE HOST in a one-shot `chroot /host` container (the orchestrator
+ * image has no docker CLI and cannot read the host .env). Paths handed to the
+ * helper are therefore HOST paths (`helperUpdatesDir`); files this module
+ * writes itself go through its own mount (`updatesDir`). Same volume.
  *
  * ── SECURITY POSTURE (why this exists + how it's fenced) ──
  * The apply step recreates every appliance container — INCLUDING the
@@ -76,16 +81,21 @@ const defaultLog = createLogger("update-agent");
 export type ExecFn = (
   file: string,
   args: string[],
-  opts?: { timeoutMs?: number },
+  /** `env` is added for this call only (the host exec passes it through). */
+  opts?: { timeoutMs?: number; env?: Record<string, string> },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export interface HostComposeRunnerOptions {
-  /** Absolute path to the host helper (scripts/lib/apply-update.sh). */
+  /** Absolute HOST path of the helper (docker/ota/apply-update.sh). */
   scriptPath: string;
   /** Absolute path to the on-host compose file the script drives. */
   composeFile: string;
-  /** Root under which <updateId>/{backup,configs.tar.gz} are staged. */
+  /** Root under which <updateId>/{backup,configs.tar.gz} are staged (this process's view). */
   updatesDir: string;
+  /** The same directory as the HELPER sees it (host path). Default: updatesDir. */
+  helperUpdatesDir?: string;
+  /** Private-GHCR token, handed to pull-images only (never another call). */
+  githubToken?: string;
   exec?: ExecFn;
   logger?: pino.Logger;
   /**
@@ -185,7 +195,7 @@ function composeOverrideYaml(
   const lines = [
     `# WARP-539 — GENERATED compose override for update ${updateId}: pins every`,
     `# service deployed on this box to its ${target} image ref. Consumed by`,
-    `# scripts/lib/apply-update.sh as the second -f (base + override) so`,
+    `# docker/ota/apply-update.sh as the second -f (base + override) so`,
     `# build:-only services are recreated FROM the pinned ref, never from the`,
     `# local build. DO NOT EDIT — rewritten by the orchestrator's snapshot step.`,
     "services:",
@@ -279,10 +289,11 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     subcommand: string,
     args: string[],
     timeoutMs: number,
+    env?: Record<string, string>,
   ): Promise<string> {
     const argv = [subcommand, ...composeArgs, ...args];
     try {
-      const { stdout } = await exec(opts.scriptPath, argv, { timeoutMs });
+      const { stdout } = await exec(opts.scriptPath, argv, env ? { timeoutMs, env } : { timeoutMs });
       return stdout;
     } catch (err) {
       log.error(
@@ -300,6 +311,11 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
 
   function updateDir(updateId: string): string {
     return path.join(opts.updatesDir, updateId);
+  }
+
+  /** The same update dir, as the helper sees it. */
+  function helperUpdateDir(updateId: string): string {
+    return path.join(opts.helperUpdatesDir ?? opts.updatesDir, updateId);
   }
 
   return {
@@ -371,7 +387,7 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       // pg_dump into the same backup dir.
       await run(
         "snapshot",
-        ["--update-id", args.updateId, "--backup-dir", backupDir],
+        ["--update-id", args.updateId, "--backup-dir", path.join(helperUpdateDir(args.updateId), "backup")],
         timeouts.quickMs,
       );
     },
@@ -381,6 +397,7 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         "pull-images",
         ["--images", ...services.map((s) => s.image)],
         timeouts.pullMs,
+        opts.githubToken ? { DROPLET_OTA_GITHUB_TOKEN: opts.githubToken } : undefined,
       );
     },
 
@@ -395,7 +412,12 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       await writeFile(tarPath, args.configsTar);
       await run(
         "stage-configs",
-        ["--update-id", args.updateId, "--configs-tar", tarPath],
+        [
+          "--update-id",
+          args.updateId,
+          "--configs-tar",
+          path.join(helperUpdateDir(args.updateId), "configs.tar.gz"),
+        ],
         timeouts.quickMs,
       );
     },

@@ -10,10 +10,9 @@
 # stayed missing there. This file travels with each release, and the release
 # that needs a key carries the code that adds it.
 #
-# HOW IT RUNS: scripts/lib/apply-update.sh `reconcile-env` launches it on the
-# HOST (a one-shot `chroot /host` container off the verified release image),
-# after stage-configs and BEFORE any container swap. The orchestrator itself
-# cannot read .env (WARP-1669: it mounts docker/ only).
+# HOW IT RUNS: docker/ota/apply-update.sh `reconcile-env` runs it on the HOST
+# (the helper itself runs there, WARP-3007), after stage-configs and BEFORE
+# any container swap. The orchestrator itself cannot read .env.
 #
 # CONTRACT (never broken, pinned by scripts/test/ota-env-reconcile.test.sh):
 #   * ADDITIVE: a key is written only when no assignment to it exists —
@@ -91,7 +90,8 @@ assigns() { grep -Eq "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$2"; }
 # Keys OTA may add: bearer tokens both ends read from .env (no file for setup
 # to materialize) and fixed defaults. Mirrors migrate_env's backfills; the
 # drift test fails when migrate_env gains a key that is in neither list below.
-#   hex32/hex64 = fresh random hex; =VALUE = that literal (may be empty).
+#   hex32/hex64 = fresh random hex; =VALUE = that literal (may be empty);
+#   @PATH = <repo-root>/PATH.
 # DEVICE_SECRET (WARP-2985): added only when ABSENT, like every key here.
 #   migrate_env also replaces an empty or publicly-known value; OTA does not
 #   (existing values are never touched). Every setup.sh-written .env has had a
@@ -131,6 +131,7 @@ DROPLET_TPM_BACKEND =mock
 DROPLET_FIPS_MODE =0
 DROPLET_ENV =production
 DROPLET_INTERNAL_TLS =0
+DROPLET_OTA_APPLY_SCRIPT @docker/ota/apply-update.sh
 '
 # migrate_env keys OTA must NOT add. setup.sh owns them:
 #   ROUTING_MODE, SMB_ENABLED, COMPOSE_PROFILES - platform-shaped defaults
@@ -177,6 +178,7 @@ echo "$ENSURE_KEYS" | while read -r key gen; do
     hex32) val="$(rand_hex 32)" ;;
     hex64) val="$(rand_hex 64)" ;;
     =*) val="${gen#=}" ;;
+    @*) val="$ROOT/${gen#@}" ;;
     *) die "bad generator for $key: $gen" ;;
   esac
   printf '%s=%s\n' "$key" "$val" >> "$STAGE"

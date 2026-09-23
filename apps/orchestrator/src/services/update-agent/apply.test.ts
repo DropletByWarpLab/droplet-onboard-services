@@ -8,7 +8,7 @@
  * only the base-URL mapping injected), and the DeviceUpdate / SystemFlag /
  * ApplianceSetup store is an in-memory stand-in. The compose-over-socket
  * mechanics are behind the ApplyRunner port — the fake here mimics the
- * scripts/lib/apply-update.sh contract exactly (including the detached
+ * docker/ota/apply-update.sh contract exactly (including the detached
  * self-swap helper's health-wait + auto-rollback behaviour), because the
  * real thing recreates Docker containers on the appliance.
  *
@@ -351,7 +351,7 @@ function createLoggerSpy() {
 }
 
 // ---------------------------------------------------------------------------
-// Fake ApplyRunner — mimics the scripts/lib/apply-update.sh contract,
+// Fake ApplyRunner — mimics the docker/ota/apply-update.sh contract,
 // including the detached self-swap helper's health-wait + auto-rollback.
 // ---------------------------------------------------------------------------
 
@@ -1107,5 +1107,90 @@ describe("imageRefMatchesDigest", () => {
     expect(imageRefMatchesDigest(`ghcr.io/x/y@${d}`, d)).toBe(true);
     expect(imageRefMatchesDigest(PREVIOUS.orchestrator!, d)).toBe(false);
     expect(imageRefMatchesDigest(null, d)).toBe(false);
+  });
+});
+
+describe("WARP-3017 — the resume gates wait for this orchestrator to listen", () => {
+  function listenGate() {
+    let listening = false;
+    let markListening!: () => void;
+    const whenListening = new Promise<void>((r) => {
+      markListening = () => {
+        listening = true;
+        r();
+      };
+    });
+    const probedBeforeListen: string[] = [];
+    const probe = async (svc: ReleaseService) => {
+      if (!listening) probedBeforeListen.push(svc.name);
+      return healthy[svc.name] ?? true;
+    };
+    return { whenListening, markListening, probe, probedBeforeListen };
+  }
+
+  it("never probes before listen, then commits once the server listens", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    const g = listenGate();
+
+    const resuming = resumeInterruptedApply({
+      ...baseOpts(prisma, runner),
+      probe: g.probe,
+      healthGate: { attempts: 20, intervalMs: 10 }, // 200 ms listen bound
+      whenListening: g.whenListening,
+    });
+    setTimeout(g.markListening, 40);
+    const resume = await resuming;
+
+    expect(g.probedBeforeListen).toEqual([]);
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+  });
+
+  it("an orchestrator that never listens within the bound is rolled back, unprobed", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    const g = listenGate();
+
+    const resume = await resumeInterruptedApply({
+      ...baseOpts(prisma, runner, logger),
+      probe: g.probe,
+      whenListening: g.whenListening, // never resolved
+    });
+
+    expect(g.probedBeforeListen).toEqual([]);
+    expect(resume.outcome).toBe("self_rollback_started");
+    expect(runner.calls).toContain("recreateSelfDetached(du-1,previous)");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.health_gate_failed", phase: "listen" }),
+      expect.any(String),
+    );
+  });
+
+  it("the OLD orchestrator's verdict gate waits for listen too", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    healthy["web-dashboard"] = false;
+    await resumeInterruptedApply(baseOpts(prisma, runner)); // starts the full rollback
+    healthy["web-dashboard"] = true;
+    const g = listenGate();
+
+    const verdict = resumeInterruptedApply({
+      ...baseOpts(prisma, runner),
+      probe: g.probe,
+      healthGate: { attempts: 20, intervalMs: 10 },
+      whenListening: g.whenListening,
+    });
+    setTimeout(g.markListening, 40);
+
+    expect((await verdict).outcome).toBe("rolled_back");
+    expect(g.probedBeforeListen).toEqual([]);
   });
 });

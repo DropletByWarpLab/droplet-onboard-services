@@ -1914,10 +1914,12 @@ entries:
       # IDENTITY string matched inside the Fulcio-issued signing cert (GitHub
       # Actions OIDC); the box never opens a connection to it. cosign's only
       # network at verify time is in-process HTTPS to ghcr.io (the same
-      # registry the pull itself uses).
+      # registry the pull itself uses). WARP-3007: the helper runs on the
+      # host, so cosign runs in a throwaway `docker run --rm` off the
+      # orchestrator's own pinned image — same binary, same destination.
       hosts: [token.actions.githubusercontent.com]
     purpose: cosign keyless-signature OIDC issuer identity matched during OFFLINE OTA image verification — not a connection the box makes
     ticket: WARP-244
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [scripts/lib/apply-update.sh]
+    code_refs: [docker/ota/apply-update.sh]

@@ -107,9 +107,14 @@ export const UPDATE_EVENTS = {
   /** info — channel / applyWindowCron / autoApply changed (old → new). */
   "update.settings_changed": "settings",
 
-  // ── host helper boundary (host-compose-runner.ts) ──
-  /** error — scripts/lib/apply-update.sh exited non-zero. */
+  // ── host helper boundary (host-compose-runner.ts / host-exec.ts) ──
+  /** error — docker/ota/apply-update.sh exited non-zero. */
   "update.host_script_failed": "host-compose-runner",
+  /** info — WARP-3007: host exec context resolved at boot; apply is live. */
+  "update.host_exec_ready": "host-exec",
+  /** error — WARP-3007: apply is enabled but the host exec context could not
+   *  be resolved (no socket / no updates volume); apply stays off. */
+  "update.host_exec_unavailable": "host-exec",
 
   // ── retention GC (purge-update-backups.ts / purge-self-swap-helpers.ts) ──
   /** info — stale terminal-update rollback backups removed. */

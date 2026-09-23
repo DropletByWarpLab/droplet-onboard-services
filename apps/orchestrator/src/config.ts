@@ -933,23 +933,20 @@ const envSchema = z.object({
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
   // WARP-539 — apply + health-gated swap + auto-rollback. The apply path is the
   // ONLY thing that drives the host Docker daemon, and only through the audited
-  // host helper scripts/lib/apply-update.sh over the mounted compose socket
+  // host helper docker/ota/apply-update.sh over the mounted compose socket
   // (docker/docker-compose.yml, orchestrator service ONLY — see the WARP-539
   // volume comment there).
-  //   APPLY_SCRIPT   — absolute path to apply-update.sh as mounted in the
-  //                    orchestrator container. Empty (the default) DISABLES the
-  //                    apply window: the box still polls + tracks pending
-  //                    releases, but never swaps containers. This is the correct
-  //                    posture for dev laptops + CI (no host socket) and until
-  //                    the compose socket mount is provisioned on a box.
-  //   COMPOSE_FILE   — the compose file the helper drives. WARP-1669: this
-  //                    path must be valid BOTH on the host and inside the
-  //                    orchestrator container, because the compose CLI runs
-  //                    in-container while the daemon resolves the file's
-  //                    relative bind mounts on the host. docker-compose.yml
-  //                    mounts the tree at its own host path (DROPLET_HOST_ROOT)
-  //                    to satisfy that; the default below is only the
-  //                    conventional install location.
+  //   APPLY_SCRIPT   — the ENABLE flag (WARP-3007). Empty (the default)
+  //                    DISABLES the apply window: the box still polls + tracks
+  //                    pending releases, but never swaps containers — the
+  //                    correct posture for dev laptops + CI. Any value enables
+  //                    it; by convention the helper's host path. The helper
+  //                    that runs is ALWAYS <CONFIG_ROOT>/docker/ota/
+  //                    apply-update.sh, shipped in every release and executed
+  //                    ON THE HOST (host-exec.ts). setup.sh writes it on
+  //                    Linux (on by default, WARP-3007); macOS gets it empty.
+  //   COMPOSE_FILE   — HOST path of the compose file the helper drives
+  //                    (derived from DROPLET_HOST_ROOT by docker-compose.yml).
   //   CONFIG_ROOT    — where a release's configs.tar.gz is extracted. CI packs
   //                    it as `docker/…` (`git archive HEAD docker`), so this is
   //                    the REPO ROOT, one level above the compose file. The
