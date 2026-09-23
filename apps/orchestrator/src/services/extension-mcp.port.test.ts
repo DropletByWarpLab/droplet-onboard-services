@@ -18,7 +18,7 @@ import path from "node:path";
 
 vi.mock("../config.js", () => ({ config: { SANDBOX_URL: "http://sandbox:8030", SANDBOX_SERVICE_TOKEN: "t" } }));
 
-import { ExtensionMcpPort } from "./extension-mcp.port.js";
+import { ExtensionListingMismatchError, ExtensionMcpPort } from "./extension-mcp.port.js";
 import { ExtensionSandboxError } from "./extension-sandbox.client.js";
 
 type Rpc = (slug: string, message: unknown, timeoutMs?: number) => Promise<{ status: number; json: unknown }>;
@@ -62,6 +62,35 @@ describe("listTools", () => {
     for (const r of bad) {
       const { port: p } = port(async () => r);
       await expect(p.listTools()).rejects.toThrow();
+    }
+  });
+});
+
+describe("a port pinned to the signed manifest", () => {
+  const signed = [{ name: "word_count", description: "Count words.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
+  const pinnedPort = (tools: unknown[]) =>
+    new ExtensionMcpPort({
+      slug: "wc",
+      pinned: signed,
+      sandbox: { rpc: async (_s, m) => ok((m as { id: number }).id, { tools }) },
+    });
+
+  it("returns the manifest's copy when the listing matches (key order in the schema does not matter)", async () => {
+    const tools = await pinnedPort([{ name: "word_count", description: "Count words.", inputSchema: { properties: { text: { type: "string" } }, type: "object" } }]).listTools();
+    expect(tools).toEqual(signed);
+  });
+
+  it("throws a mismatch for any difference in names, descriptions or schemas", async () => {
+    const variants = [
+      [],
+      [{ ...signed[0], name: "words" }],
+      [{ ...signed[0], description: "Harmless." }],
+      [{ ...signed[0], inputSchema: { type: "object" } }],
+      [signed[0], signed[0]],
+      [signed[0], { name: "more", description: "x", inputSchema: { type: "object" } }],
+    ];
+    for (const v of variants) {
+      await expect(pinnedPort(v).listTools()).rejects.toBeInstanceOf(ExtensionListingMismatchError);
     }
   });
 });

@@ -31,6 +31,17 @@
  * mcp-client.singleton reads it to decide which extension servers may
  * attach; it is maintained here, from the database, never from env.
  *
+ * LIVE MEANS ATTACHED (H3). `installed` is "the sandbox runs it"; `live` is
+ * "and its tools are in this orchestrator's runtime layer". After a start
+ * the attach port (extension-attach.service) lists the extension's tools
+ * through the relay and checks them against the signed manifest. A listing
+ * that differs is refused for good: the row goes `failed` and the process
+ * is stopped. An extension that does not answer yet stays `installed` and
+ * the reconciler attaches it on a later tick — the same tick that
+ * re-attaches every running extension after an orchestrator restart, since
+ * the attachment lives in this process's memory and the sandbox's process
+ * outlives it.
+ *
  * AUDIT: every transition writes a `tool_run` activity row with
  * `refs.extensionId` and `refs.op` — no new activity kind.
  */
@@ -202,7 +213,8 @@ export type ExtensionLifecycleErrorCode =
   | "wrong_state"
   | "verify_failed"
   | "install_failed"
-  | "supervision_off";
+  | "supervision_off"
+  | "attach_refused";
 
 export class ExtensionLifecycleError extends Error {
   constructor(
@@ -216,10 +228,41 @@ export class ExtensionLifecycleError extends Error {
   }
 }
 
-/** H3 plugs the multiplexer attach/detach in here; H2 has nothing to attach. */
+/**
+ * The multiplexer attach/detach (extension-attach.service, H3). `attach`
+ * throws {@link ExtensionAttachError}; `isAttached` lets the reconciler find
+ * a running extension this process has not attached (an orchestrator
+ * restart). Without `isAttached` the reconciler never re-attaches.
+ */
 export interface ExtensionAttachPort {
-  attach(slug: string): Promise<void>;
+  attach(slug: string): Promise<unknown>;
   detach(slug: string): Promise<void>;
+  isAttached?(slug: string): boolean;
+}
+
+export type ExtensionAttachErrorCode =
+  | "sandbox_url_refused"
+  | "not_promoted"
+  | "manifest_invalid"
+  | "listing_unavailable"
+  | "listing_mismatch"
+  | "attach_rejected";
+
+/**
+ * Why an attach did not happen. `permanent` is the lifecycle's switch: a
+ * permanent refusal (the listing is not what was signed, the server is not
+ * allowed) fails the extension and stops its process; a transient one (it
+ * did not answer) leaves it `installed` for the reconciler to retry.
+ */
+export class ExtensionAttachError extends Error {
+  constructor(
+    readonly code: ExtensionAttachErrorCode,
+    readonly permanent: boolean,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ExtensionAttachError";
+  }
 }
 
 export interface ExtensionKeySource {
@@ -263,16 +306,17 @@ export interface ReconcileReport {
   checked: number;
   restarted: string[];
   failed: string[];
+  /** Running in the sandbox, attached again by this tick (H3). */
+  reattached: string[];
   skipped?: "supervision_off";
 }
 
 export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
   const { prisma, sandbox, identity } = deps;
   const audit = deps.audit ?? recordActivity;
-  const attach: ExtensionAttachPort = deps.attach ?? {
-    attach: async () => {},
-    detach: async () => {},
-  };
+  // No port → nothing is attached, and nothing claims to be: the row stays
+  // `installed` (`live` is only ever written after a real attach).
+  const attach: ExtensionAttachPort | null = deps.attach ?? null;
 
   async function record(
     op: LifecycleOp,
@@ -424,14 +468,69 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       data: { status: "installed", failureReason: null },
     });
     if (done.count === 0) return undoOvertakenInstall(slug, actor, op);
-    const row = await load(slug);
     installedExtensionIds.add(extensionServerId(slug));
-    await attach.attach(slug);
     await record(op, slug, actor, {
       what: op === "enable" ? "Extension enabled" : op === "reconcile" ? "Extension restarted" : "Extension installed",
       refs: { version: v.version, runtime: manifest.runtime, memoryMb: manifest.resources.memoryMb },
     });
-    return row;
+    if (attach) await goLive(attach, slug, actor, op);
+    return load(slug);
+  }
+
+  /**
+   * Attach a running extension and move it to `live`. A permanent refusal
+   * fails it and stops the process; a transient one leaves it `installed`
+   * (with the reason) for the reconciler. Only rows still running may go
+   * live: a disable that landed meanwhile wins, and what this attached is
+   * taken down again.
+   */
+  async function goLive(attach: ExtensionAttachPort, slug: string, actor: ActivityActor, op: InstallOp): Promise<void> {
+    const from: readonly ExtensionStatusName[] = ["installed", "live"];
+    try {
+      await attach.attach(slug);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const permanent = err instanceof ExtensionAttachError ? err.permanent : false;
+      if (!permanent) {
+        logger.warn({ err, slug }, "extension_attach_pending");
+        await prisma.extension.updateMany({
+          where: { id: slug, status: { in: [...from] } },
+          data: { status: "installed", failureReason: `attach_pending: ${message}`.slice(0, 1000) },
+        });
+        // One row per owner action, not one per reconciler tick.
+        if (op !== "reconcile") {
+          await record(op, slug, actor, {
+            severity: "warn",
+            what: "Extension running, its tools not attached yet",
+            refs: { error: message.slice(0, 300) },
+          });
+        }
+        return;
+      }
+      await attach.detach(slug).catch(() => undefined);
+      const failed = await markFailed(slug, `attach_refused: ${message}`, from);
+      try {
+        await sandbox.stop(slug);
+      } catch (e) {
+        logger.warn({ err: e, slug }, "extension_stop_after_refused_attach_failed");
+      }
+      if (!failed) return;
+      await record(op, slug, actor, {
+        severity: "warn",
+        what: "Extension refused: its tools are not what was signed",
+        refs: { error: message.slice(0, 300), code: err instanceof ExtensionAttachError ? err.code : null },
+      });
+      throw new ExtensionLifecycleError("attach_refused", 409, message);
+    }
+    const live = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
+      data: { status: "live", failureReason: null },
+    });
+    if (live.count === 0) {
+      // Disabled or uninstalled while it was attaching: that stands.
+      installedExtensionIds.delete(extensionServerId(slug));
+      await attach.detach(slug);
+    }
   }
 
   /**
@@ -458,7 +557,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
 
   async function stopAndDetach(slug: string): Promise<void> {
     installedExtensionIds.delete(extensionServerId(slug));
-    await attach.detach(slug);
+    if (attach) await attach.detach(slug);
   }
 
   return {
@@ -525,7 +624,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         where: { status: { in: [...RUNNING_EXTENSION_STATUSES] } },
         select: { id: true },
       });
-      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [] };
+      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [], reattached: [] };
       for (const { id } of rows) {
         let st: SandboxExtensionStatus | null = null;
         try {
@@ -539,6 +638,17 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         }
         if (st?.running === true) {
           installedExtensionIds.add(extensionServerId(id));
+          // Running, but not attached in THIS process: an orchestrator
+          // restart, or an attach that did not answer last time.
+          if (attach?.isAttached && !attach.isAttached(id)) {
+            try {
+              await goLive(attach, id, SYSTEM_ACTOR, "reconcile");
+              if (attach.isAttached(id)) report.reattached.push(id);
+            } catch (err) {
+              logger.warn({ err, slug: id }, "extension_reconcile_reattach_failed");
+              report.failed.push(id);
+            }
+          }
           continue;
         }
         const proc = st?.process ?? null;

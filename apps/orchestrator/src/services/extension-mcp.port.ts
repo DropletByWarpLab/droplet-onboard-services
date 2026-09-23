@@ -17,6 +17,14 @@
  * code puts on the wire is dropped here, so no later reader can mistake it
  * for a privilege claim. The classification record (WARP-2426) decides.
  *
+ * PINNED TO THE SIGNED MANIFEST. The attach path hands the port the tools
+ * the verified manifest provides (`pinned`). Every listing is compared with
+ * them — names, descriptions, input-schema hashes — and a listing that
+ * differs throws {@link ExtensionListingMismatchError}: the extension's own
+ * code runs in the shim's process, so a listing that drifts after attach
+ * is a changed surface, and the multiplexer stops advertising it
+ * (REMOTE_CATALOG_UNAVAILABLE) rather than absorbing it.
+ *
  * A FAILED CALL IS A TOOL ERROR. A JSON-RPC error, a relay refusal (the
  * extension is not running) or a sandbox error comes back as
  * `{isError: true}` with a bounded message, the shape the agent loop feeds
@@ -24,8 +32,10 @@
  * throw: the multiplexer records that as REMOTE_CATALOG_UNAVAILABLE, and the
  * attach path refuses to advertise a catalog it could not read.
  */
+import { createHash } from "node:crypto";
 import type { McpClientPort, McpToolCallOutcome, McpToolDescriptor } from "./mcp-client.port.js";
 import type { ExtensionSandboxClient } from "./extension-sandbox.client.js";
+import { canonicalJson } from "./extension-manifest.js";
 
 /** How long a tools/list may take through the relay. */
 export const EXTENSION_LIST_TIMEOUT_MS = 15_000;
@@ -39,6 +49,8 @@ const MAX_CONTENT_ENTRIES = 16;
 export interface ExtensionMcpPortOptions {
   slug: string;
   sandbox: Pick<ExtensionSandboxClient, "rpc">;
+  /** The tools the signed manifest provides; every listing must equal them. */
+  pinned?: readonly McpToolDescriptor[];
   listTimeoutMs?: number;
   callTimeoutMs?: number;
 }
@@ -48,6 +60,43 @@ export class ExtensionMcpError extends Error {
     super(message);
     this.name = "ExtensionMcpError";
   }
+}
+
+/** The extension listed something other than what its manifest provides. */
+export class ExtensionListingMismatchError extends ExtensionMcpError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExtensionListingMismatchError";
+  }
+}
+
+/** sha256 over the canonical JSON of one tool's inputSchema. */
+export function extensionInputSchemaHash(schema: unknown): string {
+  return createHash("sha256").update(canonicalJson(schema), "utf8").digest("hex");
+}
+
+/**
+ * Why `listed` is not `expected`, or null when it is: the same set of names
+ * (each once), and for each name the same description and input schema.
+ */
+export function compareExtensionListing(
+  expected: readonly McpToolDescriptor[],
+  listed: readonly McpToolDescriptor[],
+): string | null {
+  const want = new Map(expected.map((t) => [t.name, t]));
+  const seen = new Set<string>();
+  for (const t of listed) {
+    if (seen.has(t.name)) return `${t.name} is listed twice`;
+    seen.add(t.name);
+    const w = want.get(t.name);
+    if (!w) return `${t.name} is listed but the signed manifest does not provide it`;
+    if (w.description !== t.description) return `${t.name}'s description is not the signed one`;
+    if (extensionInputSchemaHash(w.inputSchema) !== extensionInputSchemaHash(t.inputSchema)) {
+      return `${t.name}'s input schema is not the signed one`;
+    }
+  }
+  const missing = expected.filter((t) => !seen.has(t.name)).map((t) => t.name);
+  return missing.length > 0 ? `${missing.join(", ")} provided by the signed manifest but not listed` : null;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -68,6 +117,7 @@ export class ExtensionMcpPort implements McpClientPort {
   readonly #sandbox: Pick<ExtensionSandboxClient, "rpc">;
   readonly #listTimeoutMs: number;
   readonly #callTimeoutMs: number;
+  readonly #pinned: readonly McpToolDescriptor[] | null;
   #nextId = 1;
 
   constructor(opts: ExtensionMcpPortOptions) {
@@ -75,6 +125,7 @@ export class ExtensionMcpPort implements McpClientPort {
     this.#sandbox = opts.sandbox;
     this.#listTimeoutMs = opts.listTimeoutMs ?? EXTENSION_LIST_TIMEOUT_MS;
     this.#callTimeoutMs = opts.callTimeoutMs ?? EXTENSION_CALL_TIMEOUT_MS;
+    this.#pinned = opts.pinned ? opts.pinned.map((t) => ({ ...t })) : null;
   }
 
   /** One JSON-RPC exchange; returns `result` or throws with the reason. */
@@ -102,7 +153,7 @@ export class ExtensionMcpPort implements McpClientPort {
     if (!isObject(result) || !Array.isArray(result.tools)) {
       throw new ExtensionMcpError(`${this.slug}'s tools/list has no tools array`);
     }
-    return result.tools.map((t, i) => {
+    const listed: McpToolDescriptor[] = result.tools.map((t, i) => {
       if (!isObject(t) || typeof t.name !== "string" || typeof t.description !== "string" || !isObject(t.inputSchema)) {
         throw new ExtensionMcpError(`${this.slug}'s tools/list entry ${i} is not {name, description, inputSchema}`);
       }
@@ -110,6 +161,11 @@ export class ExtensionMcpPort implements McpClientPort {
       // extension's code put on the wire stop here.
       return { name: t.name, description: t.description, inputSchema: t.inputSchema };
     });
+    if (!this.#pinned) return listed;
+    const why = compareExtensionListing(this.#pinned, listed);
+    if (why) throw new ExtensionListingMismatchError(`${this.slug}: ${why}`);
+    // What crosses is the signed manifest's copy, never the wire's.
+    return this.#pinned.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallOutcome> {

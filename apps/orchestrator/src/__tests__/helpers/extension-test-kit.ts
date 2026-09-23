@@ -4,6 +4,10 @@
  * recording fake of the sandbox's extension routes, a small in-memory Prisma
  * for the Extension / ExtensionVersion / WorkshopWorkspace calls the H2
  * services make, and a manifest builder.
+ *
+ * H3 adds: the RemoteToolClassification model and a User table on the same
+ * in-memory Prisma, and `hostShimRpc`, a stand-in for the sandbox relay in
+ * front of the first-party host shim (services/sandbox/ext_host).
  */
 import { generateKeyPairSync, sign } from "node:crypto";
 import { vi } from "vitest";
@@ -28,7 +32,7 @@ export const TREE = "89abcdef0123456789abcdef0123456789abcdef";
 export interface ManifestOpts {
   id: string;
   version?: string;
-  tools?: Array<{ name: string; description?: string; requiresWrite?: boolean }>;
+  tools?: Array<{ name: string; description?: string; requiresWrite?: boolean; inputSchema?: Record<string, unknown> }>;
   memoryMb?: number;
   summary?: string;
   runtime?: "node20" | "python312";
@@ -47,7 +51,7 @@ export function manifestObject(o: ManifestOpts): Record<string, unknown> {
       tools: (o.tools ?? [{ name: "word_count" }]).map((t) => ({
         name: t.name,
         description: t.description ?? "Count the words in a piece of text.",
-        inputSchema: { type: "object", properties: { text: { type: "string" } } },
+        inputSchema: t.inputSchema ?? { type: "object", properties: { text: { type: "string" } } },
         export: "run",
         classificationProposal: {
           requiresWrite: t.requiresWrite ?? false,
@@ -189,8 +193,28 @@ export class P2002 extends Error {
   code = "P2002";
 }
 
-export function extensionPrisma(init: { workspaces?: Array<{ id: string; userId?: string; proposedTag?: string | null }> } = {}) {
+export interface KitUser {
+  id: string;
+  username: string;
+  displayName?: string;
+  role: string;
+  directoryStatus?: string;
+}
+
+export function extensionPrisma(
+  init: {
+    workspaces?: Array<{ id: string; userId?: string; proposedTag?: string | null }>;
+    users?: KitUser[];
+  } = {},
+) {
   const extensions = new Map<string, Row>();
+  const classifications = new Map<string, Row>();
+  const users = new Map<string, Row>();
+  for (const u of init.users ?? []) {
+    users.set(u.id, { displayName: u.username, directoryStatus: "ACTIVE", accessRoleId: null, accessRole: null, ...u });
+  }
+  const ck = (w: { serverId_toolName: { serverId: string; toolName: string } }) =>
+    `${w.serverId_toolName.serverId}|${w.serverId_toolName.toolName}`;
   const versions = new Map<string, Row>();
   const workspaces = new Map<string, Row>();
   for (const w of init.workspaces ?? []) {
@@ -209,7 +233,15 @@ export function extensionPrisma(init: { workspaces?: Array<{ id: string; userId?
 
   const prisma = {
     extension: {
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => withVersion(extensions.get(where.id))),
+      // `{ id }` is the typed shape; the H3 auth lookup reads by the unique
+      // `serviceTokenHash` instead.
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const byHash = (where as { serviceTokenHash?: string }).serviceTokenHash;
+        if (byHash !== undefined) {
+          return withVersion([...extensions.values()].find((e) => e.serviceTokenHash === byHash));
+        }
+        return withVersion(extensions.get(where.id));
+      }),
       findMany: vi.fn(async ({ where }: { where?: Row } = {}) =>
         [...extensions.values()].filter((e) => matches(e, where)).map((e) => withVersion(e) as Row),
       ),
@@ -268,6 +300,48 @@ export function extensionPrisma(init: { workspaces?: Array<{ id: string; userId?
         [...workspaces.values()].filter((w) => (where?.proposedTag ? w.proposedTag !== null : true)),
       ),
     },
+    remoteToolClassification: {
+      findUnique: vi.fn(async ({ where }: { where: { serverId_toolName: { serverId: string; toolName: string } } }) => {
+        const r = classifications.get(ck(where));
+        return r ? { ...r } : null;
+      }),
+      upsert: vi.fn(
+        async ({
+          where,
+          create,
+          update,
+        }: {
+          where: { serverId_toolName: { serverId: string; toolName: string } };
+          create: Row;
+          update: Row;
+        }) => {
+          const key = ck(where);
+          const existing = classifications.get(key);
+          const next = existing
+            ? { ...existing, ...update }
+            : { id: `c-${++seq}`, reviewedBy: null, reviewedAt: null, inputSchemaHash: null, ...create };
+          classifications.set(key, next);
+          return { ...next };
+        },
+      ),
+      update: vi.fn(
+        async ({ where, data }: { where: { serverId_toolName: { serverId: string; toolName: string } }; data: Row }) => {
+          const key = ck(where);
+          const next = { ...(classifications.get(key) as Row), ...data };
+          classifications.set(key, next);
+          return { ...next };
+        },
+      ),
+      findMany: vi.fn(async ({ where }: { where?: { serverId?: string } } = {}) =>
+        [...classifications.values()].filter((r) => !where?.serverId || r.serverId === where.serverId).map((r) => ({ ...r })),
+      ),
+    },
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const u = users.get(where.id);
+        return u ? { ...u } : null;
+      }),
+    },
     $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
   };
   return {
@@ -276,5 +350,52 @@ export function extensionPrisma(init: { workspaces?: Array<{ id: string; userId?
     extensions,
     versions,
     workspaces,
+    classifications,
+    users,
   };
+}
+
+// ─── the relay in front of the host shim ─────────────────────────────────
+
+export interface HostShimOpts {
+  /** What tools/list answers; defaults to the manifest's provides.tools. */
+  listing?: Array<Record<string, unknown>>;
+  /** tools/call answer; defaults to {content:[{type:'text',text:'{"ok":true}'}], isError:false}. */
+  call?: (name: string, args: Record<string, unknown>) => unknown;
+  /** Make every rpc fail the way an unreachable extension does. */
+  down?: boolean;
+}
+
+/**
+ * The sandbox relay + the first-party host shim, for one or more installed
+ * extensions: `manifests[slug]` is the manifest object the shim serves.
+ */
+export function hostShimRpc(manifests: Record<string, Record<string, unknown>>, opts: HostShimOpts = {}) {
+  const calls: Array<{ slug: string; method: string; params?: unknown }> = [];
+  const rpc = vi.fn(async (slug: string, message: unknown, _timeoutMs?: number) => {
+    const msg = message as { id: number; method: string; params?: Record<string, unknown> };
+    calls.push({ slug, method: msg.method, params: msg.params });
+    if (opts.down) throw new ExtensionSandboxError(`extension ${slug} is not answering`, 502, "SANDBOX_ERROR");
+    const manifest = manifests[slug];
+    if (!manifest) return { status: 404, json: { detail: `extension ${slug} is not installed in this sandbox` } };
+    if (msg.method === "tools/list") {
+      const tools =
+        opts.listing ??
+        ((manifest.provides as { tools: Array<Record<string, unknown>> }).tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })));
+      return { status: 200, json: { jsonrpc: "2.0", id: msg.id, result: { tools } } };
+    }
+    if (msg.method === "tools/call") {
+      const p = msg.params as { name: string; arguments: Record<string, unknown> };
+      const result = opts.call
+        ? opts.call(p.name, p.arguments)
+        : { content: [{ type: "text", text: JSON.stringify({ ok: true, tool: p.name }) }], isError: false };
+      return { status: 200, json: { jsonrpc: "2.0", id: msg.id, result } };
+    }
+    return { status: 200, json: { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } } };
+  });
+  return { rpc, calls };
 }
