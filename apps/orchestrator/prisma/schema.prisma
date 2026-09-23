@@ -170,6 +170,16 @@ model ChatSession {
   /// its original chronological spot, not to "Today".
   pinned          Boolean           @default(false)
   pinnedAt        DateTime?
+  /// WARP-2991 — may this conversation's on-box answers be replayed to a
+  /// cloud model? Explicit enum, never inferred from the timestamp. The
+  /// server replays assistant history to a cloud provider ONLY when this is
+  /// `granted` AND `cloudHistoryConsentAt` is later than every on-box answer
+  /// in the thread; anything else replays the user's own messages only.
+  /// A CHECK ties the state to its actor pair (not_asked ⇔ both NULL).
+  cloudHistoryConsent   CloudHistoryConsent @default(not_asked)
+  cloudHistoryConsentAt DateTime?
+  /// Username of the person who decided (ChatSession.userId is a username too).
+  cloudHistoryConsentBy String?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -937,6 +947,15 @@ model ChatMessage {
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
   @@index([sessionId, status])
+}
+
+/// WARP-2991 — the owner's answer to "send this conversation's earlier
+/// on-box answers to the cloud model?". `not_asked` and `declined` both
+/// replay the user's own messages only; the difference is audit, not effect.
+enum CloudHistoryConsent {
+  not_asked
+  granted
+  declined
 }
 
 /// WARP-844 — thumbs rating on an assistant message.
@@ -4052,6 +4071,16 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
+  /// Explicit, like `status`: `unchecked` until the worker first claims the
+  /// row, never inferred from `offLanProvider` being NULL.
+  cloudGate          AgentRunCloudGate        @default(unchecked)
+  /// WARP-2997 — the non-local provider the run's model resolved to at the
+  /// latest claim; NULL when it stays on the box (`cloudGate` says which).
+  offLanProvider     String?
+  /// WARP-2997 — the stored-content tools withheld from the run's pool at
+  /// the latest claim (`withholdStoredContentTools`). Empty on a local run.
+  offLanWithheldTools String[]                @default([])
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
@@ -4078,6 +4107,19 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2997 — where a run's model runs, and whether its owner may use it.
+/// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
+/// `cloud_allowed` (cloud model, person permitted; stored-content tools
+/// withheld), `cloud_refused` (451: the person may not use cloud models),
+/// `cloud_unverified` (503: the gate could not be read; fail-closed).
+enum AgentRunCloudGate {
+  unchecked
+  local
+  cloud_allowed
+  cloud_refused
+  cloud_unverified
 }
 
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as

@@ -50,6 +50,10 @@ export interface AgentRunRow {
   pendingDecidedBy: string | null;
   /** WARP-2877 — the schedule that fired this run, when one did. */
   scheduleId: string | null;
+  /** WARP-2997 — the cloud gate's verdict at the latest claim. */
+  cloudGate: string;
+  offLanProvider: string | null;
+  offLanWithheldTools: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -207,6 +211,9 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         pendingDecidedAt: null,
         pendingDecidedBy: null,
         scheduleId: (args.data.scheduleId as string | null) ?? null,
+        cloudGate: "unchecked",
+        offLanProvider: null,
+        offLanWithheldTools: [],
         createdAt: now(),
         updatedAt: now(),
       };
