@@ -149,8 +149,8 @@ def _profile_object(text: str, const: str, provider: str) -> Any:
 
 
 def _cell(text: str) -> str:
-    """renderAdr042's cell(): no newline, no bare pipe."""
-    return re.sub(r"\r?\n", " ", text).replace("|", "\\|")
+    """renderAdr042's cell(): the backslash first, then newlines, then pipes."""
+    return re.sub(r"\r?\n", " ", text.replace("\\", "\\\\")).replace("|", "\\|")
 
 
 def _adr042_problems(text: str, name: str, path: str) -> list[str]:

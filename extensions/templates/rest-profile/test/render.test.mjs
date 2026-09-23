@@ -248,6 +248,11 @@ test("checkRendered passes the renderer's own output, static and dynamic", () =>
     const draft = fixture(name);
     assert.deepEqual(checkRendered(draft, reader(render(draft))), [], name);
   }
+  // A display name with a backslash before a pipe: the rows check escapes
+  // the name as cell() does, backslash first. MUTATION: escape only the
+  // pipe in checkRendered → red.
+  const odd = { ...fixture("static"), displayName: "Acme" + "\\" + "|" + "Tasks" };
+  assert.deepEqual(checkRendered(odd, reader(render(odd))), []);
 });
 
 test("checkRendered refuses a profile that dials another host, or is not the rendered layout", () => {

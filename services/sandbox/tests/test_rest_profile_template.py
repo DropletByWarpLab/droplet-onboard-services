@@ -382,7 +382,14 @@ def _node_render(work: Path, draft: dict) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
-@pytest.mark.parametrize("draft", [_static_draft(), _dynamic_draft()], ids=["static", "dynamic"])
+@pytest.mark.parametrize(
+    "draft",
+    # The third: a display name with a backslash before a pipe — both readers
+    # escape it as cell() does, backslash first. MUTATION: escape only the
+    # pipe in connector_draft._cell → red.
+    [_static_draft(), _dynamic_draft(), {**_static_draft(), "displayName": "Acme\\|Tasks"}],
+    ids=["static", "dynamic", "odd-name"],
+)
 def test_the_python_reader_agrees_with_the_js_renderer(store, draft):
     wid = f"ws-js-{draft['baseUrl']['kind']}"
     store.create_workspace(wid, "rest-profile", ALICE)

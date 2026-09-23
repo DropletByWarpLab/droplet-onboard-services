@@ -318,7 +318,8 @@ export function checkRendered(draft, read) {
   const adr042 = read(paths.adr042);
   if (adr042 === null) problems.push(`${paths.adr042} is missing`);
   else {
-    const name = (draft.displayName?.trim() || draft.provider).replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
+    // cell() in render.mjs: the backslash first, then newlines, then pipes.
+    const name = (draft.displayName?.trim() || draft.provider).replace(/\\/g, "\\\\").replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
     problems.push(...adr042Problems(adr042, name, paths.adr042));
   }
   // Any scheme, an IP or a single label included. A dynamic draft carries
