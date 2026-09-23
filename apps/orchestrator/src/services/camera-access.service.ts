@@ -165,26 +165,85 @@ export async function filterVisibleCameras<T extends { name: string }>(
   return cameras.filter((c) => visible.has(c.name));
 }
 
+/** What `visibleCameraNames` resolves to: every camera, or these names. */
+export type CameraScope = "all" | Set<string>;
+
+/** Is this camera inside the scope? */
+export function inCameraScope(scope: CameraScope, cameraName: string): boolean {
+  return scope === "all" || scope.has(cameraName);
+}
+
 /**
- * Express guard for any route carrying a camera name in `:name`.
+ * WARP-2982 — narrow a caller-supplied camera filter to the scope, BEFORE
+ * it reaches Frigate, so `limit` and cursor pagination count only cameras
+ * the caller may see.
+ *
+ * - `undefined` → no filter needed (scope is "all" and nothing requested).
+ * - `[]`        → nothing is visible. The Frigate client answers an empty
+ *                 camera list with an empty result without querying; it
+ *                 must never be read as "no filter".
+ */
+export function narrowCameraFilter(
+  scope: CameraScope,
+  requested?: string[],
+): string[] | undefined {
+  if (scope === "all") return requested;
+  return requested ? requested.filter((c) => scope.has(c)) : [...scope];
+}
+
+/**
+ * The scope `cameraAccessGuard` resolved for this request.
+ *
+ * Throws rather than defaulting: a handler reading a scope the guard never
+ * set is a wiring bug, and the only safe answer to it is no answer.
+ */
+export function cameraScopeOf(res: Response): CameraScope {
+  const scope = res.locals.cameraScope as CameraScope | undefined;
+  if (scope === undefined) {
+    throw new Error("cameraScopeOf: route is missing cameraAccessGuard");
+  }
+  return scope;
+}
+
+/**
+ * Resolve the camera that owns a Frigate event / review id. `null` means
+ * Frigate does not know the id.
+ */
+export interface CameraOwnerResolvers {
+  eventCamera?: (eventId: string) => Promise<string | null>;
+  reviewCamera?: (reviewId: string) => Promise<string | null>;
+}
+
+/**
+ * Express guard for every route that returns or touches camera-derived data.
+ *
+ * It resolves the caller's scope ONCE and leaves it on `res.locals` for
+ * the handler (`cameraScopeOf`). Then it checks the one camera the route
+ * names, however it names it:
+ *
+ *  - `:name` on a `/cameras/:name…` route — the camera itself;
+ *  - `:eventId` — the camera that recorded the event (WARP-2982);
+ *  - `:reviewId` — the camera the review cluster belongs to (WARP-2982).
+ *
+ * Cross-camera routes (lists, search, SSE) name no camera; they get the
+ * scope and must narrow with it. Before WARP-2982 this guard only knew
+ * `:name`, so every one of those routes silently passed.
  *
  * 404, not 403, on a denied camera. A 403 confirms the camera EXISTS,
  * which leaks the shape of the household to someone who was not meant to
  * know it — "there is a camera called `bedroom` and you may not see it" is
  * itself information. An absent camera and a forbidden one are reported
- * identically.
+ * identically; the same goes for an event id on a camera you cannot see.
  */
-export function requireCameraAccess(prisma: PrismaClient) {
+export function requireCameraAccess(
+  prisma: PrismaClient,
+  resolvers: CameraOwnerResolvers = {},
+) {
   return function cameraAccessGuard(
     req: Request,
     res: Response,
     next: NextFunction,
   ): void {
-    const name = req.params.name;
-    if (typeof name !== "string" || name.length === 0) {
-      next();
-      return;
-    }
     const principal = principalFromRequest(req);
 
     // A SERVICE that forgot to say who it is asking for is a different
@@ -197,7 +256,7 @@ export function requireCameraAccess(prisma: PrismaClient) {
     // real thing; it discloses nothing a service principal cannot already
     // learn from any other route.
     if (principal.id === MCP_SERVICE_ID && !principal.assertedNextcloudUser) {
-      logger.warn({ camera: name }, "MCP camera request with no asserted user");
+      logger.warn({ path: req.path }, "MCP camera request with no asserted user");
       res.status(401).json({
         error: "no_asserted_user",
         message:
@@ -206,23 +265,48 @@ export function requireCameraAccess(prisma: PrismaClient) {
       return;
     }
 
-    canAccessCamera(prisma, principal, name)
+    // `:name` means a CAMERA only on `/cameras/:name…`; `/cameras/faces/:name`
+    // names a person.
+    const routePath: string = typeof req.route?.path === "string" ? req.route.path : "";
+    const cameraParam =
+      routePath.startsWith("/cameras/:name") && typeof req.params.name === "string"
+        ? req.params.name
+        : undefined;
+    const eventId = typeof req.params.eventId === "string" ? req.params.eventId : undefined;
+    const reviewId = typeof req.params.reviewId === "string" ? req.params.reviewId : undefined;
+
+    (async (): Promise<boolean> => {
+      const scope = await visibleCameraNames(prisma, principal);
+      res.locals.cameraScope = scope;
+      if (scope === "all") return true;
+
+      let target: string | null | undefined = cameraParam;
+      if (target === undefined && eventId !== undefined) {
+        if (!resolvers.eventCamera) throw new Error("no event→camera resolver");
+        target = await resolvers.eventCamera(eventId);
+      } else if (target === undefined && reviewId !== undefined) {
+        if (!resolvers.reviewCamera) throw new Error("no review→camera resolver");
+        target = await resolvers.reviewCamera(reviewId);
+      }
+      if (target === undefined) return true; // cross-camera route: handler narrows
+      return target !== null && scope.has(target);
+    })()
       .then((ok) => {
         if (ok) {
           next();
           return;
         }
         logger.info(
-          { userId: req.user?.id, role: req.user?.role, camera: name },
+          { userId: req.user?.id, role: req.user?.role, camera: cameraParam, eventId, reviewId },
           "camera access denied by per-camera grant",
         );
-        res.status(404).json({ error: "Camera not found" });
+        res.status(404).json({ error: cameraParam ? "Camera not found" : "Not found" });
       })
       .catch((err) => {
         // Fail CLOSED. A database blip must not become "everyone sees
         // everything" — the whole point of the module is that absence of
         // an answer is not permission.
-        logger.error({ err, camera: name }, "camera access check failed; denying");
+        logger.error({ err, camera: cameraParam, eventId, reviewId }, "camera access check failed; denying");
         res.status(503).json({ error: "access_check_unavailable" });
       });
   };
@@ -262,6 +346,16 @@ export async function setGrantsForUser(
   const found = new Map(cameras.map((c) => [c.name, c.id]));
   const unknown = wanted.filter((n) => !found.has(n));
 
+  // WARP-2982: a revoked camera must also stop PUSHING. Notification prefs
+  // outlive grants otherwise, and a person who can no longer open the
+  // camera kept getting "Person detected" for it. Owners/admins draw no
+  // access from grants, so their prefs are left alone.
+  const target = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  });
+  const pruneOrphanedPrefs = !(target && UNRESTRICTED_ROLES.has(target.role));
+
   await prisma.$transaction([
     prisma.cameraAccessGrant.deleteMany({ where: { userId } }),
     ...cameras.map((c) =>
@@ -269,6 +363,13 @@ export async function setGrantsForUser(
         data: { userId, cameraId: c.id, grantedBy: grantedBy ?? null },
       }),
     ),
+    ...(pruneOrphanedPrefs
+      ? [
+          prisma.cameraNotificationPref.deleteMany({
+            where: { userId, cameraId: { notIn: cameras.map((c) => c.id) } },
+          }),
+        ]
+      : []),
   ]);
 
   return { granted: cameras.map((c) => c.name).sort(), unknown };

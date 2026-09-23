@@ -68,7 +68,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
-    uploadFiles: vi.fn().mockResolvedValue(undefined),
+    uploadFiles: vi.fn(
+      async (_p: string, files: FileList | File[]) =>
+        Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+    ),
     createDirectory: vi.fn().mockResolvedValue(undefined),
     deleteFile: vi.fn(),
     getDownloadUrl: (p: string) => `/api/files/download?path=${p}`,
@@ -168,7 +171,11 @@ function folderDrop(
 beforeEach(() => {
   vi.clearAllMocks();
   cleanup();
-  vi.mocked(uploadFiles).mockResolvedValue(undefined);
+  // WARP-2096: the server echoes each file under its final name.
+  vi.mocked(uploadFiles).mockImplementation(
+    async (_p: string, files: FileList | File[]) =>
+      Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+  );
   vi.mocked(createDirectory).mockResolvedValue(undefined);
 });
 
@@ -226,7 +233,10 @@ describe("Files page — dropping a folder (WARP-1876)", () => {
   it("aggregates the partial-failure count across directories", async () => {
     // Root group lands, the Q1 group half-fails.
     vi.mocked(uploadFiles)
-      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        async (_p: string, files: FileList | File[]) =>
+          Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+      )
       .mockRejectedValueOnce(
         new UploadBatchError(1, 2, new Error("multer LIMIT_FILE_SIZE"), ["feb.csv"])
       );

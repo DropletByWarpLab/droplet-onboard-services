@@ -5,6 +5,7 @@ import { z } from "zod";
 // it is a `import type`, so this adds NOTHING to config.ts's runtime module
 // graph — the concern the `resolveAgentIterLimits` note below is about.
 import { MONEY_SNAPSHOT_DAILY_DAYS_DEFAULT } from "./services/erp-sync/money-snapshot.service.js";
+import { PUBLIC_DEVICE_SECRET_VALUES, isWeakDeviceSecret } from "./lib/device-secret.js";
 
 // WARP-580 — production JWT-secret strength guard. A production boot must
 // reject a secret that is too short OR is one of the shipped dev placeholders
@@ -105,12 +106,16 @@ export function resolveAgentRunLimits(
 // generates ALL of these (generate_env for fresh installs, migrate_env
 // backfills upgrades), so a provisioned device always passes this gate.
 //
-// Scope: DEVICE_SECRET_KEY (the FIPS-sealed master encryption key) + every
+// Scope: DEVICE_SECRET_KEY (the FIPS-sealed master encryption key),
+// DEVICE_SECRET (WARP-2985 — keys the claim-code hashes and clip share URLs;
+// ALSO gated on DROPLET_ENV below, since this list only runs under
+// NODE_ENV=production, which WARP-2551 has yet to arm) + every
 // SERVICE_TOKEN_* declared in the schema. Deliberately NOT the optional
 // integration secrets (ROUTING_SERVICE_TOKEN, DROPLET_SCIM_BEARER_TOKEN, …)
 // whose emptiness is a documented fail-closed feature posture.
 export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "DEVICE_SECRET_KEY",
+  "DEVICE_SECRET",
   "SERVICE_TOKEN_SWITCH",
   "SERVICE_TOKEN_AI_GATEWAY",
   "SERVICE_TOKEN_VOICE",
@@ -120,8 +125,10 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
 ];
 
 // `.env.example` ships `change-me` for DEVICE_SECRET_KEY — a copy-pasted
-// example file must fail the gate exactly like an empty value would.
-const PLACEHOLDER_SECRET_VALUES: ReadonlySet<string> = new Set(["change-me"]);
+// example file must fail the gate exactly like an empty value would. The set
+// also carries the dev literals DEVICE_SECRET used to fall back to (WARP-2985);
+// all of them are published in this repo.
+const PLACEHOLDER_SECRET_VALUES: ReadonlySet<string> = PUBLIC_DEVICE_SECRET_VALUES;
 
 /**
  * PURE — the subset of PRODUCTION_REQUIRED_SECRET_KEYS whose value in `env`
@@ -136,6 +143,13 @@ export function findEmptyProductionSecrets(
     const trimmed = v.trim();
     return trimmed === "" || PLACEHOLDER_SECRET_VALUES.has(trimmed);
   });
+}
+
+/** PURE — the shipped-box posture signal (mirrors ai-gateway
+ *  keystore._is_production). Exported for tests. */
+export function isShippedDropletEnv(v: string | undefined): boolean {
+  const t = (v ?? "").trim().toLowerCase();
+  return t === "production" || t === "prod";
 }
 
 /**
@@ -353,7 +367,11 @@ const envSchema = z.object({
   BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().nonnegative().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
+  // WARP-2093: per-file upload ceiling. Uploads stream to Nextcloud (never
+  // buffered here), so this is no longer an OOM guard; 1024 matches the
+  // nextcloud:29-apache image's APACHE_BODY_LIMIT (1 GiB per request), past
+  // which Nextcloud itself answers 413. Per-user policies can only lower it.
+  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(1024),
 
   // --- CORS (WARP-562) ---
   // Comma-separated allowlist of browser Origins permitted to make
@@ -429,6 +447,10 @@ const envSchema = z.object({
   // default lets tests run without setting the env var; production fails
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
+  // WARP-2985 — keys the setup claim-code HMAC and clip share URLs (readers
+  // take it from process.env at call time; declared here so the boot gates
+  // below can see it). No usable default exists: see lib/device-secret.ts.
+  DEVICE_SECRET: z.string().default(""),
 
   // --- Microsoft 365 cloud connector (WARP-2115, ADR-041) ---
   // The Entra application (client) id of Droplet's multi-tenant app. NOT a
@@ -1475,6 +1497,22 @@ if (parsed.NODE_ENV === "production") {
         "migrate_env backfills any keys added since this box was provisioned).",
     );
   }
+}
+
+// WARP-2985 — DEVICE_SECRET gate armed by the SHIPPED-BOX signal, not
+// NODE_ENV (which nothing sets on a box — WARP-2551 owns arming that one).
+// DROPLET_ENV=production is what setup.sh writes (and migrate_env backfills),
+// and is the same signal ai-gateway's keystore guard arms on. Scoped to
+// DEVICE_SECRET alone because it is the one required secret EVERY
+// setup.sh-generated .env has carried since the first heredoc (a generated
+// .env without it is treated as torn and restored), so arming this cannot
+// strand a box that took an OTA without re-running setup.sh.
+if (isShippedDropletEnv(process.env.DROPLET_ENV) && isWeakDeviceSecret(parsed.DEVICE_SECRET)) {
+  throw new Error(
+    "DROPLET_ENV=production requires a per-device DEVICE_SECRET; it is empty " +
+      "or a publicly-known placeholder. Run `sudo ./scripts/setup.sh --sync-secrets` " +
+      "(migrate_env generates one) and recreate the orchestrator.",
+  );
 }
 
 // --- WARP-562: resolve the CORS origin allowlist ---

@@ -128,7 +128,12 @@ the device-id key, and the device-id key never signs an extension.
 - **One RPC.** `SignExtensionManifest(statement)` is the only way to reach
   it. The sidecar parses the statement (UTF-8 JSON object, at most 4 KiB, no
   duplicate keys) and refuses anything that is not
-  `kind == keyUsage == "extension"` with `INVALID_ARGUMENT`. The bytes it
+  `kind == keyUsage == "extension"` with `INVALID_ARGUMENT`. It also refuses
+  a statement whose keys are not exactly the statement schema's
+  (`EXTENSION_STATEMENT_KEYS`, drift-tested against `extensionStatementSchema`)
+  or whose bytes are not canonical (keys sorted, compact separators), so the
+  key signs only what the orchestrator's `buildExtensionStatement` could have
+  produced, not any object that calls itself an extension. The bytes it
   signs are `droplet-extension-statement:v1:` || statement; the prefix is a
   sidecar constant (`extension_signing.py`) that no caller can choose, and
   it is disjoint from every device-key message prefix
@@ -137,7 +142,9 @@ the device-id key, and the device-id key never signs an extension.
   (`extension_spki_der`, `extension_key_fingerprint`). An unreadable or
   damaged key file never fails `GetStatus` (overlay enrolment and TLS
   issuance use it too): it is logged and reported as no key, and signing
-  still refuses. The damaged file is never overwritten with a fresh key.
+  still refuses with `FAILED_PRECONDITION` (the promote route's 503), never
+  an escaped `UNKNOWN`. The damaged file is never overwritten with a fresh
+  key.
 - **One caller.** `apps/orchestrator/src/services/extension-promotion.service.ts`
   is the only orchestrator module that may call it (a guard test pins this).
   It parses the manifest, builds the canonical statement binding the
@@ -150,7 +157,9 @@ the device-id key, and the device-id key never signs an extension.
   concurrent first promotes cannot mint two keys (a threaded test pins it).
 - **Custody on the mock backend is a plaintext PEM on the boot disk.** Same
   posture as `device-id.sealed`: the protection is the process boundary (only
-  this container mounts `/var/lib/droplet/tpm`), not a TPM. Every box ships
+  this container mounts `/var/lib/droplet/tpm`), not a TPM. The file is
+  written mode `0600` explicitly (`EXTENSION_KEY_FILE_MODE`), whatever the
+  process umask, and the mode is set before any key byte is written. Every box ships
   on the mock backend today (the real backend is the IDX-002 scaffold).
 - **The real (TPM) backend has no extension key yet.** `sign_extension`
   raises, the RPC answers `FAILED_PRECONDITION`, and promotion is a 503. It
@@ -168,8 +177,10 @@ the device-id key, and the device-id key never signs an extension.
 The verifier is `apps/orchestrator/src/services/update-agent/extension-verify.ts`.
 Keys are chosen by the statement's own `kind`: `extension` accepts the box
 extension key (over the prefixed envelope) or the Warp Lab release key
-(cosign, over the raw statement); any other kind accepts the release key
-only, and a box-key signature on it is `key_usage_mismatch`. The asymmetry
+(cosign, over the raw statement). Any other kind is refused, whoever
+signed it, and cosign is never spawned for it: a box-key signature on it is
+`key_usage_mismatch`, anything else `extension_schema_invalid`, because this
+verifier accepts extension statements only. The asymmetry
 is one-way: the release key may vouch for an extension, the box key may
 never vouch for a release, and the OTA release verifier does not know the
 box key exists.

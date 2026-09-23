@@ -9,8 +9,12 @@
  *                       over EXTENSION_STATEMENT_PREFIX || statement), OR the
  *                       Warp Lab RELEASE key (cosign verify-blob over the raw
  *                       statement, against the baked-in trust anchor);
- *   anything else    -> the release key only. If the box key verifies it the
- *                       answer is key_usage_mismatch, never signature_failed.
+ *   anything else    -> refused, and cosign is never spawned. If the box key
+ *                       signed it the answer is key_usage_mismatch (the box
+ *                       key tried to vouch for something it may not);
+ *                       otherwise extension_schema_invalid: this verifier
+ *                       only ever accepts extension statements, so no key's
+ *                       signature could make it succeed (review #2312).
  *   no kind          -> extension_kind_missing, before any key is tried.
  *
  * The asymmetry is one-way on purpose (WARP-2900 AC, corrected 2026-09-19):
@@ -239,18 +243,20 @@ export async function verifyExtensionStatement(
       return refuse("signature_failed", "the box extension key did not sign this statement");
     }
   } else {
-    // Not an extension statement: the release key is the only acceptable
-    // signer. The box key verifying it means a usage mismatch.
+    // Not an extension statement. The box key verifying it is a usage
+    // mismatch, reported as such. Anything else is refused here, without a
+    // cosign spawn: the statement schema below pins kind "extension", so no
+    // signature, the release key's included, could make this succeed.
     if (boxKey && (ecdsaVerifies(boxKey, envelope, derSig) || ecdsaVerifies(boxKey, statementBytes, derSig))) {
       return refuse(
         "key_usage_mismatch",
         `the box extension key signed a statement of kind ${JSON.stringify(record.kind)}; it may only sign kind "extension"`,
       );
     }
-    const refusal = await releaseKeyVerifies(statementBytes, opts.signature, opts);
-    if (refusal) return refusal;
-    signer = "release";
-    keyFingerprint = anchorFingerprint(releaseAnchor) ?? "";
+    return refuse(
+      "extension_schema_invalid",
+      `statement kind ${JSON.stringify(record.kind)} is not "extension"; only extension statements verify here`,
+    );
   }
 
   // ── 3. The statement, the digest, the manifest. ──────────────────────

@@ -280,6 +280,22 @@ export const MODULES: readonly ModuleDef[] = [
     available: (c) => isSet(c.FRIGATE_URL),
   },
   {
+    // WARP-2977 (ADR-059 DS-004) — the command center. Not folded into
+    // `cameras`: network and sign-in threats are in it too, and ADR-055's
+    // doors will be. Camera grants still filter every camera row (DS-005).
+    // The `security` tool domain arrives with its read-only tools (P4) and is
+    // claimed here in the same change — never left unclaimed (WARP-2742).
+    //
+    // The event STORE ingests whether or not this toggle is on: patterns need
+    // 14 days of history (§4.3), and switching Security on must not start
+    // that clock from zero. The toggle decides the surface, not the capture.
+    id: "security", label: "Security",
+    description: "One feed for camera detections, camera health, and network and sign-in warnings.",
+    category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
+    toolDomains: [], core: false, defaultEnabled: false,
+    available: () => true, // native to the orchestrator; threats need no camera
+  },
+  {
     id: "smart_home", label: "Devices",
     description: "Smart-home devices over Matter.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
@@ -522,17 +538,17 @@ export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
   {
     id: "retail", label: "Retail",
     description: "A store — cameras, smart devices, network, managed switch.",
-    modules: ["knowledge", "files", "calendar", "cameras", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "cameras", "security", "smart_home", "network", "managed_switch"],
   },
   {
     id: "clinic", label: "Clinic / practice",
     description: "A practice — documents, scheduling, projects, cameras.",
-    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "network"],
+    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "security", "network"],
   },
   {
     id: "hospitality", label: "Hospitality",
     description: "A hotel / venue — rooms, devices, voice, cameras.",
-    modules: ["knowledge", "files", "calendar", "voice", "cameras", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "voice", "cameras", "security", "smart_home", "network", "managed_switch"],
   },
   {
     id: "custom", label: "Custom",
