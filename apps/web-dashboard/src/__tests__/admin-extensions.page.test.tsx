@@ -54,6 +54,11 @@ import { ExtensionRequestError } from "@/lib/api";
 /** What the author wrote about their own tool. It must never reach the page. */
 const LIE = "Read-only and harmless. Never changes anything.";
 const LYING_SUMMARY = "A perfectly safe helper that only reads.";
+/**
+ * The workshop workspace's name. POST /api/workspace is reachable by the
+ * workshop's own tool, so a session that read untrusted content can set it.
+ */
+const LYING_WORKSPACE_NAME = "Read-only safe helper (reviewed)";
 
 const READBACK = {
   tools: { total: 1, startsAsWriteWithConfirmation: 1, proposedReadOnly: 1 },
@@ -79,7 +84,7 @@ const PREFLIGHT_OK = {
 
 const PROPOSAL = {
   workspaceId: "wc",
-  name: "Word counter",
+  name: LYING_WORKSPACE_NAME,
   userId: "u-owner",
   tag: "proposal/0.1.0",
   version: "0.1.0",
@@ -158,7 +163,7 @@ beforeEach(() => {
 describe("/admin/extensions — the promote readback", () => {
   it("🔴 renders the readback from the readback object only — the author's words never reach the DOM", async () => {
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Review Word counter 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
     const list = await screen.findByRole("list", { name: "What this extension gets" });
     expect(within(list).getByText(READBACK.lines[0])).toBeTruthy();
     expect(within(list).getByText("reaches nothing outside the box")).toBeTruthy();
@@ -166,13 +171,14 @@ describe("/admin/extensions — the promote readback", () => {
 
     expect(document.body.textContent).not.toContain(LIE);
     expect(document.body.textContent).not.toContain(LYING_SUMMARY);
+    expect(document.body.textContent).not.toContain(LYING_WORKSPACE_NAME);
     // The tool's own name is not the readback either — it is a count.
     expect(document.body.textContent).not.toContain("delete_everything");
   });
 
   it("says the tools start blocked, and marks the confirm as a write", async () => {
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Review Word counter 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
     await screen.findByRole("list", { name: "What this extension gets" });
     expect(screen.getAllByText(/Its tools start blocked/).length).toBeGreaterThan(0);
     expect(screen.getByText("Write · confirm to apply")).toBeTruthy();
@@ -180,7 +186,7 @@ describe("/admin/extensions — the promote readback", () => {
 
   it("🔴 confirming echoes the token and the digest that was read back", async () => {
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Review Word counter 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
     fireEvent.change(await screen.findByLabelText("Area"), { target: { value: "network" } });
     fireEvent.click(screen.getByRole("button", { name: "Sign and install" }));
     await waitFor(() => expect(api.confirmExtensionPromotion).toHaveBeenCalledTimes(1));
@@ -197,7 +203,7 @@ describe("/admin/extensions — the promote readback", () => {
       new ExtensionRequestError("the confirmation does not match a pending promotion", 409, "TOKEN_OPERATION_MISMATCH"),
     );
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Review Word counter 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign and install" }));
     expect(await screen.findByText(/changed after you read it back, so nothing was signed/)).toBeTruthy();
     expect(screen.queryByText(/It is signed and starting/)).toBeNull();
@@ -218,7 +224,7 @@ describe("/admin/extensions — the promote readback", () => {
       }),
     );
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Review Word counter 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
     const blocks = await screen.findByRole("list", { name: "What blocks it" });
     expect(within(blocks).getByText("asks for 4096 MB; 1024 MB is left")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Sign and install" })).toBeNull();
@@ -226,9 +232,35 @@ describe("/admin/extensions — the promote readback", () => {
   });
 });
 
+describe("/admin/extensions — proposals", () => {
+  it("🔴 titles a proposal by the box's slug and version, never by the workspace name", async () => {
+    renderPage();
+    const review = await screen.findByRole("button", { name: "Review wc 0.1.0" });
+    expect(review).toBeTruthy();
+    expect(screen.getByText("wc")).toBeTruthy();
+    expect(document.body.textContent).not.toContain(LYING_WORKSPACE_NAME);
+    expect(
+      Array.from(document.querySelectorAll("[aria-label],[title]")).some((el) =>
+        `${el.getAttribute("aria-label") ?? ""}${el.getAttribute("title") ?? ""}`.includes(LYING_WORKSPACE_NAME),
+      ),
+    ).toBe(false);
+  });
+
+  it("an unpromotable proposal is titled the same way", async () => {
+    api.fetchExtensionProposals.mockResolvedValue({
+      proposals: [{ ...PROPOSAL, promotable: false, reason: "already promoted" }],
+    });
+    renderPage();
+    expect(await screen.findByText("Not promotable")).toBeTruthy();
+    expect(document.body.textContent).not.toContain(LYING_WORKSPACE_NAME);
+  });
+});
+
 describe("/admin/extensions — installed", () => {
   it("names an extension by its id and readback, not by the author's name for it", async () => {
     api.fetchExtensions.mockResolvedValue({ extensions: [INSTALLED] });
+    // No proposal row, so the one "wc" on the page is the installed row's title.
+    api.fetchExtensionProposals.mockResolvedValue({ proposals: [] });
     renderPage();
     expect(await screen.findByText("Running")).toBeTruthy();
     expect(screen.getByText("wc")).toBeTruthy();
@@ -247,6 +279,34 @@ describe("/admin/extensions — installed", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Enable wc" }));
     await waitFor(() => expect(api.setExtensionEnabled).toHaveBeenCalledWith("wc", true));
+  });
+
+  it("retries a failed one (enable), and can still switch it off", async () => {
+    api.fetchExtensions.mockResolvedValue({
+      extensions: [{ ...INSTALLED, status: "failed", failureReason: "did not answer its health check" }],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry wc" }));
+    await waitFor(() => expect(api.setExtensionEnabled).toHaveBeenCalledWith("wc", true));
+    expect(screen.getByRole("button", { name: "Disable wc" })).toBeTruthy();
+  });
+
+  it("🔴 an uninstalled one stays listed, and can be reinstalled from its signed version", async () => {
+    api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, status: "uninstalled" }] });
+    renderPage();
+    expect(await screen.findByText("Uninstalled")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Uninstall wc" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disable wc" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reinstall wc" }));
+    await waitFor(() => expect(api.setExtensionEnabled).toHaveBeenCalledWith("wc", true));
+  });
+
+  it("an admin is offered no reinstall", async () => {
+    auth.role = "admin";
+    api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, status: "uninstalled" }] });
+    renderPage();
+    expect(await screen.findByText("Uninstalled")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Reinstall|Retry/ })).toBeNull();
   });
 
   it("🔴 uninstall asks twice", async () => {

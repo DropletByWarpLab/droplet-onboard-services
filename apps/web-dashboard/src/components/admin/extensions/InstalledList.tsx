@@ -7,8 +7,17 @@
  * A row is named by the extension's id and version (the box's names for it),
  * with what it got — the readback lines the orchestrator derived from
  * `provides` — never the author's own description. Uninstall asks twice: it
- * removes the code, the tools and the call-back token, and a promoted
- * version cannot be brought back without promoting it again.
+ * removes the running code, the tools and the call-back token.
+ *
+ * Every lifecycle state the orchestrator can leave from is offered here, so
+ * the owner never needs the raw API:
+ *   - disabled → Enable;
+ *   - failed → Retry (the same enable: re-verify, fresh token, start) or
+ *     Disable;
+ *   - uninstalled → Reinstall. The signed version row survives an uninstall
+ *     (the proposal then reads "already promoted"), and enable re-verifies
+ *     and reinstalls it, so the row stays listed with that one action rather
+ *     than vanishing and leaving the owner no way back but a new version.
  */
 import { useState } from "react";
 import { Puzzle } from "lucide-react";
@@ -50,7 +59,7 @@ export function InstalledList(props: InstalledListProps) {
       </Card>
     );
   }
-  const shown = props.extensions.filter((e) => e.status !== "uninstalled");
+  const shown = props.extensions;
   if (shown.length === 0) {
     return (
       <Card>
@@ -107,19 +116,30 @@ export function InstalledList(props: InstalledListProps) {
                           Keep
                         </button>
                       </>
+                    ) : ext.status === "uninstalled" ? (
+                      <button
+                        type="button"
+                        className="btn sm"
+                        disabled={busy || !ext.version}
+                        aria-label={`Reinstall ${ext.id}`}
+                        onClick={() => props.onSetEnabled(ext.id, true)}
+                      >
+                        Reinstall
+                      </button>
                     ) : (
                       <>
-                        {ext.status === "disabled" ? (
+                        {ext.status === "disabled" || ext.status === "failed" ? (
                           <button
                             type="button"
                             className="btn sm"
                             disabled={busy}
-                            aria-label={`Enable ${ext.id}`}
+                            aria-label={`${ext.status === "failed" ? "Retry" : "Enable"} ${ext.id}`}
                             onClick={() => props.onSetEnabled(ext.id, true)}
                           >
-                            Enable
+                            {ext.status === "failed" ? "Retry" : "Enable"}
                           </button>
-                        ) : (
+                        ) : null}
+                        {ext.status !== "disabled" ? (
                           <button
                             type="button"
                             className="btn sm"
@@ -129,7 +149,7 @@ export function InstalledList(props: InstalledListProps) {
                           >
                             Disable
                           </button>
-                        )}
+                        ) : null}
                         <button
                           type="button"
                           className="btn ghost sm"

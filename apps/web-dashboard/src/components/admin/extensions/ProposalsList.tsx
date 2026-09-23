@@ -3,10 +3,18 @@
 /**
  * WARP-2900 (ADR-056 slice H4) — workshop proposals that could be promoted.
  *
- * Each row names the workshop workspace (the owner's own label for it), the
- * proposed version, and either a "Review" action or the orchestrator's reason
- * it cannot be promoted. Nothing from the extension's manifest text is shown
- * here: what it would get is read back only after "Review", from `provides`.
+ * Each row is named by the slug this box derives from the workspace id (the
+ * name the extension will run under) and the proposed version, with either a
+ * "Review" action or the orchestrator's reason it cannot be promoted.
+ *
+ * The workspace's `name` is deliberately NOT rendered, anywhere — not as the
+ * title, not in the button's label. POST /api/workspace is reachable by the
+ * workshop's own tool, so a session that read untrusted content can name a
+ * workspace "Read-only safe helper (reviewed)", and that sentence would sit
+ * directly above the Review button. Same rule as InstalledList and the
+ * readback: at decision time, only words this box wrote. Nothing from the
+ * extension's manifest text is shown either: what it would get is read back
+ * only after "Review", from `provides`.
  */
 import { Hammer } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
@@ -59,8 +67,8 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
           <Row
             key={`${p.workspaceId}:${p.tag}`}
             icon={<Hammer size={15} />}
-            title={p.name}
-            sub={p.promotable ? `version ${p.version} · becomes ${p.slug}` : (p.reason ?? "Cannot be promoted")}
+            title={p.slug}
+            sub={p.promotable ? `version ${p.version}` : (p.reason ?? "Cannot be promoted")}
             meta={p.version}
             metaMono
             right={
@@ -70,7 +78,7 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
                     type="button"
                     className="btn sm"
                     disabled={reviewing !== null}
-                    aria-label={`Review ${p.name} ${p.version}`}
+                    aria-label={`Review ${p.slug} ${p.version}`}
                     onClick={() => onReview(p.workspaceId)}
                   >
                     {reviewing === p.workspaceId ? "Reading…" : "Review"}
