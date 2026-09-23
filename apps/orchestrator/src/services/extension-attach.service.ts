@@ -217,6 +217,22 @@ function serialised<T>(slug: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/**
+ * An attach port that builds its attacher on first use. The app is built in
+ * a dozen route suites with a `vi.mock` of the MCP singleton that has no
+ * attach surface; nothing here is read until an extension actually starts
+ * (the app.ts `detachRemoteMcp` precedent).
+ */
+export function lazyExtensionAttachPort(make: () => ExtensionAttacher): ExtensionAttacher {
+  let attacher: ExtensionAttacher | null = null;
+  const get = (): ExtensionAttacher => (attacher ??= make());
+  return {
+    attach: (slug) => get().attach(slug),
+    detach: (slug) => get().detach(slug),
+    isAttached: (slug) => get().isAttached(slug),
+  };
+}
+
 export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionAttacher {
   const { prisma, mux, sandbox } = deps;
   const registry = deps.registry ?? runtimeToolRegistry;

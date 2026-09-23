@@ -61,6 +61,9 @@ import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
+import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 // WARP-2749 / WARP-2752 (ADR-051) — reading the brain.
 import { createBrainRouter } from "./routes/brain.js";
 import type { BrainPassTrigger } from "./services/brain/brain-pass-runner.js";
@@ -290,6 +293,13 @@ export function createApp(
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
+  // WARP-2900 (ADR-056 slice H3) — an extension's call-back principal
+  // (`_service:ext:<slug>`, from its `dxt_` bearer) reaches its own two
+  // routes and nothing else. Mounted right after authMiddleware, before any
+  // router, so a route with no requireRole of its own is not reachable by
+  // an extension either.
+  app.use(extensionPrincipalGuard);
+
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an
   // admin-created user holding a temporary password can only reach the
@@ -484,7 +494,25 @@ export function createApp(
   // Promote is OWNER only (never the mcp principal); the rest owner/admin
   // reads and owner writes. Dark until SANDBOX_PROCESS_SUPERVISION=1: the
   // sandbox 404s every extension route and the promote answers 503.
-  app.use("/api", createExtensionsRouter(prisma));
+  // H3: the default lifecycle goes `live` through the multiplexer attach,
+  // hands each child the call-back URL, and `/self/call` dispatches through
+  // the same multiplexer. Every binding is read lazily (see the integrations
+  // router above for why).
+  app.use(
+    "/api",
+    createExtensionsRouter(prisma, {
+      attach: lazyExtensionAttachPort(() =>
+        createExtensionAttacher({ prisma, mux: mcpClient, sandbox: createExtensionSandboxClient() }),
+      ),
+      orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+      mcp: {
+        get isStarted() {
+          return mcpClient.isStarted;
+        },
+        callTool: (name, args, context) => mcpClient.callTool(name, args, context),
+      },
+    }),
+  );
   app.use("/api", createBrainRouter(prisma, brainPassTrigger));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6

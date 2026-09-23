@@ -30,6 +30,13 @@ export function extensionPrincipalId(slug: string): string {
   return `${EXTENSION_PRINCIPAL_PREFIX}${slug}`;
 }
 
+/**
+ * The statuses in which an extension's bearer is honoured: its process
+ * should be running. A disable or uninstall also clears the hash; this is
+ * the second lock on the same door (a `failed` row keeps no bearer either).
+ */
+export const EXTENSION_BEARER_STATUSES: readonly string[] = ["installed", "live"];
+
 /** Multiplexer server ids of promoted extensions: `ext-<slug>`. */
 export const EXTENSION_SERVER_PREFIX = "ext-";
 

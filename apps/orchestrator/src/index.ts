@@ -140,6 +140,7 @@ import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { createExtensionAttacher } from "./services/extension-attach.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
@@ -518,10 +519,17 @@ async function main() {
   // clock, its own lock key (the sandbox is one shared resource), never a
   // `while True`. No Extension rows → the tick dials nothing, so a box with
   // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  // H3: the same tick re-attaches every running extension this process has
+  // not attached (after an orchestrator restart the sandbox's processes
+  // outlive the in-memory attachment), and each restarted child gets the
+  // call-back URL.
+  const extensionSandbox = createExtensionSandboxClient();
   const extensionLifecycle = createExtensionLifecycle({
     prisma,
-    sandbox: createExtensionSandboxClient(),
+    sandbox: extensionSandbox,
     identity: createDeviceIdentityClient(),
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox }),
+    orchestratorUrl: config.EXTENSION_CALLBACK_URL,
   });
   void extensionLifecycle.refreshInstalledIds().catch((err) => {
     logger.warn({ err }, "extension installed-id refresh failed at boot");

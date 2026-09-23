@@ -10,6 +10,12 @@ import { isUserDenied } from "../services/auth-denylist.service.js";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import {
+  EXTENSION_BEARER_STATUSES,
+  EXTENSION_TOKEN_PREFIX,
+  extensionPrincipalId,
+  hashExtensionToken,
+} from "../services/extension-token.js";
 
 const logger = createLogger("auth");
 
@@ -73,6 +79,13 @@ export interface AuthUser {
    * argument in services/tool-access.service.ts.
    */
   accessRoleId?: string | null;
+  /**
+   * WARP-2900 — set only on an extension's call-back principal
+   * (`_service:ext:<slug>`): the slug of the promoted extension whose `dxt_`
+   * bearer authenticated the request. `extension-principal-guard.ts`
+   * confines such a principal to its own two routes.
+   */
+  extensionId?: string;
 }
 
 declare global {
@@ -252,6 +265,15 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : gitBasicToken;
   const token = cookieToken || headerToken;
 
+  // WARP-2900 — an extension's bearer is a header credential and nothing
+  // else. In a cookie it is refused outright: it must never reach the
+  // Nextcloud OCS fallback below, which would hand the extension's secret to
+  // another container.
+  if (cookieToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    res.status(401).json({ error: "Missing or invalid authentication" });
+    return;
+  }
+
   if (!token) {
     if (req.path.startsWith("/api/git/")) {
       // The challenge the git CLI needs before it will ask for credentials.
@@ -275,6 +297,30 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       next();
       return;
     }
+  }
+
+  // WARP-2900 (ADR-056 slice H3) — a promoted extension calling back. Its
+  // `dxt_` bearer is minted per process start and stored only as a sha256 on
+  // its Extension row, so the lookup is by that hash (a unique column; the
+  // plaintext never reaches the database). It resolves to the
+  // `_service:ext:<slug>` principal, which extension-principal-guard.ts
+  // confines to the extension's own routes. A `dxt_` bearer that does not
+  // resolve is a 401 HERE: it never falls through to the JWT or OCS paths.
+  if (headerToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
+    void resolveExtensionPrincipal(headerToken)
+      .then((principal) => {
+        if (!principal) {
+          res.status(401).json({ error: "Missing or invalid authentication" });
+          return;
+        }
+        req.user = principal;
+        next();
+      })
+      .catch((err) => {
+        logger.error({ err }, "Extension bearer lookup failed");
+        res.status(500).json({ error: "Authentication service error" });
+      });
+    return;
   }
 
   // Try JWT first — self-verifying signature, no network call. WARP-247:
@@ -408,6 +454,9 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
   if (!token) return null;
+  // WARP-2900 — an extension never opens a WebSocket, and its bearer never
+  // goes to the Nextcloud fallback below.
+  if (token.startsWith(EXTENSION_TOKEN_PREFIX)) return null;
 
   // Try JWT first. WARP-247: a sid-carrying token must also present a live
   // session record — a WS upgrade is user activity, so the default sliding
@@ -752,6 +801,22 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
     },
   },
 ];
+
+/**
+ * WARP-2900 — the extension whose current bearer this is, as its call-back
+ * principal, or null. Only a row whose process should be running counts.
+ * Fails closed with no Prisma bound (a pre-boot request).
+ */
+async function resolveExtensionPrincipal(token: string): Promise<AuthUser | null> {
+  if (!authPrisma) return null;
+  const row = await authPrisma.extension.findUnique({
+    where: { serviceTokenHash: hashExtensionToken(token) },
+    select: { id: true, status: true },
+  });
+  if (!row || !EXTENSION_BEARER_STATUSES.includes(row.status)) return null;
+  const id = extensionPrincipalId(row.id);
+  return { id, username: id, displayName: `Extension ${row.id}`, role: "service", extensionId: row.id };
+}
 
 function matchServiceToken(token: string): AuthUser | null {
   const candidate = Buffer.from(token, "utf8");
