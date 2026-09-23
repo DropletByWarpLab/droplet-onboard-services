@@ -239,13 +239,14 @@ export const MODULES: readonly ModuleDef[] = [
     description: "Invoices and bills landed from a connected ledger.",
     category: "workspace", routePrefixes: ["/api/money"],
     navHrefs: ["/money"],
-    // WARP-2581 — NO tool domain claimed. `money_list_open_documents` is
-    // excluded from the chat pool while `base-prompt-budget.test.ts` sits 59
-    // characters under its 60,000 tripwire (WARP-2547 owns that decision), and
-    // the registry's `unknown domain` invariant is about a gate pointing at
-    // nothing — a domain claimed here for a tool the model can never be
-    // offered would be exactly that.
-    toolDomains: [], core: false, defaultEnabled: false,
+    // WARP-2742 — claimed. WARP-2581 shipped this `[]` because the tool is
+    // kept out of the CHAT pool (EXCLUDED_FROM_CHAT_TOOLS), but it is still
+    // MCP-, ToolSpec- and dispatch-reachable, and an unclaimed domain used to
+    // pass the §3 feature intersection unconditionally: neither the Money
+    // toggle nor a role's Money grant withheld the ledger. The `money` domain
+    // exists in the tools-core catalog, so the `unknown domain` invariant is
+    // satisfied.
+    toolDomains: ["money"], core: false, defaultEnabled: false,
     // No `requires`. The bar is "the child has no reachable surface of its own
     // without the parent" — /money reads landed documents and needs neither the
     // CRM nor Projects to be on. A box that does its books in QuickBooks and

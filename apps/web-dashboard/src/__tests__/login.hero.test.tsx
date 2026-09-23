@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 /**
- * Aurora sign-in — composition, gated methods, and submit wiring.
+ * Sign-in surface — the dot-matrix hero (WARP-2973), page composition, gated
+ * methods, and submit wiring.
  * (Friendly-error translation is covered separately in login.errors.test.tsx.)
  */
 
@@ -46,8 +47,9 @@ vi.mock("next/navigation", async () => {
 });
 
 import LoginPage from "@/app/login/page";
+import { LoginHero } from "@/components/auth/LoginHero";
 
-describe("Aurora LoginPage", () => {
+describe("LoginPage", () => {
   beforeEach(() => {
     loginMock.mockReset();
     pushMock.mockReset();
@@ -69,6 +71,13 @@ describe("Aurora LoginPage", () => {
       screen.getByRole("heading", { name: /welcome back/i }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  // WARP-2973 — the shared auth shell carries the build stamp under the
+  // footnote, from the same constant the sidebar renders.
+  it("renders the version line under the form", () => {
+    render(<LoginPage />);
+    expect(screen.getByText("Droplet v0.1.0")).toBeInTheDocument();
   });
 
   it("exposes exactly one top-level heading — the form's, not the hero's", () => {
@@ -315,5 +324,90 @@ describe("Aurora LoginPage", () => {
     expect(
       screen.getByText(/setup already completed/i),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-2973 — the dot-matrix hero.
+ *
+ * Rendered directly (not through the page) so the animation assertions can
+ * count `requestAnimationFrame` calls without anything else on the surface
+ * contributing to them.
+ *
+ * jsdom has no 2D canvas backend, so `getContext("2d")` returns null: these
+ * tests pin that the hero MOUNTS and SCHEDULES, and that it draws nothing
+ * without a context rather than throwing. The pixels themselves are an
+ * eyeball check on a box (see the PR test plan).
+ */
+describe("LoginHero (WARP-2973)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // matchMedia is not implemented by jsdom; the reduced-motion test installs
+    // one, so take it back off rather than leaking a stub into later files.
+    delete (window as { matchMedia?: unknown }).matchMedia;
+  });
+
+  it("mounts both canvases and starts one animation loop", () => {
+    const raf = vi.spyOn(window, "requestAnimationFrame");
+    render(<LoginHero />);
+
+    expect(screen.getByTestId("login-hero-field")).toBeInTheDocument();
+    expect(screen.getByTestId("login-hero-gem")).toBeInTheDocument();
+    expect(raf).toHaveBeenCalled();
+  });
+
+  it("schedules no frames when the viewer prefers reduced motion", () => {
+    window.matchMedia = vi.fn().mockReturnValue({
+      matches: true,
+      media: "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }) as unknown as typeof window.matchMedia;
+    const raf = vi.spyOn(window, "requestAnimationFrame");
+
+    render(<LoginHero />);
+
+    // Still painted (one static frame), just never animated.
+    expect(screen.getByTestId("login-hero-field")).toBeInTheDocument();
+    expect(raf).not.toHaveBeenCalled();
+  });
+
+  it("cancels the loop on unmount", () => {
+    const cancel = vi.spyOn(window, "cancelAnimationFrame");
+    const { unmount } = render(<LoginHero />);
+    unmount();
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("renders the positioning copy and the three trust chips", () => {
+    render(<LoginHero />);
+    expect(screen.getByText(/on your premises/i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing leaves the building/i)).toBeInTheDocument();
+    for (const label of ["On-prem", "Encrypted at rest", "Yours, not licensed"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("shows the box's own hostname in the status line", () => {
+    render(<LoginHero />);
+    // jsdom serves the suite from http://localhost.
+    expect(screen.getByText(window.location.hostname)).toBeInTheDocument();
+  });
+
+  it("hides the decorative layers from assistive tech", () => {
+    const { container } = render(<LoginHero />);
+    for (const id of ["login-hero-field", "login-hero-gem"]) {
+      expect(screen.getByTestId(id)).toHaveAttribute("aria-hidden", "true");
+    }
+    // The online dot conveys nothing the adjacent text does not.
+    expect(container.querySelector(".lh-dot")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+  });
+
+  it("keeps the positioning line out of the heading outline", () => {
+    render(<LoginHero />);
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
   });
 });

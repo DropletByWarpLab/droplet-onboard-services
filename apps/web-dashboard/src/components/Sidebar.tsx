@@ -13,6 +13,7 @@ import { useIntegrations } from "@/lib/hooks/useIntegrations";
 import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+import { VERSION_LABEL } from "@/lib/brand";
 // WARP-2956 — collapse (64px icon rail) + drag-resize (200–360px) state for
 // the desktop aside. The hook owns persistence and the `--sidebar-w` CSS
 // variable; this file only renders against `collapsed` / `width`.
@@ -435,7 +436,7 @@ export function Sidebar() {
 
           {!collapsed && (
             <p className="type-caption-2 text-label-quaternary text-center">
-              Droplet v0.1.0
+              {VERSION_LABEL}
             </p>
           )}
         </div>

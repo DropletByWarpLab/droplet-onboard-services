@@ -23,7 +23,7 @@ import type {
 } from "@simplewebauthn/browser";
 import { useAuth } from "@/lib/auth";
 import type { AuthUser } from "@/lib/auth";
-import { AuroraPanel } from "@/components/auth/AuroraPanel";
+import { LoginHero } from "@/components/auth/LoginHero";
 import { DropletMark } from "@/components/DropletMark";
 import { safeNext } from "@/lib/safe-next";
 import {
@@ -410,8 +410,8 @@ function PasskeyApprovalInner() {
   const showFooter = state !== "success";
 
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-      <AuroraPanel className="hidden lg:flex" />
+    <div className="min-h-dvh grid lg:grid-cols-2 bg-surface-primary">
+      <LoginHero className="hidden lg:block" />
 
       {/* Right panel. The waiting state keeps its content top-aligned below lg
           (Cancel above the native bottom-sheet zone) and — via the column's
@@ -575,8 +575,8 @@ export default function PasskeyApprovalPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-          <AuroraPanel className="hidden lg:flex" />
+        <div className="min-h-dvh grid lg:grid-cols-2 bg-surface-primary">
+          <LoginHero className="hidden lg:block" />
           <div className="flex items-center justify-center p-6 sm:p-10">
             <div className="w-full max-w-[380px]">
               <div className="lg:hidden flex items-center gap-2 mb-8">

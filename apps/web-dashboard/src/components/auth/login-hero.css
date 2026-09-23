@@ -1,0 +1,290 @@
+/* ─────────── Login landing hero — WARP-2973 ───────────
+   * The brand half of every public auth surface (/login, /invite/[token],
+   * /login/passkey, /change-password).
+   *
+   * WHY THIS FILE EXISTS AT ALL: the hero is pinned DARK in both themes —
+   * it is a lit object on a near-black field, and there is no light-mode
+   * version of it. So its colours cannot come from the theme tokens, which
+   * invert. They are the design's literal values (Claude Design export,
+   * `docs/design/login-landing.dc.html`), scoped here as `--lh-*` on `.lh`
+   * rather than sprayed as hex across className strings:
+   *
+   * - the dashboard token ratchet (`scripts/check-dashboard-classes.sh`)
+   * reads component source for `bg-surface-*` / `text-label-*` /
+   * `border-separator` / `bg-accent` — none of which this surface may
+   * use, and none of which appear here;
+   * - `--lh-*` are scoped to `.lh`, NOT to `:root`, so they never reach
+   * the `:root` / `.dark` custom-property contract that
+   * `design-tokens.lock.test.ts` pins byte-for-byte against the
+   * design-and-style canon.
+   *
+   * The form column beside it is the opposite: tokens only, follows the
+   * theme. Don't blend the two.
+   *
+   * Motion: the three keyframes below are decorative. The reduced-motion
+   * block at the bottom stops all of them; the rAF field/gem loop is
+   * separately not started at all (see LoginHero.tsx), so a reduced-motion
+   * viewer gets one static frame and no repaint. */
+
+.lh {
+  /* Design literals — see the block above before changing any of these. */
+  --lh-bg: #0f1117;
+  --lh-ink: #e4e4e7;
+  --lh-ink-strong: #f4f4f5;
+  --lh-ink-2: #a1a1aa;
+  --lh-ink-3: #71717a;
+  --lh-line: #2a2d3a;
+  --lh-chip-bg: rgba(26, 29, 39, 0.72);
+  --lh-chip-line: rgba(129, 140, 248, 0.35);
+  --lh-indigo: #6366f1;
+  --lh-indigo-300: #a5b4fc;
+  --lh-online: #22c55e;
+
+  position: relative;
+  overflow: hidden;
+  min-height: 100%;
+  background: var(--lh-bg);
+  color: var(--lh-ink);
+  cursor: crosshair;
+}
+
+/* The dot-matrix field. Sized by ResizeObserver, painted by the rAF loop. */
+.lh-field {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Vignette — sinks the field's edges so the gem reads as the light source. */
+.lh-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 70% 60% at 50% 45%,
+    rgba(15, 17, 23, 0) 0%,
+    rgba(15, 17, 23, 0.55) 100%
+  );
+}
+
+.lh-brand {
+  position: absolute;
+  top: 32px;
+  left: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--lh-ink);
+  animation: lh-fade-rise 0.5s cubic-bezier(0.25, 0.1, 0.25, 1) both;
+}
+/* The mark's two faces come off `currentColor` (the lighter one at 55%
+   opacity), so one colour is the whole glyph. */
+.lh-mark {
+  color: var(--lh-indigo);
+}
+.lh-wordmark {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.8px;
+}
+
+/* The centred stack. `pointer-events: none` so the whole section keeps
+   receiving the mouse for the field's heat halo; the gem and the chips
+   opt back in. */
+.lh-stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 96px 36px 80px;
+  pointer-events: none;
+}
+
+.lh-tilt {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  perspective: 700px;
+  transform-style: preserve-3d;
+  transition: transform 0.25s cubic-bezier(0.25, 0.1, 0.25, 1);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.lh-halo {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 240px;
+  height: 240px;
+  margin: -120px 0 0 -120px;
+  border-radius: 50%;
+  filter: blur(18px);
+  background: radial-gradient(
+    circle,
+    rgba(99, 102, 241, 0.5) 0%,
+    rgba(79, 70, 229, 0.2) 35%,
+    rgba(15, 17, 23, 0) 70%
+  );
+  animation: lh-halo-pulse 6s ease-in-out infinite;
+}
+.lh-float {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: lh-gem-float 7s ease-in-out infinite;
+}
+/* Backing store is 360×360 (DPR 2 of the 180 CSS box) — see drawGem. */
+.lh-gem {
+  position: absolute;
+  inset: 0;
+  width: 180px;
+  height: 180px;
+  filter: drop-shadow(0 24px 30px rgba(49, 46, 129, 0.7));
+}
+
+.lh-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  max-width: 560px;
+  text-align: center;
+}
+/* Deliberately NOT a heading: the page's only <h1> is the form column's
+   "Welcome back" / "You've been invited". This line is positioning copy,
+   and when it was an <h1> screen-reader users landed on the pitch instead
+   of the thing they came to do. */
+.lh-title {
+  margin: 0;
+  font-size: clamp(34px, 3.4vw, 46px);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -1.4px;
+  color: var(--lh-ink-strong);
+  text-wrap: balance;
+  animation: lh-fade-rise 0.5s cubic-bezier(0.25, 0.1, 0.25, 1) 0.12s both;
+}
+.lh-sub {
+  margin: 0;
+  max-width: 460px;
+  font-size: 17px;
+  line-height: 1.5;
+  color: var(--lh-ink-2);
+  text-wrap: pretty;
+  animation: lh-fade-rise 0.5s cubic-bezier(0.25, 0.1, 0.25, 1) 0.22s both;
+}
+
+.lh-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  pointer-events: auto;
+  animation: lh-fade-rise 0.5s cubic-bezier(0.25, 0.1, 0.25, 1) 0.32s both;
+}
+.lh-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--lh-chip-line);
+  background: var(--lh-chip-bg);
+  backdrop-filter: blur(12px) saturate(150%);
+  font-size: 13px;
+  color: var(--lh-ink);
+  transition:
+    border-color 0.2s cubic-bezier(0.25, 0.1, 0.25, 1),
+    background 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+.lh-chip:hover {
+  border-color: var(--lh-indigo-300);
+  background: rgba(31, 41, 55, 0.85);
+}
+.lh-chip svg {
+  color: var(--lh-indigo-300);
+}
+
+.lh-status {
+  position: absolute;
+  left: 36px;
+  bottom: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--lh-ink-2);
+}
+.lh-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lh-online);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+.lh-sep {
+  color: var(--lh-ink-3);
+}
+/* The hostname the browser actually reached — read from
+   window.location in an effect, so SSR renders the line without it. */
+.lh-host {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--lh-ink-3);
+}
+
+@keyframes lh-gem-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-14px);
+  }
+}
+@keyframes lh-fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes lh-halo-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.08);
+  }
+}
+
+/* Reduced motion: no float, no pulse, no entrance — and no pointer tilt
+   (LoginHero skips the transform write). The rAF loop is never started,
+   so the field and the gem are painted once and left alone. */
+@media (prefers-reduced-motion: reduce) {
+  .lh .lh-brand,
+  .lh .lh-title,
+  .lh .lh-sub,
+  .lh .lh-chips,
+  .lh .lh-halo,
+  .lh .lh-float {
+    animation: none;
+  }
+  .lh .lh-tilt {
+    transition: none;
+  }
+}

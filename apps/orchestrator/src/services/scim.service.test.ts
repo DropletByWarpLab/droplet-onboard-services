@@ -261,6 +261,8 @@ describe("provisionUser — create-or-update by normalized email, idempotent", (
     expect(user.directoryStatus).toBe("ACTIVE");
     // SCIM users cannot password-login.
     expect(prisma.user.create.mock.calls[0]![0].data.passwordHash ?? null).toBeNull();
+    // WARP-2858: the origin is written explicitly at creation.
+    expect(prisma.user.create.mock.calls[0]![0].data.provisionSource).toBe("SCIM");
     // Linked via the EXISTING SsoIdentity table under provider "okta".
     expect(prisma.ssoIdentity.create).toHaveBeenCalledTimes(1);
     const link = prisma.ssoIdentity.create.mock.calls[0]![0].data;
