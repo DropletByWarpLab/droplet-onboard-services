@@ -220,8 +220,9 @@ export function createApp(
   app.use(createScimRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
-  // without a session cookie. Token in the query string is the auth (HMAC
-  // of DEVICE_SECRET + username, see routes/calendar.ts publishToken).
+  // without a session cookie. Token in the query string is the auth (a
+  // stored, per-user, expiring credential — WARP-2767,
+  // services/calendar-feed-token.service.ts).
   // Mount BEFORE the auth middleware so it doesn't require a session.
   app.use("/api", createCalendarPublicRouter(prisma));
   // Public clip-share endpoint — recipient of a shared link doesn't have a
