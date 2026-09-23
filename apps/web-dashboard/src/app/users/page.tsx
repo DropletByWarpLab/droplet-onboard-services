@@ -1593,7 +1593,7 @@ export default function UsersPage() {
                       value={inviteEmail}
                       onChange={(e) => setInviteEmail(e.target.value)}
                       placeholder="you@company.com"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1611,7 +1611,7 @@ export default function UsersPage() {
                       value={inviteDisplay}
                       onChange={(e) => setInviteDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1668,7 +1668,7 @@ export default function UsersPage() {
                         id={inviteTtlId}
                         value={inviteTtlHours}
                         onChange={(e) => setInviteTtlHours(Number(e.target.value))}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -1819,7 +1819,7 @@ export default function UsersPage() {
                       <input
                         readOnly
                         value={inviteResult.url}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 type-footnote"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -1920,7 +1920,7 @@ export default function UsersPage() {
                       value={createDisplay}
                       onChange={(e) => setCreateDisplay(e.target.value)}
                       placeholder="Display name"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1942,7 +1942,7 @@ export default function UsersPage() {
                       value={createEmail}
                       onChange={(e) => setCreateEmail(e.target.value)}
                       placeholder="alex@example.com"
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1974,7 +1974,7 @@ export default function UsersPage() {
                       id={createRoleId}
                       value={createRole}
                       onChange={(e) => setCreateRole(e.target.value as CreateUserRole)}
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -1998,7 +1998,7 @@ export default function UsersPage() {
                         id={createPasswordId}
                         value={createPassword}
                         onChange={(e) => setCreatePassword(e.target.value)}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",
@@ -2074,7 +2074,7 @@ export default function UsersPage() {
                     id={createEmailId}
                     readOnly
                     value={createEmail}
-                    className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono type-footnote"
+                    className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors font-mono type-footnote"
                     style={{
                       background: "var(--surface)",
                       border: "1px solid var(--border)",
@@ -2097,7 +2097,7 @@ export default function UsersPage() {
                       ref={createHandoffPwRef}
                       readOnly
                       value={createPassword}
-                      className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
+                      className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors flex-1 font-mono type-footnote"
                       style={{
                         background: "var(--surface)",
                         border: "1px solid var(--border)",
@@ -2192,7 +2192,7 @@ export default function UsersPage() {
                   id={editDisplayNameId}
                   value={editDisplayName}
                   onChange={(e) => setEditDisplayName(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -2218,7 +2218,7 @@ export default function UsersPage() {
                   type="password"
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -2294,7 +2294,7 @@ export default function UsersPage() {
                           aria-label="Storage limit"
                           disabled={editingIsOwner}
                           title={editUsageDisabledTitle}
-                          className="flex-1 px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
+                          className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2308,7 +2308,7 @@ export default function UsersPage() {
                           aria-label="Storage limit unit"
                           disabled={editingIsOwner}
                           title={editUsageDisabledTitle}
-                          className="px-2.5 py-2.5 outline-none focus:border-[var(--brand)] transition-colors disabled:opacity-55"
+                          className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2339,7 +2339,7 @@ export default function UsersPage() {
                         aria-label="Upload cap in megabytes"
                         disabled={editingIsOwner}
                         title={editUsageDisabledTitle}
-                        className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
+                        className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors disabled:opacity-55"
                         style={{
                           background: "var(--surface)",
                           border: "1px solid var(--border)",

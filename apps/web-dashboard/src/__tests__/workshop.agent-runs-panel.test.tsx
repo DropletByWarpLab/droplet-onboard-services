@@ -301,3 +301,39 @@ describe("Background runs panel (WARP-2180)", () => {
     });
   });
 });
+
+// WARP-2909 — a notification deep-links to `/workshop?run=<id>`; approving from
+// there is redeemed ONLY by POST /api/agent-runs/:id/confirm. Pin that the one
+// dashboard source line touching that route is `decideAgentRun`, so no
+// notification surface grows its own approve shortcut. Scoped to
+// `/api/agent-runs/` + `/confirm` — other `/confirm` routes (storage, network,
+// cameras, ERP write-requests) exist and are unrelated.
+describe("agent-run confirm has exactly one caller (WARP-2909)", () => {
+  it("only decideAgentRun fetches /api/agent-runs/…/confirm", async () => {
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.resolve(__dirname, "..");
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name !== "__tests__" && e.name !== "node_modules") walk(p);
+        } else if (/\.(ts|tsx|js)$/.test(e.name)) {
+          readFileSync(p, "utf-8")
+            .split("\n")
+            .forEach((line, i) => {
+              if (line.includes("/api/agent-runs/") && line.includes("/confirm")) {
+                hits.push(`${path.relative(src, p)}:${i + 1}`);
+              }
+            });
+        }
+      }
+    };
+    walk(src);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatch(/^components\/workshop\/agent-runs\/api\.ts:/);
+    const apiSrc = readFileSync(path.join(src, "components/workshop/agent-runs/api.ts"), "utf-8");
+    expect(apiSrc).toMatch(/export async function decideAgentRun[\s\S]{0,200}\/api\/agent-runs\/\$\{encodeURIComponent\(id\)\}\/confirm/);
+  });
+});

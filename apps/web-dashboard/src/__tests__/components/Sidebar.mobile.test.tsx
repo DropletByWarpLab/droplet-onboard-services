@@ -205,19 +205,22 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
 
   // ── WARP-1554 ────────────────────────────────────────────────────────
   // /files owns a bottom tab, and the drawer used to drop a primary's
-  // children along with the primary's own row. That left Recents,
-  // Favorites, Shared, Trash and Sync Devices with NO mobile navigation path
-  // whatsoever — the desktop sub-nav lives in a `hidden lg:flex` <aside>, so
-  // it is no fallback. These cases pin mobile reachability so the regression
-  // cannot happen silently again. (WARP-2959 moved Drives out of Files
-  // entirely — it is reached from Settings -> Storage now, so it is no longer
-  // one of the sub-views this has to keep reachable.)
+  // children along with the primary's own row. That left the Files sub-views
+  // with NO mobile navigation path whatsoever — the desktop sub-nav lives in a
+  // `hidden lg:flex` <aside>, so it is no fallback. These cases pin mobile
+  // reachability so the regression cannot happen silently again.
+  //
+  // The list shrinks as surfaces MOVE, never as they vanish, and each move
+  // brings its new door in the same change:
+  //   · WARP-2959 — Drives → Settings → Storage.
+  //   · WARP-2966 — Sync devices → Settings → Advanced (addendum §2.3), and
+  //     Favorites → the /files toolbar (it is a filter over the places below,
+  //     not a place). Settings is itself a drawer row, so both stay reachable
+  //     on a phone; neither is a Files sub-view any more, which is the point.
   const FILES_SUBVIEWS: Array<[string, RegExp, string]> = [
-    ["Recents", /^recents$/i, "/files/recents"],
-    ["Favorites", /^favorites$/i, "/files/favorites"],
+    ["Recent", /^recent$/i, "/files/recents"],
     ["Shared", /^shared$/i, "/files/shared"],
     ["Trash", /^trash$/i, "/files/trash"],
-    ["Sync Devices", /^sync devices$/i, "/files/devices"],
   ];
 
   it.each(FILES_SUBVIEWS)(
@@ -277,8 +280,26 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
       within(dialog).getByRole("link", { name: /^trash$/i }),
     ).toHaveAttribute("aria-current", "page");
     expect(
-      within(dialog).getByRole("link", { name: /^favorites$/i }),
+      within(dialog).getByRole("link", { name: /^recent$/i }),
     ).not.toHaveAttribute("aria-current");
+  });
+
+  // WARP-2966 — the two surfaces that left Files must not have left the phone.
+  it("keeps the moved Files surfaces reachable via the drawer's Settings row (WARP-2966)", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    // Tucked out of the nav — the drawer must not offer a second, stale door…
+    expect(dialog.querySelector("a[href='/files/devices']")).toBeNull();
+    expect(dialog.querySelector("a[href='/files/favorites']")).toBeNull();
+    // …and Settings, which carries the Sync devices row, is one tap away.
+    expect(
+      within(dialog).getByRole("link", { name: /^settings$/i }),
+    ).toHaveAttribute("href", "/settings");
   });
 
   it("keeps the non-primary Cameras parent as a real link with its child flattened after it (WARP-1554 regression guard)", () => {

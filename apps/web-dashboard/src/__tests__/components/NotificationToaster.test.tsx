@@ -9,6 +9,11 @@ vi.mock("@/components/Toast", () => ({
   useToast: () => ({ toast: toastSpy }),
 }));
 
+const routerPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: routerPush, replace: vi.fn() }),
+}));
+
 // Mock auth so the WebSocket effect runs.
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
@@ -116,4 +121,46 @@ describe("NotificationToaster fallback copy (WARP-297)", () => {
     expect(message).toMatch(/Door open/);
     expect(message).toMatch(/Front door has been open 2m/);
   });
+});
+
+describe("NotificationToaster deep link (WARP-2909)", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    toastSpy.mockReset();
+    routerPush.mockReset();
+    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { protocol: "http:", host: "localhost" } as Location,
+    });
+  });
+
+  async function toastFor(payload: unknown) {
+    render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      deliver(payload);
+    });
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    return toastSpy.mock.calls[0][2] as { label: string; onClick: () => void } | undefined;
+  }
+
+  it("a toast with a url gets an Open action that navigates in-app", async () => {
+    const action = await toastFor({ kind: "ai", title: "Approval needed: delete_file", url: "/workshop?run=r1" });
+    expect(action?.label).toBe("Open");
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/workshop?run=r1");
+  });
+
+  it("a toast without a url has no action", async () => {
+    expect(await toastFor({ kind: "ai", title: "Done" })).toBeUndefined();
+  });
+
+  it.each(["//evil.example/x", "https://evil.example", "javascript:alert(1)", "/\\evil.example"])(
+    "never offers to navigate to %s",
+    async (url) => {
+      expect(await toastFor({ kind: "ai", title: "x", url })).toBeUndefined();
+      expect(routerPush).not.toHaveBeenCalled();
+    },
+  );
 });
