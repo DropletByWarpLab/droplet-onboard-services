@@ -402,7 +402,14 @@ def test_the_python_reader_agrees_with_the_js_renderer(store, draft):
     assert p["kind"] == "connector-draft" and p["connectorDraft"]["problems"] == []
 
 
-@pytest.mark.skipif(not Path("/usr/local/bin/npm").exists(), reason="the sandbox image's npm is not here")
+# The image, not just any host with /usr/local/bin/npm: a GitHub runner has
+# that npm too, and there this test hung the sandbox job to its 15-minute
+# timeout (the run's rlimits and env are the image's, not the runner's).
+# /app/templates is the image's own layout (services/sandbox/Dockerfile).
+IN_THE_IMAGE = Path("/usr/local/bin/npm").exists() and Path("/app/templates").is_dir()
+
+
+@pytest.mark.skipif(not IN_THE_IMAGE, reason="runs only inside the sandbox image")
 def test_end_to_end_in_the_image(store, tmp_path):
     # The live path: the run allow-list's `npm run build` / `npm test`, then
     # propose, then the bundle an owner downloads, cloned with no network.
