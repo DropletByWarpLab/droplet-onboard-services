@@ -230,9 +230,11 @@ export function bundleFilename(disposition: string | null | undefined, id: strin
 /**
  * WARP-2899 — download the workspace as a `git bundle` (the `work` branch and
  * its proposal tags). Owner/admin people only; the route refuses anyone else
- * and writes one audit row per download. The session token rides in a header,
- * so this is an authFetch blob download rather than a plain link. Returns the
- * name the file was saved under.
+ * and writes one audit row per download. It is an authFetch blob download
+ * rather than a plain link (the session cookie would ride either way) so that
+ * an expired access token is refreshed and the call retried, a refusal is
+ * reported in place instead of navigating to a JSON error page, and the saved
+ * name is checked (`bundleFilename`). Returns the name the file was saved under.
  */
 export async function exportWorkspace(id: string): Promise<string> {
   const res = await authFetch(`/api/workspace/${encodeURIComponent(id)}/export`);

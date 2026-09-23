@@ -19,10 +19,14 @@
  *      readback for a workspace that is not a draft, an older orchestrator,
  *      or a sandbox that did not answer.
  *   3. `Export bundle` is offered to owner and admin only.
- *   4. The export is an authFetch blob download (the session token rides in
- *      a header, so a plain link could not carry it), saved under the
+ *   4. The export is an authFetch blob download (authFetch refreshes an
+ *      expired session and retries, and a refusal is reported in place
+ *      instead of navigating to a JSON error page), saved under the
  *      server's filename only when that name is a plain `<id>-<hex>.bundle`.
  *   5. A refused export says so calmly and downloads nothing.
+ *   6. The result line is one live region, mounted before the export, and an
+ *      export still running when the person switches workspace never writes
+ *      onto the next workspace's pane.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
@@ -196,6 +200,85 @@ describe("Export bundle (WARP-2899)", () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:bundle-1");
     await waitFor(() => expect(within(p).getByTestId("export-status").textContent).toContain("ws-d-0123456.bundle"));
+  });
+
+  it("keeps one live region mounted, so the result is announced when its text arrives", async () => {
+    wire(DETAIL, () => okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
+    const p = await pane();
+    // Present and empty before any export: a region inserted already filled is often not read out.
+    const region = within(p).getByTestId("export-status");
+    expect(region.getAttribute("role")).toBe("status");
+    expect(region.textContent).toBe("");
+    fireEvent.click(within(p).getByRole("button", { name: /export bundle/i }));
+    await waitFor(() => expect(region.textContent).toContain("ws-d-0123456.bundle"));
+    expect(within(p).getByTestId("export-status")).toBe(region);
+  });
+
+  it("an export still running when the person switches workspace does not land on the next pane", async () => {
+    let finish: (v: unknown) => void = () => {};
+    const other = { ...DETAIL, id: "ws-e", name: "Other", git: { ...DETAIL.git, id: "ws-e" } };
+    authFetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/workspace/ws-d") return okJson(DETAIL);
+      if (url === "/api/workspace/ws-e") return okJson(other);
+      if (/^\/api\/workspace\/ws-[de]\/log/.test(url)) return okJson({ entries: [] });
+      if (/^\/api\/workspace\/ws-[de]\/diff/.test(url)) return okJson({ base: "HEAD", diff: "", truncated: false });
+      if (/^\/api\/workspace\/ws-[de]\/output/.test(url)) return okJson({ lastRun: null });
+      if (url === "/api/workspace/ws-d/export") return new Promise((resolve) => (finish = resolve));
+      throw new Error(`unexpected ${url}`);
+    });
+    const { rerender } = render(<WorkspaceContext workspaceId="ws-d" live={false} />);
+    const p = await screen.findByTestId("workspace-context");
+    await waitFor(() => expect(p.textContent).toContain("proposal/0.1.0"));
+    fireEvent.click(within(p).getByRole("button", { name: /export bundle/i }));
+    await waitFor(() => expect(within(p).getByRole("button", { name: /exporting/i })).toBeDisabled());
+
+    rerender(<WorkspaceContext workspaceId="ws-e" live={false} />);
+    await waitFor(() => expect(p.textContent).toContain("Other"));
+    const button = within(p).getByRole("button", { name: /export bundle/i });
+    expect(button).toBeEnabled();
+
+    finish(okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
+    // The bytes the person asked for still download; only the pane stays ws-e's.
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(p).getByTestId("export-status").textContent).toBe("");
+    expect(p.textContent).not.toContain("ws-d-0123456.bundle");
+    expect(within(p).getByRole("button", { name: /export bundle/i })).toBeEnabled();
+  });
+
+  it("the old workspace's export finishing does not end the next workspace's export", async () => {
+    const finish: Record<string, (v: unknown) => void> = {};
+    const other = { ...DETAIL, id: "ws-e", name: "Other", git: { ...DETAIL.git, id: "ws-e" } };
+    authFetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/workspace/ws-d") return okJson(DETAIL);
+      if (url === "/api/workspace/ws-e") return okJson(other);
+      if (/^\/api\/workspace\/ws-[de]\/log/.test(url)) return okJson({ entries: [] });
+      if (/^\/api\/workspace\/ws-[de]\/diff/.test(url)) return okJson({ base: "HEAD", diff: "", truncated: false });
+      if (/^\/api\/workspace\/ws-[de]\/output/.test(url)) return okJson({ lastRun: null });
+      const m = /^\/api\/workspace\/(ws-[de])\/export$/.exec(url);
+      if (m) return new Promise((resolve) => (finish[m[1]!] = resolve));
+      throw new Error(`unexpected ${url}`);
+    });
+    const { rerender } = render(<WorkspaceContext workspaceId="ws-d" live={false} />);
+    const p = await screen.findByTestId("workspace-context");
+    await waitFor(() => expect(p.textContent).toContain("proposal/0.1.0"));
+    fireEvent.click(within(p).getByRole("button", { name: /export bundle/i }));
+    await waitFor(() => expect(finish["ws-d"]).toBeDefined());
+
+    rerender(<WorkspaceContext workspaceId="ws-e" live={false} />);
+    await waitFor(() => expect(p.textContent).toContain("Other"));
+    fireEvent.click(within(p).getByRole("button", { name: /export bundle/i }));
+    await waitFor(() => expect(finish["ws-e"]).toBeDefined());
+
+    finish["ws-d"]!(okBundle("# v2 git bundle\n", 'attachment; filename="ws-d-0123456.bundle"'));
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 0));
+    // ws-e's own export is still running: its button stays busy.
+    expect(within(p).getByRole("button", { name: /exporting/i })).toBeDisabled();
+
+    finish["ws-e"]!(okBundle("# v2 git bundle\n", 'attachment; filename="ws-e-0123456.bundle"'));
+    await waitFor(() => expect(within(p).getByTestId("export-status").textContent).toBe("Downloaded ws-e-0123456.bundle."));
+    expect(within(p).getByRole("button", { name: /export bundle/i })).toBeEnabled();
   });
 
   it("a refused export says so calmly and downloads nothing", async () => {

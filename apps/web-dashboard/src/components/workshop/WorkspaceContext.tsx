@@ -18,7 +18,7 @@
  * only, one audit row per download); the role check here decides only what
  * to render.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Cable, Copy, Download, FileDiff, FlaskConical, FolderGit2, GitCommitHorizontal, History, Play, Tag, X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isAdminRole } from "@/lib/access";
@@ -73,6 +73,10 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<{ text: string; title?: string } | null>(null);
+  // The pane is reused across workspaces (no key), so an export still running
+  // when the person switches must not write onto the next workspace's pane.
+  // Every switch bumps the generation; an export only reports into its own.
+  const exportGen = useRef(0);
   const { user } = useAuth();
   const canExport = isAdminRole(user?.role);
 
@@ -104,6 +108,8 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     setDiff(null);
     setOutput(undefined);
     setError(null);
+    exportGen.current += 1;
+    setExporting(false);
     setExportStatus(null);
     void load();
   }, [load]);
@@ -125,15 +131,17 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   };
 
   const exportBundle = async () => {
+    const gen = exportGen.current;
+    const current = () => exportGen.current === gen;
     setExporting(true);
     setExportStatus(null);
     try {
       const filename = await exportWorkspace(workspaceId);
-      setExportStatus({ text: `Downloaded ${filename}.` });
+      if (current()) setExportStatus({ text: `Downloaded ${filename}.` });
     } catch (err) {
-      setExportStatus({ text: "Couldn't export this workspace. Try again in a moment.", title: err instanceof Error ? err.message : String(err) });
+      if (current()) setExportStatus({ text: "Couldn't export this workspace. Try again in a moment.", title: err instanceof Error ? err.message : String(err) });
     } finally {
-      setExporting(false);
+      if (current()) setExporting(false);
     }
   };
 
@@ -234,9 +242,17 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                   </button>
                 )}
               </div>
-              {canExport && exportStatus && (
-                <p className="ws-note" style={{ marginTop: 6 }} role="status" data-testid="export-status" title={exportStatus.title}>
-                  {exportStatus.text}
+              {/* One live region, mounted before any export and only its text
+                  changing: a region inserted already filled is often not read out. */}
+              {canExport && (
+                <p
+                  className="ws-note"
+                  style={exportStatus ? { marginTop: 6 } : undefined}
+                  role="status"
+                  data-testid="export-status"
+                  title={exportStatus?.title}
+                >
+                  {exportStatus?.text ?? ""}
                 </p>
               )}
             </section>
