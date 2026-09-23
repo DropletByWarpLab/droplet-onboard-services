@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import secrets
 import threading
 from pathlib import Path
@@ -27,6 +28,8 @@ from extension_signing import (
     spki_fingerprint,
 )
 from storage import Storage
+
+logger = logging.getLogger(__name__)
 
 # Cert validity window — kept as a named constant per the "no guessing"
 # project rule. Self-signed certs live 5 years; renewal is a future ticket.
@@ -203,7 +206,20 @@ class MockBackend:
 
     def get_status(self) -> dict:
         provisioned = self.is_provisioned()
-        ext = self.extension_public_key() if provisioned else None
+        ext = None
+        if provisioned:
+            # GetStatus serves overlay enrolment and TLS issuance too. A
+            # damaged extension key (only the promote path uses it) must not
+            # take those down: report no extension key and log it. Signing
+            # stays fail-closed in sign_extension().
+            try:
+                ext = self.extension_public_key()
+            except Exception as exc:  # noqa: BLE001 - isolate every failure
+                logger.error(
+                    "extension key unreadable; GetStatus reports none: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
         ext_spki, ext_fp = ext if ext is not None else (b"", "")
         if not provisioned:
             return {

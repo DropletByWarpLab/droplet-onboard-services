@@ -15,6 +15,8 @@ Mutations each test is written to catch are named inline.
 """
 import json
 import sys
+import threading
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -240,6 +242,98 @@ def test_key_file_is_written_once(provisioned, tmp_path):
     first = (tmp_path / EXTENSION_KEY_FILE).read_bytes()
     provisioned.sign_extension(_statement(version="0.2.0"))
     assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == first
+
+
+def test_concurrent_first_signs_mint_one_key(provisioned, tmp_path, monkeypatch):
+    """Two promotes racing on the first sign must not mint two keys: the
+    loser's signature would name a key the file no longer holds, and every
+    later verify of it would be extension_key_changed.
+    MUTATION: drop `with self._extension_lock:` -> several keys, red."""
+    import backends.mock as mock_mod
+
+    real_generate = mock_mod.ec.generate_private_key
+    minted = []
+
+    def slow_generate(curve):
+        # Widen the check-then-create window so an unlocked race is certain.
+        time.sleep(0.05)
+        key = real_generate(curve)
+        minted.append(key)
+        return key
+
+    monkeypatch.setattr(mock_mod.ec, "generate_private_key", slow_generate)
+
+    n = 8
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        results[i] = provisioned.sign_extension(_statement(version=f"0.{i}.0"))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(minted) == 1
+    # The key on disk, as a restarted sidecar would load it.
+    on_disk = MockBackend(storage_root=tmp_path).extension_public_key()
+    assert on_disk is not None
+    spki, _fp = on_disk
+    for i, sig in enumerate(results):
+        assert sig is not None
+        assert _verify(spki, sig, EXTENSION_STATEMENT_PREFIX + _statement(version=f"0.{i}.0"))
+
+
+def _write_key_file(tmp_path, body: bytes) -> None:
+    (tmp_path / EXTENSION_KEY_FILE).write_bytes(body)
+
+
+def _ed25519_pem() -> str:
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"usage": "other", "priv_pem": "x"}).encode(),
+        b"not json at all",
+        json.dumps({"usage": EXTENSION_KEY_USAGE}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": "garbage"}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": _ed25519_pem()}).encode(),
+    ],
+    ids=["wrong-usage", "not-json", "no-pem", "bad-pem", "not-ec"],
+)
+def test_a_damaged_extension_key_never_breaks_get_status(provisioned, servicer, tmp_path, body):
+    """GetStatus serves overlay-connect and TLS issuance; a key only the
+    promote path uses must not take it down. The damage is reported as no
+    extension key, and signing still fails closed.
+    MUTATION: drop the try/except around extension_public_key() in
+    get_status -> GetStatus raises, red."""
+    _write_key_file(tmp_path, body)
+    fresh = MockBackend(storage_root=tmp_path)
+    status = fresh.get_status()
+    assert status["provisioned"] is True
+    assert status["extension_spki_der"] == b""
+    assert status["extension_key_fingerprint"] == ""
+
+    rpc = DeviceIdentityServicer(fresh).GetStatus(pb.GetStatusRequest(), MagicMock())
+    assert rpc.provisioned is True
+    assert rpc.extension_spki_der == b""
+
+    # Fail closed: no signature, and the damaged file is not replaced by a
+    # fresh key behind the owner's back.
+    with pytest.raises((RuntimeError, ValueError, KeyError)):
+        fresh.sign_extension(_statement())
+    assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == body
 
 
 # ─── the gRPC handler ────────────────────────────────────────────────────
