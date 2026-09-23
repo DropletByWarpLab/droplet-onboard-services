@@ -379,10 +379,7 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
     "PATCH /cameras/pins/reorder": "the caller's own pins",
     "DELETE /cameras/pins/:cameraName": "the caller's own pins",
     "POST /cameras/clips/share": "signs a Nextcloud path; governed by Nextcloud ACLs, custody roles only",
-    "GET /cameras/faces": "household face roster, not per-camera footage",
-    "GET /cameras/faces/:name/images/:image": "face training image, not per-camera footage",
-    "DELETE /cameras/faces/:name": "face roster",
-    "DELETE /cameras/faces/:name/images/:image": "face roster",
+    "DELETE /cameras/faces/:name": "custody roles only (owner/admin see every camera)",
     "GET /cameras/plates": "household plate roster",
     "PUT /cameras/plates/:plate": "household plate roster",
     "DELETE /cameras/plates/:plate": "household plate roster",
@@ -449,6 +446,20 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
       "GET /cameras/birdseye/live",
       "GET /cameras/reviews/:reviewId/preview",
       "GET /cameras/reviews/:reviewId/thumbnail",
+    ]) {
+      expect(guarded, key).toContain(key);
+    }
+  });
+
+  it("WARP-3013: the face-library routes that can serve a camera's crops are guarded", () => {
+    // Frigate's face library holds `train` — recent face crops from every
+    // camera — next to the curated roster, so these are not "household
+    // roster, not per-camera footage" after all.
+    const guarded = new Set(allRoutes().filter((r) => r.guarded).map((r) => r.key));
+    for (const key of [
+      "GET /cameras/faces",
+      "GET /cameras/faces/:name/images/:image",
+      "DELETE /cameras/faces/:name/images/:image",
     ]) {
       expect(guarded, key).toContain(key);
     }

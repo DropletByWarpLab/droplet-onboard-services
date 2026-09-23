@@ -110,6 +110,7 @@ import {
 } from "../services/camera-retention-backfill.service.js";
 import {
   cameraScopeOf,
+  canSeeFaceFolder,
   filterVisibleCameras,
   inCameraScope,
   listGrantsForUser,
@@ -668,13 +669,19 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   //
   // Names + image filenames are tightened past Frigate's anything-goes
   // because we splice them straight into upstream URLs.
+  //
+  // WARP-3013: Frigate lists its `train` folder — recent face crops from
+  // every camera — alongside the named people. The routes that can show or
+  // remove those crops carry the per-camera guard, and only an all-camera
+  // scope gets the folder (`canSeeFaceFolder`).
 
   const FACE_NAME_RE = /^[a-zA-Z0-9_ -]{1,40}$/;
   const FACE_IMAGE_RE = /^[a-zA-Z0-9._-]{1,100}\.(jpg|jpeg|png|webp)$/i;
 
-  router.get("/cameras/faces", requireRole(...CAMERA_VIEW_ROLES), async (_req, res, next) => {
+  router.get("/cameras/faces", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (_req, res, next) => {
     try {
-      const faces = await fetchKnownFaces();
+      const scope = cameraScopeOf(res);
+      const faces = (await fetchKnownFaces()).filter((f) => canSeeFaceFolder(scope, f.name));
       // Rewrite image URLs to point at our proxy.
       const out = faces.map((f) => ({
         name: f.name,
@@ -689,13 +696,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/cameras/faces/:name/images/:image", requireRole(...CAMERA_VIEW_ROLES), async (req, res, next) => {
+  router.get("/cameras/faces/:name/images/:image", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!FACE_NAME_RE.test(req.params.name)) {
         return res.status(400).json({ error: "Invalid face name" });
       }
       if (!FACE_IMAGE_RE.test(req.params.image)) {
         return res.status(400).json({ error: "Invalid image name" });
+      }
+      if (!canSeeFaceFolder(cameraScopeOf(res), req.params.name)) {
+        return res.status(404).json({ error: "Face not found" });
       }
       const upstream = await fetchFaceImage(req.params.name, req.params.image);
       res.setHeader(
@@ -725,6 +735,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.delete(
     "/cameras/faces/:name/images/:image",
     requireRole("owner", "admin", "family"),
+    cameraAccess,
     async (req, res, next) => {
       try {
         if (!FACE_NAME_RE.test(req.params.name)) {
@@ -732,6 +743,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         if (!FACE_IMAGE_RE.test(req.params.image)) {
           return res.status(400).json({ error: "Invalid image name" });
+        }
+        // What a caller cannot see, they cannot remove.
+        if (!canSeeFaceFolder(cameraScopeOf(res), req.params.name)) {
+          return res.status(404).json({ error: "Face not found" });
         }
         await deleteFaceImage(req.params.name, req.params.image);
         res.status(204).end();
