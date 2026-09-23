@@ -67,6 +67,9 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2985: migrate_env backfills a missing/public DEVICE_SECRET once
+      # and never rotates a real one.
+      - "tests/device-secret-backfill.test.sh"
       # WARP-2944: the bootstrap cert's SAN follows the box's address around
       # the SAME key, so pinned pairings survive a move.
       - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
@@ -141,6 +144,9 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2985: migrate_env backfills a missing/public DEVICE_SECRET once
+      # and never rotates a real one.
+      - "tests/device-secret-backfill.test.sh"
       # WARP-2944: the bootstrap cert's SAN follows the box's address around
       # the SAME key, so pinned pairings survive a move.
       - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
@@ -381,6 +387,14 @@ jobs:
         # `droplet` is migrated, and verify.sh refuses it when HQ is configured.
         # Pure bash over a fixture /sys tree; no Docker, no root.
         run: bash tests/device-id-seed.test.sh
+
+      - name: Run DEVICE_SECRET backfill tests
+        # WARP-2985: the orchestrator refuses a missing/public DEVICE_SECRET on
+        # DROPLET_ENV=production, so migrate_env must give every box one —
+        # absent/empty/placeholder → a fresh random value, a real value never
+        # rewritten, a re-run byte-identical, the value never logged. Runs the
+        # real migrate_env in a temp REPO_ROOT; no Docker, no root.
+        run: bash tests/device-secret-backfill.test.sh
 
       - name: Run bootstrap-certificate key-reuse tests
         # WARP-2944 / ADR-058: the self-signed bootstrap certificate names the
