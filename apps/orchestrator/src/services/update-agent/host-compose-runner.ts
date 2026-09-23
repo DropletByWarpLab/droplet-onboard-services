@@ -64,6 +64,7 @@ import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import {
+  ReconcileUnsupportedError,
   SELF_SERVICE_NAME,
   type ApplyRunner,
   type EnvReconcileReport,
@@ -260,6 +261,20 @@ function parseStringList(text: string | undefined, key: "failed" | "skipped"): s
     // Not JSON — fall through to null (an unexpected failure shape).
   }
   return null;
+}
+
+/**
+ * The installed helper predates `reconcile-env` (every helper on stage/main
+ * before WARP-2995). Its arg parser dies on `--image` ("unknown flag") before
+ * dispatch, or on the subcommand itself. Matched on those exact die lines
+ * only: any other non-zero exit is a real reconcile failure.
+ */
+const RECONCILE_UNSUPPORTED_RE =
+  /\[apply-update\] ERROR: (unknown subcommand: reconcile-env|unknown flag: --image)\b/;
+
+function isReconcileUnsupported(err: unknown): boolean {
+  const stderr = (err as { stderr?: unknown }).stderr;
+  return typeof stderr === "string" && RECONCILE_UNSUPPORTED_RE.test(stderr);
 }
 
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
@@ -465,11 +480,17 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     },
 
     async reconcileEnv(args: { updateId: string; image: string }): Promise<EnvReconcileReport> {
-      const stdout = await run(
-        "reconcile-env",
-        ["--update-id", args.updateId, "--image", args.image],
-        timeouts.quickMs,
-      );
+      let stdout: string;
+      try {
+        stdout = await run(
+          "reconcile-env",
+          ["--update-id", args.updateId, "--image", args.image],
+          timeouts.quickMs,
+        );
+      } catch (err) {
+        if (isReconcileUnsupported(err)) throw new ReconcileUnsupportedError(err);
+        throw err;
+      }
       return parseEnvReconcileReport(stdout);
     },
 

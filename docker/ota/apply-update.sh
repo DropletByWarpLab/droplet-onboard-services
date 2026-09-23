@@ -631,6 +631,16 @@ cmd_restore_configs() {
   validate_update_id "$UPDATE_ID"
   local pre="${DROPLET_OTA_UPDATES_DIR:-/data/updates}/$UPDATE_ID/backup/configs-pre-image.tar.gz"
   log "restore-configs $UPDATE_ID from $pre"
+  # WARP-2995 (#2320 review): undo this update's .env + boot-unit changes
+  # FIRST, with the release's own env-reconcile.sh (it made the backups, and
+  # the pre-image unpacked below may carry an older copy). No backups → no-op.
+  # A failure is logged, not fatal: the config + image rollback matter more.
+  local reconcile
+  reconcile="$(config_root)/docker/ota/env-reconcile.sh"
+  if [ -f "$reconcile" ] || [ -n "$DRY_RUN" ]; then
+    run /bin/sh "$reconcile" --restore "$(config_root)" "$UPDATE_ID" >&2 \
+      || log "restore-configs: .env / boot-unit restore FAILED for $UPDATE_ID — continuing"
+  fi
   if [ -f "$pre" ] || [ -n "$DRY_RUN" ]; then
     run tar -xzf "$pre" -C "$(config_root)"
   else
