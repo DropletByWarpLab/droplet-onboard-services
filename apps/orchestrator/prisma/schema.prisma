@@ -2752,6 +2752,8 @@ model User {
   // access-control key, where an assignment is mere provenance.
   brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
   brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
+  // WARP-2251: the user's own morning briefings, one per box-local day.
+  morningBriefings   MorningBriefing[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -8043,4 +8045,79 @@ model RemoteToolClassification {
 
   @@unique([serverId, toolName])
   @@index([serverId])
+}
+
+/// WARP-2251 — morning briefing: one agent-written day plan per user per
+/// box-local day. Self-only: every read is scoped by `userId` (decision 2,
+/// 2026-08-27). Status is an explicit enum (CLAUDE.md "No guessing"): never
+/// derive readiness from `body IS NOT NULL` or failure from `endedAt IS NULL`.
+/// `body` is NOT encrypted at rest in v1 (decision 1); 30-day retention.
+model MorningBriefing {
+  id            String              @id @default(uuid())
+  userId        String
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Box-local calendar date the briefing is FOR (not when it ran).
+  forDate       DateTime            @db.Date
+  status        BriefingStatus      @default(pending)
+  skipReason    String?
+  failureReason String?
+  headline      String?
+  vibe          BriefingVibe?
+  /// The validated output contract (WARP-2248). Null until status = ready.
+  body          Json?
+  /// Tool names actually called, from the agent trace.
+  sources       Json?
+  model         String?
+  iterations    Int?
+  artKind       BriefingArtKind     @default(ascii)
+  photoStatus   BriefingPhotoStatus @default(none)
+  /// "<YYYY-MM-DD>/<theme>/<pexelsId>" (WARP-2263); null when no photo.
+  photoRef      String?
+  triggeredBy   BriefingTrigger     @default(scheduler)
+  startedAt     DateTime?
+  endedAt       DateTime?
+  readAt        DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@unique([userId, forDate])
+  @@index([userId, forDate(sort: Desc)])
+  @@index([status, forDate])
+}
+
+enum BriefingStatus {
+  pending
+  running
+  ready
+  failed
+  skipped
+}
+
+enum BriefingVibe {
+  calm
+  focused
+  busy
+  urgent
+  celebratory
+  quiet
+  stormy
+  fresh
+}
+
+enum BriefingArtKind {
+  ascii
+  svg
+  photo
+}
+
+enum BriefingPhotoStatus {
+  none
+  fetched
+  fetch_failed
+  disabled
+}
+
+enum BriefingTrigger {
+  scheduler
+  user
 }
