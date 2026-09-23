@@ -20,7 +20,7 @@
  * the box key exists; release-paths-stay-release-only.test.ts pins that.
  *
  * Order, after the signature holds: statement schema (strict) -> the
- * manifest digest (extension_digest_mismatch) -> the manifest schema and its
+ * extensionId is deriveExtensionSlug(workspaceId) -> the manifest digest (extension_digest_mismatch) -> the manifest schema and its
  * version against the statement (extension_schema_invalid).
  *
  * Single read: the statement and manifest are copied ONCE on entry and only
@@ -40,6 +40,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   canonicalJson,
+  deriveExtensionSlug,
   extensionKeyFingerprint,
   extensionStatementSchema,
   manifestSha256,
@@ -260,6 +261,15 @@ export async function verifyExtensionStatement(
       `not an extension statement: ${statement.error.issues
         .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
         .join("; ")}`,
+    );
+  }
+  // The slug is the extension's identity ("ext-<slug>"); it must be the one
+  // the workspace id derives to, so no statement can claim another's slot.
+  const expectedSlug = deriveExtensionSlug(statement.data.workspaceId);
+  if (statement.data.extensionId !== expectedSlug) {
+    return refuse(
+      "extension_schema_invalid",
+      `extensionId ${statement.data.extensionId} is not the slug of workspace ${statement.data.workspaceId} (${expectedSlug})`,
     );
   }
   const digest = manifestSha256(manifestBytes);

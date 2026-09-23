@@ -265,18 +265,38 @@ export function buildExtensionStatement(fields: ExtensionStatementFields): Buffe
   return Buffer.from(canonicalJson(statement), "utf8");
 }
 
+/** Hex chars of sha256(workspaceId) a hashed slug ends with (40 bits). */
+export const EXTENSION_SLUG_HASH_HEX = 10;
+const HASHED_SLUG_TAIL = new RegExp(`-[0-9a-f]{${EXTENSION_SLUG_HASH_HEX}}$`);
+
 /**
  * Stable extension slug for a workspace id. The multiplexer caps server ids
- * at 32 characters ("ext-" + slug) and workspace ids may be 64, so a long id
- * is cut to 22 characters plus "-" and 4 hex of its sha256.
+ * at 32 characters ("ext-" + slug) and workspace ids may be 64.
+ *
+ * Two disjoint shapes, so no workspace can take another's slug by spelling:
+ *   - a short id that does NOT end in "-" + 10 hex is its own slug;
+ *   - every other id (longer than the cap, or already ending in "-" + 10
+ *     hex) becomes <head> + "-" + the first 10 hex of its sha256.
+ * Every hashed slug ends in "-" + 10 hex and no identity slug does, so a
+ * short id spelled like another id's hashed slug is itself hashed. Two
+ * hashed slugs collide only on a 40-bit hash prefix with the same head; the
+ * store's unique slug (H2) refuses the promotion if that ever happens.
+ * The slug is inside the signed statement: changing this is a re-promote.
  */
 export function deriveExtensionSlug(workspaceId: string): string {
   if (!WORKSPACE_ID_PATTERN.test(workspaceId)) {
     throw new Error(`not a workspace id: ${JSON.stringify(workspaceId)}`);
   }
-  if (workspaceId.length <= EXTENSION_SLUG_MAX_LENGTH) return workspaceId;
-  const suffix = createHash("sha256").update(workspaceId).digest("hex").slice(0, 4);
-  const head = workspaceId.slice(0, EXTENSION_SLUG_MAX_LENGTH - 5).replace(/-+$/, "");
+  if (workspaceId.length <= EXTENSION_SLUG_MAX_LENGTH && !HASHED_SLUG_TAIL.test(workspaceId)) {
+    return workspaceId;
+  }
+  const suffix = createHash("sha256")
+    .update(workspaceId)
+    .digest("hex")
+    .slice(0, EXTENSION_SLUG_HASH_HEX);
+  const head = workspaceId
+    .slice(0, EXTENSION_SLUG_MAX_LENGTH - EXTENSION_SLUG_HASH_HEX - 1)
+    .replace(/-+$/, "");
   return `${head}-${suffix}`;
 }
 

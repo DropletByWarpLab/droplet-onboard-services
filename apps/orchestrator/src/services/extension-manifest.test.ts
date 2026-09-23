@@ -20,6 +20,7 @@ import {
   canonicalJson,
   deriveExtensionSlug,
   deriveReadback,
+  EXTENSION_SLUG_HASH_HEX,
   EXTENSION_SLUG_MAX_LENGTH,
   extensionManifestSchema,
   extensionStatementSchema,
@@ -322,7 +323,7 @@ describe("deriveExtensionSlug (multiplexer server ids cap at 32 = 'ext-' + 28)",
     const long = "a-very-long-workspace-identifier-that-exceeds-the-cap";
     const slug = deriveExtensionSlug(long);
     expect(slug.length).toBeLessThanOrEqual(EXTENSION_SLUG_MAX_LENGTH);
-    expect(slug).toMatch(/^[a-z0-9][a-z0-9-]*-[0-9a-f]{4}$/);
+    expect(slug).toMatch(new RegExp(`^[a-z0-9][a-z0-9-]*-[0-9a-f]{${EXTENSION_SLUG_HASH_HEX}}$`));
     expect(deriveExtensionSlug(long)).toBe(slug);
     expect(`ext-${slug}`).toMatch(/^[a-z0-9][a-z0-9-]{0,31}$/);
   });
@@ -330,6 +331,33 @@ describe("deriveExtensionSlug (multiplexer server ids cap at 32 = 'ext-' + 28)",
   it("two long ids sharing a prefix get different slugs", () => {
     const base = "shared-prefix-that-is-long-enough-to-be-cut-";
     expect(deriveExtensionSlug(`${base}one`)).not.toBe(deriveExtensionSlug(`${base}two`));
+  });
+
+  it("the hash suffix is at least 40 bits", () => {
+    // MUTATION: shrink the suffix back to 4 hex -> red.
+    expect(EXTENSION_SLUG_HASH_HEX).toBeGreaterThanOrEqual(10);
+  });
+
+  it("a short id equal to another id's hashed slug does not take that slug", () => {
+    // Review finding (WARP-2900 H1): with identity for short ids and
+    // '<head>-<hex>' for long ones, a short id spelled like a long id's slug
+    // mapped to the same slug, so two workspaces shared one extensionId.
+    // MUTATION: return any id of <= 27 chars as is -> red.
+    const long = "acme-front-desk-intake-automation-v2";
+    const slugOfLong = deriveExtensionSlug(long);
+    expect(slugOfLong.length).toBeLessThanOrEqual(EXTENSION_SLUG_MAX_LENGTH);
+    expect(deriveExtensionSlug(slugOfLong)).not.toBe(slugOfLong);
+  });
+
+  it("a short id already shaped like a hashed slug is hashed too; other short ids keep their name", () => {
+    const shaped = `word-count-${"a".repeat(EXTENSION_SLUG_HASH_HEX)}`;
+    expect(shaped.length).toBeLessThanOrEqual(EXTENSION_SLUG_MAX_LENGTH);
+    const slug = deriveExtensionSlug(shaped);
+    expect(slug).not.toBe(shaped);
+    expect(slug.length).toBeLessThanOrEqual(EXTENSION_SLUG_MAX_LENGTH);
+    expect(deriveExtensionSlug("word-count-v2")).toBe("word-count-v2");
+    const max = "x".repeat(EXTENSION_SLUG_MAX_LENGTH);
+    expect(deriveExtensionSlug(max)).toBe(max);
   });
 
   it("refuses an id that is not a workspace id", () => {

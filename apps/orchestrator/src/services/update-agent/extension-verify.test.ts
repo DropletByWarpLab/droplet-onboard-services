@@ -242,6 +242,17 @@ describe("verifyExtensionStatement: statement shape (WARP-2900)", () => {
     expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
   });
 
+  it("an extensionId that is not the workspace id's derived slug is extension_schema_invalid", async () => {
+    // Review finding (WARP-2900 H1): the slug is the extension's identity
+    // (serverId "ext-<slug>"); a signed statement may not name any other.
+    // MUTATION: drop the slug check in the verifier -> accepted.
+    const stmt = Buffer.from(
+      JSON.stringify(Object.fromEntries(Object.entries({ ...valid, extensionId: "other-extension" }).sort())),
+      "utf8",
+    );
+    expect(await run(stmt)).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
+  });
+
   it("a statement version that differs from the manifest version is extension_schema_invalid", async () => {
     const stmt = Buffer.from(
       JSON.stringify(Object.fromEntries(Object.entries({ ...valid, version: "9.9.9" }).sort())),
