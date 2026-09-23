@@ -8879,6 +8879,41 @@ export async function deleteRoutineSchedule(
   }
 }
 
+/** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
+ *  `CloudHistorySummary` in the orchestrator's cloud-history-consent.service. */
+export interface CloudHistorySummary {
+  consent: "not_asked" | "granted" | "declined";
+  decidedAt: string | null;
+  uncoveredOnBoxAnswers: number;
+  unaskedOnBoxAnswers: number;
+  userMessages: number;
+  drewOn: string[];
+}
+
+export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/cloud-history`,
+  );
+  if (!res.ok) throw new Error(`Failed to read conversation history state: ${res.status}`);
+  return (await res.json()) as CloudHistorySummary;
+}
+
+/** Record the owner's answer. The server enforces the rule either way. */
+export async function setCloudHistoryConsent(
+  conversationId: string,
+  decision: "granted" | "declined",
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/cloud-history`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to record the choice: ${res.status}`);
+}
+
 // ── WARP-2977 (ADR-059 P2): the Security command center ──
 // Read-only in P2. A 503 is an outage, never an empty feed — the page renders
 // it as "not reporting", because an empty list reads as a quiet site.
