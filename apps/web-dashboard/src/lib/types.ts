@@ -2855,6 +2855,26 @@ export interface ScheduleEvent {
 // from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
 // orchestrator's declared tool domains; it arrives as a string so the
 // dashboard never has to stay in lockstep with the registry's union.
+/**
+ * WARP-2969 — whether a chat turn can reach this tool at all.
+ *
+ * `excluded` is the chat-scope policy list (`EXCLUDED_FROM_CHAT_TOOLS`),
+ * which withholds a tool from ASKING while leaving it callable from its own
+ * screen or by an MCP client. It is "not by asking", never "unavailable".
+ *
+ * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
+ * not applied to the chat pool for an owner or anybody holding no AccessRole,
+ * so a "Module off" chip would have been a confident false statement on every
+ * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ *
+ * The per-person axes (role grants, off-LAN withholding, turn relevance) need
+ * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
+ * inspector instead.
+ */
+export interface ToolReach {
+  chat: "allowed" | "excluded";
+}
+
 export interface ToolCatalogEntry {
   name: string;
   /** Agent-facing description from the registry (may contain jargon). */
@@ -2864,6 +2884,14 @@ export interface ToolCatalogEntry {
   domain: string;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2969. Optional because the field is additive and an orchestrator
+   * from before it shipped answers without one — absence means "no evidence
+   * this is withheld", which is the pre-WARP-2969 behaviour, not "withheld".
+   * Read it through `reachableInChat` / `reachNote` (lib/tool-domains), never
+   * by hand, so both surfaces agree on what absence means.
+   */
+  reach?: ToolReach;
 }
 
 // ── WARP-2823: the admin console's prompt + tool inspector ────────────────

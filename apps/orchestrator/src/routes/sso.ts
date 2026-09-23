@@ -252,6 +252,8 @@ async function ensureLinkedUser(
       ...emailWriteData(email),
       role: "family",
       isLocal: true,
+      // WARP-2858: explicit origin — the box never sets a local password on it.
+      provisionSource: "SSO",
       // No passwordHash — this account authenticates via SSO only. The
       // /auth/login route fails closed on a null hash, so this row is never
       // password-loginable (and never "login-unable" — SSO works).

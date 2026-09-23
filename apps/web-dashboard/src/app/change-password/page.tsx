@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, KeyRound } from "lucide-react";
 import { validatePassword } from "@droplet/auth-policy";
 import { DropletMark } from "@/components/DropletMark";
-import { AuroraPanel } from "@/components/auth/AuroraPanel";
+import { LoginHero } from "@/components/auth/LoginHero";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { translateError } from "@/lib/friendly-errors";
 import { changePassword } from "@/lib/api";
@@ -70,8 +70,8 @@ export default function ChangePasswordPage() {
   }
 
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-      <AuroraPanel className="hidden lg:flex" />
+    <div className="min-h-dvh grid lg:grid-cols-2 bg-surface-primary">
+      <LoginHero className="hidden lg:block" />
 
       <div className="flex items-center justify-center p-6 sm:p-10">
         <div className="w-full max-w-[380px]">

@@ -1172,6 +1172,97 @@ describe("WARP-2549 — the landing seam", () => {
 });
 
 // ---------------------------------------------------------------------------
+// WARP-2848 — the sweep lands what it re-enumerated before the watermark moves
+// ---------------------------------------------------------------------------
+
+describe("WARP-2848 — the sweep lands what it found", () => {
+  /**
+   * A land seam backed by a row store keyed like the real one,
+   * `(connectionId, externalId)`, so the assertions are on ROWS STORED, not
+   * on call order. `watermarkAtLand` records where the cursor stood when the
+   * rows were written.
+   */
+  function storingLand(h: Harness) {
+    const stored = new Map<string, unknown>();
+    const watermarkAtLand: unknown[] = [];
+    const land = vi.fn(async (args: any) => {
+      watermarkAtLand.push(h.prisma.__cursor("cur-1").watermark);
+      for (const row of args.rows as Array<Record<string, unknown>>) {
+        stored.set(`${args.connection.id}:${String(row.invoice_id)}`, row);
+      }
+      return { entity: args.entity, landed: args.rows.length, skipped: 0, reason: null };
+    });
+    return { land, stored, watermarkAtLand };
+  }
+
+  it("🔴 lands all N missed records, and the watermark lands exactly past them", async () => {
+    // MUTATION: delete the sweep's `land` call → `stored` never holds the
+    // missed rows → RED. Move it after `releaseErpCursorSuccess` →
+    // `watermarkAtLand` reads the advanced mark → RED.
+    const missed = [3, 4, 5].map((n) => ({
+      invoice_id: `INV-100${n}`,
+      issued_at: `2026-08-2${n}T00:00:00Z`,
+      customer_id: "smith-dental",
+      amount: "10.00",
+      balance: "10.00",
+      status: "Open",
+    }));
+    const h = harness({
+      read: async (_n, params) =>
+        "since" in params ? INVOICE_ROWS : [...INVOICE_ROWS, ...missed],
+    });
+    const { land, stored, watermarkAtLand } = storingLand(h);
+
+    const { reports, deferred } = await runnerFor(h, { land }).runReconciliationSweep();
+
+    expect(deferred).toBe(0);
+    expect(reports[0].totalMissed).toBe(3);
+    for (const row of missed) {
+      expect(stored.get(`conn-1:${row.invoice_id}`)).toEqual(row);
+    }
+    // Written while the cursor still stood at the OLD mark…
+    expect(watermarkAtLand).toEqual(["2026-08-15T00:00:00Z"]);
+    // …and the mark then moved to exactly the newest landed record.
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-25T00:00:00Z");
+  });
+
+  it("🔴 a landing failure leaves the watermark unchanged and the sweep deferred", async () => {
+    const h = driftHarness();
+    const land = vi.fn(async () => {
+      throw new Error("check constraint violated");
+    });
+
+    const { reports, deferred } = await runnerFor(h, { land }).runReconciliationSweep();
+
+    expect(deferred).toBe(1);
+    expect(reports).toHaveLength(0);
+    const cursor = h.prisma.__cursor("cur-1");
+    expect(cursor.watermark).toBe("2026-08-15T00:00:00Z");
+    // Still due: the next sweep re-enumerates and re-offers the same rows.
+    expect(cursor.lastSweepAt).toBeNull();
+    expect(cursor.state).not.toBe("IDLE");
+    // No drift row claiming a sweep that did not complete.
+    expect(h.prisma.__driftRows).toHaveLength(0);
+  });
+
+  it("does not reach the seam for a dataset that lands nowhere", async () => {
+    const h = harness({
+      cursors: [cursorRow({ entity: "ticket" })],
+      read: async () => [
+        { ticket_id: "t-1", created_at: "2026-08-26T00:00:00Z", subject: "Broken chair" },
+      ],
+    });
+    const land = vi.fn();
+
+    const { deferred } = await runnerFor(h, { land }).runReconciliationSweep();
+
+    expect(land).not.toHaveBeenCalled();
+    expect(deferred).toBe(0);
+    expect(h.prisma.__cursor("cur-1").watermark).toBe("2026-08-26T00:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // WARP-2623 — a plan boundary is not a broken sync
 // ---------------------------------------------------------------------------
 

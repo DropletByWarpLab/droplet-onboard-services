@@ -9,7 +9,25 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: (...a: unknown[]) => mqttPublish(...a),
 }));
 
-import { sendNotification, listRecentNotifications } from "../services/notifications.service.js";
+// WARP-2909 — web-push itself is mocked so a test can capture the exact
+// payload the push channel would encrypt and send.
+const webpushSend = vi.fn(async () => ({}));
+vi.mock("web-push", () => ({
+  default: {
+    generateVAPIDKeys: () => ({ publicKey: "pub", privateKey: "priv" }),
+    setVapidDetails: () => {},
+    sendNotification: (...a: unknown[]) => webpushSend(...(a as [])),
+  },
+}));
+
+import {
+  sendNotification,
+  listRecentNotifications,
+  publishNotificationToast,
+  recordNotification,
+  assertNotificationLink,
+  assertNotificationData,
+} from "../services/notifications.service.js";
 
 function makePrismaStub() {
   const created: Array<Record<string, unknown>> = [];
@@ -26,6 +44,31 @@ function makePrismaStub() {
   };
   return stub as unknown as PrismaClient & { _created: typeof created };
 }
+
+/** The same stub plus the two delegates web push needs: a persisted VAPID
+ *  keypair and one subscription for the user. */
+function makePushingPrismaStub() {
+  const stub = makePrismaStub() as unknown as Record<string, unknown>;
+  stub.systemFlag = {
+    findUnique: vi.fn(async () => ({ valueJson: { publicKey: "pub", privateKey: "priv" } })),
+  };
+  stub.pushSubscription = {
+    findMany: vi.fn(async () => [{ endpoint: "https://push.example/1", p256dhKey: "p", authKey: "a" }]),
+    deleteMany: vi.fn(async () => ({ count: 0 })),
+    updateMany: vi.fn(async () => ({ count: 1 })),
+  };
+  return stub as unknown as PrismaClient & { _created: Array<Record<string, unknown>> };
+}
+
+const PARKED = {
+  userId: "romain",
+  kind: "ai" as const,
+  title: "Approval needed: delete_file",
+  body: "Open the run to approve or deny it.",
+  url: "/workshop?run=run-1",
+  tag: "agent-run:run-1",
+  data: { agentRunId: "run-1", pendingTool: "delete_file", needsDecision: true },
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -129,5 +172,131 @@ describe("listRecentNotifications", () => {
     expect(prisma.notificationLog.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({ take: 1 }),
     );
+  });
+});
+
+// ── WARP-2909: deep links ───────────────────────────────────────────────────
+
+describe("assertNotificationLink (WARP-2909)", () => {
+  it.each(["/workshop?run=r1", "/", "/cameras/front_door"])("accepts the same-origin path %s", (u) => {
+    expect(() => assertNotificationLink(u)).not.toThrow();
+  });
+  it.each([
+    ["a scheme", "https://evil.example/x"],
+    ["javascript:", "javascript:alert(1)"],
+    ["mailto:", "mailto:a@b.c"],
+    ["protocol-relative", "//evil.example/x"],
+    ["a backslash", "/\\evil.example"],
+    ["CR", "/a\rb"],
+    ["LF", "/a\nb"],
+    ["NUL", "/a\u0000b"],
+    ["a relative path", "workshop"],
+    ["empty", ""],
+    ["over 512 chars", "/" + "a".repeat(512)],
+  ])("rejects %s", (_label, u) => {
+    expect(() => assertNotificationLink(u)).toThrow(/invalid_notification_link/);
+  });
+});
+
+describe("assertNotificationData (WARP-2909)", () => {
+  it("accepts a small flat object", () => {
+    expect(() => assertNotificationData({ a: "x", n: 1, b: true })).not.toThrow();
+  });
+  it.each(["url", "token", "confirmationToken", "bindingHash", "pendingBindingHash"])(
+    "refuses the key %s",
+    (k) => {
+      expect(() => assertNotificationData({ [k]: "x" })).toThrow(/forbidden key/);
+    },
+  );
+  it("refuses nesting", () => {
+    expect(() => assertNotificationData({ a: { b: 1 } } as never)).toThrow(/not flat/);
+    expect(() => assertNotificationData({ a: [1] } as never)).toThrow(/not flat/);
+  });
+  it("refuses more than 1 KB serialised", () => {
+    expect(() => assertNotificationData({ a: "x".repeat(1100) })).toThrow(/too large/);
+  });
+});
+
+describe("sendNotification deep link (WARP-2909)", () => {
+  it("a bad url throws before the toast, the push and the row", async () => {
+    const prisma = makePushingPrismaStub();
+    await expect(sendNotification(prisma, { ...PARKED, url: "//evil.example" })).rejects.toThrow(
+      /invalid_notification_link/,
+    );
+    expect(prisma._created).toHaveLength(0);
+    expect(mqttPublish).not.toHaveBeenCalled();
+    expect(webpushSend).not.toHaveBeenCalled();
+  });
+
+  it("a bad tag throws too", async () => {
+    const prisma = makePrismaStub();
+    await expect(sendNotification(prisma, { ...PARKED, tag: "has space" })).rejects.toThrow(/tag/);
+    expect(prisma._created).toHaveLength(0);
+  });
+
+  it("carries url + data to the toast, url + data + tag to web push, url + data to the row", async () => {
+    const prisma = makePushingPrismaStub();
+    const result = await sendNotification(prisma, PARKED);
+    expect(result.channels).toEqual(["toast", "push"]);
+
+    const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
+    expect(toast).toMatchObject({ url: PARKED.url, data: PARKED.data });
+
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push).toEqual({ title: PARKED.title, body: PARKED.body, url: PARKED.url, data: PARKED.data, tag: PARKED.tag });
+
+    expect(prisma._created[0]).toMatchObject({ url: PARKED.url, data: PARKED.data });
+
+    // The redemption contract: nothing that could approve the run rides on
+    // any of the three, and the link's only query key is `run`.
+    const secretish = /token|hash|confirm/i;
+    const keysOf = (o: unknown): string[] =>
+      o && typeof o === "object" ? Object.entries(o).flatMap(([k, v]) => [k, ...keysOf(v)]) : [];
+    for (const surface of [toast, push, prisma._created[0]]) {
+      expect(keysOf(surface).filter((k) => secretish.test(k))).toEqual([]);
+    }
+    expect([...new URL(PARKED.url, "https://box.local").searchParams.keys()]).toEqual(["run"]);
+  });
+
+  it("no tag supplied → the push carries tag: undefined (none is derived)", async () => {
+    const prisma = makePushingPrismaStub();
+    await sendNotification(prisma, { userId: "alice", kind: "reminder", title: "Standup" });
+    const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
+    expect(push.tag).toBeUndefined();
+    expect(push.url).toBeUndefined();
+    expect(prisma._created[0]).toMatchObject({ url: null });
+  });
+});
+
+describe("publishNotificationToast deep link (WARP-2909)", () => {
+  it("never throws: a bad url is DROPPED from the toast and recorded", () => {
+    const out = publishNotificationToast({ ...PARKED, url: "javascript:alert(1)" });
+    expect(out.channels).toEqual(["toast"]);
+    expect(out.errors).toContain("toast: invalid_link");
+    const toast = mqttPublish.mock.calls[0]![1] as Record<string, unknown>;
+    expect(toast).not.toHaveProperty("url");
+    expect(toast).not.toHaveProperty("data");
+  });
+});
+
+describe("recordNotification deep link (WARP-2909)", () => {
+  it("throws before the row write on a bad url", async () => {
+    const prisma = makePrismaStub();
+    await expect(recordNotification(prisma, { ...PARKED, url: "https://x" })).rejects.toThrow();
+    expect(prisma._created).toHaveLength(0);
+  });
+  it("writes url + data", async () => {
+    const prisma = makePrismaStub();
+    await recordNotification(prisma, PARKED);
+    expect(prisma._created[0]).toMatchObject({ url: PARKED.url, data: PARKED.data });
+  });
+});
+
+describe("listRecentNotifications deep link (WARP-2909)", () => {
+  it("returns url and data for a row written with them", async () => {
+    const prisma = makePrismaStub();
+    await sendNotification(prisma, PARKED);
+    const [row] = await listRecentNotifications(prisma, "romain");
+    expect(row).toMatchObject({ url: PARKED.url, data: PARKED.data });
   });
 });

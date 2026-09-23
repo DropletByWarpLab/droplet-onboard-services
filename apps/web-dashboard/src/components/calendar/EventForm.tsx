@@ -252,7 +252,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               disabled={externallySynced}
-              className="outline-none focus:border-[var(--brand)]"
+              className="outline-none focus:ring-2 focus:ring-[var(--brand)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -340,7 +340,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
                   maxLength={2048}
                   aria-invalid={urlError ? true : undefined}
                   aria-describedby={urlError ? meetingUrlErrorId : undefined}
-                  className="outline-none focus:border-[var(--brand)]"
+                  className="outline-none focus:ring-2 focus:ring-[var(--brand)]"
                   style={{
                     background: "var(--surface)",
                     border: `1px solid ${urlError ? "var(--danger)" : "var(--border)"}`,
@@ -397,7 +397,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               disabled={externallySynced}
-              className="min-h-[80px] outline-none focus:border-[var(--brand)]"
+              className="min-h-[80px] outline-none focus:ring-2 focus:ring-[var(--brand)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

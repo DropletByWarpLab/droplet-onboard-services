@@ -129,6 +129,13 @@ import { summarizeToolArguments } from "./confirmation-summary.js";
 
 const logger = createLogger("agent-run-worker");
 
+/** WARP-2909 — a run's deep link. `/workshop?run=` is the canonical run view
+ *  (WARP-2925; `/admin/audit?run=` only forwards there). `run` is the only
+ *  query key, and the tag collapses every notification about one run. */
+function agentRunLink(runId: string): { url: string; tag: string } {
+  return { url: `/workshop?run=${encodeURIComponent(runId)}`, tag: `agent-run:${runId}` };
+}
+
 export const AGENT_RUN_LOCK_KEY = "droplet:agent-run-worker";
 
 /**
@@ -1449,6 +1456,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
               ? ". You approved this before and the run was interrupted mid-call, so it MAY ALREADY " +
                 "have happened — check before approving it again."
               : ". Open the run to approve or deny it. Nothing has been done yet."),
+          // WARP-2909 — the link opens the run; approving it is redeemed ONLY
+          // by POST /api/agent-runs/:id/confirm from that page. No token, no
+          // hash, no args (they can carry customer data) ride on the payload.
+          ...agentRunLink(runId),
+          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
@@ -1627,6 +1639,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         kind: "ai",
         title: status === "succeeded" ? `Background run finished: ${goal}` : `Background run failed: ${goal}`,
         body,
+        // WARP-2909 — same link and tag as the park, so the finish replaces
+        // the approval prompt in the tray. No `needsDecision` here.
+        ...agentRunLink(runId),
+        data: { agentRunId: runId, status },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });
