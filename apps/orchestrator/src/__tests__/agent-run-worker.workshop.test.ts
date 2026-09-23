@@ -157,7 +157,7 @@ const writeThenPropose = (req: { messages: Array<{ role: string; content: unknow
   return { role: "assistant", content: null, tool_calls: [toolCall("c2", "workspace_propose", { name: "N", version: "0.1.0", summary: "s" })] };
 };
 
-function interceptingMcp(tier2: Set<string>) {
+function interceptingMcp(tier2: Set<string>, proposed: Record<string, unknown> = { tag: "proposal/0.1.0", commit: "abc" }) {
   let minted = 0;
   const live = new Set<string>();
   const executed: Array<{ name: string; args: Record<string, unknown>; ctx?: Record<string, unknown> }> = [];
@@ -184,7 +184,7 @@ function interceptingMcp(tier2: Set<string>) {
       }
     }
     executed.push({ name, args, ctx });
-    if (name === "workspace_propose") return wire({ ok: true, data: { tag: "proposal/0.1.0", commit: "abc" } });
+    if (name === "workspace_propose") return wire({ ok: true, data: proposed });
     return wire({ ok: true, data: { changed: true } });
   });
   const listed = [...EXPECTED_WORKSPACE_TOOLS, "list_files"].map((name) => ({ name, description: "d", inputSchema: {} }));
@@ -260,6 +260,33 @@ describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ what: "Agent run proposed an extension", refs: expect.objectContaining({ agentRunId: id }) }),
     );
+  });
+
+  it("a run that proposes a connector draft is not told it proposed an extension (WARP-2899)", async () => {
+    // Review of #2324: the notification and the terminal audit said
+    // "Extension proposed" for a draft that can never be installed.
+    // MUTATION: drop the kind branch in the worker → red.
+    const readback = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "draft acme", model: "m", workspaceId: "ws-c" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]), { tag: "proposal/0.1.0", commit: "abc", kind: "connector-draft", readback });
+    const a = makeWorker(db, mcp, "A");
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    expect(await decideAgentRun(db.prisma, { id, decision: "approved", decidedBy: { id: OWNER.id, username: "romain", role: "owner" } })).toMatchObject({ ok: true });
+    const b = makeWorker(db, mcp, "B");
+    await b.worker.tickOnce();
+    await settle(b.worker);
+
+    expect(db.row(id).status).toBe("succeeded");
+    expect(db.row(id).stopReason).toBe("proposed");
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ title: "Connector draft proposed", body: expect.stringContaining(readback) }),
+    );
+    expect(sendNotificationMock).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: "Extension proposed" }));
+    expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run proposed a connector draft" }));
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Agent run proposed an extension" }));
   });
 
   it("an ordinary run puts no workspaceId on the wire and never sees the workspace tools", async () => {

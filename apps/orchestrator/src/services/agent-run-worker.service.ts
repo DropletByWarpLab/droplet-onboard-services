@@ -558,6 +558,24 @@ type StopReason = "cancelled" | "deadline" | "fenced" | "parked" | "unknown_outc
  */
 const PROPOSE_TOOL = "workspace_propose";
 
+/**
+ * WARP-2899 — what a proposal IS, read off the tool's own result: an
+ * extension, or a connector draft (no manifest, nothing to install) with the
+ * readback sentence the propose route composed. A result that does not
+ * parse is an extension, as before.
+ */
+function proposalKindOf(text: string): { kind: "extension" } | { kind: "connector-draft"; readback: string | null } {
+  try {
+    const parsed = JSON.parse(text) as { data?: { kind?: unknown; readback?: unknown } } | null;
+    if (parsed?.data?.kind === "connector-draft") {
+      return { kind: "connector-draft", readback: typeof parsed.data.readback === "string" ? parsed.data.readback : null };
+    }
+  } catch {
+    /* not JSON: an extension, as before */
+  }
+  return { kind: "extension" };
+}
+
 class AgentRunStopped extends Error {
   constructor(
     readonly reason: StopReason,
@@ -1483,15 +1501,21 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         error: null,
         ...CLEAR_PENDING,
       });
-      await audit(runId, run.userId, "succeeded", "Agent run proposed an extension", undefined,
+      // WARP-2899 — a connector draft is not an extension: say which.
+      const proposed = proposalKindOf(text);
+      const draft = proposed.kind === "connector-draft";
+      await audit(runId, run.userId, "succeeded", draft ? "Agent run proposed a connector draft" : "Agent run proposed an extension", undefined,
         user ? { username: user.username, goal: run.goal, result: text } : undefined);
       if (user) {
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
         await sendNotification(prisma, {
           userId: user.username,
           kind: "ai",
-          title: "Extension proposed",
-          body: `Background run "${goal}" finished with a proposal. Open the Workshop to review it.`,
+          title: draft ? "Connector draft proposed" : "Extension proposed",
+          body:
+            proposed.kind === "connector-draft"
+              ? `Background run "${goal}" finished with a connector draft${proposed.readback ? `: ${proposed.readback}` : ""}. An owner exports it from the Workshop for a Warp Lab PR.`
+              : `Background run "${goal}" finished with a proposal. Open the Workshop to review it.`,
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_proposal_notification_failed");
         });

@@ -87,6 +87,9 @@ describe("the REST profile registry has no store-backed path", () => {
       for (const needle of ["SANDBOX_URL", "workspace.service", "connector-draft", "extensions/templates", "/git/"]) {
         expect(text.includes(needle), `${file}: ${needle}`).toBe(false);
       }
+      // AC3(b): the code names no sandbox and no workspace, in any case — an
+      // import, a WORKSPACE_GIT_DIR read or a `sandbox` host alike.
+      expect(/sandbox|workspace/i.exec(code(text))?.[0], file).toBeUndefined();
       for (const m of code(text).matchAll(SPECIFIER)) {
         expect(/sandbox|workspace/i.test(m[1]!), `${file} imports ${m[1]}`).toBe(false);
       }

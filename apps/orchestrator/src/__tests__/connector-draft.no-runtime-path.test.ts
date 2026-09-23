@@ -101,8 +101,11 @@ describe("the REST profile lookup has no store-backed path (b)", () => {
   });
 
   it("erp-provider.ts names nothing of the sandbox or the workspace store", () => {
-    for (const needle of ["SANDBOX_URL", "workspace.service", "connector-draft", "/git/", "extensions/templates", "sandbox"]) {
-      expect(erpProvider.includes(needle), needle).toBe(false);
+    // AC3(b): no `sandbox`, no `workspace` — any case, anywhere (a
+    // `./workshop-workspace.js` import or a WORKSPACE_GIT_DIR read included).
+    const text = erpProvider.toLowerCase();
+    for (const needle of ["sandbox_url", "workspace.service", "connector-draft", "/git/", "extensions/templates", "sandbox", "workspace"]) {
+      expect(text.includes(needle), needle).toBe(false);
     }
   });
 });
