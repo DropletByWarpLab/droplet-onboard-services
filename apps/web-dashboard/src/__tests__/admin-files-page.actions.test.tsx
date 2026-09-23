@@ -115,7 +115,10 @@ beforeEach(() => {
   ];
   fetchAdminFilesUsageMock.mockResolvedValue(USAGE_WITH_NO_LIBRARIES);
   listDepartmentsMock.mockResolvedValue({ departments: [] });
-  uploadFilesMock.mockResolvedValue(undefined);
+  uploadFilesMock.mockImplementation(
+    async (_p: string, files: FileList | File[]) =>
+      Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+  );
   createDirectoryMock.mockResolvedValue(undefined);
 });
 

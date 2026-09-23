@@ -31,7 +31,11 @@ import { CreateLibraryDialog } from "@/components/Departments/CreateLibraryDialo
 import type { DroppedSelection } from "@/components/FileManager/dropped-entries";
 import { requiredDirectories } from "@/components/FileManager/dropped-entries";
 import { runUpload } from "@/lib/run-upload";
-import { uploadOutcomeMessage, uploadProgressLabel } from "@/lib/upload-feedback";
+import {
+  uploadNoticeMessage,
+  uploadOutcomeMessage,
+  uploadProgressLabel,
+} from "@/lib/upload-feedback";
 import { useSpaces } from "@/lib/hooks/useSpaces";
 import { useToast } from "@/components/Toast";
 
@@ -150,21 +154,23 @@ export default function AdminFilesPage() {
         ),
       );
       try {
-        const { uploaded, total, skipped, cause, directoriesFailed } = await runUpload(selection, {
-          // The company space's own root — `rootForSpace` applies the mount
-          // prefix server-side, so "/" here is the top of the shared library.
-          basePath: "/",
-          space: companySpace.id,
-          onProgress: setUploadPercent,
-        });
+        const { uploaded, total, skipped, cause, directoriesFailed, renamed, duplicates } =
+          await runUpload(selection, {
+            // The company space's own root — `rootForSpace` applies the mount
+            // prefix server-side, so "/" here is the top of the shared library.
+            basePath: "/",
+            space: companySpace.id,
+            onProgress: setUploadPercent,
+          });
         if (uploaded > 0) await reload().catch(() => undefined);
         // The folder picker can carry an empty subfolder here too, and its
         // mkdir is just as invisible to the file counts (WARP-1876 review
         // round 2) — so this surface reads the same clause /files does.
         const failure = uploadOutcomeMessage(uploaded, total, cause, skipped, directoriesFailed);
+        // WARP-2096 — renamed-because-taken / already-on-the-box.
+        const notice = uploadNoticeMessage(renamed, duplicates);
         toast(
-          failure ??
-            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"} to ${companySpace.name}.`,
+          `${failure ?? `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"} to ${companySpace.name}.`}${notice}`,
         );
       } finally {
         setUploadStatus(null);

@@ -405,6 +405,12 @@ const appendQueues = new Map<string, Promise<unknown>>();
  * a global-client audit must still never run in, or be interleaved with, a
  * callback that appends in-tx.
  *
+ * A rolled-back append leaves a gap in the `ActivityRow.id` sequence, and that
+ * is harmless: `verifyActivityChain` walks rows in id order but links each one
+ * to its predecessor by signature (`prevSignatureHash` = hash of the previous
+ * row's signature), never by id adjacency. Do not add a "contiguous ids" check
+ * to the verifier.
+ *
  * Every check above assumes the REAL handle Prisma handed the callback and
  * ONE instance of this module in the process — see `ActivityAppendTx` for
  * what a handle assembled on purpose, or a second module copy, can still get

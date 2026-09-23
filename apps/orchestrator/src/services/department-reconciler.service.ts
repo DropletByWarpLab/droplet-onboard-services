@@ -209,6 +209,9 @@ export interface ReconcileResult {
   // pr-reviewer #1229 N1: DEACTIVATED rows re-asserted against Nextcloud.
   ncDisableMirrored: number;
   ncDisableMirrorFailed: number;
+  // WARP-2993: humans stripped from Nextcloud's built-in `admin` group.
+  ncInstanceAdminRemoved: number;
+  ncInstanceAdminFailed: number;
 }
 
 /**
@@ -1013,6 +1016,81 @@ async function sweepAdminGroupMembership(
   return { added, removed, failed };
 }
 
+/** Nextcloud's built-in instance-administrator group. */
+export const NC_INSTANCE_ADMIN_GROUP = "admin";
+
+/**
+ * WARP-2993 — only the box service account is a Nextcloud instance admin.
+ *
+ * Romain, 2026-09-22: no human holds NC instance admin, the owner included.
+ * Until then `buildNcGroups` put every owner/admin in NC's built-in `admin`
+ * group, so any Droplet admin could reset the owner's NC password in
+ * Nextcloud and read the owner's NC home, or administer the instance. New
+ * accounts no longer join it; this sweep converges existing boxes and heals
+ * any later out-of-band add from NC's own UI.
+ *
+ * Stateless and idempotent, same shape as sweepAdminGroupMembership: list
+ * (strict — an outage skips the tick instead of reading as "empty"), remove
+ * every member that is not NEXTCLOUD_ADMIN_USER, audit each removal. Once
+ * converged it lists one member and does nothing.
+ *
+ * Never strands the instance: if the service account is NOT among the
+ * listed members, nothing is removed and the tick logs an error. Removing
+ * humans then could leave the group with no working admin credential at
+ * all — an operator has to fix the service account first.
+ */
+async function sweepNcInstanceAdminGroup(
+  adminToken: string,
+): Promise<{ removed: number; failed: number }> {
+  let removed = 0;
+  let failed = 0;
+
+  let members: { id: string }[];
+  try {
+    members = await ncListGroupMembersStrict(adminToken, NC_INSTANCE_ADMIN_GROUP);
+  } catch (err) {
+    logger.error(
+      { err },
+      "nc-instance-admin sweep: listing the NC admin group failed (non-fatal; next tick retries)",
+    );
+    return { removed, failed };
+  }
+
+  const serviceAccount = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+  if (!members.some((m) => m.id.toLowerCase() === serviceAccount)) {
+    logger.error(
+      { memberCount: members.length },
+      "nc-instance-admin sweep: the service account is not in the NC admin group — refusing to remove anyone (would strand the instance)",
+    );
+    return { removed, failed };
+  }
+
+  for (const member of members) {
+    if (member.id.toLowerCase() === serviceAccount) continue;
+    try {
+      await ncRemoveUserFromGroup(adminToken, member.id, NC_INSTANCE_ADMIN_GROUP);
+      removed += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Removed a person from Nextcloud instance admin (only the box service account holds it)",
+        sub: `${member.id} · ${NC_INSTANCE_ADMIN_GROUP}`,
+        refs: { ncUsername: member.id, group: NC_INSTANCE_ADMIN_GROUP },
+        actor: { type: "system" },
+      });
+    } catch (err) {
+      failed += 1;
+      logger.error(
+        { err, ncUsername: member.id },
+        "nc-instance-admin sweep: removing a member failed (next tick retries)",
+      );
+    }
+  }
+
+  return { removed, failed };
+}
+
 /**
  * WARP-1526 (pr-reviewer #1229 N1) — directoryStatus → Nextcloud enable
  * mirror.
@@ -1084,6 +1162,7 @@ export async function reconcileDepartments(
   const usageResult = await sweepUsagePolicies(prisma, adminToken);
   const adminGroupResult = await sweepAdminGroupMembership(prisma, adminToken);
   const statusMirrorResult = await sweepDirectoryStatusMirror(prisma, adminToken);
+  const instanceAdminResult = await sweepNcInstanceAdminGroup(adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -1106,6 +1185,8 @@ export async function reconcileDepartments(
     adminGroupFailed: adminGroupResult.failed,
     ncDisableMirrored: statusMirrorResult.disabledMirrored,
     ncDisableMirrorFailed: statusMirrorResult.failed,
+    ncInstanceAdminRemoved: instanceAdminResult.removed,
+    ncInstanceAdminFailed: instanceAdminResult.failed,
   };
 
   // WARP-1557: the tick summary used to be debug-only, which is why the .87
