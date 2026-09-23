@@ -18,6 +18,7 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
+import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createPersonaRouter } from "./routes/persona.js";
@@ -351,7 +352,15 @@ export function createApp(
   // WARP-2900 (H4) — GET /api/llm/tools/runtime: the runtime half of the tool
   // universe for /tools (extensions, connected servers). Names, sources and
   // the dispatch decision only; never a wire description.
-  app.use("/api", createToolsRuntimeRouter({ policy: (input) => remoteCallPolicy(input) }));
+  app.use(
+    "/api",
+    createToolsRuntimeRouter({
+      policy: (input) => remoteCallPolicy(input),
+      // §3 — a custom role never reaches a runtime tool in chat, so it is
+      // not listed one here either.
+      resolveScope: (user) => resolveToolAccessScope(prisma, user),
+    }),
+  );
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the

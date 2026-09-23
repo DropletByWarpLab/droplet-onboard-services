@@ -22,7 +22,10 @@ export function classificationLabel(c: RuntimeToolClassification): Classificatio
     return {
       kind: "ok",
       label: "Reviewed read",
-      note: "An owner reviewed it as read-only, so the assistant can use it.",
+      // Not "the assistant can use it": whether a given person's assistant is
+      // given the tool also depends on their role (a custom role reaches no
+      // runtime tool), and the orchestrator lists it only to those it reaches.
+      note: "An owner reviewed it as read-only, so a call to it runs.",
     };
   }
   switch (c.code) {
