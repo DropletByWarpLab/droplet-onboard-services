@@ -365,6 +365,25 @@ describe("createHostComposeRunner (WARP-539)", () => {
     ]);
   });
 
+  it("startServices reports only what the helper started, not what it skipped (WARP-2970)", async () => {
+    const { fn } = fakeExec({
+      "recreate-services": '{"failed":[],"skipped":["mcp-server"]}\n',
+    });
+    const runner = makeRunner(fn);
+    const svc = (name: string): ReleaseService => ({
+      name,
+      image: `ghcr.io/x/${name}@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    });
+    await mkdir(path.join(workDir, "du-10"), { recursive: true });
+    const res = await runner.startServices({
+      updateId: "du-10",
+      services: [svc("email-indexer"), svc("mcp-server")],
+    });
+    expect(res.started).toEqual(["email-indexer"]);
+  });
+
   it("never builds a shell string — argv is always an array of discrete tokens", async () => {
     const { fn, calls } = fakeExec({ "current-image-refs": "{}" });
     const runner = makeRunner(fn);

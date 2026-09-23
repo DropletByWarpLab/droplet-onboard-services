@@ -73,6 +73,8 @@ case "${1:-}" in
     #   path is exercised; the failing service is the LAST argv token.
     case "$*" in
       *" ps -q "*) printf '%s\n' "${DOCKER_STUB_PS_CID:-}" ;;
+      # WARP-2970 grow: `ps -a -q` also sees a STOPPED container.
+      *" ps -a -q "*) printf '%s\n' "${DOCKER_STUB_PS_ALL_CID:-}" ;;
       # WARP-2970 enabled-services: scripted newline-joined service names.
       *" config --services"*) printf '%s\n' "${DOCKER_STUB_SERVICES:-}" ;;
       *" up "*)
@@ -388,6 +390,16 @@ if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
   pass "recreate-services --target grow starts the service pinned by override-grow.yml"
 else
   fail "grow start missing the pinned compose invocation (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+stub_reset
+GROW_OUT="$(DOCKER_STUB_PS_ALL_CID=stoppedcid run_apply recreate-services \
+  --compose-file "$COMPOSE_FILE" --update-id "$UPDATE_ID" --services email-indexer \
+  --target grow 2>/dev/null)"
+if [ "$GROW_OUT" = '{"failed":[],"skipped":["email-indexer"]}' ] \
+  && ! grep -q " up " "$STUB_DIR/calls.log"; then
+  pass "grow leaves a service that already has a (stopped) container alone"
+else
+  fail "grow recreated a stopped service or misreported it (out: $GROW_OUT; calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
 fi
 if run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
     --update-id "$UPDATE_ID" --target grow >/dev/null 2>&1; then

@@ -46,6 +46,7 @@ import {
   applyWindowTick,
   httpHealthProbe,
   imageRefMatchesDigest,
+  SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
   type RecreateTarget,
 } from "./apply.js";
@@ -363,6 +364,8 @@ class FakeRunner implements ApplyRunner {
   enabled: string[] = Object.keys(PREVIOUS);
   /** WARP-2970 — make the post-commit start fail. */
   startFails = false;
+  /** WARP-2970 — services that already have a (stopped) container: grow skips them. */
+  hasStoppedContainer: string[] = [];
 
   async enabledServices(): Promise<string[]> {
     this.calls.push("enabledServices()");
@@ -372,7 +375,9 @@ class FakeRunner implements ApplyRunner {
   async startServices(opts: { updateId: string; services: ReleaseService[] }) {
     this.calls.push(`startServices(${opts.services.map((s) => s.name).join(",")})`);
     if (this.startFails) throw new Error("stub: start failed");
-    for (const s of opts.services) this.running[s.name] = s.digest;
+    const started = opts.services.filter((s) => !this.hasStoppedContainer.includes(s.name));
+    for (const s of started) this.running[s.name] = s.digest;
+    return { started: started.map((s) => s.name) };
   }
 
   async currentImageRefs(services: string[]): Promise<Record<string, string | null>> {
@@ -772,26 +777,41 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
       name: "email-indexer",
       image: `ghcr.io/dropletbywarplab/droplet-email-indexer@${EMAIL_DIGEST}`,
       digest: EMAIL_DIGEST,
-      healthcheck: { type: "none" },
+      healthcheck: { type: "http", port: 8086, path: "/health" },
     });
     return m;
   }
 
+  beforeEach(() => {
+    healthy["email-indexer"] = true;
+  });
+
   async function applyAndResume(runner: FakeRunner, logger = createLoggerSpy()) {
     const prisma = createPrismaStub();
     await seedPendingRow(prisma, manifestWithEmailIndexer());
-    await applyPendingUpdate(baseOpts(prisma, runner, logger));
-    const resume = await resumeInterruptedApply(baseOpts(prisma, runner, logger));
-    return { prisma, resume, logger };
+    const notifyOwners = vi.fn(async () => {});
+    const opts = { ...baseOpts(prisma, runner, logger), notifyOwners };
+    await applyPendingUpdate(opts);
+    const resume = await resumeInterruptedApply(opts);
+    return { prisma, resume, logger, notifyOwners };
+  }
+
+  async function runPostCommit(resume: Awaited<ReturnType<typeof resumeInterruptedApply>>) {
+    if (resume.outcome !== "committed") throw new Error(`expected committed, got ${resume.outcome}`);
+    await resume.startNewServices();
   }
 
   it("starts a release service the box enables but has never run (OTA-upgraded box)", async () => {
     const runner = new FakeRunner();
     runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
-    const { resume, prisma, logger } = await applyAndResume(runner);
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
 
     expect(resume.outcome).toBe("committed");
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // The resume hook itself does NOT start anything: index.ts runs it after
+    // listen, unawaited, so the boot path never waits on `compose up`.
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    await runPostCommit(resume);
     // Never part of the swap/rollback set — only started after commit.
     expect(runner.calls.filter((c) => c.startsWith("recreateServices")).join()).not.toContain(
       "email-indexer",
@@ -802,27 +822,64 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
       expect.objectContaining({ event: "update.services_started", services: ["email-indexer"] }),
       expect.any(String),
     );
+    expect(notifyOwners).not.toHaveBeenCalled();
   });
 
   it("leaves a service off when this box's compose does not enable it (profile-gated)", async () => {
     const runner = new FakeRunner(); // enabled = the deployed three only
     const { resume } = await applyAndResume(runner);
-    expect(resume.outcome).toBe("committed");
+    await runPostCommit(resume);
     expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
     expect(runner.running["email-indexer"]).toBeUndefined();
   });
 
-  it("a failed start is logged loudly and never un-commits a healthy update", async () => {
+  it("leaves a service an operator stopped alone (it has a container)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.hasStoppedContainer = ["email-indexer"];
+    const { resume, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
+    expect(notifyOwners).not.toHaveBeenCalled();
+  });
+
+  it("a failed start is logged, reaches the owners, and never un-commits a healthy update", async () => {
     const runner = new FakeRunner();
     runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
     runner.startFails = true;
-    const { resume, prisma, logger } = await applyAndResume(runner);
-    expect(resume.outcome).toBe("committed");
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+    expect(notifyOwners).toHaveBeenCalledWith(
+      SERVICES_START_FAILED_TITLE,
+      expect.stringContaining("email-indexer"),
+    );
+  });
+
+  it("a started service that never goes healthy is a failure, not a success", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    healthy["email-indexer"] = false; // crash-looping
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.services_start_failed" }),
       expect.any(String),
     );
+    expect(notifyOwners).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -68,6 +68,9 @@
 #   recreate-services   ... --target grow
 #       WARP-2970: the same loop pinned to override-grow.yml — post-commit,
 #       starts release services this box enables but has no container for.
+#       A service that HAS a container (even a stopped one: an operator's
+#       `docker stop`) is skipped, never recreated; stdout then also carries
+#       {"failed":[…],"skipped":[…]}.
 #   enabled-services
 #       `docker compose config --services`: the services the staged compose
 #       file enables under this box's COMPOSE_PROFILES, one per line.
@@ -439,10 +442,19 @@ cmd_recreate_services() {
   # EVERY service, collect the ones that failed, and return the list to the
   # caller (JSON on stdout + non-zero exit) so the outcome is actionable.
   local svc rc=0
-  local failed=()
+  local failed=() skipped=()
   local IFS=','
   for svc in $SERVICES; do
     [ -z "$svc" ] && continue
+    # grow starts only a service that has NEVER had a container here. The
+    # orchestrator's "not running" (current-image-refs, `ps -q`) also covers
+    # a container someone stopped on purpose; `ps -a -q` tells them apart.
+    if [ "$TARGET" = "grow" ] && \
+       [ -n "$(run_capture docker compose -f "$COMPOSE_FILE" ps -a -q "$svc")" ]; then
+      log "grow: $svc already has a container (stopped?) — leaving it as it is"
+      skipped+=("$svc")
+      continue
+    fi
     # --no-deps: recreate ONLY this service (its deps are already up);
     # --no-build: NEVER fall back to the local build — the override's image:
     #   pin is the whole point (build:-only services would otherwise reuse
@@ -467,7 +479,15 @@ cmd_recreate_services() {
   for f in ${failed[@]+"${failed[@]}"}; do
     [ -z "$joined" ] && joined="\"$f\"" || joined="$joined,\"$f\""
   done
-  printf '{"failed":[%s]}\n' "$joined"
+  if [ "$TARGET" = "grow" ]; then
+    local sk=""
+    for f in ${skipped[@]+"${skipped[@]}"}; do
+      [ -z "$sk" ] && sk="\"$f\"" || sk="$sk,\"$f\""
+    done
+    printf '{"failed":[%s],"skipped":[%s]}\n' "$joined" "$sk"
+  else
+    printf '{"failed":[%s]}\n' "$joined"
+  fi
   return "$rc"
 }
 

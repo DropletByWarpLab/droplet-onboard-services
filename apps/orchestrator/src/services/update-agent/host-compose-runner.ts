@@ -202,14 +202,18 @@ export class RecreateServicesError extends Error {
  * Returns null when there is no parseable payload.
  */
 function parseFailedServices(text: string | undefined): string[] | null {
+  return parseStringList(text, "failed");
+}
+
+function parseStringList(text: string | undefined, key: "failed" | "skipped"): string[] | null {
   if (!text) return null;
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end < start) return null;
   try {
-    const parsed = JSON.parse(text.slice(start, end + 1)) as { failed?: unknown };
-    if (Array.isArray(parsed.failed)) {
-      return parsed.failed.filter((s): s is string => typeof s === "string");
+    const list = (JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>)[key];
+    if (Array.isArray(list)) {
+      return list.filter((s): s is string => typeof s === "string");
     }
   } catch {
     // Not JSON — fall through to null (an unexpected failure shape).
@@ -416,7 +420,10 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         .filter((l) => SERVICE_NAME_RE.test(l));
     },
 
-    async startServices(args: { updateId: string; services: ReleaseService[] }): Promise<void> {
+    async startServices(args: {
+      updateId: string;
+      services: ReleaseService[];
+    }): Promise<{ started: string[] }> {
       // WARP-2970 — its own override: override-release.yml pins only what was
       // DEPLOYED at snapshot time, and a service must never start unpinned.
       await writeFile(
@@ -427,7 +434,7 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
           args.services.map((s) => ({ name: s.name, image: s.image })),
         ),
       );
-      await run(
+      const stdout = await run(
         "recreate-services",
         [
           "--update-id",
@@ -439,6 +446,10 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         ],
         timeouts.recreateMs,
       );
+      // The helper skips a service that already has a (stopped) container and
+      // names it in "skipped"; everything else it started.
+      const skipped = new Set(parseStringList(stdout, "skipped") ?? []);
+      return { started: args.services.map((s) => s.name).filter((n) => !skipped.has(n)) };
     },
   };
 }

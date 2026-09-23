@@ -180,8 +180,13 @@ export interface ApplyRunner {
   /**
    * WARP-2970 — start services that have NO container yet, pinned to their
    * release refs (a third override, override-grow.yml). Post-commit only.
+   * A service that already has a container (an operator stopped it) is left
+   * alone; `started` names only what was actually started.
    */
-  startServices(opts: { updateId: string; services: ReleaseService[] }): Promise<void>;
+  startServices(opts: {
+    updateId: string;
+    services: ReleaseService[];
+  }): Promise<{ started: string[] }>;
 }
 
 /** One health-probe attempt; true = healthy. */
@@ -237,6 +242,11 @@ export interface ApplyUpdateOptions {
   logger?: pino.Logger;
   probe?: HealthProbe;
   healthGate?: { attempts: number; intervalMs: number };
+  /**
+   * WARP-2970 — tell the box's owners and admins something they must act on
+   * (index.ts wires the notification fan-out). Absent → log only.
+   */
+  notifyOwners?: (title: string, body: string) => Promise<void>;
 }
 
 export type ApplyUpdateResult =
@@ -255,7 +265,18 @@ export type ApplyUpdateResult =
 
 export type ResumeResult =
   | { outcome: "nothing_to_resume" }
-  | { outcome: "committed"; deviceUpdateId: string }
+  | {
+      outcome: "committed";
+      deviceUpdateId: string;
+      /**
+       * WARP-2970 — the post-commit start of services new to this box's
+       * enabled set. NOT run by the resume hook: index.ts calls it after the
+       * server listens and does not await it, so a slow `compose up` can never
+       * hold the orchestrator off its own healthcheck (which the detached
+       * self-swap helper is waiting on). Never throws.
+       */
+      startNewServices: () => Promise<void>;
+    }
   | { outcome: "rolled_back"; deviceUpdateId: string }
   | { outcome: "failed"; deviceUpdateId: string }
   | { outcome: "self_rollback_started"; deviceUpdateId: string }
@@ -324,7 +345,10 @@ async function runHealthGate(
   probe: HealthProbe,
   gate: { attempts: number; intervalMs: number },
   log: pino.Logger,
-  ctx: { deviceUpdateId: string; phase: "sidecars" | "post_swap" | "rollback" },
+  ctx: {
+    deviceUpdateId: string;
+    phase: "sidecars" | "post_swap" | "rollback" | "post_commit_start";
+  },
 ): Promise<string | null> {
   const startedAt = Date.now();
   const unhealthy = await healthGate(services, probe, gate);
@@ -373,21 +397,41 @@ async function runHealthGate(
 async function startNewlyEnabledServices(
   runner: ApplyRunner,
   log: pino.Logger,
-  opts: { updateId: string; manifest: ReleaseManifest; refs: Record<string, string | null> },
+  opts: {
+    updateId: string;
+    manifest: ReleaseManifest;
+    refs: Record<string, string | null>;
+    probe: HealthProbe;
+    gate: { attempts: number; intervalMs: number };
+    notifyOwners?: (title: string, body: string) => Promise<void>;
+  },
 ): Promise<void> {
+  let names: string[] = [];
   try {
     const enabled = new Set(await runner.enabledServices());
     const missing = opts.manifest.services.filter(
       (s) => opts.refs[s.name] === null && enabled.has(s.name),
     );
     if (missing.length === 0) return;
-    await runner.startServices({ updateId: opts.updateId, services: missing });
+    names = missing.map((s) => s.name);
+    const { started } = await runner.startServices({ updateId: opts.updateId, services: missing });
+    if (started.length === 0) return;
+    // "started" is not "working": probe each one with the healthcheck the
+    // manifest carries, so a crash-looping container is reported, not logged
+    // as a success.
+    const unhealthy = await runHealthGate(
+      missing.filter((s) => started.includes(s.name)),
+      opts.probe,
+      opts.gate,
+      log,
+      { deviceUpdateId: opts.updateId, phase: "post_commit_start" },
+    );
+    if (unhealthy !== null) {
+      names = started;
+      throw new Error(`${unhealthy} did not become healthy after it was started`);
+    }
     log.info(
-      {
-        event: "update.services_started",
-        deviceUpdateId: opts.updateId,
-        services: missing.map((s) => s.name),
-      },
+      { event: "update.services_started", deviceUpdateId: opts.updateId, services: started },
       "OTA post-commit — started release services this box enables but was not running",
     );
   } catch (err) {
@@ -395,11 +439,31 @@ async function startNewlyEnabledServices(
       {
         event: "update.services_start_failed",
         deviceUpdateId: opts.updateId,
+        services: names,
         err: err instanceof Error ? err.message : String(err),
       },
       "OTA post-commit service start FAILED — the update stays committed; the service is not running",
     );
+    try {
+      await opts.notifyOwners?.(
+        SERVICES_START_FAILED_TITLE,
+        servicesStartFailedBody(names),
+      );
+    } catch (notifyErr) {
+      log.warn({ err: notifyErr, deviceUpdateId: opts.updateId }, "OTA owner notification failed");
+    }
   }
+}
+
+export const SERVICES_START_FAILED_TITLE = "Part of your Droplet update didn't start";
+
+export function servicesStartFailedBody(services: string[]): string {
+  const what = services.length > 0 ? ` (${services.join(", ")})` : "";
+  return (
+    `The update installed and your Droplet is running normally, but a new part of it${what} ` +
+    "did not start, so the features that use it are unavailable for now. " +
+    "Contact support if this doesn't clear up."
+  );
 }
 
 /** recreateServices + the WARP-541 per-batch progress event. */
@@ -843,12 +907,19 @@ export async function resumeInterruptedApply(
           { event: "update.committed", deviceUpdateId: applying.id, gitSha: applying.gitSha },
           "OTA update committed — all services healthy on the release digests",
         );
-        await startNewlyEnabledServices(runner, log, {
-          updateId: applying.id,
-          manifest,
-          refs,
-        });
-        return { outcome: "committed", deviceUpdateId: applying.id };
+        return {
+          outcome: "committed",
+          deviceUpdateId: applying.id,
+          startNewServices: () =>
+            startNewlyEnabledServices(runner, log, {
+              updateId: applying.id,
+              manifest,
+              refs,
+              probe,
+              gate,
+              notifyOwners: opts.notifyOwners,
+            }),
+        };
       }
       // Full detached rollback — the OLD orchestrator's resume writes the
       // rolled_back / failed verdict once it is back.
