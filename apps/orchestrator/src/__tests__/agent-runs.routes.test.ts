@@ -45,6 +45,13 @@ vi.mock("../services/notifications.service.js", () => ({
   sendNotification: vi.fn().mockResolvedValue({ id: "n", channels: [], delivered: false }),
 }));
 
+// WARP-2997 — only ever read for a cloud-resolving model; every local-model
+// test in this file never reaches it.
+vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
+  resolveEffectiveAccess: vi.fn(async () => ({ cloud: false })),
+}));
+
 import { createAgentRunsRouter } from "../routes/agent-runs.js";
 import { enqueueAgentRun } from "../services/agent-run-worker.service.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
@@ -103,6 +110,19 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "tool_run", refs: expect.objectContaining({ agentRunId: res.body.id }) }),
     );
+  });
+
+  it("WARP-2997: a cloud model the person may not use is refused up front — 451, chat's body, no row", async () => {
+    const { app, db } = buildApp(owner);
+    const run = await request(app).post("/api/agent-runs").send({ goal: "g", model: "claude-opus-4-20250514" });
+    expect(run.status).toBe(451);
+    expect(run.body).toMatchObject({ error: "off_lan_blocked", provider: "anthropic", scope: "per_person" });
+    const sched = await request(app)
+      .post("/api/agent-runs/schedules")
+      .send({ goal: "g", model: "claude-opus-4-20250514", rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0" });
+    expect(sched.status).toBe(451);
+    expect(db.rows).toHaveLength(0);
+    expect(db.schedules).toHaveLength(0);
   });
 
   it("rejects an empty goal and, with no model configured, a missing model", async () => {
