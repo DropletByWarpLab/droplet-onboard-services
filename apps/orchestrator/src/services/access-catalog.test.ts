@@ -161,18 +161,26 @@ describe("access-catalog — every tool domain has a feature decision (WARP-2742
   }
 
   it.each([...TOOL_DOMAINS])(
-    "%s is claimed by exactly one module XOR declared feature-ungated",
+    "%s is claimed by at least one module XOR declared feature-ungated",
     (domain) => {
       const owners = claimedBy.get(domain) ?? [];
       const ungated = Object.prototype.hasOwnProperty.call(FEATURE_UNGATED_TOOL_DOMAINS, domain);
-      expect(owners.length, `${domain} claimed by ${owners.join(", ")}`).toBeLessThanOrEqual(1);
       expect(
-        owners.length === 1 ? !ungated : ungated,
+        owners.length > 0 ? !ungated : ungated,
         `${domain}: claim it in module-registry.ts toolDomains OR add it to ` +
           "FEATURE_UNGATED_TOOL_DOMAINS with a reason — not both, not neither",
       ).toBe(true);
     },
   );
+
+  // WARP-2988 — a second claim WIDENS a domain (any owner passes it), so the
+  // shared claims are pinned exactly. A new one is a deliberate edit here.
+  it("only `business` is shared, by exactly crm and projects (OR semantics)", () => {
+    const shared = Object.fromEntries(
+      [...claimedBy].filter(([, owners]) => owners.length > 1).map(([d, o]) => [d, [...o].sort()]),
+    );
+    expect(shared).toEqual({ business: ["crm", "projects"] });
+  });
 
   it("unmappedToolDomains() is empty — the gate denies anything that lands there", () => {
     expect(unmappedToolDomains()).toEqual([]);
@@ -186,14 +194,19 @@ describe("access-catalog — every tool domain has a feature decision (WARP-2742
   });
 
   it.each([...TOOL_DOMAINS].filter((d) => claimedBy.has(d)))(
-    "claimed domain %s passes only while its owning module is in the feature set",
+    "claimed domain %s passes iff at least one owning module is in the feature set",
     (domain) => {
-      const owner = claimedBy.get(domain)![0] as ModuleId;
+      const owners = claimedBy.get(domain)! as ModuleId[];
       const all = new Set<ModuleId>(MODULES.map((m) => m.id));
       expect(domainsForFeatures(all).has(domain)).toBe(true);
       const without = new Set(all);
-      without.delete(owner);
+      for (const o of owners) without.delete(o);
       expect(domainsForFeatures(without).has(domain)).toBe(false);
+      for (const o of owners) {
+        expect(domainsForFeatures(new Set([...without, o])).has(domain), `${domain} via ${o}`).toBe(
+          true,
+        );
+      }
     },
   );
 

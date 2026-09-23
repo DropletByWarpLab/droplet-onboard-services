@@ -92,7 +92,8 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createModulesRouter } from "./routes/modules.routes.js";
 import { createModuleGate } from "./middleware/module-gate.js";
-import { mountModuleGates } from "./modules/module-mounts.js";
+import { mountModuleGates, mountMcpActingUserGates } from "./modules/module-mounts.js";
+import { actingUserAccessResolver } from "./middleware/mcp-acting-user-gate.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createAuditRootsRouter } from "./routes/audit-roots.js";
@@ -317,6 +318,10 @@ export function createApp(
   // Specs: docs/superpowers/specs/2026-07-07-module-toggles-design.md, ADR-032.
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
+  // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
+  // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
+  // (`business` needs CRM or Projects). Humans are untouched by this mount.
+  mountMcpActingUserGates(app, actingUserAccessResolver(prisma));
 
   app.use("/api", createModulesRouter(prisma, config, moduleGate));
 

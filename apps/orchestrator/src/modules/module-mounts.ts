@@ -60,6 +60,10 @@ import {
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import {
+  requireMcpActingUserToolDomain,
+  type ActingUserAccessResolver,
+} from "../middleware/mcp-acting-user-gate.js";
 
 /** The `app.use(path, handler)` surface — structural so tests can pass a bare
  *  Express app or a Router without pulling the whole app type in. */
@@ -173,6 +177,40 @@ export function mountModuleGates(
         app.use(
           prefix,
           scopeToOwnedPaths(requireFeatureAccess(def.id, "view", resolve), applies),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * WARP-2988 — tool domains whose routes narrow the `_service:mcp` principal by
+ * the ACTING user's §3 tool scope (middleware/mcp-acting-user-gate.ts).
+ *
+ * `business` only, deliberately: it is the domain Romain's "CRM or Projects"
+ * decision is about, and the one whose routes sit under two modules. The gate
+ * mounts on the prefixes of every module that CLAIMS the domain — derived from
+ * the registry, never hand-listed — and `module-mounts.test.ts` pins that every
+ * tool hop under those prefixes (tools-core TOOL_ROUTES) is a tool of this
+ * domain, so the gate can never refuse another domain's tool.
+ */
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business"];
+
+/** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
+export function mountMcpActingUserGates(
+  app: ModuleGateMountTarget,
+  resolve: ActingUserAccessResolver,
+): void {
+  for (const domain of MCP_ACTING_USER_GATED_DOMAINS) {
+    for (const def of MODULES) {
+      if (!def.toolDomains.includes(domain)) continue;
+      for (const prefix of def.routePrefixes) {
+        app.use(
+          prefix,
+          scopeToOwnedPaths(
+            requireMcpActingUserToolDomain(domain, def.id, resolve),
+            gateScopeFor(def, prefix),
+          ),
         );
       }
     }

@@ -65,9 +65,9 @@
  *
  * WHY `business` REPLACED THE DEAD GRANT ON ONE TEMPLATE AND NOT THREE.
  * `business` is where those reads went, so substituting it looks like the
- * obvious repair — but it is NOT a rename. `business` is declared
- * FEATURE-UNGATED (access-catalog.ts FEATURE_UNGATED_TOOL_DOMAINS), so
- * `domainsForFeatures` passes it for ANY
+ * obvious repair — but it is NOT a rename. `business` passes the feature
+ * intersection on CRM OR Projects (WARP-2988; before it, for ANY feature set),
+ * so `domainsForFeatures` passes it for EITHER
  * feature set, and the route layer does not make up the difference: only
  * eight modules are in `FEATURE_GATED_MODULES` (module-mounts.ts) and
  * `projects` is not one of them, so the whole `/api/pm` tree carries the
