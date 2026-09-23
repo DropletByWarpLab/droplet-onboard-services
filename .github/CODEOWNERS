@@ -1,0 +1,30 @@
+# CODEOWNERS (WARP-2900 / WARP-2923, ADR-056 slice H)
+#
+# The box's signing keys and the code that decides what they vouch for. A
+# change here changes what the appliance will sign or trust, so it carries a
+# required security review.
+#
+# This file only REQUESTS the review. It is enforced once a repo admin turns
+# on "Require review from Code Owners" in the `stage` (and `main`) branch
+# protection. Until then, the WARP-2923 manual gate applies: no PR touching
+# these paths merges without @rjouffret's GitHub approval.
+#
+# Last matching pattern wins, so keep the most specific lines last.
+
+# Device-identity sidecar: the device-id key and the extension-signing key.
+/services/device-identity-svc/                                  @rjouffret
+/proto/device_identity.proto                                    @rjouffret
+/apps/orchestrator/src/grpc-generated/device_identity.ts        @rjouffret
+/apps/orchestrator/src/services/device-identity.client.ts       @rjouffret
+
+# The OTA release verifier and the extension verifier (both trust anchors).
+/apps/orchestrator/src/services/update-agent/                   @rjouffret
+
+# Extensions: the one signer caller, the statement format, and the promote route.
+/apps/orchestrator/src/services/extension-promotion.service.ts  @rjouffret
+/apps/orchestrator/src/services/extension-manifest.ts           @rjouffret
+/apps/orchestrator/src/routes/extensions.ts                     @rjouffret
+/docs/schemas/extension-manifest.schema.json                    @rjouffret
+
+# This file.
+/.github/CODEOWNERS                                             @rjouffret

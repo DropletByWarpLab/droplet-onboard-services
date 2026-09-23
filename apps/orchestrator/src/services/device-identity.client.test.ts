@@ -76,8 +76,6 @@ describe("device-identity.client", () => {
     expect(status.sealingPcrs).toEqual([0, 2, 4, 7]);
     expect(status.sealValid).toBe(true);
     expect(status.currentPcrSnapshot["0"]).toBe("00");
-    // WARP-2900: JSON-safe; the admin status route serializes this object.
-    expect(status.extensionKeyFingerprint).toBe("");
   });
 
   // ── WARP-2900: the extension key ────────────────────────────────────────

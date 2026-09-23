@@ -56,11 +56,6 @@ export interface DeviceIdentityStatus {
   sealValid: boolean;
   lastResealAt: string;
   currentPcrSnapshot: Record<string, string>;
-  /** WARP-2900: "sha256:<hex>" of the extension key's SPKI, "" until the
-   *  first extension promote creates the key. The DER itself is served by
-   *  getExtensionPublicKey(); this object is JSON-serialized by the admin
-   *  status route, so it carries no bytes. */
-  extensionKeyFingerprint: string;
 }
 
 /** The only key usage the sidecar's extension key signs under. */
@@ -224,7 +219,6 @@ export function createDeviceIdentityClient(
             v,
           ]),
         ),
-        extensionKeyFingerprint: r.extensionKeyFingerprint,
       };
     },
 
