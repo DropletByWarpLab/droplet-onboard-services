@@ -48,7 +48,6 @@ import {
   Sparkles,
   Stethoscope,
   Trash2,
-  Star,
   Clock,
   Share2,
   Bot,
@@ -238,18 +237,50 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Files",
         icon: FolderOpen,
         requiresModule: "files",
-        // Files sub-nav — the original nesting, now expressed via the
-        // generalized `children` mechanism (was the standalone filesSubNav
-        // const). Reveals on any /files/* route. "All files" is `exact` so
-        // it doesn't stay lit while you're in a deeper Files view.
+        // Files sub-nav. WARP-2966 cut it from six rows to three, because six
+        // was not one idea: an "All files" row whose href WAS the parent's,
+        // four places inside the tree, and a device-pairing screen.
+        //
+        // What is left is the one thing the caption can honestly name — the
+        // places a file can be that are not a folder. Reveals on any /files/*
+        // route; the Libraries rail (FilesLibrariesNav) is appended beneath.
+        //
+        // Three rows are gone and each went somewhere:
+        //  · "All files" was `{ href: "/files", exact: true }` — a child whose
+        //    href is its own parent's. The parent link IS Browse, so the row
+        //    said the same word twice and the section read as a container of
+        //    itself.
+        //  · Favorites is not a place, it is a FILTER over the places below.
+        //    It lives on /files' own toolbar now; the route is untouched and
+        //    still claimed by this item's `files` module through the /files
+        //    prefix (see the WARP-2966 pin in Sidebar.files-section.test.tsx).
+        //  · Sync Devices left Files entirely — see the tucked entry below.
         children: [
-          { href: "/files", label: "All files", icon: FolderOpen, exact: true },
-          { href: "/files/recents", label: "Recents", icon: Clock },
-          { href: "/files/favorites", label: "Favorites", icon: Star },
+          { href: "/files/recents", label: "Recent", icon: Clock },
           { href: "/files/shared", label: "Shared", icon: Share2 },
           { href: "/files/trash", label: "Trash", icon: Trash2 },
-          { href: "/files/devices", label: "Sync Devices", icon: Laptop },
         ],
+      },
+      // WARP-2966 (addendum §2.3) — Sync Devices manages sync-client pairing.
+      // It has no path, no listing and no library, so it cannot answer "where
+      // am I"; keeping it in a rail of locations made the rail mean two
+      // things. It moves to Settings, as the WARP-1807 tuck: `hidden: true`
+      // renders it on no nav surface while `moduleForPath` keeps claiming the
+      // route and the label/icon stay canonical. The addendum is explicit that
+      // this is A MOVE, NOT A DELETION — the Settings → Advanced row
+      // (settings.advanced-links.test.tsx) is the other half and lands in the
+      // same change, so there is no orphan window.
+      //
+      // `requiresModule: "files"` is stated rather than inherited: it was a
+      // child of Files and took the parent's gate: promoting it to top level
+      // without this would turn the files module off and leave the pairing
+      // screen reachable from Settings.
+      {
+        href: "/files/devices",
+        label: "Sync devices",
+        icon: Laptop,
+        requiresModule: "files",
+        hidden: true,
       },
       // WARP-837: Email triage surface. Left unrestricted — the backend allows
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is

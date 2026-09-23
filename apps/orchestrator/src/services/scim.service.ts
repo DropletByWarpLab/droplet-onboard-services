@@ -165,6 +165,8 @@ export async function provisionUser(
       ...emailWriteData(parsed.email),
       role: "family", // least privilege; provisionGroup raises it
       isLocal: true,
+      // WARP-2858: explicit origin — the box never sets a local password on it.
+      provisionSource: "SCIM",
       directoryStatus: targetStatus,
       // No passwordHash — SCIM-provisioned users authenticate via Okta SSO
       // only; /auth/login fails closed on a null hash.

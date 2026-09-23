@@ -956,6 +956,31 @@ export function createErpSyncRunner(deps: ErpSyncDeps): ErpSyncRunner {
               spec.updatedAtField,
             );
             const drift = diffForDrift(entity, watermark, incremental, full);
+
+            // 🔴 WARP-2848 — land what the sweep re-enumerated BEFORE the
+            // watermark moves. The release below adopts the full read's
+            // high-water mark, which sits at or past every record `drift` just
+            // proved the incremental path missed; releasing without landing
+            // told the next tick to ask only for rows AFTER them, so the sweep
+            // found the missing records and then guaranteed they never landed.
+            // Same rule, same gate as `runOneCursor` (WARP-2549). The FULL set,
+            // not just the drifted rows: landing reconciles on
+            // `(connectionId, externalId)`, so re-landing a row already here is
+            // harmless.
+            //
+            // It sits BEFORE `entityDrift.push` on purpose: the catch below
+            // names the failing cursor as `due[entityDrift.length]`, so a
+            // landing failure here parks THIS cursor (watermark and
+            // lastSweepAt untouched, still due) and writes no drift row for a
+            // sweep that did not complete.
+            if (landsOnBox(entity)) {
+              await land({
+                connection: { id: conn.id, provider: conn.provider },
+                entity,
+                rows: fullRows,
+                now: at,
+              });
+            }
             entityDrift.push(drift);
 
             // WARP-2463 — persist it. UNCONDITIONALLY: a clean sweep writes a

@@ -1132,6 +1132,16 @@ enum DirectoryUserStatus {
   DEACTIVATED
 }
 
+// WARP-2858 — how a User row came to exist. LOCAL: /auth/setup, admin
+// create, invite accept (the box owns the credential). SSO: just-in-time
+// created by an OIDC sign-in (sso.ts). SCIM: pushed by the IdP's directory
+// sync (scim.service.ts provisionUser).
+enum UserProvisionSource {
+  LOCAL
+  SSO
+  SCIM
+}
+
 /// WARP-1202: explicit pairing-code lifecycle. Persistent state lives in this
 /// enum column, never inferred from a `used` boolean + `expiresAt` comparison
 /// + `claimedBy` nullability (CLAUDE.md "no guessing"; WARP-218
@@ -2283,6 +2293,10 @@ model NotificationLog {
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — deep link: a same-origin dashboard path (validated by
+  // assertNotificationLink) and small flat PHI-free client context.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
@@ -2671,6 +2685,13 @@ model User {
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
   directoryStatus    DirectoryUserStatus @default(ACTIVE)
+  // WARP-2858: where this account was CREATED — written once, by the path
+  // that minted the row, never inferred from a null `passwordHash` or
+  // `nextcloudUsername`. SSO / SCIM rows authenticate through the IdP only:
+  // the box refuses to set, change or verify a local password on them,
+  // because a local password is a login the IdP's disable/deprovision cannot
+  // reach. A LOCAL row that later links an SSO identity stays LOCAL.
+  provisionSource    UserProvisionSource @default(LOCAL)
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
@@ -2752,6 +2773,8 @@ model User {
   // access-control key, where an assignment is mere provenance.
   brainFindingsOwned BrainFinding[] @relation("BrainFindingOwner")
   brainDigestsOwned  BrainDigest[]  @relation("BrainDigestOwner")
+  // WARP-2251: the user's own morning briefings, one per box-local day.
+  morningBriefings   MorningBriefing[]
 
   @@index([role])
   @@index([accessRoleId])
@@ -8104,4 +8127,79 @@ model RemoteToolClassification {
 
   @@unique([serverId, toolName])
   @@index([serverId])
+}
+
+/// WARP-2251 — morning briefing: one agent-written day plan per user per
+/// box-local day. Self-only: every read is scoped by `userId` (decision 2,
+/// 2026-08-27). Status is an explicit enum (CLAUDE.md "No guessing"): never
+/// derive readiness from `body IS NOT NULL` or failure from `endedAt IS NULL`.
+/// `body` is NOT encrypted at rest in v1 (decision 1); 30-day retention.
+model MorningBriefing {
+  id            String              @id @default(uuid())
+  userId        String
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Box-local calendar date the briefing is FOR (not when it ran).
+  forDate       DateTime            @db.Date
+  status        BriefingStatus      @default(pending)
+  skipReason    String?
+  failureReason String?
+  headline      String?
+  vibe          BriefingVibe?
+  /// The validated output contract (WARP-2248). Null until status = ready.
+  body          Json?
+  /// Tool names actually called, from the agent trace.
+  sources       Json?
+  model         String?
+  iterations    Int?
+  artKind       BriefingArtKind     @default(ascii)
+  photoStatus   BriefingPhotoStatus @default(none)
+  /// "<YYYY-MM-DD>/<theme>/<pexelsId>" (WARP-2263); null when no photo.
+  photoRef      String?
+  triggeredBy   BriefingTrigger     @default(scheduler)
+  startedAt     DateTime?
+  endedAt       DateTime?
+  readAt        DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@unique([userId, forDate])
+  @@index([userId, forDate(sort: Desc)])
+  @@index([status, forDate])
+}
+
+enum BriefingStatus {
+  pending
+  running
+  ready
+  failed
+  skipped
+}
+
+enum BriefingVibe {
+  calm
+  focused
+  busy
+  urgent
+  celebratory
+  quiet
+  stormy
+  fresh
+}
+
+enum BriefingArtKind {
+  ascii
+  svg
+  photo
+}
+
+enum BriefingPhotoStatus {
+  none
+  fetched
+  fetch_failed
+  disabled
+}
+
+enum BriefingTrigger {
+  scheduler
+  user
 }

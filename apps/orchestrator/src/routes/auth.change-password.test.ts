@@ -337,6 +337,20 @@ describe("POST /auth/change-password", () => {
     expect(JSON.stringify(stored)).not.toContain("Brand-new-secret123");
   });
 
+  // WARP-2858: the IdP owns an SSO/SCIM account's credential. Refused before
+  // the current-password verify and before any write.
+  it.each(["SSO", "SCIM"])("%s-provisioned account → 409 SSO_MANAGED_ACCOUNT, nothing written", async (source) => {
+    const prisma = createPrismaMock([row({ provisionSource: source } as any)]);
+    const res = await request(protectedApp(prisma, session()))
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Temp-secret123", newPassword: "Brand-new-secret123" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SSO_MANAGED_ACCOUNT");
+    expect(verifyPassword).not.toHaveBeenCalled();
+    expect(hashPassword).not.toHaveBeenCalled();
+  });
+
   it("rejects a wrong current password with 400 INVALID_PASSWORD and does NOT clear the flag", async () => {
     verifyPassword.mockResolvedValueOnce(false);
     const prisma = createPrismaMock([row({ mustChangePassword: true })]);
