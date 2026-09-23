@@ -162,8 +162,11 @@ statement alone.
   record is the whole call policy: an unreviewed tool is
   `REMOTE_WRITE_NOT_PERMITTED`, so **no extension tool runs from chat until
   an owner reviews it as a read** (or WARP-2321 lands). A new version keeps
-  a reviewed read only while the tool's input-schema hash is unchanged; a
-  changed schema resets the tool to the default and clears the review. An
+  a reviewed read only while the tool's description and input schema are
+  unchanged (one hash over both, `remoteToolReviewHash`); a changed
+  description or schema resets the tool to the default and clears the
+  review, and a review sent with the hash it was shown is then a
+  `STALE_REVIEW`. An
   operator's block is never lifted by that reset.
 - **Call-back principal.** A `dxt_` header bearer is looked up by its
   sha256 and resolves to `_service:ext:<slug>` only while the extension is

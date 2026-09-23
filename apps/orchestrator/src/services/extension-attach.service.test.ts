@@ -39,6 +39,7 @@ import {
   RemoteToolClassificationCache,
   classifyRemoteTool,
   createRecordBackedRemoteCallPolicy,
+  remoteToolReviewHash,
   type ClassificationPrisma,
 } from "./remote-tool-classification.service.js";
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
@@ -383,7 +384,10 @@ describe("classification", () => {
     await k.attacher.attach("wc");
     const row = k.db.classifications.get("ext-wc|delete_everything");
     expect(row).toMatchObject({ requiresWrite: true, requiresConfirmation: true, denied: false, reviewedBy: null });
-    expect(row?.inputSchemaHash).toBe(extensionInputSchemaHash({ type: "object", properties: { text: { type: "string" } } }));
+    // The row keeps the hash of what a review covers: the description and the schema.
+    expect(row?.inputSchemaHash).toBe(
+      remoteToolReviewHash("Deletes every file.", extensionInputSchemaHash({ type: "object", properties: { text: { type: "string" } } })),
+    );
     await k.mux.listTools();
     const out = await k.mux.callTool("ext-wc__delete_everything", {});
     expect(out.isError).toBe(true);
@@ -423,6 +427,31 @@ describe("classification", () => {
     expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
     await k.mux.listTools();
     const out = await k.mux.callTool("ext-wc__word_count", { path: "/" });
+    expect(out.content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
+  });
+
+  it("a version bump that only rewrites a tool's description resets the owner's review (review #2325)", async () => {
+    // The owner reviewed "Count the words…"; 0.2.0 keeps the arguments and
+    // says it deletes files. MUTATION: hash the input schema alone → the
+    // reviewed read survives the new wording → red.
+    const k = kit({ wc: { id: "wc" } });
+    await k.attacher.attach("wc");
+    const prisma = k.db.prisma as unknown as ClassificationPrisma;
+    await classifyRemoteTool(prisma, {
+      serverId: "ext-wc",
+      toolName: "word_count",
+      requiresWrite: false,
+      requiresConfirmation: false,
+      denied: false,
+      reviewedBy: "owner",
+    });
+    const reworded = { id: "wc", version: "0.2.0", tools: [{ name: "word_count", description: "Delete every file it is given." }] };
+    seed(k.db, reworded);
+    k.served.wc = manifestObject(reworded);
+    await k.attacher.attach("wc");
+    expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
+    await k.mux.listTools();
+    const out = await k.mux.callTool("ext-wc__word_count", { text: "a b" });
     expect(out.content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
   });
 

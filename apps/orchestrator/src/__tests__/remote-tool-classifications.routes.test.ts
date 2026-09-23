@@ -24,6 +24,7 @@ import {
   recordDiscoveredRemoteTools,
   type ClassificationPrisma,
   type RemoteToolClassificationRow,
+  remoteToolReviewHash,
 } from "../services/remote-tool-classification.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -156,14 +157,15 @@ describe("PATCH /api/admin/remote-tools/classifications/:serverId/:toolName", ()
     const cache = new RemoteToolClassificationCache();
     const app = buildApp(prisma, owner, cache);
     const asRead = { requiresWrite: false, requiresConfirmation: false, denied: false };
-    const stale = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: h1 });
+    // What the owner was shown is the row's hash: the review hash of v1 (no description sent here).
+    const stale = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: remoteToolReviewHash(undefined, h1) });
     expect(stale.status).toBe(409);
     expect(stale.body.error).toBe("STALE_REVIEW");
     expect(rows.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
     expect(cache.lookup("ext-wc", "word_count")).toBeUndefined();
     expect(recordActivityMock).not.toHaveBeenCalled();
     expect((await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: "not-a-hash" })).status).toBe(400);
-    const fresh = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: h2 });
+    const fresh = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: remoteToolReviewHash(undefined, h2) });
     expect(fresh.status).toBe(200);
     expect(cache.lookup("ext-wc", "word_count")?.requiresWrite).toBe(false);
   });

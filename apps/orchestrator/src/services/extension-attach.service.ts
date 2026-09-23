@@ -31,9 +31,10 @@
  *      check runs on every later listing (the port is pinned to the
  *      manifest), so a listing that drifts at runtime stops being
  *      advertised instead of being absorbed;
- *   4. `recordDiscoveredRemoteTools` with each tool's input-schema hash:
- *      every tool is a confirming write until a person says otherwise, and
- *      a tool whose schema changed since that person said so is again;
+ *   4. `recordDiscoveredRemoteTools` with each tool's description and
+ *      input-schema hash: every tool is a confirming write until a person
+ *      says otherwise, and a tool whose description or schema changed since
+ *      that person said so is again;
  *   5. the classification cache refresh, so step 4 is what dispatch reads.
  *      Steps 4 and 5 run BEFORE anything is attached or advertised, and a
  *      failure of either is a transient attach failure (retried), never a
