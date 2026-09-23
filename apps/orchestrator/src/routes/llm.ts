@@ -3002,6 +3002,38 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // RBAC matches GET /llm/tools: owner/admin see every tool; everyone else
   // (family, guest, unauthenticated) sees read-only tools only, closing
   // the same information-disclosure gap on the destructive surface.
+  //
+  // WARP-2969 — every entry also carries `reach`, saying whether a chat turn
+  // can get to it at all. Without it this page listed all 142 registry tools
+  // as if asking for any of them would work, while 54 are withheld from chat
+  // by policy — reachable from their own screen or over MCP, never by asking
+  // — and the page named no reason for any of them.
+  //
+  // ANNOTATES, NEVER FILTERS. A withheld tool is still callable by an MCP
+  // client, so dropping it here would be a second, wrong answer to a
+  // different question. The field is additive; every WARP-555 field is
+  // untouched.
+  //
+  // The verdict is the SHIPPED list, called — not re-derived. Same rule
+  // `tool-inspect.service.ts` reports as its `chat_policy` gate, so the two
+  // surfaces cannot disagree.
+  //
+  // 🔴 ONE AXIS, AND THE MISSING ONE IS DELIBERATE. An earlier cut of this
+  // also reported a `module` axis from `domainsForFeatures`. It would have
+  // lied on every shipped box: §6 module gating never reaches the chat pool
+  // for an owner or for anybody holding no AccessRole.
+  // `resolveToolAccessScope` returns a NULL scope for them,
+  // `narrowToolsToScope` passes a null scope through byte-for-byte, and
+  // `llm-agent.service.ts` narrows by EXCLUDED_FROM_CHAT_TOOLS alone — so
+  // `list_cameras` reaches the model on a box with `cameras` switched off,
+  // and `moduleSetting` is never even read. A "Module off" chip would have
+  // been a confident false statement about a boundary. **WARP-2972** wires
+  // that gate for everyone; the axis belongs here again the day it is true,
+  // and not one day sooner.
+  //
+  // The PER-PERSON axes (role grants, off-LAN withholding, turn relevance)
+  // are deliberately NOT here either — they need a resolved principal and a
+  // modelled turn, which is what `GET /api/admin/tool-inspect/:userId` is for.
   router.get("/llm/tools/catalog", (req, res) => {
     const role = (req as AuthedRequest).user?.role;
     const tools = isPrivilegedRole(role)
@@ -3015,6 +3047,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         domain: t.domain,
         requiresWrite: t.requiresWrite,
         requiresConfirmation: t.requiresConfirmation,
+        reach: {
+          chat: EXCLUDED_FROM_CHAT_TOOLS.has(t.name) ? "excluded" : "allowed",
+        },
       })),
       domains: TOOL_DOMAINS,
     });

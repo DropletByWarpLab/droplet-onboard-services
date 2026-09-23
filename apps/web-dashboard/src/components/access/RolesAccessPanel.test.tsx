@@ -853,7 +853,10 @@ describe("WARP-2738 — the template gallery", () => {
     await waitFor(() => expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument());
     // The gallery is present…
     expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
-    expect(screen.getByText("Front Desk")).toBeInTheDocument();
+    // WARP-2756: the gallery section renders while its own templates read is
+    // still loading (skeletons), so the test-id is true one fetch too early.
+    // Wait for the card itself, not for its container.
+    expect(await screen.findByText("Front Desk")).toBeInTheDocument();
     // …and starting from nothing is still reachable, in the same card.
     expect(screen.getByRole("button", { name: /New role/ })).toBeInTheDocument();
   });

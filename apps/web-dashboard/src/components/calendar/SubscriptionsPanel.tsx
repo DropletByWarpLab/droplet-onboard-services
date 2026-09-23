@@ -166,7 +166,7 @@ export function SubscriptionsPanel() {
               placeholder="e.g. Personal iCloud"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -186,7 +186,7 @@ export function SubscriptionsPanel() {
               placeholder="https://…"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -221,7 +221,7 @@ export function SubscriptionsPanel() {
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -236,7 +236,7 @@ export function SubscriptionsPanel() {
                 placeholder="Password or app password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",

@@ -341,7 +341,7 @@ describe("lockOperationDenied — mayOperateLocks (§3 locks)", () => {
 //
 // WHICH domains each module claims (the calendar/reminders/notifications
 // grouping, knowledge→memory, projects→pm, smart_home→smart-home, and the
-// four unclaimed pass-through domains) is asserted by T3's
+// declared feature-ungated domains, WARP-2742) is asserted by T3's
 // access-catalog.test.ts — that suite owns the grouping and this one does
 // NOT fork it. What is pinned here is the one thing T3 cannot see from the
 // resolved side: that no registry entry names a domain tools-core has never

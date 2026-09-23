@@ -63,6 +63,7 @@ import {
   type SpaceId,
 } from "./workspace-nav-config";
 
+import { VERSION_LABEL } from "@/lib/brand";
 import "@/components/shell/indigo-tokens.css";
 import "./workspace-nav.css";
 
@@ -347,7 +348,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           {healthCopy.label}
         </span>
         <span className="ws-strip-meta">{host}</span>
-        <span className="ws-strip-meta">Droplet v0.1.0</span>
+        <span className="ws-strip-meta">{VERSION_LABEL}</span>
         <span className="ws-spring" />
         <span className="ws-strip-keys" aria-hidden="true">
           ⌥1–{spaces.length} spaces

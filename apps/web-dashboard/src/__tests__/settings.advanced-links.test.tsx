@@ -135,3 +135,31 @@ describe("Settings — Storage links to the moved Drives surface (WARP-2959)", (
     expect(document.querySelector("a[href='/files/drives']")).toBeNull();
   });
 });
+
+/**
+ * WARP-2966 — Settings → "Sync devices" link row.
+ *
+ * `docs/design/files-surface-addendum.md` §2.3: Sync Devices manages
+ * sync-client pairing, not a file location, so it leaves the Files sub-nav
+ * (`hidden: true` in nav-config) — and the addendum is explicit that this is
+ * **a move, not a deletion**. This row is the move's other half. Same failure
+ * shape as the Advanced and Storage rows above: delete it and nothing breaks,
+ * builds, type-checks or fails — the surface simply becomes unreachable.
+ */
+describe("Settings — Sync devices links to the moved Files sub-view (WARP-2966)", () => {
+  it("renders a row pointing at /files/devices", () => {
+    render(<SettingsPage />);
+    const devices = screen.getByRole("link", { name: /sync devices/i });
+    expect(devices).toHaveAttribute("href", "/files/devices");
+    expect(devices).toHaveTextContent(/computers mirroring a folder/i);
+  });
+
+  it("hides the row ONLY on a positive files-module off (fail-open, WARP-1807)", () => {
+    // The nav entry carries `requiresModule: "files"`, so the row mirrors it —
+    // and mirrors its posture too: a probe blip must never hide the last path
+    // in. `useModuleGate` answers true for anything not explicitly false.
+    modulesRef.current = { files: false };
+    render(<SettingsPage />);
+    expect(document.querySelector("a[href='/files/devices']")).toBeNull();
+  });
+});

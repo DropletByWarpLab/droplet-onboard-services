@@ -359,6 +359,37 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
     expect(nc.ncLoginWithCredentials).not.toHaveBeenCalled();
   });
 
+  // WARP-2858: an SSO/SCIM-provisioned account never password-logs-in, even
+  // if a hash reached its row before the box refused to write one. Same
+  // shared deny branch as DEACTIVATED — no oracle, real verify never runs.
+  it.each(["SSO", "SCIM"])("%s-provisioned account with a stray hash → 401, real verify never runs", async (source) => {
+    const idp = { ...stefan, id: "u-idp", email: "idp@warp.test", provisionSource: source } as UserRow;
+    const prisma = createPrismaMock([idp]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "idp@warp.test", password: "correct-horse" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("Invalid credentials");
+    expect(verifyPassword).not.toHaveBeenCalled();
+    expect(verifyDummyPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it("a LOCAL account (explicit provisionSource) still logs in", async () => {
+    verifyPassword.mockResolvedValueOnce(true);
+    const local = { ...stefan, provisionSource: "LOCAL" } as UserRow;
+    const prisma = createPrismaMock([local]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "stefan@warp.test", password: "correct-horse" });
+
+    expect(res.status).toBe(200);
+  });
+
   it("Nextcloud provisioning failure is non-fatal — login still 200s", async () => {
     verifyPassword.mockResolvedValueOnce(true);
     // Downstream NC session refresh fails (Nextcloud down / not yet

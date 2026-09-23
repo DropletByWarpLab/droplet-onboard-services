@@ -71,6 +71,7 @@ import {
   SERIALIZABLE_TX,
   runRemovalPostEffects,
   runDisablePostEffects,
+  type NcMirror,
 } from "../services/role-mutation-guard.service.js";
 import {
   SESSION_COOKIE_NAME,
@@ -679,6 +680,74 @@ async function deriveUniqueUserId(
   throw new Error("deriveUniqueUserId: exhausted candidate space");
 }
 
+/**
+ * WARP-2820 / WARP-2858 — resolve an admin route's `:username` path param to
+ * the local directory row. The ONE lookup every `/auth/users/:username` write
+ * route uses (update, disable, enable, revoke-sessions, delete).
+ *
+ * The Nextcloud mapping key FIRST, then the local login handle. Resolving only
+ * `nextcloudUsername` missed every SCIM- and SSO-provisioned account:
+ * `provisionUser` and the SSO just-in-time create both seed `username` from the
+ * email and never write the mapping key (schema: `String? @unique`, no
+ * default). Those rows list as live everywhere that keys off `User.id`, while
+ * every write here fell through to the rowless legacy branch.
+ *
+ * Two ORDERED findUniques, not one `findFirst({ OR: [...] })`: both columns are
+ * @unique, and keeping the mapping key ahead of the login handle means no call
+ * that resolved before this change can resolve to a different row after it.
+ * An OR would leave the winner to row order. Every path that writes
+ * `nextcloudUsername` writes the same value into `username`, so the second
+ * lookup only ever runs for rows that never had a mapping key at all.
+ *
+ * `nextcloudUsername` is returned so the caller keys the Nextcloud side off the
+ * RESOLVED row — null means the account has no Nextcloud user, and the NC call
+ * is skipped with an explicit `ncMirror: "no_account"`, never attempted
+ * against a name Nextcloud has never seen.
+ */
+const DIRECTORY_USER_SELECT = {
+  id: true,
+  username: true,
+  nextcloudUsername: true,
+  role: true,
+  directoryStatus: true,
+  provisionSource: true,
+} as const;
+
+/**
+ * WARP-2858 — true for an account the IdP created (SSO just-in-time or SCIM
+ * push), read from the explicit `User.provisionSource` column. Such an account
+ * never gets, changes or uses a local password: its credential lives at the
+ * IdP, whose disable/deprovision would not reach a local one. Named sources,
+ * not `!== "LOCAL"`, so a future enum member is a deliberate decision here
+ * rather than an accidental lockout.
+ */
+function isIdpProvisioned(u: { provisionSource?: string | null }): boolean {
+  return u.provisionSource === "SSO" || u.provisionSource === "SCIM";
+}
+
+/** WARP-2858 — the one refusal body for a local-password write on an
+ *  SSO/SCIM-provisioned account (admin PUT and self-service change). */
+const SSO_MANAGED_ACCOUNT_BODY = {
+  error: "This account signs in through your identity provider, so it cannot have a Droplet password",
+  code: "SSO_MANAGED_ACCOUNT",
+} as const;
+
+async function findDirectoryUserByHandle(
+  prisma: import("@prisma/client").PrismaClient,
+  handle: string,
+) {
+  return (
+    (await prisma.user.findUnique({
+      where: { nextcloudUsername: handle },
+      select: DIRECTORY_USER_SELECT,
+    })) ??
+    (await prisma.user.findUnique({
+      where: { username: handle },
+      select: DIRECTORY_USER_SELECT,
+    }))
+  );
+}
+
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
 ): Router {
@@ -1109,10 +1178,17 @@ export function createPublicAuthRouter(
       // wire-indistinguishable from a non-existent one (no oracle for "this
       // email exists but is disabled") and the timing matches (dummy verify
       // spent, real argon2id verify never runs).
+      // WARP-2858: an SSO/SCIM-provisioned account never password-logs-in,
+      // even if a hash reached its row before the box refused to write one
+      // (an admin PUT predating the SSO_MANAGED_ACCOUNT refusal). The IdP's
+      // disable/deprovision cannot reach a local password, so honouring one
+      // would be a login that outlives the offboarding. Same deny branch —
+      // wire-indistinguishable from an unknown email.
       if (
         !localUser ||
         !localUser.passwordHash ||
-        localUser.directoryStatus === "DEACTIVATED"
+        localUser.directoryStatus === "DEACTIVATED" ||
+        isIdpProvisioned(localUser)
       ) {
         await verifyDummyPassword(password);
         await denyInvalid(loginEmail);
@@ -2355,6 +2431,12 @@ export function createProtectedAuthRouter(
         res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
         return;
       }
+      // WARP-2858: the IdP owns this account's credential — see
+      // SSO_MANAGED_ACCOUNT on PUT /auth/users/:username.
+      if (isIdpProvisioned(localUser)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
+        return;
+      }
 
       const ok = await verifyPassword(localUser.passwordHash, currentPassword);
       if (!ok) {
@@ -3098,11 +3180,10 @@ export function createProtectedAuthRouter(
       // The target row, read ONCE and shared by both guarded branches below.
       // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
       // on every request, because the credential branch is guarded too.
+      // WARP-2858: resolved through the shared handle resolver so SSO/SCIM
+      // rows (no `nextcloudUsername`) are found and guarded like any other.
       const target = prisma
-        ? await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true, role: true },
-          })
+        ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
 
       try {
@@ -3209,6 +3290,30 @@ export function createProtectedAuthRouter(
       const { username } = req.params;
       const { displayName, email, quota, password } = parsed.data;
 
+      // WARP-2858: the Nextcloud user this row mirrors to. A row with no
+      // mapping key (SSO/SCIM-provisioned) has NO Nextcloud account, so the
+      // mirror below is skipped rather than aimed at a name Nextcloud has
+      // never seen. No local row (legacy NC-only account / no directory):
+      // the path param IS the Nextcloud user, as before.
+      const ncUsername = target ? target.nextcloudUsername : username;
+      // Quota is a Nextcloud storage attribute and nothing else — on an
+      // account with no Nextcloud user there is nothing to apply it to.
+      // Refuse explicitly, BEFORE any write, instead of 200-ing a no-op.
+      // WARP-2858 (Romain, 2026-09-22): no local password on an account the
+      // IdP provisioned. It would be a login that the IdP's disable and
+      // SCIM deprovision cannot reach. Refused before any write.
+      if (password !== undefined && target && isIdpProvisioned(target)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
+        return;
+      }
+      if (quota !== undefined && ncUsername === null) {
+        res.status(409).json({
+          error: "This account has no file storage, so it has no storage quota to set",
+          code: "NO_NEXTCLOUD_ACCOUNT",
+        });
+        return;
+      }
+
       // ADR-013: the built-in directory is the auth source of truth and
       // /auth/login verifies the LOCAL passwordHash by email. An email or
       // password edit that only touches Nextcloud has NO effect on login, so
@@ -3262,8 +3367,10 @@ export function createProtectedAuthRouter(
             // credential rotation. `target` is null only where there is no
             // local row to pin against (legacy shim / NC-only account), and
             // that case already fails closed below.
+            // WARP-2858: pinned by the resolved row's id, not the mapping
+            // key — an SSO/SCIM row has no `nextcloudUsername` to match.
             where: target
-              ? { nextcloudUsername: username, role: target.role }
+              ? { id: target.id, role: target.role }
               : { nextcloudUsername: username },
             data,
           });
@@ -3297,19 +3404,23 @@ export function createProtectedAuthRouter(
       // Mirror the changes to Nextcloud (the WebDAV account + NC-side
       // attributes). One OCS PUT per field; the plaintext password is sent
       // here so the user's Files/WebDAV login keeps working.
+      if (ncUsername === null) {
+        res.json({ status: "ok", username, ncMirror: "no_account" satisfies NcMirror });
+        return;
+      }
       if (displayName !== undefined) {
-        await ncUpdateUser(token, username, "displayname", displayName);
+        await ncUpdateUser(token, ncUsername, "displayname", displayName);
       }
       if (email !== undefined) {
-        await ncUpdateUser(token, username, "email", email);
+        await ncUpdateUser(token, ncUsername, "email", email);
       }
       if (quota !== undefined) {
-        await ncUpdateUser(token, username, "quota", String(quota));
+        await ncUpdateUser(token, ncUsername, "quota", String(quota));
       }
       if (password !== undefined) {
-        await ncUpdateUser(token, username, "password", password);
+        await ncUpdateUser(token, ncUsername, "password", password);
       }
-      res.json({ status: "ok", username });
+      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
         res.status(403).json({ error: "Admin access required" });
@@ -3334,11 +3445,12 @@ export function createProtectedAuthRouter(
 
         // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
         // the auth source of truth and the guard rails key off it.
+        // WARP-2858: via the shared resolver — SSO/SCIM rows have no
+        // `nextcloudUsername` and used to fall through to the rowless branch
+        // below, whose Nextcloud call then failed against a user Nextcloud
+        // never had: the account stayed ACTIVE with live sessions.
         const row = prisma
-          ? await prisma.user.findUnique({
-              where: { nextcloudUsername: req.params.username },
-              select: { id: true, role: true, directoryStatus: true },
-            })
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
           : null;
 
         if (row && prisma) {
@@ -3380,15 +3492,20 @@ export function createProtectedAuthRouter(
           // NC outage must not fail a disable whose authoritative local
           // write already committed. Logged at error for operator
           // follow-up; re-running disable is idempotent.
-          let ncMirror: "synced" | "failed" = "synced";
-          try {
-            await ncSetUserEnabled(token, req.params.username, false);
-          } catch (err) {
-            ncMirror = "failed";
-            logger.error(
-              { err, username: req.params.username },
-              "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
-            );
+          // WARP-2858: a row with no mapping key has no Nextcloud account —
+          // the local DEACTIVATED is the whole disable, stated as such.
+          let ncMirror: NcMirror = "no_account";
+          if (row.nextcloudUsername !== null) {
+            try {
+              await ncSetUserEnabled(token, row.nextcloudUsername, false);
+              ncMirror = "synced";
+            } catch (err) {
+              ncMirror = "failed";
+              logger.error(
+                { err, username: req.params.username },
+                "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
+              );
+            }
           }
 
           // Rail 6 (consolidated): WARP-116/247 session-record revocation +
@@ -3476,20 +3593,25 @@ export function createProtectedAuthRouter(
         // forever. Local truth first, then the NC mirror (fatal on failure,
         // as before — a retry converges both sides). No guard rails here:
         // enabling restores access, it can never strand the box.
-        if (prisma) {
-          const row = await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
+        // WARP-2858: resolved through the shared resolver, and the NC call
+        // keys off the resolved row — skipped (explicit `no_account`) for an
+        // SSO/SCIM row that has no Nextcloud user.
+        const row = prisma
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
+          : null;
+        if (row && prisma) {
+          await prisma.user.update({
+            where: { id: row.id },
+            data: { directoryStatus: "ACTIVE" },
           });
-          if (row) {
-            await prisma.user.update({
-              where: { id: row.id },
-              data: { directoryStatus: "ACTIVE" },
-            });
-          }
         }
-        await ncSetUserEnabled(token, req.params.username, true);
-        res.json({ status: "enabled", username: req.params.username });
+        const ncUsername = row ? row.nextcloudUsername : req.params.username;
+        let ncMirror: NcMirror = "no_account";
+        if (ncUsername !== null) {
+          await ncSetUserEnabled(token, ncUsername, true);
+          ncMirror = "synced";
+        }
+        res.json({ status: "enabled", username: req.params.username, ncMirror });
       } catch (err: any) {
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
@@ -3599,15 +3721,7 @@ export function createProtectedAuthRouter(
         // order. Every path that writes `nextcloudUsername` writes the same
         // value into `username`, so the second lookup only ever runs for rows
         // that never had a mapping key at all.
-        const row =
-          (await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
-          })) ??
-          (await prisma.user.findUnique({
-            where: { username: req.params.username },
-            select: { id: true },
-          }));
+        const row = await findDirectoryUserByHandle(prisma, req.params.username);
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
@@ -3665,11 +3779,9 @@ export function createProtectedAuthRouter(
       // because that is the half that must be atomic with the rails; the
       // local row is deleted at the end, once Nextcloud has confirmed the
       // account is gone. See the delete below for why that order.
+      // WARP-2858: via the shared resolver so SSO/SCIM rows are removable.
       const row = prisma
-        ? await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true, username: true, role: true },
-          })
+        ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
       if (row && prisma) {
         assertRemovalAllowed({
@@ -3703,11 +3815,24 @@ export function createProtectedAuthRouter(
         }, SERIALIZABLE_TX);
       }
 
-      await ncDeleteUser(token, req.params.username);
+      // WARP-2858: the Nextcloud account named by the RESOLVED row. An
+      // SSO/SCIM row has none — skip the call (it would fail against a user
+      // Nextcloud never had and strand the row DEACTIVATED-but-present) and
+      // say so in the response. Rowless legacy accounts: the param IS the
+      // Nextcloud user, as before.
+      const ncUsername = row ? row.nextcloudUsername : req.params.username;
+      let ncMirror: NcMirror = "no_account";
+      if (ncUsername !== null) {
+        await ncDeleteUser(token, ncUsername);
+        ncMirror = "synced";
+      }
 
-      if (prisma) {
+      if (prisma && row) {
         try {
-          const purged = await purgeUserData(prisma, req.params.username);
+          // WARP-2858: brain memory keys on the local `User.id` (WARP-493).
+          // This used to pass the path param — a username — so the
+          // delete-time purge matched nothing for any account.
+          const purged = await purgeUserData(prisma, row.id);
           logger.info(
             {
               username: req.params.username,
@@ -3726,11 +3851,12 @@ export function createProtectedAuthRouter(
           );
         }
       } else {
-        // Should never happen in production; createProtectedAuthRouter
-        // is invoked with prisma in app.ts.
+        // No local row (legacy NC-only account) owns no `User.id`-keyed brain
+        // memory; no prisma should never happen in production
+        // (createProtectedAuthRouter is invoked with prisma in app.ts).
         logger.warn(
           { username: req.params.username },
-          "purgeUserData skipped — protected auth router instantiated without prisma",
+          "purgeUserData skipped — no local directory row (or protected auth router instantiated without prisma)",
         );
       }
 
@@ -3815,7 +3941,7 @@ export function createProtectedAuthRouter(
         // identically to DELETE /api/people/:id.
       });
 
-      res.json({ status: "deleted", username: req.params.username });
+      res.json({ status: "deleted", username: req.params.username, ncMirror });
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
