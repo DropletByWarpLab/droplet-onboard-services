@@ -5,8 +5,16 @@
  * (`/var/run/droplet/device-identity.sock`). The grpc-js library treats a
  * `unix://<path>` URL natively — no extra socket wrangling.
  *
- * The four orchestrator-facing methods unwrap the proto types into
- * camelCase TS interfaces so callers never see protobuf.
+ * The orchestrator-facing methods unwrap the proto types into camelCase TS
+ * interfaces so callers never see protobuf.
+ *
+ * WARP-2900 (ADR-056 slice H1) adds the EXTENSION key: `signExtensionManifest`
+ * and `getExtensionPublicKey`. It is a second key inside the sidecar, never
+ * the device-id key, and the sidecar alone decides what it signs (see
+ * services/device-identity-svc/extension_signing.py). Exactly one product
+ * module may call `signExtensionManifest`:
+ * services/extension-promotion.service.ts (pinned by
+ * src/__tests__/extension-signer.guard.test.ts).
  *
  * The `stubFactory` option follows the WARP-202 EmbeddingClient pattern
  * (see `embedding.client.ts`): production callers pass `{ socketPath }`
@@ -23,7 +31,10 @@ import {
   type GetStatusResponse,
   type ResealRequest,
   type ResealResponse,
+  type SignExtensionManifestRequest,
+  type SignExtensionManifestResponse,
 } from "../grpc-generated/device_identity.js";
+import { extensionKeyFingerprint } from "./extension-manifest.js";
 
 const DEFAULT_SOCKET = "/var/run/droplet/device-identity.sock";
 
@@ -45,6 +56,30 @@ export interface DeviceIdentityStatus {
   sealValid: boolean;
   lastResealAt: string;
   currentPcrSnapshot: Record<string, string>;
+  /** WARP-2900: "sha256:<hex>" of the extension key's SPKI, "" until the
+   *  first extension promote creates the key. The DER itself is served by
+   *  getExtensionPublicKey(); this object is JSON-serialized by the admin
+   *  status route, so it carries no bytes. */
+  extensionKeyFingerprint: string;
+}
+
+/** The only key usage the sidecar's extension key signs under. */
+export const EXTENSION_KEY_USAGE = "extension";
+
+export interface ExtensionSignResult {
+  /** DER ECDSA-P256-SHA256 over EXTENSION_STATEMENT_PREFIX || statement. */
+  signature: Uint8Array;
+  algorithm: string;
+  /** SubjectPublicKeyInfo DER of the key that signed. */
+  extensionSpkiDer: Uint8Array;
+  /** "sha256:<hex>" recomputed here over extensionSpkiDer. */
+  keyFingerprint: string;
+}
+
+export interface ExtensionPublicKey {
+  spkiDer: Uint8Array;
+  /** "sha256:<hex>" over spkiDer, recomputed here (never taken on trust). */
+  fingerprint: string;
 }
 
 export interface SignResult {
@@ -80,6 +115,13 @@ export interface DeviceIdentityStub {
     req: ResealRequest,
     cb: (err: ServiceError | null, res: ResealResponse | null) => void,
   ): unknown;
+  signExtensionManifest(
+    req: SignExtensionManifestRequest,
+    cb: (
+      err: ServiceError | null,
+      res: SignExtensionManifestResponse | null,
+    ) => void,
+  ): unknown;
 }
 
 export interface DeviceIdentityClientOptions {
@@ -94,6 +136,16 @@ export interface DeviceIdentityClient {
   signWithDeviceKey(payload: Uint8Array): Promise<SignResult>;
   getDeviceCert(): Promise<string>;
   requestReseal(operatorAuthNonce: string): Promise<ResealResult>;
+  /**
+   * WARP-2900: sign a canonical extension statement with the box EXTENSION
+   * key. Only services/extension-promotion.service.ts may call this.
+   * Rejects with the gRPC error (FAILED_PRECONDITION when unprovisioned or
+   * the backend has no extension key; INVALID_ARGUMENT when the sidecar
+   * refuses the statement).
+   */
+  signExtensionManifest(statement: Uint8Array): Promise<ExtensionSignResult>;
+  /** WARP-2900: the extension key's public half, or null before first use. */
+  getExtensionPublicKey(): Promise<ExtensionPublicKey | null>;
 }
 
 function callUnary<Req, Res>(
@@ -172,7 +224,44 @@ export function createDeviceIdentityClient(
             v,
           ]),
         ),
+        extensionKeyFingerprint: r.extensionKeyFingerprint,
       };
+    },
+
+    async signExtensionManifest(statement) {
+      const r = await callUnary<
+        SignExtensionManifestRequest,
+        SignExtensionManifestResponse
+      >(stub.signExtensionManifest.bind(stub), { statement });
+      if (r.keyUsage !== EXTENSION_KEY_USAGE) {
+        throw new Error(
+          `sidecar signed under key usage ${JSON.stringify(r.keyUsage)}, expected "${EXTENSION_KEY_USAGE}"`,
+        );
+      }
+      if (r.signature.length === 0 || r.extensionSpkiDer.length === 0) {
+        throw new Error("sidecar returned an empty extension signature or key");
+      }
+      return {
+        signature: r.signature,
+        algorithm: r.algorithm,
+        extensionSpkiDer: r.extensionSpkiDer,
+        keyFingerprint: extensionKeyFingerprint(r.extensionSpkiDer),
+      };
+    },
+
+    async getExtensionPublicKey() {
+      const r = await callUnary<GetStatusRequest, GetStatusResponse>(
+        stub.getStatus.bind(stub),
+        {},
+      );
+      if (r.extensionSpkiDer.length === 0) return null;
+      const fingerprint = extensionKeyFingerprint(r.extensionSpkiDer);
+      if (fingerprint !== r.extensionKeyFingerprint) {
+        throw new Error(
+          "sidecar extension key fingerprint does not match its SPKI; refusing to use it",
+        );
+      }
+      return { spkiDer: r.extensionSpkiDer, fingerprint };
     },
 
     async signWithDeviceKey(payload) {
