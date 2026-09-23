@@ -17,9 +17,17 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const registerPasskey = vi.fn();
 const isPasskeySupported = vi.fn();
-vi.mock("@/lib/webauthn", () => ({
+const listPasskeys = vi.fn();
+const renamePasskey = vi.fn();
+const removePasskey = vi.fn();
+vi.mock("@/lib/webauthn", async () => ({
+  // WARP-1157: real error mapping + origin check; only the wire is faked.
+  ...(await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn")),
   registerPasskey: (...a: unknown[]) => registerPasskey(...a),
   isPasskeySupported: (...a: unknown[]) => isPasskeySupported(...a),
+  listPasskeys: (...a: unknown[]) => listPasskeys(...a),
+  renamePasskey: (...a: unknown[]) => renamePasskey(...a),
+  removePasskey: (...a: unknown[]) => removePasskey(...a),
 }));
 
 import { PasskeysSection } from "./PasskeysSection";
@@ -28,6 +36,7 @@ describe("PasskeysSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     isPasskeySupported.mockReturnValue(true);
+    listPasskeys.mockResolvedValue([]);
   });
 
   it("renders the add-a-passkey action when supported", () => {
@@ -144,5 +153,90 @@ describe("PasskeysSection", () => {
     await waitFor(() => {
       expect(screen.getByText(/secure .*address/i)).toBeInTheDocument();
     });
+  });
+
+  // =====================================================================
+  // WARP-1157 — the address check runs first, box failures are named, and
+  // the owner can see, rename and remove their passkeys.
+  // =====================================================================
+
+  it("on plain http blames the connection, not the browser (WARP-1157)", () => {
+    // Browsers hide WebAuthn on http, so support reads false there too.
+    isPasskeySupported.mockReturnValue(false);
+    Object.defineProperty(window, "isSecureContext", { value: false, configurable: true });
+    try {
+      render(<PasskeysSection />);
+      expect(screen.getByText(/secure connection/i)).toBeInTheDocument();
+      expect(screen.queryByText(/doesn't support passkeys/i)).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    }
+  });
+
+  it("names a storage failure on the box and does not tell the user to retry now (WARP-1157)", async () => {
+    const { PasskeyServerError } = await vi.importActual<typeof import("@/lib/webauthn")>("@/lib/webauthn");
+    registerPasskey.mockRejectedValueOnce(new PasskeyServerError(500, "storage_failed", "x"));
+    render(<PasskeysSection />);
+    fireEvent.click(screen.getByRole("button", { name: /add a passkey/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't save the passkey/i);
+    expect(alert).toHaveTextContent(/on the Droplet, not your device/i);
+    expect(alert).not.toHaveTextContent(/^.*Try again\.$/);
+  });
+
+  it("lists my passkeys with where each works and when it was added (WARP-1157)", async () => {
+    listPasskeys.mockResolvedValue([
+      {
+        id: "p1",
+        name: "Work laptop",
+        rpId: "localhost",
+        transports: ["internal"],
+        createdAt: "2026-09-01T10:00:00Z",
+        lastUsedAt: null,
+      },
+      {
+        id: "p2",
+        name: null,
+        rpId: "d-abc.droplet-us.com",
+        transports: [],
+        createdAt: "2026-09-02T10:00:00Z",
+        lastUsedAt: "2026-09-10T10:00:00Z",
+      },
+    ]);
+    render(<PasskeysSection />);
+    const list = await screen.findByRole("list", { name: /your passkeys/i });
+    expect(list).toHaveTextContent("Work laptop");
+    expect(list).toHaveTextContent("Works at localhost");
+    expect(list).toHaveTextContent("Unnamed passkey");
+    // A passkey made on another address is flagged — it won't be offered here.
+    expect(list).toHaveTextContent("Works at d-abc.droplet-us.com (not this address)");
+    expect(list).toHaveTextContent(/Not used yet/);
+    expect(list).toHaveTextContent(/Last used/);
+  });
+
+  it("renames a passkey", async () => {
+    listPasskeys.mockResolvedValue([
+      { id: "p1", name: null, rpId: "localhost", transports: [], createdAt: "2026-09-01T10:00:00Z", lastUsedAt: null },
+    ]);
+    renamePasskey.mockResolvedValue(undefined);
+    render(<PasskeysSection />);
+    fireEvent.click(await screen.findByRole("button", { name: /rename unnamed passkey/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /passkey name/i }), {
+      target: { value: "Phone" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(renamePasskey).toHaveBeenCalledWith("p1", "Phone"));
+    await waitFor(() => expect(listPasskeys).toHaveBeenCalledTimes(2));
+  });
+
+  it("removes a passkey after confirming", async () => {
+    listPasskeys.mockResolvedValue([
+      { id: "p1", name: "Phone", rpId: "localhost", transports: [], createdAt: "2026-09-01T10:00:00Z", lastUsedAt: null },
+    ]);
+    removePasskey.mockResolvedValue(undefined);
+    render(<PasskeysSection />);
+    fireEvent.click(await screen.findByRole("button", { name: /remove phone/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /remove passkey/i }));
+    await waitFor(() => expect(removePasskey).toHaveBeenCalledWith("p1"));
   });
 });

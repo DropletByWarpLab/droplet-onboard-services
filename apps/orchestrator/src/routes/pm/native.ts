@@ -7,7 +7,12 @@
  * to any authenticated role; writes are gated with `requireRole`. Project,
  * work-item + comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
- * through here (the tool layer owns the human-facing confirmation gate).
+ * through here. The human-facing confirmation gate is NOT in this file and NOT
+ * in the tool handlers: it is the dispatch-time interceptor
+ * (`packages/tools-core/src/interceptor.ts`, WARP-2305), pinned for every
+ * confirming tool by `confirmation-interceptor-compat.test.ts`. An earlier
+ * version of this comment claimed "the tool layer owns" it with no test behind
+ * it, and the pm_* tools shipped ungated (WARP-2008).
  *
  * Errors: the service throws Error(code); we map codes → HTTP status here,
  * mirroring routes/calendar.ts.

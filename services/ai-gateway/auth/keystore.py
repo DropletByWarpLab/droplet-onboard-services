@@ -23,13 +23,26 @@ logger = logging.getLogger(__name__)
 
 KEYS_DIR = Path(os.getenv("KEYS_DIR", "/data/keys"))
 
-# The literal fallback used when DEVICE_SECRET is unset. Every device that
-# boots without setup.sh's per-device secret would otherwise derive its Fernet
-# key from this single public string — i.e. encrypt its cloud BYOK keys under a
-# key whose entropy is zero and known to anyone with the source. We keep the
-# constant named so we can detect when it's active and refuse to ship with it.
+# The literal this module USED to fall back to when DEVICE_SECRET was unset
+# (WARP-2985 removed the fallback). It is still named so an operator who set it
+# explicitly is refused like an unset value: anyone with the source knows it.
 _DEV_DEFAULT_SECRET = "dev-secret-change-in-production"
-DEVICE_SECRET = os.getenv("DEVICE_SECRET", _DEV_DEFAULT_SECRET)
+# Every publicly-known value — the .env.example placeholder and each literal a
+# code path or dev compose file ever fell back to. Mirrors
+# apps/orchestrator/src/lib/device-secret.ts.
+_PUBLIC_SECRETS = frozenset({
+    "change-me",
+    "dev-only-not-secure",
+    _DEV_DEFAULT_SECRET,
+    "dev-only-device-secret-do-not-ship",
+})
+DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")
+
+
+def _is_weak_secret(value: str) -> bool:
+    """True when `value` is empty or publicly known — never a key source."""
+    v = (value or "").strip()
+    return not v or v in _PUBLIC_SECRETS
 
 
 def _is_production() -> bool:
@@ -58,7 +71,7 @@ def _assert_device_secret_safe() -> None:
     loses every stored key (InvalidToken → None), so surfacing this early is
     the cheapest way to avoid a baffling "key not configured" later.
     """
-    if DEVICE_SECRET and DEVICE_SECRET != _DEV_DEFAULT_SECRET:
+    if not _is_weak_secret(DEVICE_SECRET):
         return  # a real per-device secret is in use — nothing to warn about
     if _is_production():
         raise RuntimeError(
@@ -71,10 +84,9 @@ def _assert_device_secret_safe() -> None:
     # is a public constant, but a log line that says "DEVICE_SECRET" must never
     # be followed by a secret-shaped value — name the constant, not its contents.
     logger.error(
-        "DEVICE_SECRET is unset or equal to the public dev default "
-        "(keystore._DEV_DEFAULT_SECRET). BYOK API keys will be encrypted under "
-        "a known, zero-entropy key — acceptable only for dev/test. Set a "
-        "per-device DEVICE_SECRET for any real deployment."
+        "DEVICE_SECRET is unset or a publicly-known value "
+        "(keystore._PUBLIC_SECRETS). Storing or reading BYOK API keys will "
+        "fail until a per-device DEVICE_SECRET is set (setup.sh generates one)."
     )
 
 
@@ -162,7 +174,17 @@ def _get_or_create_salt() -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    """Derive a Fernet key from the device secret using PBKDF2."""
+    """Derive a Fernet key from the device secret using PBKDF2.
+
+    WARP-2985: refuses a missing or publicly-known secret in EVERY environment
+    — there is no fallback key, so nothing is ever encrypted under a value
+    anyone with the source could derive.
+    """
+    if _is_weak_secret(DEVICE_SECRET):
+        raise RuntimeError(
+            "DEVICE_SECRET is unset or a publicly-known value; refusing to "
+            "derive the BYOK encryption key."
+        )
     salt = _get_or_create_salt()
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),

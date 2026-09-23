@@ -221,6 +221,15 @@ describe("WorkspaceShell — gates reach the DOM", () => {
 
 describe("WorkspaceShell — keyboard", () => {
   it("⌥N jumps to the Nth space's first destination", () => {
+    // WARP-2977 — Security leads Operations (it is where the cameras'
+    // events land), so ⌥4 opens it on a box that has the module on.
+    renderAt("/");
+    fireEvent.keyDown(window, { code: "Digit4", altKey: true });
+    expect(pushMock).toHaveBeenCalledWith("/security");
+  });
+
+  it("⌥N skips a destination the box has switched off — Security off still lands on Cameras", () => {
+    modulesRef.current = { security: false };
     renderAt("/");
     fireEvent.keyDown(window, { code: "Digit4", altKey: true });
     expect(pushMock).toHaveBeenCalledWith("/cameras");

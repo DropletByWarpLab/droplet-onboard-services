@@ -442,6 +442,7 @@ describe("FEATURE_GATED_MODULES — every module whose grant the panel offers", 
       "knowledge",
       "money",
       "network",
+      "security",
       "smart_home",
     ]);
   });

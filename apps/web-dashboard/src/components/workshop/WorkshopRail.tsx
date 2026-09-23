@@ -3,10 +3,11 @@
  * WARP-2974 (ADR-056) — the Workshop's rail: the chat surface's
  * conversation rail (`conv-*`, chat-indigo.css), reused for three groups.
  *
+ *   (top)        — `New run` and `New custom tool` as plain rows, always
+ *                  first: the Mac app's sidebar shape (DropletAgent spec §5).
  *   Custom tools — one row per workspace (WARP-2896): its name, its
- *                  lifecycle chip, what its last run did. `New custom tool`
- *                  sits first, always. Selecting one opens its context pane
- *                  and points the composer at it.
+ *                  lifecycle chip, what its last run did. Selecting one
+ *                  opens its context pane and points the composer at it.
  *   Runs         — the person's runs, PARKED FIRST regardless of age (a run
  *                  waiting for an OK is the one thing on this page that
  *                  needs a person), then newest first. A filter row for the
@@ -62,9 +63,6 @@ export function WorkshopRail(p: WorkshopRailProps) {
     <>
       <div className="conv-head">
         <span className="conv-head-t">Workshop</span>
-        <button type="button" className="conv-new-btn" aria-label="New run" title="New run" onClick={p.onNewRun}>
-          <Plus size={15} aria-hidden />
-        </button>
         {p.onClose && (
           <button type="button" className="conv-new-btn" aria-label="Close" onClick={p.onClose}>
             <X size={15} aria-hidden />
@@ -72,12 +70,20 @@ export function WorkshopRail(p: WorkshopRailProps) {
         )}
       </div>
 
+      {/* The Mac app's sidebar opens with its actions as plain rows (New
+          chat, Search); the Workshop's are a new run and a new custom tool. */}
+      <div className="ws-rail-top">
+        <button type="button" onClick={p.onNewRun}>
+          <Plus size={15} aria-hidden /> New run
+        </button>
+        <button type="button" onClick={(e) => p.onNewTool(e.currentTarget)} data-testid="new-tool">
+          <Hammer size={15} aria-hidden /> New custom tool
+        </button>
+      </div>
+
       <div className="conv-list">
         <div className="conv-group">
           <div className="conv-cap">Custom tools</div>
-          <button type="button" className="ws-rail-new" onClick={(e) => p.onNewTool(e.currentTarget)} data-testid="new-tool">
-            <Hammer size={14} aria-hidden /> New custom tool
-          </button>
           {p.workspacesError ? (
             <div className="conv-none" role="status" title={p.workspacesError}>
               {CALM_ERROR}

@@ -83,3 +83,15 @@ export function deriveWebAuthnRp(req: Request): WebAuthnRp {
     rpName: WEBAUTHN_RP_NAME,
   };
 }
+
+/**
+ * WARP-1157 — true when the RP ID is an IP address. The WebAuthn spec only
+ * accepts a registrable domain as an RP ID, so a dashboard reached by raw IP
+ * (`https://192.168.9.195`) can never create or use a passkey. The browser
+ * would reject the ceremony with a SecurityError; the routes refuse earlier
+ * with a coded error so the dashboard can say why.
+ */
+export function isIpRpId(rpID: string): boolean {
+  if (rpID.includes(":")) return true; // IPv6 literal (brackets already stripped)
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(rpID);
+}

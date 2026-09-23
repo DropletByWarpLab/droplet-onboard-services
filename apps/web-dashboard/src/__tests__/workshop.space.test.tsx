@@ -18,7 +18,9 @@
  * The composer:
  *   7. Starting a run POSTs `{ goal }`, clears the field, opens the run.
  *   8. A refused start renders the calm error with the cause, keeps the goal.
- *   9. Choosing a custom tool under `Work in` makes the POST a workshop run.
+ *   9. Choosing a custom tool under `Work in` makes the POST a workshop run
+ *      (the chip is a themed menu — its own suite is
+ *      workshop.work-in-picker.test.tsx).
  * Custom tools:
  *  10. `New custom tool` POSTs name + template and points the composer at it.
  *  11. `?workspace=<id>` opens the context pane: branch, proposal, changes,
@@ -223,6 +225,9 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
       const post = authFetchMock.mock.calls.find((c) => c[0] === "/api/agent-runs/run-1/confirm");
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ decision: "denied" });
     });
+    // The Decline is still in flight until both reloads settle (`busyId`), and
+    // Cancel is `disabled={busy}` meanwhile: a click before then is a no-op.
+    await waitFor(() => expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
     await waitFor(() => expect(authFetchMock.mock.calls.some((c) => c[0] === "/api/agent-runs/run-1/cancel")).toBe(true));
   });
@@ -237,6 +242,25 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
     expect(screen.queryByRole("button", { name: /cancel run/i })).toBeNull();
     // The head names the run and its state.
     expect(screen.getByTitle("sweep last night's clips")).toBeInTheDocument();
+  });
+
+  it("with no run open the pill sits under the greeting; opening one docks it, and a half-typed goal survives", async () => {
+    // The Mac app's empty chat (DropletAgent spec §5): `is-empty` on the
+    // column centres greeting + composer; the composer is the SAME element in
+    // both layouts, so switching never remounts it and loses the goal.
+    wire({ runs: [finished] });
+    const { container } = render(<WorkshopSpace />);
+    const column = container.querySelector(".chat-main")!;
+    expect(column.classList.contains("is-empty")).toBe(true);
+    fireEvent.change(goalField(), { target: { value: "half a thought" } });
+    const field = goalField();
+
+    const runsList = await screen.findByRole("list", { name: "Runs" });
+    fireEvent.click(await within(runsList).findByRole("button", { name: /sweep last night's clips/i }));
+    await screen.findByText("Reviewed 12 clips; nothing unusual.");
+    expect(column.classList.contains("is-empty")).toBe(false);
+    expect(goalField()).toBe(field);
+    expect(goalField().value).toBe("half a thought");
   });
 
   it("drops a late detail response for a run that is no longer selected", async () => {
@@ -282,6 +306,7 @@ describe("Workshop — the transcript (WARP-2974 carries WARP-2180)", () => {
     });
     render(<WorkshopSpace />);
     await screen.findByRole("group", { name: /waiting for your OK/i });
+    await waitFor(() => expect(screen.getByRole("button", { name: /cancel run/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /cancel run/i }));
     await waitFor(() => expect(rejectCancel).toBeTruthy());
 
@@ -385,9 +410,10 @@ describe("Workshop — the composer", () => {
   it("choosing a custom tool under 'Work in' makes the start POST a workshop run, and the placeholder speaks to the tool", async () => {
     wire({ workspaces: [WS] });
     render(<WorkshopSpace />);
-    const select = (await screen.findByTestId("workspace-select")) as HTMLSelectElement;
-    await waitFor(() => expect(select.options.length).toBe(2));
-    fireEvent.change(select, { target: { value: "ws-a" } });
+    const pill = screen.getByRole("form", { name: "Start a run" });
+    fireEvent.click(within(pill).getByRole("button", { name: "Work in: No workspace" }));
+    fireEvent.click(await within(pill).findByRole("menuitemradio", { name: /Word counter/ }));
+    expect(within(pill).getByRole("button", { name: "Work in: Word counter" })).toBeInTheDocument();
     const field = screen.getByLabelText("What should Word counter do?") as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "count words in every scan" } });
     fireEvent.click(screen.getByRole("button", { name: /start run/i }));
@@ -418,9 +444,17 @@ describe("Workshop — custom tools", () => {
       expect(post).toBeTruthy();
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ name: "Booking reminders", template: "typescript-tool" });
     });
-    await waitFor(() => expect((screen.getByTestId("workspace-select") as HTMLSelectElement).value).toBe("new-ws-abc123"));
+    await waitFor(() => expect(screen.getByTestId("workspace-picker")).toHaveAccessibleName("Work in: Booking reminders"));
     expect(screen.getByLabelText("What should Booking reminders do?")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Custom tools" }).textContent).toContain("Booking reminders");
+  });
+
+  it("the composer pill's + opens the same New custom tool dialog", async () => {
+    wire();
+    render(<WorkshopSpace />);
+    const pill = screen.getByRole("form", { name: "Start a run" });
+    fireEvent.click(within(pill).getByRole("button", { name: "New custom tool" }));
+    expect(await screen.findByRole("form", { name: "New custom tool" })).toBeInTheDocument();
   });
 
   it("?workspace=<id> opens the context pane: branch, proposal, changes, last command, history, clone", async () => {
@@ -440,7 +474,7 @@ describe("Workshop — custom tools", () => {
     expect(commits.textContent).toContain("proposal");
     expect(within(pane).getByTestId("clone-url").textContent).toMatch(/\/git\/ws-a\.git$/);
     // The composer is pointed at it.
-    expect((screen.getByTestId("workspace-select") as HTMLSelectElement).value).toBe("ws-a");
+    expect(screen.getByTestId("workspace-picker")).toHaveAccessibleName("Work in: Word counter");
     // And a proposed workspace offers no "start a run here" — it is waiting for review.
     expect(within(pane).queryByRole("button", { name: /start a run here/i })).toBeNull();
   });

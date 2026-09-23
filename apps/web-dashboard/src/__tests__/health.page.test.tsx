@@ -115,6 +115,33 @@ describe("HealthStatusView (PR #382)", () => {
     expect(link).toHaveAttribute("href", "/settings/storage");
   });
 
+  it("shows why a service is down — the broker crash loop reads as a reason, not a bare red dot (WARP-2548)", () => {
+    render(
+      <HealthStatusView
+        health={makeHealth({
+          status: "degraded",
+          components: [
+            { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+            {
+              name: "mqtt",
+              status: "down",
+              latencyMs: 0,
+              lastCheckedAt: "2026-05-31T00:00:00Z",
+              error: "MQTT broker connecting: connect ECONNREFUSED 172.18.0.9:8883",
+            },
+          ],
+        })}
+        isLoading={false}
+        error={undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: /service health/i });
+    expect(within(list).getByText(/messaging \(mqtt broker\)/i)).toBeInTheDocument();
+    expect(within(list).getByText(/ECONNREFUSED 172\.18\.0\.9:8883/)).toBeInTheDocument();
+    // An up service carries no error line.
+    expect(within(list).queryAllByText(/ECONNREFUSED/)).toHaveLength(1);
+  });
+
   it("renders a loading state without crashing when health is undefined", () => {
     render(<HealthStatusView health={undefined} isLoading={true} error={undefined} />);
     expect(screen.getByText(/checking|loading/i)).toBeInTheDocument();
