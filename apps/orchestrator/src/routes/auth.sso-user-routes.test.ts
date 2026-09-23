@@ -249,6 +249,7 @@ const LOCAL = {
   nextcloudUsername: "alice",
   role: "family",
   directoryStatus: "ACTIVE",
+  provisionSource: "LOCAL",
 };
 
 /** SSO/SCIM account: `username` seeded from the email, no mapping key. */
@@ -258,6 +259,7 @@ const SSO = {
   nextcloudUsername: null,
   role: "family",
   directoryStatus: "ACTIVE",
+  provisionSource: "SSO",
 };
 
 const row = (prisma: any, id: string) => prisma._users.find((u: any) => u.id === id);
@@ -369,6 +371,32 @@ describe("PUT /api/auth/users/:username", () => {
     expect(res.body.code).toBe("NO_NEXTCLOUD_ACCOUNT");
     expect(prisma.user.updateMany).not.toHaveBeenCalled();
     expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  // WARP-2858 (Romain, 2026-09-22): no local password on an IdP-provisioned
+  // account — it would be a login the IdP's disable/deprovision cannot reach.
+  it.each(["SSO", "SCIM"])("%s-provisioned account: a password write → 409 SSO_MANAGED_ACCOUNT, nothing written anywhere", async (source) => {
+    const prisma = createPrismaMock([{ ...SSO, provisionSource: source }]);
+    const res = await request(buildApp(prisma))
+      .put("/api/auth/users/dana.chen")
+      .send({ displayName: "Dana C.", password: "New-secret123" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SSO_MANAGED_ACCOUNT");
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    expect(row(prisma, "u-dana").passwordHash).toBeUndefined();
+    expect(row(prisma, "u-dana").displayName).toBeUndefined();
+    expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+
+  it("a LOCAL row that later linked SSO keeps its password (the tag, not the link, decides)", async () => {
+    const prisma = createPrismaMock([{ ...LOCAL }]);
+    const res = await request(buildApp(prisma))
+      .put("/api/auth/users/alice")
+      .send({ password: "New-secret123" });
+
+    expect(res.status).toBe(200);
+    expect(row(prisma, "u-alice").passwordHash).toBe("$argon2id$stub");
   });
 
   it("SSO/SCIM owner: an admin rewriting their password is still refused (rail 1b)", async () => {

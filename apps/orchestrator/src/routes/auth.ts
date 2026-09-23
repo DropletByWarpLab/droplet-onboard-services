@@ -710,6 +710,26 @@ const DIRECTORY_USER_SELECT = {
   nextcloudUsername: true,
   role: true,
   directoryStatus: true,
+  provisionSource: true,
+} as const;
+
+/**
+ * WARP-2858 — true for an account the IdP created (SSO just-in-time or SCIM
+ * push), read from the explicit `User.provisionSource` column. Such an account
+ * never gets, changes or uses a local password: its credential lives at the
+ * IdP, whose disable/deprovision would not reach a local one. Named sources,
+ * not `!== "LOCAL"`, so a future enum member is a deliberate decision here
+ * rather than an accidental lockout.
+ */
+function isIdpProvisioned(u: { provisionSource?: string | null }): boolean {
+  return u.provisionSource === "SSO" || u.provisionSource === "SCIM";
+}
+
+/** WARP-2858 — the one refusal body for a local-password write on an
+ *  SSO/SCIM-provisioned account (admin PUT and self-service change). */
+const SSO_MANAGED_ACCOUNT_BODY = {
+  error: "This account signs in through your identity provider, so it cannot have a Droplet password",
+  code: "SSO_MANAGED_ACCOUNT",
 } as const;
 
 async function findDirectoryUserByHandle(
@@ -1158,10 +1178,17 @@ export function createPublicAuthRouter(
       // wire-indistinguishable from a non-existent one (no oracle for "this
       // email exists but is disabled") and the timing matches (dummy verify
       // spent, real argon2id verify never runs).
+      // WARP-2858: an SSO/SCIM-provisioned account never password-logs-in,
+      // even if a hash reached its row before the box refused to write one
+      // (an admin PUT predating the SSO_MANAGED_ACCOUNT refusal). The IdP's
+      // disable/deprovision cannot reach a local password, so honouring one
+      // would be a login that outlives the offboarding. Same deny branch —
+      // wire-indistinguishable from an unknown email.
       if (
         !localUser ||
         !localUser.passwordHash ||
-        localUser.directoryStatus === "DEACTIVATED"
+        localUser.directoryStatus === "DEACTIVATED" ||
+        isIdpProvisioned(localUser)
       ) {
         await verifyDummyPassword(password);
         await denyInvalid(loginEmail);
@@ -2404,6 +2431,12 @@ export function createProtectedAuthRouter(
         res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
         return;
       }
+      // WARP-2858: the IdP owns this account's credential — see
+      // SSO_MANAGED_ACCOUNT on PUT /auth/users/:username.
+      if (isIdpProvisioned(localUser)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
+        return;
+      }
 
       const ok = await verifyPassword(localUser.passwordHash, currentPassword);
       if (!ok) {
@@ -3266,6 +3299,13 @@ export function createProtectedAuthRouter(
       // Quota is a Nextcloud storage attribute and nothing else — on an
       // account with no Nextcloud user there is nothing to apply it to.
       // Refuse explicitly, BEFORE any write, instead of 200-ing a no-op.
+      // WARP-2858 (Romain, 2026-09-22): no local password on an account the
+      // IdP provisioned. It would be a login that the IdP's disable and
+      // SCIM deprovision cannot reach. Refused before any write.
+      if (password !== undefined && target && isIdpProvisioned(target)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
+        return;
+      }
       if (quota !== undefined && ncUsername === null) {
         res.status(409).json({
           error: "This account has no file storage, so it has no storage quota to set",
