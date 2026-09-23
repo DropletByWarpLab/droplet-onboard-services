@@ -568,6 +568,47 @@ describe("applyPendingUpdate (WARP-539)", () => {
     );
   });
 
+  // WARP-2898 (ADR-056 slice K1): apply-now is LLM-triggerable (WARP-1450),
+  // so an extension document must die at the manifest gate, before ANY
+  // runner step — the socket path never sees it.
+  it.each([
+    ["kind: extension", { kind: "extension" }],
+    ["usage: extension", { usage: "extension" }],
+    ["keyUsage: extension", { keyUsage: "extension" }],
+  ])(
+    "a pending row whose release-shaped manifest carries %s is rejected before any runner call",
+    async (_label, extra) => {
+      const prisma = createPrismaStub();
+      const runner = new FakeRunner();
+      const logger = createLoggerSpy();
+      await seedPendingRow(prisma, { ...buildManifest(), ...extra });
+
+      const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+      expect(res).toMatchObject({ outcome: "rejected", failureReason: "schema_invalid" });
+      expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+        status: "rejected",
+        failureReason: "schema_invalid",
+      });
+      // The fake runner's spies are all at zero: no currentImageRefs,
+      // snapshot, pull, stage, migrate or recreate.
+      expect(runner.calls).toEqual([]);
+    },
+  );
+
+  it("an interrupted applying row whose manifest carries kind: extension fails without a runner call", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const row = await seedPendingRow(prisma, { ...buildManifest(), kind: "extension" });
+    await prisma.deviceUpdate.update({ where: { id: row.id }, data: { status: "applying" } });
+
+    const res = await resumeInterruptedApply(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "failed" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({ status: "failed", failureReason: "schema_invalid" });
+    expect(runner.calls).toEqual([]);
+  });
+
   it("rejects with image_signature_failed when the pull step refuses a signature", async () => {
     const prisma = createPrismaStub();
     const runner = new FakeRunner();

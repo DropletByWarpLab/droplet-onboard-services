@@ -115,4 +115,47 @@ describe("parseReleaseManifest (WARP-537)", () => {
     const res = parseReleaseManifest(JSON.stringify(doc));
     expect(res).toMatchObject({ ok: false, failureReason: "schema_invalid" });
   });
+
+  // WARP-2898 (ADR-056 slice K1): an extension document can never parse as a
+  // release. The zod schema strips unknown keys, so without this fence a
+  // manifest carrying `kind: extension` beside release-shaped fields would
+  // ride the LLM-triggerable apply-now path (WARP-1450) as a release.
+  describe("a non-release kind or a key-usage field is refused (WARP-2898)", () => {
+    const withTop = (extra: Record<string, unknown>): string =>
+      JSON.stringify({ ...(JSON.parse(fixture("release.valid.json")) as object), ...extra });
+
+    it.each([
+      ["kind: extension", { kind: "extension" }, /kind "extension" is not a release/],
+      ["kind: Release (case)", { kind: "Release" }, /kind "Release" is not a release/],
+      ["kind: null", { kind: null }, /kind null is not a release/],
+      ["usage: extension", { usage: "extension" }, /usage is an extension-signing field/],
+      ["keyUsage: extension", { keyUsage: "extension" }, /keyUsage is an extension-signing field/],
+      ["kind: release + usage: release", { kind: "release", usage: "release" }, /usage is an extension-signing field/],
+    ])("%s -> schema_invalid", (_label, extra, detail) => {
+      const res = parseReleaseManifest(withTop(extra));
+      expect(res).toMatchObject({ ok: false, failureReason: "schema_invalid" });
+      if (res.ok) return;
+      expect(res.detail).toMatch(detail);
+    });
+
+    it("the kind verdict comes before the version gates", () => {
+      // An extension document at another schemaVersion is still refused as
+      // what it is, not as a release of the wrong version.
+      const res = parseReleaseManifest(withTop({ kind: "extension", schemaVersion: 0 }));
+      expect(res).toMatchObject({ ok: false, failureReason: "schema_invalid" });
+    });
+
+    it.each(["extension.valid.json", "extension.manifest.json"])(
+      "the H1 extension fixture %s is refused as schema_invalid",
+      (name) => {
+        const res = parseReleaseManifest(fixture(name));
+        expect(res).toMatchObject({ ok: false, failureReason: "schema_invalid" });
+      },
+    );
+
+    it("an explicit kind: release is still a release", () => {
+      const res = parseReleaseManifest(withTop({ kind: "release" }));
+      expect(res.ok).toBe(true);
+    });
+  });
 });
