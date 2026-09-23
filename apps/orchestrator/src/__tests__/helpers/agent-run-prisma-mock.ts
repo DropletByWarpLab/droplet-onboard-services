@@ -52,6 +52,10 @@ export interface AgentRunRow {
   scheduleId: string | null;
   /** WARP-2896 — the workshop workspace a run works in, when it has one. */
   workspaceId: string | null;
+  /** WARP-2997 — the cloud gate's verdict at the latest claim. */
+  cloudGate: string;
+  offLanProvider: string | null;
+  offLanWithheldTools: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -210,6 +214,9 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         pendingDecidedBy: null,
         scheduleId: (args.data.scheduleId as string | null) ?? null,
         workspaceId: (args.data.workspaceId as string | null) ?? null,
+        cloudGate: "unchecked",
+        offLanProvider: null,
+        offLanWithheldTools: [],
         createdAt: now(),
         updatedAt: now(),
       };
