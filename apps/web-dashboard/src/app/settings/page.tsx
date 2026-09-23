@@ -3,16 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  BookOpen,
   ChevronRight,
   Cloud,
   DownloadCloud,
   HardDrive,
-  Laptop,
   Mic,
   Plus,
   Settings as SettingsIcon,
-  Sparkles,
   Trash2,
   Users,
   X,
