@@ -51,6 +51,14 @@ GUIDE_SECTIONS = [
 
 PROVIDER_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 
+# validate.mjs HOST_RE / SUFFIX_RE: lowercase labels, at least two, and a last
+# label with a letter in it — a domain, never an IP.
+HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z0-9-]*[a-z][a-z0-9-]*$")
+SUFFIX_RE = re.compile(r"^\.[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z0-9-]*[a-z][a-z0-9-]*$")
+MAX_HOST = 253
+# The readback carries the name verbatim on three surfaces; bound it.
+MAX_DISPLAY_NAME = 80
+
 # renderAdr042's three tables: the header each starts with, and how its one
 # data row names the vendor.
 ADR042_TABLES = (
@@ -80,7 +88,22 @@ def output_paths(provider: str) -> dict[str, str]:
     }
 
 
+def _domains(values: Any, pattern: re.Pattern[str], at: str, problems: list[str]) -> list[str]:
+    """The entries that are domains (or `.domain` suffixes). Anything else is
+    a problem and is left out, so the readback never names it."""
+    kept = []
+    for i, value in enumerate(values if isinstance(values, list) else []):
+        if isinstance(value, str) and len(value) <= MAX_HOST and pattern.fullmatch(value):
+            kept.append(value)
+        else:
+            problems.append(f"{at}[{i}] is not a domain{' suffix' if pattern is SUFFIX_RE else ''}")
+    return kept
+
+
 def _host(base: Any, problems: list[str]) -> dict[str, Any] | None:
+    """What the draft would dial, as the readback may name it: domains only,
+    by the grammar validate.mjs applies (the draft is not re-validated here,
+    so a hand-written IP or prose never reaches "nothing will dial X")."""
     if not isinstance(base, dict):
         problems.append("connector-draft.json has no baseUrl")
         return None
@@ -90,11 +113,14 @@ def _host(base: Any, problems: list[str]) -> dict[str, Any] | None:
         if not parts or parts.scheme != "https" or not parts.hostname:
             problems.append("baseUrl.origin is not an https origin yet")
             return None
+        if len(parts.hostname) > MAX_HOST or not HOST_RE.fullmatch(parts.hostname):
+            problems.append("baseUrl.origin must name a host by domain, never an IP")
+            return None
         return {"kind": "static", "hosts": [parts.hostname]}
     if base.get("kind") == "dynamic":
         field = base.get("configField")
-        suffixes = [s for s in base.get("allowedSuffixes") or [] if isinstance(s, str)]
-        hosts = [h for h in base.get("allowedHosts") or [] if isinstance(h, str)]
+        suffixes = _domains(base.get("allowedSuffixes"), SUFFIX_RE, "baseUrl.allowedSuffixes", problems)
+        hosts = _domains(base.get("allowedHosts"), HOST_RE, "baseUrl.allowedHosts", problems)
         shape = base.get("hostShape") if isinstance(base.get("hostShape"), str) else ""
         if not isinstance(field, str) or not field:
             problems.append("baseUrl.configField is empty")
@@ -193,7 +219,9 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
         return facts
     provider = draft.get("provider")
     display = draft.get("displayName")
-    facts["displayName"] = display.strip() if isinstance(display, str) else ""
+    display = display.strip() if isinstance(display, str) else ""
+    # The readback's copy is bounded; the rows check below reads the full name.
+    facts["displayName"] = display if len(display) <= MAX_DISPLAY_NAME else display[: MAX_DISPLAY_NAME - 1] + "…"
     host = _host(draft.get("baseUrl"), problems)
     facts["host"] = host
     if not isinstance(provider, str) or not PROVIDER_RE.match(provider):
@@ -207,7 +235,8 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
     ready = "; run `npm run build`"
 
     # Nothing but a static origin carries a scheme (validate.mjs's rule).
-    static = bool(host and host["kind"] == "static")
+    base = draft.get("baseUrl")
+    static = isinstance(base, dict) and base.get("kind") == "static"
     for at, value in _strings(draft):
         if SCHEME in value and not (static and at == "baseUrl.origin"):
             problems.append(f"{DRAFT_FILE} {at} carries a scheme URL; describe hosts in words (hostShape)")
@@ -226,12 +255,15 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
                 problems.append(f"{paths['profile']} names a provider other than {provider}")
             if host and obj.get("baseUrl") != _expected_base(draft["baseUrl"]):
                 problems.append(f"{paths['profile']} baseUrl does not match connector-draft.json")
-            if static:
-                # The origin, once, in the text AND in the values (a `\/`
-                # escape hides "://" from the text but not from the value).
-                extra = [at for at, v in _strings(obj) if SCHEME in v and at != "baseUrl.origin"]
-                if profile.count(SCHEME) != 1 or extra:
-                    problems.append(f"{paths['profile']} carries a scheme URL other than its origin")
+            # The values as well as the text: a `\/` escape hides "://" from
+            # the text but not from the value. A static profile carries its
+            # origin once; a dynamic one carries none (its text is scanned
+            # below with the other files).
+            extra = [at for at, v in _strings(obj) if SCHEME in v and not (static and at == "baseUrl.origin")]
+            if static and (profile.count(SCHEME) != 1 or extra):
+                problems.append(f"{paths['profile']} carries a scheme URL other than its origin")
+            elif not static and extra:
+                problems.append(f"{paths['profile']} carries a scheme URL in {', '.join(extra)}; describe the host in words")
 
     guide = read(paths["guide"])
     if guide is None:
@@ -255,7 +287,7 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
     if adr042 is None:
         problems.append(f"{paths['adr042']} is missing its ADR-042 rows{ready}")
     else:
-        name = _cell(facts["displayName"] or provider)
+        name = _cell(display or provider)
         problems.extend(_adr042_problems(adr042, name, paths["adr042"]))
 
     # Any "://", not only the egress gate's URL_RE shape (which needs a

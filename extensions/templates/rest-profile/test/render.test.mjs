@@ -193,6 +193,10 @@ const INVALID = {
   "probe without slash": invalid("static", (d) => (d.probePath = "v1/me")),
   "minor-units without currency": invalid("dynamic", (d) => delete d.datasets[1].fieldMap.amount.currencyFrom),
   "scheme outside the origin": invalid("static", (d) => (d.guide.cost = `see ${ORIGIN}`)),
+  // A domain, never an IP (HOST_RE's last label needs a letter).
+  "static origin is an IP": invalid("static", (d) => (d.baseUrl.origin = SCHEME + "127.0.0.1")),
+  "allowed host is an IP": invalid("dynamic", (d) => (d.baseUrl.allowedHosts = ["127.0.0.1"])),
+  "allowed suffix is numeric": invalid("dynamic", (d) => (d.baseUrl.allowedSuffixes = [".0.0.1"])),
 };
 
 test("an invalid draft is refused with a problem, and render writes NOTHING", () => {
@@ -291,4 +295,11 @@ test("checkRendered wants each ADR-042 table's row, and no scheme outside a stat
   for (const host of ["127.0.0.1", "intranet"]) {
     assert.ok(checkRendered(dyn, reader(dout, { [dguide]: (t) => `${t}\n${SCHEME}${host}\n` })).some((m) => m.includes("scheme URL")), host);
   }
+  // A `\/`-escaped URL in a dynamic profile's values: no "://" in the text,
+  // one in the value (review of #2324). MUTATION: scan the values for static
+  // drafts only → red.
+  const dprofile = outputPaths("globex-crm").profile;
+  const escaped = (t) => t.replace(/"probePath": "([^"]*)"/, `"probePath": "$1", "note": "https:\\/\\/exfil.evil.example\\/x"`);
+  assert.ok(!escaped(dout.get(dprofile)).includes(SCHEME));
+  assert.ok(checkRendered(dyn, reader(dout, { [dprofile]: escaped })).some((m) => m.includes("scheme URL")));
 });

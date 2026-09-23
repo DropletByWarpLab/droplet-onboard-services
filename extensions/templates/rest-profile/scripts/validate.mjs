@@ -22,8 +22,10 @@ export const GUIDE_SECTIONS = [
 
 export const PROVIDER_RE = /^[a-z][a-z0-9-]{1,40}$/;
 const CONFIG_FIELD_RE = /^[a-z][A-Za-z0-9]{0,63}$/;
-const HOST_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
-const SUFFIX_RE = /^\.[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+// A domain, never an IP: two or more labels, the last with a letter in it.
+// connector_draft.py (the sandbox) holds the same two patterns.
+const HOST_RE = /^(?:[a-z0-9-]+\.)+[a-z0-9-]*[a-z][a-z0-9-]*$/;
+const SUFFIX_RE = /^\.[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z0-9-]*[a-z][a-z0-9-]*$/;
 const HEADER_RE = /^[A-Za-z0-9-]{1,64}$/;
 const DATA_CLASS_RE = /^[a-z][a-z-]{1,63}$/;
 const PAGINATION_KINDS = ["cursor", "link-header", "limit-offset", "page-number", "relay-pageinfo"];
@@ -288,13 +290,14 @@ export function checkRendered(draft, read) {
       if (canon(obj.baseUrl) !== canon(expectedBase(draft.baseUrl))) {
         problems.push(`${paths.profile} baseUrl does not match connector-draft.json`);
       }
-      if (isStatic) {
-        // The origin, once, in the text AND in the values (a `\/` escape
-        // hides the scheme from the text but not from the value).
-        const extra = strings(obj).filter(([at, v]) => v.includes(SCHEME) && at !== "baseUrl.origin");
-        if (profile.split(SCHEME).length - 1 !== 1 || extra.length) {
-          problems.push(`${paths.profile} carries a scheme URL other than its origin`);
-        }
+      // The values as well as the text: a `\/` escape hides the scheme from
+      // the text but not from the value. A static profile carries its origin
+      // once; a dynamic one carries none (its text is scanned below).
+      const extra = strings(obj).filter(([at, v]) => v.includes(SCHEME) && !(isStatic && at === "baseUrl.origin"));
+      if (isStatic && (profile.split(SCHEME).length - 1 !== 1 || extra.length)) {
+        problems.push(`${paths.profile} carries a scheme URL other than its origin`);
+      } else if (!isStatic && extra.length) {
+        problems.push(`${paths.profile} carries a scheme URL in ${extra.map(([at]) => at).join(", ")}; describe the host in words`);
       }
     }
   }

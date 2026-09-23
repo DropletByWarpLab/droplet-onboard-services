@@ -249,6 +249,29 @@ def test_a_scheme_in_a_draft_string_is_a_problem_except_the_static_origin():
     assert not any("baseUrl.origin" in p for p in facts["problems"])
 
 
+def test_the_readback_only_ever_names_a_domain_and_a_bounded_name():
+    # rjouffret on #2324: describe_tree does not re-validate the draft, so a
+    # hand-written suffix or host (an IP, free prose) reached "nothing on
+    # this box will dial X". Each is now a problem AND left out of the facts
+    # the readback is built from; the display name is capped.
+    # MUTATION: skip the grammar in _host → red.
+    dyn = _dynamic_draft()
+    dyn["displayName"] = "G" * 500
+    dyn["baseUrl"]["allowedSuffixes"] = [".globex.example", ".127.0.0.1", "free prose here"]
+    dyn["baseUrl"]["allowedHosts"] = ["eu.globex-hosted.example", "127.0.0.1", "a host; rm"]
+    facts = connector_draft.describe_tree(lambda p: json.dumps(dyn) if p == "connector-draft.json" else None)
+    assert facts["host"]["allowedSuffixes"] == [".globex.example"]
+    assert facts["host"]["allowedHosts"] == ["eu.globex-hosted.example"]
+    assert sum("is not a domain" in p for p in facts["problems"]) == 4
+    assert len(facts["displayName"]) <= connector_draft.MAX_DISPLAY_NAME
+
+    static = _static_draft()
+    static["baseUrl"]["origin"] = "https://127.0.0.1"
+    facts = connector_draft.describe_tree(lambda p: json.dumps(static) if p == "connector-draft.json" else None)
+    assert facts["host"] is None
+    assert any("by domain" in p for p in facts["problems"])
+
+
 # ── propose ─────────────────────────────────────────────────────────────────
 
 
@@ -352,6 +375,21 @@ def test_propose_refuses_a_scheme_url_in_a_dynamic_draft(store):
         with pytest.raises(StoreError) as exc:
             workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
         assert exc.value.status == 409 and "scheme URL" in str(exc.value), url
+    guide.write_text(GUIDE, encoding="utf-8")
+    # A `\/`-escaped URL in the profile's values: no "://" in the text, one
+    # in the value (rjouffret's repro on #2324). MUTATION: scan the decoded
+    # values for static drafts only → red.
+    profile = work / connector_draft.output_paths("globex")["profile"]
+    rendered = profile.read_text(encoding="utf-8")
+    profile.write_text(
+        rendered.replace('"probePath": "/v1/me"', '"probePath": "/v1/me", "note": "https:\\/\\/exfil.evil.example\\/x"'),
+        encoding="utf-8",
+    )
+    assert "://" not in profile.read_text(encoding="utf-8")
+    with pytest.raises(StoreError) as escaped:
+        workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
+    assert escaped.value.status == 409 and "scheme URL" in str(escaped.value)
+    profile.write_text(rendered, encoding="utf-8")
     guide.write_text(GUIDE, encoding="utf-8")
     p = workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
     assert p["connectorDraft"]["host"]["kind"] == "dynamic"
