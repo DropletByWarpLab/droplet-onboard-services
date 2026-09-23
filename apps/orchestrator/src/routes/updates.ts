@@ -111,6 +111,8 @@ const ROW_SELECT = {
   gitSha: true,
   builtAt: true,
   failureReason: true,
+  // WARP-3007 — the explicit apply outcome (DeviceUpdateOutcome).
+  outcome: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -123,6 +125,7 @@ interface UpdateRowView {
   gitSha: string;
   builtAt: Date;
   failureReason: string | null;
+  outcome: string;
   createdAt: Date;
   updatedAt: Date;
 }

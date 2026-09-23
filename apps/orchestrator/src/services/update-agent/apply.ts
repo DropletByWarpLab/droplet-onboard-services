@@ -81,6 +81,12 @@
  *   - `env_reconcile_failed` — rides `rejected`: the host .env reconcile
  *     (step 3b) failed; configs were restored and nothing was swapped.
  *
+ * OUTCOME (WARP-3007) — `DeviceUpdate.outcome` is the explicit verdict an
+ * operator acts on, written in the same guarded write as the status:
+ * rolled_back / rollback_failed on the rollback paths, starting_services at
+ * commit, then committed / services_start_failed from the post-commit start
+ * (startNewServices). Everything else stays not_applied.
+ *
  * OBSERVABILITY (WARP-541) — every stage emits a structured
  * `event: "update.<stage>"` pino event (canonical list + payload rules:
  * events.ts) and every status write funnels through the advance-only
@@ -99,7 +105,11 @@ import {
   type UpdateFailureReason,
 } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
-import { transitionDeviceUpdate } from "./transitions.js";
+import {
+  recordCommittedOutcome,
+  transitionDeviceUpdate,
+  type DeviceUpdateOutcomeName,
+} from "./transitions.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -353,12 +363,13 @@ async function setStatus(
   id: string,
   status: "verifying" | "applying" | "committed" | "rolled_back" | "failed" | "rejected",
   failureReason: string | null = null,
+  outcome?: DeviceUpdateOutcomeName,
 ): Promise<void> {
   // Committed BEFORE the action the new status guards — this write IS the
   // resumability contract. Routed through the WARP-541 advance-only choke
   // point: a backwards transition (or a concurrently-moved row) throws
   // instead of corrupting the audit table.
-  await transitionDeviceUpdate(prisma, { id, to: status, failureReason, logger: log });
+  await transitionDeviceUpdate(prisma, { id, to: status, failureReason, outcome, logger: log });
 }
 
 /**
@@ -449,6 +460,7 @@ async function startNewlyEnabledServices(
   runner: ApplyRunner,
   log: pino.Logger,
   opts: {
+    prisma: PrismaClient;
     updateId: string;
     manifest: ReleaseManifest;
     refs: Record<string, string | null>;
@@ -457,16 +469,37 @@ async function startNewlyEnabledServices(
     notifyOwners?: (title: string, body: string) => Promise<void>;
   },
 ): Promise<void> {
+  const outcome = await startNewlyEnabledServicesInner(runner, log, opts);
+  // WARP-3007 — the post-commit verdict, on the row. Never throws.
+  try {
+    await recordCommittedOutcome(opts.prisma, { id: opts.updateId, outcome, logger: log });
+  } catch (err) {
+    log.warn({ err, deviceUpdateId: opts.updateId, outcome }, "OTA could not record the post-commit outcome");
+  }
+}
+
+async function startNewlyEnabledServicesInner(
+  runner: ApplyRunner,
+  log: pino.Logger,
+  opts: {
+    updateId: string;
+    manifest: ReleaseManifest;
+    refs: Record<string, string | null>;
+    probe: HealthProbe;
+    gate: { attempts: number; intervalMs: number };
+    notifyOwners?: (title: string, body: string) => Promise<void>;
+  },
+): Promise<"committed" | "services_start_failed"> {
   let names: string[] = [];
   try {
     const enabled = new Set(await runner.enabledServices({ updateId: opts.updateId }));
     const missing = opts.manifest.services.filter(
       (s) => opts.refs[s.name] === null && enabled.has(s.name),
     );
-    if (missing.length === 0) return;
+    if (missing.length === 0) return "committed";
     names = missing.map((s) => s.name);
     const { started } = await runner.startServices({ updateId: opts.updateId, services: missing });
-    if (started.length === 0) return;
+    if (started.length === 0) return "committed";
     // "started" is not "working": probe each one with the healthcheck the
     // manifest carries, so a crash-looping container is reported, not logged
     // as a success.
@@ -485,6 +518,7 @@ async function startNewlyEnabledServices(
       { event: "update.services_started", deviceUpdateId: opts.updateId, services: started },
       "OTA post-commit — started release services this box enables but was not running",
     );
+    return "committed";
   } catch (err) {
     log.error(
       {
@@ -503,6 +537,7 @@ async function startNewlyEnabledServices(
     } catch (notifyErr) {
       log.warn({ err: notifyErr, deviceUpdateId: opts.updateId }, "OTA owner notification failed");
     }
+    return "services_start_failed";
   }
 }
 
@@ -954,7 +989,7 @@ export async function applyPendingUpdate(
     });
     if (stillUnhealthy !== null) {
       // ── step 9: rollback also failed ──
-      await setStatus(prisma, log, row.id, "failed", "degraded_health");
+      await setStatus(prisma, log, row.id, "failed", "degraded_health", "rollback_failed");
       log.error(
         {
           event: "update.failed",
@@ -966,7 +1001,7 @@ export async function applyPendingUpdate(
       );
       return { outcome: "failed", deviceUpdateId: row.id };
     }
-    await setStatus(prisma, log, row.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, row.id, "rolled_back", "health_gate_failed", "rolled_back");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: row.id, unhealthyService: unhealthy },
       "OTA update rolled back — previous digests restored and healthy",
@@ -1047,7 +1082,7 @@ export async function resumeInterruptedApply(
           })
         : SELF_SERVICE_NAME;
       if (unhealthy === null) {
-        await setStatus(prisma, log, applying.id, "committed", null);
+        await setStatus(prisma, log, applying.id, "committed", null, "starting_services");
         log.info(
           { event: "update.committed", deviceUpdateId: applying.id, gitSha: applying.gitSha },
           "OTA update committed — all services healthy on the release digests",
@@ -1057,6 +1092,7 @@ export async function resumeInterruptedApply(
           deviceUpdateId: applying.id,
           startNewServices: () =>
             startNewlyEnabledServices(runner, log, {
+              prisma,
               updateId: applying.id,
               manifest,
               refs,
@@ -1096,7 +1132,7 @@ export async function resumeInterruptedApply(
         })
       : SELF_SERVICE_NAME;
     if (unhealthy !== null) {
-      await setStatus(prisma, log, applying.id, "failed", "degraded_health");
+      await setStatus(prisma, log, applying.id, "failed", "degraded_health", "rollback_failed");
       log.error(
         {
           event: "update.failed",
@@ -1108,7 +1144,7 @@ export async function resumeInterruptedApply(
       );
       return { outcome: "failed", deviceUpdateId: applying.id };
     }
-    await setStatus(prisma, log, applying.id, "rolled_back", "health_gate_failed");
+    await setStatus(prisma, log, applying.id, "rolled_back", "health_gate_failed", "rolled_back");
     log.warn(
       { event: "update.rolled_back", deviceUpdateId: applying.id, gitSha: applying.gitSha },
       "OTA update rolled back — previous digests restored and healthy",
