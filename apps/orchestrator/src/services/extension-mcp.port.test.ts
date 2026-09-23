@@ -11,6 +11,11 @@
  *   - it dials only the sandbox client's rpc (no SDK transport, no URL of
  *     its own): the file imports no @modelcontextprotocol module and names
  *     no fetch.
+ *   - a port is always pinned to the signed manifest's tools: `pinned` is
+ *     required by type and at runtime (review #2325);
+ *   - each text entry of a result is capped at
+ *     EXTENSION_CONTENT_TEXT_CAP_BYTES, cut on a character boundary and
+ *     saying so (MUTATION: drop the cap → red).
  */
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -18,20 +23,28 @@ import path from "node:path";
 
 vi.mock("../config.js", () => ({ config: { SANDBOX_URL: "http://sandbox:8030", SANDBOX_SERVICE_TOKEN: "t" } }));
 
-import { ExtensionListingMismatchError, ExtensionMcpPort } from "./extension-mcp.port.js";
+import {
+  EXTENSION_CONTENT_TEXT_CAP_BYTES,
+  ExtensionListingMismatchError,
+  ExtensionMcpPort,
+} from "./extension-mcp.port.js";
 import { ExtensionSandboxError } from "./extension-sandbox.client.js";
+import type { McpToolDescriptor } from "./mcp-client.port.js";
 
 type Rpc = (slug: string, message: unknown, timeoutMs?: number) => Promise<{ status: number; json: unknown }>;
 
-function port(rpc: Rpc) {
+const WORD_COUNT = [{ name: "word_count", description: "Count words.", inputSchema: { type: "object" } }];
+
+function port(rpc: Rpc, pinned: readonly McpToolDescriptor[] = WORD_COUNT) {
   const fn = vi.fn<Rpc>(rpc);
-  return { port: new ExtensionMcpPort({ slug: "wc", sandbox: { rpc: fn } }), rpc: fn };
+  return { port: new ExtensionMcpPort({ slug: "wc", sandbox: { rpc: fn }, pinned }), rpc: fn };
 }
 
 const ok = (id: unknown, result: unknown) => ({ status: 200, json: { jsonrpc: "2.0", id, result } });
 
 describe("listTools", () => {
   it("keeps name, description and inputSchema and drops everything else the wire sent", async () => {
+    const pinned = [{ name: "delete_everything", description: "Deletes every file.", inputSchema: { type: "object" } }];
     const { port: p, rpc } = port(async (_s, m) =>
       ok((m as { id: number }).id, {
         tools: [
@@ -44,6 +57,7 @@ describe("listTools", () => {
           },
         ],
       }),
+      pinned,
     );
     const tools = await p.listTools();
     expect(tools).toEqual([{ name: "delete_everything", description: "Deletes every file.", inputSchema: { type: "object" } }]);
@@ -67,6 +81,13 @@ describe("listTools", () => {
 });
 
 describe("a port pinned to the signed manifest", () => {
+  it("cannot be built without the signed manifest's tools", () => {
+    const rpc = vi.fn<Rpc>();
+    // @ts-expect-error `pinned` is required: an unpinned port would pass the wire's listing through.
+    expect(() => new ExtensionMcpPort({ slug: "wc", sandbox: { rpc } })).toThrow(/pinned/);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   const signed = [{ name: "word_count", description: "Count words.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
   const pinnedPort = (tools: unknown[]) =>
     new ExtensionMcpPort({
@@ -132,6 +153,37 @@ describe("callTool", () => {
     );
     const out = await p.callTool("word_count", {});
     expect(out).toEqual({ content: [{ type: "text", text: "hi" }], isError: true });
+  });
+});
+
+describe("a result's text is bounded per entry (review #2325)", () => {
+  const answering = (text: string) =>
+    port(async (_s, m) => ok((m as { id: number }).id, { content: [{ type: "text", text }, { type: "text", text: "short" }], isError: false }));
+
+  it("passes an entry at the cap unchanged", async () => {
+    const text = "a".repeat(EXTENSION_CONTENT_TEXT_CAP_BYTES);
+    const out = await answering(text).port.callTool("word_count", {});
+    expect(out.content[0].text).toBe(text);
+  });
+
+  it("cuts an entry over the cap at the cap and says how much it held", async () => {
+    const text = "a".repeat(EXTENSION_CONTENT_TEXT_CAP_BYTES * 3);
+    const out = await answering(text).port.callTool("word_count", {});
+    const first = out.content[0].text as string;
+    expect(first.startsWith("a".repeat(EXTENSION_CONTENT_TEXT_CAP_BYTES))).toBe(true);
+    expect(first.slice(EXTENSION_CONTENT_TEXT_CAP_BYTES)).toMatch(/^\n\[truncated: the extension returned \d+ bytes; the first \d+ are shown\]$/);
+    expect(first).toContain(`returned ${EXTENSION_CONTENT_TEXT_CAP_BYTES * 3} bytes`);
+    expect(out.content[1].text).toBe("short");
+  });
+
+  it("cuts on a character boundary, never inside a multi-byte character", async () => {
+    // Two-byte characters with the cap falling one byte into one of them.
+    const text = "x" + "é".repeat(EXTENSION_CONTENT_TEXT_CAP_BYTES);
+    const out = await answering(text).port.callTool("word_count", {});
+    const kept = (out.content[0].text as string).split("\n[truncated")[0];
+    expect(kept).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(kept, "utf8")).toBeLessThanOrEqual(EXTENSION_CONTENT_TEXT_CAP_BYTES);
+    expect(Buffer.byteLength(kept, "utf8")).toBeGreaterThan(EXTENSION_CONTENT_TEXT_CAP_BYTES - 2);
   });
 });
 
