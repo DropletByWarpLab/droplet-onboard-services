@@ -73,7 +73,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -129,6 +129,10 @@ import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 /** Prisma stub: findUnique by nextcloudUsername + count + tx passthrough. */
 function createPrismaMock(seed: any[] = []) {
@@ -261,8 +265,10 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "deleted", username: "alice" });
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "alice");
-    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "alice");
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
+    // WARP-2858: brain memory keys on User.id (WARP-493) — the purge is
+    // handed the resolved row id, never the path param.
+    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
     // WARP-2115 — the removed person's Microsoft 365 refresh token must go
     // with them. Nothing cascades (userId is not an FK) and the /api/m365
     // routes scope to the requester's OWN connection, so a row left behind
@@ -300,7 +306,7 @@ describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 par
     const res = await request(app).delete("/api/auth/users/legacy");
 
     expect(res.status).toBe(200);
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "legacy");
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "legacy");
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(denylistUserMock).not.toHaveBeenCalled();
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
@@ -412,7 +418,7 @@ describe("DELETE /api/auth/users/:username — WARP-1526 rails", () => {
     const res = await request(app).delete("/api/auth/users/sam");
 
     expect(res.status).toBe(200);
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "sam");
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "sam");
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-sam");
   });
 });

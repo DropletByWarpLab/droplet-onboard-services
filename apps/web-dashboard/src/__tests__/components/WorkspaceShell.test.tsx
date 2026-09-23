@@ -118,7 +118,7 @@ describe("WorkspaceShell — structure", () => {
 });
 
 describe("WorkspaceShell — the URL decides the space, the chips and the view", () => {
-  it("/files/recents → Work tab, Files chip current, Recents pill current", () => {
+  it("/files/recents → Work tab, Files chip current, Recent pill current", () => {
     renderAt("/files/recents");
     const tabs = within(screen.getByRole("tablist", { name: "Spaces" })).getAllByRole("tab");
     expect(tabs.find((t) => t.textContent === "Work")).toHaveAttribute(
@@ -132,11 +132,13 @@ describe("WorkspaceShell — the URL decides the space, the chips and the view",
       "aria-current",
     );
     const views = screen.getByRole("navigation", { name: "Views" });
-    expect(within(views).getByRole("link", { name: "Recents" })).toHaveAttribute(
+    expect(within(views).getByRole("link", { name: "Recent" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(within(views).getByRole("link", { name: "All files" })).toHaveAttribute(
+    // WARP-2966 dropped the "All files" child (its href was the parent's), so
+    // the section itself leads the view row instead.
+    expect(within(views).getByRole("link", { name: "Files" })).toHaveAttribute(
       "href",
       "/files",
     );
@@ -219,6 +221,15 @@ describe("WorkspaceShell — gates reach the DOM", () => {
 
 describe("WorkspaceShell — keyboard", () => {
   it("⌥N jumps to the Nth space's first destination", () => {
+    // WARP-2977 — Security leads Operations (it is where the cameras'
+    // events land), so ⌥4 opens it on a box that has the module on.
+    renderAt("/");
+    fireEvent.keyDown(window, { code: "Digit4", altKey: true });
+    expect(pushMock).toHaveBeenCalledWith("/security");
+  });
+
+  it("⌥N skips a destination the box has switched off — Security off still lands on Cameras", () => {
+    modulesRef.current = { security: false };
     renderAt("/");
     fireEvent.keyDown(window, { code: "Digit4", altKey: true });
     expect(pushMock).toHaveBeenCalledWith("/cameras");

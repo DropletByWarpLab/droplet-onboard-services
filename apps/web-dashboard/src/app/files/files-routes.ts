@@ -53,10 +53,13 @@ export const FILES_ROUTE_HEADERS: Record<string, FilesRouteHeader> = {
     title: "Favorites",
     sub: "Files and folders you've marked as favorites for quick access.",
   },
+  // WARP-2966 — "Recent", not "Recents". The sidebar row was relabelled with
+  // the section re-cut, and a nav row and the page it opens saying different
+  // words is the drift this map exists to prevent.
   "/files/recents": {
     icon: "recents",
-    label: "Recents",
-    title: "Recents",
+    label: "Recent",
+    title: "Recent",
     sub: "Files you've modified recently, grouped by time.",
   },
   "/files/shared": {

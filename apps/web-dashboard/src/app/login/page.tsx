@@ -223,9 +223,13 @@ function LoginPageInner() {
       }
     >
       {fromSetup && (
-        <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
-          <Check size={16} className="flex-shrink-0" aria-hidden="true" />
-          <p className="type-subheadline">
+        /* `bg-accent-subtle` is a real token; `bg-accent/10` was not —
+           the accent is a bare `var()` with no <alpha-value>, so Tailwind
+           dropped the fill entirely and this chip shipped untinted
+           (WARP-2973, same class of bug the accent-alpha guard polices). */
+        <div className="flex items-start gap-2.5 rounded-sm bg-accent-subtle px-3.5 py-3">
+          <Check size={16} className="flex-none mt-px text-accent" aria-hidden="true" />
+          <p className="type-footnote leading-snug text-label-primary">
             Setup already completed. Sign in to access your dashboard.
           </p>
         </div>

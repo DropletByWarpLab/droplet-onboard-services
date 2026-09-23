@@ -8,6 +8,7 @@ import {
   Cloud,
   DownloadCloud,
   HardDrive,
+  Laptop,
   Mic,
   Plus,
   Settings as SettingsIcon,
@@ -28,6 +29,7 @@ import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
+import { BackupRows } from "@/components/settings/BackupRows";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -40,7 +42,7 @@ import {
   createUser,
   deleteUser as apiDeleteUser,
 } from "@/lib/api";
-import type { AuthUser } from "@/lib/types";
+import { ROSTER_SOURCE_LABEL, type RosterUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
 import { inferenceRuntimeLabel } from "@/lib/provider";
@@ -51,7 +53,7 @@ export default function SettingsPage() {
   // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
   // (fail-open — hidden only on a positive "off").
   const isModuleOn = useModuleGate();
-  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [users, setUsers] = useState<RosterUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
@@ -216,6 +218,31 @@ export default function SettingsPage() {
               </span>
               <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
             </Link>
+            {/* WARP-2966 (files-surface addendum §2.3) — Sync devices left the
+                Files sub-nav: it pairs a desktop machine, it is not a place a
+                file can be, and a rail of locations that also held it meant
+                two things at once. The route is unchanged; this row is the
+                only way in now, which is why it ships in the same change.
+                Gated on the files module for the same reason the nav entry is,
+                with the same fail-open posture as Knowledge above. */}
+            {isModuleOn("files") && (
+              <Link
+                href="/files/devices"
+                className="lrow"
+                style={{ padding: "12px 16px", alignItems: "center" }}
+              >
+                <span className="ri">
+                  <Laptop size={16} />
+                </span>
+                <span className="rt">
+                  <span className="nm">Sync devices</span>
+                  <span className="sub">
+                    Computers mirroring a folder with this Droplet
+                  </span>
+                </span>
+                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+              </Link>
+            )}
           </div>
         </div>
 
@@ -309,7 +336,7 @@ export default function SettingsPage() {
                   value={newEmail}
                   onChange={(e) => setNewEmail(e.target.value)}
                   placeholder="you@company.com"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -328,7 +355,7 @@ export default function SettingsPage() {
                   value={newDisplayName}
                   onChange={(e) => setNewDisplayName(e.target.value)}
                   placeholder="Display name (optional)"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -348,7 +375,7 @@ export default function SettingsPage() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="Create a password"
-                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -418,6 +445,13 @@ export default function SettingsPage() {
                       <span className="nm">{u.displayName || u.id}</span>
                       <span className="sub mono">{u.id}</span>
                     </span>
+                    {/* WARP-2984: where the account comes from — the roster
+                        lists every account, so the origin is shown, not implied. */}
+                    {u.source && (
+                      <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
+                        {ROSTER_SOURCE_LABEL[u.source]}
+                      </span>
+                    )}
                     {u.id !== currentUser?.username ? (
                       // Always rendered (no opacity-gate on hover) so the
                       // action is discoverable for touch + keyboard users.
@@ -474,6 +508,9 @@ export default function SettingsPage() {
                 the one action when renewal is failing). Owner/admin only;
                 reads the state row the daily tick maintains, no new poll. */}
             <CertificateRows />
+            {/* WARP-1405 — backup health: last success, and the reason
+                when backups have stopped. Owner/admin only. */}
+            <BackupRows />
           </div>
         </div>
 

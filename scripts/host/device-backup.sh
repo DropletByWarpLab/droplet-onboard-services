@@ -124,6 +124,7 @@ DATA_VOLUMES=(
 # with factory-reset.sh's wipe list minus DATA_VOLUMES minus the pg_dump'd DBs.
 EXCLUDED_VOLUMES=(
   migration-snapshots # WARP-573 pre-migration DB snapshots — regenerated on fresh boot
+  cache-data         # WARP-1401 Redis AOF (sessions, NC app-passwords) — a restore must NOT resurrect them
   frigate-config     # NVR config — regenerated from .env on setup
   rag-eval-data      # RAGAS eval output — not customer data
   whisper-models     # STT model cache (~470MB) — re-downloaded

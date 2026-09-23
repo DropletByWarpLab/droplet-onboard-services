@@ -529,7 +529,7 @@ export function ZoneEditor({
             maxLength={40}
             placeholder="front_yard"
             aria-label="Zone name"
-            className="w-full h-10 px-3 type-subheadline outline-none focus:border-[var(--brand)] transition-colors"
+            className="w-full h-10 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
