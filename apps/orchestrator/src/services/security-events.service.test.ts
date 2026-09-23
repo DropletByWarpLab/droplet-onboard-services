@@ -11,6 +11,7 @@ import {
   buildSecurityHealth,
   createStatusTracker,
   feedVisibilityWhere,
+  listSecurityEvents,
   mirrorThreatRows,
   noteFrigateSubscription,
   parseFeedCursor,
@@ -375,6 +376,46 @@ describe("buildSecurityHealth — 'nothing reporting' never reads as 'all clear'
     });
     expect(row(rows, "threat_mirror").state).toBe("quiet");
     expect(row(rows, "retention").state).toBe("quiet");
+  });
+
+  it("WARP-2977 P2b: a site_mode row is placed after threat_mirror and before retention, verbatim", () => {
+    const siteMode = { id: "site_mode" as const, state: "down" as const, detail: "Not running", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, ingest: ingest(), siteMode });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "camera_system", "threat_mirror", "site_mode", "retention"]);
+    expect(row(rows, "site_mode")).toBe(siteMode);
+  });
+
+  it("WARP-2977 P2b: the pinned order holds when rows drop out — no camera system, site_mode still before retention", () => {
+    const siteMode = { id: "site_mode" as const, state: "not_configured" as const, detail: "x", lastSeenAt: null };
+    const rows = buildSecurityHealth({ ...base, frigateConfigured: false, ingest: ingest(), siteMode });
+    expect(rows.map((r) => r.id)).toEqual(["camera_ingest", "threat_mirror", "site_mode", "retention"]);
+  });
+});
+
+describe("listSecurityEvents — extraWhere narrows after the camera clause (WARP-2977 P2b)", () => {
+  const findMany = vi.fn();
+  const prisma = { securityEvent: { findMany } } as never;
+  beforeEach(() => {
+    findMany.mockReset();
+    findMany.mockResolvedValue([]);
+  });
+
+  it("visibility stays AND[0]; the extra clauses follow the camera clause; the cursor stays last", async () => {
+    const visibility = feedVisibilityWhere(new Set(["front"]), false);
+    const zone = { camera: "front", OR: [{ kind: { in: ["camera_offline" as const, "camera_online" as const] } }] };
+    const cursor = { startedAt: NOW, id: 9n };
+    await listSecurityEvents(prisma, visibility, { limit: 10, includeLow: false, camera: "front", cursor }, [zone]);
+    const and = findMany.mock.calls[0]![0].where.AND;
+    expect(and[0]).toBe(visibility);
+    expect(and[3]).toEqual({ camera: "front" });
+    expect(and[4]).toBe(zone);
+    expect(and[5]).toEqual({ OR: [{ startedAt: { lt: NOW } }, { startedAt: NOW, id: { lt: 9n } }] });
+    expect(and).toHaveLength(6);
+  });
+
+  it("without extraWhere the query is exactly P2a's", async () => {
+    await listSecurityEvents(prisma, {}, { limit: 10, includeLow: true });
+    expect(findMany.mock.calls[0]![0].where.AND).toEqual([{}, {}, {}, {}, {}]);
   });
 });
 
