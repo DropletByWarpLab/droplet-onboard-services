@@ -294,7 +294,7 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
       "owner3",
       "Third-secret123",
       undefined,
-      ["admin", "droplet-admins", "household"],
+      ["droplet-admins", "household"],
     );
     // Idempotent local write lands BEFORE the one-shot NC provisioning.
     expect(prisma._callOrder).toEqual(["user.upsert", "ncInstallAndCreateAdmin"]);
@@ -318,8 +318,9 @@ describe("WARP-883 — /auth/setup adds the owner to the household group", () =>
     expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledTimes(1);
     const groupsArg = (nc.ncInstallAndCreateAdmin as any).mock.calls[0][3] as string[];
     expect(groupsArg).toContain("household");
-    // The owner keeps their existing Nextcloud "admin" group too.
-    expect(groupsArg).toContain("admin");
+    // WARP-2993: the owner is NOT a Nextcloud instance admin — only the box
+    // service account is.
+    expect(groupsArg).not.toContain("admin");
     // No duplicate household entry.
     expect(groupsArg.filter((g) => g === "household")).toHaveLength(1);
   });

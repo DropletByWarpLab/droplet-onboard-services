@@ -619,6 +619,70 @@ export interface Department {
    *  batch lookup for the whole list). Null on any read failure or before
    *  discovery — never a fabricated 0. */
   usedBytes: string | null;
+  /**
+   * WARP-2976 (ADR-059 §2.2) — the row's OWN profile summary. `null` is a
+   * real state: the department is not set up yet, and the UI says so rather
+   * than guessing a template from the name. Optional because the key is
+   * absent (not null) on rows the server did not load it for — team
+   * summaries inside a detail read, or an orchestrator older than P1 — and
+   * absent must never be read as "not set up".
+   */
+  profile?: DepartmentProfileSummary | null;
+}
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+
+/** The seven templates. A template is data — default nav hrefs, default home
+ *  widgets and a headline figure (`lib/departments/templates.ts`). */
+export type DepartmentTemplate =
+  | "security"
+  | "sales"
+  | "finance"
+  | "operations"
+  | "front_desk"
+  | "it"
+  | "custom";
+
+export type DepartmentWidgetSize = "s" | "m" | "l";
+
+/** One tile on a department home. `widget` is validated for SHAPE only on the
+ *  server; the dashboard skips an id its widget registry does not know. */
+export interface DepartmentHomeWidget {
+  widget: string;
+  size: DepartmentWidgetSize;
+}
+
+/** What GET /api/departments carries per row: enough to label the switcher. */
+export interface DepartmentProfileSummary {
+  template: DepartmentTemplate;
+  /** A lucide icon name (kebab-case); unknown names render a fallback glyph. */
+  icon: string;
+}
+
+/** The full profile — GET/PUT /api/departments/:id/profile. It ARRANGES what a
+ *  department shows; it grants nothing (ADR-059 §2.5). */
+export interface DepartmentProfile extends DepartmentProfileSummary {
+  departmentId: string;
+  /** Ordered nav hrefs. An href that is not in NAV_GROUPS never renders. */
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface DepartmentProfileResponse {
+  profile: DepartmentProfile | null;
+  /** Set for a TEAM: the parent department whose profile this is. */
+  inheritedFrom: string | null;
+  /** Owner/admin, or a manager of this department (or of its parent). */
+  canEdit: boolean;
+}
+
+export interface PutDepartmentProfilePayload {
+  template: DepartmentTemplate;
+  icon: string;
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
 }
 
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
@@ -1230,6 +1294,32 @@ export interface RosterUser extends AuthUser {
    *  orchestrator older than this field sends nothing, and `undefined` must
    *  read as enabled rather than painting the whole roster deactivated. */
   enabled?: boolean;
+  /** WARP-2984 — where the account comes from. `local`/`sso`/`scim` read the
+   *  local row's explicit provisionSource; `nextcloud` is a Nextcloud user
+   *  with no local row. Optional: an older orchestrator sends nothing, and the
+   *  UI then renders no source chip rather than guessing. */
+  source?: RosterSource;
+  /** WARP-2984 — false when the account has no Nextcloud user, i.e. no file
+   *  storage: storage/upload limits don't apply. Optional for the same
+   *  reason; only an explicit false hides the storage controls. */
+  hasStorage?: boolean;
+}
+
+/** WARP-2984 — see RosterUser.source. */
+export type RosterSource = "local" | "sso" | "scim" | "nextcloud";
+
+/** WARP-2984 — roster chip copy per source. */
+export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
+  local: "Local",
+  sso: "SSO",
+  scim: "SCIM",
+  nextcloud: "Nextcloud only",
+};
+
+/** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set
+ *  a local password (409 SSO_MANAGED_ACCOUNT), so the UI never offers one. */
+export function isIdpManaged(u: { source?: RosterSource }): boolean {
+  return u.source === "sso" || u.source === "scim";
 }
 
 // ── WARP-217 invite types ──
@@ -1364,7 +1454,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-2977 — the Security command center (ADR-059). */
+  | "security";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -3204,4 +3296,47 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
+
+/** Mirrors the orchestrator's SecurityEventKind enum. */
+export type SecurityEventKind =
+  | "detection"
+  | "detection_low"
+  | "camera_offline"
+  | "camera_online"
+  | "source_offline"
+  | "source_online"
+  | "threat";
+
+export interface SecurityEvent {
+  /** BigInt id, serialised as a string. */
+  id: string;
+  source: "frigate" | "frigate_status" | "activity_mirror";
+  kind: SecurityEventKind;
+  severity: "info" | "notice" | "alert";
+  /** Frigate camera name; null for rows no camera produced. */
+  camera: string | null;
+  labels: string[];
+  cameraZones: string[];
+  score: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string;
+  /** Set on detections — the clip/thumbnail routes key on it. */
+  frigateEventId: string | null;
+}
+
+export interface SecurityEventsPage {
+  events: SecurityEvent[];
+  nextCursor: string | null;
+}
+
+/** One line of the feed header: what the feed is listening to, and whether it is reporting. */
+export interface SecurityHealthRow {
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  state: "ok" | "quiet" | "down" | "not_configured";
+  detail: string;
+  lastSeenAt: string | null;
 }
