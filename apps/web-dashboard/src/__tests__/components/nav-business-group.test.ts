@@ -33,20 +33,49 @@ function businessItems() {
   return group.items;
 }
 
+/**
+ * WARP-2967 nested two of the six: Brief and Reports under Insights, Money
+ * under Projects. Every assertion in this file is about which DESTINATIONS a
+ * viewer is offered, not about which indent they sit at, so it reads the
+ * group flattened one level — which is also what the mobile drawer renders.
+ *
+ * Nesting DOES add the parent's gate on top of the child's (`visibleItems`
+ * drops a parent before its children are considered), and that narrowing is
+ * pinned explicitly below rather than smuggled through this helper.
+ */
+const flatHrefs = (
+  role: Parameters<typeof visibleItems>[1],
+  caps = openCapabilities,
+  isOn: (id: string) => boolean = () => true,
+) =>
+  visibleItems(businessItems(), role, caps, isOn).flatMap((i) => [
+    i.href,
+    ...(i.children ?? []).map((c) => c.href),
+  ]);
+
 describe("the Business group (WARP-2558)", () => {
-  it("sits between Workspace and Operations", () => {
+  it("sits between Work and Systems (WARP-2967 renamed its neighbours)", () => {
     const labels = NAV_GROUPS.map((g) => g.label);
-    expect(labels.indexOf("Business")).toBe(labels.indexOf("Workspace") + 1);
-    expect(labels.indexOf("Operations")).toBe(labels.indexOf("Business") + 1);
+    expect(labels.indexOf("Business")).toBe(labels.indexOf("Work") + 1);
+    expect(labels.indexOf("Systems")).toBe(labels.indexOf("Business") + 1);
   });
 
-  it("holds Planning, Brief, Customers, Projects, Money and Practice, in that order", () => {
-    // WARP-2752 — /brief sits second, beside Planning: both answer a question
-    // about the business as a whole rather than about one record, and both are
-    // role-gated rather than module-gated.
+  it("holds the same six destinations, now two levels deep", () => {
+    // WARP-2752 — /brief sits beside what was "Planning": both answer a
+    // question about the business as a whole rather than about one record.
+    // WARP-2967 made that relationship structural rather than adjacent, and
+    // renamed the parent Insights because "Planning" named only one of the
+    // three tenses it now carries.
     expect(businessItems().map((i) => i.href)).toEqual([
       "/business",
+      "/customers",
+      "/projects",
+      "/practice",
+    ]);
+    expect(flatHrefs("owner")).toEqual([
+      "/business",
       "/brief",
+      "/reports",
       "/customers",
       "/projects",
       "/money",
@@ -54,30 +83,52 @@ describe("the Business group (WARP-2558)", () => {
     ]);
   });
 
-  it("no longer keeps Projects in Workspace — the route moved groups, not addresses", () => {
-    const workspace = NAV_GROUPS.find((g) => g.label === "Workspace");
-    expect(workspace?.items.map((i) => i.href) ?? []).not.toContain("/projects");
+  it("no longer keeps Projects in Work — the route moved groups, not addresses", () => {
+    const work = NAV_GROUPS.find((g) => g.label === "Work");
+    expect(work?.items.map((i) => i.href) ?? []).not.toContain("/projects");
   });
 });
 
 describe("each entry survives its neighbour being off (WARP-2558)", () => {
   it("shows Customers alone on a CRM-on, Projects-off box", () => {
-    const visible = visibleItems(businessItems(), "owner", openCapabilities, only("crm"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/customers", "/practice"]);
+    expect(flatHrefs("owner", openCapabilities, only("crm"))).toEqual([
+      "/business",
+      "/brief",
+      "/reports",
+      "/customers",
+      "/practice",
+    ]);
   });
 
   it("shows Projects alone on a Projects-on, CRM-off box", () => {
-    const visible = visibleItems(businessItems(), "owner", openCapabilities, only("projects"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/projects", "/practice"]);
+    expect(flatHrefs("owner", openCapabilities, only("projects"))).toEqual([
+      "/business",
+      "/brief",
+      "/reports",
+      "/projects",
+      "/practice",
+    ]);
   });
 
-  it("shows Money alone on a books-on, CRM-off, Projects-off box", () => {
-    // WARP-2581 — /money is module-gated like Customers and Projects, so it
-    // disappears entirely on a box that keeps its books elsewhere. The two
-    // role-gated entries stand either side of it regardless, which is the
-    // whole point of the split.
-    const visible = visibleItems(businessItems(), "owner", openCapabilities, only("money"));
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/money", "/practice"]);
+  it("keeps Money on a books-on, Projects-OFF box — promoted into Projects' slot", () => {
+    // WARP-2967 nested Money under Projects. Nesting is filing, not a gate:
+    // books without PM is a supported box (the likely dental shape), so a
+    // parent that fails ONLY its module gate promotes a child with a module of
+    // its own (`passesParentGate`). Review of #2284 caught the earlier
+    // version dropping Money here from every shell.
+    expect(flatHrefs("owner", openCapabilities, only("money"))).toEqual([
+      "/business",
+      "/brief",
+      "/reports",
+      "/money",
+      "/practice",
+    ]);
+  });
+
+  it("keeps Money on a books-on, Projects-ON box", () => {
+    expect(flatHrefs("owner", openCapabilities, only("money", "projects"))).toContain(
+      "/money",
+    );
   });
 
   it("keeps Practice with every module off — it is role-gated, not module-gated", () => {
@@ -85,22 +136,23 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
     // stops one being invented by accident. Tagging Practice with somebody
     // else's module id would delete the practice's whole day the moment that
     // module was toggled, which is the /reports lesson one surface over.
-    const visible = visibleItems(businessItems(), "owner", openCapabilities, only());
-    // /brief survives every module being off for the same reason /business and
-    // /practice do — none of the three is module-gated.
-    expect(visible.map((i) => i.href)).toEqual(["/business", "/brief", "/practice"]);
+    //
+    // Insights, Brief and Reports survive for the same reason: none of the
+    // three is module-gated, and nesting Brief and Reports under a parent that
+    // carries no module gate could not introduce one.
+    expect(flatHrefs("owner", openCapabilities, only())).toEqual([
+      "/business",
+      "/brief",
+      "/reports",
+      "/practice",
+    ]);
   });
 
   it("shows all three when the modules are on", () => {
-    const visible = visibleItems(
-      businessItems(),
-      "owner",
-      openCapabilities,
-      only("crm", "projects"),
-    );
-    expect(visible.map((i) => i.href)).toEqual([
+    expect(flatHrefs("owner", openCapabilities, only("crm", "projects"))).toEqual([
       "/business",
       "/brief",
+      "/reports",
       "/customers",
       "/projects",
       "/practice",
@@ -108,20 +160,28 @@ describe("each entry survives its neighbour being off (WARP-2558)", () => {
   });
 
   it("shows the whole group when every module gate is on", () => {
-    const visible = visibleItems(
-      businessItems(),
-      "owner",
-      openCapabilities,
-      only("crm", "projects", "money"),
-    );
-    expect(visible.map((i) => i.href)).toEqual([
+    expect(
+      flatHrefs("owner", openCapabilities, only("crm", "projects", "money")),
+    ).toEqual([
       "/business",
       "/brief",
+      "/reports",
       "/customers",
       "/projects",
       "/money",
       "/practice",
     ]);
+  });
+
+  it("never captions a lone row: a family box with no business module shows one item", () => {
+    // WARP-2967's "no group renders a lone item" rule. Brief is owner/admin,
+    // so a family viewer with every module off is left with Insights and
+    // Reports — two rows, one of them nested, which is a group. The Sidebar
+    // drops the CAPTION when a group has fewer than two top-level rows; this
+    // pins the data side of that.
+    const family = visibleItems(businessItems(), "family", openCapabilities, only());
+    expect(family.map((i) => i.href)).toEqual(["/business"]);
+    expect(family[0]?.children?.map((c) => c.href)).toEqual(["/reports"]);
   });
 });
 
@@ -154,10 +214,10 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
   // (accounting only, or nothing connected yet) has nothing to show there.
   it("is hidden until the box reports a connected medical integration", () => {
     const noMedical = { ...openCapabilities, medicalConnector: false };
-    const visible = visibleItems(businessItems(), "owner", noMedical, everyModuleOn);
-    expect(visible.map((i) => i.href)).toEqual([
+    expect(flatHrefs("owner", noMedical, everyModuleOn)).toEqual([
       "/business",
       "/brief",
+      "/reports",
       "/customers",
       "/projects",
       "/money",
@@ -170,7 +230,10 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
   });
 
   it("has left the Integrations subtree, which keeps only the plumbing", () => {
-    const ops = NAV_GROUPS.find((g) => g.label === "Operations");
+    // WARP-2967 renamed Operations to Systems and tucked both Integrations
+    // entries behind Settings; ADR-044's pin is unchanged either way — no
+    // practice DATA surface hangs off the connector plumbing.
+    const ops = NAV_GROUPS.find((g) => g.label === "Systems");
     // WARP-2968 flattened the subtree — Credentials is a sibling now, not a
     // child — so this reads every Integrations destination wherever it sits.
     // ADR-044's pin is unchanged: no practice DATA surface hangs off it.
@@ -210,8 +273,11 @@ describe("Planning is composed, so it outlives every module (WARP-2561)", () => 
     expect(visible.map((i) => i.href)).not.toContain("/business");
   });
 
-  it("is labelled Planning — the nav label and the page header are one word", () => {
-    expect(businessItems().find((i) => i.href === "/business")?.label).toBe("Planning");
+  it("is labelled Insights — the nav label and the page header are one word", () => {
+    // WARP-2967 renamed it from "Planning": the entry now heads Brief and
+    // Reports, and "Planning" named only the first of the three tenses. The
+    // page header moved in the same change — this pin is what forces that.
+    expect(businessItems().find((i) => i.href === "/business")?.label).toBe("Insights");
   });
 });
 
