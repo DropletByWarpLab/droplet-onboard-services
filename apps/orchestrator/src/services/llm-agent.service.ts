@@ -1437,9 +1437,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // rollback lever rather than protect it. This gate polices SELECTION's
   // output; when there is no selection there is nothing for it to police.
   //
-  // Headroom, measured in-repo at the WARP-2445 SHA (fixture schemas, not a
-  // box): the worst single-domain turn is ~3.2K tokens and the worst
-  // four-domain turn ~8.0K, both far under the ceiling. Real per-turn numbers
+  // Headroom, measured in-repo when WARP-2445 landed (not on a box): the
+  // worst single-domain turn is ~3.2K tokens and the worst four-domain turn
+  // ~8.0K, both far under the ceiling. Real per-turn numbers
   // come from the `agent_tool_pool_size` debug line below (WARP-2921), which
   // is what the ADR-056 §12 go/no-go is measured from.
   // The realistic route to tripping this is CONTINUITY ACCUMULATION — a long
