@@ -379,7 +379,6 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
     "PATCH /cameras/pins/reorder": "the caller's own pins",
     "DELETE /cameras/pins/:cameraName": "the caller's own pins",
     "POST /cameras/clips/share": "signs a Nextcloud path; governed by Nextcloud ACLs, custody roles only",
-    "DELETE /cameras/faces/:name": "custody roles only (owner/admin see every camera)",
     "GET /cameras/plates": "household plate roster",
     "PUT /cameras/plates/:plate": "household plate roster",
     "DELETE /cameras/plates/:plate": "household plate roster",
@@ -420,6 +419,7 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
         Object.keys(r.methods).map((m) => ({
           key: `${m.toUpperCase()} ${r.path}`,
           guarded: r.stack.some((h) => h.handle?.name === "cameraAccessGuard"),
+          faceFolderGuarded: r.stack.some((h) => h.handle?.name === "faceFolderAccess"),
         })),
       );
   }
@@ -459,10 +459,26 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
     for (const key of [
       "GET /cameras/faces",
       "GET /cameras/faces/:name/images/:image",
+      "DELETE /cameras/faces/:name",
       "DELETE /cameras/faces/:name/images/:image",
     ]) {
       expect(guarded, key).toContain(key);
     }
+  });
+
+  it("WARP-3013: every face route addressed by :name carries the `train`-folder check", () => {
+    // One rule, not per-route judgement: whatever a route does with a face
+    // folder (read, remove, write into), a scope that may not see `train`
+    // does not reach it. Custody-only routes included — they are safe today
+    // only because custody roles happen to see every camera.
+    const faceRoutes = allRoutes().filter((r) => / \/cameras\/faces\/:name/.test(r.key));
+    expect(faceRoutes.map((r) => r.key).sort()).toEqual([
+      "DELETE /cameras/faces/:name",
+      "DELETE /cameras/faces/:name/images/:image",
+      "GET /cameras/faces/:name/images/:image",
+      "POST /cameras/faces/:name/from-event/:eventId",
+    ]);
+    expect(faceRoutes.filter((r) => !r.faceFolderGuarded).map((r) => r.key)).toEqual([]);
   });
 
   it("the exemption list carries no stale entries", () => {

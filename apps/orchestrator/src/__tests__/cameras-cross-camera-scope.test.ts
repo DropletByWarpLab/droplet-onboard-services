@@ -327,6 +327,19 @@ describe("WARP-3013: Frigate's `train` face crops are for all-camera viewers onl
       ["train", CROP],
     ]);
   });
+
+  it("a scoped user cannot tag an event's face into `train`, even from their own camera", async () => {
+    // ev-front is Sam's camera, so the event guard passes; the folder is
+    // still the all-camera one, and Sam may not write into what they cannot see.
+    const res = await sam().post("/api/cameras/faces/train/from-event/ev-front");
+    expect(res.status).toBe(404);
+    expect(vi.mocked(frigate.tagEventAsFace)).not.toHaveBeenCalled();
+  });
+
+  it("an owner can still clear the whole `train` folder", async () => {
+    const res = await owner().delete("/api/cameras/faces/train");
+    expect(res.status).toBe(204);
+  });
 });
 
 describe("birdseye composites every camera, so only an all-camera viewer gets it", () => {
