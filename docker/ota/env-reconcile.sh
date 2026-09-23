@@ -10,10 +10,9 @@
 # stayed missing there. This file travels with each release, and the release
 # that needs a key carries the code that adds it.
 #
-# HOW IT RUNS: scripts/lib/apply-update.sh `reconcile-env` launches it on the
-# HOST (a one-shot `chroot /host` container off the verified release image),
-# after stage-configs and BEFORE any container swap. The orchestrator itself
-# cannot read .env (WARP-1669: it mounts docker/ only).
+# HOW IT RUNS: docker/ota/apply-update.sh `reconcile-env` runs it on the HOST
+# (the helper itself runs there, WARP-3007), after stage-configs and BEFORE
+# any container swap. The orchestrator itself cannot read .env.
 #
 # CONTRACT (never broken, pinned by scripts/test/ota-env-reconcile.test.sh):
 #   * ADDITIVE: a key is written only when no `KEY=` line exists. An existing

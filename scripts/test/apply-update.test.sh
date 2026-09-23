@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Integration tests for scripts/lib/apply-update.sh (WARP-539).
+# Integration tests for docker/ota/apply-update.sh (WARP-539).
 # =============================================================================
 #
 # Pins the two behaviours a stubbed helper once faked (QA rework findings):
@@ -15,12 +15,13 @@
 #      (client-side only — no daemon needed).
 #
 #   2. THE DETACHED SELF-SWAP HELPER IS REAL — `recreate-self-detached`
-#      launches a helper that (a) recreates the orchestrator pinned to the
-#      target override, (b) waits BOUNDED on the recreated container's
-#      healthcheck, (c) on timeout rolls EVERY service in services.txt back
-#      to the previous refs. The test extracts the helper's payload + `-e`
-#      environment from the recorded `docker run` argv and EXECUTES it under
-#      the fake docker — both the healthy path and the timeout→rollback path.
+#      launches a HOST-side supervisor (`chroot /host` off the pinned image,
+#      no network — WARP-3007) that (a) recreates the orchestrator pinned to
+#      the target override, (b) waits BOUNDED on the recreated container's
+#      healthcheck, (c) on timeout restores the config pre-image and execs
+#      the RESTORED helper's rollback over services.txt. The test takes the
+#      supervisor's argv + `-e` environment from the recorded `docker run`
+#      and EXECUTES it under the fake docker — healthy and timeout paths.
 #
 # Harness: PATH-shimmed fake `docker` (same convention as tests/setup.test.sh
 # Phase 3) that records every invocation — one space-joined line in calls.log
@@ -37,7 +38,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-APPLY_SH="$REPO_ROOT/scripts/lib/apply-update.sh"
+APPLY_SH="$REPO_ROOT/docker/ota/apply-update.sh"
 
 FAILURES=0
 TESTS=0
@@ -174,7 +175,9 @@ run_apply() {
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   DROPLET_OTA_CONFIG_ROOT="${DROPLET_OTA_CONFIG_ROOT:-}" \
-  bash "$APPLY_SH" "$@"
+  DROPLET_OTA_HOST_IMAGE="${DROPLET_OTA_HOST_IMAGE-$HOST_IMG}" \
+  DROPLET_COSIGN_BIN="${DROPLET_COSIGN_BIN-cosign}" \
+  bash "${APPLY_SH_UNDER_TEST:-$APPLY_SH}" "$@"
 }
 
 # -----------------------------------------------------------------------------
@@ -214,6 +217,8 @@ REL_ROUTING="ghcr.io/dropletbywarplab/routing@sha256:$HEX_C"
 PREV_ORCH="sha256:$HEX_D"
 PREV_DASH="ghcr.io/dropletbywarplab/web-dashboard@sha256:$HEX_E"
 PREV_ROUTING="sha256:$HEX_A"
+# WARP-3007: the image the host-exec one-shot runs off (pinned by image ID).
+HOST_IMG="sha256:$HEX_D"
 
 cat > "$UDIR/override-release.yml" <<EOF
 # WARP-539 — test fixture in the exact runner-generated format
@@ -465,17 +470,26 @@ else
   fail "real compose enabled set wrong (none='$REAL_NONE' eval='$REAL_EVAL')"
 fi
 
-# --- WARP-2995: reconcile-env runs the staged script on the host ---
+# --- WARP-2995 / WARP-3007: reconcile-env runs the staged script directly ---
+# The helper already runs on the host, so reconcile-env just runs
+# <config root>/docker/ota/env-reconcile.sh — no nested container.
 REC_IMG="ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:$HEX_A"
 REC_REPORT='{"addedKeys":["SANDBOX_SERVICE_TOKEN"],"addedProfiles":[],"profiles":"linux","unitUpdated":false,"backup":"/x/.env.bak.ota-du-test-1"}'
-stub_reset
-REC_OUT="$(DOCKER_STUB_RUN_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
-  --update-id "$UPDATE_ID" --image "$REC_IMG" 2>/dev/null)"; REC_RC=$?
 REC_ROOT="$(dirname "$FIXTURE")"
+mkdir -p "$REC_ROOT/docker/ota"
+cat > "$REC_ROOT/docker/ota/env-reconcile.sh" <<RECEOF
+#!/bin/sh
+printf 'env-reconcile %s\n' "\$*" >> "$STUB_DIR/calls.log"
+printf '%s\n' "\${REC_STUB_OUT:-}"
+exit "\${REC_STUB_EXIT:-0}"
+RECEOF
+stub_reset
+REC_OUT="$(REC_STUB_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --image "$REC_IMG" 2>/dev/null)"; REC_RC=$?
 if [ "$REC_RC" -eq 0 ] && [ "$REC_OUT" = "$REC_REPORT" ] \
-  && grep -qF -- "run --rm --name droplet-ota-env-reconcile-$UPDATE_ID --network none --user 0:0 --entrypoint chroot -v /:/host $REC_IMG /host /bin/sh $REC_ROOT/docker/ota/env-reconcile.sh $REC_ROOT $UPDATE_ID" \
-    "$STUB_DIR/calls.log"; then
-  pass "reconcile-env chroots into the host, no network, and runs the STAGED script"
+  && grep -qxF -- "env-reconcile $REC_ROOT $UPDATE_ID" "$STUB_DIR/calls.log" \
+  && ! grep -q '^run ' "$STUB_DIR/calls.log"; then
+  pass "reconcile-env runs the STAGED script directly on the host (no nested container)"
 else
   fail "reconcile-env invocation wrong (rc=$REC_RC out=$REC_OUT calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
 fi
@@ -485,7 +499,14 @@ else
   fail "env-reconcile.json not written"
 fi
 stub_reset
-if DOCKER_STUB_RUN_EXIT=1 run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+if REC_STUB_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" >/dev/null 2>&1; then
+  pass "reconcile-env no longer needs --image"
+else
+  fail "reconcile-env refused a call without --image"
+fi
+stub_reset
+if REC_STUB_EXIT=1 run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
     --update-id "$UPDATE_ID" --image "$REC_IMG" >/dev/null 2>&1; then
   fail "reconcile-env must fail when the host script fails"
 else
@@ -574,41 +595,79 @@ else
 fi
 
 # =============================================================================
-# Phase 3 — recreate-self-detached: launch surface + the helper payload's
-# wait-then-rollback behaviour (executed under the fake docker)
+# Phase 3 — recreate-self-detached: launch surface + the host-side
+# supervisor's wait-then-rollback behaviour (executed under the fake docker)
 # =============================================================================
 echo ""
-echo "--- Phase 3: detached self-swap helper ---"
+echo "--- Phase 3: detached self-swap supervisor (host-side, WARP-3007) ---"
+
+# The supervisor runs the helper FROM THE CONFIG TREE (in production
+# <root>/docker/ota/apply-update.sh), and a release rollback restores that
+# tree first. Model it: a copy of the helper under the fixture's config
+# subdir, plus a pre-image whose helper is a recognisable "previous" one.
+SELF_COPY="$FIXTURE/ota/apply-update.sh"
+reset_self_copy() { mkdir -p "$FIXTURE/ota"; cp "$APPLY_SH" "$SELF_COPY"; rm -f "$FIXTURE/restored-marker"; }
+reset_self_copy
+PRE_SRC="$TMP/pre-image-src"
+mkdir -p "$PRE_SRC/fixture/ota" "$UDIR/backup"
+cat > "$PRE_SRC/fixture/ota/apply-update.sh" <<PREVEOF
+#!/usr/bin/env bash
+printf 'previous-helper %s\n' "\$*" >> "$STUB_DIR/calls.log"
+PREVEOF
+touch "$PRE_SRC/fixture/restored-marker"
+tar -czf "$UDIR/backup/configs-pre-image.tar.gz" -C "$PRE_SRC" fixture
 
 stub_reset
-export DOCKER_STUB_PS_CID="orch-cid-123"
-export DOCKER_STUB_MOUNTS="ota-updates|/var/lib/docker/volumes/ota-updates/_data|$UPDATES_DIR"
 if DROPLET_OTA_SELF_HEALTH_ATTEMPTS=3 DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=0 \
+    APPLY_SH_UNDER_TEST="$SELF_COPY" \
     run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
     --update-id "$UPDATE_ID" --target release >/dev/null 2>&1; then
-  pass "recreate-self-detached exits 0 after launching the helper"
+  pass "recreate-self-detached exits 0 after launching the supervisor"
 else
   fail "recreate-self-detached exited non-zero"
 fi
 
 RUN_LINE="$(grep '^run ' "$STUB_DIR/calls.log" 2>/dev/null || true)"
 for want in \
-    "-v /var/run/docker.sock:/var/run/docker.sock" \
-    "-v $COMPOSE_FILE:$COMPOSE_FILE:ro" \
-    "-v ota-updates:$UPDATES_DIR:ro" \
-    "docker:27-cli"; do
+    "--network none" \
+    "--entrypoint chroot" \
+    "-v /:/host" \
+    "-e DROPLET_OTA_UPDATES_DIR=$UPDATES_DIR" \
+    "-e DROPLET_OTA_HOST_IMAGE=$HOST_IMG" \
+    "$HOST_IMG /host /bin/bash $SELF_COPY self-swap-supervise --compose-file $COMPOSE_FILE --update-id $UPDATE_ID --target release"; do
   if [[ "$RUN_LINE" == *"$want"* ]]; then
-    pass "helper launch carries '$want'"
+    pass "supervisor launch carries '$want'"
   else
-    fail "helper launch missing '$want' (got: $RUN_LINE)"
+    fail "supervisor launch missing '$want' (got: $RUN_LINE)"
   fi
 done
+for unwanted in "docker:27-cli" "docker.sock" " sh -c "; do
+  if [[ "$RUN_LINE" == *"$unwanted"* ]]; then
+    fail "supervisor launch still carries '$unwanted' (got: $RUN_LINE)"
+  else
+    pass "supervisor launch no longer carries '$unwanted'"
+  fi
+done
+stub_reset
+if DROPLET_OTA_HOST_IMAGE='' run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --target release >/dev/null 2>&1 \
+   || grep -q '^run ' "$STUB_DIR/calls.log" 2>/dev/null; then
+  fail "recreate-self-detached must refuse to launch without a pinned host image"
+else
+  pass "recreate-self-detached refuses to launch without a pinned host image"
+fi
+stub_reset
+DROPLET_OTA_SELF_HEALTH_ATTEMPTS=3 DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=0 \
+  APPLY_SH_UNDER_TEST="$SELF_COPY" \
+  run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --target release >/dev/null 2>&1
 
 # Rollback forensics (Romain review finding 3): the helper must NOT be
 # launched with --rm (its logs are the only forensic trail if rollback
 # itself fails on an unattended fleet), and a `docker rm -f
 # droplet-ota-self-swap-<id>` collision guard must run BEFORE the launch so
 # a retried apply for the same update id can't hit a name clash.
+RUN_LINE="$(grep '^run ' "$STUB_DIR/calls.log" 2>/dev/null || true)"
 if [[ "$RUN_LINE" == *" --rm "* ]]; then
   fail "helper launch still uses --rm — rollback logs would be destroyed on exit"
 else
@@ -619,7 +678,6 @@ if grep -qF -- "rm -f droplet-ota-self-swap-$UPDATE_ID" "$STUB_DIR/calls.log"; t
 else
   fail "no docker rm -f collision guard before the helper launch"
 fi
-# Ordering: the collision guard must precede the launch.
 GUARD_N="$(grep -n "rm -f droplet-ota-self-swap-$UPDATE_ID" "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
 RUN_N="$(grep -n '^run ' "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
 if [ -n "$GUARD_N" ] && [ -n "$RUN_N" ] && [ "$GUARD_N" -lt "$RUN_N" ]; then
@@ -628,84 +686,109 @@ else
   fail "collision guard did not precede the helper launch (guard=$GUARD_N run=$RUN_N)"
 fi
 
-# Extract the helper's argv: the recorded `docker run …` call.
+# Extract the supervisor's argv + -e env from the recorded `docker run …`.
 HELPER_CALL=""
 for f in "$STUB_DIR"/call-*; do
   mapfile -d '' -t argv < "$f"
   if [ "${argv[0]:-}" = "run" ]; then HELPER_CALL="$f"; fi
 done
 if [ -n "$HELPER_CALL" ]; then
-  pass "helper docker run argv captured"
+  pass "supervisor docker run argv captured"
 else
   fail "no docker run invocation recorded"
 fi
-
 mapfile -d '' -t HELPER_ARGV < "$HELPER_CALL"
-HELPER_PAYLOAD="${HELPER_ARGV[$((${#HELPER_ARGV[@]} - 1))]}"
 HELPER_ENVS=()
+HELPER_CMD=()
 i=0
 while [ "$i" -lt "${#HELPER_ARGV[@]}" ]; do
   if [ "${HELPER_ARGV[$i]}" = "-e" ]; then
     HELPER_ENVS+=("${HELPER_ARGV[$((i + 1))]}")
   fi
+  # Everything after `/host /bin/bash` is what bash runs inside the chroot.
+  if [ "${HELPER_ARGV[$i]}" = "/host" ] && [ "${HELPER_ARGV[$((i + 1))]:-}" = "/bin/bash" ]; then
+    HELPER_CMD=("${HELPER_ARGV[@]:$((i + 2))}")
+    break
+  fi
   i=$((i + 1))
 done
 
-# Run the payload EXACTLY as the helper container would: POSIX sh, the -e
-# environment from the recorded launch, docker resolved via PATH.
-run_helper_payload() {
+# Run the supervisor EXACTLY as the container would (minus the chroot): the
+# recorded command under bash, the recorded -e environment, fake docker.
+run_supervisor() {
   (
     export PATH="$STUB_BIN:$PATH" DOCKER_STUB_DIR="$STUB_DIR"
-    export DOCKER_STUB_PS_CID DOCKER_STUB_MOUNTS DOCKER_STUB_HEALTHY_AFTER
+    export DOCKER_STUB_PS_CID DOCKER_STUB_HEALTHY_AFTER
+    unset DROPLET_OTA_UPDATES_DIR DROPLET_OTA_CONFIG_ROOT
     local kv
     for kv in "${HELPER_ENVS[@]}"; do export "${kv?}"; done
-    sh -c "$HELPER_PAYLOAD"
+    bash "${HELPER_CMD[@]}"
   )
 }
 
 # --- healthy path: swap holds, nothing rolls back ---
 stub_reset
+reset_self_copy
 DOCKER_STUB_PS_CID="new-orch-cid"
 DOCKER_STUB_HEALTHY_AFTER=2
-if run_helper_payload >/dev/null 2>&1; then
-  pass "helper payload exits 0 when the recreated orchestrator goes healthy"
+if run_supervisor >/dev/null 2>&1; then
+  pass "supervisor exits 0 when the recreated orchestrator goes healthy"
 else
-  fail "helper payload exited non-zero on the healthy path"
+  fail "supervisor exited non-zero on the healthy path"
 fi
 if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-release.yml up -d --no-deps --no-build --pull never --force-recreate orchestrator" \
     "$STUB_DIR/calls.log"; then
-  pass "helper recreates the orchestrator pinned to the RELEASE override"
+  pass "supervisor recreates the orchestrator pinned to the RELEASE override"
 else
-  fail "helper did not recreate the orchestrator on the release override"
+  fail "supervisor did not recreate the orchestrator on the release override"
 fi
-if grep -q "override-previous.yml" "$STUB_DIR/calls.log"; then
+if grep -q "override-previous.yml\|previous-helper" "$STUB_DIR/calls.log" || [ -e "$FIXTURE/restored-marker" ]; then
   fail "healthy path must not roll anything back"
 else
-  pass "healthy path rolls nothing back"
+  pass "healthy path rolls nothing back and restores no configs"
 fi
 
-# --- timeout path: bounded wait, then EVERY service back to previous ---
+# --- timeout path: bounded wait, restore configs, then the RESTORED helper
+#     rolls EVERY service back to previous ---
 stub_reset
+reset_self_copy
 DOCKER_STUB_PS_CID="new-orch-cid"
 DOCKER_STUB_HEALTHY_AFTER=999
-if run_helper_payload >/dev/null 2>&1; then
-  pass "helper payload exits 0 after a successful full rollback"
+if run_supervisor >/dev/null 2>&1; then
+  pass "supervisor exits 0 after handing the rollback to the restored helper"
 else
-  fail "helper payload exited non-zero after the rollback path"
+  fail "supervisor exited non-zero after the rollback path"
 fi
 if [ "$(cat "$STUB_DIR/health-calls" 2>/dev/null || echo 0)" = "3" ]; then
-  pass "helper polled the healthcheck exactly DROPLET_OTA_SELF_HEALTH_ATTEMPTS (3) times"
+  pass "supervisor polled the healthcheck exactly DROPLET_OTA_SELF_HEALTH_ATTEMPTS (3) times"
 else
-  fail "helper health poll count != 3 (got $(cat "$STUB_DIR/health-calls" 2>/dev/null || echo 0))"
+  fail "supervisor health poll count != 3 (got $(cat "$STUB_DIR/health-calls" 2>/dev/null || echo 0))"
 fi
-for svc in web-dashboard routing orchestrator; do
-  if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-previous.yml up -d --no-deps --no-build --pull never --force-recreate $svc" \
-      "$STUB_DIR/calls.log"; then
-    pass "timeout rollback recreates $svc on the PREVIOUS override"
-  else
-    fail "timeout rollback missing $svc"
-  fi
-done
+if [ -e "$FIXTURE/restored-marker" ]; then
+  pass "timeout restores the config pre-image before rolling back"
+else
+  fail "timeout did not restore the config pre-image"
+fi
+if grep -qxF -- "previous-helper recreate-services --compose-file $COMPOSE_FILE --update-id $UPDATE_ID --services web-dashboard,routing,orchestrator --target previous" \
+    "$STUB_DIR/calls.log"; then
+  pass "rollback runs the RESTORED (previous release's) helper over every service in services.txt"
+else
+  fail "rollback did not exec the restored helper (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+
+# --- a previous-target swap does NOT restore configs (resume already did) ---
+stub_reset
+reset_self_copy
+HELPER_CMD=("${HELPER_CMD[@]/--target/--target}")
+HELPER_CMD[${#HELPER_CMD[@]}-1]="previous"
+run_supervisor >/dev/null 2>&1
+if [ ! -e "$FIXTURE/restored-marker" ] \
+   && grep -qF -- "-f $UDIR/override-previous.yml up -d --no-deps --no-build --pull never --force-recreate web-dashboard" "$STUB_DIR/calls.log"; then
+  pass "previous-target timeout re-runs the previous recreate without a second restore"
+else
+  fail "previous-target timeout wrong (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+reset_self_copy
 
 # --- launch preconditions: refuse to launch a helper that cannot roll back ---
 stub_reset
@@ -778,12 +861,32 @@ fi
 
 # 5c. Dry-run stays side-effect-free and prints the verify it WOULD run.
 DRY_PULL_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
-  bash "$APPLY_SH" pull-images --images "$REL_ORCH" 2>/dev/null)"
+  DROPLET_COSIGN_BIN=cosign bash "$APPLY_SH" pull-images --images "$REL_ORCH" 2>/dev/null)"
 if printf '%s\n' "$DRY_PULL_OUT" | grep -q "^DRY-RUN: cosign verify" \
    && printf '%s\n' "$DRY_PULL_OUT" | grep -q "^DRY-RUN: docker pull"; then
   pass "dry-run prints verify + pull without executing either"
 else
   fail "dry-run output missing verify/pull commands (got: $DRY_PULL_OUT)"
+fi
+
+# 5d. WARP-3007: on the host there is no cosign — the helper runs the pinned
+#     orchestrator image's vendored cosign in a throwaway container, handing
+#     it the registry auth read-only. No pinned image → refuse, never pull
+#     an unpinned one.
+NESTED_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  DROPLET_OTA_HOST_IMAGE="$HOST_IMG" DROPLET_OTA_GITHUB_TOKEN=tok \
+  bash "$APPLY_SH" pull-images --images "$REL_ORCH" 2>/dev/null)"
+if printf '%s\n' "$NESTED_OUT" | grep -q "^DRY-RUN: docker run --rm --entrypoint /usr/local/bin/cosign -v [^ ]*:/ota-registry-auth:ro -e DOCKER_CONFIG=/ota-registry-auth $HOST_IMG verify " \
+   && printf '%s\n' "$NESTED_OUT" | grep -q "^DRY-RUN: docker pull $REL_ORCH"; then
+  pass "host-side verify runs the pinned image's cosign (auth mounted read-only), then pulls"
+else
+  fail "host-side cosign invocation wrong (got: $NESTED_OUT)"
+fi
+if DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+    bash "$APPLY_SH" pull-images --images "$REL_ORCH" >/dev/null 2>&1; then
+  fail "pull-images must refuse when neither cosign nor a pinned host image is available"
+else
+  pass "pull-images refuses without a pinned host image to run cosign from"
 fi
 
 # =============================================================================

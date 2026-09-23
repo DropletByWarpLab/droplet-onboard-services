@@ -380,26 +380,19 @@ services:
       # eval profile" banner. Setting the URL unconditionally is correct;
       # the route detects the connection failure at request time.
       - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
-      # WARP-539 — OTA apply over the host compose socket. APPLY_SCRIPT points
-      # at the helper bind-mounted below; empty DISABLES the apply window (the
-      # box still polls + tracks pending releases).
-      # UPDATES_DIR is the in-container mount of the ota-updates volume.
+      # WARP-539 / WARP-3007 — OTA apply. APPLY_SCRIPT is the ENABLE flag:
+      # empty DISABLES the apply window (the box still polls + tracks pending
+      # releases); any value enables it. The helper that runs is ALWAYS the
+      # release-shipped <CONFIG_ROOT>/docker/ota/apply-update.sh, executed ON
+      # THE HOST in a one-shot `chroot /host` container the orchestrator
+      # creates over the socket below (host-exec.ts) — this image has no
+      # docker CLI, and compose run in here could not read the host .env.
+      # Convention: set it to that host path.
       #
-      # WARP-1669 — COMPOSE_FILE must resolve to the SAME absolute path on the
-      # host AND inside this container, which is why it derives from
-      # DROPLET_HOST_ROOT (setup.sh writes the repo's absolute host path into
-      # docker/.env) instead of being hardcoded. Both halves need it:
-      #   * the compose CLI runs INSIDE this container and reads the file
-      #     locally, so the path has to exist here;
-      #   * the relative bind mounts in that file (./certs,
-      #     ../data/secrets/…) are resolved by the CLI against the compose
-      #     file's directory and then handed to the HOST daemon, which
-      #     resolves them on the host.
-      # Mount the tree anywhere else and compose asks the daemon for host
-      # paths that don't exist — Docker creates them as empty directories and
-      # the stack comes back up with no certs and no secrets.
-      # CONFIG_ROOT is the repo root because CI packs configs as `docker/…`
-      # (publish-release.yml: `git archive HEAD docker`).
+      # COMPOSE_FILE and CONFIG_ROOT are HOST paths (DROPLET_HOST_ROOT, which
+      # setup.sh writes into docker/.env). UPDATES_DIR is this container's
+      # mount of the ota-updates volume; the host path behind it is resolved
+      # at boot from this container's own mounts.
       - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-${DROPLET_HOST_ROOT:-/opt/droplet}/docker/docker-compose.yml}
       - DROPLET_OTA_CONFIG_ROOT=${DROPLET_OTA_CONFIG_ROOT:-${DROPLET_HOST_ROOT:-/opt/droplet}}
@@ -416,26 +409,9 @@ services:
       # trust to the internal CA from the /data/service-tls bundle below.
       - REDIS_URL=rediss://orchestrator:${REDIS_PASSWORD_ORCHESTRATOR:-}@cache:6380
     volumes:
-      # WARP-539: the OTA apply host helper, bind-mounted read-only so the
-      # orchestrator can exec it against the docker socket below. Its container
-      # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
-      # orchestrator only ever execs it, never rewrites it.
-      - ../scripts/lib/apply-update.sh:${DROPLET_HOST_ROOT:-/opt/droplet}/scripts/lib/apply-update.sh:ro
-      # WARP-1669: the config tree the helper drives — THIS compose file plus
-      # everything a release's configs.tar.gz replaces — mounted at its own
-      # host path (see DROPLET_OTA_COMPOSE_FILE above for why the paths must
-      # be identical). Without it, `docker compose -f "$COMPOSE_FILE"` and
-      # every `tar -C "$(config_root)"` inside the helper fail on a path that
-      # exists only on the host: snapshot, stage-configs and restore-configs
-      # were all unrunnable on a real box.
-      #
-      # Read-WRITE, and deliberately scoped to `docker/` alone: stage-configs
-      # untars a release's configs over it and restore-configs rolls it back,
-      # so it cannot be :ro — but mounting the repo ROOT would hand this
-      # container data/secrets/internal-ca/ca.key and let it mint any
-      # service's TLS identity, which the single-file audit.key / doc-kek.key
-      # binds below exist specifically to avoid.
-      - ../docker:${DROPLET_HOST_ROOT:-/opt/droplet}/docker:rw
+      # WARP-3007: no apply-update.sh bind mount and no rw docker/ mount any
+      # more. The helper runs on the host and edits the host tree there; this
+      # container never needs to see (let alone write) docker/.
       # Client-app installers (Windows/Android/iOS) the box hands to a
       # browser at /downloads. NOT delivered by the image: the installers
       # are git-ignored and the box clones this repo, so an operator puts
@@ -459,7 +435,7 @@ services:
       # overwritten or deleted outright, letting a compromised orchestrator
       # report `off` while sshd is live, during exactly the incident this
       # feature exists to support. `:ro` is what makes the readback honest;
-      # same pattern as apply-update.sh and service-tls above.
+      # same pattern as service-tls above.
       - /var/lib/droplet-ssh-access:/var/lib/droplet-ssh-access:ro
       # ...and the writable half, scoped to the one file the container is
       # supposed to write. Nested under the read-only mount above (Docker
@@ -557,11 +533,14 @@ services:
       # deliberate, fenced basis:
       #   * this is the ONLY service in the whole compose file that mounts it —
       #     no sidecar, no gateway, no ai-gateway ever gets the socket;
-      #   * NOTHING in the codebase talks to the socket directly. Every daemon
-      #     op funnels through host-compose-runner.ts → the single audited host
-      #     helper scripts/lib/apply-update.sh, whose surface is a FIXED set of
-      #     subcommands invoked with an argv array (never a shell string), not
-      #     an arbitrary `docker` passthrough;
+      #   * exactly ONE module talks to the socket: host-exec.ts, and only to
+      #     create/start/wait/log/remove the one-shot below. Every daemon op
+      #     funnels through host-compose-runner.ts → the single audited host
+      #     helper docker/ota/apply-update.sh (run ON THE HOST in a one-shot,
+      #     no-network `chroot /host` container off this image, pinned by ID —
+      #     WARP-3007), whose surface is a FIXED set of subcommands invoked
+      #     with an argv array (never a shell string), not an arbitrary
+      #     `docker` passthrough;
       #   * only a cosign-VERIFIED (WARP-537) release whose configs.tar.gz
       #     sha256 matches the signed manifest (apply.ts) ever reaches the
       #     runner — the crypto verify chain is the gate in front of the socket.

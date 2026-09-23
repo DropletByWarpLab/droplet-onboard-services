@@ -26,7 +26,7 @@
  *   4. `prisma migrate deploy` — gated on minOrchestratorSchema (the
  *      parse gate refuses `orchestrator_schema_unsupported` outright);
  *   5. recreate every manifest service EXCEPT the orchestrator via the
- *      scripts/lib/apply-update.sh helper over the host compose socket;
+ *      docker/ota/apply-update.sh helper over the host compose socket;
  *   6. health-gate them (the /health(z) probes from WARP-535, carried in
  *      each manifest service's `healthcheck` entry);
  *   7. swap the orchestrator itself LAST through a DETACHED helper
@@ -134,7 +134,7 @@ export interface EnvReconcileReport {
 /**
  * Port to the compose-over-socket mechanics (production:
  * host-compose-runner.ts → detached helper containers running
- * scripts/lib/apply-update.sh; tests: an in-memory fake honoring the
+ * docker/ota/apply-update.sh; tests: an in-memory fake honoring the
  * same contract). apply.ts owns the state machine, the runner owns the
  * Docker surface — nothing in this module touches the socket directly.
  */
@@ -276,6 +276,14 @@ export interface ApplyUpdateOptions {
    * (index.ts wires the notification fan-out). Absent → log only.
    */
   notifyOwners?: (title: string, body: string) => Promise<void>;
+  /**
+   * WARP-3017 — resolves once THIS process's HTTP server is listening
+   * (index.ts resolves it in the `server.listen` callback). The resume gates
+   * include the orchestrator itself, so they wait for it — bounded by the
+   * gate's own attempts × interval — and never probe this process before it
+   * can answer. Absent → treated as already listening (tests, apply-now).
+   */
+  whenListening?: Promise<void>;
 }
 
 export type ApplyUpdateResult =
@@ -493,6 +501,42 @@ export function servicesStartFailedBody(services: string[]): string {
     "did not start, so the features that use it are unavailable for now. " +
     "Contact support if this doesn't clear up."
   );
+}
+
+/**
+ * WARP-3017 — bounded wait for this process to listen before a resume gate
+ * that includes it. False = it never listened within attempts × interval,
+ * which the caller treats as the orchestrator being unhealthy.
+ */
+async function waitUntilListening(
+  whenListening: Promise<void> | undefined,
+  gate: { attempts: number; intervalMs: number },
+  log: pino.Logger,
+  deviceUpdateId: string,
+): Promise<boolean> {
+  if (!whenListening) return true;
+  const boundMs = gate.attempts * gate.intervalMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const listened = await Promise.race([
+    whenListening.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), boundMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!listened) {
+    log.warn(
+      {
+        event: "update.health_gate_failed",
+        deviceUpdateId,
+        phase: "listen",
+        unhealthyService: SELF_SERVICE_NAME,
+        durationMs: boundMs,
+      },
+      "OTA resume — this orchestrator never started listening within the gate bound",
+    );
+  }
+  return listened;
 }
 
 /** recreateServices + the WARP-541 per-batch progress event. */
@@ -915,6 +959,8 @@ export async function applyPendingUpdate(
 /**
  * onStart hook (index.ts, right after the update-agent settings load):
  * resume whatever the previous orchestrator process left in flight.
+ * WARP-3017: index.ts does NOT await this before `server.listen` — the gates
+ * here probe this process, so they wait on `opts.whenListening` instead.
  */
 export async function resumeInterruptedApply(
   opts: ApplyUpdateOptions,
@@ -958,13 +1004,19 @@ export async function resumeInterruptedApply(
       "OTA resume found an in-flight applying row — health-gating the running state",
     );
 
+    // WARP-3017 — every gate below includes this very process, so wait
+    // (bounded) until it listens; never probe it before `listen`.
+    const listening = await waitUntilListening(opts.whenListening, gate, log, applying.id);
+
     if (runningTarget) {
       // We ARE the new orchestrator — final gate over ALL services
       // (sidecars were gated pre-swap; this re-checks them plus self).
-      const unhealthy = await runHealthGate(deployed, probe, gate, log, {
-        deviceUpdateId: applying.id,
-        phase: "post_swap",
-      });
+      const unhealthy = listening
+        ? await runHealthGate(deployed, probe, gate, log, {
+            deviceUpdateId: applying.id,
+            phase: "post_swap",
+          })
+        : SELF_SERVICE_NAME;
       if (unhealthy === null) {
         await setStatus(prisma, log, applying.id, "committed", null);
         log.info(
@@ -1008,10 +1060,12 @@ export async function resumeInterruptedApply(
     // Running the OLD image with an `applying` row → the detached helper
     // rolled the swap back (or it never landed). Gate the previous state
     // and write the verdict.
-    const unhealthy = await runHealthGate(deployed, probe, gate, log, {
-      deviceUpdateId: applying.id,
-      phase: "rollback",
-    });
+    const unhealthy = listening
+      ? await runHealthGate(deployed, probe, gate, log, {
+          deviceUpdateId: applying.id,
+          phase: "rollback",
+        })
+      : SELF_SERVICE_NAME;
     if (unhealthy !== null) {
       await setStatus(prisma, log, applying.id, "failed", "degraded_health");
       log.error(

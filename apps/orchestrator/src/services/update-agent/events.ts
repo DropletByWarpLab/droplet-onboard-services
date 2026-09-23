@@ -105,7 +105,7 @@ export const UPDATE_EVENTS = {
   "update.settings_changed": "settings",
 
   // ── host helper boundary (host-compose-runner.ts) ──
-  /** error — scripts/lib/apply-update.sh exited non-zero. */
+  /** error — docker/ota/apply-update.sh exited non-zero. */
   "update.host_script_failed": "host-compose-runner",
 
   // ── retention GC (purge-update-backups.ts / purge-self-swap-helpers.ts) ──
