@@ -25,6 +25,20 @@
 /apps/orchestrator/src/services/extension-manifest.ts           @rjouffret
 /apps/orchestrator/src/routes/extensions.ts                     @rjouffret
 /docs/schemas/extension-manifest.schema.json                    @rjouffret
+# Every extension-* source and test beside them (manifest, promotion,
+# cross-protocol, schema drift).
+/apps/orchestrator/src/services/extension-*                     @rjouffret
+/apps/orchestrator/src/services/device-identity.client.test.ts  @rjouffret
+
+# The tests that pin the above. Editing one (e.g. adding a second signer to
+# the guard's allowlist, or an RPC to the pinned proto set) is a change to
+# what the box will sign, so it carries the same review.
+/apps/orchestrator/src/__tests__/extension-signer.guard.test.ts       @rjouffret
+/apps/orchestrator/src/__tests__/device-identity-proto.snapshot.test.ts @rjouffret
+/apps/orchestrator/src/__tests__/env-preflight.ts                     @rjouffret
+
+# The custody contract for both keys.
+/docs/security/device-identity.md                               @rjouffret
 
 # This file.
 /.github/CODEOWNERS                                             @rjouffret
