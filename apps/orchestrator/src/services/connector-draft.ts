@@ -45,6 +45,16 @@ const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
+/**
+ * The display name on one line: whitespace, control and invisible format
+ * characters (zero-width, bidi overrides) collapse to one space. The sandbox
+ * (connector_draft.py) does the same; this holds it for the three surfaces
+ * that carry the name verbatim — the activity `sub`, the notification and the
+ * tool message (rjouffret on #2324).
+ */
+const NOT_ONE_LINE_RE = /[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g;
+const oneLine = (s: string): string => s.replace(NOT_ONE_LINE_RE, " ").trim();
+
 function parseHost(raw: unknown): ConnectorDraftHost | null {
   if (!isObj(raw)) return null;
   if (raw.kind === "static") return { kind: "static", hosts: strings(raw.hosts) };
@@ -69,7 +79,7 @@ export function parseConnectorDraftFacts(raw: unknown): ConnectorDraftFacts | nu
   }
   return {
     provider: raw.provider,
-    displayName: str(raw.displayName),
+    displayName: oneLine(str(raw.displayName)),
     host: parseHost(raw.host),
     files,
     problems: strings(raw.problems),

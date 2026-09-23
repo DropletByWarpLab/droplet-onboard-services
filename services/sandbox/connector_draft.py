@@ -58,6 +58,10 @@ SUFFIX_RE = re.compile(r"^\.[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z0-9-]*[a-z][a-z0-9-
 MAX_HOST = 253
 # The readback carries the name verbatim on three surfaces; bound it.
 MAX_DISPLAY_NAME = 80
+# ...and keep it on one line: whitespace, control and invisible format
+# characters (zero-width, bidi overrides) collapse to one space, as cell()
+# collapses a table cell's newlines.
+_NOT_ONE_LINE_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+")
 
 # renderAdr042's three tables: the header each starts with, and how its one
 # data row names the vendor.
@@ -234,8 +238,11 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
     provider = draft.get("provider")
     display = draft.get("displayName")
     display = display.strip() if isinstance(display, str) else ""
-    # The readback's copy is bounded; the rows check below reads the full name.
-    facts["displayName"] = display if len(display) <= MAX_DISPLAY_NAME else display[: MAX_DISPLAY_NAME - 1] + "…"
+    # The readback's copy is one line and bounded; the rows check below reads
+    # the full name (rjouffret on #2324: a newline reached the activity sub,
+    # the notification and the tool message).
+    shown = _NOT_ONE_LINE_RE.sub(" ", display).strip()
+    facts["displayName"] = shown if len(shown) <= MAX_DISPLAY_NAME else shown[: MAX_DISPLAY_NAME - 1] + "…"
     host = _host(draft.get("baseUrl"), problems)
     facts["host"] = host
     if not isinstance(provider, str) or not PROVIDER_RE.fullmatch(provider):

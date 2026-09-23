@@ -97,6 +97,18 @@ describe("parseConnectorDraftFacts", () => {
     expect(parseConnectorDraftFacts({ provider: "", displayName: "", host: { kind: "weird" }, problems: [] })?.host).toBeNull();
   });
 
+  it("keeps the display name on one line, whatever the sandbox sends (rjouffret on #2324)", () => {
+    // A newline, a tab, a bell, a bidi override and a zero-width space would
+    // otherwise reach the activity sub, the notification and the tool
+    // message verbatim. MUTATION: return str(raw.displayName) as is → red.
+    const odd = "  Globex\r\n" + String.fromCharCode(0x202e) + "CRM\t" + String.fromCharCode(7) + "Inc" + String.fromCharCode(0x200b) + " ";
+    const parsed = parseConnectorDraftFacts({ provider: "globex", displayName: odd, host: null, problems: [] });
+    expect(parsed?.displayName).toBe("Globex CRM Inc");
+    expect(connectorDraftReadback(parsed!)).toBe(
+      "drafts a connector for Globex CRM Inc; nothing on this box will dial the vendor until Warp Lab ships it",
+    );
+  });
+
   it("summarizes for the detail response", () => {
     expect(summarizeConnectorDraft({ ...base, problems: ["p"] })).toEqual({
       provider: "acme",

@@ -289,6 +289,14 @@ def test_the_readback_only_ever_names_a_domain_and_a_bounded_name():
     assert sum("is not a domain" in p for p in facts["problems"]) == 4
     assert len(facts["displayName"]) <= connector_draft.MAX_DISPLAY_NAME
 
+    # One line, too (rjouffret on #2324): a newline, a tab, a bell and a bidi
+    # override in the name reached the activity sub, the notification and
+    # the tool message. MUTATION: skip the collapse → red.
+    dyn = _dynamic_draft()
+    dyn["displayName"] = "  Globex\r\n\u202eCRM\t\x07Inc\u200b "
+    facts = connector_draft.describe_tree(lambda p: json.dumps(dyn) if p == "connector-draft.json" else None)
+    assert facts["displayName"] == "Globex CRM Inc"
+
     static = _static_draft()
     static["baseUrl"]["origin"] = "https://127.0.0.1"
     facts = connector_draft.describe_tree(lambda p: json.dumps(static) if p == "connector-draft.json" else None)
