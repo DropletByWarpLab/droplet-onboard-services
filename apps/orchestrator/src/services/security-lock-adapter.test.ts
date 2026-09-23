@@ -305,6 +305,15 @@ describe("lockRowDraft", () => {
     expect(lockDisplayName({ nodeId: "123456789", friendlyName: "  ", name: "" })).toBe("Lock …6789");
     expect(lockDisplayName({ nodeId: NODE, friendlyName: "Back\ndoor\u0007 lock" })).toBe("Back door lock");
   });
+
+  it("name: cut by code point, never leaving half an emoji; a lone surrogate becomes U+FFFD", () => {
+    const long = `${"a".repeat(79)}\u{1F512}tail`; // the emoji straddles UTF-16 units 80 and 81
+    const cut = lockDisplayName({ nodeId: NODE, friendlyName: long });
+    expect(cut).toBe(`${"a".repeat(79)}\u{1F512}`);
+    expect(cut).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(lockDisplayName({ nodeId: NODE, friendlyName: "Gate \uD83D" })).toBe("Gate \uFFFD");
+    expect(lockDisplayName({ nodeId: NODE, friendlyName: "\uDD12 Gate" })).toBe("\uFFFD Gate");
+  });
 });
 
 // ── the tracker ──────────────────────────────────────────────────────────
@@ -478,10 +487,22 @@ describe("createLockTracker — transitions only, memory moves only with the sto
     await tracker.observe(obs("unlocked"), "live");
     expect(tracker.writeHealth().lastWriteError?.at).toEqual(new Date(T0));
     expect(tracker.writeHealth().lastRecordedAt).toBeNull();
+    expect(tracker.writeHealth().unsaved).toBe(1);
     c.advance(1000);
     await tracker.observe(obs("unlocked"), "live");
     expect(tracker.writeHealth().lastRecordedAt).toEqual(new Date(T0 + 1000));
     expect(tracker.writeHealth().lastLiveFrameAt).toEqual(new Date(T0 + 1000));
+    expect(tracker.writeHealth().unsaved).toBe(0);
+  });
+
+  it("unsaved counts keys, not failures: two failures on one lock are one pending change", async () => {
+    seed(store, "locked", "7");
+    store.write.mockResolvedValueOnce("failed").mockResolvedValueOnce("failed");
+    await tracker.observe(obs("unlocked"), "live");
+    await tracker.observe(obs("unlocked"), "live");
+    expect(tracker.writeHealth().unsaved).toBe(1);
+    await tracker.observe(obs("locked", "99", 1), "live"); // another lock saves: this one is still pending
+    expect(tracker.writeHealth().unsaved).toBe(1);
   });
 });
 
@@ -548,11 +569,12 @@ describe("lockFrameSubscriber — can never throw into the bridge", () => {
 
 describe("sweep — finds what the live stream missed", () => {
   it("writes a polled row for a changed lock, named from the list", async () => {
-    const { adapter, store, c } = adapterWith({});
+    const { adapter, store, c, logger } = adapterWith({});
     seed(store, "locked", "7");
     c.advance(5000);
     const r = await adapter.sweep();
     expect(r).toMatchObject({ status: "ok", locks: 1, observed: 1, recorded: 1 });
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ recorded: 1 }), "security lock sweep");
     expect(store.rows.at(-1)?.draft).toMatchObject({
       observed: "polled",
       dedupeKey: `matter_lock:${NODE}/1:after:7:unlocked`,
@@ -750,8 +772,8 @@ function healthInput(over: Partial<LockHealthInput> = {}): LockHealthInput {
     lastSweepError: null,
     consecutiveSweepFailures: 0,
     lastSweepLockCount: 1,
-    knownLocks: [{ name: "Back door lock", connected: true }],
-    write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null },
+    knownLocks: [{ nodeId: NODE, name: "Back door lock", connected: true }],
+    write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null, unsaved: 0 },
     ...over,
   };
 }
@@ -821,8 +843,8 @@ describe("lockHealthRow", () => {
         healthInput({
           lastSweepLockCount: 2,
           knownLocks: [
-            { name: "A", connected: true },
-            { name: "B", connected: true },
+            { nodeId: "1", name: "A", connected: true },
+            { nodeId: "2", name: "B", connected: true },
           ],
         }),
       ),
@@ -830,7 +852,7 @@ describe("lockHealthRow", () => {
   });
 
   it("a known lock that is disconnected → down '<name> isn't reporting'", () => {
-    expect(lockHealthRow(healthInput({ knownLocks: [{ name: "Back door lock", connected: false }] }))).toMatchObject({
+    expect(lockHealthRow(healthInput({ knownLocks: [{ nodeId: NODE, name: "Back door lock", connected: false }] }))).toMatchObject({
       state: "down",
       detail: "Back door lock isn't reporting",
     });
@@ -839,29 +861,49 @@ describe("lockHealthRow", () => {
         healthInput({
           lastSweepLockCount: 3,
           knownLocks: [
-            { name: "Back door lock", connected: false },
-            { name: "Front door lock", connected: false },
-            { name: "Gate", connected: true },
+            { nodeId: "1", name: "Back door lock", connected: false },
+            { nodeId: "2", name: "Front door lock", connected: false },
+            { nodeId: "3", name: "Gate", connected: true },
           ],
         }),
       ).detail,
     ).toBe("Back door lock and 1 other lock aren't reporting");
   });
 
-  it("changes arriving but not saved → down; a later save clears it", () => {
-    const failing = { lastRecordedAt: new Date(T0), lastWriteError: { at: new Date(T0 + 1), message: "x" }, lastLiveFrameAt: null };
+  it("a disconnected device with two DoorLock endpoints is ONE device not reporting", () => {
+    expect(
+      lockHealthRow(
+        healthInput({
+          lastSweepLockCount: 2,
+          knownLocks: [
+            { nodeId: NODE, name: "Double door", connected: false },
+            { nodeId: NODE, name: "Double door", connected: false },
+          ],
+        }),
+      ).detail,
+    ).toBe("Double door isn't reporting");
+  });
+
+  it("a lock change not saved yet → down; settled → ok, whatever the timestamps say", () => {
+    const failing = {
+      lastRecordedAt: new Date(T0 + 5),
+      lastWriteError: { at: new Date(T0 + 1), message: "x" },
+      lastLiveFrameAt: null,
+      unsaved: 1,
+    };
     expect(lockHealthRow(healthInput({ write: failing }))).toMatchObject({
       state: "down",
       detail: "Lock changes are arriving but could not be saved",
     });
-    expect(lockHealthRow(healthInput({ write: { ...failing, lastRecordedAt: new Date(T0 + 2) } })).state).toBe("ok");
+    // An old error with nothing pending is history, not a fault.
+    expect(lockHealthRow(healthInput({ write: { ...failing, lastRecordedAt: null, unsaved: 0 } })).state).toBe("ok");
   });
 
   it("lastSeenAt is the later of the last good list and the last live frame", () => {
     expect(lockHealthRow(healthInput()).lastSeenAt).toBe(new Date(T0).toISOString());
     expect(
       lockHealthRow(
-        healthInput({ write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: new Date(T0 + 9000) } }),
+        healthInput({ write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: new Date(T0 + 9000), unsaved: 0 } }),
       ).lastSeenAt,
     ).toBe(new Date(T0 + 9000).toISOString());
     expect(lockHealthRow(healthInput({ lastSweepOkAt: null, bridgeUp: false })).lastSeenAt).toBeNull();
@@ -872,10 +914,23 @@ describe("lockHealthRow", () => {
       lockHealthRow(healthInput({ started: false })),
       lockHealthRow(healthInput({ lastSweepOkAt: null })),
       lockHealthRow(healthInput({ bridgeUp: false })),
-      lockHealthRow(healthInput({ knownLocks: [{ name: "L", connected: false }] })),
+      lockHealthRow(healthInput({ knownLocks: [{ nodeId: "1", name: "L", connected: false }] })),
+      lockHealthRow(
+        healthInput({
+          knownLocks: [
+            { nodeId: "1", name: "L", connected: false },
+            { nodeId: "2", name: "M", connected: false },
+            { nodeId: "3", name: "N", connected: false },
+          ],
+        }),
+      ),
+      lockHealthRow(healthInput({ write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null, unsaved: 1 } })),
       lockHealthRow(healthInput({ lastSweepLockCount: 0, knownLocks: [] })),
+      lockHealthRow(healthInput({ lastSweepLockCount: 2 })),
       lockHealthRow(healthInput()),
     ].map((r) => r.detail);
+    // Every state's copy is in the list above, once.
+    expect(new Set(details).size).toBe(details.length);
     const summaries = LOCK_READINGS.flatMap((reading) =>
       (["live", "polled"] as const).map(
         (via) => lockRowDraft({ obs: obs(reading), prevId: null, name: "L", via, at: new Date(T0) }).summary,
@@ -915,6 +970,75 @@ describe("the adapter's health, end to end", () => {
     devices.push(lockDevice());
     await adapter.sweep();
     expect(adapter.health()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+  });
+
+  it("a store blip that recovers WITHOUT a write clears the save failure — a still lock must not read down for days", async () => {
+    const { adapter, store, c } = adapterWith({});
+    seed(store, "unlocked", "7"); // the list says unlocked too: nothing will ever need writing
+    adapter.start();
+    adapter.noteSweepScheduled();
+    store.lastReading.mockRejectedValueOnce(new Error("db restarting"));
+    await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", failed: 1 });
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Lock changes are arriving but could not be saved" });
+
+    c.advance(60_000);
+    await expect(adapter.sweep()).resolves.toMatchObject({ status: "ok", failed: 0, recorded: 0 });
+    expect(store.write).not.toHaveBeenCalled();
+    expect(adapter.health()).toMatchObject({ state: "ok", detail: "Listening to 1 lock" });
+  });
+
+  it("a failed write is cleared when the lock goes back to what the store already says", async () => {
+    const { adapter, store, c, emitter } = adapterWith({});
+    seed(store, "locked", "7");
+    adapter.start();
+    adapter.noteSweepScheduled();
+    await adapter.sweep(); // unlocked → recorded after 7
+    c.advance(1000);
+    store.write.mockResolvedValueOnce("failed");
+    emitter.emit("state_changed", frame(1)); // locked: the write fails
+    await flush();
+    expect(adapter.health().state).toBe("down");
+    c.advance(1000);
+    emitter.emit("state_changed", frame(2)); // back to unlocked, which the store holds: nothing unsaved
+    await flush();
+    expect(adapter.health()).toMatchObject({ state: "ok" });
+  });
+
+  it("one lock's recovery does not hide another lock's unsaved change", async () => {
+    const { adapter, store, c, emitter } = adapterWith({
+      source: staticSource([
+        lockDevice(),
+        lockDevice({ nodeId: "99", friendlyName: "Gate", attributes: { lockState: 1 } }),
+      ]),
+    });
+    adapter.start();
+    adapter.noteSweepScheduled();
+    await adapter.sweep(); // two baselines
+    c.advance(1000);
+    store.write.mockResolvedValueOnce("failed");
+    emitter.emit("state_changed", frame(1)); // 4660 locked: fails
+    await flush();
+    c.advance(1000);
+    emitter.emit("state_changed", frame(2, { nodeId: "99" })); // Gate unlocked: saved, later
+    await flush();
+    expect(store.rows.at(-1)?.draft.sourceRef).toBe("matter:99/1");
+    expect(adapter.health()).toMatchObject({ state: "down", detail: "Lock changes are arriving but could not be saved" });
+  });
+
+  it("a decommissioned lock's unsaved change stops counting once a successful list drops it", async () => {
+    const devices = [lockDevice()];
+    const { adapter, store, c, emitter } = adapterWith({ source: staticSource(() => Promise.resolve(devices)) });
+    adapter.start();
+    adapter.noteSweepScheduled();
+    await adapter.sweep();
+    c.advance(1000);
+    store.write.mockResolvedValueOnce("failed");
+    emitter.emit("state_changed", frame(1));
+    await flush();
+    expect(adapter.health().state).toBe("down");
+    devices.length = 0;
+    await adapter.sweep();
+    expect(adapter.health()).toMatchObject({ state: "not_configured", detail: "No door locks paired" });
   });
 
   it("a source whose bridgeUp throws reads as unreachable", async () => {

@@ -40,6 +40,9 @@
  *     EventEmitter callback would tear down the SSE bridge for every consumer.
  *   · Health never reads `not_configured` on a smart-home service that has
  *     never answered: "no locks" is only ever what a SUCCESSFUL list said.
+ *   · "Could not be saved" is per lock: down while some lock's latest store
+ *     round-trip failed and is unsettled, never on an old error alone (locks
+ *     sit still for days) and never cleared by ANOTHER lock's save.
  *   · Copy never says monitored, armed, alarm, secure, protected, guard or
  *     space; rows never claim a cause (no "someone unlocked").
  *   · Canary (WARP-2203): no `next…` / `…Cursor` keys in this file.
@@ -228,10 +231,21 @@ const READING_TEXT: Record<LockReading, string> = {
   unknown: "state unknown",
 };
 
+/** A UTF-16 surrogate without its partner: not encodable as UTF-8, so not storable text. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 function cleanName(v: unknown): string {
   if (typeof v !== "string") return "";
-  // eslint-disable-next-line no-control-regex
-  return v.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, NAME_MAX);
+  const flat = v
+    .replace(LONE_SURROGATE, "\uFFFD")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Cut by code point: a UTF-16 slice can split an emoji and leave a lone
+  // surrogate in the summary, and a summary the store cannot take would fail
+  // every write for that lock.
+  return Array.from(flat).slice(0, NAME_MAX).join("").trim();
 }
 
 export function fallbackLockName(nodeId: string): string {
@@ -284,6 +298,15 @@ export interface LockWriteHealth {
   lastRecordedAt: Date | null;
   lastWriteError: { at: Date; message: string } | null;
   lastLiveFrameAt: Date | null;
+  /**
+   * Keys whose LATEST store round-trip failed (history read or write) and has
+   * not since been settled — by a save, by the store turning out to hold the
+   * reading already, or by the node leaving the list. Health keys on this,
+   * not on "last error newer than last save": a lock can sit still for days,
+   * so a recovered blip that needs no write would otherwise read down until
+   * the next change, and one lock's save would hide another lock's failure.
+   */
+  unsaved: number;
 }
 
 export interface LockTracker {
@@ -325,7 +348,9 @@ export function createLockTracker(deps: {
   /** What the device last said per key — for display (knownLocks), never for transitions. */
   const heard = new Map<string, LockReading>();
   const chains = new Map<string, Promise<void>>();
-  const health: LockWriteHealth = { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null };
+  /** Keys whose latest store round-trip failed and is not settled yet (see LockWriteHealth.unsaved). */
+  const unsaved = new Set<string>();
+  const health: Omit<LockWriteHealth, "unsaved"> = { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null };
 
   function enqueue<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prior = chains.get(key) ?? Promise.resolve();
@@ -340,6 +365,7 @@ export function createLockTracker(deps: {
   }
 
   function noteFailure(err: unknown, obs: LockObservation, what: string): void {
+    unsaved.add(obs.ref);
     health.lastWriteError = { at: now(), message: errMessage(err) };
     log.warn({ err, ref: obs.ref, reading: obs.reading }, `security lock ${what} failed — kept the previous reading, will retry`);
   }
@@ -372,7 +398,11 @@ export function createLockTracker(deps: {
       known = stored ? { id: stored.id, reading: stored.reading } : { id: null, reading: null };
       persisted.set(obs.ref, known);
     }
-    if (known.reading === obs.reading) return "unchanged";
+    if (known.reading === obs.reading) {
+      // The store already holds what the device says: nothing is pending.
+      unsaved.delete(obs.ref);
+      return "unchanged";
+    }
 
     const draft = lockRowDraft({ obs, prevId: known.id, name: nameOf(obs), via, at: receivedAt });
     let outcome: LockWriteOutcome;
@@ -387,6 +417,7 @@ export function createLockTracker(deps: {
       return "failed";
     }
     health.lastRecordedAt = now();
+    unsaved.delete(obs.ref);
 
     let id: string | null = null;
     try {
@@ -427,13 +458,14 @@ export function createLockTracker(deps: {
           enqueue(ref, async () => {
             persisted.delete(ref);
             heard.delete(ref);
+            unsaved.delete(ref);
           }),
         );
       }
       return Promise.all(drops).then(() => drops.length);
     },
     lastHeard: (ref) => heard.get(ref) ?? null,
-    writeHealth: () => health,
+    writeHealth: () => ({ ...health, unsaved: unsaved.size }),
   };
 }
 
@@ -557,7 +589,7 @@ export interface LockHealthInput extends LockSweepState {
   started: boolean;
   sweepScheduled: boolean;
   bridgeUp: boolean;
-  knownLocks: ReadonlyArray<Pick<KnownLock, "name" | "connected">>;
+  knownLocks: ReadonlyArray<Pick<KnownLock, "nodeId" | "name" | "connected">>;
   write: Readonly<LockWriteHealth>;
 }
 
@@ -586,11 +618,17 @@ export function lockHealthRow(input: LockHealthInput): LockHealth {
   ) {
     return row("down", "Can't reach the smart-home service");
   }
-  const w = input.write;
-  if (w.lastWriteError && (!w.lastRecordedAt || w.lastWriteError.at > w.lastRecordedAt)) {
+  if (input.write.unsaved > 0) {
     return row("down", "Lock changes are arriving but could not be saved");
   }
-  const silent = input.knownLocks.filter((l) => !l.connected);
+  // Connection is per NODE: a device with two DoorLock endpoints that drops
+  // off is one device not reporting, not "X and 1 other lock".
+  const silentNodes = new Set<string>();
+  const silent = input.knownLocks.filter((l) => {
+    if (l.connected || silentNodes.has(l.nodeId)) return false;
+    silentNodes.add(l.nodeId);
+    return true;
+  });
   if (silent.length === 1) return row("down", `${silent[0].name} isn't reporting`);
   if (silent.length > 1) {
     const others = silent.length - 1;
@@ -735,8 +773,8 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
     state.consecutiveSweepFailures = 0;
     state.lastSweepLockCount = known.length;
     const count = (o: LockObserveOutcome) => outcomes.filter((x) => x === o).length;
-    return {
-      status: "ok",
+    const result = {
+      status: "ok" as const,
       locks: known.length,
       observed: outcomes.length,
       recorded: count("recorded"),
@@ -744,6 +782,8 @@ export function createSecurityLockAdapter(deps: SecurityLockAdapterDeps): Securi
       superseded: count("superseded"),
       dropped,
     };
+    if (result.recorded > 0 || result.dropped > 0) log.info(result, "security lock sweep");
+    return result;
   }
 
   const adapter: SecurityLockAdapter = {
@@ -843,8 +883,8 @@ export function registerSecurityLockJobs(
   cronRuntime.scheduleInterval(
     SECURITY_LOCK_SWEEP_INTERVAL_MS,
     async () => {
-      const r = await adapter.sweep();
-      if (r.status === "ok" && (r.recorded > 0 || r.dropped > 0)) defaultLogger.info(r, "security lock sweep");
+      // sweep() never throws and logs through the adapter's own logger.
+      await adapter.sweep();
     },
     { lockKey: SECURITY_LOCK_SWEEP_LOCK_KEY },
   );
@@ -873,7 +913,7 @@ export function securityLockHealthRow(): LockHealth {
         sweepScheduled: false,
         bridgeUp: false,
         knownLocks: [],
-        write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null },
+        write: { lastRecordedAt: null, lastWriteError: null, lastLiveFrameAt: null, unsaved: 0 },
       });
 }
 
