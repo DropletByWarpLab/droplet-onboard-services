@@ -596,7 +596,9 @@ export function toolDispatchDenial(
   scope: ToolAccessScope | null | undefined,
   /** WARP-2897 — the same runtime lookup the advertisement was narrowed with,
    *  so a REGISTERED runtime tool out of scope is refused here as forbidden
-   *  rather than reaching the hallucinated-tool guard. */
+   *  rather than reaching the hallucinated-tool guard. A registered tool whose
+   *  domain is not operator-mapped is absent from the lookup, so it is never
+   *  advertised to a scoped person and the guard refuses it instead. */
   runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): ToolDispatchDenial | null {
   if (!scope) return null;

@@ -146,13 +146,18 @@ describe("narrowAllowedToolsForRole — runtime tools under a scope (WARP-2897)"
     firstSeenAt: at,
     lastSeenAt: at,
   });
-  const descriptor = (wireName: string) => ({
+  const descriptor = (
+    wireName: string,
+    // Only an operator-mapped domain can admit a runtime tool to a role
+    // (PR #2314 review item 1), so the reachable fixtures are operator-sourced.
+    domainSource: "operator" | "server" | "default" = "operator",
+  ) => ({
     name: `bookings__${wireName}`,
     serverId: "bookings",
     // The extension-domain vocabulary is slice H's decision; the layer model
     // reads strings, so a fixture outside the closed union is cast.
     domain: "ext-bookings" as ToolDomain,
-    domainSource: "server" as const,
+    domainSource,
     description: "fixture",
     inputSchema: {},
   });
@@ -211,6 +216,22 @@ describe("narrowAllowedToolsForRole — runtime tools under a scope (WARP-2897)"
     runtimeToolRegistry.clear();
     expect(
       await narrowAllowedToolsForRole("family", undefined, false, scope(["files", "ext-bookings"])),
+    ).toEqual([FILES_READ]);
+  });
+
+  it("a runtime tool whose domain the SERVER declared stays out, even with that domain granted", async () => {
+    // PR #2314 review item 1: a vendor must not choose which grants admit it.
+    runtimeToolRegistry.registerServerTools("bookings", [
+      descriptor("list_slots", "server"),
+      descriptor("book_slot", "default"),
+    ]);
+    expect(
+      await narrowAllowedToolsForRole(
+        "admin",
+        [FILES_READ, LIST, BOOK],
+        false,
+        scope(["files", "ext-bookings"], ["ext-bookings"]),
+      ),
     ).toEqual([FILES_READ]);
   });
 });

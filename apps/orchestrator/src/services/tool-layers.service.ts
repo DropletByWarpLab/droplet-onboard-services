@@ -95,13 +95,29 @@ export function catalogLayer(): readonly LayeredTool[] {
 }
 
 /** The part of a runtime descriptor the layer reads. Deliberately narrow: the
- *  description, schema and any wire annotations are not in it. */
-export type RuntimeDescriptorFacts = Pick<RuntimeToolDescriptor, "name" | "serverId" | "domain">;
+ *  description, schema and any wire annotations are not in it. `domainSource`
+ *  is in it because the domain now AUTHORIZES the tool (see runtimeLayer). */
+export type RuntimeDescriptorFacts = Pick<
+  RuntimeToolDescriptor,
+  "name" | "serverId" | "domain" | "domainSource"
+>;
 
 /**
  * The runtime layer: each registered descriptor, classified by its record row
  * (keyed on `serverId` + the WIRE name, which is how the record is written).
  * Denied tools are dropped; a missing row means write.
+ *
+ * Only an OPERATOR-mapped domain puts a tool in the layer. A runtime tool's
+ * domain decides which role grants admit it, and `resolveRuntimeToolDomain`
+ * can also produce that domain from the server's own registration (a hint
+ * from outside the trust boundary) or from the `data` default (which is
+ * feature-ungated). Either would let a vendor choose which roles' grants
+ * admit its tools, so a `"server"` or `"default"` source is left out of the
+ * layer, and of the lookup built from it: unreachable for every scoped
+ * principal, never a reason a domain counts as populated or grantable.
+ * Owners, service principals and role-less people carry no scope, so neither
+ * the layer nor the lookup narrows them. They keep every registered tool,
+ * whatever its source, exactly as before.
  */
 export function runtimeLayer(
   descriptors: readonly RuntimeDescriptorFacts[],
@@ -109,6 +125,7 @@ export function runtimeLayer(
 ): LayeredTool[] {
   const out: LayeredTool[] = [];
   for (const d of descriptors) {
+    if (d.domainSource !== "operator") continue;
     const wireName = parseNamespacedToolName(d.name)?.wireName ?? d.name;
     const row = lookup(d.serverId, wireName);
     if (row?.denied) continue;

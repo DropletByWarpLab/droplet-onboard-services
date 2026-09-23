@@ -284,13 +284,18 @@ describe("runAgent — runtime tools under a scope (WARP-2897)", () => {
     firstSeenAt: at,
     lastSeenAt: at,
   });
-  const descriptor = (wireName: string) => ({
+  const descriptor = (
+    wireName: string,
+    // Only an operator-mapped domain can admit a runtime tool to a role
+    // (PR #2314 review item 1), so the reachable fixtures are operator-sourced.
+    domainSource: "operator" | "server" | "default" = "operator",
+  ) => ({
     name: `bookings__${wireName}`,
     serverId: "bookings",
     // Slice H owns the extension-domain vocabulary; the layer model reads
     // strings, so a fixture outside the closed union is cast.
     domain: "ext-bookings" as ToolDomain,
-    domainSource: "server" as const,
+    domainSource,
     description: "fixture",
     inputSchema: {},
   });
@@ -349,5 +354,31 @@ describe("runAgent — runtime tools under a scope (WARP-2897)", () => {
       tool: BOOK,
       result: { status: "error", error: { code: "FORBIDDEN_TOOL_FOR_ROLE" } },
     });
+  });
+
+  /** PR #2314 review item 1: a vendor-declared (or defaulted) domain never
+   *  admits a runtime tool to a scoped person — not advertised, not dispatched,
+   *  even with the domain granted as `use` and a read classification row. */
+  it("neither advertises nor dispatches a runtime tool whose domain the server declared", async () => {
+    runtimeToolRegistry.registerServerTools("bookings", [
+      descriptor("list_slots", "server"),
+      descriptor("book_slot", "default"),
+    ]);
+    remoteToolClassificationCache.seed([row("list_slots", false), row("book_slot", false)]);
+    const { deps, chat, callTool } = makeDeps([
+      callOf(LIST),
+      { role: "assistant", content: "ok" },
+    ]);
+    withRuntimePool(deps);
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "any free slots?" }],
+      allowed_tools: [LIST, BOOK],
+      toolAccessScope: scope(["files", "ext-bookings"], ["ext-bookings"]),
+    });
+    // A zero-tool turn may omit `tools` from the wire request altogether.
+    const sent = chat.mock.calls[0]![0] as { tools?: { function: { name: string } }[] };
+    expect((sent.tools ?? []).map((t) => t.function.name)).toEqual([]);
+    expect(callTool).not.toHaveBeenCalled();
   });
 });
