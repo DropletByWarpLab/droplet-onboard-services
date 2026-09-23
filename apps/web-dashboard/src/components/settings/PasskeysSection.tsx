@@ -32,8 +32,9 @@ import {
  *   - the list of your own passkeys: name, the address it works at, when it
  *     was added and last used, rename and remove.
  *
- * Copy is sentence case with no exclamation marks. Inputs reuse the shared
- * `dp-input` class unchanged (WARP-1356 owns input focus styling).
+ * Copy is sentence case with no exclamation marks. Rows use the shell's
+ * `.lrow` list-row tokens; the rename input takes the shell's input styling
+ * plus the ratified 2px brand focus ring (no legacy `dp-*` / `bg-surface-*`).
  */
 
 function formatDate(iso: string | null): string | null {
@@ -172,16 +173,20 @@ export function PasskeysSection() {
         )}
 
         {passkeys && passkeys.length > 0 && (
-          <ul aria-label="Your passkeys" className="space-y-2 pt-1">
+          <ul aria-label="Your passkeys">
             {passkeys.map((pk) => {
               const label = pk.name ?? "Unnamed passkey";
               const addedOn = formatDate(pk.createdAt);
               const used = formatDate(pk.lastUsedAt);
               const elsewhere = pk.rpId !== null && host !== null && pk.rpId !== host;
               return (
-                <li key={pk.id} className="flex items-start gap-3 rounded-sm px-3 py-2 bg-surface-secondary">
-                  <KeyRound size={16} strokeWidth={1.5} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
-                  <div className="flex-1 min-w-0">
+                // Shell list row (.lrow/.ri/.rt, droplet-shell.css): the
+                // DESIGN.md row tokens, same as CertificateRows.
+                <li key={pk.id} className="lrow">
+                  <span className="ri" aria-hidden="true">
+                    <KeyRound size={16} strokeWidth={1.5} />
+                  </span>
+                  <div className="rt">
                     {editingId === pk.id ? (
                       <form
                         className="flex items-center gap-2"
@@ -192,7 +197,8 @@ export function PasskeysSection() {
                       >
                         <input
                           aria-label="Passkey name"
-                          className="dp-input flex-1"
+                          // Romain 2026-09-22: input focus = full-strength 2px brand ring (as PR #2287).
+                          className="flex-1 h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                           value={draftName}
                           maxLength={64}
                           autoFocus
@@ -206,17 +212,15 @@ export function PasskeysSection() {
                         </button>
                       </form>
                     ) : (
-                      <p className="type-subheadline truncate" style={{ color: "var(--text)" }}>
-                        {label}
-                      </p>
+                      <span className="nm">{label}</span>
                     )}
-                    <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+                    <span className="sub">
                       {pk.rpId
                         ? `Works at ${pk.rpId}${elsewhere ? " (not this address)" : ""}`
                         : "Address not recorded"}
                       {addedOn ? ` · Added ${addedOn}` : ""}
                       {` · ${used ? `Last used ${used}` : "Not used yet"}`}
-                    </p>
+                    </span>
                   </div>
                   {editingId !== pk.id && (
                     <div className="flex items-center gap-1 flex-shrink-0">
