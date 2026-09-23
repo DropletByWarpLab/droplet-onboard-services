@@ -343,6 +343,34 @@ def test_storage_mode_ignores_umask_and_narrows_a_stale_tmp(tmp_path):
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(not hasattr(os, "fchmod"), reason="os.fchmod is POSIX-only before Python 3.13")
+def test_storage_mode_is_set_on_the_open_fd_and_a_failure_closes_it(tmp_path, monkeypatch):
+    """Re-review #2312: the mode is set through the fd Storage.write holds
+    (fchmod), not by path, and a failure there closes the fd instead of
+    leaking it. MUTATIONS: chmod by path again -> no error raised, red; drop
+    the close on failure -> the fd is still open, red."""
+    opened = []
+    real_open = os.open
+
+    def spy_open(path, flags, mode=0o777, *args, **kwargs):
+        fd = real_open(path, flags, mode, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def refuse(fd, mode):
+        raise PermissionError(1, "fchmod refused")
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "fchmod", refuse)
+    with pytest.raises(PermissionError):
+        Storage(tmp_path).write(EXTENSION_KEY_FILE, b"secret", mode=0o600)
+    monkeypatch.undo()
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert not (tmp_path / EXTENSION_KEY_FILE).exists()
+
+
 def test_key_persists_across_a_restart(provisioned, tmp_path):
     provisioned.sign_extension(_statement())
     spki1, fp1 = provisioned.extension_public_key()

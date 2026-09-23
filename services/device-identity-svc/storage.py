@@ -34,8 +34,10 @@ class Storage:
         file BEFORE any byte is written, so the content never exists on disk
         under the process umask; os.replace keeps it on the final file. The
         explicit chmod also narrows a stale ``.tmp`` a crashed earlier write
-        left behind, which O_CREAT alone would keep at its old mode. Without
-        ``mode`` the file gets the umask default, as before."""
+        left behind, which O_CREAT alone would keep at its old mode. It goes
+        through the fd already open (fchmod), so no path swapped in between
+        can take the mode, and a failure closes that fd instead of leaking
+        it. Without ``mode`` the file gets the umask default, as before."""
         target = self.root / name
         tmp = self.root / f"{name}.tmp"
         if mode is None:
@@ -43,8 +45,15 @@ class Storage:
         else:
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
             fd = os.open(tmp, flags, mode)
-            os.chmod(tmp, mode)
-            f = os.fdopen(fd, "wb")
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, mode)
+                else:  # Windows before Python 3.13: a dev checkout only
+                    os.chmod(tmp, mode)
+                f = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
         with f:
             f.write(data)
             f.flush()
