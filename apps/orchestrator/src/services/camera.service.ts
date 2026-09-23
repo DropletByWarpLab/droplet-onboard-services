@@ -46,6 +46,15 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
+import { frigateEndToDraft } from "./security-event-ingest.js";
+import {
+  createStatusTracker,
+  noteFrigateMessage,
+  noteFrigateSubscribeFailed,
+  noteFrigateSubscription,
+  recordSecurityEvent,
+  type StatusTracker,
+} from "./security-events.service.js";
 
 const logger = createLogger("camera-service");
 
@@ -55,6 +64,12 @@ const CACHE_TTL = 5; // seconds
 
 let _mqttClient: mqtt.MqttClient | null = null;
 let _initialized = false;
+let _statusTracker: StatusTracker | null = null;
+
+/** WARP-2977 — the camera/Frigate health the /security header shows. */
+export function securityStatusSnapshot(): ReturnType<StatusTracker["snapshot"]> {
+  return _statusTracker?.snapshot() ?? new Map();
+}
 
 // SSE subscribers
 type SSECallback = (event: CameraSSEEvent) => void;
@@ -82,11 +97,28 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
       ...mqttConnectOptions(config.MQTT_BROKER),
     });
 
+    _statusTracker = createStatusTracker(prisma);
+
     _mqttClient.on("connect", () => {
       logger.info("Camera service connected to MQTT");
-      _mqttClient!.subscribe("frigate/events", { qos: 1 });
       _mqttClient!.subscribe("droplet/cameras/discovered", { qos: 1 });
-      _mqttClient!.subscribe("frigate/+/status", { qos: 0 });
+      // WARP-2977 — the Security event store's topics. Until then this
+      // subscribed to `frigate/+/status`, which Frigate never publishes: its
+      // health topic is `frigate/<camera>/status/<role>`, and MQTT's `+` is
+      // exactly one level, so camera online/offline never arrived. The SUBACK
+      // is checked: a refused topic is an ingest that is down, not a quiet
+      // site, and /security says so.
+      _mqttClient!.subscribe(
+        {
+          "frigate/events": { qos: 1 },
+          "frigate/+/status/detect": { qos: 1 },
+          "frigate/available": { qos: 1 },
+        },
+        (err, granted) => {
+          if (err) noteFrigateSubscribeFailed(err);
+          else noteFrigateSubscription(granted ?? []);
+        },
+      );
     });
 
     _mqttClient.on("message", (topic, payload) => {
@@ -111,6 +143,7 @@ export async function shutdownCameraService(): Promise<void> {
     _mqttClient = null;
   }
   _sseSubscribers.clear();
+  _statusTracker = null;
   _initialized = false;
 }
 
@@ -123,16 +156,24 @@ function handleMqttMessage(
 ): void {
   const raw = payload.toString();
 
-  // Frigate status topics send raw "ON"/"OFF" strings (not JSON)
-  const statusMatch = topic.match(/^frigate\/([^/]+)\/status$/);
-  if (statusMatch) {
-    const cameraName = statusMatch[1];
-    const isOnline = raw.trim().toUpperCase() === "ON";
-    broadcastSSE({
-      type: isOnline ? "camera_online" : "camera_offline",
-      camera: cameraName,
-      timestamp: Date.now(),
-    });
+  // Frigate health: `frigate/<camera>/status/detect` and `frigate/available`
+  // carry bare strings (online | offline | disabled), not JSON. Only a
+  // TRANSITION is stored or broadcast — both topics are retained, so every
+  // reconnect replays the current state.
+  if (topic === "frigate/available" || /^frigate\/[^/]+\/status\/detect$/.test(topic)) {
+    noteFrigateMessage();
+    void _statusTracker
+      ?.observe(topic, raw)
+      .then((recorded) => {
+        if (recorded?.camera) {
+          broadcastSSE({
+            type: recorded.kind === "camera_online" ? "camera_online" : "camera_offline",
+            camera: recorded.camera,
+            timestamp: Date.now(),
+          });
+        }
+      })
+      .catch((err) => logger.warn({ err, topic }, "security status ingest failed"));
     return;
   }
 
@@ -145,6 +186,15 @@ function handleMqttMessage(
   }
 
   if (topic === "frigate/events") {
+    noteFrigateMessage();
+    // WARP-2977 — persist BEFORE the gate, from the raw message. The gate
+    // below drops a second object while one is tracked and anything in the
+    // cooldown, and the `end` of a dropped event then reads as stale: behind
+    // it, the store would lose exactly the busy moments. One row per object,
+    // on `end`; a redelivered `end` is absorbed by the dedupe key.
+    const securityDraft = frigateEndToDraft(data);
+    if (securityDraft) void recordSecurityEvent(prisma, securityDraft);
+
     const after = data.after as Record<string, unknown> | undefined;
     const before = data.before as Record<string, unknown> | undefined;
 

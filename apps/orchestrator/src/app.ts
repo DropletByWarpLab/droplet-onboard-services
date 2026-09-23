@@ -69,6 +69,7 @@ import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createSecurityRouter } from "./routes/security.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
@@ -489,6 +490,10 @@ export function createApp(
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
+  // WARP-2977 (ADR-059 P2) — the Security command center's feed. The
+  // `security` module gate (toggle + per-person view) is mounted above by
+  // mountModuleGates off the registry prefix /api/security.
+  app.use("/api", createSecurityRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
