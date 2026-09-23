@@ -30,6 +30,11 @@ import {
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { dispatchDetectionEvent } from "./push-dispatch.service.js";
 import { processCameraEvent } from "./camera-event-gate.js";
+import {
+  inCameraScope,
+  narrowCameraFilter,
+  type CameraScope,
+} from "./camera-access.service.js";
 import { config } from "../config.js";
 import { mqttConnectOptions } from "../lib/internal-tls.js";
 import type {
@@ -487,10 +492,22 @@ function broadcastSSE(event: CameraSSEEvent): void {
   }
 }
 
-export function subscribeCameraEvents(callback: SSECallback): () => void {
-  _sseSubscribers.add(callback);
+/**
+ * Subscribe to the live camera stream, filtered to what this subscriber may
+ * see (WARP-2982). `scope` is read per event, so a subscriber can refresh
+ * it (grant revoked, role changed) without reconnecting. Before this, every
+ * broadcast reached every subscriber regardless of per-camera grants.
+ */
+export function subscribeCameraEvents(
+  callback: SSECallback,
+  scope: () => CameraScope,
+): () => void {
+  const scoped: SSECallback = (event) => {
+    if (inCameraScope(scope(), event.camera ?? "")) callback(event);
+  };
+  _sseSubscribers.add(scoped);
   return () => {
-    _sseSubscribers.delete(callback);
+    _sseSubscribers.delete(scoped);
   };
 }
 
@@ -634,17 +651,30 @@ export async function invalidateCamerasCache(): Promise<void> {
 // --- Events ---
 
 export async function getRecentEvents(
+  scope: CameraScope,
   limit = 20,
   camera?: string
 ): Promise<DetectionEvent[]> {
-  const cacheKey = camera
-    ? `cameras:events:${camera}`
+  // WARP-2982: narrow to the caller's cameras BEFORE the limit, so a scoped
+  // user gets their `limit` newest events, not a slice of everyone's.
+  const cameras = narrowCameraFilter(scope, camera ? [camera] : undefined);
+  if (cameras?.length === 0) return [];
+  // Narrowed lists get their own namespace: under the bare
+  // `cameras:events:<names>` form, a camera named `recent` shared
+  // CACHE_KEY_EVENTS — the owner's all-camera list.
+  const cacheKey = cameras
+    ? `cameras:events:only:${[...cameras].sort().join(",")}`
     : CACHE_KEY_EVENTS;
   const cached = await cacheGet<DetectionEvent[]>(cacheKey);
-  if (cached) return cached;
+  // The key names cameras, not a caller: whoever wrote the entry may have
+  // had a wider scope than this reader. Re-apply the scope on a hit, the
+  // same second check the fetch path below runs.
+  if (cached) return cached.filter((e) => inCameraScope(scope, e.camera));
 
-  const rawEvents = await fetchEvents(limit, camera);
-  const events: DetectionEvent[] = (rawEvents as any[]).map((e) => ({
+  const rawEvents = await fetchEvents(limit, cameras);
+  const events: DetectionEvent[] = (rawEvents as any[])
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => ({
     id: e.id,
     camera: e.camera,
     label: e.label,
@@ -679,11 +709,15 @@ export interface FilteredEventsResult {
 
 export async function getEventsFiltered(
   filter: FrigateEventFilter,
+  scope: CameraScope,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
-  const rawEvents = (await fetchEventsFiltered(filter)) as Array<Record<string, unknown>>;
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const rawEvents = (await fetchEventsFiltered({ ...filter, cameras })) as Array<Record<string, unknown>>;
 
-  const events: EventDetail[] = rawEvents.map((e) => {
+  const events: EventDetail[] = rawEvents
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => {
     const id = String(e.id);
     const camera = String(e.camera ?? "");
     const hasClip = Boolean(e.has_clip);
@@ -761,11 +795,15 @@ export interface FilteredReviewsResult {
 
 export async function getReviewsFiltered(
   filter: FrigateReviewFilter,
+  scope: CameraScope,
 ): Promise<FilteredReviewsResult> {
   const limit = filter.limit ?? 50;
-  const raw = (await fetchReviews(filter)) as Array<Record<string, unknown>>;
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const raw = (await fetchReviews({ ...filter, cameras })) as Array<Record<string, unknown>>;
 
-  const reviews: ReviewItem[] = raw.map((r) => {
+  const reviews: ReviewItem[] = raw
+    .filter((r) => inCameraScope(scope, String(r.camera ?? "")))
+    .map((r) => {
     const id = String(r.id);
     // Frigate nests the cluster's detection list + zones + objects + audio
     // inside `data`. Older payloads leak some fields to the top level —
@@ -838,10 +876,14 @@ export async function setReviewViewed(reviewId: string): Promise<void> {
  */
 export async function searchEventsSemanticTyped(
   filter: FrigateSearchFilter,
+  scope: CameraScope,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
-  const raw = (await searchEventsSemantic(filter)) as Array<Record<string, unknown>>;
-  const events: EventDetail[] = raw.map((e) => {
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const raw = (await searchEventsSemantic({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  const events: EventDetail[] = raw
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => {
     const id = String(e.id);
     const camera = String(e.camera ?? "");
     const hasClip = Boolean(e.has_clip);

@@ -42,6 +42,9 @@ export interface UpsertFileRegistryEntryParams {
   ownerUserId: string;
   path: string;
   departmentId: string | null;
+  /** WARP-2096 — hex SHA-256 of the bytes written, and their length. */
+  sha256?: string;
+  sizeBytes?: number;
 }
 
 /**
@@ -63,11 +66,15 @@ export async function upsertFileRegistryEntry(
         ownerUserId: params.ownerUserId,
         path: params.path,
         departmentId: params.departmentId,
+        sha256: params.sha256,
+        sizeBytes: params.sizeBytes,
       },
       update: {
         ownerUserId: params.ownerUserId,
         path: params.path,
         departmentId: params.departmentId,
+        sha256: params.sha256,
+        sizeBytes: params.sizeBytes,
       },
     });
   } catch (err) {
@@ -76,4 +83,36 @@ export async function upsertFileRegistryEntry(
       "upsertFileRegistryEntry: non-fatal write failure",
     );
   }
+}
+
+/**
+ * WARP-2096 — registry rows holding the same bytes as a new upload, newest
+ * first. Scoped to the SAME owner and the SAME space (departmentId, null =
+ * personal): a wider lookup would hand the uploader another person's path,
+ * and a deliberate personal→team copy is not a mistake worth flagging.
+ *
+ * Rows are CANDIDATES only — the registry is not maintained on delete/move
+ * (WARP-2096 Leg 5), so the caller must confirm a row is still live before
+ * reporting it. `excludeNcFileId` drops the file just written.
+ */
+export async function findSameContentCandidates(
+  prisma: PrismaClient,
+  params: {
+    ownerUserId: string;
+    departmentId: string | null;
+    sha256: string;
+    excludeNcFileId: number | null;
+  },
+): Promise<{ ncFileId: number; path: string | null }[]> {
+  return prisma.file.findMany({
+    where: {
+      ownerUserId: params.ownerUserId,
+      departmentId: params.departmentId,
+      sha256: params.sha256,
+      ...(params.excludeNcFileId !== null ? { NOT: { ncFileId: params.excludeNcFileId } } : {}),
+    },
+    select: { ncFileId: true, path: true },
+    orderBy: { updatedAt: "desc" },
+    take: 3,
+  });
 }

@@ -3,7 +3,7 @@
 import { Suspense, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
+import { ArrowLeft, ChevronLeft, LogOut, MoreHorizontal, X } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
@@ -34,14 +34,21 @@ import { FilesLibrariesNav } from "./nav/FilesLibrariesNav";
 import {
   MOBILE_PRIMARY_HREFS,
   NAV_GROUPS,
+  isSettingsContext,
+  settingsGroups,
   visibleItems,
   type AuthRole,
   type NavItem,
 } from "./nav-config";
-
-/** Does this href own a slot in the mobile bottom tab bar? */
-const isMobilePrimary = (href: string): boolean =>
-  (MOBILE_PRIMARY_HREFS as readonly string[]).includes(href);
+// WARP-2976 (ADR-059 §2.3) — the department switcher and the department
+// filter. The filter only NARROWS `NAV_GROUPS` to the active department's
+// profile; `visibleItems` below still runs every gate over the result, so a
+// department can never surface a route the person could not already reach.
+// With no active department (or one that is not set up) it returns
+// `NAV_GROUPS` itself — Whole business is today's nav, unchanged.
+import { DepartmentSwitcher } from "./Departments/DepartmentSwitcher";
+import { useActiveDepartment } from "@/lib/departments/active-department";
+import { departmentNavGroups } from "@/lib/departments/department-nav";
 
 /**
  * One block of the mobile "More" drawer: a nav destination plus the
@@ -143,10 +150,16 @@ export function Sidebar() {
         .slice(0, 2)
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
+  // WARP-2976 — the active department's arrangement of the nav, or
+  // NAV_GROUPS itself for Whole business. Gating runs AFTER this, below.
+  const { active: activeDepartment, activeProfile } = useActiveDepartment();
+  const navGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
+  const inDepartment = navGroups !== NAV_GROUPS;
+
   // Compute the rendered groups once. Empty groups (e.g. Admin when the
   // user is family/guest without the Activity entry) are filtered out so
   // we don't render a lone caption.
-  const renderedGroups = NAV_GROUPS.map((g) => ({
+  const renderedGroups = navGroups.map((g) => ({
     label: g.label,
     items: visibleItems(
       g.items,
@@ -155,6 +168,42 @@ export function Sidebar() {
       isModuleOn,
     ),
   })).filter((g) => g.items.length > 0);
+
+  // WARP-2967 — the contextual Settings panel. Inside Settings (and on every
+  // destination tucked behind it) the aside swaps the working tree for a
+  // focused list of what Settings leads to, headed by a way back.
+  //
+  // The override is keyed on the pathname rather than a boolean, so it needs
+  // no effect and cannot go stale: pressing "Back to main menu" shows the main
+  // tree for THIS route, and the moment you navigate anywhere — including
+  // deeper into Settings — the panel is back. A plain boolean would have to be
+  // reset by an effect watching the pathname, which is the same state stored
+  // twice.
+  const settingsContext = isSettingsContext(pathname);
+  const [mainTreeAt, setMainTreeAt] = useState<string | null>(null);
+  const showSettingsPanel = settingsContext && mainTreeAt !== pathname;
+  const settingsSections = showSettingsPanel
+    ? settingsGroups(
+        user?.role as AuthRole | undefined,
+        capabilities,
+        isModuleOn,
+      )
+    : [];
+  const settingsHome = showSettingsPanel
+    ? NAV_GROUPS.flatMap((g) => g.items).find((i) => i.href === "/settings")
+    : undefined;
+
+  // Which hrefs own a bottom-tab slot. Whole business keeps the fixed
+  // MOBILE_PRIMARY_HREFS. Inside a department most of those are not in its
+  // nav at all, so the bar takes the department's own first destinations
+  // (its home, then its pages, already gated) — the same number of slots.
+  const primaryHrefs: readonly string[] = inDepartment
+    ? (renderedGroups[0]?.items ?? [])
+        .slice(0, MOBILE_PRIMARY_HREFS.length)
+        .map((i) => i.href)
+    : MOBILE_PRIMARY_HREFS;
+  /** Does this href own a slot in the mobile bottom tab bar? */
+  const isMobilePrimary = (href: string): boolean => primaryHrefs.includes(href);
 
   // Flatten for the "More" drawer — anything not in the bottom-bar
   // primary set lands here in group order. Nested children (e.g. Events
@@ -204,7 +253,7 @@ export function Sidebar() {
   // whose module is off is dropped; the bar simply shows fewer tabs (the
   // surface is genuinely gone), and everything non-primary stays in the
   // drawer.
-  const mobileTabs: NavItem[] = MOBILE_PRIMARY_HREFS.map((href) => {
+  const mobileTabs: NavItem[] = primaryHrefs.map((href) => {
     for (const g of renderedGroups) {
       const found = g.items.find((i) => i.href === href);
       if (found) return found;
@@ -274,17 +323,86 @@ export function Sidebar() {
           </button>
         </div>
 
+        {/* WARP-2976 — the department switcher, directly under the logo row.
+            Renders nothing below two choices, so a box without departments
+            (or a person in one) keeps exactly today's aside. */}
+        <DepartmentSwitcher
+          variant={collapsed ? "rail" : "sidebar"}
+          className={collapsed ? "px-2 pb-2" : "px-3 pb-2"}
+        />
+
+        {/* WARP-2967 — the contextual panel's way out. Above the nav rather
+            than inside it: it is not a destination, it is the control that
+            puts the destinations back, and the reference (rule 4) places it
+            at the TOP of the panel.
+
+            A button and not a link, deliberately. "Back to main menu" is
+            about which NAV you are looking at, not where you are — sending
+            the user to Overview would lose the settings page they came to
+            read. */}
+        {showSettingsPanel && (
+          <div className={collapsed ? "px-2 pt-1" : "px-3 pt-1"}>
+            <button
+              type="button"
+              onClick={() => setMainTreeAt(pathname)}
+              aria-label={collapsed ? "Back to main menu" : undefined}
+              title="Back to main menu"
+              className={`
+                flex items-center h-9 rounded-lg w-full
+                type-subheadline text-label-secondary
+                hover:bg-surface-secondary hover:text-label-primary
+                transition-all duration-200 ease-smooth
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                ${collapsed ? "justify-center w-10 mx-auto" : "gap-3 px-3"}
+              `}
+            >
+              <ArrowLeft size={17} strokeWidth={1.5} aria-hidden="true" />
+              {!collapsed && "Back to main menu"}
+            </button>
+          </div>
+        )}
+
         {/* Navigation */}
         <nav
-          aria-label="Sections"
+          aria-label={showSettingsPanel ? "Settings" : "Sections"}
           className="flex-1 px-3 py-1 overflow-y-auto"
         >
-          {renderedGroups.map((group, groupIndex) => (
+          {/* WARP-2967 review — the panel's own index. Every tucked row leads
+              away from /settings; without this the page that owns them was
+              reachable only by "Back to main menu" and then Settings. */}
+          {settingsHome && (
+            <div className="space-y-0.5 mb-4">
+              <NavLink
+                item={settingsHome}
+                active={isItemActive(settingsHome)}
+                showChildren={false}
+                pathname={pathname}
+                badge={0}
+                collapsed={collapsed}
+              />
+            </div>
+          )}
+          {(showSettingsPanel ? settingsSections : renderedGroups).map(
+            (group, groupIndex) => (
             <div key={group.label} className={groupIndex > 0 ? "mt-4" : ""}>
               {/* Section caption. Apple-HIG-style: uppercase + tracking
                   + tertiary label color. Kept tiny so groups read as
-                  organizational, not as primary nav. Hidden in the rail. */}
-              {!collapsed && (
+                  organizational, not as primary nav. Hidden in the rail.
+
+                  WARP-2967: and hidden over a LONE item. A caption names what
+                  several rows have in common; over one row it names nothing
+                  the row does not already say, and the reference's practice 8
+                  is about separating groups, not labelling singletons. This is
+                  what keeps ADMIN from captioning its single Settings row, and
+                  what keeps Business from captioning Insights alone on a
+                  family account with every business module off.
+
+                  The Settings panel is exempt: its five sections are the only
+                  structure a sixteen-row list has, and they are fixed names a
+                  person learns rather than a scan aid over a short tree. A
+                  lone Account row still reads as "this is the account part".
+                  */}
+              {!collapsed && (showSettingsPanel || group.items.length > 1) && (
                 <p
                   className="
                     px-3 mb-1 type-caption-2 uppercase tracking-[0.18em]
@@ -300,7 +418,9 @@ export function Sidebar() {
                     key={item.href}
                     item={item}
                     active={isItemActive(item)}
-                    showChildren={!collapsed && isSectionOpen(item)}
+                    showChildren={
+                      !collapsed && !showSettingsPanel && isSectionOpen(item)
+                    }
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
                     collapsed={collapsed}
@@ -308,7 +428,8 @@ export function Sidebar() {
                 ))}
               </div>
             </div>
-          ))}
+            ),
+          )}
         </nav>
 
         {/* Footer. WARP-2956: in the rail only the avatar survives — the
@@ -512,6 +633,15 @@ export function Sidebar() {
               <X size={20} aria-hidden="true" />
             </button>
           </div>
+
+          {/* WARP-2976 — the switcher at the top of the drawer; the phone
+              has no rail to put it in. Picking a department navigates, so
+              the drawer closes with it. */}
+          <DepartmentSwitcher
+            variant="drawer"
+            className="px-3 pt-3"
+            onNavigate={() => setMoreOpen(false)}
+          />
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
             {drawerGroups.map((group, groupIndex) => (

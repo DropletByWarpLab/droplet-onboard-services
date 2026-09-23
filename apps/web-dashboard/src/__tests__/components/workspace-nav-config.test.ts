@@ -74,6 +74,27 @@ describe("workspace-nav-config — the map is complete and single-homed", () => 
     expect(orphans).toEqual([]);
   });
 
+  // WARP-2967 — the sidebar's re-cut must not reach this layout's reach. Two
+  // ways it could: a destination tucked behind Settings losing its chip (rule
+  // 2 says `hidden` is a surface decision), or a destination that merely
+  // changed indent in the sidebar losing its home here.
+  it("keeps every tucked destination as a first-class chip (WARP-2967)", () => {
+    const spaces = resolveSpaces("owner", ALL_CAPS, allOn);
+    const chips = new Set(
+      spaces.flatMap((s) => s.destinations.map((d) => d.item.href)),
+    );
+    const tucked = NAV_GROUPS.flatMap((g) => g.items).filter((i) => i.hidden);
+    expect(tucked.length).toBeGreaterThan(0);
+    for (const item of tucked)
+      expect(chips.has(item.href), `${item.href} lost its chip`).toBe(true);
+  });
+
+  it("keeps the newly nested routes homed (WARP-2967)", () => {
+    const set = new Set(spaceHrefs);
+    for (const href of ["/brief", "/reports", "/money", "/voice", "/remote-access"])
+      expect(set.has(href), `${href} has no home`).toBe(true);
+  });
+
   it("has six spaces, Business between Work and Operations (ADR-044)", () => {
     expect(SPACES.map((s) => s.id)).toEqual([
       "home",
@@ -115,6 +136,19 @@ describe("workspace-nav-config — gates are the sidebar's", () => {
     // even though it is its own chip here (mirrors visibleItems).
     expect(hrefs).not.toContain("/events");
     expect(hrefs).toContain("/network");
+  });
+
+  it("keeps Money with Projects off and Voice with Network off (review of #2284)", () => {
+    // A parent failing only its MODULE gate does not take a child that names
+    // its own module — the sidebar's `passesParentGate`, mirrored here.
+    const chips = (off: string) =>
+      resolveSpaces("owner", ALL_CAPS, (id) => id !== off).flatMap((s) =>
+        s.destinations.map((d) => d.item.href),
+      );
+    expect(chips("projects")).toContain("/money");
+    expect(chips("projects")).not.toContain("/projects");
+    expect(chips("network")).toContain("/voice");
+    expect(chips("network")).not.toContain("/remote-access");
   });
 
   it("a role gate hides the chip, and an emptied space loses its tab", () => {
@@ -227,5 +261,46 @@ describe("workspace-nav-config — locate() derives space + destination from the
     expect(locate(spaces, "/admin/files")?.destination.item.href).toBe(
       "/admin/files",
     );
+  });
+});
+
+describe("workspace-nav-config — restrictTo (WARP-2976, ADR-059 §2.3)", () => {
+  const hrefsOf = (spaces: ReturnType<typeof resolveSpaces>) =>
+    spaces.flatMap((s) => s.destinations.map((d) => d.item.href));
+
+  it("omitted, the spaces are exactly today's", () => {
+    expect(hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, undefined))).toEqual(
+      hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn)),
+    );
+  });
+
+  it("keeps only destinations in the set, and drops the spaces it empties", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/settings", "/help"]);
+    const spaces = resolveSpaces("owner", ALL_CAPS, allOn, restrict);
+    expect(spaces.map((s) => s.def.id)).toEqual(["ops", "admin"]);
+    expect(hrefsOf(spaces)).toEqual(["/cameras", "/events", "/network", "/settings", "/help"]);
+  });
+
+  it("is an intersection: the gates still apply inside the set", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/integrations"]);
+    const hrefs = hrefsOf(resolveSpaces("family", ALL_CAPS, (id) => id !== "cameras", restrict));
+    // cameras module off → Cameras and its Events child go; Integrations is
+    // owner/admin only → gone for family. Only Network survives.
+    expect(hrefs).toEqual(["/network"]);
+  });
+
+  it("an href outside NAV_GROUPS in the set adds nothing", () => {
+    const hrefs = hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/nope", "/files"])));
+    expect(hrefs).toEqual(["/files"]);
+  });
+
+  it("an empty set leaves no spaces at all", () => {
+    expect(resolveSpaces("owner", ALL_CAPS, allOn, new Set())).toEqual([]);
+  });
+
+  it("keeps a destination's views when the destination survives", () => {
+    const files = resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/files"]))[0]
+      ?.destinations[0];
+    expect(files?.views.map((v) => v.href)).toContain("/files/recents");
   });
 });

@@ -171,14 +171,15 @@ describe("interceptor — naked handler (WARP-2312)", () => {
 });
 
 /**
- * The legacy `confirmed: true` path. It exists so the 16 hand-rolled
- * two-phase tools keep completing in the chat surface, where nothing can
- * carry a token back (`_meta` is set by the orchestrator; the model is
- * what re-issues the call). It is weaker than the token by design — and
- * strictly stronger than what shipped before, which accepted the bare
- * boolean with no challenge, no binding, no expiry and no single-use.
+ * WARP-2002 — `confirmed: true` is something the MODEL writes, so it
+ * approves nothing. It used to be accepted against a "live challenge",
+ * but that challenge was the one minted a moment earlier in reply to the
+ * model's own first call: the model could re-issue with the flag and
+ * write with no human involved. Only a token on `_meta` admits a
+ * confirming call now, and the token reaches `_meta` only from a human
+ * decision (chat grant, parked-run confirm route, an MCP client's UI).
  */
-describe("interceptor — legacy `confirmed: true` against a live challenge", () => {
+describe("interceptor — `confirmed: true` never approves (WARP-2002)", () => {
   /** A tool shaped like the 16: schema declares `confirmed`. */
   function legacyTool(name = "legacy_write"): InterceptableTool {
     return {
@@ -194,20 +195,18 @@ describe("interceptor — legacy `confirmed: true` against a live challenge", ()
     };
   }
 
-  it("completes the two-phase flow the chat surface actually performs", () => {
+  it("REFUSES the model re-issuing its own challenged call with `confirmed: true`", () => {
+    // The exact self-attestation WARP-2002 describes: challenge, then the
+    // model sets the flag itself in the same turn. Mutation: restore the
+    // live-challenge acceptance → this reds.
     const interceptor = createToolCallInterceptor();
     const tool = legacyTool();
 
     const first = interceptor.intercept(tool, { id: "a" }, undefined, T0);
     expect(first.kind).toBe("confirmation_required");
 
-    // The model re-issues with `confirmed: true` — no token, because it
-    // has no way to obtain one. This MUST proceed, or every confirming
-    // tool challenges forever in production.
     const second = interceptor.intercept(tool, { id: "a", confirmed: true }, undefined, T0 + 1);
-    expect(second.kind).toBe("proceed");
-    if (second.kind !== "proceed") return;
-    expect(second.confirmationConsumed).toBe(true);
+    expect(second.kind).toBe("confirmation_required");
   });
 
   it("REFUSES `confirmed: true` when nothing ever challenged this call", () => {
@@ -252,18 +251,26 @@ describe("interceptor — legacy `confirmed: true` against a live challenge", ()
     expect(outcome.kind).toBe("confirmation_required");
   });
 
-  it("is SINGLE-USE — the same approval cannot drive two writes", () => {
+  it("the token still admits the call even when the model also sent `confirmed: true`", () => {
+    // `confirmed` is excluded from the binding, so a human-approved token
+    // matches whether or not the model's re-issue carries the flag.
     const interceptor = createToolCallInterceptor();
     const tool = legacyTool();
-    interceptor.intercept(tool, { id: "a" }, undefined, T0);
+    const first = interceptor.intercept(tool, { id: "a" }, undefined, T0);
+    const token = first.kind === "confirmation_required" ? first.token : "";
 
-    expect(interceptor.intercept(tool, { id: "a", confirmed: true }, undefined, T0 + 1).kind).toBe(
-      "proceed",
+    const second = interceptor.intercept(
+      tool,
+      { id: "a", confirmed: true },
+      { confirmationToken: token },
+      T0 + 1,
     );
-    // A second write on one thumbs-up must challenge again.
-    expect(interceptor.intercept(tool, { id: "a", confirmed: true }, undefined, T0 + 2).kind).toBe(
-      "confirmation_required",
-    );
+    expect(second.kind).toBe("proceed");
+    // Single-use: the same token cannot drive a second write.
+    expect(
+      interceptor.intercept(tool, { id: "a", confirmed: true }, { confirmationToken: token }, T0 + 2)
+        .kind,
+    ).toBe("confirmation_rejected");
   });
 
   it("EXPIRES — an approval given long after the challenge is refused", () => {
@@ -280,10 +287,7 @@ describe("interceptor — legacy `confirmed: true` against a live challenge", ()
     expect(outcome.kind).toBe("confirmation_required");
   });
 
-  it("is NOT available to a tool with no handler-side gate — those must present a real token", () => {
-    // The 8 registry tools that had no check, and every WARP-320 remote
-    // tool, fall here. Fail-closed is the correct direction for a write
-    // nothing was guarding.
+  it("refuses `confirmed: true` on a tool with no handler-side gate too", () => {
     const interceptor = createToolCallInterceptor();
     const { tool } = nakedTool();
     interceptor.intercept(tool, { path: "/a" }, undefined, T0);

@@ -357,3 +357,107 @@ describe("WARP-1962: every camera-scoped route is per-camera guarded too", () =>
     }
   });
 });
+
+describe("WARP-2982: routes that name NO camera are per-camera guarded too", () => {
+  // The WARP-1962 sweep above only walked `/cameras/:name*`, so every
+  // cross-camera route (events, search, SSE, reviews, clips) and every route
+  // addressed by event / review id shipped with the role check alone. This
+  // sweep covers the WHOLE router: a route either carries the per-camera
+  // guard, or it is listed here with the reason it returns nothing a
+  // per-camera grant governs. A new route has to pick one.
+  const EXEMPT: Record<string, string> = {
+    "GET /cameras": "filters its own list via filterVisibleCameras",
+    "POST /cameras": "adds a camera (owner/admin/family), returns no footage",
+    "GET /cameras/groups": "group metadata — camera-name disclosure is a separate follow-up",
+    "POST /cameras/groups": "group metadata",
+    "PATCH /cameras/groups/:id": "group metadata",
+    "DELETE /cameras/groups/:id": "group metadata",
+    "POST /cameras/groups/:id/members": "group metadata",
+    "DELETE /cameras/groups/:id/members/:cameraName": "group metadata",
+    "GET /cameras/pins": "the caller's own pins",
+    "POST /cameras/pins": "the caller's own pins",
+    "PATCH /cameras/pins/reorder": "the caller's own pins",
+    "DELETE /cameras/pins/:cameraName": "the caller's own pins",
+    "POST /cameras/clips/share": "signs a Nextcloud path; governed by Nextcloud ACLs, custody roles only",
+    "GET /cameras/faces": "household face roster, not per-camera footage",
+    "GET /cameras/faces/:name/images/:image": "face training image, not per-camera footage",
+    "DELETE /cameras/faces/:name": "face roster",
+    "DELETE /cameras/faces/:name/images/:image": "face roster",
+    "GET /cameras/plates": "household plate roster",
+    "PUT /cameras/plates/:plate": "household plate roster",
+    "DELETE /cameras/plates/:plate": "household plate roster",
+    "GET /cameras/system": "appliance health — camera-name disclosure is a separate follow-up",
+    "GET /cameras/storage": "appliance health — camera-name disclosure is a separate follow-up",
+    "GET /cameras/stats": "appliance health — camera-name disclosure is a separate follow-up",
+    "POST /cameras/system/restart": "owner-only appliance action",
+    "POST /cameras/scan": "network discovery",
+    "GET /cameras/discovered": "unadopted candidates, no grants can exist yet",
+    "POST /cameras/discovered/:id/accept": "adoption",
+    "POST /cameras/discovered/:id/reject": "adoption",
+    "GET /cameras/drivers": "appliance health",
+    "POST /cameras/drivers/fix": "owner/admin appliance action",
+    "GET /cameras/subnet": "network config",
+    "POST /cameras/subnet/setup": "owner/admin network config",
+    "DELETE /cameras/subnet": "owner/admin network config",
+    "POST /cameras/command/confirm": "confirms a pending token minted by a guarded route",
+    "GET /cameras/retention/backfill": "custody roles only (owner/admin see every camera)",
+    "POST /cameras/retention/backfill": "custody roles only (owner/admin see every camera)",
+    "GET /cameras/access/:userId": "custody roles only — administers grants",
+    "PUT /cameras/access/:userId": "custody roles only — administers grants",
+  };
+
+  function allRoutes() {
+    const router = createCamerasRouter(prismaStub) as unknown as {
+      stack: Array<{
+        route?: {
+          path: string;
+          methods: Record<string, boolean>;
+          stack: Array<{ handle: { name?: string } }>;
+        };
+      }>;
+    };
+    return router.stack
+      .map((l) => l.route)
+      .filter((r): r is NonNullable<typeof r> => Boolean(r) && r!.path.startsWith("/cameras"))
+      .flatMap((r) =>
+        Object.keys(r.methods).map((m) => ({
+          key: `${m.toUpperCase()} ${r.path}`,
+          guarded: r.stack.some((h) => h.handle?.name === "cameraAccessGuard"),
+        })),
+      );
+  }
+
+  it("every camera route is per-camera guarded or explicitly exempt", () => {
+    const routes = allRoutes();
+    expect(routes.length).toBeGreaterThan(60);
+    const unaccounted = routes.filter((r) => !r.guarded && !(r.key in EXEMPT)).map((r) => r.key);
+    expect(unaccounted).toEqual([]);
+  });
+
+  it("the routes the ticket named are guarded, not exempt", () => {
+    const guarded = new Set(allRoutes().filter((r) => r.guarded).map((r) => r.key));
+    for (const key of [
+      "GET /cameras/events",
+      "GET /cameras/events/search",
+      "GET /cameras/events/sse",
+      "GET /cameras/events/recent",
+      "GET /cameras/reviews",
+      "GET /cameras/events/:eventId/thumbnail",
+      "GET /cameras/events/:eventId/snapshot",
+      "GET /cameras/clips",
+      "GET /cameras/clips/event/:eventId",
+      "GET /cameras/birdseye/live",
+      "GET /cameras/reviews/:reviewId/preview",
+      "GET /cameras/reviews/:reviewId/thumbnail",
+    ]) {
+      expect(guarded, key).toContain(key);
+    }
+  });
+
+  it("the exemption list carries no stale entries", () => {
+    // An exemption for a route that no longer exists (or has since gained
+    // the guard) is dead weight that hides the next real gap.
+    const unguarded = new Set(allRoutes().filter((r) => !r.guarded).map((r) => r.key));
+    expect(Object.keys(EXEMPT).filter((k) => !unguarded.has(k))).toEqual([]);
+  });
+});

@@ -61,11 +61,11 @@ import {
 import { createSession } from "../services/session.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
-import { deriveWebAuthnRp } from "../services/webauthn-config.js";
+import { deriveWebAuthnRp, isIpRpId } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 import { browserMarkerHeader } from "../lib/browser-context.js";
-import { authRateLimit } from "../middleware/rate-limit.js";
+import { authRateLimit, sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("webauthn-routes");
 
@@ -80,6 +80,50 @@ const logger = createLogger("webauthn-routes");
 function callerIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
+
+/**
+ * WARP-1157 — machine-readable failure codes. The dashboard maps each one to
+ * accurate copy (only offering "try again" where a retry can succeed); the
+ * `error` string stays for older clients and logs.
+ */
+export type WebAuthnErrorCode =
+  | "origin_unsupported"
+  | "directory_unavailable"
+  | "challenge_expired"
+  | "verification_failed"
+  | "already_registered"
+  | "storage_failed"
+  | "not_found";
+
+function fail(
+  res: import("express").Response,
+  status: number,
+  code: WebAuthnErrorCode,
+  error: string,
+): void {
+  res.status(status).json({ error, code });
+}
+
+/** WARP-1157 — refuse a ceremony on an address that can never hold a passkey
+ *  (raw IP). Returns true when it has answered the request. */
+function refuseUnsupportedOrigin(
+  rpID: string,
+  res: import("express").Response,
+): boolean {
+  if (!isIpRpId(rpID)) return false;
+  fail(
+    res,
+    400,
+    "origin_unsupported",
+    "Passkeys need the box's name, not its IP address",
+  );
+  return true;
+}
+
+/** WARP-1157 — owner-chosen passkey label. Trimmed, 1–64 chars. */
+const renameBodySchema = z.object({
+  name: z.string().trim().min(1).max(64),
+});
 
 /** The verify endpoints accept the browser's ceremony response under `response`.
  *  Shape is validated by @simplewebauthn/server; we only assert it's present. */
@@ -202,11 +246,12 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
         return;
       }
       if (!prisma) {
-        res.status(503).json({ error: "Directory unavailable" });
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
         return;
       }
 
       const { rpID, rpName } = deriveWebAuthnRp(req);
+      if (refuseUnsupportedOrigin(rpID, res)) return;
 
       // Exclude already-registered credentials so the same authenticator
       // can't be enrolled twice for this user.
@@ -248,7 +293,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
         return;
       }
       if (!prisma) {
-        res.status(503).json({ error: "Directory unavailable" });
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
         return;
       }
 
@@ -260,6 +305,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
       const response = parsed.data.response as unknown as RegistrationResponseJSON;
 
       const { rpID, origin } = deriveWebAuthnRp(req);
+      if (refuseUnsupportedOrigin(rpID, res)) return;
 
       // Look up the live challenge by the value echoed in the client data,
       // bound to THIS user, then consume it (single-use). A registration
@@ -273,7 +319,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
       }
       const stored = await consumeChallenge(prisma, clientChallenge, "REGISTRATION");
       if (!stored || stored.userId !== user.id) {
-        res.status(400).json({ error: "Registration challenge expired or invalid" });
+        fail(res, 400, "challenge_expired", "Registration challenge expired or invalid");
         return;
       }
 
@@ -288,25 +334,40 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
         });
       } catch (err) {
         logger.warn({ err: (err as Error).message }, "WebAuthn registration verification failed");
-        res.status(400).json({ error: "Registration verification failed" });
+        fail(res, 400, "verification_failed", "Registration verification failed");
         return;
       }
 
       if (!verification.verified || !verification.registrationInfo) {
-        res.status(400).json({ error: "Registration could not be verified" });
+        fail(res, 400, "verification_failed", "Registration could not be verified");
         return;
       }
 
       const { credential } = verification.registrationInfo;
-      await prisma.webAuthnCredential.create({
-        data: {
-          userId: user.id,
-          credentialId: credential.id,
-          publicKey: Buffer.from(credential.publicKey),
-          counter: credential.counter,
-          transports: serializeTransports(credential.transports),
-        },
-      });
+      try {
+        await prisma.webAuthnCredential.create({
+          data: {
+            userId: user.id,
+            credentialId: credential.id,
+            publicKey: Buffer.from(credential.publicKey),
+            counter: credential.counter,
+            transports: serializeTransports(credential.transports),
+            // WARP-1157: record where this passkey works (see the migration).
+            rpId: rpID,
+          },
+        });
+      } catch (err) {
+        // WARP-1157: a storage failure is the box's problem, not the user's —
+        // say so instead of the generic 500. P2002 = the credential id is
+        // already stored (the same authenticator enrolled twice).
+        if ((err as { code?: unknown }).code === "P2002") {
+          fail(res, 409, "already_registered", "This passkey is already registered");
+          return;
+        }
+        logger.error({ err: (err as Error).message }, "WebAuthn credential could not be stored");
+        fail(res, 500, "storage_failed", "The passkey could not be saved");
+        return;
+      }
 
       await recordActivity({
         kind: "auth",
@@ -319,6 +380,123 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
       });
 
       res.json({ verified: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── WARP-1157: the signed-in user's own passkeys ──
+  // Every query is filtered by req.user.id, so another user's credential id
+  // reads as 404 (no enumeration). Admins get no cross-user view here on
+  // purpose: offboarding goes through directory deactivation, which already
+  // blocks passkey sign-in (ORCH-02). Public keys and credential ids are never
+  // returned; the row id is the handle.
+  router.get("/auth/webauthn/credentials", standardRateLimit, async (req, res, next) => {
+    try {
+      const user = (req as unknown as { user?: { id: string } }).user;
+      if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
+        return;
+      }
+      const rows = await prisma.webAuthnCredential.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          name: true,
+          rpId: true,
+          transports: true,
+          createdAt: true,
+          lastUsedAt: true,
+        },
+      });
+      res.json({
+        credentials: rows.map((r) => ({
+          ...r,
+          transports: parseTransports(r.transports) ?? [],
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/auth/webauthn/credentials/:id", sensitiveRateLimit, async (req, res, next) => {
+    try {
+      const user = (req as unknown as { user?: { id: string } }).user;
+      if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
+        return;
+      }
+      const parsed = renameBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Name must be 1 to 64 characters" });
+        return;
+      }
+      const id = String(req.params.id);
+      // updateMany scoped by userId: a foreign or unknown id updates 0 rows.
+      const { count } = await prisma.webAuthnCredential.updateMany({
+        where: { id, userId: user.id },
+        data: { name: parsed.data.name },
+      });
+      if (count === 0) {
+        fail(res, 404, "not_found", "Passkey not found");
+        return;
+      }
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "key-round",
+        what: "Passkey renamed",
+        sub: `${user.id} • ${callerIp(req) ?? "unknown"}`,
+        refs: { outcome: "passkey_renamed", userId: user.id, credentialRowId: id, ip: callerIp(req) ?? null },
+        actor: { type: "user", id: user.id },
+      });
+      res.json({ id, name: parsed.data.name });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/auth/webauthn/credentials/:id", sensitiveRateLimit, async (req, res, next) => {
+    try {
+      const user = (req as unknown as { user?: { id: string } }).user;
+      if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
+        return;
+      }
+      const id = String(req.params.id);
+      // Removing a passkey can't lock anyone out: the password sign-in is
+      // untouched, so no last-credential guard is needed.
+      const { count } = await prisma.webAuthnCredential.deleteMany({
+        where: { id, userId: user.id },
+      });
+      if (count === 0) {
+        fail(res, 404, "not_found", "Passkey not found");
+        return;
+      }
+      await recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "key-round",
+        what: "Passkey removed",
+        sub: `${user.id} • ${callerIp(req) ?? "unknown"}`,
+        refs: { outcome: "passkey_removed", userId: user.id, credentialRowId: id, ip: callerIp(req) ?? null },
+        actor: { type: "user", id: user.id },
+      });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }
@@ -337,10 +515,11 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   router.post("/auth/webauthn/authenticate/options", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
-        res.status(503).json({ error: "Directory unavailable" });
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
         return;
       }
       const { rpID } = deriveWebAuthnRp(req);
+      if (refuseUnsupportedOrigin(rpID, res)) return;
 
       // Passwordless / discoverable-credential flow: no user is known yet, so
       // we mint an ANONYMOUS challenge and let the authenticator surface its
@@ -363,7 +542,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
   router.post("/auth/webauthn/authenticate/verify", authRateLimit, async (req, res, next) => {
     try {
       if (!prisma) {
-        res.status(503).json({ error: "Directory unavailable" });
+        fail(res, 503, "directory_unavailable", "Directory unavailable");
         return;
       }
       const parsed = verifyBodySchema.safeParse(req.body);
@@ -382,7 +561,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
       }
       const stored = await consumeChallenge(prisma, clientChallenge, "AUTHENTICATION");
       if (!stored) {
-        res.status(400).json({ error: "Authentication challenge expired or invalid" });
+        fail(res, 400, "challenge_expired", "Authentication challenge expired or invalid");
         return;
       }
 
