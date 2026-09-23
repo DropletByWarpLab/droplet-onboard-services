@@ -34,7 +34,7 @@
  * AUDIT: every transition writes a `tool_run` activity row with
  * `refs.extensionId` and `refs.op` — no new activity kind.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
@@ -52,10 +52,12 @@ import {
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
+import { EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
+
+export { EXTENSION_TOKEN_PREFIX, hashExtensionToken };
 
 const logger = createLogger("extension-lifecycle");
 
-export const EXTENSION_TOKEN_PREFIX = "dxt_";
 export const EXTENSION_SERVER_PREFIX = "ext-";
 export const EXTENSION_RECONCILE_LOCK_KEY = "droplet:extension-reconciler";
 export const EXTENSION_TICKET = "WARP-2900";
@@ -68,10 +70,6 @@ export const installedExtensionIds = new Set<string>();
 
 export function extensionServerId(slug: string): string {
   return `${EXTENSION_SERVER_PREFIX}${slug}`;
-}
-
-export function hashExtensionToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 export function mintExtensionToken(): { token: string; hash: string } {

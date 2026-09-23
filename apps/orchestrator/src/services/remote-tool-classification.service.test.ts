@@ -92,7 +92,7 @@ describe("recordDiscoveredRemoteTools — the one import path", () => {
       ],
       T0,
     );
-    expect(out).toEqual({ created: ["searchJiraIssuesUsingJql", "getConfluencePage", "createJiraIssue"], seen: 3 });
+    expect(out).toEqual({ created: ["searchJiraIssuesUsingJql", "getConfluencePage", "createJiraIssue"], seen: 3, reset: [] });
     for (const name of ["searchJiraIssuesUsingJql", "getConfluencePage", "createJiraIssue"]) {
       const row = rows.get(`atlassian|${name}`)!;
       expect(row).toMatchObject({ requiresWrite: true, requiresConfirmation: true, denied: false, reviewedBy: null, reviewedAt: null });
@@ -114,7 +114,7 @@ describe("recordDiscoveredRemoteTools — the one import path", () => {
     expect(demoted.ok).toBe(true);
 
     const again = await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getConfluencePage", description: "v2" }], T1);
-    expect(again).toEqual({ created: [], seen: 1 });
+    expect(again).toEqual({ created: [], seen: 1, reset: [] });
     const row = rows.get("atlassian|getConfluencePage")!;
     expect(row).toMatchObject({
       requiresWrite: false,
@@ -262,6 +262,87 @@ describe("composed over a compiled table", () => {
     const policy = composeRemoteCallPolicy({ lookup: cache.lookup });
     expect(policy(call("vendor2", "list"))).toEqual({ kind: "allow" });
     expect(policy(call("vendor2", "other"))).toMatchObject({ kind: "deny", code: RECORD_DENY_CODES.notClassified });
+  });
+});
+
+describe("WARP-2900 — a re-discovered tool keeps its review only while its input schema is the same", () => {
+  const demote = (prisma: ClassificationPrisma, toolName: string) =>
+    classifyRemoteTool(
+      prisma,
+      { serverId: "ext-wc", toolName, requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "owner" },
+      T0,
+    );
+
+  it("records the schema hash on the created row, as the import default", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T0);
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, inputSchemaHash: "h1" });
+  });
+
+  it("the same name and hash (a version bump that left the tool alone) keeps the reviewed read", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T0);
+    expect((await demote(prisma, "word_count")).ok).toBe(true);
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T1);
+    expect(rows.get("ext-wc|word_count")).toMatchObject({
+      requiresWrite: false,
+      requiresConfirmation: false,
+      reviewedBy: "owner",
+      reviewedAt: T0,
+      lastSeenAt: T1,
+    });
+  });
+
+  it("a changed input schema resets the tool to the import default and clears the review", async () => {
+    // MUTATION: keep the classification on a hash change → red.
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T0);
+    expect((await demote(prisma, "word_count")).ok).toBe(true);
+    const out = await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h2" }], T1);
+    expect(out).toEqual({ created: [], seen: 1, reset: ["word_count"] });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({
+      ...IMPORT_DEFAULT_CLASSIFICATION,
+      reviewedBy: null,
+      reviewedAt: null,
+      inputSchemaHash: "h2",
+      firstSeenAt: T0,
+      lastSeenAt: T1,
+    });
+  });
+
+  it("a row recorded before any hash is treated as changed when a hash arrives", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count" }], T0);
+    expect((await demote(prisma, "word_count")).ok).toBe(true);
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T1);
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, reviewedBy: null, inputSchemaHash: "h1" });
+  });
+
+  it("an operator's block survives a schema change: the reset never unblocks a tool", async () => {
+    // MUTATION: spread IMPORT_DEFAULT_CLASSIFICATION (denied:false) over a
+    // blocked row on a hash change → the block is silently lifted → red.
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "wipe", inputSchemaHash: "h1" }], T0);
+    await classifyRemoteTool(
+      prisma,
+      { serverId: "ext-wc", toolName: "wipe", requiresWrite: true, requiresConfirmation: true, denied: true, reviewedBy: "owner" },
+      T0,
+    );
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "wipe", inputSchemaHash: "h2" }], T1);
+    expect(rows.get("ext-wc|wipe")).toMatchObject({ denied: true, reviewedBy: "owner", inputSchemaHash: "h2" });
+  });
+
+  it("a caller that sends no hash (the Atlassian attach) keeps today's behaviour exactly", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getConfluencePage" }], T0);
+    await classifyRemoteTool(
+      prisma,
+      { serverId: "atlassian", toolName: "getConfluencePage", requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "romain" },
+      T0,
+    );
+    const out = await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getConfluencePage" }], T1);
+    expect(out).toEqual({ created: [], seen: 1, reset: [] });
+    expect(rows.get("atlassian|getConfluencePage")).toMatchObject({ requiresWrite: false, reviewedBy: "romain" });
   });
 });
 
