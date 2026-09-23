@@ -211,6 +211,16 @@ export function extensionPrisma(init: { workspaces?: Array<{ id: string; userId?
         Object.assign(e, data, { updatedAt: new Date() });
         return { ...e };
       }),
+      updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
+        let count = 0;
+        for (const e of extensions.values()) {
+          if (matches(e, where)) {
+            Object.assign(e, data, { updatedAt: new Date() });
+            count += 1;
+          }
+        }
+        return { count };
+      }),
       upsert: vi.fn(async ({ where, create, update }: { where: { id: string }; create: Row; update: Row }) => {
         const e = extensions.get(where.id);
         if (e) {

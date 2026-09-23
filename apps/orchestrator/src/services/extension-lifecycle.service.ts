@@ -229,6 +229,8 @@ export interface ExtensionLifecycleDeps {
 
 export type LifecycleOp = "promote" | "install" | "disable" | "enable" | "uninstall" | "reconcile";
 
+type ExtensionStatusName = "signed" | "installed" | "live" | "disabled" | "failed" | "uninstalled";
+
 const SYSTEM_ACTOR: ActivityActor = { type: "system", id: null };
 
 export interface ReconcileReport {
@@ -359,6 +361,28 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return row;
   }
 
+  /**
+   * Move `slug` from one of `from` to `to` in ONE statement (updateMany with
+   * the status in the WHERE), so two tabs — or an owner and the reconciler —
+   * cannot both pass a read-then-check. count 0 → 404 or 409 with the state
+   * that won.
+   */
+  async function claim(
+    slug: string,
+    from: readonly ExtensionStatusName[],
+    to: ExtensionStatusName,
+    extra: { serviceTokenHash?: null } = {},
+  ): Promise<void> {
+    const u = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
+      data: { status: to, ...extra },
+    });
+    if (u.count === 0) {
+      const ext = await load(slug);
+      throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is ${ext.status}`);
+    }
+  }
+
   async function stopAndDetach(slug: string): Promise<void> {
     installedExtensionIds.delete(extensionServerId(slug));
     await attach.detach(slug);
@@ -368,41 +392,28 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     install: (slug: string, actor: ActivityActor) => install(slug, actor, "install"),
 
     async enable(slug: string, actor: ActivityActor) {
-      const ext = await load(slug);
-      if (!["disabled", "failed", "signed", "uninstalled"].includes(ext.status)) {
-        throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is ${ext.status}`);
-      }
+      // Claimed to `signed` (not running yet) first: a second enable racing
+      // this one finds `signed` and gets the 409.
+      await claim(slug, ["disabled", "failed", "uninstalled"], "signed");
       return install(slug, actor, "enable");
     },
 
     async disable(slug: string, actor: ActivityActor) {
-      const ext = await load(slug);
-      if (ext.status === "disabled" || ext.status === "uninstalled") {
-        throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is already ${ext.status}`);
-      }
+      await claim(slug, ["signed", "installed", "live", "failed"], "disabled", { serviceTokenHash: null });
       await stopAndDetach(slug);
       await sandbox.stop(slug);
-      const row = await prisma.extension.update({
-        where: { id: slug },
-        data: { status: "disabled", serviceTokenHash: null },
-      });
       await record("disable", slug, actor, { what: "Extension disabled" });
-      return row;
+      return load(slug);
     },
 
     async uninstall(slug: string, actor: ActivityActor) {
-      const ext = await load(slug);
-      if (ext.status === "uninstalled") {
-        throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is already uninstalled`);
-      }
+      await claim(slug, ["signed", "installed", "live", "failed", "disabled"], "uninstalled", {
+        serviceTokenHash: null,
+      });
       await stopAndDetach(slug);
       await sandbox.uninstall(slug);
-      const row = await prisma.extension.update({
-        where: { id: slug },
-        data: { status: "uninstalled", serviceTokenHash: null },
-      });
       await record("uninstall", slug, actor, { severity: "warn", what: "Extension uninstalled" });
-      return row;
+      return load(slug);
     },
 
     /** installedExtensionIds := the rows that should be running. */

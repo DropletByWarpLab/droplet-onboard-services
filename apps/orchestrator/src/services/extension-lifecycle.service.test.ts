@@ -231,6 +231,39 @@ describe("install re-verifies and rotates", () => {
   });
 });
 
+describe("transitions are claimed in one statement (no read-then-write race)", () => {
+  it("two concurrent disables: one wins, the other is 409", async () => {
+    // MUTATION: go back to findUnique -> check -> update in disable() and
+    // both requests pass the check.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "installed" });
+    const results = await Promise.allSettled([
+      k.lifecycle.disable("wc", OWNER),
+      k.lifecycle.disable("wc", OWNER),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ code: "wrong_state", httpStatus: 409 });
+    expect(k.sandbox.calls.filter((c) => c === "stop wc")).toHaveLength(1);
+  });
+
+  it("two concurrent enables start the extension once", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "disabled" });
+    const results = await Promise.allSettled([k.lifecycle.enable("wc", OWNER), k.lifecycle.enable("wc", OWNER)]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(k.sandbox.installs).toHaveLength(1);
+  });
+
+  it("unknown is 404, already-uninstalled is 409", async () => {
+    const k = kit();
+    await expect(k.lifecycle.disable("nope", OWNER)).rejects.toMatchObject({ httpStatus: 404 });
+    await seedSigned(k.db, k.identity, { status: "uninstalled" });
+    await expect(k.lifecycle.uninstall("wc", OWNER)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(k.lifecycle.disable("wc", OWNER)).rejects.toMatchObject({ httpStatus: 409 });
+  });
+});
+
 describe("the reconciler", () => {
   it("dials nothing when there is nothing to run", async () => {
     const k = kit();
