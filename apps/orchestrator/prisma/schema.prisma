@@ -3945,6 +3945,16 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
+  /// Explicit, like `status`: `unchecked` until the worker first claims the
+  /// row, never inferred from `offLanProvider` being NULL.
+  cloudGate          AgentRunCloudGate        @default(unchecked)
+  /// WARP-2997 — the non-local provider the run's model resolved to at the
+  /// latest claim; NULL when it stays on the box (`cloudGate` says which).
+  offLanProvider     String?
+  /// WARP-2997 — the stored-content tools withheld from the run's pool at
+  /// the latest claim (`withholdStoredContentTools`). Empty on a local run.
+  offLanWithheldTools String[]                @default([])
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
@@ -3971,6 +3981,19 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2997 — where a run's model runs, and whether its owner may use it.
+/// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
+/// `cloud_allowed` (cloud model, person permitted; stored-content tools
+/// withheld), `cloud_refused` (451: the person may not use cloud models),
+/// `cloud_unverified` (503: the gate could not be read; fail-closed).
+enum AgentRunCloudGate {
+  unchecked
+  local
+  cloud_allowed
+  cloud_refused
+  cloud_unverified
 }
 
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as
