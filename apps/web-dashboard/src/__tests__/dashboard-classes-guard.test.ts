@@ -28,6 +28,12 @@
  *     `npm run lint:dashboard-classes`.
  *   - Guard 1 is a fixed nine-name list that genuinely benefits from
  *     being asserted twice. A 130-entry ratchet does not.
+ *
+ * Guard 6 (WARP-1356, dead focus styling: a `focus:` utility defeated by
+ * an inline style on the same element) is also script-only. It needs a
+ * JSX-tag parser, and this suite already re-reads every source file once
+ * per bad class (WARP-2711 tracks its timeout); a second copy here would
+ * add cost for no extra signal.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";

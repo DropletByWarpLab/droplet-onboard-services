@@ -3,9 +3,10 @@
 # check-dashboard-classes.sh — WARP-288 (classes) + WARP-291 (native
 # dialogs) + the DESIGN.md design-token ratchet.
 #
-# Five guards in one script. 1 and 2 are clean-tree guards on things that
+# Six guards in one script. 1 and 2 are clean-tree guards on things that
 # DON'T EXIST; 3–5 are a shrink-only ratchet on things that DO exist and
 # still shouldn't be used — see the block above them for the full design.
+# 6 is a clean-tree guard on dead focus styling (WARP-1356), at the end.
 #
 # 1. Bad Tailwind utility class names that don't exist in
 #    `apps/web-dashboard/src/app/globals.css` or
@@ -417,3 +418,113 @@ EOF
 fi
 
 echo "check-dashboard-tokens: OK (0 new legacy-token / accent-alpha / white-on-accent / card-outer-margin sites)"
+
+# ─────────────────────────────────────────────────────────────────────
+# Guard 6 — WARP-1356: dead focus styling.
+#
+# An inline `style` beats every stylesheet rule (Tailwind 3, no
+# `important` config), so `focus:border-[var(--brand)]` on an element
+# whose `style` sets `border` never renders. Paired with `outline-none`
+# that leaves keyboard focus invisible (WCAG 2.4.7). The idiom spread by
+# copy-paste to 115 elements before this guard existed.
+#
+# Flags any JSX opening tag where a `focus:` / `focus-visible:` /
+# `focus-within:` utility targets a property the same tag's inline style
+# also sets:
+#   border-*  vs  border / borderColor / borderWidth / borderStyle
+#   ring-*    vs  boxShadow   (a ring IS a box-shadow)
+#   bg-*      vs  background / backgroundColor
+#   outline-* vs  outline / outlineColor / outlineWidth / outlineStyle
+#
+# Fix: the ring idiom `focus:ring-2 focus:ring-[var(--brand)]`, which an
+# inline border cannot defeat (DESIGN.md "Inputs / Fields → Focus"), or
+# move the property out of the style object into a class.
+#
+# Resolves `style={SAME_FILE_CONST}`, `className={CONST}` and `${CONST}`
+# when the const is declared in the same file. Blind spots: styles or
+# classes imported from another module, and `cn()`/`clsx()` helpers.
+#
+# Cost: perl runs only over the .tsx files grep finds carrying a focus
+# utility (~130 files), well under a second — this is a script guard,
+# not a vitest one, so it adds nothing to the dashboard-classes vitest
+# guard's runtime (WARP-2711).
+# ─────────────────────────────────────────────────────────────────────
+
+focus_files=()
+while IFS= read -r f; do focus_files+=("$f"); done < <(
+  grep -rlE \
+    --include='*.tsx' \
+    --exclude='*.test.tsx' \
+    --exclude-dir='__tests__' \
+    --exclude-dir='node_modules' \
+    --exclude-dir='.next' \
+    'focus(-visible|-within)?:(border|ring|bg|outline)' \
+    "$SRC_ROOT" || true
+)
+
+# Loaded via `read` rather than a heredoc inside $(...): bash mis-parses
+# quotes in a heredoc nested in a command substitution.
+IFS= read -r -d '' DEAD_FOCUS_PL <<'PERL' || true
+use strict; use warnings;
+# A balanced {...} JS expression: skips strings, template literals and
+# comments so a brace or quote inside them can't end the match early.
+my $br = qr/(\{(?:[^{}"'`\/]++|\/\/[^\n]*|\/\*.*?\*\/|\/|"[^"]*"|'[^']*'|`(?:[^`\\]|\\.)*`|(?-1))*\})/s;
+my %inline = (
+  border  => qr/\bborder(?:Color|Width|Style)?\s*:/,
+  ring    => qr/\bboxShadow\s*:/,
+  bg      => qr/\bbackground(?:Color)?\s*:/,
+  outline => qr/\boutline(?:Color|Width|Style)?\s*:/,
+);
+for my $f (@ARGV) {
+  open my $fh, '<', $f or die "$f: $!";
+  my $src = do { local $/; <$fh> };
+  # Same-file consts, so `style={inputStyle}` / `className={CLS}` resolve.
+  my (%objs, %strs);
+  $objs{$1} = $2 while $src =~ /\bconst\s+(\w+)\s*(?::[^=]+)?=\s*$br/g;
+  $strs{$1} = $2 while $src =~ /\bconst\s+(\w+)\s*(?::[^=]+)?=\s*"([^"]*)"/g;
+  # Every JSX opening tag: name, then attributes / spreads / comments.
+  while ($src =~ /<[A-Za-z][\w.]*((?:\s+(?:[\w:.-]+(?:=(?:"[^"]*"|'[^']*'|$br))?|$br|\/\/[^\n]*|\/\*.*?\*\/))*)\s*\/?>/gs) {
+    my ($attrs, $start) = ($1, $-[0]);
+    $attrs =~ s/\$\{(\w+)\}|className=\{(\w+)\}/exists $strs{$1 || $2} ? $strs{$1 || $2} : $&/ge;
+    my %want;
+    $want{$1}++ while $attrs =~ /\bfocus(?:-visible|-within)?:(border|ring|bg|outline)(?=[-\s"'`\]]|$)/g;
+    next unless %want;
+    my $style = $attrs =~ /\bstyle=\{\s*$br\s*\}/ ? $1
+              : $attrs =~ /\bstyle=\{\s*(\w+)\s*\}/ && exists $objs{$1} ? $objs{$1} : '';
+    for my $p (sort grep { $style =~ $inline{$_} } keys %want) {
+      my $line = 1 + (() = substr($src, 0, $start) =~ /\n/g);
+      print "$f:$line: focus:$p-* never renders, the inline style sets the same property\n";
+    }
+  }
+}
+PERL
+
+set +e
+dead_focus_hits=""
+if [ "${#focus_files[@]}" -gt 0 ]; then
+  dead_focus_hits="$(perl -e "$DEAD_FOCUS_PL" "${focus_files[@]}")"
+fi
+dead_focus_status=$?
+set -e
+
+if [ "$dead_focus_status" -ne 0 ] && [ -z "$dead_focus_hits" ]; then
+  echo "check-dead-focus: the perl scanner failed (exit $dead_focus_status)" >&2
+  exit 2
+fi
+
+if [ -n "$dead_focus_hits" ]; then
+  count="$(printf '%s\n' "$dead_focus_hits" | wc -l | tr -d '[:space:]')"
+  echo
+  echo "✘ [dead-focus] ${count} element(s) whose focus style is overridden by an inline style:"
+  printf '%s\n' "$dead_focus_hits" | sed "s|^${SRC_ROOT}/|    |"
+  cat <<'MSG'
+
+check-dead-focus: inline `style` outranks every Tailwind class, so these
+focus utilities never paint — and with `outline-none` keyboard focus is
+invisible (WCAG 2.4.7). Use `focus:ring-2 focus:ring-[var(--brand)]`, or
+move the property from the style object into a class. Refs: WARP-1356.
+MSG
+  exit 1
+fi
+
+echo "check-dead-focus: OK (0 focus utilities defeated by an inline style)"

@@ -1506,7 +1506,7 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
+            className="flex-1 py-2 px-3 outline-none focus:ring-2 focus:ring-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
