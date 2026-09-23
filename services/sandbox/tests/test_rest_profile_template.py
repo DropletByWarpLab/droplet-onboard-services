@@ -329,6 +329,10 @@ def test_propose_a_connector_draft_writes_no_manifest_and_tags(store):
         # and as a value under a key that spells the origin's location.
         ("profile-escaped-url-key", "scheme URL other than its origin"),
         ("profile-origin-spelling-key", "scheme URL other than its origin"),
+        # A URL in the egress entry: YAML decodes a double-quoted `\/` (the
+        # text holds no "://"), and a plain one is in the text.
+        ("egress-escaped-url", "allowed-egress.acme.draft.yaml carries a backslash"),
+        ("egress-plain-url", "allowed-egress.acme.draft.yaml carries a scheme URL"),
         ("adr042-header-only", "no §2 row for Acme Tasks"),
         ("adr042-no-provisioning", "no §7 provisioning row for Acme Tasks"),
         ("adr042-blank-cell", "no §4 accept/reject row for Acme Tasks"),
@@ -374,6 +378,10 @@ def test_propose_refuses_a_draft_whose_renders_are_missing_or_disagree(store, br
         edited = text.replace('"probePath": "/v1/me"', f'"probePath": "/v1/me", {extra}')
         assert edited.count("://") == 1  # the origin's own, nothing else in the text
         (work / paths["profile"]).write_text(edited, encoding="utf-8")
+    elif breakage in ("egress-escaped-url", "egress-plain-url"):
+        url = "https:\\/\\/exfil.evil.example\\/x" if breakage == "egress-escaped-url" else "https://exfil.evil.example/x"
+        egress = work / paths["egress"]
+        egress.write_text(egress.read_text(encoding="utf-8") + f'    purpose: "{url}"\n', encoding="utf-8")
     elif breakage == "adr042-header-only":
         (work / paths["adr042"]).write_text(
             "| Vendor | What the owner pastes | Accepted shape | Full-privilege alternative to refuse "
@@ -430,6 +438,17 @@ def test_propose_refuses_a_scheme_url_in_a_dynamic_draft(store):
         workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
     assert keyed.value.status == 409 and "scheme URL" in str(keyed.value)
     profile.write_text(rendered, encoding="utf-8")
+    # The egress entry: a double-quoted `\/` URL (YAML decodes it; the text
+    # holds no "://") and a plain one. MUTATION: drop the backslash rule →
+    # the escaped case goes through.
+    egress = work / connector_draft.output_paths("globex")["egress"]
+    entry = egress.read_text(encoding="utf-8")
+    for url, expect in (("https:\\/\\/exfil.evil.example\\/x", "carries a backslash"), ("https://exfil.evil.example/x", "scheme URL")):
+        egress.write_text(entry + f'    purpose: "{url}"\n', encoding="utf-8")
+        with pytest.raises(StoreError) as bad_egress:
+            workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
+        assert bad_egress.value.status == 409 and expect in str(bad_egress.value), url
+    egress.write_text(entry, encoding="utf-8")
     guide.write_text(GUIDE, encoding="utf-8")
     p = workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
     assert p["connectorDraft"]["host"]["kind"] == "dynamic"
@@ -478,6 +497,30 @@ def test_the_python_reader_agrees_with_the_js_renderer(store, draft):
     assert t.returncode == 0, t.stdout[-2000:]
     p = workspace.propose(wid, "Draft", "0.1.0", "s", ALICE)
     assert p["kind"] == "connector-draft" and p["connectorDraft"]["problems"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_rendered_egress_entry_carries_no_backslash_and_parses_back(store):
+    # rjouffret on #2324: YAML decodes "https:\/\/..." to a URL, so the
+    # readers refuse any backslash in the egress entry, and the renderer must
+    # write none: free text is single-quoted, on one line. MUTATION: go back
+    # to JSON-quoting the free text → the propose below is refused.
+    yaml = pytest.importorskip("yaml")
+    assert yaml.safe_load('purpose: "https:\\/\\/exfil.evil.example\\/x"')["purpose"] == "https://exfil.evil.example/x"
+    draft = _dynamic_draft()
+    draft["egress"]["purpose"] = 'the "Export" tab\'s\r\n\trows'
+    draft["baseUrl"]["hostShape"] = 'the customer\'s "own"\nsubdomain'
+    store.create_workspace("ws-js-quoted", "rest-profile", ALICE)
+    work = store.work_path("ws-js-quoted")
+    r = _node_render(work, draft)
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = (work / connector_draft.output_paths("globex")["egress"]).read_text(encoding="utf-8")
+    assert "\\" not in text
+    entry = yaml.safe_load(text)["entries"][0]
+    assert entry["purpose"] == 'the "Export" tab\'s rows'
+    assert entry["config_key"] == 'IntegrationConnection.providerConfig.companyDomain (the customer\'s "own" subdomain)'
+    p = workspace.propose("ws-js-quoted", "Draft", "0.1.0", "s", ALICE)
+    assert p["connectorDraft"]["problems"] == []
 
 
 # The image, not just any host with /usr/local/bin/npm: a GitHub runner has

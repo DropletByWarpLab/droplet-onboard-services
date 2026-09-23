@@ -204,6 +204,12 @@ export function validateDraft(draft, vocab) {
   if (!isObj(draft.egress) || !isStr(draft.egress.dataClass) || !DATA_CLASS_RE.test(draft.egress.dataClass)) {
     problems.push("egress.dataClass must be a registry data_class such as user-content-on-request");
   }
+  // The egress entry is YAML, and in YAML a backslash is an escape that can
+  // hide a URL; checkRendered refuses any in the rendered entry. The two free
+  // texts the entry carries are refused here, where the person can fix them.
+  for (const [at, value] of [["egress.purpose", draft.egress?.purpose], ["baseUrl.hostShape", draft.baseUrl?.hostShape]]) {
+    if (isStr(value) && value.includes("\\")) problems.push(`${at} carries a backslash; the egress entry is YAML, so write it out in words`);
+  }
   if (!isObj(draft.credential)) problems.push("credential must be an object");
   if (!isObj(draft.guide) || !Array.isArray(draft.guide.clickPath)) problems.push("guide must be an object with a clickPath list");
 
@@ -332,6 +338,12 @@ export function checkRendered(draft, read) {
   } else {
     const key = `IntegrationConnection.providerConfig.${draft.baseUrl.configField}`;
     if (!egress.includes(key)) problems.push(`${paths.egress} does not name ${key}`);
+  }
+  // The renderer writes no escape into the egress entry (free text is
+  // single-quoted), and a YAML double-quoted `https:\/\/…` is a URL the
+  // "://" scan below cannot see (review of #2324). So: no backslash at all.
+  if (egress !== null && egress.includes("\\")) {
+    problems.push(`${paths.egress} carries a backslash; a YAML escape can hide a URL, and \`npm run build\` writes none`);
   }
   const adr042 = read(paths.adr042);
   if (adr042 === null) problems.push(`${paths.adr042} is missing`);

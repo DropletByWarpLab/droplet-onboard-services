@@ -41,8 +41,21 @@ function cell(text) {
   return text.replace(/\\/g, "\\\\").replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
 }
 
-/** A YAML scalar. JSON strings are valid YAML double-quoted scalars. */
+/**
+ * A YAML scalar for a validated domain. JSON strings are valid YAML
+ * double-quoted scalars, and a domain needs no escape, so none is written.
+ */
 const y = (s) => JSON.stringify(s);
+
+/**
+ * A YAML scalar for free text: one line, single-quoted. A single-quoted
+ * scalar has no escapes (a quote is doubled), so the egress entry never
+ * carries a backslash and both readers refuse one: in a double-quoted
+ * scalar `https:\/\/…` decodes to a URL their "://" scan cannot see
+ * (review of #2324). Whitespace and control characters, line breaks
+ * included, collapse to one space.
+ */
+const text = (s) => `'${s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, " ").trim().replace(/'/g, "''")}'`;
 
 /** The RestVendorProfile subset of the draft — the connector's type, nothing more. */
 function profileOf(draft) {
@@ -138,7 +151,7 @@ function renderEgress(draft, today) {
         `      protocol: https`,
         `    phase: runtime`,
         `    data_class: ${draft.egress.dataClass}`,
-        `    purpose: ${y(purpose)}`,
+        `    purpose: ${text(purpose)}`,
       ]),
       `    code_refs: [${profilePath}]`,
     );
@@ -150,10 +163,10 @@ function renderEgress(draft, today) {
       `  - id: ${p}-api`,
       `    kind: dynamic`,
       `    service: erp-connector`,
-      `    config_key: ${y(`IntegrationConnection.providerConfig.${b.configField} (${b.hostShape.trim()})`)}`,
+      `    config_key: ${text(`IntegrationConnection.providerConfig.${b.configField} (${b.hostShape.trim()})`)}`,
       `    phase: runtime`,
       `    data_class: ${draft.egress.dataClass}`,
-      `    purpose: ${y(purpose)}`,
+      `    purpose: ${text(purpose)}`,
     ]),
     `    code_refs: [${profilePath}]`,
   );
@@ -169,7 +182,7 @@ function renderEgress(draft, today) {
         `    service: erp-connector`,
         `    destination:`,
         `      hosts: [${y(host)}]`,
-        `    purpose: ${y(`${why}, named in the profile as the guard's anchor; not a connection the box makes`)}`,
+        `    purpose: ${text(`${why}, named in the profile as the guard's anchor; not a connection the box makes`)}`,
       ]),
     );
   }

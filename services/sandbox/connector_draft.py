@@ -11,8 +11,8 @@ and the ADR-042 rows. This module reads them back and says two things:
   * the problems that make it not ready to propose: a rendered file missing,
     a profile that is not the renderer's layout or dials another baseUrl, a
     guide whose sections are not the six in order, an egress entry that does
-    not name the host, an ADR-042 table without its row, and any "://" but a
-    static draft's one origin.
+    not name the host or carries a backslash (a YAML escape), an ADR-042
+    table without its row, and any "://" but a static draft's one origin.
 
 It mirrors checkRendered() in the template's scripts/validate.mjs, and the
 tests prove the two agree on the renderer's real output. It is deliberately
@@ -296,6 +296,11 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
         key = f"IntegrationConnection.providerConfig.{host['configField']}"
         if key not in egress:
             problems.append(f"{paths['egress']} does not name {key}")
+    # validate.mjs's rule: the renderer writes no escape into the egress entry
+    # (free text is single-quoted), and a YAML double-quoted `https:\/\/...`
+    # is a URL the "://" scan below cannot see (review of #2324).
+    if egress is not None and "\\" in egress:
+        problems.append(f"{paths['egress']} carries a backslash; a YAML escape can hide a URL, and `npm run build` writes none")
 
     adr042 = read(paths["adr042"])
     if adr042 is None:

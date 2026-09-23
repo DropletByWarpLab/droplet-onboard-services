@@ -136,13 +136,51 @@ test("a table cell escapes a literal backslash before escaping the pipe it prece
   assert.equal(row.split(" | ").length, 7, row);
 });
 
+test("the egress entry's free text is single-quoted on one line, so it carries no backslash", () => {
+  // A quote, an apostrophe and a line break in the purpose and the host
+  // shape: JSON-quoting them wrote `\"` and `\n`, and the readers refuse any
+  // backslash in the egress entry (review of #2324). A backslash of the
+  // draft's own is refused by validateDraft (INVALID above).
+  // MUTATION: go back to JSON-quoting the free text → red.
+  for (const name of ["static", "dynamic"]) {
+    const draft = structuredClone(fixture(name));
+    draft.egress.purpose = `the "Export" tab's\r\n\trows`;
+    if (name === "dynamic") draft.baseUrl.hostShape = `the customer's "own"\nsubdomain`;
+    assert.deepEqual(validateDraft(draft, VOCAB), [], name);
+    const out = render(draft);
+    const egress = out.get(outputPaths(draft.provider).egress);
+    assert.ok(!egress.includes("\\"), egress);
+    assert.match(egress, /purpose: 'the "Export" tab''s rows'\n/);
+    if (name === "dynamic") assert.match(egress, /\(the customer''s "own" subdomain\)'\n/);
+    assert.deepEqual(checkRendered(draft, reader(out)), [], name);
+  }
+});
+
+test("checkRendered refuses a URL in the egress entry, escaped in a double-quoted scalar or plain", () => {
+  // rjouffret on #2324: YAML decodes "https:\/\/…" to a URL, and the text
+  // holds no "://". MUTATION: drop the backslash rule → the escaped case red.
+  const BS = "\\";
+  const edits = {
+    escaped: [(t) => `${t}    purpose: "https:${BS}/${BS}/exfil.evil.example${BS}/x"\n`, "backslash"],
+    plain: [(t) => `${t}    purpose: ${SCHEME}exfil.evil.example/x\n`, "scheme URL"],
+  };
+  for (const name of ["static", "dynamic"]) {
+    const draft = fixture(name);
+    const out = render(draft);
+    const p = outputPaths(draft.provider).egress;
+    for (const [label, [edit, expect]] of Object.entries(edits)) {
+      assert.ok(checkRendered(draft, reader(out, { [p]: edit })).some((m) => m.startsWith(p) && m.includes(expect)), `${name} ${label}`);
+    }
+  }
+});
+
 test("a dynamic draft renders no scheme URL anywhere, a kind: dynamic entry and one reference per suffix or host", () => {
   // MUTATION: emit a scheme URL for the suffix in render → red.
   const out = render(fixture("dynamic"));
   for (const [path, text] of out) assert.ok(!text.includes("://"), `${path} carries a scheme URL`);
   const egress = out.get(outputPaths("globex-crm").egress);
   assert.match(egress, /id: globex-crm-api\n\s+kind: dynamic/);
-  assert.match(egress, /config_key: "IntegrationConnection\.providerConfig\.companyDomain \(/);
+  assert.match(egress, /config_key: 'IntegrationConnection\.providerConfig\.companyDomain \(the customer''s own/);
   assert.match(egress, /id: ref-globex-crm-host-suffix\n\s+kind: reference[\s\S]*?hosts: \["globex\.example"\]/);
   assert.match(egress, /id: ref-globex-crm-host\n\s+kind: reference[\s\S]*?hosts: \["eu\.globex-hosted\.example"\]/);
   assert.match(egress, /code_refs: \[services\/erp-connector\/src\/rest\/vendors\/globex-crm\.ts\]/);
@@ -201,6 +239,9 @@ const INVALID = {
   // location a static draft's scheme is allowed at.
   "a key carrying a scheme": invalid("dynamic", (d) => (d.guide[`${SCHEME}exfil.evil.example/x`] = "")),
   "a key spelling baseUrl.origin": invalid("static", (d) => (d["baseUrl.origin"] = `${SCHEME}exfil.evil.example`)),
+  // The egress entry carries no backslash (a YAML escape can hide a URL).
+  "a purpose with a backslash": invalid("static", (d) => (d.egress.purpose = "tasks " + "\\" + " exports")),
+  "a host shape with a backslash": invalid("dynamic", (d) => (d.baseUrl.hostShape = "a subdomain" + "\\")),
 };
 
 test("an invalid draft is refused with a problem, and render writes NOTHING", () => {
