@@ -1364,7 +1364,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-2977 — the Security command center (ADR-059). */
+  | "security";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -3204,4 +3206,47 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
+
+/** Mirrors the orchestrator's SecurityEventKind enum. */
+export type SecurityEventKind =
+  | "detection"
+  | "detection_low"
+  | "camera_offline"
+  | "camera_online"
+  | "source_offline"
+  | "source_online"
+  | "threat";
+
+export interface SecurityEvent {
+  /** BigInt id, serialised as a string. */
+  id: string;
+  source: "frigate" | "frigate_status" | "activity_mirror";
+  kind: SecurityEventKind;
+  severity: "info" | "notice" | "alert";
+  /** Frigate camera name; null for rows no camera produced. */
+  camera: string | null;
+  labels: string[];
+  cameraZones: string[];
+  score: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string;
+  /** Set on detections — the clip/thumbnail routes key on it. */
+  frigateEventId: string | null;
+}
+
+export interface SecurityEventsPage {
+  events: SecurityEvent[];
+  nextCursor: string | null;
+}
+
+/** One line of the feed header: what the feed is listening to, and whether it is reporting. */
+export interface SecurityHealthRow {
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  state: "ok" | "quiet" | "down" | "not_configured";
+  detail: string;
+  lastSeenAt: string | null;
 }

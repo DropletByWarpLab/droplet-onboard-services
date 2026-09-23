@@ -80,6 +80,8 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "money",
         "network",
         "projects",
+        // WARP-2977 — the Security command center, on the same terms.
+        "security",
         "smart_home",
         "team_chat",
         "voice",

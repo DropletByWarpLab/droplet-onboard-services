@@ -73,6 +73,11 @@ const NOT_A_CURSOR: Record<string, string> = {
     "reaches does hold a resume position (its `watermark` column), but that never crosses a " +
     "tool result: WARP-2218's poller is a cron job, not a tool. Adding it to CURSOR_KEYS would " +
     "preserve a key that is never in a payload in the first place.",
+  threatCursor:
+    "security-events.service.ts — the SecurityIngestState COLUMN holding the threat mirror's " +
+    "ActivityRow id watermark (WARP-2977). Only mirrorThreatRows reads and writes it, and only the " +
+    "registerSecurityJobs interval job calls that — a cron, not a tool. No route or tool result " +
+    "carries it: /api/security/health selects threatMirrorRanAt and the retention fields only.",
   nextSecrets:
     "saas-credential.service.ts — a LOCAL const, not a payload key: " +
     "`const nextSecrets: Record<string, string>`. declaredKeys() greps `identifier:` and so " +

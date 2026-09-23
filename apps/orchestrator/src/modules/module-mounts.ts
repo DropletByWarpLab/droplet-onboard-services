@@ -111,6 +111,9 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // so `gateScopeFor` returns null for both and no sibling surface is caught.
   "crm",
   "money",
+  // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
+  // narrowed away from Security never reaches `/api/security`.
+  "security",
 ]);
 
 /**

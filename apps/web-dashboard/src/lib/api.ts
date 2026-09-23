@@ -133,6 +133,9 @@ import type {
   RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
+  SecurityEventKind,
+  SecurityEventsPage,
+  SecurityHealthRow,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -8777,4 +8780,45 @@ export async function deleteRoutineSchedule(
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
   }
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center ──
+// Read-only in P2. A 503 is an outage, never an empty feed — the page renders
+// it as "not reporting", because an empty list reads as a quiet site.
+
+export interface SecurityEventsQuery {
+  cursor?: string | null;
+  limit?: number;
+  kinds?: SecurityEventKind[];
+  camera?: string;
+  includeLow?: boolean;
+}
+
+export function securityEventsPath(q: SecurityEventsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
+  if (q.camera) p.set("camera", q.camera);
+  if (q.includeLow) p.set("includeLow", "true");
+  const qs = p.toString();
+  return `/api/security/events${qs ? `?${qs}` : ""}`;
+}
+
+export async function getSecurityEvents(q: SecurityEventsQuery = {}): Promise<SecurityEventsPage> {
+  const res = await authFetch(`${BASE}${securityEventsPath(q)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security events: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[] }> {
+  const res = await authFetch(`${BASE}/api/security/health`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security health: ${res.status}`);
+  }
+  return res.json();
 }

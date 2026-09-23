@@ -116,6 +116,7 @@ export const SPACES: SpaceDef[] = [
     // rather than its child, so it is its own chip here too — the pin in
     // workspace-nav-config.test.ts caught the two PRs crossing on stage.
     hrefs: [
+      "/security",
       "/cameras",
       "/events",
       "/network",
