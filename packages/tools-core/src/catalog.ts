@@ -254,8 +254,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
   cloud: ["cloud_query_dataset"],
-  // ADR-045 slice C — `business` is an UNCLAIMED domain (access-catalog.ts's
-  // UNCLAIMED_DOMAINS: system / business / data / erp are not feature-gated),
+  // ADR-045 slice C — `business` is a FEATURE-UNGATED domain (access-catalog.ts
+  // FEATURE_UNGATED_TOOL_DOMAINS, WARP-2742),
   // so unlike `crm`/`pm` these two are advertised regardless of the module
   // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
   // `/api/crm/*` and `/api/pm/*`), and `_graph.ts`'s `businessError`
