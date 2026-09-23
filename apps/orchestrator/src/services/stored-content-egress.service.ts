@@ -42,6 +42,18 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
  *    same Drive content (the attachment path writes `BrainMemoryItem` +
  *    `FileContentChunk` rows), so withholding `files` while leaving `memory`
  *    advertised would leave the hole open one indirection further down.
+ *  - `business` — WARP-2990 (Romain, 2026-09-22: "withheld, the same as the
+ *    memory tool"). `business_profile_get` returns the BusinessProfile the
+ *    prompt gate below withholds, and `business_find` reaches CRM/PM records
+ *    and the ADR-051 brain findings, so leaving the domain advertised would
+ *    hand a cloud model on request exactly what it is not given unasked. The
+ *    whole domain goes, writes included: a cloud turn has no business surface.
+ *
+ *    COMPOSES WITH the per-person feature/domain gate (access-catalog.ts,
+ *    WARP-2742/2988: `business` needs CRM or Projects) as an AND. That gate
+ *    decides who may reach the domain at all; this one only ever subtracts
+ *    from what it already allowed, so a business tool reaches a turn only if
+ *    both say yes — on a cloud turn, never.
  *
  * DELIBERATELY NOT WIDENED HERE: `erp`, `email`, `calendar`, and `team_chat`
  * also carry customer content — `erp` most acutely, since it is literally the
@@ -53,6 +65,7 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 export const OFF_LAN_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>([
   "files",
   "memory",
+  "business",
 ]);
 
 /**
@@ -94,7 +107,8 @@ export function withholdStoredContentTools(allowed: readonly string[]): string[]
 export const OFF_LAN_WITHHELD_NOTICE =
   "You are running on a cloud model, off this appliance. The user's stored " +
   "files, their contents, their filenames, and any attachments are NOT " +
-  "available to you on this turn, and no file or memory tools are offered. " +
+  "available to you on this turn, and no file, memory or business-record " +
+  "tools are offered. " +
   "Stored content was also left out of these instructions: the facts the " +
   "user asked you to remember, the business profile, what the Droplet has " +
   "learned about the business, and any pinned items. This is a deliberate " +
@@ -133,11 +147,9 @@ export const OFF_LAN_ATTACHMENT_NOTICE =
  *    rather than restated, so the two axes cannot disagree again. `MemoryFact`
  *    is workspace-wide (no userId column), and the brain block is built from
  *    rows the corpus pass derived from Drive content (ADR-051).
- *  - `business` — the BusinessProfile block. ADR-051 is silent on whether any
- *    of its fields may leave the box, and every field identifies the company
- *    (name, services, clients, locations). The conservative default applies:
- *    withheld whole. Loosening it is a product decision for the owner, not a
- *    refactor.
+ *  - `business` — the BusinessProfile block. FOLLOWS THE `business` TOOL
+ *    DOMAIN (WARP-2990). Every field identifies the company; Romain ruled
+ *    2026-09-22 that none of it goes to a cloud model.
  *  - `context_pins` — pinned file paths and resolved customer/deal names.
  *    Filenames are stored content (see the module header), so a pin is the
  *    `list_files` hole in prompt form.
@@ -152,7 +164,9 @@ const MEMORY_DOMAIN_WITHHELD = OFF_LAN_WITHHELD_DOMAINS.has("memory");
 export const OFF_LAN_WITHHELD_PROMPT_BLOCKS: ReadonlySet<OffLanPromptBlock> =
   new Set<OffLanPromptBlock>([
     ...(MEMORY_DOMAIN_WITHHELD ? (["memory", "brain"] as const) : []),
-    "business",
+    // WARP-2990 — now that the `business` TOOL domain is withheld too, the
+    // profile block follows it rather than standing on its own default.
+    ...(OFF_LAN_WITHHELD_DOMAINS.has("business") ? (["business"] as const) : []),
     "context_pins",
   ]);
 

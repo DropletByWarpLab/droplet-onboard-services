@@ -76,6 +76,9 @@ const LIVE_TOOLS = [
   { name: "search_content" },
   { name: "list_files" },
   { name: "memory_recall" },
+  // WARP-2990 — the business profile / CRM / brain-findings door.
+  { name: "business_profile_get" },
+  { name: "business_find" },
   { name: "get_network_status" },
   { name: "list_smart_home_devices" },
 ];
@@ -340,6 +343,8 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).not.toContain("search_content");
     expect(allowed).not.toContain("list_files");
     expect(allowed).not.toContain("memory_recall");
+    expect(allowed).not.toContain("business_profile_get");
+    expect(allowed).not.toContain("business_find");
     // The other half of the contract: it subtracted, it didn't nuke.
     expect(allowed).toContain("get_network_status");
   });
@@ -363,6 +368,8 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).toContain("read_file");
     expect(allowed).toContain("search_content");
     expect(allowed).toContain("memory_recall");
+    expect(allowed).toContain("business_profile_get");
+    expect(allowed).toContain("business_find");
   });
 
   it("withholds them from the OWNER too — the role most likely to be on a cloud model", async () => {
@@ -581,6 +588,9 @@ describe("withholdPromptBlocksForOffLan — the one definition", () => {
     expect(OFF_LAN_WITHHELD_DOMAINS.has("memory")).toBe(true);
     expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("memory")).toBe(true);
     expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("brain")).toBe(true);
+    // WARP-2990 — and the profile block follows the business tool domain.
+    expect(OFF_LAN_WITHHELD_DOMAINS.has("business")).toBe(true);
+    expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("business")).toBe(true);
   });
 
   it("is a no-op on a local turn and records only non-empty blocks off-LAN", () => {
