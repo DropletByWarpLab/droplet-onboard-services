@@ -193,9 +193,18 @@ export function mountModuleGates(
  * `business` only, deliberately: it is the domain Romain's "CRM or Projects"
  * decision is about, and the one whose routes sit under two modules. The gate
  * mounts on the prefixes of every module that CLAIMS the domain — derived from
- * the registry, never hand-listed — and `module-mounts.test.ts` pins that every
- * tool hop under those prefixes (tools-core TOOL_ROUTES) is a tool of this
- * domain, so the gate can never refuse another domain's tool.
+ * the registry, never hand-listed — and `middleware/mcp-acting-user-gate.test.ts`
+ * pins that every tool hop under those prefixes (tools-core TOOL_ROUTES) is a
+ * tool of this domain, so the gate can never refuse another domain's tool.
+ *
+ * `business` hops OUTSIDE those prefixes, which this gate does not see (the
+ * same test pins this list, so a new one fails until it is added here):
+ *   - `business_find` → GET /api/brain/findings, GET /api/brain/digests.
+ *     routes/brain.ts is `requireRoleOrMcpService("owner", "admin")` and
+ *     re-resolves the acting user from the same header for its own scope
+ *     filter.
+ *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
+ * Both rely on the tool-level gate (the chat / runner dispatch check).
  */
 export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business"];
 
@@ -203,6 +212,7 @@ export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business"];
 export function mountMcpActingUserGates(
   app: ModuleGateMountTarget,
   resolve: ActingUserAccessResolver,
+  features: EffectiveAccessResolver = resolveEffectiveAccess,
 ): void {
   for (const domain of MCP_ACTING_USER_GATED_DOMAINS) {
     for (const def of MODULES) {
@@ -211,7 +221,7 @@ export function mountMcpActingUserGates(
         app.use(
           prefix,
           scopeToOwnedPaths(
-            requireMcpActingUserToolDomain(domain, def.id, resolve),
+            requireMcpActingUserToolDomain(domain, def.id, resolve, features),
             gateScopeFor(def, prefix),
           ),
         );

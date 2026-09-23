@@ -79,17 +79,24 @@ async function scopeFor(opts: {
     deptRights: [],
   };
   resolveMock.mockResolvedValue(computeEffectiveAccess(inputs));
-  // Answers both reads the resolvers make: the Nextcloud-username lookup of
-  // the MCP route gate, and the access-role row of the scope resolvers.
+  // One user row, returned only when `where` matches it: the MCP route gate
+  // looks the header up by username (stdio) then id (HTTP), the scope
+  // resolvers by id. `nextcloudUsername` is null, as for every SSO / SCIM
+  // account — a lookup on that column would miss.
+  const row = {
+    id: "u1",
+    username: "sam",
+    nextcloudUsername: null,
+    role: "admin",
+    directoryStatus: "ACTIVE",
+    accessRoleId: "r1",
+    accessRole: { toolGrants },
+  };
   const prisma = {
     user: {
-      findUnique: vi.fn(async () => ({
-        id: "u1",
-        role: "admin",
-        directoryStatus: "ACTIVE",
-        accessRoleId: "r1",
-        accessRole: { toolGrants },
-      })),
+      findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        Object.entries(where).every(([k, v]) => (row as Record<string, unknown>)[k] === v) ? row : null,
+      ),
     },
   } as never;
   lastPrisma = prisma;
@@ -146,7 +153,7 @@ describe("WARP-2988 — business is gated by CRM or Projects", () => {
 // reaching the CRM / PM routes on behalf of the person, through the REAL
 // resolver chain (username → attributed scope → §3 composition).
 describe("WARP-2988 — the MCP service path enforces the same OR", () => {
-  async function mcpGet(path: string, method: "get" | "post" = "get") {
+  async function mcpGet(path: string, method: "get" | "post" = "get", asserted = "sam") {
     const app = express();
     app.use((req, _res, next) => {
       (req as unknown as { user: unknown }).user = { id: MCP_PRINCIPAL_ID, role: "service" };
@@ -154,7 +161,7 @@ describe("WARP-2988 — the MCP service path enforces the same OR", () => {
     });
     mountMcpActingUserGates(app, actingUserAccessResolver(lastPrisma));
     app[method](path, (_q, res) => { res.json({ ok: true }); });
-    return (await request(app)[method](path).set("X-Nextcloud-User", "sam")).status;
+    return (await request(app)[method](path).set("X-Nextcloud-User", asserted)).status;
   }
 
   it("neither feature: CRM and PM routes are refused to the assistant", async () => {
@@ -163,12 +170,21 @@ describe("WARP-2988 — the MCP service path enforces the same OR", () => {
     expect(await mcpGet("/api/pm/work-items")).toBe(404);
   });
 
-  it("either feature: the routes answer, writes included (`use` grant)", async () => {
+  it("either feature: that module's routes answer, writes included (`use` grant); the other module's do not", async () => {
     await scopeFor({ featureOff: ["crm"] });
-    expect(await mcpGet("/api/crm/companies")).toBe(200);
     expect(await mcpGet("/api/pm/work-items", "post")).toBe(200);
+    expect(await mcpGet("/api/crm/companies")).toBe(404);
     await scopeFor({ featureOff: ["projects"] });
-    expect(await mcpGet("/api/pm/work-items")).toBe(200);
+    expect(await mcpGet("/api/crm/companies")).toBe(200);
+    expect(await mcpGet("/api/crm/companies", "post")).toBe(200);
+    expect(await mcpGet("/api/pm/work-items")).toBe(404);
+  });
+
+  it("names the acting user as either transport does: username (stdio) or User.id (HTTP)", async () => {
+    await scopeFor({});
+    expect(await mcpGet("/api/crm/companies", "get", "sam")).toBe(200);
+    expect(await mcpGet("/api/crm/companies", "get", "u1")).toBe(200);
+    expect(await mcpGet("/api/crm/companies", "get", "ghost")).toBe(404);
   });
 
   it("no business tool grant: refused even with both features", async () => {
