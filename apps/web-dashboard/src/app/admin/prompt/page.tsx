@@ -26,9 +26,10 @@
  *
  * WARP-2900 (ADR-056 slice H4) — the table also carries runtime tools
  * (promoted extensions, connected servers). Each row's source is on screen
- * (`extension:<slug>@<version>`), and a runtime tool whose every call dispatch
- * refuses sits in its own group with its own reason per row, because the
- * refusals differ (unreviewed, blocked, never classified).
+ * (`extension:<slug>@<version>`). A runtime tool whose every call dispatch
+ * refuses is still listed with what reaches the assistant — the real turn
+ * sends its schema, and only the call is refused — with the server's refusal
+ * sentence and the verdict badge on its row, and the KPI says how many.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -71,7 +72,6 @@ const GATE_LABEL: Record<InspectGate, string> = {
   off_lan_withhold: "Off the home network",
   chat_policy: "Not available by asking",
   turn_relevance: "Not relevant to this message",
-  runtime_classification: "Shown, but refused when called",
 };
 
 const GATE_ORDER: InspectGate[] = [
@@ -81,7 +81,6 @@ const GATE_ORDER: InspectGate[] = [
   "off_lan_withhold",
   "chat_policy",
   "turn_relevance",
-  "runtime_classification",
 ];
 
 /**
@@ -257,7 +256,15 @@ export default function AssistantInspectorPage() {
                 icon={<Wrench size={15} />}
                 label="Reach the assistant"
                 value={tools.state === "ok" ? tools.value.counts.advertised : UNKNOWN}
-                note={tools.state === "failed" ? "Unknown" : undefined}
+                note={
+                  tools.state === "failed"
+                    ? "Unknown"
+                    : tools.state === "ok" && (tools.value.counts.refusedAtDispatch ?? 0) > 0
+                      ? `${tools.value.counts.refusedAtDispatch} of these ${
+                          tools.value.counts.refusedAtDispatch === 1 ? "is" : "are"
+                        } refused when called`
+                      : undefined
+                }
               />
             </Card>
             <Card>
@@ -312,11 +319,16 @@ export default function AssistantInspectorPage() {
                   <Row
                     key={r.name}
                     title={r.homeDescription}
-                    sub={r.lockCaveat ?? r.name}
-                    subMono={!r.lockCaveat}
+                    sub={r.callRefusal ?? r.lockCaveat ?? r.name}
+                    subMono={!r.callRefusal && !r.lockCaveat}
                     meta={sourceMeta(r)}
                     right={
-                      r.lockCaveat ? (
+                      r.callRefusal && r.classification ? (
+                        // Shown to the model, refused at the call (WARP-2900).
+                        <Badge kind={classificationLabel(r.classification).kind}>
+                          {classificationLabel(r.classification).label}
+                        </Badge>
+                      ) : r.lockCaveat ? (
                         <Badge kind="warn">Locks refused</Badge>
                       ) : (
                         <Badge kind="ok">Available</Badge>
@@ -340,26 +352,18 @@ export default function AssistantInspectorPage() {
                     >
                       {/* One reason per group, taken from the server. Every row
                           in the group was withheld by the same gate, so
-                          repeating the sentence per row would be noise —
-                          except the dispatch verdict, whose reason differs
-                          by what the record says (WARP-2900). */}
-                      {gate === "runtime_classification" ? null : (
-                        <p className="sub">{list[0].reason}</p>
-                      )}
+                          repeating the sentence per row would be noise. */}
+                      <p className="sub">{list[0].reason}</p>
                       <div className="rows">
                         {list.map((r) => (
                           <Row
                             key={r.name}
                             title={r.homeDescription}
-                            sub={gate === "runtime_classification" ? r.reason : r.name}
-                            subMono={gate !== "runtime_classification"}
+                            sub={r.name}
+                            subMono
                             meta={sourceMeta(r)}
                             right={
-                              gate === "runtime_classification" && r.classification ? (
-                                <Badge kind={classificationLabel(r.classification).kind}>
-                                  {classificationLabel(r.classification).label}
-                                </Badge>
-                              ) : r.alsoWithheldBy.length > 0 ? (
+                              r.alsoWithheldBy.length > 0 ? (
                                 // The fact that makes this actionable: a tool
                                 // held back by one gate is one grant away, and
                                 // a tool held back by four is not.

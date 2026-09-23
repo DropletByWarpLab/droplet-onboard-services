@@ -14,7 +14,7 @@
  *     "132 withheld" with no reason is the page this slice replaced.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import { NAV_GROUPS, visibleItems } from "@/components/nav-config";
 
@@ -287,7 +287,8 @@ describe("the assistant inspector — extension tools", () => {
     counts: {
       ...TOOLS.counts,
       registered: 141,
-      byGate: { ...TOOLS.counts.byGate, runtime_classification: 1 },
+      advertised: 8,
+      refusedAtDispatch: 1,
     },
     rows: [
       ...TOOLS.rows,
@@ -311,10 +312,12 @@ describe("the assistant inspector — extension tools", () => {
         homeDescription: "Delete everything, from the wc extension, version 0.1.0",
         requiresWrite: true,
         requiresConfirmation: true,
-        advertised: false,
-        gate: "runtime_classification",
-        reason: "The assistant is shown it, but every call is refused: it starts as a change that asks first.",
+        // Advertised: the real turn sends its schema; callTool refuses it.
+        advertised: true,
+        gate: null,
+        reason: null,
         alsoWithheldBy: [],
+        callRefusal: "The assistant is shown it, but every call is refused: it starts as a change that asks first.",
         source: "extension:wc@0.1.0",
         serverId: "ext-wc",
         classification: { decision: "deny", code: "REMOTE_WRITE_NOT_PERMITTED" },
@@ -332,12 +335,17 @@ describe("the assistant inspector — extension tools", () => {
     expect(screen.getByText("files")).toBeTruthy();
   });
 
-  it("🔴 groups a refused-at-dispatch tool with its own reason and verdict", async () => {
+  it("🔴 lists a refused-at-dispatch tool among what reaches the assistant, with its refusal and verdict", async () => {
     fetchToolInspectMock.mockResolvedValue(RUNTIME);
     render(<AssistantInspectorPage />);
     await selectPerson();
-    expect(await screen.findByText("Shown, but refused when called")).toBeTruthy();
-    expect(screen.getByText(/every call is refused/)).toBeTruthy();
-    expect(screen.getByText("Blocked until reviewed")).toBeTruthy();
+    const refusal = await screen.findByText(/every call is refused/);
+    // In the advertised card, not a withheld group: the model IS shown it.
+    const card = refusal.closest(".card") as HTMLElement;
+    expect(within(card).getByText("What the assistant can use")).toBeTruthy();
+    expect(within(card).getByText("Blocked until reviewed")).toBeTruthy();
+    expect(screen.queryByText("Shown, but refused when called")).toBeNull();
+    // The KPI says how many of the advertised tools are refused when called.
+    expect(screen.getByText("1 of these is refused when called")).toBeTruthy();
   });
 });

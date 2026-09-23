@@ -223,6 +223,21 @@ describe("🔴 looking leaves a trace, and the trace carries no content", () => 
     expect(row.refs.by).toBe("admin-1");
   });
 
+  it("🔴 the tool-inspect row counts runtime tools the model is shown but dispatch refuses (WARP-2900)", async () => {
+    // They are advertised — the real turn sends their schemas — so they are
+    // in `advertised`, and the row says separately how many of those every
+    // call to would be refused. Folding them into `withheld` undercounts what
+    // the model receives.
+    mocks.inspectTools.mockResolvedValue({
+      ...TOOLS_RESULT,
+      counts: { ...TOOLS_RESULT.counts, refusedAtDispatch: 3 },
+    });
+    await request(appAs("owner")).get("/api/admin/tool-inspect/u1");
+    const row = mocks.recordActivity.mock.calls[0]![0] as ActivityRow;
+    expect(row.refs.advertised).toBe(7);
+    expect(row.refs.refusedAtDispatch).toBe(3);
+  });
+
   it("🔴 never copies the prompt text into the row", async () => {
     // The assembled prompt carries durable memory facts and business context.
     // An audit row that copied them would put the very thing this endpoint

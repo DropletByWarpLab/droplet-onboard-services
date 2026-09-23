@@ -34,7 +34,10 @@
  * ── Runtime tools (WARP-2900, H4) ──────────────────────────────────────────
  *
  * The tool table also lists runtime tools (promoted extensions, connected
- * servers) with their source and the dispatch verdict. That verdict comes
+ * servers) with their source and the dispatch verdict. A refused runtime
+ * tool is still ADVERTISED (the model is shown it; callTool refuses it), so
+ * it counts in `advertised` and is in the composer's tool list below, and
+ * `refusedAtDispatch` says how many of those are refused. That verdict comes
  * from the remote call policy the multiplexer dispatches through, handed in
  * by `app.ts` as a lazy binding over the process-wide one, so this page and
  * a real call can never disagree about whether an extension tool runs.
@@ -102,6 +105,9 @@ export function createAdminPromptInspectorRouter(
             target: req.params.userId,
             advertised: result.counts.advertised,
             withheld: result.counts.withheld,
+            // WARP-2900 — of `advertised`, how many the model is shown but
+            // every call to is refused at dispatch.
+            refusedAtDispatch: result.counts.refusedAtDispatch,
             unresolved: result.unresolved,
           },
         }).catch(() => {

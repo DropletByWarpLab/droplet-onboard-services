@@ -40,12 +40,17 @@
  *   - `role_grant`: a runtime tool has no catalog entry, and
  *     `toolAllowedInScope` fails closed on that, so a person with a custom
  *     role never reaches one. The reason says so instead of naming an area.
- *   - `runtime_classification`, the last gate: the multiplexer asks the
- *     remote call policy (the WARP-2426 record, for an extension) at the
- *     moment of the call. The model is shown the tool, but every call is
- *     refused — an unreviewed extension tool reads REMOTE_WRITE_NOT_PERMITTED
- *     until an owner reviews it as a read. The verdict is the policy's
- *     answer, obtained by calling it (runtime-tool-view.service.ts).
+ *   - the dispatch verdict is NOT a gate. The multiplexer's `listTools()`
+ *     advertises every vetted remote tool and asks the remote call policy
+ *     (the WARP-2426 record, for an extension) only inside `callTool`. So
+ *     the model IS shown an unreviewed extension tool — its schema costs
+ *     window budget and invites a call — and every call is refused
+ *     (REMOTE_WRITE_NOT_PERMITTED until an owner reviews it as a read).
+ *     The row stays `advertised` and carries the refusal as `callRefusal`,
+ *     counted in `refusedAtDispatch`, the way `lockCaveat` says "advertised,
+ *     but a lock call is refused". Counting it as withheld would understate
+ *     what the model receives. The verdict is the policy's answer, obtained
+ *     by calling it (runtime-tool-view.service.ts).
  *
  * A runtime row never carries the wire description: `homeDescription` is a
  * sentence this box writes from the name and the source.
@@ -103,9 +108,9 @@ export const INSPECT_GATES = [
   "off_lan_withhold",
   "chat_policy",
   "turn_relevance",
-  // WARP-2900 — a runtime tool's dispatch verdict. LAST, because it is
-  // decided at the call, after the tool has been advertised.
-  "runtime_classification",
+  // WARP-2900 — a runtime tool's dispatch verdict is deliberately absent: it
+  // is decided inside callTool, after the tool has been advertised, so it is
+  // `ToolInspectRow.callRefusal`, not a gate.
 ] as const;
 
 export type InspectGate = (typeof INSPECT_GATES)[number];
@@ -154,6 +159,12 @@ export interface ToolInspectRow {
    * write, the import default.
    */
   classification?: RuntimeToolClassificationView;
+  /**
+   * WARP-2900 — runtime rows only, set ⇔ the dispatch policy denies every
+   * call to it. One sentence saying so. NOT a withholding gate: an advertised
+   * row with a `callRefusal` is a tool the model is shown and cannot use.
+   */
+  callRefusal?: string;
 }
 
 export interface ToolInspectResult {
@@ -183,6 +194,12 @@ export interface ToolInspectResult {
     withheld: number;
     /** Withheld count per gate — first-gate attribution, so these sum to `withheld`. */
     byGate: Record<InspectGate, number>;
+    /**
+     * WARP-2900 — how many ADVERTISED rows carry a `callRefusal`: tools the
+     * model is shown whose every call dispatch refuses. A subset of
+     * `advertised`, never of `withheld`.
+     */
+    refusedAtDispatch: number;
   };
   rows: ToolInspectRow[];
 }
@@ -227,7 +244,7 @@ interface GateSubject {
   domain: string;
   requiresWrite: boolean;
   /** Present ⇔ a runtime tool. */
-  runtime?: { classification: RuntimeToolClassificationView };
+  runtime?: true;
 }
 
 const RUNTIME_REFUSAL: Record<string, string> = {
@@ -260,11 +277,14 @@ const REASONS: Record<InspectGate, (e: GateSubject, tier: string | null) => stri
     `from an external client, but not by asking.`,
   turn_relevance: () =>
     `Nothing in this message matched its area. It would come back on a message that did.`,
-  runtime_classification: (e) => {
-    const code = e.runtime?.classification.code ?? "";
-    return RUNTIME_REFUSAL[code] ?? `The assistant is shown it, but every call is refused (${code}).`;
-  },
 };
+
+/** The row's `callRefusal`: undefined ⇔ the policy allows the call. */
+function callRefusalOf(classification: RuntimeToolClassificationView): string | undefined {
+  if (classification.decision === "allow") return undefined;
+  const code = classification.code ?? "";
+  return RUNTIME_REFUSAL[code] ?? `The assistant is shown it, but every call is refused (${code}).`;
+}
 
 /**
  * Evaluate every gate for one tool. Returns them in dispatch order, so the
@@ -299,9 +319,6 @@ function gatesWithholding(
   if (opts.offLan && isWithheldFromOffLan(name)) hits.push("off_lan_withhold");
   if (EXCLUDED_FROM_CHAT_TOOLS.has(name)) hits.push("chat_policy");
   if (!opts.advertisedThisTurn.has(name)) hits.push("turn_relevance");
-  if (entry.runtime && entry.runtime.classification.decision !== "allow") {
-    hits.push("runtime_classification");
-  }
 
   return hits;
 }
@@ -442,8 +459,8 @@ export async function inspectToolsForPerson(
     };
   });
 
-  // WARP-2900 — the runtime half, through the same gates plus the dispatch
-  // verdict. The multiplexer never registers a runtime name that matches a
+  // WARP-2900 — the runtime half, through the same gates, with the dispatch
+  // verdict recorded beside them rather than as one. The multiplexer never registers a runtime name that matches a
   // compiled one (WARP-2420), so a runtime row cannot shadow a compiled row.
   const compiled = new Set(TOOL_CATALOG.map((e) => e.name));
   for (const tool of runtimeTools) {
@@ -454,8 +471,9 @@ export async function inspectToolsForPerson(
       name: tool.name,
       domain: tool.domain,
       requiresWrite: !readAllowed,
-      runtime: { classification },
+      runtime: true,
     };
+    const callRefusal = callRefusalOf(classification);
     const hits = gatesWithholding(subject, gateOpts);
     const gate = hits[0] ?? null;
     if (gate) byGate[gate] += 1;
@@ -472,10 +490,12 @@ export async function inspectToolsForPerson(
       source: runtimeToolSource(tool),
       serverId: tool.serverId,
       classification,
+      ...(callRefusal ? { callRefusal } : {}),
     });
   }
 
   const advertised = rows.filter((r) => r.advertised).length;
+  const refusedAtDispatch = rows.filter((r) => r.advertised && r.callRefusal).length;
 
   return {
     targetUserId: input.targetUserId,
@@ -487,6 +507,7 @@ export async function inspectToolsForPerson(
       advertised,
       withheld: rows.length - advertised,
       byGate,
+      refusedAtDispatch,
     },
     rows,
   };

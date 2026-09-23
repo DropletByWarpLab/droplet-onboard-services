@@ -10,8 +10,12 @@
  *   - the default policy is the process-wide `remoteCallPolicy` over the
  *     classification record (MUTATION: default to an allow-all policy → the
  *     unreviewed tool reads as available → red);
- *   - an unreviewed extension tool is withheld at `runtime_classification`
- *     with REMOTE_WRITE_NOT_PERMITTED (MUTATION: skip the gate → red);
+ *   - an unreviewed extension tool is ADVERTISED — the multiplexer's
+ *     listTools() puts every vetted remote tool in the model's tools[] and
+ *     asks the policy only inside callTool — and carries the dispatch
+ *     refusal as `callRefusal`, counted in `refusedAtDispatch`, never in
+ *     `withheld` (MUTATION: treat the refusal as a withholding gate → the
+ *     row reads advertised:false → red; MUTATION: drop `callRefusal` → red);
  *   - a custom role never reaches a runtime tool, because
  *     `toolAllowedInScope` fails closed on a name with no catalog entry, and
  *     the reason says that instead of naming an area;
@@ -127,8 +131,8 @@ describe("runtime rows sit beside the catalog", () => {
   });
 });
 
-describe("🔴 runtime_classification is the dispatch policy's answer", () => {
-  it("an unreviewed extension tool is withheld with REMOTE_WRITE_NOT_PERMITTED, by the default policy", async () => {
+describe("🔴 the dispatch verdict is the policy's answer, and it does not withhold", () => {
+  it("an unreviewed extension tool is advertised, and every call is refused with REMOTE_WRITE_NOT_PERMITTED, by the default policy", async () => {
     asOwner();
     const r = await inspectToolsForPerson(
       prisma,
@@ -136,14 +140,32 @@ describe("🔴 runtime_classification is the dispatch policy's answer", () => {
       { runtimeTools: [ext("delete_everything")] },
     );
     const row = rowOf(r, "ext-wc__delete_everything");
-    expect(row.advertised).toBe(false);
-    expect(row.gate).toBe("runtime_classification");
+    // The real turn sends this schema to the model (listTools advertises
+    // every vetted remote tool); the refusal happens inside callTool.
+    expect(row.advertised).toBe(true);
+    expect(row.gate).toBeNull();
+    expect(row.reason).toBeNull();
     expect(row.classification).toEqual({ decision: "deny", code: "REMOTE_WRITE_NOT_PERMITTED" });
     expect(row.requiresWrite).toBe(true);
     expect(row.requiresConfirmation).toBe(true);
-    expect(row.reason).toMatch(/every call is refused/);
-    expect(row.reason).toMatch(/review it as read-only/);
-    expect(r.counts.byGate.runtime_classification).toBe(1);
+    expect(row.callRefusal).toMatch(/every call is refused/);
+    expect(row.callRefusal).toMatch(/review it as read-only/);
+    expect(r.counts.refusedAtDispatch).toBe(1);
+    // Counted where the model receives it, not in the withheld column.
+    const withheldNames = r.rows.filter((x) => !x.advertised).map((x) => x.name);
+    expect(withheldNames).not.toContain("ext-wc__delete_everything");
+    expect(Object.keys(r.counts.byGate)).not.toContain("runtime_classification");
+  });
+
+  it("a reviewed read carries no refusal", async () => {
+    asOwner();
+    const r = await inspectToolsForPerson(
+      prisma,
+      { targetUserId: "u1", selectionMode: "off" },
+      { runtimeTools: [ext("word_count")] },
+    );
+    expect(rowOf(r, "ext-wc__word_count").callRefusal).toBeUndefined();
+    expect(r.counts.refusedAtDispatch).toBe(0);
   });
 
   it("an owner's block reads as blocked", async () => {
@@ -156,7 +178,8 @@ describe("🔴 runtime_classification is the dispatch policy's answer", () => {
     );
     const row = rowOf(r, "ext-wc__word_count");
     expect(row.classification).toEqual({ decision: "deny", code: "REMOTE_TOOL_DENIED" });
-    expect(row.reason).toMatch(/An owner blocked it/);
+    expect(row.callRefusal).toMatch(/An owner blocked it/);
+    expect(row.advertised).toBe(true);
   });
 
   it("an injected policy is the one asked", async () => {
@@ -170,8 +193,22 @@ describe("🔴 runtime_classification is the dispatch policy's answer", () => {
       },
     );
     const row = rowOf(r, "ext-wc__word_count");
-    expect(row.gate).toBe("runtime_classification");
-    expect(row.reason).toContain("SOME_NEW_CODE");
+    expect(row.advertised).toBe(true);
+    expect(row.callRefusal).toContain("SOME_NEW_CODE");
+  });
+
+  it("refusedAtDispatch counts only advertised rows: a refused tool the turn withholds is counted once, as withheld", async () => {
+    asOwner();
+    const r = await inspectToolsForPerson(
+      prisma,
+      { targetUserId: "u1", message: "", selectionMode: "domains" },
+      { runtimeTools: [ext("delete_everything", "network")] },
+    );
+    const row = rowOf(r, "ext-wc__delete_everything");
+    expect(row.gate).toBe("turn_relevance");
+    // The verdict is still on the row, for the reader, but it is not a count.
+    expect(row.callRefusal).toMatch(/every call is refused/);
+    expect(r.counts.refusedAtDispatch).toBe(0);
   });
 });
 
@@ -191,7 +228,8 @@ describe("🔴 a custom role does not reach a runtime tool", () => {
     const row = rowOf(r, "ext-wc__delete_everything");
     expect(row.gate).toBe("role_grant");
     expect(row.reason).toMatch(/custom roles do not reach tools added at runtime/);
-    expect(row.alsoWithheldBy).toContain("runtime_classification");
+    expect(row.alsoWithheldBy).not.toContain("runtime_classification");
+    expect(row.callRefusal).toMatch(/every call is refused/);
   });
 });
 

@@ -2907,9 +2907,7 @@ export type InspectGate =
   | "interview_strip"
   | "off_lan_withhold"
   | "chat_policy"
-  | "turn_relevance"
-  /** WARP-2900 — a runtime tool whose every call dispatch refuses. */
-  | "runtime_classification";
+  | "turn_relevance";
 
 /** Why an identity could not be established. */
 export type AttributionFailure =
@@ -2941,6 +2939,12 @@ export interface ToolInspectRow {
   serverId?: string | null;
   /** WARP-2900 — runtime rows only: what dispatch does with a call. */
   classification?: RuntimeToolClassification;
+  /**
+   * WARP-2900 — runtime rows only, present ⇔ dispatch refuses every call.
+   * Not a withholding gate: an advertised row with one is a tool the model
+   * is shown and cannot use.
+   */
+  callRefusal?: string;
 }
 
 export interface ToolInspectResponse {
@@ -2954,6 +2958,11 @@ export interface ToolInspectResponse {
     advertised: number;
     withheld: number;
     byGate: Record<InspectGate, number>;
+    /**
+     * WARP-2900 — of `advertised`, how many dispatch refuses every call to.
+     * Optional only so an older orchestrator still types.
+     */
+    refusedAtDispatch?: number;
   };
   rows: ToolInspectRow[];
 }
