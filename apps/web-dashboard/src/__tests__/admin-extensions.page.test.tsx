@@ -19,7 +19,10 @@
  *     are rendered by CODE only, as sentences this box wrote: the tsc tail,
  *     tool names and JSON-RPC text they carry never reach the DOM (review
  *     #2326; MUTATION: render `failureReason` / `installError.message` /
- *     `reason` → red).
+ *     `reason` → red);
+ *   - a failed action still refreshes the lists; the Review button is free
+ *     again once the readback lands; a pre-release is shown only as the fact
+ *     of one.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
@@ -299,6 +302,21 @@ describe("/admin/extensions — installed", () => {
     expect(screen.getByText(/failed for a reason this page does not show/)).toBeTruthy();
   });
 
+  it("a failed action still refreshes the list: the row may have moved even though the call failed", async () => {
+    // MUTATION: refresh only after a success → the list keeps saying Running.
+    api.fetchExtensions.mockResolvedValue({ extensions: [INSTALLED] });
+    // The orchestrator claimed the row (disabled), then the sandbox stop failed.
+    api.setExtensionEnabled.mockImplementation(async () => {
+      api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, status: "disabled" }] });
+      throw new ExtensionRequestError("stop failed", 502, "sandbox_error");
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Disable wc" }));
+    expect(await screen.findByText("The sandbox did not answer. Try again.")).toBeTruthy();
+    expect(await screen.findByText("Disabled")).toBeTruthy();
+    expect(screen.queryByText("Running")).toBeNull();
+  });
+
   it("🔴 an uninstalled one stays listed, and can be reinstalled from its signed version", async () => {
     api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, status: "uninstalled" }] });
     renderPage();
@@ -384,6 +402,30 @@ describe("/admin/extensions — 🔴 author-worded text never reaches the owner'
     fireEvent.click(await screen.findByRole("button", { name: "Enable wc" }));
     expect(await screen.findByText(/signed code no longer checks out on this box/)).toBeTruthy();
     expect(document.body.textContent).not.toContain(MARKER);
+  });
+});
+
+describe("/admin/extensions — the review flow", () => {
+  it("frees the Review button once the readback has landed", async () => {
+    // MUTATION: keep `reviewing` set after the readback → the button stays "Reading…", disabled.
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    await screen.findByRole("list", { name: "What this extension gets" });
+    const button = screen.getByRole("button", { name: "Review wc 0.1.0" }) as HTMLButtonElement;
+    expect(button.textContent).toBe("Review");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("shows a pre-release only as the fact of one: its words never reach the page", async () => {
+    const PRE = "1.0.0-reviewed-and-approved-by-warp-lab";
+    api.fetchExtensionProposals.mockResolvedValue({
+      proposals: [{ ...PROPOSAL, tag: `proposal/${PRE}`, version: PRE }],
+    });
+    api.prepareExtensionPromotion.mockResolvedValue({ ...PHASE1, tag: `proposal/${PRE}`, version: PRE });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 1.0.0 (pre-release)" }));
+    expect(await screen.findByText("Before you promote wc 1.0.0 (pre-release)")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("reviewed-and-approved");
   });
 });
 

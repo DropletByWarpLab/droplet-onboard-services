@@ -140,3 +140,14 @@ export function explainExtensionError(err: unknown): string {
   }
   return EXTENSION_ERROR_DEFAULT;
 }
+
+/**
+ * A version as this page shows it: major.minor.patch, and a pre-release only
+ * as the fact of one. The pre-release is text the author chose, of any
+ * length, and would otherwise sit in the readback title the owner decides on.
+ */
+export function displayVersion(version: string): string {
+  const m = /^(\d+\.\d+\.\d+)(-.+)?$/.exec(version);
+  if (!m) return "(unrecognised version)";
+  return m[2] ? `${m[1]} (pre-release)` : m[1];
+}

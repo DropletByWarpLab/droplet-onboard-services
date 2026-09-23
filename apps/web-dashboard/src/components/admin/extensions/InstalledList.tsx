@@ -26,7 +26,7 @@ import { useState } from "react";
 import { Puzzle } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionListItem } from "@/lib/types";
-import { STATUS_BADGE, explainExtensionError, explainLifecycleFailure } from "./copy";
+import { STATUS_BADGE, displayVersion, explainExtensionError, explainLifecycleFailure } from "./copy";
 
 export interface InstalledListProps {
   extensions: ExtensionListItem[];
@@ -85,7 +85,7 @@ export function InstalledList(props: InstalledListProps) {
           const busy = props.busy === ext.id;
           const lines = ext.readback?.lines ?? [];
           const sub = [
-            ext.version ? `version ${ext.version.version} · ${signerLabel(ext.version.signer)}` : "no signed version",
+            ext.version ? `version ${displayVersion(ext.version.version)} · ${signerLabel(ext.version.signer)}` : "no signed version",
             ext.status === "failed" ? explainLifecycleFailure(ext.failureReason) : null,
             lines[0] ?? null,
           ]

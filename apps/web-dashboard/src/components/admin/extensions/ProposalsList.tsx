@@ -16,19 +16,20 @@
  * extension's manifest text is shown either: what it would get is read back
  * only after "Review", from `provides`. Why a proposal cannot be promoted is
  * said by the reason's code, never its detail (a manifest error quotes the
- * manifest; a sandbox error, the sandbox) (review #2326).
+ * manifest; a sandbox error, the sandbox), and a version's pre-release only
+ * as the fact of one (review #2326).
  */
 import { Hammer } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionProposal } from "@/lib/types";
-import { explainExtensionError, explainProposalReason } from "./copy";
+import { displayVersion, explainExtensionError, explainProposalReason } from "./copy";
 
 export interface ProposalsListProps {
   proposals: ExtensionProposal[];
   loading: boolean;
   error: Error | undefined;
   canPromote: boolean;
-  /** The proposal whose readback is being fetched or shown. */
+  /** The proposal whose readback is being fetched (cleared once it lands). */
   reviewing: string | null;
   onReview: (workspaceId: string) => void;
 }
@@ -71,8 +72,8 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
             key={`${p.workspaceId}:${p.tag}`}
             icon={<Hammer size={15} />}
             title={p.slug}
-            sub={p.promotable ? `version ${p.version}` : explainProposalReason(p.reason)}
-            meta={p.version}
+            sub={p.promotable ? `version ${displayVersion(p.version)}` : explainProposalReason(p.reason)}
+            meta={displayVersion(p.version)}
             metaMono
             right={
               p.promotable ? (
@@ -81,7 +82,7 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
                     type="button"
                     className="btn sm"
                     disabled={reviewing !== null}
-                    aria-label={`Review ${p.slug} ${p.version}`}
+                    aria-label={`Review ${p.slug} ${displayVersion(p.version)}`}
                     onClick={() => onReview(p.workspaceId)}
                   >
                     {reviewing === p.workspaceId ? "Reading…" : "Review"}

@@ -28,7 +28,10 @@ import type {
  *
  * The actions are thin: every decision — who may promote, whether the bytes
  * moved since the readback, whether the sandbox is on — is the orchestrator's,
- * and a refusal comes back as an `ExtensionRequestError` with its code.
+ * and a refusal comes back as an `ExtensionRequestError` with its code. Every
+ * action refreshes both lists when it ends, failed or not: a refused call can
+ * still have moved the row (a disable whose sandbox stop failed is already
+ * `disabled`).
  */
 export function useExtensions() {
   const installed = useSWR<{ extensions: ExtensionListItem[] }>("/api/extensions", fetchExtensions);
@@ -52,29 +55,37 @@ export function useExtensions() {
   /** Phase 2: sign + install exactly what was read back. */
   const confirmPromotion = useCallback(
     async (phase1: ExtensionPromotePhase1, operatorDomain: string | null): Promise<ExtensionPromoteResult> => {
-      const result = await confirmExtensionPromotion(phase1.workspaceId, {
-        confirmationToken: phase1.confirmationToken,
-        manifestSha256: phase1.manifestSha256,
-        ...(operatorDomain ? { operatorDomain } : {}),
-      });
-      await refresh();
-      return result;
+      try {
+        return await confirmExtensionPromotion(phase1.workspaceId, {
+          confirmationToken: phase1.confirmationToken,
+          manifestSha256: phase1.manifestSha256,
+          ...(operatorDomain ? { operatorDomain } : {}),
+        });
+      } finally {
+        await refresh();
+      }
     },
     [refresh],
   );
 
   const setEnabled = useCallback(
     async (slug: string, enabled: boolean) => {
-      await setExtensionEnabled(slug, enabled);
-      await refresh();
+      try {
+        await setExtensionEnabled(slug, enabled);
+      } finally {
+        await refresh();
+      }
     },
     [refresh],
   );
 
   const uninstall = useCallback(
     async (slug: string) => {
-      await uninstallExtension(slug);
-      await refresh();
+      try {
+        await uninstallExtension(slug);
+      } finally {
+        await refresh();
+      }
     },
     [refresh],
   );

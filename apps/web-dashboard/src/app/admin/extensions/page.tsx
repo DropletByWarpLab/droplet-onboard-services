@@ -37,6 +37,7 @@ import {
   OWNER_ONLY,
   TOOLS_START_BLOCKED,
   WHAT_PROMOTING_DOES,
+  displayVersion,
   explainExtensionError,
   explainLifecycleFailure,
 } from "@/components/admin/extensions/copy";
@@ -126,9 +127,11 @@ export default function ExtensionsAdminPage() {
           preflight: err.body.preflight,
         });
       } else {
-        setReviewing(null);
         setReviewError(explainExtensionError(err));
       }
+    } finally {
+      // The fetch is over, whichever way: the Review buttons are free again.
+      setReviewing(null);
     }
   };
 
@@ -142,7 +145,7 @@ export default function ExtensionsAdminPage() {
       closeReview();
       // The install error by its code only: its message can carry the
       // extension's build output and error text (review #2326).
-      const promoted = `Promoted ${phase1.slug} ${phase1.version}`;
+      const promoted = `Promoted ${phase1.slug} ${displayVersion(phase1.version)}`;
       setNotice(
         result.installed
           ? `${promoted}. It is signed and starting in the sandbox.`

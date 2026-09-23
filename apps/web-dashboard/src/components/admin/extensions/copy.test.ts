@@ -13,6 +13,7 @@ import { describe, it, expect } from "vitest";
 import { ExtensionRequestError } from "@/lib/api";
 import {
   LIFECYCLE_COPY,
+  displayVersion,
   explainExtensionError,
   explainLifecycleFailure,
   explainProposalReason,
@@ -94,5 +95,13 @@ describe("a proposal's reason is read by its code only", () => {
     expect(explainProposalReason(`manifest invalid: provides.tools.0.name: ${MARKER}`)).not.toContain(MARKER);
     expect(explainProposalReason(`the sandbox said ${MARKER}`)).not.toContain(MARKER);
     expect(explainProposalReason(null)).toBeTruthy();
+  });
+});
+
+describe("displayVersion", () => {
+  it("shows major.minor.patch, and a pre-release only as the fact of one", () => {
+    expect(displayVersion("0.1.0")).toBe("0.1.0");
+    expect(displayVersion("1.2.3-reviewed-and-approved-by-warp-lab")).toBe("1.2.3 (pre-release)");
+    expect(displayVersion(`not a version ${MARKER}`)).not.toContain(MARKER);
   });
 });

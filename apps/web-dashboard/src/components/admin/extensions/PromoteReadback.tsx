@@ -21,7 +21,7 @@ import { AlertTriangle, ShieldCheck } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionPreflight, ExtensionReadback } from "@/lib/types";
 import { labelForDomain } from "@/lib/tool-domains";
-import { TOOLS_START_BLOCKED } from "./copy";
+import { TOOLS_START_BLOCKED, displayVersion } from "./copy";
 
 export interface PromoteReadbackProps {
   slug: string;
@@ -52,7 +52,7 @@ export function PromoteReadback(props: PromoteReadbackProps) {
   return (
     <Card
       icon={<ShieldCheck size={15} />}
-      title={`Before you promote ${props.slug} ${props.version}`}
+      title={`Before you promote ${props.slug} ${displayVersion(props.version)}`}
       meta={<Badge kind="warn">Write · confirm to apply</Badge>}
     >
       <p className="sub" style={{ marginTop: 0 }}>What this extension gets:</p>
