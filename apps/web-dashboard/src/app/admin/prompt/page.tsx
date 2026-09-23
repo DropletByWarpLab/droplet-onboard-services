@@ -23,6 +23,12 @@
  * turn calls. This file must never compute a verdict of its own — a second
  * opinion about a security boundary is the whole defect class the slice was
  * written to end.
+ *
+ * WARP-2900 (ADR-056 slice H4) — the table also carries runtime tools
+ * (promoted extensions, connected servers). Each row's source is on screen
+ * (`extension:<slug>@<version>`), and a runtime tool whose every call dispatch
+ * refuses sits in its own group with its own reason per row, because the
+ * refusals differ (unreviewed, blocked, never classified).
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -45,6 +51,7 @@ import type {
   ToolInspectRow,
 } from "@/lib/types";
 import { useAssistantInspect } from "@/lib/hooks/useAssistantInspect";
+import { classificationLabel } from "@/lib/runtime-tools";
 
 const ICON = <Bot size={15} />;
 const SUB = "The prompt and the tools each person's assistant actually receives.";
@@ -64,6 +71,7 @@ const GATE_LABEL: Record<InspectGate, string> = {
   off_lan_withhold: "Off the home network",
   chat_policy: "Not available by asking",
   turn_relevance: "Not relevant to this message",
+  runtime_classification: "Shown, but refused when called",
 };
 
 const GATE_ORDER: InspectGate[] = [
@@ -73,7 +81,17 @@ const GATE_ORDER: InspectGate[] = [
   "off_lan_withhold",
   "chat_policy",
   "turn_relevance",
+  "runtime_classification",
 ];
+
+/**
+ * The row's meta: its area, plus where it comes from when that is not the
+ * compiled catalog. An older orchestrator sends no source; that reads as
+ * built-in, which is what every row it sends is.
+ */
+function sourceMeta(r: ToolInspectRow): string {
+  return r.source && r.source !== "built-in" ? `${r.domain} · ${r.source}` : r.domain;
+}
 
 /** Why an identity could not be established, in a sentence. */
 const UNRESOLVED_COPY: Record<string, string> = {
@@ -296,7 +314,7 @@ export default function AssistantInspectorPage() {
                     title={r.homeDescription}
                     sub={r.lockCaveat ?? r.name}
                     subMono={!r.lockCaveat}
-                    meta={r.domain}
+                    meta={sourceMeta(r)}
                     right={
                       r.lockCaveat ? (
                         <Badge kind="warn">Locks refused</Badge>
@@ -322,18 +340,26 @@ export default function AssistantInspectorPage() {
                     >
                       {/* One reason per group, taken from the server. Every row
                           in the group was withheld by the same gate, so
-                          repeating the sentence per row would be noise. */}
-                      <p className="sub">{list[0].reason}</p>
+                          repeating the sentence per row would be noise —
+                          except the dispatch verdict, whose reason differs
+                          by what the record says (WARP-2900). */}
+                      {gate === "runtime_classification" ? null : (
+                        <p className="sub">{list[0].reason}</p>
+                      )}
                       <div className="rows">
                         {list.map((r) => (
                           <Row
                             key={r.name}
                             title={r.homeDescription}
-                            sub={r.name}
-                            subMono
-                            meta={r.domain}
+                            sub={gate === "runtime_classification" ? r.reason : r.name}
+                            subMono={gate !== "runtime_classification"}
+                            meta={sourceMeta(r)}
                             right={
-                              r.alsoWithheldBy.length > 0 ? (
+                              gate === "runtime_classification" && r.classification ? (
+                                <Badge kind={classificationLabel(r.classification).kind}>
+                                  {classificationLabel(r.classification).label}
+                                </Badge>
+                              ) : r.alsoWithheldBy.length > 0 ? (
                                 // The fact that makes this actionable: a tool
                                 // held back by one gate is one grant away, and
                                 // a tool held back by four is not.

@@ -278,3 +278,66 @@ describe("nav", () => {
     expect(item!.requiresModule).toBeUndefined();
   });
 });
+
+// ─── WARP-2900 (ADR-056 slice H4) — runtime rows ────────────────────────────
+
+describe("the assistant inspector — extension tools", () => {
+  const RUNTIME = {
+    ...TOOLS,
+    counts: {
+      ...TOOLS.counts,
+      registered: 141,
+      byGate: { ...TOOLS.counts.byGate, runtime_classification: 1 },
+    },
+    rows: [
+      ...TOOLS.rows,
+      {
+        name: "ext-wc__word_count",
+        domain: "data",
+        homeDescription: "Word count, from the wc extension, version 0.1.0",
+        requiresWrite: false,
+        requiresConfirmation: false,
+        advertised: true,
+        gate: null,
+        reason: null,
+        alsoWithheldBy: [],
+        source: "extension:wc@0.1.0",
+        serverId: "ext-wc",
+        classification: { decision: "allow", code: null },
+      },
+      {
+        name: "ext-wc__delete_everything",
+        domain: "data",
+        homeDescription: "Delete everything, from the wc extension, version 0.1.0",
+        requiresWrite: true,
+        requiresConfirmation: true,
+        advertised: false,
+        gate: "runtime_classification",
+        reason: "The assistant is shown it, but every call is refused: it starts as a change that asks first.",
+        alsoWithheldBy: [],
+        source: "extension:wc@0.1.0",
+        serverId: "ext-wc",
+        classification: { decision: "deny", code: "REMOTE_WRITE_NOT_PERMITTED" },
+      },
+    ],
+  };
+
+  it("🔴 shows where a runtime tool comes from", async () => {
+    fetchToolInspectMock.mockResolvedValue(RUNTIME);
+    render(<AssistantInspectorPage />);
+    await selectPerson();
+    await screen.findByText("Word count, from the wc extension, version 0.1.0");
+    expect(screen.getAllByText("data · extension:wc@0.1.0").length).toBe(2);
+    // A built-in row stays labelled by its area alone.
+    expect(screen.getByText("files")).toBeTruthy();
+  });
+
+  it("🔴 groups a refused-at-dispatch tool with its own reason and verdict", async () => {
+    fetchToolInspectMock.mockResolvedValue(RUNTIME);
+    render(<AssistantInspectorPage />);
+    await selectPerson();
+    expect(await screen.findByText("Shown, but refused when called")).toBeTruthy();
+    expect(screen.getByText(/every call is refused/)).toBeTruthy();
+    expect(screen.getByText("Blocked until reviewed")).toBeTruthy();
+  });
+});
