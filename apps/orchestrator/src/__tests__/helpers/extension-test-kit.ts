@@ -101,7 +101,13 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
   const installed = new Map<string, SandboxExtensionStatus>();
   const installs: Array<{ slug: string; req: ExtensionInstallRequest }> = [];
   const calls: string[] = [];
-  const state = { supervisionOff: false, availableMb: init.availableMb ?? 200, failInstall: null as Error | null };
+  const state = {
+    supervisionOff: false,
+    availableMb: init.availableMb ?? 200,
+    failInstall: null as Error | null,
+    /** When set, install() waits on it after the request lands (a long tsc). */
+    installHold: null as Promise<void> | null,
+  };
   const gate = () => {
     if (state.supervisionOff) {
       throw new ExtensionSandboxError("extensions are not enabled on this box", 503, "SUPERVISION_OFF");
@@ -127,6 +133,8 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
     install: vi.fn(async (slug: string, req: ExtensionInstallRequest) => {
       calls.push(`install ${slug}`);
       gate();
+      if (state.installHold) await state.installHold;
+      calls.push(`installed ${slug}`);
       if (state.failInstall) throw state.failInstall;
       installs.push({ slug, req });
       const st: SandboxExtensionStatus = {

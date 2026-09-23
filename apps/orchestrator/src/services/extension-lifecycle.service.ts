@@ -18,6 +18,14 @@
  * orchestrator side of the call-back (resolving `dxt_` to the
  * `_service:ext:<slug>` principal) is WARP-2900 H3.
  *
+ * EVERY WRITE IS CLAIMED. An install takes up to four minutes (export, tsc,
+ * start, ready ping), and the owner's disable or uninstall may land in the
+ * middle of it. So each of install()'s writes — the bearer hash, the final
+ * `installed`, a `failed` — is an updateMany whose WHERE still carries the
+ * statuses the install started from. If the row has left them, the owner
+ * won: the install stops (or removes) whatever the sandbox started, and
+ * answers 409 wrong_state instead of reviving the extension.
+ *
  * `installedExtensionIds` is the set of multiplexer server ids
  * (`ext-<slug>`) this process considers installed. H3's
  * mcp-client.singleton reads it to decide which extension servers may
@@ -40,6 +48,7 @@ import {
   ExtensionSandboxError,
   type ExtensionSandboxClient,
   type SandboxBudget,
+  type SandboxExtensionStatus,
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
@@ -190,6 +199,7 @@ export function preflightExtension(input: PreflightInput): PreflightResult {
 
 export type ExtensionLifecycleErrorCode =
   | "not_found"
+  | "preflight_blocked"
   | "not_promoted"
   | "wrong_state"
   | "verify_failed"
@@ -201,6 +211,7 @@ export class ExtensionLifecycleError extends Error {
     readonly code: ExtensionLifecycleErrorCode,
     readonly httpStatus: number,
     message: string,
+    readonly body: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "ExtensionLifecycleError";
@@ -230,6 +241,23 @@ export interface ExtensionLifecycleDeps {
 export type LifecycleOp = "promote" | "install" | "disable" | "enable" | "uninstall" | "reconcile";
 
 type ExtensionStatusName = "signed" | "installed" | "live" | "disabled" | "failed" | "uninstalled";
+
+type InstallOp = "install" | "enable" | "reconcile";
+
+/**
+ * The statuses each install path may start from — and must still find at
+ * every write. A promote installs a freshly signed row (or reinstalls a
+ * running one); an enable has claimed the row to `signed`; the reconciler
+ * restarts rows that should be running.
+ */
+const INSTALL_FROM: Record<InstallOp, readonly ExtensionStatusName[]> = {
+  install: ["signed", "installed", "live"],
+  enable: ["signed"],
+  reconcile: ["installed", "live"],
+};
+
+/** Supervisor states that mean the process died and stays dead (restarts spent). */
+const DEAD_PROCESS_STATES: ReadonlySet<string> = new Set(["failed", "exited"]);
 
 const SYSTEM_ACTOR: ActivityActor = { type: "system", id: null };
 
@@ -274,16 +302,57 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return ext;
   }
 
-  async function markFailed(slug: string, reason: string): Promise<void> {
+  /** `failed` only while the row is still in `from`; false when someone else moved it. */
+  async function markFailed(slug: string, reason: string, from: readonly ExtensionStatusName[]): Promise<boolean> {
     installedExtensionIds.delete(extensionServerId(slug));
-    await prisma.extension.update({
-      where: { id: slug },
+    const u = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
       data: { status: "failed", failureReason: reason.slice(0, 1000), serviceTokenHash: null },
     });
+    return u.count > 0;
   }
 
-  async function install(slug: string, actor: ActivityActor, op: LifecycleOp = "install") {
+  async function overtaken(slug: string): Promise<ExtensionLifecycleError> {
+    const now = await load(slug);
+    return new ExtensionLifecycleError(
+      "wrong_state",
+      409,
+      `extension ${slug} became ${now.status} while it was being installed; that stands`,
+    );
+  }
+
+  /**
+   * The owner's disable/uninstall won while the sandbox was starting the
+   * process: take down what the sandbox started, the way the winning
+   * transition would have if the process had existed when it ran.
+   */
+  async function undoOvertakenInstall(slug: string, actor: ActivityActor, op: InstallOp): Promise<never> {
+    installedExtensionIds.delete(extensionServerId(slug));
+    const now = await load(slug);
+    try {
+      if (now.status === "uninstalled") await sandbox.uninstall(slug);
+      else await sandbox.stop(slug);
+    } catch (e) {
+      logger.warn({ err: e, slug, status: now.status }, "extension_overtaken_install_cleanup_failed");
+    }
+    await record(op, slug, actor, {
+      severity: "warn",
+      what: `Extension install stopped: it was ${now.status} meanwhile`,
+      refs: { status: now.status },
+    });
+    throw new ExtensionLifecycleError(
+      "wrong_state",
+      409,
+      `extension ${slug} became ${now.status} while it was being installed; that stands`,
+    );
+  }
+
+  async function install(slug: string, actor: ActivityActor, op: InstallOp) {
+    const from = INSTALL_FROM[op];
     const ext = await load(slug);
+    if (!from.includes(ext.status as ExtensionStatusName)) {
+      throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is ${ext.status}`);
+    }
     const v = ext.currentVersion;
     if (!v) throw new ExtensionLifecycleError("not_promoted", 409, `extension ${slug} has no signed version`);
 
@@ -307,7 +376,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     });
     if (!check.ok) {
       const reason = `${check.failureReason}: ${check.detail}`;
-      await markFailed(slug, reason);
+      if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
       await record(op, slug, actor, {
         severity: "warn",
         what: "Extension refused: its signed statement no longer verifies",
@@ -319,7 +388,11 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
 
     // 2. Rotate the bearer BEFORE the start: the child may call back at once.
     const { token, hash } = mintExtensionToken();
-    await prisma.extension.update({ where: { id: slug }, data: { serviceTokenHash: hash } });
+    const claimed = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
+      data: { serviceTokenHash: hash },
+    });
+    if (claimed.count === 0) throw await overtaken(slug);
 
     // 3. Start it.
     try {
@@ -336,7 +409,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      await markFailed(slug, `install_failed: ${reason}`);
+      if (!(await markFailed(slug, `install_failed: ${reason}`, from))) throw await overtaken(slug);
       await record(op, slug, actor, {
         severity: "warn",
         what: "Extension install failed",
@@ -348,10 +421,12 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       throw new ExtensionLifecycleError("install_failed", 502, reason);
     }
 
-    const row = await prisma.extension.update({
-      where: { id: slug },
+    const done = await prisma.extension.updateMany({
+      where: { id: slug, status: { in: [...from] } },
       data: { status: "installed", failureReason: null },
     });
+    if (done.count === 0) return undoOvertakenInstall(slug, actor, op);
+    const row = await load(slug);
     installedExtensionIds.add(extensionServerId(slug));
     await attach.attach(slug);
     await record(op, slug, actor, {
@@ -392,6 +467,21 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     install: (slug: string, actor: ActivityActor) => install(slug, actor, "install"),
 
     async enable(slug: string, actor: ActivityActor) {
+      // The same preflight a promote runs: while this one was off, another
+      // extension may have taken one of its tool names, or the memory.
+      const ext = await load(slug);
+      const parsed = ext.currentVersion ? parseExtensionManifest(ext.currentVersion.manifestBytes) : null;
+      if (parsed?.ok) {
+        const preflight = await preflightAgainstBox(prisma, sandbox, slug, parsed.manifest, 0);
+        if (!preflight.ok) {
+          throw new ExtensionLifecycleError(
+            "preflight_blocked",
+            422,
+            preflight.blocking.map((b) => b.detail).join("; "),
+            { preflight },
+          );
+        }
+      }
       // Claimed to `signed` (not running yet) first: a second enable racing
       // this one finds `signed` and gets the 409.
       await claim(slug, ["disabled", "failed", "uninstalled"], "signed");
@@ -439,9 +529,9 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       });
       const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [] };
       for (const { id } of rows) {
-        let running = false;
+        let st: SandboxExtensionStatus | null = null;
         try {
-          running = (await sandbox.status(id))?.running === true;
+          st = await sandbox.status(id);
         } catch (err) {
           if (err instanceof ExtensionSandboxError && err.code === "SUPERVISION_OFF") {
             return { ...report, skipped: "supervision_off" };
@@ -449,10 +539,27 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
           logger.warn({ err, slug: id }, "extension_reconcile_status_failed");
           continue;
         }
-        if (running) {
+        if (st?.running === true) {
           installedExtensionIds.add(extensionServerId(id));
           continue;
         }
+        const proc = st?.process ?? null;
+        if (proc && DEAD_PROCESS_STATES.has(proc.state)) {
+          // The sandbox still has it and it died after its own restarts:
+          // rebuilding it every tick would loop (export, tsc, a new bearer,
+          // an audit row per minute). The owner sees why and re-enables.
+          const reason = `process_${proc.state}: exit code ${proc.exitCode ?? "unknown"} after ${proc.restarts} restarts`;
+          if (await markFailed(id, reason, INSTALL_FROM.reconcile)) {
+            await record("reconcile", id, SYSTEM_ACTOR, {
+              severity: "warn",
+              what: "Extension stopped: its process kept exiting",
+              refs: { process: proc.state, exitCode: proc.exitCode, restarts: proc.restarts },
+            });
+          }
+          report.failed.push(id);
+          continue;
+        }
+        if (proc?.state === "starting") continue;
         try {
           await install(id, SYSTEM_ACTOR, "reconcile");
           report.restarted.push(id);
@@ -485,4 +592,27 @@ export async function otherExtensionTools(
     for (const t of parsed.manifest.provides.tools) out.set(t.name, extensionServerId(r.id));
   }
   return out;
+}
+
+/**
+ * Preflight `manifest` against the box as it is NOW: a fresh sandbox budget,
+ * every other extension's tool names, the catalog and the attached servers.
+ * `currentMemoryMb` is what this slug's running version holds (freed by a
+ * reinstall). Promote runs it at both phases; enable runs it before it claims.
+ */
+export async function preflightAgainstBox(
+  prisma: PrismaClient,
+  sandbox: ExtensionSandboxClient,
+  slug: string,
+  manifest: ExtensionManifest,
+  currentMemoryMb: number,
+): Promise<PreflightResult> {
+  const budget = await sandbox.budget();
+  return preflightExtension({
+    slug,
+    manifest,
+    budget,
+    currentMemoryMb,
+    otherExtensionTools: await otherExtensionTools(prisma, slug),
+  });
 }

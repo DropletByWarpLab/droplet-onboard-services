@@ -332,3 +332,148 @@ describe("a statement signed by a key the box never held", () => {
     expect(k.sandbox.installs).toEqual([]);
   });
 });
+
+/** A sandbox install that stays in flight (a long tsc) until released. */
+function holdInstall(k: ReturnType<typeof kit>): () => void {
+  let release: () => void = () => {};
+  k.sandbox.state.installHold = new Promise<void>((r) => {
+    release = r;
+  });
+  return release;
+}
+
+/** Let the pending install reach the sandbox (and park on the hold). */
+async function untilSandboxInstall(k: ReturnType<typeof kit>, slug = "wc"): Promise<void> {
+  for (let i = 0; i < 50 && !k.sandbox.calls.includes(`install ${slug}`); i += 1) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  expect(k.sandbox.calls).toContain(`install ${slug}`);
+}
+
+describe("an owner's kill switch beats an install in flight", () => {
+  it("disable during an enable's install: the row stays disabled and the late process is stopped", async () => {
+    // MUTATION: write the final `installed` with an unconditional update and
+    // the row flips back to installed with the process running.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "disabled" });
+    const release = holdInstall(k);
+    const enabling = k.lifecycle.enable("wc", OWNER).catch((e: unknown) => e);
+    await untilSandboxInstall(k);
+    await k.lifecycle.disable("wc", OWNER);
+    release();
+    expect(await enabling).toMatchObject({ code: "wrong_state", httpStatus: 409 });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "disabled", serviceTokenHash: null });
+    expect(installedExtensionIds.has("ext-wc")).toBe(false);
+    expect(k.attach.attach).not.toHaveBeenCalled();
+    // The process the sandbox started after the disable's stop is stopped again.
+    const after = k.sandbox.calls.slice(k.sandbox.calls.indexOf("installed wc"));
+    expect(after).toContain("stop wc");
+    expect(k.sandbox.installed.get("wc")?.running).toBe(false);
+  });
+
+  it("uninstall during a reconcile restart: the row stays uninstalled and the sandbox copy is removed", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "installed" });
+    const release = holdInstall(k);
+    const reconciling = k.lifecycle.reconcile();
+    await untilSandboxInstall(k);
+    await k.lifecycle.uninstall("wc", OWNER);
+    release();
+    expect(await reconciling).toEqual({ checked: 1, restarted: [], failed: ["wc"] });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "uninstalled", serviceTokenHash: null });
+    const after = k.sandbox.calls.slice(k.sandbox.calls.indexOf("installed wc"));
+    expect(after).toContain("uninstall wc");
+    expect(k.sandbox.installed.has("wc")).toBe(false);
+    expect(installedExtensionIds.has("ext-wc")).toBe(false);
+  });
+
+  it("a failed install does not overwrite a disable that landed meanwhile", async () => {
+    // MUTATION: make markFailed an unconditional update and the disabled row
+    // turns `failed` (and enable-able from a state the owner never chose).
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "disabled" });
+    const release = holdInstall(k);
+    k.sandbox.state.failInstall = new Error("the TypeScript build failed");
+    const enabling = k.lifecycle.enable("wc", OWNER).catch((e: unknown) => e);
+    await untilSandboxInstall(k);
+    await k.lifecycle.disable("wc", OWNER);
+    release();
+    expect(await enabling).toMatchObject({ code: "wrong_state", httpStatus: 409 });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "disabled", failureReason: null });
+  });
+
+  it("an install of a row that is not in an installable state touches nothing", async () => {
+    // MUTATION: drop the early from-state check and a disabled row is
+    // re-verified against the sidecar before the bearer write refuses it.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "disabled" });
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "wrong_state", httpStatus: 409 });
+    expect(k.identity.getExtensionPublicKey).not.toHaveBeenCalled();
+    expect(k.sandbox.calls).toEqual([]);
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "disabled", serviceTokenHash: null });
+  });
+
+  it("the bearer is not written for a row that left the install's state before it started", async () => {
+    // MUTATION: write serviceTokenHash with update() and a disabled row gets
+    // a live bearer back.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "installed" });
+    const findUnique = k.db.raw.extension.findUnique;
+    // The disable lands between install()'s read and its bearer write.
+    findUnique.mockImplementationOnce(async (args: { where: { id: string } }) => {
+      const row = await findUnique.getMockImplementation()!(args);
+      k.db.extensions.get("wc")!.status = "disabled";
+      return row;
+    });
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "wrong_state" });
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "disabled", serviceTokenHash: null });
+    expect(k.sandbox.installs).toEqual([]);
+  });
+});
+
+describe("the reconciler does not rebuild a process that keeps dying", () => {
+  it("a process the sandbox reports failed after its restarts is marked failed, not reinstalled", async () => {
+    // MUTATION: treat every not-running status as lost and the extension is
+    // rebuilt (export, tsc, new bearer, audit row) every tick.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "installed" });
+    k.sandbox.installed.set("wc", {
+      slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18001,
+      running: false, process: { state: "failed", restarts: 5, exitCode: 1 },
+    });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: [], failed: ["wc"] });
+    expect(k.sandbox.installs).toEqual([]);
+    expect(k.db.extensions.get("wc")).toMatchObject({ status: "failed", serviceTokenHash: null });
+    expect(String(k.db.extensions.get("wc")?.failureReason)).toMatch(/^process_failed: exit code 1 after 5 restarts/);
+    expect(k.audit.mock.calls.map((c) => (c[0] as { severity: string; refs: { op: string } }).refs.op)).toEqual(["reconcile"]);
+    // The next tick has nothing to do: the row is no longer one that should run.
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 0, restarted: [], failed: [] });
+  });
+
+  it("a stopped process (the sandbox kept it, nothing is running it) is restarted", async () => {
+    const k = kit();
+    await seedSigned(k.db, k.identity, { status: "installed" });
+    k.sandbox.installed.set("wc", {
+      slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18001,
+      running: false, process: { state: "stopped", restarts: 0, exitCode: -15 },
+    });
+    expect(await k.lifecycle.reconcile()).toEqual({ checked: 1, restarted: ["wc"], failed: [] });
+  });
+});
+
+describe("enable preflights like a promote", () => {
+  it("a tool name another extension took while this one was disabled blocks the enable, and nothing moves", async () => {
+    // MUTATION: drop the preflight from enable() and two servers offer word_count.
+    const k = kit();
+    await seedSigned(k.db, k.identity, { slug: "wc", status: "disabled" });
+    await seedSigned(k.db, k.identity, { slug: "other", status: "installed" });
+    await expect(k.lifecycle.enable("wc", OWNER)).rejects.toMatchObject({
+      code: "preflight_blocked",
+      httpStatus: 422,
+      body: { preflight: { ok: false, blocking: [{ code: "tool_name_collides_with_extension" }] } },
+    });
+    expect(k.db.extensions.get("wc")?.status).toBe("disabled");
+    expect(k.sandbox.installs).toEqual([]);
+  });
+});
+

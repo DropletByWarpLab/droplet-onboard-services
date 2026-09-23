@@ -107,7 +107,7 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
       return;
     }
     if (err instanceof ExtensionLifecycleError) {
-      res.status(err.httpStatus).json({ error: err.code, message: err.message });
+      res.status(err.httpStatus).json({ error: err.code, message: err.message, ...err.body });
       return;
     }
     if (err instanceof ExtensionSandboxError) {
