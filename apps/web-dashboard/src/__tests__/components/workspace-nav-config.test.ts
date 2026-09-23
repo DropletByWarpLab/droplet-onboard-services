@@ -250,3 +250,44 @@ describe("workspace-nav-config — locate() derives space + destination from the
     );
   });
 });
+
+describe("workspace-nav-config — restrictTo (WARP-2976, ADR-059 §2.3)", () => {
+  const hrefsOf = (spaces: ReturnType<typeof resolveSpaces>) =>
+    spaces.flatMap((s) => s.destinations.map((d) => d.item.href));
+
+  it("omitted, the spaces are exactly today's", () => {
+    expect(hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, undefined))).toEqual(
+      hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn)),
+    );
+  });
+
+  it("keeps only destinations in the set, and drops the spaces it empties", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/settings", "/help"]);
+    const spaces = resolveSpaces("owner", ALL_CAPS, allOn, restrict);
+    expect(spaces.map((s) => s.def.id)).toEqual(["ops", "admin"]);
+    expect(hrefsOf(spaces)).toEqual(["/cameras", "/events", "/network", "/settings", "/help"]);
+  });
+
+  it("is an intersection: the gates still apply inside the set", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/integrations"]);
+    const hrefs = hrefsOf(resolveSpaces("family", ALL_CAPS, (id) => id !== "cameras", restrict));
+    // cameras module off → Cameras and its Events child go; Integrations is
+    // owner/admin only → gone for family. Only Network survives.
+    expect(hrefs).toEqual(["/network"]);
+  });
+
+  it("an href outside NAV_GROUPS in the set adds nothing", () => {
+    const hrefs = hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/nope", "/files"])));
+    expect(hrefs).toEqual(["/files"]);
+  });
+
+  it("an empty set leaves no spaces at all", () => {
+    expect(resolveSpaces("owner", ALL_CAPS, allOn, new Set())).toEqual([]);
+  });
+
+  it("keeps a destination's views when the destination survives", () => {
+    const files = resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/files"]))[0]
+      ?.destinations[0];
+    expect(files?.views.map((v) => v.href)).toContain("/files/recents");
+  });
+});

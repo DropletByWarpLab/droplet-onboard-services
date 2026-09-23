@@ -40,10 +40,15 @@ import {
   type AuthRole,
   type NavItem,
 } from "./nav-config";
-
-/** Does this href own a slot in the mobile bottom tab bar? */
-const isMobilePrimary = (href: string): boolean =>
-  (MOBILE_PRIMARY_HREFS as readonly string[]).includes(href);
+// WARP-2976 (ADR-059 §2.3) — the department switcher and the department
+// filter. The filter only NARROWS `NAV_GROUPS` to the active department's
+// profile; `visibleItems` below still runs every gate over the result, so a
+// department can never surface a route the person could not already reach.
+// With no active department (or one that is not set up) it returns
+// `NAV_GROUPS` itself — Whole business is today's nav, unchanged.
+import { DepartmentSwitcher } from "./Departments/DepartmentSwitcher";
+import { useActiveDepartment } from "@/lib/departments/active-department";
+import { departmentNavGroups } from "@/lib/departments/department-nav";
 
 /**
  * One block of the mobile "More" drawer: a nav destination plus the
@@ -145,10 +150,16 @@ export function Sidebar() {
         .slice(0, 2)
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
-  // Compute the rendered groups once. Empty groups (e.g. Business when every
-  // one of its modules is off) are filtered out so we don't render a lone
-  // caption.
-  const renderedGroups = NAV_GROUPS.map((g) => ({
+  // WARP-2976 — the active department's arrangement of the nav, or
+  // NAV_GROUPS itself for Whole business. Gating runs AFTER this, below.
+  const { active: activeDepartment, activeProfile } = useActiveDepartment();
+  const navGroups = departmentNavGroups(NAV_GROUPS, activeDepartment, activeProfile);
+  const inDepartment = navGroups !== NAV_GROUPS;
+
+  // Compute the rendered groups once. Empty groups (e.g. Admin when the
+  // user is family/guest without the Activity entry) are filtered out so
+  // we don't render a lone caption.
+  const renderedGroups = navGroups.map((g) => ({
     label: g.label,
     items: visibleItems(
       g.items,
@@ -178,6 +189,18 @@ export function Sidebar() {
         isModuleOn,
       )
     : [];
+
+  // Which hrefs own a bottom-tab slot. Whole business keeps the fixed
+  // MOBILE_PRIMARY_HREFS. Inside a department most of those are not in its
+  // nav at all, so the bar takes the department's own first destinations
+  // (its home, then its pages, already gated) — the same number of slots.
+  const primaryHrefs: readonly string[] = inDepartment
+    ? (renderedGroups[0]?.items ?? [])
+        .slice(0, MOBILE_PRIMARY_HREFS.length)
+        .map((i) => i.href)
+    : MOBILE_PRIMARY_HREFS;
+  /** Does this href own a slot in the mobile bottom tab bar? */
+  const isMobilePrimary = (href: string): boolean => primaryHrefs.includes(href);
 
   // Flatten for the "More" drawer — anything not in the bottom-bar
   // primary set lands here in group order. Nested children (e.g. Events
@@ -227,7 +250,7 @@ export function Sidebar() {
   // whose module is off is dropped; the bar simply shows fewer tabs (the
   // surface is genuinely gone), and everything non-primary stays in the
   // drawer.
-  const mobileTabs: NavItem[] = MOBILE_PRIMARY_HREFS.map((href) => {
+  const mobileTabs: NavItem[] = primaryHrefs.map((href) => {
     for (const g of renderedGroups) {
       const found = g.items.find((i) => i.href === href);
       if (found) return found;
@@ -296,6 +319,14 @@ export function Sidebar() {
             />
           </button>
         </div>
+
+        {/* WARP-2976 — the department switcher, directly under the logo row.
+            Renders nothing below two choices, so a box without departments
+            (or a person in one) keeps exactly today's aside. */}
+        <DepartmentSwitcher
+          variant={collapsed ? "rail" : "sidebar"}
+          className={collapsed ? "px-2 pb-2" : "px-3 pb-2"}
+        />
 
         {/* WARP-2967 — the contextual panel's way out. Above the nav rather
             than inside it: it is not a destination, it is the control that
@@ -584,6 +615,15 @@ export function Sidebar() {
               <X size={20} aria-hidden="true" />
             </button>
           </div>
+
+          {/* WARP-2976 — the switcher at the top of the drawer; the phone
+              has no rail to put it in. Picking a department navigates, so
+              the drawer closes with it. */}
+          <DepartmentSwitcher
+            variant="drawer"
+            className="px-3 pt-3"
+            onNavigate={() => setMoreOpen(false)}
+          />
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
             {drawerGroups.map((group, groupIndex) => (

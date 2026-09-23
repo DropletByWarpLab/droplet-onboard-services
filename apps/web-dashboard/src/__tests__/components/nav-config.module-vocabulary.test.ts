@@ -52,6 +52,8 @@ const MODULE_IDS: readonly AccessModuleId[] = [
   // grows, so a new id cannot reach the nav without someone confirming it is
   // nav-able. /money is gated on it in the Business group.
   "money",
+  // WARP-2977 — /security is gated on it in the Operations group.
+  "security",
 ];
 
 /** Every `requiresModule` in the tree, parents and children alike. */

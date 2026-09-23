@@ -44,6 +44,7 @@ import {
   KeyRound,
   ScrollText,
   Settings,
+  Shield,
   ShieldCheck,
   Sparkles,
   Stethoscope,
@@ -482,9 +483,17 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       // Cameras owns the surveillance section. Events nests beneath it
       // (Samantha QA #bugs) — they were flat siblings, which read as two
-      // unrelated destinations. The Cameras parent link IS the section index;
-      // its default prefix match keeps it lit on /cameras and the
-      // /cameras/[name] detail pages, but NOT on the /events sibling.
+      // unrelated destinations. The sub-nav reveals on /cameras or /events
+      // (mirrors the Files sub-nav). The Cameras parent link IS the section
+      // index; its default prefix match keeps it lit on /cameras and the
+      // /cameras/[name] detail pages, but NOT on the /events sibling (which
+      // owns its own active state).
+      //
+      // WARP-2977 (ADR-059) — Security sits ABOVE Cameras: it is the one
+      // place camera detections, camera health and network warnings land,
+      // and Cameras is one of its sources. Its own module, so a person can
+      // hold it without holding cameras (and vice versa).
+      { href: "/security", label: "Security", icon: Shield, requiresModule: "security" },
       {
         href: "/cameras",
         label: "Cameras",
