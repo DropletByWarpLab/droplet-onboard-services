@@ -232,20 +232,21 @@ describe("WARP-485 — req.user.id normalization", () => {
     // Local row exists with nextcloudUsername="stefan-cruceru" and a
     // proper UUID id. The middleware must resolve the OCS token to the
     // local row's UUID, not pass through `ocs.data.id`.
+    // WARP-2573: a family row — owner/admin rows are refused on this path.
     const localUser: MockUserRow = {
       id: "u-uuid-stefan-7777",
       username: "stefan-cruceru",
       displayName: "Stefan Cruceru",
       email: null,
       nextcloudUsername: "stefan-cruceru",
-      role: "owner",
+      role: "family",
       isLocal: false,
       createdAt: new Date("2026-05-26T10:00:00Z"),
       updatedAt: new Date("2026-05-26T10:00:00Z"),
     };
     const prisma = buildPrismaMock([localUser]);
     _setAuthPrismaForTests(prisma);
-    roleFromGroups.mockReturnValue("owner");
+    roleFromGroups.mockReturnValue("family");
     (global.fetch as any).mockResolvedValueOnce(
       buildOcsResponse("stefan-cruceru", "Stefan Cruceru"),
     );
@@ -264,7 +265,7 @@ describe("WARP-485 — req.user.id normalization", () => {
     // Display fields keep the OCS-derived values for UX continuity.
     expect(user.username).toBe("stefan-cruceru");
     expect(user.displayName).toBe("Stefan Cruceru");
-    expect(user.role).toBe("owner");
+    expect(user.role).toBe("family");
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { nextcloudUsername: "stefan-cruceru" },
     });
@@ -314,7 +315,7 @@ describe("WARP-485 — req.user.id normalization", () => {
     expect((req as any).user).toBeUndefined();
   });
 
-  it("WARP-480 self-action guard fires under OCS auth (end-to-end normalization)", async () => {
+  it("WARP-480/WARP-2573: an owner's OCS token cannot reach the self-delete route at all", async () => {
     // The regression that motivated WARP-485. Pre-fix path:
     //   - OCS sets req.user.id = "stefan-cruceru" (NC username)
     //   - DELETE /api/people/u-uuid-stefan-7777 compares params.id ("u-uuid-stefan-7777")
@@ -322,6 +323,11 @@ describe("WARP-485 — req.user.id normalization", () => {
     //     → owner deletes themselves.
     // Post-fix: req.user.id is the local UUID, so the equality check
     // fires correctly and returns 409 SELF_ACTION_NOT_ALLOWED.
+    //
+    // WARP-2573: an owner can no longer authenticate on the OCS path at
+    // all, so the self-delete never reaches the people router — it is
+    // refused at the gate (401). The UUID normalisation itself is pinned
+    // by the family-row test above.
     const owner: MockUserRow = {
       id: "u-uuid-stefan-7777",
       username: "stefan-cruceru",
@@ -370,8 +376,8 @@ describe("WARP-485 — req.user.id normalization", () => {
       .delete("/api/people/u-uuid-stefan-7777")
       .set("Authorization", "Bearer ocs-legacy-token");
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("NC_CREDENTIAL_ADMIN_TIER_REFUSED");
     expect(prisma.user.delete).not.toHaveBeenCalled();
   });
 

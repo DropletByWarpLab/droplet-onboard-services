@@ -15,6 +15,10 @@
  * below is about the shipped code path end to end: OCS says "this person
  * is in Nextcloud's built-in `admin` group", the local row says
  * `role="admin"`, and the session must come back `admin`.
+ *
+ * WARP-2573 tightened this: an owner/admin-tier row is now refused on this
+ * path outright (see auth.nc-password-reset-escalation.test.ts), so the
+ * cap is exercised on the non-admin tiers that still use the fallback.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import type { Request, NextFunction } from "express";
@@ -134,13 +138,10 @@ describe("WARP-1636 — OCS fallback caps the session role at the stored Droplet
     global.fetch = realFetch;
   });
 
-  it("a narrowed admin in Nextcloud's built-in `admin` group gets an `admin` session, not `owner`", async () => {
-    // The contractor from the ticket: an operator built an Admin-based
-    // custom role granting cameras + smart_home and deliberately NOT
-    // files, and assigned it at role=admin. buildNcGroups put them in
-    // NC's `admin` group, so they are an instance administrator — but
-    // that must not buy them an orchestrator session at the one tier
-    // ADR-032 §3 says bypasses layer 2.
+  it("a narrowed admin in Nextcloud's built-in `admin` group gets NO session (WARP-2573), never `owner`", async () => {
+    // The contractor from WARP-1636: an Admin-based custom role, NC
+    // instance admin via buildNcGroups. WARP-1636 capped them at `admin`;
+    // WARP-2573 goes further — an NC credential never mints admin tier.
     const stored: StoredUser = {
       id: "u-uuid-contractor-0001",
       username: "facilities-contractor",
@@ -157,36 +158,35 @@ describe("WARP-1636 — OCS fallback caps the session role at the stored Droplet
     const res = mockRes();
     const { next } = await runAuth(req, res);
 
-    expect(next).toHaveBeenCalledTimes(1);
-    expect(res.statusCode).toBe(0);
-    const user = (req as any).user;
-    expect(user.id).toBe("u-uuid-contractor-0001");
-    expect(user.role).toBe("admin");
-    // The regression this whole ticket is about.
-    expect(user.role).not.toBe("owner");
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
+    expect(res.body.code).toBe("NC_CREDENTIAL_ADMIN_TIER_REFUSED");
+    expect((req as any).user).toBeUndefined();
+    // Nothing cached — a warm entry would replay the session.
+    expect(cacheSet).not.toHaveBeenCalled();
   });
 
-  it("caches the CAPPED role, so a warm token cannot replay the escalation", async () => {
+  it("caches the CAPPED role, so a warm token cannot replay a raised role", async () => {
     // The cache stores fully-normalised AuthUser rows and short-circuits
     // the mint on a hit. Writing the uncapped role here would hand the
     // escalation back for TOKEN_CACHE_TTL on every subsequent request.
     const stored: StoredUser = {
-      id: "u-uuid-contractor-0002",
-      username: "narrowed",
-      nextcloudUsername: "narrowed",
-      role: "admin",
+      id: "u-uuid-family-0002",
+      username: "drifted",
+      nextcloudUsername: "drifted",
+      role: "family",
       directoryStatus: "ACTIVE",
     };
     _setAuthPrismaForTests(buildPrismaMock(stored));
     (global.fetch as any).mockResolvedValueOnce(
-      ocsUserWithGroups("narrowed", ["admin"]),
+      ocsUserWithGroups("drifted", ["admin"]),
     );
 
     await runAuth(mockReq("nc-app-password-2"), mockRes());
 
     expect(cacheSet).toHaveBeenCalledTimes(1);
     const cachedUser = cacheSet.mock.calls[0][1] as { role: string };
-    expect(cachedUser.role).toBe("admin");
+    expect(cachedUser.role).toBe("family");
   });
 
   it("a family user drifted into the NC admin group gets a `family` session", async () => {
@@ -209,7 +209,7 @@ describe("WARP-1636 — OCS fallback caps the session role at the stored Droplet
     expect((req as any).user.role).toBe("family");
   });
 
-  it("a real owner still gets an `owner` session (the cap removes authority, never adds)", async () => {
+  it("an owner presenting a Nextcloud credential is refused — owners sign in through Droplet (WARP-2573)", async () => {
     const stored: StoredUser = {
       id: "u-uuid-owner-0004",
       username: "stefan-cruceru",
@@ -223,9 +223,11 @@ describe("WARP-1636 — OCS fallback caps the session role at the stored Droplet
     );
 
     const req = mockReq("nc-app-password-4");
-    const { next } = await runAuth(req, mockRes());
+    const res = mockRes();
+    const { next } = await runAuth(req, res);
 
-    expect(next).toHaveBeenCalledTimes(1);
-    expect((req as any).user.role).toBe("owner");
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
+    expect(res.body.code).toBe("NC_CREDENTIAL_ADMIN_TIER_REFUSED");
   });
 });

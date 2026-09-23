@@ -248,7 +248,7 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
     // Re-validated by a single-column select on the primary key, not a full row.
     expect(findUnique).toHaveBeenCalledWith({
       where: { id: "u-uuid-dave-0004" },
-      select: { directoryStatus: true },
+      select: { directoryStatus: true, role: true },
     });
     // Stale cache entry purged; OCS fetch never reached on a hit.
     expect(cacheDel).toHaveBeenCalled();

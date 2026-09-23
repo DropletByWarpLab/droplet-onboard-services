@@ -112,6 +112,7 @@ export const REFRESH_COOKIE_NAME = "droplet_refresh";
  *
  * JWT tokens are self-verifying (no Redis/Nextcloud call needed).
  * Legacy Nextcloud tokens fall through to OCS validation with Redis cache.
+ * WARP-2573: that fallback never authenticates an owner/admin-tier account.
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!config.AUTH_ENABLED) {
@@ -346,6 +347,17 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       if (cookieToken) {
         res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
       }
+      // WARP-2573 — an admin-tier account presented a Nextcloud credential.
+      // Distinct code so an operator reading the 401 knows to sign in
+      // through /auth/login rather than chase a "bad token".
+      if (result.kind === "admin-tier-refused") {
+        res.status(401).json({
+          error:
+            "Owner and admin accounts must sign in through Droplet, not with a Nextcloud credential.",
+          code: "NC_CREDENTIAL_ADMIN_TIER_REFUSED",
+        });
+        return;
+      }
       // WARP-485 — surface a distinct structured error for "OCS token
       // is valid, but no local User row maps to it" so the dashboard
       // can prompt the operator to add the user via /api/people
@@ -412,7 +424,27 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
 type OcsValidationResult =
   | { kind: "ok"; user: AuthUser }
   | { kind: "invalid" } // OCS rejected the token (bad creds, meta.status !== ok, network fail)
-  | { kind: "user-not-provisioned" }; // OCS accepted, no matching local User row
+  | { kind: "user-not-provisioned" } // OCS accepted, no matching local User row
+  | { kind: "admin-tier-refused" }; // WARP-2573: OCS accepted, but the local row is owner/admin
+
+/**
+ * WARP-2573 — a Nextcloud credential alone never yields an owner/admin
+ * session. Every owner/admin-tier user is a Nextcloud instance admin
+ * (`buildNcGroups`), and any NC instance admin can reset another NC user's
+ * password. So before this, resetting the OWNER's NC password and presenting
+ * it here (`Bearer basic:<b64 owner:newpass>` is forwarded as HTTP Basic)
+ * minted an owner session: the WARP-1636 cap resolves against the owner's
+ * own stored role, and this path checks neither the Droplet argon2 hash nor
+ * TOTP. Admin-tier people sign in through /auth/login, SSO or WebAuthn, all
+ * of which verify a Droplet-side factor and issue a JWT that never reaches
+ * this fallback. Non-admin tiers keep the fallback (capped as before).
+ */
+function isAdminTier(role: Role): boolean {
+  // Literal, matching ADMIN_TIER_ROLES in role-mutation-guard.service.ts
+  // (the same choice auth-groups.ts makes): importing that service here
+  // would drag the provisioning graph into the auth middleware.
+  return role === "owner" || role === "admin";
+}
 
 /**
  * Validate a token against Nextcloud OCS API with Redis cache.
@@ -467,11 +499,18 @@ async function validateNextcloudTokenDetailed(
     if (authPrisma) {
       const row = await authPrisma.user.findUnique({
         where: { id: cached.id },
-        select: { directoryStatus: true },
+        select: { directoryStatus: true, role: true },
       });
       if (!row || row.directoryStatus === "DEACTIVATED") {
         await cacheDel(cacheKey);
         return { kind: "invalid" };
+      }
+      // WARP-2573 — also re-check tier on a hit: an entry warmed before this
+      // guard shipped (or before a promotion) must not replay an admin-tier
+      // session for the rest of its TTL.
+      if (isAdminTier(row.role as Role)) {
+        await cacheDel(cacheKey);
+        return { kind: "admin-tier-refused" };
       }
       return { kind: "ok", user: cached };
     }
@@ -537,6 +576,14 @@ async function validateNextcloudTokenDetailed(
         "OCS auth: directory user is deactivated; rejecting token (ADR-013)",
       );
       return { kind: "invalid" };
+    }
+    // WARP-2573 — see isAdminTier. Refused BEFORE the cache write below.
+    if (isAdminTier(localUser.role as Role)) {
+      logger.warn(
+        { ncUsername, userId: localUser.id },
+        "OCS auth: admin-tier account presented a Nextcloud credential; refusing (WARP-2573)",
+      );
+      return { kind: "admin-tier-refused" };
     }
 
     const user: AuthUser = {
