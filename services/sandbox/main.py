@@ -133,12 +133,13 @@ async def _lifespan(_app: FastAPI):
     except gitstore.StoreError as exc:
         print(f"[sandbox] git store: templates not seeded: {exc}", flush=True)
     # WARP-2899: a template the image gained since this box seeded is added;
-    # an existing one is never touched.
+    # an existing one is never touched. Best-effort: nothing it raises may
+    # cost a box that already worked its sandbox.
     try:
         added = gitstore.sync_templates()
         if added:
             print(f"[sandbox] git store: templates added from the image: {', '.join(added)}", flush=True)
-    except gitstore.StoreError as exc:
+    except Exception as exc:  # noqa: BLE001 — logged; the service must still start
         print(f"[sandbox] git store: templates not synced: {exc}", flush=True)
     yield
 

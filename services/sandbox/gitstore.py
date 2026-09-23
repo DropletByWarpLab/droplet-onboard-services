@@ -36,6 +36,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -202,23 +203,29 @@ def sync_templates() -> list[str]:
     )
     if not missing:
         return []
-    ensure_dirs()
     staging = WORK_DIR / ".sync-templates"
-    if staging.exists():
-        _rmtree(staging)
+    # Best-effort by design: a full or failing volume (copytree, rmtree)
+    # surfaces as a StoreError the lifespan logs, never as an OSError that
+    # would keep the sandbox from starting.
     try:
-        must(git(["clone", "-q", "-b", "main", str(bare), str(staging)], WORK_DIR), "clone templates.git")
-        for name in missing:
-            shutil.copytree(TEMPLATES_SRC / name, staging / name)
-            must(git(["add", "-A", "--", name], staging), "stage template")
-            must(
-                git(["commit", "-q", "-m", f"templates: add {name} from the image"], staging, author=SYSTEM_AUTHOR),
-                "commit template",
-            )
-        must(git(["push", "-q", "origin", "main:main"], staging), "push templates")
-    finally:
+        ensure_dirs()
         if staging.exists():
             _rmtree(staging)
+        try:
+            must(git(["clone", "-q", "-b", "main", str(bare), str(staging)], WORK_DIR), "clone templates.git")
+            for name in missing:
+                shutil.copytree(TEMPLATES_SRC / name, staging / name)
+                must(git(["add", "-A", "--", name], staging), "stage template")
+                must(
+                    git(["commit", "-q", "-m", f"templates: add {name} from the image"], staging, author=SYSTEM_AUTHOR),
+                    "commit template",
+                )
+            must(git(["push", "-q", "origin", "main:main"], staging), "push templates")
+        finally:
+            if staging.exists():
+                _rmtree(staging)
+    except (OSError, shutil.Error, subprocess.SubprocessError) as exc:
+        raise StoreError(500, f"sync templates: {exc}") from exc
     return missing
 
 
@@ -308,20 +315,64 @@ def _qualified(ref: str) -> str:
     return f"refs/heads/{ref}" if ref == WORK_BRANCH else f"refs/tags/{ref}"
 
 
+def _git_stdout_capped(args: list[str], cwd: Path, cap: int, timeout: int) -> bytes:
+    """git's stdout, read as it streams: the child is killed the moment it
+    passes `cap` bytes (413) or `timeout` seconds (504), so an oversized
+    export is never held whole in the sandbox's memory."""
+    proc = subprocess.Popen(
+        ["git", *args], cwd=str(cwd), env=dict(GIT_ENV), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    stderr: list[bytes] = []
+    drain = threading.Thread(target=lambda: stderr.append(proc.stderr.read() if proc.stderr else b""), daemon=True)
+    drain.start()
+    expired = threading.Event()
+
+    def _expire() -> None:
+        expired.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _expire)
+    timer.start()
+    chunks: list[bytes] = []
+    total = 0
+    over = False
+    try:
+        assert proc.stdout is not None
+        while chunk := proc.stdout.read(65_536):
+            total += len(chunk)
+            if total > cap:
+                over = True
+                proc.kill()
+                break
+            chunks.append(chunk)
+    finally:
+        timer.cancel()
+        returncode = proc.wait()
+        drain.join(timeout=5)
+    if over:
+        raise StoreError(413, f"the workspace exceeds the {cap // (1024 * 1024)} MB export ceiling")
+    if expired.is_set():
+        raise StoreError(504, "the export took too long")
+    if returncode != 0:
+        lines = b"".join(stderr).decode("utf-8", "replace").strip().splitlines()
+        raise StoreError(500, f"bundle: {(lines[-1] if lines else f'exit {returncode}')[:200]}")
+    return b"".join(chunks)
+
+
 def bundle(workspace_id: str) -> tuple[bytes, str]:
-    """The workspace as a `git bundle`: HEAD, the `work` branch and every tag
-    (the proposals). Built from the local bare repo and returned on stdout —
-    no temp file for a run child (same UID, HOME=/tmp) to swap. Returns the
-    bytes and the head of `work`."""
+    """The workspace as a `git bundle`: the `work` branch, every proposal/*
+    tag, and HEAD when it names `work` — nothing else a /git push may have
+    left in the bare repo. Built from the local bare repo and returned on
+    stdout — no temp file for a run child (same UID, HOME=/tmp) to swap.
+    Returns the bytes and the head of `work`."""
     bare = _bare_or_404(workspace_id)
     head = must(git(["rev-parse", f"refs/heads/{WORK_BRANCH}"], bare), "rev-parse").stdout.strip()
-    cp = must(
-        git(["bundle", "create", "-", "HEAD", "--branches", "--tags"], bare, binary=True, timeout=BUNDLE_TIMEOUT_S),
-        "bundle",
-    )
-    if len(cp.stdout) > MAX_BUNDLE_BYTES:
-        raise StoreError(413, f"the workspace exceeds the {MAX_BUNDLE_BYTES // (1024 * 1024)} MB export ceiling")
-    return cp.stdout, head
+    tags = must(git(["for-each-ref", "--format=%(refname)", "refs/tags/proposal/"], bare), "list proposals").stdout.split()
+    refs = [f"refs/heads/{WORK_BRANCH}", *tags]
+    if git(["symbolic-ref", "-q", "HEAD"], bare).stdout.strip() == f"refs/heads/{WORK_BRANCH}":
+        refs.insert(0, "HEAD")
+    body = _git_stdout_capped(["bundle", "create", "-", *refs], bare, MAX_BUNDLE_BYTES, BUNDLE_TIMEOUT_S)
+    return body, head
 
 
 def ref_exists(workspace_id: str, ref: str) -> bool:

@@ -91,6 +91,45 @@ def test_sync_is_a_no_op_without_a_store(tmp_path, monkeypatch):
     assert gitstore.sync_templates() == []
 
 
+def test_a_sync_that_cannot_copy_is_a_store_error_and_leaves_no_staging(tmp_path, monkeypatch):
+    # Review of #2324: copytree/rmtree raise OSError, which escaped the
+    # lifespan's `except StoreError` and kept the sandbox from starting.
+    # MUTATION: drop the OSError wrap in sync_templates → OSError, red.
+    import gitstore
+
+    monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
+    monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile"))
+    assert gitstore.seed_templates() is True
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", TEMPLATES_SRC)
+
+    def full_disk(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gitstore.shutil, "copytree", full_disk)
+    with pytest.raises(gitstore.StoreError) as exc:
+        gitstore.sync_templates()
+    assert exc.value.status == 500 and "No space left" in str(exc.value)
+    assert not (gitstore.WORK_DIR / ".sync-templates").exists()
+    assert gitstore.list_templates() == ["python-tool", "typescript-tool"]
+
+
+def test_the_sandbox_starts_when_the_template_sync_fails(monkeypatch):
+    # The sync is best-effort: whatever it raises, the service comes up.
+    # MUTATION: narrow the lifespan's sync catch back to StoreError → red.
+    from fastapi.testclient import TestClient
+
+    import gitstore
+    import main
+
+    def boom():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(gitstore, "sync_templates", boom)
+    with TestClient(main.app) as c:
+        assert c.get("/health", headers={"Authorization": "Bearer pytest-fake-token"}).status_code == 200
+
+
 def test_git_reads_no_config_file_a_run_child_could_have_planted(store, tmp_path, monkeypatch):
     # HOME for the store's git is the same /tmp a `workspace_run` child gets, so
     # a planted $HOME/.gitconfig would otherwise steer every later git call —
@@ -515,6 +554,23 @@ def test_bundle_is_the_work_branch_and_every_proposal_tag_and_clones_offline(sto
     assert store.git(["rev-parse", "HEAD"], clone).stdout.strip() == head
     assert store.git(["tag", "--list"], clone).stdout.split() == ["proposal/0.1.0"]
     assert (clone / "NOTES.md").read_text(encoding="utf-8") == "# notes\n"
+
+
+def test_bundle_carries_only_work_and_the_proposal_tags(store, tmp_path):
+    # AC2: the work branch plus every proposal/* tag — not whatever else was
+    # pushed to the bare repo over /git. MUTATION: bundle `--branches --tags`
+    # again → `other` and `v1` ride along, red.
+    store.create_workspace("ws-refs", "typescript-tool", ALICE)
+    workspace.propose("ws-refs", "Word counter", "0.1.0", "Counts.", ALICE)
+    bare = store.bare_path("ws-refs")
+    store.must(store.git(["branch", "other", "refs/heads/work"], bare), "branch")
+    store.must(store.git(["tag", "v1", "refs/heads/work"], bare), "tag")
+    body, _head = store.bundle("ws-refs")
+    path = tmp_path / "refs.bundle"
+    path.write_bytes(body)
+    heads = store.must(store.git(["bundle", "list-heads", str(path)], tmp_path), "list-heads").stdout.split()
+    refs = sorted(r for r in heads if r.startswith(("refs/", "HEAD")))
+    assert refs == ["HEAD", "refs/heads/work", "refs/tags/proposal/0.1.0"]
 
 
 def test_bundle_is_capped_and_an_unknown_workspace_is_404(store, monkeypatch):
