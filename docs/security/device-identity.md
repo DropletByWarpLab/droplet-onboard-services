@@ -142,7 +142,9 @@ the device-id key, and the device-id key never signs an extension.
   (`extension_spki_der`, `extension_key_fingerprint`). An unreadable or
   damaged key file never fails `GetStatus` (overlay enrolment and TLS
   issuance use it too): it is logged and reported as no key, and signing
-  still refuses. The damaged file is never overwritten with a fresh key.
+  still refuses with `FAILED_PRECONDITION` (the promote route's 503), never
+  an escaped `UNKNOWN`. The damaged file is never overwritten with a fresh
+  key.
 - **One caller.** `apps/orchestrator/src/services/extension-promotion.service.ts`
   is the only orchestrator module that may call it (a guard test pins this).
   It parses the manifest, builds the canonical statement binding the

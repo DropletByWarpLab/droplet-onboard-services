@@ -419,6 +419,39 @@ def test_a_damaged_extension_key_never_breaks_get_status(provisioned, servicer, 
     assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == body
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"usage": "other", "priv_pem": "x"}).encode(),
+        b"not json at all",
+        json.dumps({"usage": EXTENSION_KEY_USAGE}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": "garbage"}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": _ed25519_pem()}).encode(),
+    ],
+    ids=["wrong-usage", "not-json", "no-pem", "bad-pem", "not-ec"],
+)
+def test_rpc_on_a_damaged_extension_key_is_failed_precondition(provisioned, tmp_path, body):
+    """Review #2312: the sign RPC used to let _load_extension_key's
+    RuntimeError / ValueError / KeyError escape, i.e. gRPC UNKNOWN. It is a
+    deliberate FAILED_PRECONDITION now, with no signature, no key material in
+    the details, and the damaged file left as it was.
+    MUTATION: drop the (RuntimeError, ValueError, KeyError) arm -> the
+    exception escapes the handler, red."""
+    _write_key_file(tmp_path, body)
+    fresh = MockBackend(storage_root=tmp_path)
+    ctx = MagicMock()
+    resp = DeviceIdentityServicer(fresh).SignExtensionManifest(
+        pb.SignExtensionManifestRequest(statement=_statement()), ctx
+    )
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    assert resp.signature == b""
+    assert resp.extension_spki_der == b""
+    details = ctx.set_details.call_args.args[0]
+    assert "damaged" in details
+    assert "PRIVATE KEY" not in details
+    assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == body
+
+
 # ─── the gRPC handler ────────────────────────────────────────────────────
 
 
