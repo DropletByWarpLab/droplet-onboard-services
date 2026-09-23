@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHostComposeRunner, type ExecFn } from "./host-compose-runner.js";
@@ -323,6 +324,45 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[0]!.args[0]).toBe("migrate-deploy");
     expect(calls[1]!.args[0]).toBe("restore-configs");
     expect(calls[1]!.args).toContain("du-1");
+  });
+
+  it("enabledServices parses one service per line and drops anything not service-shaped (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec({
+      "enabled-services": "orchestrator\nemail-indexer\n\nWARN something odd\n",
+    });
+    const runner = makeRunner(fn);
+    expect(await runner.enabledServices()).toEqual(["orchestrator", "email-indexer"]);
+    expect(calls[0]!.args).toEqual([
+      "enabled-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+    ]);
+  });
+
+  it("startServices pins each service in override-grow.yml and recreates with --target grow (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    const svc: ReleaseService = {
+      name: "email-indexer",
+      image: `ghcr.io/x/email-indexer@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    };
+    await mkdir(path.join(workDir, "du-9"), { recursive: true });
+    await runner.startServices({ updateId: "du-9", services: [svc] });
+    const yaml = readFileSync(path.join(workDir, "du-9", "override-grow.yml"), "utf8");
+    expect(yaml).toContain(`  email-indexer:\n    image: ghcr.io/x/email-indexer@${DIGEST("5")}`);
+    expect(calls[0]!.args).toEqual([
+      "recreate-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-9",
+      "--services",
+      "email-indexer",
+      "--target",
+      "grow",
+    ]);
   });
 
   it("never builds a shell string — argv is always an array of discrete tokens", async () => {

@@ -73,6 +73,8 @@ case "${1:-}" in
     #   path is exercised; the failing service is the LAST argv token.
     case "$*" in
       *" ps -q "*) printf '%s\n' "${DOCKER_STUB_PS_CID:-}" ;;
+      # WARP-2970 enabled-services: scripted newline-joined service names.
+      *" config --services"*) printf '%s\n' "${DOCKER_STUB_SERVICES:-}" ;;
       *" up "*)
         svc="${!#}"
         case ",${DOCKER_STUB_FAIL_RECREATE:-}," in
@@ -369,6 +371,39 @@ if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
   fail "--target must reject values outside release|previous"
 else
   pass "--target rejects values outside release|previous"
+fi
+
+# --- WARP-2970: post-commit start of services new to the default set ---
+cat > "$UDIR/override-grow.yml" <<EOF
+services:
+  email-indexer:
+    image: ghcr.io/dropletbywarplab/droplet-email-indexer@sha256:$(printf '5%.0s' $(seq 1 64))
+EOF
+stub_reset
+if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --services email-indexer \
+    --target grow >/dev/null 2>&1 \
+  && grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-grow.yml up -d --no-deps --no-build --pull never --force-recreate email-indexer" \
+    "$STUB_DIR/calls.log"; then
+  pass "recreate-services --target grow starts the service pinned by override-grow.yml"
+else
+  fail "grow start missing the pinned compose invocation (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+if run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --target grow >/dev/null 2>&1; then
+  fail "--target grow must be refused for the self-swap"
+else
+  pass "--target grow is recreate-services-only (self-swap refuses it)"
+fi
+
+stub_reset
+ENABLED_OUT="$(DOCKER_STUB_SERVICES="$(printf 'orchestrator\nemail-indexer')" \
+  run_apply enabled-services --compose-file "$COMPOSE_FILE" 2>/dev/null)"
+if [ "$ENABLED_OUT" = "$(printf 'orchestrator\nemail-indexer')" ] \
+  && grep -qF -- "compose -f $COMPOSE_FILE config --services" "$STUB_DIR/calls.log"; then
+  pass "enabled-services prints compose config --services for the staged file"
+else
+  fail "enabled-services output wrong (got: $ENABLED_OUT)"
 fi
 
 # --- per-service failure capture: one failing recreate must NOT abort the

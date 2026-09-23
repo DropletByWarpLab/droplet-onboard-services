@@ -359,6 +359,21 @@ class FakeRunner implements ApplyRunner {
   selfSwapHealthy = true;
   /** hook fired whenever a recreate lands, so tests can flip health state */
   onRecreate: (services: string[], target: RecreateTarget) => void = () => {};
+  /** WARP-2970 — what `docker compose config --services` reports on this box. */
+  enabled: string[] = Object.keys(PREVIOUS);
+  /** WARP-2970 — make the post-commit start fail. */
+  startFails = false;
+
+  async enabledServices(): Promise<string[]> {
+    this.calls.push("enabledServices()");
+    return this.enabled;
+  }
+
+  async startServices(opts: { updateId: string; services: ReleaseService[] }) {
+    this.calls.push(`startServices(${opts.services.map((s) => s.name).join(",")})`);
+    if (this.startFails) throw new Error("stub: start failed");
+    for (const s of opts.services) this.running[s.name] = s.digest;
+  }
 
   async currentImageRefs(services: string[]): Promise<Record<string, string | null>> {
     this.calls.push(`currentImageRefs(${services.join(",")})`);
@@ -746,6 +761,68 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
     expect(runner.calls).toEqual([]);
+  });
+});
+
+describe("post-commit start of newly enabled services (WARP-2970)", () => {
+  const EMAIL_DIGEST = `sha256:${"5".repeat(64)}`;
+  function manifestWithEmailIndexer(): ReleaseManifest {
+    const m = buildManifest();
+    m.services.push({
+      name: "email-indexer",
+      image: `ghcr.io/dropletbywarplab/droplet-email-indexer@${EMAIL_DIGEST}`,
+      digest: EMAIL_DIGEST,
+      healthcheck: { type: "none" },
+    });
+    return m;
+  }
+
+  async function applyAndResume(runner: FakeRunner, logger = createLoggerSpy()) {
+    const prisma = createPrismaStub();
+    await seedPendingRow(prisma, manifestWithEmailIndexer());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    const resume = await resumeInterruptedApply(baseOpts(prisma, runner, logger));
+    return { prisma, resume, logger };
+  }
+
+  it("starts a release service the box enables but has never run (OTA-upgraded box)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    const { resume, prisma, logger } = await applyAndResume(runner);
+
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // Never part of the swap/rollback set — only started after commit.
+    expect(runner.calls.filter((c) => c.startsWith("recreateServices")).join()).not.toContain(
+      "email-indexer",
+    );
+    expect(runner.calls.at(-1)).toBe("startServices(email-indexer)");
+    expect(runner.running["email-indexer"]).toBe(EMAIL_DIGEST);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+  });
+
+  it("leaves a service off when this box's compose does not enable it (profile-gated)", async () => {
+    const runner = new FakeRunner(); // enabled = the deployed three only
+    const { resume } = await applyAndResume(runner);
+    expect(resume.outcome).toBe("committed");
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+  });
+
+  it("a failed start is logged loudly and never un-commits a healthy update", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.startFails = true;
+    const { resume, prisma, logger } = await applyAndResume(runner);
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed" }),
+      expect.any(String),
+    );
   });
 });
 

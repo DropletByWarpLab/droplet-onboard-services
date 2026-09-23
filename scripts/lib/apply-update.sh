@@ -65,6 +65,12 @@
 #       `docker compose -f <base> -f override-<target>.yml up -d --no-deps
 #       --no-build --pull never --force-recreate` each named service — i.e.
 #       ACTUALLY pinned to the release (manifest) or previous (backup) refs.
+#   recreate-services   ... --target grow
+#       WARP-2970: the same loop pinned to override-grow.yml — post-commit,
+#       starts release services this box enables but has no container for.
+#   enabled-services
+#       `docker compose config --services`: the services the staged compose
+#       file enables under this box's COMPOSE_PROFILES, one per line.
 #   restore-configs     ID
 #       Restore the backed-up host config tree (rollback step 8).
 #   recreate-self-detached --update-id ID --target release|previous
@@ -420,7 +426,8 @@ cmd_migrate_deploy() {
 cmd_recreate_services() {
   validate_update_id "$UPDATE_ID"
   validate_services "$SERVICES"
-  validate_target "$TARGET"
+  # `grow` (WARP-2970) is recreate-services-only: never a self-swap target.
+  [ "$TARGET" = "grow" ] || validate_target "$TARGET"
   local override
   override="$(override_file "$UPDATE_ID" "$TARGET")"
   require_pin_file "$override" "per-target override"
@@ -462,6 +469,14 @@ cmd_recreate_services() {
   done
   printf '{"failed":[%s]}\n' "$joined"
   return "$rc"
+}
+
+# WARP-2970 — read-only. Lets the post-commit step tell "not running because
+# its profile is off here" from "not running because it is new to the default
+# set". Fails loudly (non-zero) rather than printing an empty set.
+cmd_enabled_services() {
+  [ -n "$DRY_RUN" ] && return 0
+  dc config --services
 }
 
 cmd_restore_configs() {
@@ -689,6 +704,7 @@ case "$SUBCOMMAND" in
   stage-configs) cmd_stage_configs ;;
   migrate-deploy) cmd_migrate_deploy ;;
   recreate-services) cmd_recreate_services ;;
+  enabled-services) cmd_enabled_services ;;
   restore-configs) cmd_restore_configs ;;
   recreate-self-detached) cmd_recreate_self_detached ;;
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;

@@ -172,6 +172,16 @@ export interface ApplyRunner {
    * the helper is launched.
    */
   recreateSelfDetached(opts: { updateId: string; target: RecreateTarget }): Promise<void>;
+  /**
+   * WARP-2970 — the compose services the (now staged) compose file enables on
+   * this box under its own COMPOSE_PROFILES: `docker compose config --services`.
+   */
+  enabledServices(): Promise<string[]>;
+  /**
+   * WARP-2970 — start services that have NO container yet, pinned to their
+   * release refs (a third override, override-grow.yml). Post-commit only.
+   */
+  startServices(opts: { updateId: string; services: ReleaseService[] }): Promise<void>;
 }
 
 /** One health-probe attempt; true = healthy. */
@@ -342,6 +352,54 @@ async function runHealthGate(
     );
   }
   return unhealthy;
+}
+
+/**
+ * WARP-2970 — the OTA path only ever SWAPS what is already running
+ * (`deployed`), so a service that joins the default compose set in a release
+ * (email-indexer) would never start on a box that gets its code by OTA: the
+ * box never re-runs setup.sh, and the orchestrator cannot rewrite .env.
+ *
+ * After COMMIT, start every manifest service the new compose enables on this
+ * box that has no container, pinned to its release digest. Profile-gated
+ * services stay off unless the box's own COMPOSE_PROFILES turns them on, so
+ * this never GROWS a deployment beyond what the box's config already says.
+ *
+ * Post-commit by design: the update is healthy and final, so a failure here
+ * is logged loudly and does not roll back. Keeping it out of the rollback
+ * machinery means there is no "previous" ref to invent for a service that
+ * never ran.
+ */
+async function startNewlyEnabledServices(
+  runner: ApplyRunner,
+  log: pino.Logger,
+  opts: { updateId: string; manifest: ReleaseManifest; refs: Record<string, string | null> },
+): Promise<void> {
+  try {
+    const enabled = new Set(await runner.enabledServices());
+    const missing = opts.manifest.services.filter(
+      (s) => opts.refs[s.name] === null && enabled.has(s.name),
+    );
+    if (missing.length === 0) return;
+    await runner.startServices({ updateId: opts.updateId, services: missing });
+    log.info(
+      {
+        event: "update.services_started",
+        deviceUpdateId: opts.updateId,
+        services: missing.map((s) => s.name),
+      },
+      "OTA post-commit — started release services this box enables but was not running",
+    );
+  } catch (err) {
+    log.error(
+      {
+        event: "update.services_start_failed",
+        deviceUpdateId: opts.updateId,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "OTA post-commit service start FAILED — the update stays committed; the service is not running",
+    );
+  }
 }
 
 /** recreateServices + the WARP-541 per-batch progress event. */
@@ -785,6 +843,11 @@ export async function resumeInterruptedApply(
           { event: "update.committed", deviceUpdateId: applying.id, gitSha: applying.gitSha },
           "OTA update committed — all services healthy on the release digests",
         );
+        await startNewlyEnabledServices(runner, log, {
+          updateId: applying.id,
+          manifest,
+          refs,
+        });
         return { outcome: "committed", deviceUpdateId: applying.id };
       }
       // Full detached rollback — the OLD orchestrator's resume writes the

@@ -83,6 +83,12 @@ export const UPDATE_EVENTS = {
   "update.resume_applying": "apply",
   /** info — the update is COMMITTED: all services healthy on release digests. */
   "update.committed": "apply",
+  /** info — WARP-2970: after commit, started release services this box's
+   *  compose enables but that were not running (a service new to the default
+   *  set). The update is already committed; this never rolls it back. */
+  "update.services_started": "apply",
+  /** error — WARP-2970: that post-commit start failed; the update stays committed. */
+  "update.services_start_failed": "apply",
 
   // ── boot resume wrapper (index.ts) ──
   /** info — the onStart resume hook settled an interrupted apply. */

@@ -146,7 +146,7 @@ const IMAGE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
  * that pins what runs on the box.
  */
 function composeOverrideYaml(
-  target: RecreateTarget,
+  target: RecreateTarget | "grow",
   updateId: string,
   pins: Array<{ name: string; image: string }>,
 ): string {
@@ -404,6 +404,40 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
         "recreate-self-detached",
         ["--update-id", args.updateId, "--target", args.target],
         timeouts.quickMs,
+      );
+    },
+
+    async enabledServices(): Promise<string[]> {
+      const stdout = await run("enabled-services", [], timeouts.quickMs);
+      // One name per line; anything not service-shaped is not a service.
+      return stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => SERVICE_NAME_RE.test(l));
+    },
+
+    async startServices(args: { updateId: string; services: ReleaseService[] }): Promise<void> {
+      // WARP-2970 — its own override: override-release.yml pins only what was
+      // DEPLOYED at snapshot time, and a service must never start unpinned.
+      await writeFile(
+        path.join(updateDir(args.updateId), "override-grow.yml"),
+        composeOverrideYaml(
+          "grow",
+          args.updateId,
+          args.services.map((s) => ({ name: s.name, image: s.image })),
+        ),
+      );
+      await run(
+        "recreate-services",
+        [
+          "--update-id",
+          args.updateId,
+          "--services",
+          args.services.map((s) => s.name).join(","),
+          "--target",
+          "grow",
+        ],
+        timeouts.recreateMs,
       );
     },
   };
