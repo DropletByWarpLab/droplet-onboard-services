@@ -170,6 +170,16 @@ model ChatSession {
   /// its original chronological spot, not to "Today".
   pinned          Boolean           @default(false)
   pinnedAt        DateTime?
+  /// WARP-2991 — may this conversation's on-box answers be replayed to a
+  /// cloud model? Explicit enum, never inferred from the timestamp. The
+  /// server replays assistant history to a cloud provider ONLY when this is
+  /// `granted` AND `cloudHistoryConsentAt` is later than every on-box answer
+  /// in the thread; anything else replays the user's own messages only.
+  /// A CHECK ties the state to its actor pair (not_asked ⇔ both NULL).
+  cloudHistoryConsent   CloudHistoryConsent @default(not_asked)
+  cloudHistoryConsentAt DateTime?
+  /// Username of the person who decided (ChatSession.userId is a username too).
+  cloudHistoryConsentBy String?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -937,6 +947,15 @@ model ChatMessage {
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
   @@index([sessionId, status])
+}
+
+/// WARP-2991 — the owner's answer to "send this conversation's earlier
+/// on-box answers to the cloud model?". `not_asked` and `declined` both
+/// replay the user's own messages only; the difference is audit, not effect.
+enum CloudHistoryConsent {
+  not_asked
+  granted
+  declined
 }
 
 /// WARP-844 — thumbs rating on an assistant message.
@@ -2005,6 +2024,41 @@ model Note {
 // `source = "local"` and are publishable via the /api/calendar/publish/... ICS
 // feed, so phones can subscribe without needing OAuth.
 
+/// WARP-2767: lifecycle of a calendar feed link. Persistent state lives in
+/// this enum, never inferred from a nullable timestamp (PairingCodeStatus is
+/// the precedent).
+///   - active  — the feed answers. `expiresAt` stays authoritative in real
+///               time: the feed refuses an overdue active row and stamps it
+///               `expired` on the spot.
+///   - rotated — replaced by a newer link via POST /calendar/publish/rotate.
+///   - revoked — turned off via POST /calendar/publish/revoke.
+///   - expired — past `expiresAt`.
+enum CalendarFeedTokenState {
+  active
+  rotated
+  revoked
+  expired
+}
+
+/// WARP-2767: a bearer credential for the pre-auth ICS feed at
+/// /api/calendar/publish/:user.ics. The URL token is `<id>.<secret>`; only
+/// sha256(secret) is stored, so a database read never yields a working link.
+/// Bound to exactly one account by FK — the feed also requires the URL's
+/// username to be that account's current username.
+model CalendarFeedToken {
+  id         String                 @id @default(uuid())
+  userId     String
+  secretHash String
+  state      CalendarFeedTokenState @default(active)
+  createdAt  DateTime               @default(now())
+  expiresAt  DateTime
+  /// Set when the row leaves `active` (rotated / revoked / expired).
+  endedAt    DateTime?
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, state])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2737,6 +2791,10 @@ model User {
   // was supplied up front). Anonymous passwordless-authenticate challenges
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
+  // WARP-2767: calendar ICS feed links ("subscribe on my phone"). Deleting
+  // the user cascades them, so a reused username can never inherit an old
+  // link (see CalendarFeedToken).
+  calendarFeedTokens  CalendarFeedToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -3181,6 +3239,11 @@ model WebAuthnCredential {
   // hybrid"). Optional — older authenticators omit it. Used only as a UX
   // hint to the browser on the next authenticate ceremony.
   transports   String?
+  // WARP-1157: owner-chosen label shown in Settings. NULL until renamed.
+  name         String?
+  // WARP-1157: the RP ID (host) this passkey was created on — passkeys only
+  // work on that address. NULL only for rows enrolled before it was recorded.
+  rpId         String?
   createdAt    DateTime  @default(now())
   // Bumped on every successful assertion so the dashboard can show
   // "last used 3 days ago" without a separate audit query.
@@ -3261,12 +3324,20 @@ model File {
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
   path         String?
+  // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
+  // through, and their length. Null for rows written before it or outside
+  // POST /files/upload. The (owner, sha256) index is deliberately NOT unique:
+  // a second copy of the same bytes is a legitimate file, so duplicates are
+  // reported to the uploader, never refused by the database.
+  sha256       String?
+  sizeBytes    BigInt?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
   @@index([departmentId])
+  @@index([ownerUserId, sha256])
 }
 
 // ── WARP-456: signed append-only activity log ──
@@ -3983,6 +4054,16 @@ model AgentRun {
   /// runs rather than deleting the runs with it.
   scheduleId         String?
   schedule           AgentRunSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  /// WARP-2997 — the per-person cloud gate's verdict at the LATEST claim.
+  /// Explicit, like `status`: `unchecked` until the worker first claims the
+  /// row, never inferred from `offLanProvider` being NULL.
+  cloudGate          AgentRunCloudGate        @default(unchecked)
+  /// WARP-2997 — the non-local provider the run's model resolved to at the
+  /// latest claim; NULL when it stays on the box (`cloudGate` says which).
+  offLanProvider     String?
+  /// WARP-2997 — the stored-content tools withheld from the run's pool at
+  /// the latest claim (`withholdStoredContentTools`). Empty on a local run.
+  offLanWithheldTools String[]                @default([])
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
@@ -4009,6 +4090,19 @@ enum AgentRunStatus {
   succeeded
   failed
   cancelled
+}
+
+/// WARP-2997 — where a run's model runs, and whether its owner may use it.
+/// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
+/// `cloud_allowed` (cloud model, person permitted; stored-content tools
+/// withheld), `cloud_refused` (451: the person may not use cloud models),
+/// `cloud_unverified` (503: the gate could not be read; fail-closed).
+enum AgentRunCloudGate {
+  unchecked
+  local
+  cloud_allowed
+  cloud_refused
+  cloud_unverified
 }
 
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as

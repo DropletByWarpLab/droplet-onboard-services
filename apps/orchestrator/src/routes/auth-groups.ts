@@ -38,8 +38,9 @@ export function householdGroupName(sharedFolderName: string): string {
 /**
  * Build the `groups[]` list passed to `ncCreateUser` for a given role.
  *
- * Preserves the pre-WARP-883 role→group mapping (owner/admin → "admin",
- * guest → "guest", family → no role group) and ADDS the household group so the
+ * Role→group mapping: owner/admin → `droplet-admins` (WARP-2993 dropped NC's
+ * built-in "admin"), guest → "guest", family → no role group; plus the
+ * household group so the
  * shared folder mounts for every household member. The household group is
  * appended without duplication.
  *
@@ -74,9 +75,16 @@ export function householdGroupName(sharedFolderName: string): string {
  * /auth/setup already does for the household group.
  */
 export function buildNcGroups(role: Role, householdGroup: string): string[] {
+  // WARP-2993 — NO role joins Nextcloud's built-in `admin` group any more,
+  // the owner included (Romain, 2026-09-22): only the box service account
+  // (NEXTCLOUD_ADMIN_USER) is an NC instance admin. Instance admin let any
+  // Droplet admin reset the owner's NC password and read their NC home.
+  // Admin-tier see-all over department libraries comes from
+  // `droplet-admins` (ADR-029 Tier 1), which is unchanged. The reconciler's
+  // sweepNcInstanceAdminGroup strips humans from `admin` on existing boxes.
   const roleGroups: string[] =
     role === "owner" || role === "admin"
-      ? ["admin", DROPLET_ADMINS_GROUP]
+      ? [DROPLET_ADMINS_GROUP]
       : role === "guest"
         ? ["guest"]
         : [];

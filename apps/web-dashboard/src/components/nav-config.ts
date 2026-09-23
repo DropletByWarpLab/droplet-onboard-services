@@ -58,6 +58,25 @@ import {
   Wrench,
 } from "lucide-react";
 
+/**
+ * WARP-2967 — the sections of the Settings front door, in render order.
+ *
+ * Five, from the sidebar-UX reference's contextual-panel practice
+ * (`shared_brain/research/design/sidebar-ux-reference`, rule 4): who can sign
+ * in, what the business shares, what runs by itself, what the box is, and the
+ * diagnostics you only open when something is wrong. A section with nothing
+ * visible in it is dropped rather than captioned empty.
+ */
+export const SETTINGS_SECTIONS = [
+  "Account",
+  "Workspace",
+  "Automation",
+  "System",
+  "Advanced",
+] as const;
+
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+
 export type NavItem = {
   href: string;
   label: string;
@@ -121,6 +140,33 @@ export type NavItem = {
    */
   hidden?: boolean;
   /**
+   * WARP-2967 — which section of the Settings front door carries this item.
+   *
+   * REQUIRED on every `hidden` item and forbidden on every visible one, both
+   * pinned in `nav-config.four-groups.test.ts`. The tuck and the way back in
+   * are one decision, and splitting them across two files is how WARP-1807's
+   * Knowledge row nearly shipped without its Settings link: nothing breaks,
+   * builds or type-checks when a tucked surface has no door — it simply
+   * becomes unreachable.
+   *
+   * The contextual sidebar panel and the Settings page's link rows are BOTH
+   * derived from this, so there is one list and it cannot disagree with
+   * itself.
+   */
+  settingsSection?: SettingsSection;
+  /**
+   * WARP-2967 — the one-line "what is this" shown beside a tucked item's row
+   * on the Settings page. Ships WITH `settingsSection` (pinned together) so a
+   * row can never read as a bare noun the reader has to click to understand.
+   *
+   * Period-free noun-phrase fragments, matching the neighbouring hand-written
+   * rows (Voice, Software updates, Storage) — the WARP-1807 review's call.
+   *
+   * The sidebar panel does NOT render it: the rail has no room for a second
+   * line, and the panel is a list you already know your way around.
+   */
+  settingsBlurb?: string;
+  /**
    * WARP-1683 — named live-count badge rendered on the item (desktop
    * sidebar + mobile More drawer). The KEY lives here so nav-config stays
    * the one source of truth for what the nav shows; the VALUE is resolved
@@ -157,82 +203,31 @@ export type NavGroup = {
   items: NavItem[];
 };
 
-/* ─────────── Nav definition (re-pointed 2026-05-18 from flat lists) ───────────
-   Groups mirror the redesign's Workspace / Operations / Admin IA.
-   Routes are unchanged — only labels and grouping are new. WARP-1341:
-   business-only build, so the landing surface is labelled "Overview"
+/* ─────────── Nav definition ───────────────────────────────────────────────
+   WARP-2967 — four groups and a Settings front door:
+
+     WORK      Overview · Ask AI · Files · Messages · Email · Calendar
+     BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
+     SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
+     ADMIN     Settings
+
+   ~14 rows all-on, ~11 on a typical box. Everything else keeps its route and
+   moves behind Settings as the WARP-1807 tuck — `hidden: true` plus a
+   `settingsSection`, which is what `settingsGroups()` below renders from.
+
+   ROUTES ARE UNCHANGED. Nothing here redirects, renames a path or 404s; the
+   only things that moved are captions, nesting and which surface shows what.
+   WARP-1341: business-only build, so the landing surface is "Overview"
    (route stays "/"). */
 export const NAV_GROUPS: NavGroup[] = [
+  // WARP-2967 — WORK. The things a person opens to do their job. Six rows,
+  // ordered by how often a working day touches them, and every one of them is
+  // somewhere you *go*, never something you *configure*.
   {
-    label: "Workspace",
+    label: "Work",
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
-      // WARP-1992: Reports is a PEER of Overview — the "how did it go" view
-      // next to the "what's happening now" view — not an admin tool. Placed
-      // here deliberately; it is not a Settings sub-page.
-      //
-      // Not module-gated: the page composes surfaces that are individually
-      // gated (files, cameras, network, erp) and each tile degrades on its
-      // own. A module gate here would hide the whole page because one of its
-      // ten tiles is off. Role-gated instead — a guest has access to almost
-      // nothing on it, so the nav never advertises a page that would be
-      // eight-tenths locked.
-      {
-        href: "/reports",
-        label: "Reports",
-        icon: ChartColumn,
-        roles: ["owner", "admin", "family"],
-      },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
-      // WARP-2671: Routines sits in Workspace, NOT Admin, and deliberately
-      // apart from /tools. `/tools` is under Admin because a catalog of the
-      // box's built-in capabilities is administrative reference material; a
-      // routine is a sequence somebody composed to do their own job, which
-      // makes it their work and not an admin artefact.
-      //
-      // Placed AFTER Ask AI rather than between Reports and Ask AI: WARP-1992
-      // pins Reports as directly after Overview and directly before Ask AI
-      // (reports.nav.test.ts), and that adjacency was chosen on purpose.
-      //
-      // Role-gated rather than module-gated: routines compose tools from
-      // every surface, so there is no single module whose absence should
-      // hide the page. Guests cannot run or publish anything here.
-      {
-        href: "/routines",
-        label: "Routines",
-        icon: Repeat,
-        roles: ["owner", "admin", "family"],
-      },
-      // WARP-2925 (ADR-056): Workshop — where a person gives the box a goal
-      // and follows the background run that pursues it. The run panel lived
-      // at the bottom of /admin/audit and was deliberately not a nav item
-      // (WARP-2180); ADR-056 made the run the unit of every agentic slice
-      // that follows — workshop runs, extensions, toolset drafts all start as
-      // one — so it now has a surface with a door. Sits after Routines: a
-      // routine is a sequence a person composed; a run is a goal the box
-      // pursues on its own. Both are their work, so both are Workspace.
-      //
-      // owner/admin only — mirrors RUN_STARTER_ROLES on the agent-runs routes,
-      // the guard that actually decides; this only keeps the nav from
-      // offering a page that would 403. Not module-gated for the reason
-      // Routines gives: a run may touch any surface, so no single module's
-      // absence should hide the page.
-      {
-        href: "/workshop",
-        label: "Workshop",
-        icon: Hammer,
-        roles: ["owner", "admin"],
-      },
-      // WARP-1683: member-to-member team chat. Sits next to Ask AI (both
-      // are conversation surfaces); gated by the team_chat module and
-      // carrying the unread-count badge the Sidebar resolves.
-      {
-        href: "/messages",
-        label: "Messages",
-        icon: MessagesSquare,
-        requiresModule: "team_chat",
-        badgeKey: "teamChatUnread",
-      },
       {
         href: "/files",
         label: "Files",
@@ -262,26 +257,16 @@ export const NAV_GROUPS: NavGroup[] = [
           { href: "/files/trash", label: "Trash", icon: Trash2 },
         ],
       },
-      // WARP-2966 (addendum §2.3) — Sync Devices manages sync-client pairing.
-      // It has no path, no listing and no library, so it cannot answer "where
-      // am I"; keeping it in a rail of locations made the rail mean two
-      // things. It moves to Settings, as the WARP-1807 tuck: `hidden: true`
-      // renders it on no nav surface while `moduleForPath` keeps claiming the
-      // route and the label/icon stay canonical. The addendum is explicit that
-      // this is A MOVE, NOT A DELETION — the Settings → Advanced row
-      // (settings.advanced-links.test.tsx) is the other half and lands in the
-      // same change, so there is no orphan window.
-      //
-      // `requiresModule: "files"` is stated rather than inherited: it was a
-      // child of Files and took the parent's gate: promoting it to top level
-      // without this would turn the files module off and leave the pairing
-      // screen reachable from Settings.
+      // WARP-1683: member-to-member team chat. Sits next to Ask AI and Files
+      // (the three surfaces a working day actually lives in); gated by the
+      // team_chat module and carrying the unread-count badge the Sidebar
+      // resolves.
       {
-        href: "/files/devices",
-        label: "Sync devices",
-        icon: Laptop,
-        requiresModule: "files",
-        hidden: true,
+        href: "/messages",
+        label: "Messages",
+        icon: MessagesSquare,
+        requiresModule: "team_chat",
+        badgeKey: "teamChatUnread",
       },
       // WARP-837: Email triage surface. Left unrestricted — the backend allows
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is
@@ -289,94 +274,158 @@ export const NAV_GROUPS: NavGroup[] = [
       // NavItem type has no count field; out of scope).
       { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
-      // WARP-2558 (ADR-044): /projects moved to the Business group below. The
-      // ROUTE is unchanged — it is live, deep-linked and named by PM tools —
-      // only its grouping moved.
-      // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
+
+      /* ── tucked out of Work (WARP-1807 / WARP-2966 / WARP-2967) ────────
+         Rendered by no nav surface; Settings owns the way in. Each keeps its
+         route, its gates and its glyph, and names the Settings section that
+         carries it — see `settingsGroups` below. */
+
+      // WARP-1807: not daily operation. Reachable from Settings → Advanced.
       {
         href: "/knowledge",
         label: "Knowledge",
         icon: BookOpen,
         requiresModule: "knowledge",
         hidden: true,
+        settingsSection: "Advanced",
+        settingsBlurb: "What's indexed for retrieval",
       },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
       // /context is "what's indexed" by capability density.
-      // WARP-1807: tucked — not daily operation; reachable from Settings → Advanced.
-      { href: "/context", label: "Context", icon: Sparkles, hidden: true },
+      {
+        href: "/context",
+        label: "Context",
+        icon: Sparkles,
+        hidden: true,
+        settingsSection: "Advanced",
+        settingsBlurb: "Indexing coverage and pipeline health",
+      },
+      // WARP-2966 (files-surface addendum §2.3) — Sync Devices manages
+      // sync-client pairing. It has no path, no listing and no library, so it
+      // cannot answer "where am I"; keeping it in a rail of locations made the
+      // rail mean two things.
+      //
+      // `requiresModule: "files"` is stated rather than inherited: it was a
+      // child of Files and took the parent's gate, so promoting it to top
+      // level without this would turn the files module off and leave the
+      // pairing screen reachable from Settings.
+      {
+        href: "/files/devices",
+        label: "Sync devices",
+        icon: Laptop,
+        requiresModule: "files",
+        hidden: true,
+        settingsSection: "Workspace",
+        settingsBlurb: "Computers mirroring a folder with this Droplet",
+      },
+      // WARP-2671 / WARP-2925 — Routines and Workshop. Both are a person's own
+      // work, not admin artefacts, which is why WARP-2671 fought to keep
+      // Routines out of Admin and away from /tools. WARP-2967 does not undo
+      // that argument: they are tucked because they are not DAILY, and they
+      // land under Settings → **Automation**, their own section — not folded
+      // under Ask AI, which would make a composed sequence look like a mode of
+      // the chat box.
+      //
+      // Role-gated rather than module-gated: both compose tools from every
+      // surface, so there is no single module whose absence should hide them.
+      {
+        href: "/routines",
+        label: "Routines",
+        icon: Repeat,
+        roles: ["owner", "admin", "family"],
+        hidden: true,
+        settingsSection: "Automation",
+        settingsBlurb: "Sequences the box runs on a schedule or a trigger",
+      },
+      // owner/admin only — mirrors RUN_STARTER_ROLES on the agent-runs routes,
+      // the guard that actually decides; this only keeps the nav from offering
+      // a page that would 403.
+      {
+        href: "/workshop",
+        label: "Workshop",
+        icon: Hammer,
+        roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Automation",
+        settingsBlurb: "Give the box a goal and watch the run that pursues it",
+      },
     ],
   },
   // WARP-2558 (ADR-044) — the Business group.
   //
   // Three systems describe the same business: who you sell to (CRM), the work
-  // you deliver (PM), and the practice you run day to day (the ERP surface,
-  // which arrives in slice 2). They were a lodger inside Projects, Projects
-  // itself, and a page filed next to the router. Grouping them says they are
-  // one subject without merging them into one page — the rejected shape, which
-  // only pushes the container-is-its-own-child problem down a level.
+  // you deliver (PM), and the practice you run day to day (the ERP surface).
+  // Grouping them says they are one subject without merging them into one
+  // page — the rejected shape, which only pushes the container-is-its-own-child
+  // problem down a level.
   //
   // Two rules this group holds:
   //
   //  1. A tab never renames itself. Each entry's `label` is constant; turning
-  //     a module on may ADD an entry, never rebrand one. That is the fix for
-  //     the shipped state where the sidebar said "Projects" and the page
-  //     header said "CRM" on the same box.
+  //     a module on may ADD an entry, never rebrand one.
   //  2. Every entry survives its neighbours being off. `visibleItems` already
   //     filters per item and Sidebar drops empty groups, so a CRM-only box
-  //     shows Customers alone and a Projects-only box shows Projects alone —
-  //     no caption over an empty list, and no dependency between them.
+  //     shows Customers alone and a Projects-only box shows Projects alone.
   {
     label: "Business",
     items: [
-      // WARP-2561 (ADR-044) — Planning: what is COMING. /reports answers how
-      // it went and has no business tile at all, so nothing in the product
-      // answered the forward question.
+      // WARP-2561 (ADR-044) / WARP-2967 — Insights: the group's front door.
       //
-      // Role-gated and NOT module-gated, for the reason spelled out on
-      // /reports above: it composes tiles from separately-gated sources and
-      // each degrades on its own, so a module gate here would delete the whole
-      // page because one tile's module is off. There is deliberately no
-      // `business` module — a ModuleId value costs a Prisma enum migration
-      // plus six mirrored sites, to buy a gate this page must not have.
+      // Relabelled from "Planning" because it now carries Brief and Reports
+      // beneath it, and those three answer the same question at three tenses —
+      // what is coming, what the box noticed, how it went. "Planning" named
+      // only the first of them, so the parent would have been one of its own
+      // children. Rule 1 above is about a label changing with a MODULE; this
+      // is a deliberate rename shipped with the re-grouping, and the page
+      // header moves with it.
       //
-      // Same role array as /reports. A guest has access to almost nothing on
-      // it, so the nav never advertises a page that would be mostly locked.
+      // Role-gated and NOT module-gated: it composes tiles from separately
+      // gated sources and each degrades on its own, so a module gate here
+      // would delete the whole page because one tile's module is off. There is
+      // deliberately no `business` module — a ModuleId value costs a Prisma
+      // enum migration plus six mirrored sites, to buy a gate this page must
+      // not have.
       {
         href: "/business",
-        label: "Planning",
+        label: "Insights",
         icon: Sparkles,
         roles: ["owner", "admin", "family"],
+        children: [
+          // WARP-2752 (ADR-051) — Brief: what the box NOTICED.
+          //
+          // owner/admin only, and narrower than its parent on purpose: a
+          // finding can be derived from the whole-company corpus, and ADR-051
+          // §9 puts that scope behind those two roles. Kept verbatim through
+          // the move — `visibleItems` runs a child's own gates as well as its
+          // parent's (WARP-1528).
+          //
+          // NOT capability-gated on the brain either (WARP-2838): /brief's off
+          // state is the only place in the product that can turn the brain ON,
+          // so gating the entry on the brain being on would make the switch
+          // reachable only once it no longer needed pressing.
+          {
+            href: "/brief",
+            label: "Brief",
+            icon: Lightbulb,
+            roles: ["owner", "admin"],
+          },
+          // WARP-1992 → WARP-2967. Reports was pinned as a PEER of Overview
+          // ("the how-did-it-go view next to the what's-happening-now view").
+          // That argument put it in the wrong group: it is a business report,
+          // and it now sits beside Brief under Insights, where the three
+          // tenses read together. Same role gate, still no module gate — it
+          // composes ten separately-gated tiles and each degrades on its own.
+          {
+            href: "/reports",
+            label: "Reports",
+            icon: ChartColumn,
+            roles: ["owner", "admin", "family"],
+          },
+        ],
       },
-      // WARP-2752 (ADR-051) — Brief: what the box NOTICED, as opposed to
-      // Planning's what is coming and /reports' how it went.
-      //
-      // owner/admin only, and narrower than its neighbours on purpose: a
-      // finding can be derived from the whole-company corpus, and ADR-051 §9
-      // puts that scope behind those two roles. The service filters by scope
-      // as well, so this entry is wayfinding rather than the gate.
-      //
-      // NOT module-gated. Like /business it composes separately-gated sources
-      // (money findings need the ERP connectors, document findings need the
-      // corpus pass) and each degrades on its own — a module gate here would
-      // hide the whole page because one source is off.
-      //
-      // WARP-2838 — AND NOT CAPABILITY-GATED ON THE BRAIN EITHER. That was the
-      // open question: hide /brief until the brain is on, the way /messages
-      // hides behind team_chat, or leave it visible as its own discovery
-      // surface? DECIDED: visible. /brief's off state is now the only place in
-      // the product that can turn the brain ON, so gating the entry on the
-      // brain being on would make the switch reachable only once it no longer
-      // needed pressing. /messages can hide because nothing about team chat is
-      // decided from that page; this one carries the consent screen.
-      {
-        href: "/brief",
-        label: "Brief",
-        icon: Lightbulb,
-        roles: ["owner", "admin"],
-      },
-      // The CRM's own door. Before this it had `navHrefs: []` and rendered as
-      // sub-tabs on /projects, which made CRM-without-PM unrepresentable —
+      // The CRM's own door. Before ADR-044 it had `navHrefs: []` and rendered
+      // as sub-tabs on /projects, which made CRM-without-PM unrepresentable —
       // and that is the shape of most dental boxes.
       {
         href: "/customers",
@@ -384,41 +433,34 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Building2,
         requiresModule: "crm",
       },
-      // ADR-026: native PM surface. Page at /projects renders natively off
-      // /api/pm/* under the dashboard session — no embedded stack, no second
-      // login. WARP-1154/1155: hidden when the orchestrator says the Projects
-      // module is off, so the nav never advertises a surface the box won't
-      // serve.
-      { href: "/projects", label: "Projects", icon: FolderKanban, requiresModule: "projects" },
-      // WARP-2581 — what the business is owed and what it owes, landed from a
-      // connected ledger. Gated on its own module: a box that keeps its books
-      // somewhere else has no /money entry at all rather than an empty page.
-      // Sits after Projects: customers, then the work, then what it is worth.
-      // Practice stays last — it is the vertical's surface, role-gated rather
-      // than module-gated, and ADR-044 put it at the end of the group.
-      { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
+      // ADR-026: native PM surface, rendered off /api/pm/* under the dashboard
+      // session — no embedded stack, no second login. WARP-1154/1155: hidden
+      // when the orchestrator says the Projects module is off.
+      {
+        href: "/projects",
+        label: "Projects",
+        icon: FolderKanban,
+        requiresModule: "projects",
+        children: [
+          // WARP-2581 / WARP-2967 — what the business is owed and what it owes,
+          // landed from a connected ledger. Keeps its own `money` module gate.
+          //
+          // Nesting does NOT add the `projects` module gate: books without
+          // PM is a supported box (the likely dental shape), so when Projects
+          // is off `visibleItems` promotes Money into its slot
+          // (`passesParentGate`). Every other gate still holds.
+          { href: "/money", label: "Money", icon: Receipt, requiresModule: "money" },
+        ],
+      },
       // WARP-2560 (ADR-044) — the practice's day: schedule, KPIs, patient
-      // lookup. It rendered at /integrations/eaglesoft, filed in Operations
-      // beside the router, because that is where the CONNECTION is set up.
-      // This is not a connection screen.
+      // lookup. Gated by `roles` and NOT by `requiresModule`, because there is
+      // no `erp` module and connector reach is ADR-032 §5.4's connectors axis,
+      // not the feature axis. The label is a fixed word on purpose (ADR-044
+      // records the per-connector `partyNoun` as a later slice).
       //
-      // Gated by `roles` and NOT by `requiresModule`, because there is no
-      // `erp` module and this ticket does not invent one — connector reach is
-      // ADR-032 §5.4's connectors axis, not the feature axis. The array is
-      // the SAME one the /integrations/eaglesoft child carried, copied rather
-      // than widened, and it mirrors the orchestrator's own
-      // requireRole("owner","admin") on the admin-tier ERP routes.
-      //
-      // The label is a fixed word on purpose. ADR-044 records that the
-      // vertical's own noun (patient / client / guest) becomes a per-connector
-      // `partyNoun` on the connector descriptor; that is a later slice, and
-      // making the nav label data-driven before a second connector exists
-      // would be a mechanism with one caller.
-      //
-      // WARP-2880: shown only while a MEDICAL integration is connected. The
-      // page is the practice's day read from a practice-management system; a
-      // box without one has nothing to show there. Rule 1 above holds — the
-      // entry is ADDED or REMOVED with the connection, never relabelled.
+      // WARP-2880: shown only while a MEDICAL integration is connected. Rule 1
+      // above holds — the entry is ADDED or REMOVED with the connection, never
+      // relabelled.
       {
         href: "/practice",
         label: "Practice",
@@ -428,8 +470,13 @@ export const NAV_GROUPS: NavGroup[] = [
       },
     ],
   },
+  // WARP-2967 — SYSTEMS, renamed from "Operations". Three rows: the hardware
+  // the box watches, the network it runs, and the things on it. "Operations"
+  // had come to mean "everything that is not a document", which is how it
+  // collected the integrations hub and a credentials configurator — plumbing
+  // you set up once, not a place you operate from. Those moved to Settings.
   {
-    label: "Operations",
+    label: "Systems",
     items: [
       // Cameras owns the surveillance section. Events nests beneath it
       // (Samantha QA #bugs) — they were flat siblings, which read as two
@@ -456,87 +503,134 @@ export const NAV_GROUPS: NavGroup[] = [
           { href: "/events", label: "Events", icon: Film },
         ],
       },
-      { href: "/network", label: "Network", icon: Network, requiresModule: "network" },
+      {
+        href: "/network",
+        label: "Network",
+        icon: Network,
+        requiresModule: "network",
+        children: [
+          // WARP-1055 / WARP-2967 — mic health + guided calibration. It was a
+          // peer surface ("calibration is living, health-bearing state", design
+          // brief §2) and it stays one — it is simply filed under the subsystem
+          // it belongs to instead of beside it.
+          //
+          // As with Money above, nesting does not add the `network` module
+          // gate: with networking off, Voice is promoted into Network's slot.
+          { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
+          // Already carried `requiresModule: "network"` — the same gate as its
+          // new parent, so nesting changes nothing for it.
+          {
+            href: "/remote-access",
+            label: "Remote access",
+            icon: Globe,
+            requiresModule: "network",
+          },
+        ],
+      },
       // WARP-302: "Devices" uses Cpu so it doesn't visually collide with
-      // the Overview tab's LayoutDashboard glyph at thumb distance.
+      // the Overview tab's LayoutDashboard glyph at thumb distance. Stays
+      // top-level: it owns a mobile bottom tab (MOBILE_PRIMARY_HREFS), which
+      // is resolved against top-level items only.
       { href: "/devices", label: "Devices", icon: Cpu, requiresModule: "smart_home" },
-      // WARP-1055: mic health + guided calibration. A peer surface, not
-      // a Settings subpage — calibration is living, health-bearing state
-      // (design brief §2). Ordered Cameras · Network · Devices · Voice.
-      { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
-      { href: "/remote-access", label: "Remote Access", icon: Globe, requiresModule: "network" },
-      // WARP-1101: the Integrations hub — connecting, credentials, connection
-      // status. WARP-2560 (ADR-044) removed the Eaglesoft child: the practice
-      // DATA surface moved to /practice in the Business group, and what stays
-      // here is the plumbing. Connecting a connector genuinely is
-      // infrastructure; reading the day's schedule is not.
+
+      /* ── tucked out of Systems (WARP-2967) ──────────────────────────── */
+
+      // WARP-1101 — the Integrations hub: connecting, credentials, connection
+      // status. Connecting a connector is something you do once per connector,
+      // which is configuration, not operation.
+      //
       // WARP-1528 (nav-gate gap b): this item shipped with NO gate at all
       // while the orchestrator's erp.ts + integrations.ts both require
-      // owner/admin — so family/guest were shown a hub that 403s. Mirrors the
-      // server guard, exactly like /admin/files does. There is no `integrations`
-      // module in the registry (connector reach is ADR-032's §5.4 connectors
-      // axis, not the feature axis), so `roles` — not `requiresModule` — is the
-      // honest gate; the Credentials sibling below carries it too, so a future
-      // role widening on one can't silently widen the other.
-      { href: "/integrations", label: "Integrations", icon: Blocks, roles: ["owner", "admin"] },
-      // WARP-2275: the SaaS credential configurator. WARP-2968 made it a
-      // SIBLING rather than a child of Integrations: `isSectionOpen` reveals a
-      // section's children only once that section is open, so as a child this
-      // page was invisible in the rail and in the mobile drawer until the
-      // owner had already clicked Integrations — a destination you can only
-      // reach by guessing what it is behind is not in the nav.
+      // owner/admin. There is no `integrations` module in the registry
+      // (connector reach is ADR-032 §5.4's connectors axis), so `roles` — not
+      // `requiresModule` — is the honest gate.
+      {
+        href: "/integrations",
+        label: "Integrations",
+        icon: Blocks,
+        roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Workspace",
+        settingsBlurb: "Connect the services this business already uses",
+      },
+      // WARP-2275 — the SaaS credential configurator. WARP-2968 made it a
+      // SIBLING rather than a child of Integrations, because `isSectionOpen`
+      // reveals children only once the section is open and a destination you
+      // can only reach by guessing what it is behind is not in the nav. It
+      // stays a sibling here: both are rows of the same Settings section, so
+      // neither hides behind the other.
       //
       // `roles` on both entries, for the same reason it was on both before —
-      // a future widening of one must not silently widen the other. It
-      // mirrors the orchestrator's own `requireRole("owner","admin")` on
-      // /api/integrations/*/credentials, which is the guard that actually
-      // decides; this only keeps the nav from offering a page that would 403.
+      // a future widening of one must not silently widen the other.
       {
         href: "/integrations/credentials",
         label: "Credentials",
         icon: KeyRound,
         roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Workspace",
+        settingsBlurb: "API keys and sign-ins for connected services",
       },
     ],
   },
+  // WARP-2967 — ADMIN is one row now: the front door.
+  //
+  // It held thirteen. Every one of them keeps its route and its gates and
+  // moves behind Settings, which renders them as a contextual panel in the
+  // sidebar (see `settingsGroups`) and as link rows on the Settings page. The
+  // reference practice this implements: "Settings gets its own contextual
+  // panel with a back link rather than 14 admin rows in the main tree"
+  // (shared_brain/research/design/sidebar-ux-reference, rule 4).
   {
     label: "Admin",
     items: [
-      // The console's front door. /admin used to 404 and the pages beneath
-      // it were reachable only by typing their URLs, so nothing in the
-      // product ever pointed at them.
+      { href: "/settings", label: "Settings", icon: Settings },
+
+      /* ── tucked behind Settings (WARP-2967) ─────────────────────────── */
+
+      // The console's front door. /admin used to 404 and the pages beneath it
+      // were reachable only by typing their URLs.
       //
-      // `exact: true` on purpose: the default startsWith match would keep
-      // this entry lit while the operator is on /admin/audit or
-      // /admin/files, which have their own entries below.
+      // `exact: true` on purpose: the default startsWith match would keep this
+      // entry lit while the operator is on /admin/audit or /admin/files.
       //
-      // Carries no `requiresModule` — deliberately. moduleForPath() picks
-      // the longest matching href, so an /admin entry with a module would
-      // start claiming every /admin/* route and ModuleRouteGuard would
-      // blank all of them on a positive denial.
+      // Carries no `requiresModule` — deliberately. moduleForPath() picks the
+      // longest matching href, so an /admin entry with a module would start
+      // claiming every /admin/* route and ModuleRouteGuard would blank all of
+      // them on a positive denial.
       {
         href: "/admin",
         label: "Console",
         icon: ServerCog,
         exact: true,
         roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "The operator console for this appliance",
       },
-      // WARP-2823 — the prompt + tool inspector. Same posture as the Console
-      // entry above and for the same reason: no `requiresModule`, because a
-      // page whose whole job is explaining why the assistant cannot reach
+      // WARP-2823 — the prompt + tool inspector. No `requiresModule`, because
+      // a page whose whole job is explaining why the assistant cannot reach
       // something must not itself disappear when a module is switched off.
+      // Filed under Automation: it explains what the automated surfaces can do.
       {
         href: "/admin/prompt",
         label: "Assistant",
         icon: Bot,
         roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Automation",
+        settingsBlurb: "What the assistant is told, and which tools it can reach",
       },
-      // /users is the existing People surface. Label kept as "Users" in
-      // Phase 1 so the WARP-290 a11y test contract (queries by /users/i)
-      // doesn't regress; Phase 3 renames to "People" alongside test
-      // updates and adds the full Roles / Groups / Sessions entries
-      // with workspace:"business" set.
-      { href: "/users", label: "Users", icon: Users },
+      // /users is the existing People surface. Label kept as "Users" so the
+      // WARP-290 a11y test contract (queries by /users/i) doesn't regress.
+      {
+        href: "/users",
+        label: "Users",
+        icon: Users,
+        hidden: true,
+        settingsSection: "Account",
+        settingsBlurb: "People who can sign in, and what each of them may do",
+      },
       // WARP-1270 (T18): company-wide storage usage roster (people +
       // libraries). Owner/admin — mirrors the server-side
       // `requireRole("owner","admin")` gate on GET /api/admin/files/usage.
@@ -545,30 +639,83 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Company files",
         icon: FolderLock,
         roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Workspace",
+        settingsBlurb: "Storage used per person and per library",
       },
-      // WARP-555: read-only catalog of the assistant's built-in tools.
-      // No role restriction — the /api/llm/tools/catalog route filters
-      // write tools out for non-privileged roles, so family/guest see a
-      // safe read-only subset. Visible in both workspaces.
-      { href: "/tools", label: "Tools", icon: Wrench },
+      // WARP-555: read-only catalog of the assistant's built-in tools. No role
+      // restriction — the /api/llm/tools/catalog route filters write tools out
+      // for non-privileged roles, so family/guest see a safe read-only subset.
+      {
+        href: "/tools",
+        label: "Tools",
+        icon: Wrench,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "The assistant's built-in tools, read-only",
+      },
       // WARP-836: read-only Models status surface (local LLMs + opt-in cloud).
       // Unrestricted — GET /api/models is open to any authenticated principal
-      // (ADR-004 §3), so family/guest see the same status-only view. Reuses the
-      // Cpu glyph already imported for /devices. Active-state is automatic.
-      { href: "/models", label: "Models", icon: Cpu },
-      // Client-app downloads. No `roles` gate and no `requiresModule` —
-      // every authenticated member needs the app for the box they were
-      // invited to, and GET /api/app-downloads makes the same call. Sits
-      // next to Settings/Help in the support/reference zone, since it is a
-      // one-time errand rather than a daily destination.
-      { href: "/downloads", label: "Get the app", icon: Download },
-      { href: "/settings", label: "Settings", icon: Settings },
+      // (ADR-004 §3), so family/guest see the same status-only view.
+      {
+        href: "/models",
+        label: "Models",
+        icon: Cpu,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Local models and any cloud provider you opted into",
+      },
       // PR #382: appliance/service health status page. Reads the existing
-      // WARP-43 aggregate; sits in the support/reference zone next to Help.
-      { href: "/health", label: "Health", icon: HeartPulse },
-      // WARP-174: customer-facing manual + "How Droplet works" replay
-      // modal. Sits next to Settings — same "support / reference" zone.
-      { href: "/help", label: "Help", icon: HelpCircle },
+      // WARP-43 aggregate.
+      {
+        href: "/health",
+        label: "Health",
+        icon: HeartPulse,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Live status of every service on the box",
+      },
+      // Client-app downloads. No `roles` gate and no `requiresModule` — every
+      // authenticated member needs the app for the box they were invited to,
+      // and GET /api/app-downloads makes the same call.
+      {
+        href: "/downloads",
+        label: "Get the app",
+        icon: Download,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Desktop and mobile apps for this Droplet",
+      },
+      // WARP-246: Trust Center placeholder — visible to every signed-in member.
+      {
+        href: "/trust",
+        label: "Trust Center",
+        icon: ShieldCheck,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "How this box handles your data, in plain terms",
+      },
+      // WARP-174: customer-facing manual + "How Droplet works" replay modal.
+      {
+        href: "/help",
+        label: "Help",
+        icon: HelpCircle,
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "The manual, and a replay of how Droplet works",
+      },
+      // WARP-246: signed activity log viewer. Role-gated to owner/admin
+      // (mirrors the orchestrator's owner/admin gate on /api/activity); no
+      // capability gate — the activity surface always exists.
+      {
+        href: "/admin/audit",
+        label: "Audit log",
+        icon: ScrollText,
+        roles: ["owner", "admin"],
+        hidden: true,
+        settingsSection: "Advanced",
+        settingsBlurb: "The signed record of everything the box did",
+      },
       // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
       // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
       {
@@ -577,6 +724,9 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Activity,
         roles: ["owner", "admin"],
         requiresCapability: "claudeActivity",
+        hidden: true,
+        settingsSection: "Advanced",
+        settingsBlurb: "What the assistant has been working on",
       },
       // WARP-519: ad-hoc RAGAS run + baseline bootstrap trigger surface.
       // Hidden unless RAG_EVAL_URL is set (capabilities.ragEval) — #15.
@@ -586,19 +736,10 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: FlaskConical,
         roles: ["owner", "admin"],
         requiresCapability: "ragEval",
+        hidden: true,
+        settingsSection: "Advanced",
+        settingsBlurb: "Retrieval-quality runs against a baseline",
       },
-      // WARP-246: signed activity log viewer. Role-gated to owner/admin
-      // (mirrors the orchestrator's owner/admin gate on /api/activity);
-      // no capability gate — the activity surface always exists.
-      {
-        href: "/admin/audit",
-        label: "Audit log",
-        icon: ScrollText,
-        roles: ["owner", "admin"],
-      },
-      // WARP-246: Trust Center placeholder — visible to every signed-in
-      // member (support/reference zone, next to Help).
-      { href: "/trust", label: "Trust Center", icon: ShieldCheck },
     ],
   },
 ];
@@ -632,8 +773,53 @@ export function visibleItems(
     // other gates would say — Settings owns the way in. Children run this
     // same predicate, so a hidden child drops too.
     !item.hidden && passesGates(item, role, capabilities, isModuleOn);
-  return items.filter(allowed).map((item) =>
-    item.children ? { ...item, children: item.children.filter(allowed) } : item,
+  return items.flatMap((item) => {
+    if (allowed(item))
+      return [
+        item.children
+          ? { ...item, children: item.children.filter(allowed) }
+          : item,
+      ];
+    // WARP-2967 review — a parent that fails ONLY its module gate does not
+    // take a child that names a module of its own with it: that child is
+    // promoted to the parent's slot. Money (books on, PM off) and Voice
+    // (voice on, network off) would otherwise have no row at all. A tucked
+    // parent promotes nothing — the tuck is a surface decision for the whole
+    // subtree.
+    if (item.hidden) return [];
+    return (item.children ?? []).filter(
+      (child) =>
+        allowed(child) &&
+        passesParentGate(item, child, role, capabilities, isModuleOn),
+    );
+  });
+}
+
+/**
+ * WARP-2967 review — does a child's PARENT let it through?
+ *
+ * Yes when the parent passes its own gates. Also yes when the parent fails
+ * ONLY its module gate and the child names its own, different module: nesting
+ * is filing, and filing Money under Projects must not make a ledger-without-PM
+ * box lose Money. A child with no module of its own (Events under Cameras) is
+ * part of its parent's section — `moduleForPath` says so too — and still
+ * drops with it. Role and capability gates on the parent always hold.
+ *
+ * The sidebar (`visibleItems`, which promotes such a child), the Workspace
+ * layout (`resolveSpaces`) and department navs all route through this.
+ */
+export function passesParentGate(
+  parent: NavItem,
+  child: NavItem,
+  role: AuthRole | undefined,
+  capabilities: NavCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
+): boolean {
+  if (passesGates(parent, role, capabilities, isModuleOn)) return true;
+  return (
+    !!child.requiresModule &&
+    child.requiresModule !== parent.requiresModule &&
+    passesGates({ ...parent, requiresModule: undefined }, role, capabilities, isModuleOn)
   );
 }
 
@@ -671,6 +857,70 @@ export function passesGates(
   // WARP-1528: "effective" is now per person, not just per box.
   if (item.requiresModule && !isModuleOn(item.requiresModule)) return false;
   return true;
+}
+
+/**
+ * WARP-2967 — the Settings front door, derived from the one nav definition.
+ *
+ * Every tucked item (`hidden: true`) names a `settingsSection`; this buckets
+ * them in `SETTINGS_SECTIONS` order and applies the viewer's gates. Two
+ * surfaces render it: the sidebar's contextual Settings panel and the Settings
+ * page's link rows. Deriving both from `NAV_GROUPS` is what keeps
+ * `moduleForPath`, the panel and the page from ever disagreeing about which
+ * destinations exist — the alternative is a second hand-kept list, which is
+ * the drift `workspace-nav-config.ts` rule 1 already exists to prevent.
+ *
+ * The `hidden` tuck is the ONE predicate deliberately not applied: it is what
+ * put these rows here. Everything else — role, capability, module — runs
+ * exactly as the sidebar runs it, via the shared `passesGates`. That inherits
+ * the WARP-1807 fail-open posture for free: `useModuleGate` answers true for
+ * anything not positively reported off, so a probe blip can never hide the
+ * last path in to a surface.
+ *
+ * Sections with nothing visible are dropped rather than captioned empty.
+ */
+export function settingsGroups(
+  role: AuthRole | undefined,
+  capabilities: NavCapabilities,
+  isModuleOn: (moduleId: string) => boolean,
+): NavGroup[] {
+  const buckets = new Map<SettingsSection, NavItem[]>();
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (!item.hidden || !item.settingsSection) continue;
+      if (!passesGates(item, role, capabilities, isModuleOn)) continue;
+      const bucket = buckets.get(item.settingsSection) ?? [];
+      bucket.push(item);
+      buckets.set(item.settingsSection, bucket);
+    }
+  }
+  return SETTINGS_SECTIONS.filter((s) => buckets.get(s)?.length).map((s) => ({
+    label: s,
+    items: buckets.get(s)!,
+  }));
+}
+
+/**
+ * WARP-2967 — is this route inside Settings, for sidebar purposes?
+ *
+ * True for /settings and its sub-pages, and for every TUCKED destination:
+ * Settings is the only way in to those, so the panel that led you there is
+ * the nav that should still be on screen when you arrive. Arriving on
+ * /admin/audit with the main tree showing would leave the sidebar pointing at
+ * nothing you are near.
+ *
+ * Segment-aware through `pathMatches`, so /settingsomething is not Settings.
+ */
+export function isSettingsContext(pathname: string): boolean {
+  if (pathMatches(pathname, "/settings")) return true;
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (!item.hidden) continue;
+      if (item.exact ? pathname === item.href : pathMatches(pathname, item.href))
+        return true;
+    }
+  }
+  return false;
 }
 
 /**
