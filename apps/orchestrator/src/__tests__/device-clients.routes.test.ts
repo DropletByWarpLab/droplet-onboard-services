@@ -23,6 +23,7 @@ const mockPrisma = {
   pushSubscription: { upsert: vi.fn(), deleteMany: vi.fn() },
   $transaction: vi.fn(),
 };
+const txSeam = createTransactionSeam({ client: () => mockPrisma });
 
 vi.mock("../services/nextcloud.client.js", () => ({
   ncGenerateAppPassword: vi.fn(),
@@ -75,6 +76,7 @@ import { cacheGet } from "../services/cache.service.js";
 import { createDeviceClientsRouter } from "../routes/device-clients.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 // WARP-237: capture pairing/revoke audit rows.
 const recordedDeviceClients: RecordParams[] = [];
@@ -142,9 +144,12 @@ beforeEach(() => {
     },
     null,
   );
-  // Restore the default transaction runner after clearAllMocks wipes impls.
+  // Restore the default transaction runner after clearAllMocks wipes impls:
+  // the shared seam (WARP-1570), which runs the callback against mockPrisma,
+  // records the options argument and rejects on a throw.
+  txSeam.reset();
   mockPrisma.$transaction.mockImplementation(
-    async (fn: (tx: typeof mockPrisma) => unknown) => fn(mockPrisma),
+    (fn: (tx: typeof mockPrisma) => Promise<unknown>, options?: unknown) => txSeam.$transaction(fn, options),
   );
   // Sensible defaults that individual tests override.
   mockCacheGet.mockResolvedValue(null);

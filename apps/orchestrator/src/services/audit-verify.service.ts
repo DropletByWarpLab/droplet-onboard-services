@@ -33,13 +33,22 @@ export interface ChainVerifyResult {
   brokenAtId: string | null;
 }
 
+/**
+ * Walk the chain and check every link and signature. `from` (optional) walks
+ * only the rows AFTER that row, the first one anchored on `from.signature`
+ * (its prev pointer must be `hashSignature(from.signature)`, which does not
+ * depend on the signer) — a segment walk, for the pg test lane, where files
+ * share one database and each verifies only the rows it appended. Omitted,
+ * it is the whole chain, trusting the first row's prev pointer as the origin.
+ */
 export async function verifyActivityChain(
   prisma: PrismaClient,
   signer: ActivityRowSigner,
+  from?: { id: bigint; signature: string } | null,
 ): Promise<ChainVerifyResult> {
   const PAGE = 200;
-  let cursor: bigint | undefined;
-  let prevSignature: string | null = null;
+  let cursor: bigint | undefined = from ? from.id : undefined;
+  let prevSignature: string | null = from ? from.signature : null;
   let rowsChecked = 0;
   let brokenAtId: string | null = null;
 
