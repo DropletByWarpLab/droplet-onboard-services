@@ -4,6 +4,7 @@ import {
   folderOnlyOutcomeMessage,
   uploadOutcomeMessage,
   uploadProgressLabel,
+  uploadNoticeMessage,
 } from "@/lib/upload-feedback";
 
 /**
@@ -192,5 +193,27 @@ describe("uploadProgressLabel", () => {
 
   it("does not announce zero files when the drop is folders only", () => {
     expect(uploadProgressLabel(0, 3)).toBe("Creating 3 folders...");
+  });
+});
+
+// WARP-2096 — a same-name upload is kept under a new name and a content
+// duplicate is advisory; both must be SAID, never read as a plain success.
+describe("uploadNoticeMessage", () => {
+  it("is empty when the server wrote everything under its own name", () => {
+    expect(uploadNoticeMessage(0, 0)).toBe("");
+  });
+
+  it("names renamed files and already-on-the-box files, singular and plural", () => {
+    expect(uploadNoticeMessage(1, 0)).toBe(
+      " 1 file had the same name as an existing one and was saved under a new name.",
+    );
+    expect(uploadNoticeMessage(3, 2)).toBe(
+      " 3 files had the same name as existing ones and were saved under new names." +
+        " 2 files were already on the box in this space.",
+    );
+  });
+
+  it("never claims a file is new or unique", () => {
+    expect(uploadNoticeMessage(0, 5)).not.toMatch(/unique|new file/i);
   });
 });

@@ -12,7 +12,11 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import { extensionKeyFingerprint } from "../../services/extension-manifest.js";
+import {
+  buildExtensionStatement,
+  extensionKeyFingerprint,
+  manifestSha256,
+} from "../../services/extension-manifest.js";
 import { EXTENSION_STATEMENT_PREFIX } from "../../services/update-agent/extension-verify.js";
 import type { ExtensionSignResult } from "../../services/device-identity.client.js";
 import type {
@@ -90,12 +94,56 @@ export function fakeSidecar(opts: { provisioned?: boolean } = {}) {
       };
     }),
     getExtensionPublicKey: vi.fn(async () => ({ spkiDer: spki(), fingerprint: extensionKeyFingerprint(spki()) })),
+    /** The same envelope signature, synchronously: for seeding a stored version. */
+    signSync(statement: Uint8Array): { signature: string; keyFingerprint: string } {
+      const prefix = Buffer.from(EXTENSION_STATEMENT_PREFIX, "utf8");
+      return {
+        signature: sign("sha256", Buffer.concat([prefix, statement]), privateKey).toString("base64"),
+        keyFingerprint: extensionKeyFingerprint(spki()),
+      };
+    },
     /** A rebuilt boot disk: the sidecar now holds a different extension key. */
     rotateKey() {
       ({ privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" }));
     },
   };
   return identity;
+}
+
+/**
+ * An ExtensionVersion row as a promote stores it, signed by the sidecar's
+ * current key: the statement names the slug (workspace id = slug), the
+ * version, COMMIT, TREE and the manifest's sha256.
+ */
+export function signedVersionRow(
+  identity: ReturnType<typeof fakeSidecar>,
+  o: { slug: string; version: string; manifest: Buffer; id?: string },
+): Record<string, unknown> {
+  const statement = buildExtensionStatement({
+    extensionId: o.slug,
+    workspaceId: o.slug,
+    version: o.version,
+    commit: COMMIT,
+    tree: TREE,
+    manifestSha256: manifestSha256(o.manifest),
+  });
+  const signed = identity.signSync(statement);
+  return {
+    id: o.id ?? `v-${o.slug}-${o.version}`,
+    extensionId: o.slug,
+    version: o.version,
+    tag: `proposal/${o.version}`,
+    commit: COMMIT,
+    tree: TREE,
+    manifestBytes: o.manifest,
+    manifestSha256: manifestSha256(o.manifest),
+    statementBytes: statement,
+    signature: signed.signature,
+    signer: "box",
+    keyFingerprint: signed.keyFingerprint,
+    promotedByUserId: "u-owner",
+    createdAt: new Date(),
+  };
 }
 
 // ─── the sandbox ─────────────────────────────────────────────────────────
@@ -109,6 +157,11 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
     supervisionOff: false,
     availableMb: init.availableMb ?? 200,
     failInstall: null as Error | null,
+    /** When set, install() starts the process and THEN throws it: a caller-side
+     *  TIMEOUT / UNREACHABLE, where the sandbox went on and started it anyway. */
+    startThenFail: null as Error | null,
+    /** When set, stop() throws it and leaves the process running. */
+    failStop: null as Error | null,
     /** When set, install() waits on it after the request lands (a long tsc). */
     installHold: null as Promise<void> | null,
   };
@@ -152,17 +205,25 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
         process: { state: "running", restarts: 0, exitCode: null },
       };
       installed.set(slug, st);
+      if (state.startThenFail) throw state.startThenFail;
       return st;
+    }),
+    list: vi.fn(async () => {
+      calls.push("list");
+      gate();
+      return [...installed.values()].map((st) => ({ slug: st.slug, running: st.running }));
     }),
     stop: vi.fn(async (slug: string) => {
       calls.push(`stop ${slug}`);
       gate();
+      if (state.failStop) throw state.failStop;
       const st = installed.get(slug);
       if (st) installed.set(slug, { ...st, running: false });
     }),
     uninstall: vi.fn(async (slug: string) => {
       calls.push(`uninstall ${slug}`);
       gate();
+      if (state.failStop) throw state.failStop;
       installed.delete(slug);
     }),
     rpc: vi.fn(async () => ({ status: 200, json: {} })),

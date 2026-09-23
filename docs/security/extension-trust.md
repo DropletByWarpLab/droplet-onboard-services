@@ -51,6 +51,14 @@ with the recorded signer and fingerprint as the expectation. A rebuilt boot
 disk (a new box extension key) is `extension_key_changed`; the extension is
 marked `failed` and the owner re-promotes.
 
+The signature covers the statement, not the row. The `Extension` /
+`ExtensionVersion` columns that repeat what the statement says (workspace,
+version, commit, tree) are plain columns, so every start compares them with
+the verified statement and refuses a row that disagrees, or that carries
+another extension's statement (`statement_mismatch`, marked `failed`,
+nothing started). What the sandbox is asked to export is taken from the
+statement alone.
+
 ## Install and run (the sandbox)
 
 - The sandbox exports exactly the signed commit, and refuses unless its tree
@@ -88,16 +96,49 @@ marked `failed` and the owner re-promotes.
 - Every install write is status-claimed. An owner's disable or uninstall
   that lands during an install (up to four minutes of export, `tsc` and
   start) wins: the install stops or removes what the sandbox started and
-  answers `409 wrong_state`.
-- The reconciler reinstalls an extension the sandbox has forgotten (after a
-  sandbox restart). One whose process died after its restarts is marked
-  `failed` with the exit code, not rebuilt every tick.
+  answers `409 wrong_state`. An install that fails stops what the sandbox
+  may still start as well: a `TIMEOUT` or `UNREACHABLE` is the orchestrator
+  giving up (about 245 s), not the sandbox (worst case about 315 s).
+- The kill switch is retryable. Disable and uninstall claim the row first,
+  then ask the sandbox. If that call fails, the row already says `disabled`
+  / `uninstalled`, and a retry of the same transition acts again while the
+  sandbox still runs (holds) the extension, instead of answering `409`.
+- A stop takes the whole process tree. Every extension leads its own
+  process group (`start_new_session`), and a stop signals the group:
+  `SIGTERM`, a grace period, then `SIGKILL` to what is left. When the
+  process exits on its own, the rest of its group is killed too. So a fork
+  the extension made (which holds its `DROPLET_EXT_TOKEN`) does not survive
+  a disable, an uninstall or a crash. The sandbox runs under `init: true`,
+  so the killed orphans are reaped instead of piling up as zombies against
+  `pids_limit` (pinned in `scripts/test-security.sh`). A fork that calls
+  `setsid` itself leaves the group; see Known limitations.
+- The supervisor never restarts an extension (`restart="never"`). A dead
+  process comes back only through the orchestrator's install path, which
+  re-exports the signed commit into a fresh directory after re-verifying
+  the statement and rotating the bearer. The reconciler does that at most
+  5 times in a row (`EXTENSION_MAX_RECONCILE_RESTARTS`), then marks the
+  extension `failed` with the exit code; the owner re-enables it, which
+  starts the count again.
+- The reconciler goes both ways. It reinstalls an extension that should run
+  and does not (a sandbox restart forgets every process, or the process
+  died), and it stops a process the sandbox runs (`GET /extensions`) for a
+  row that must not run: a kill switch whose sandbox call failed, an install
+  that outlived its caller, a row left `signed` by an orchestrator restart,
+  or no row at all. A row that still exists keeps its sandbox copy
+  (stopped); an uninstalled row, or none, loses it. A slug whose install is
+  in flight is left alone.
 - `budget` is a reserved slug: the sandbox's `GET /extensions/budget` is
   declared before `GET /extensions/{slug}`.
 
 ## Attach and call-back (slice H3)
 
-- **Attach.** After a start, the orchestrator lists the extension's tools
+- **Attach.** Every attach re-verifies the stored statement against the
+  box key and the row against the statement (the check install() makes),
+  and pins what that verified, never the row's manifest bytes on their own
+  word: the reconciler attaches with no install before it. A statement
+  that does not verify fails the extension; a box key the sidecar cannot
+  hand over yet leaves it `installed` for a later tick. The orchestrator
+  then lists the extension's tools
   through the relay (`services/extension-mcp.port.ts`, plain JSON-RPC
   over the sandbox client, no MCP SDK transport) and compares the listing
   with the signed manifest: the same names, descriptions and input-schema
@@ -111,15 +152,21 @@ marked `failed` and the owner re-promotes.
 - **The row is `live` only once attached.** An extension that does not
   answer yet stays `installed`, and the reconciler attaches it later. The
   same tick re-attaches every running extension after an orchestrator
-  restart (the attachment is in-process memory).
+  restart (the attachment is in-process memory), but only the process
+  install() started (`restarts` 0). One the sandbox restarted in place, or
+  one with no process record, is detached and reinstalled through
+  install() first (review #2325).
 - **Classification.** Every tool is recorded as a confirming write
   (`requiresWrite`, `requiresConfirmation`), whatever the author proposed
   or the wire claims (`readOnlyHint` is never read). For `ext-*` the
   record is the whole call policy: an unreviewed tool is
   `REMOTE_WRITE_NOT_PERMITTED`, so **no extension tool runs from chat until
   an owner reviews it as a read** (or WARP-2321 lands). A new version keeps
-  a reviewed read only while the tool's input-schema hash is unchanged; a
-  changed schema resets the tool to the default and clears the review. An
+  a reviewed read only while the tool's description and input schema are
+  unchanged (one hash over both, `remoteToolReviewHash`); a changed
+  description or schema resets the tool to the default and clears the
+  review, and a review sent with the hash it was shown is then a
+  `STALE_REVIEW`. An
   operator's block is never lifted by that reset.
 - **Call-back principal.** A `dxt_` header bearer is looked up by its
   sha256 and resolves to `_service:ext:<slug>` only while the extension is
@@ -132,11 +179,22 @@ marked `failed` and the owner re-promotes.
 - **Acting for the owner.** Both routes resolve the owner who installed
   the extension at call time (the User row, active, still an owner) and
   answer `403 owner_unresolved` otherwise. `/self/call` runs a static
-  catalog tool with `requiresWrite` and `requiresConfirmation` both false,
-  as that owner, after the owner's own reach check; the `tool_call` row
-  carries `refs.extensionId`. Writes are refused in v1. **`/self/call`
-  ships off** (`EXTENSION_SELF_CALL_ENABLED=0`, a 503), for the reason in
-  the first known limitation below.
+  catalog tool as that owner, after the owner's own reach check, only if
+  the tool is on an explicit allowlist of box-local reads
+  (`EXTENSION_SELF_CALL_TOOLS`, `services/extension-self-call.ts`), which
+  is **empty in v1**: every tool is a `403 tool_not_allowlisted`. "Any
+  read" is not the rule (review #2325): a read can still carry the owner's
+  data off the box. A tool whose domain is a connector (`cloud`, `erp`), or
+  whose route goes through the egress screen (`/api/web/`, so
+  `get_weather`, `currency_convert`), a connector (`/api/erp/`, so
+  `cloud_query_dataset`; `/api/integrations/`), the model (`/api/llm/`: the
+  provider may be a cloud one) or a mail account (`/api/email/`), or that
+  has no route entry, is a `403 off_box_tool_refused` whatever the
+  allowlist says, and the allowlist's test refuses such an entry. Writes
+  are `403 write_tool_refused`. The `tool_call` row carries
+  `refs.extensionId`. **`/self/call` ships off**
+  (`EXTENSION_SELF_CALL_ENABLED=0`, a 503), for the reason in the first
+  known limitation below.
 
 ### Why a sandbox relay and not the mcp-bridge
 
@@ -177,11 +235,12 @@ inside the host shim) can do the following:
   including an installed extension's relay key and `dxt_` call-back
   bearer. The relay key stops a naive connect, not a same-uid reader.
   Since H3 that bearer has authority: with `EXTENSION_SELF_CALL_ENABLED=1`
-  it runs read tools as the extension's installing OWNER. A workspace
-  `run` child belongs to whoever started the workshop run, which need not
-  be an owner, so turning that flag on lets such a child read what the
-  owner can read. The flag stays off until WARP-2898 (or per-process
-  uids) closes this.
+  it runs the allowlisted box-local reads as the extension's installing
+  OWNER. A workspace `run` child belongs to whoever started the workshop
+  run, which need not be an owner, so turning that flag on lets such a
+  child run those reads as the owner. It never lets it reach outside the
+  box: no tool that does is callable, and the allowlist is empty in v1.
+  The flag stays off until WARP-2898 (or per-process uids) closes this.
 - **Not the server's bearer, conditionally.** `SANDBOX_SERVICE_TOKEN` is in
   the SERVER's environment only, and the server is non-dumpable (above).
   If `prctl` fails (the log line says so), a child can read
@@ -192,9 +251,14 @@ inside the host shim) can do the following:
   (`/var/lib/workspace-git`), the checkouts and every extension's install
   dir belong to that uid. The install dir's `0400`/`0500` modes stop an
   accidental write, not the extension: it owns the files and can `chmod`
-  them back, then rewrite its own code or a sibling's. The rewrite would
-  run from the next supervisor restart. A signed statement is re-verified
-  at every INSTALL, not at every supervisor restart. **Treat "read-only" as
-  advisory against the extension itself.**
+  them back, then rewrite its own code or a sibling's. There is no
+  supervisor restart to pick a rewrite up: a dead extension comes back only
+  through install, which removes the directory and re-exports the signed
+  commit. Code already loaded keeps running as loaded, and a module the
+  process imports later is read from the (rewritable) directory. **Treat
+  "read-only" as advisory against the extension itself.**
+- **Escape the process group.** A fork that calls `setsid` leaves the
+  extension's group, so a stop does not reach it. It keeps running,
+  bounded by `pids_limit` and `mem_limit`, holding whatever it read.
 - Extension tools stay denied at dispatch until an owner reviews one as a
   read, or WARP-2321's runtime confirmation lands (H3, above).

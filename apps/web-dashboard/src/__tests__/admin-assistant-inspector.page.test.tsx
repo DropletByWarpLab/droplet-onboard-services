@@ -16,7 +16,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
-import { NAV_GROUPS, visibleItems } from "@/components/nav-config";
+import { NAV_GROUPS, settingsGroups, visibleItems } from "@/components/nav-config";
 
 const fetchUsersMock = vi.fn();
 const fetchToolInspectMock = vi.fn();
@@ -246,26 +246,37 @@ describe("nav", () => {
   const CAPS = { claudeActivity: true, ragEval: true, medicalConnector: true };
   const ALL_MODULES_ON = () => true;
 
-  it("puts Assistant in the operator nav and nowhere else", async () => {
-    const seen = (role: string) =>
-      NAV_GROUPS.flatMap((g) =>
-        visibleItems(g.items, role as never, CAPS, ALL_MODULES_ON),
-      );
+  // WARP-2967 tucked it behind Settings (→ Automation: it explains what the
+  // automated surfaces can reach). The ROLE gate is what these cases hold, and
+  // it did not move — only the surface that offers the door did.
+  const offered = (role: string) =>
+    settingsGroups(role as never, CAPS, ALL_MODULES_ON).flatMap((g) =>
+      g.items.map((i) => i.href),
+    );
 
-    expect(seen("owner").some((i) => i.href === "/admin/prompt")).toBe(true);
-    expect(seen("admin").some((i) => i.href === "/admin/prompt")).toBe(true);
-    expect(seen("family").some((i) => i.href === "/admin/prompt")).toBe(false);
-    expect(seen("guest").some((i) => i.href === "/admin/prompt")).toBe(false);
+  it("puts Assistant in the operator's Settings and nowhere else", async () => {
+    expect(offered("owner")).toContain("/admin/prompt");
+    expect(offered("admin")).toContain("/admin/prompt");
+    expect(offered("family")).not.toContain("/admin/prompt");
+    expect(offered("guest")).not.toContain("/admin/prompt");
+
+    // And on no nav surface, for any role — that is what the tuck means.
+    for (const role of ["owner", "admin", "family", "guest"])
+      expect(
+        NAV_GROUPS.flatMap((g) =>
+          visibleItems(g.items, role as never, CAPS, ALL_MODULES_ON),
+        ).some((i) => i.href === "/admin/prompt"),
+      ).toBe(false);
   });
 
-  it("🔴 stays visible with every module switched OFF", async () => {
+  it("🔴 stays reachable with every module switched OFF", async () => {
     // The reason it carries no `requiresModule`. A console page that explains
     // why the assistant cannot reach a module must not be gated on that
     // module — the box where it disappears is the box you needed it on.
-    const off = NAV_GROUPS.flatMap((g) =>
-      visibleItems(g.items, "owner" as never, CAPS, () => false),
+    const off = settingsGroups("owner" as never, CAPS, () => false).flatMap((g) =>
+      g.items.map((i) => i.href),
     );
-    expect(off.some((i) => i.href === "/admin/prompt")).toBe(true);
+    expect(off).toContain("/admin/prompt");
   });
 
   it("carries no module requirement", async () => {

@@ -7,14 +7,13 @@
  *
  * The publish endpoint is special: it serves an ICS feed at
  * `/api/calendar/publish/:user.ics?token=...` and is NOT behind auth so
- * phones can `webcal://` subscribe. Access is gated by a per-user secret
- * token derived from DEVICE_SECRET + username via HMAC. Rotating
- * DEVICE_SECRET invalidates every subscription; the user can rotate their
- * own token by hitting POST /api/calendar/publish/rotate.
+ * phones can `webcal://` subscribe. Access is gated by a stored, per-user,
+ * expiring token (WARP-2767, services/calendar-feed-token.service.ts) that
+ * the owner can rotate (POST /calendar/publish/rotate) or turn off
+ * (POST /calendar/publish/revoke).
  */
 
 import { Router, type Request } from "express";
-import crypto from "node:crypto";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -28,6 +27,15 @@ import {
   syncSource,
 } from "../services/calendar.service.js";
 import { serializeIcs } from "../services/ics.js";
+// WARP-2767 — stored, revocable, expiring feed credential.
+import {
+  getFeedTokenStatus,
+  revokeFeedTokens,
+  rotateFeedToken,
+  verifyFeedToken,
+} from "../services/calendar-feed-token.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
 // WARP-1906 — premade workspace locations (building + conference room) rank
@@ -46,41 +54,20 @@ import { isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
 // services/places.service.ts so the structured-formatting logic is unit-tested
 // directly.
 
+/** WARP-2767 — the local User.id, which feed tokens are bound to (a username
+ *  can be reused after de-provisioning; a User.id cannot). */
+function getUserId(req: Request): string {
+  const id = req.user?.id;
+  if (!id) throw new Error("authenticated user required");
+  return id;
+}
+
 function getUser(req: Request): string {
   const username = req.user?.username;
   // authMiddleware guarantees req.user on these routes; an absent username is
   // an invariant break, not a legitimate "admin" default (ORCH-007 fail-open).
   if (!username) throw new Error("authenticated user required");
   return username;
-}
-
-function publishToken(username: string): string {
-  const key = process.env.DEVICE_SECRET;
-  if (!key) {
-    // In production an unset DEVICE_SECRET silently weakens every token —
-    // they'd all be derivable from a known literal. Fail loudly instead.
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("DEVICE_SECRET must be set to issue calendar publish tokens");
-    }
-    // Tests / dev — log once and use a deterministic placeholder so the
-    // dashboard URL stays stable across restarts of `npm run dev`.
-    return crypto.createHmac("sha256", "dev-only-not-secure")
-      .update(`calendar:${username}`).digest("hex").slice(0, 32);
-  }
-  return crypto.createHmac("sha256", key).update(`calendar:${username}`).digest("hex").slice(0, 32);
-}
-
-/** Constant-time string equality to avoid leaking the publish token via
- *  response timing on the public ICS endpoint. The two buffers must be the
- *  same length for `timingSafeEqual` not to throw — we enforce that with the
- *  length check before constructing the buffer. */
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-  } catch {
-    return false;
-  }
 }
 
 const eventCreateSchema = z.object({
@@ -127,9 +114,9 @@ const sourceCreateSchema = z.object({
 const PRIVATE_HOST_ROLES = new Set(["owner", "admin"]);
 
 /** PUBLIC router — only the ICS publish endpoint. Mount BEFORE the auth
- *  middleware in app.ts. Auth is by HMAC token in the query string, NOT by
- *  session cookie, so phones can subscribe via webcal:// without a Droplet
- *  account on the device. */
+ *  middleware in app.ts. Auth is by a stored feed token in the query string,
+ *  NOT by session cookie, so phones can subscribe via webcal:// without a
+ *  Droplet account on the device. */
 export function createCalendarPublicRouter(prisma: PrismaClient): Router {
   const router = Router();
   router.get("/calendar/publish/:user.ics", async (req, res, next) => {
@@ -137,15 +124,17 @@ export function createCalendarPublicRouter(prisma: PrismaClient): Router {
       const user = req.params.user;
       // Defense in depth: usernames in this codebase are Nextcloud handles
       // (short, ASCII). A 200-char cap rejects pathological input before it
-      // reaches the HMAC + Prisma where-clause.
+      // reaches the token lookup + Prisma where-clause.
       if (!user || user.length > 200) {
         res.status(400).json({ error: "invalid_user" });
         return;
       }
       const token = req.query.token;
       // CodeQL js/type-confusion-through-parameter-tampering: `?token=a&token=b`
-      // arrives as an array; only a single string can be the HMAC token.
-      if (typeof token !== "string" || !safeEqual(token, publishToken(user))) {
+      // arrives as an array; only a single string can be the feed token.
+      // WARP-2767: the token must be active, unexpired, and belong to the
+      // account whose CURRENT username is `user` — anything else is a 403.
+      if (typeof token !== "string" || !(await verifyFeedToken(prisma, token, user))) {
         res.status(403).json({ error: "invalid_token" });
         return;
       }
@@ -357,25 +346,61 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
 
   // ── Publish: ICS feed phones can subscribe to via webcal:// ──
 
-  router.get("/calendar/publish-token", (req, res) => {
-    const user = getUser(req);
-    res.json({
-      url: `/api/calendar/publish/${encodeURIComponent(user)}.ics?token=${publishToken(user)}`,
-    });
+  // WARP-2767 — the feed link is a stored credential. Only its hash exists
+  // server-side, so this reports status and never a URL; a URL is returned
+  // exactly once, by /publish/rotate.
+  router.get("/calendar/publish-token", async (req, res, next) => {
+    try {
+      res.json(await getFeedTokenStatus(prisma, getUserId(req)));
+    } catch (err) {
+      next(err);
+    }
   });
 
   // The actual publish handler lives in createCalendarPublicRouter so it
   // can be mounted BEFORE the auth middleware. Don't duplicate it here.
 
-  router.post("/calendar/publish/rotate", (req, res) => {
-    // The token is derived deterministically from DEVICE_SECRET. To rotate
-    // a single user's token we'd need a per-user salt column; for v1 the
-    // user can rotate by changing DEVICE_SECRET (which invalidates ALL
-    // tokens — fine for a single-user appliance). Document and stub.
-    res.status(501).json({
-      error: "not_implemented",
-      hint: "rotate DEVICE_SECRET to invalidate all subscription tokens; per-user rotation is a follow-up",
-    });
+  // Mint a new link; every earlier link of the CALLER stops working in the
+  // same transaction. Other users' links are untouched.
+  router.post("/calendar/publish/rotate", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+      const minted = await rotateFeedToken(prisma, getUserId(req));
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "calendar",
+        what: minted.rotated > 0 ? "Calendar feed link replaced" : "Calendar feed link created",
+        sub: user,
+        // Never the token itself — the row id is the non-secret selector.
+        refs: { tokenId: minted.id, endedPrevious: minted.rotated, expiresAt: minted.expiresAt.toISOString() },
+        actor: actorFromRequest(req),
+      });
+      res.json({
+        url: `/api/calendar/publish/${encodeURIComponent(user)}.ics?token=${minted.token}`,
+        expiresAt: minted.expiresAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/calendar/publish/revoke", async (req, res, next) => {
+    try {
+      const revoked = await revokeFeedTokens(prisma, getUserId(req));
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "calendar",
+        what: "Calendar feed link turned off",
+        sub: getUser(req),
+        refs: { revoked },
+        actor: actorFromRequest(req),
+      });
+      res.json({ revoked });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // ── WARP-307: location autocomplete via OSM Nominatim ──

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import supervisor
+from tests.proc_helpers import alive, needs_linux, wait_gone
 
 
 @pytest.fixture()
@@ -113,6 +114,85 @@ def test_a_clean_exit_with_never_is_exited_not_failed(ext):
     sup = supervisor.Supervisor()
     sup.start("ext-d", ["python", "ok.py"], cwd=None, restart="never", max_restarts=3, env={})
     assert _wait_for(sup, "ext-d", {"exited", "failed"})["state"] == "exited"
+
+
+# ── WARP-2900 review #2323 (d): a stop takes the whole process tree ────────
+
+
+def _forker(ext: Path, name: str, then: str) -> Path:
+    """An entrypoint that forks a long sleeper, writes its pid, then `then`."""
+    pidfile = ext / f"{name}.pid"
+    (ext / f"{name}.py").write_text(
+        "import os, subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"with open({str(pidfile)!r} + '.tmp', 'w') as fh:\n"
+        "    fh.write(str(p.pid))\n"
+        f"os.replace({str(pidfile)!r} + '.tmp', {str(pidfile)!r})\n"
+        f"{then}\n"
+    )
+    return pidfile
+
+
+def _read_pid(pidfile: Path, timeout_s: float = 10.0) -> int:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if pidfile.exists():
+            return int(pidfile.read_text())
+        time.sleep(0.05)
+    raise AssertionError(f"{pidfile.name} never appeared")
+
+
+@needs_linux
+def test_stop_takes_a_process_the_child_forked(ext):
+    # Stop used to signal only the direct child, so an extension that forked
+    # kept the fork running through disable and uninstall, holding its
+    # DROPLET_EXT_TOKEN. MUTATIONS: drop start_new_session -> the child shares
+    # the server's group (getpgid != pid), red; terminate()/kill() the child
+    # instead of killpg -> the sleeper survives the stop, red.
+    pidfile = _forker(ext, "forker", "time.sleep(120)")
+    sup = supervisor.Supervisor()
+    snap = sup.start("ext-fork", ["python", "forker.py"], cwd=None, restart="never", max_restarts=0, env={})
+    sleeper = _read_pid(pidfile)
+    assert os.getpgid(snap["pid"]) == snap["pid"], "the child leads its own process group"
+    assert os.getpgid(sleeper) == snap["pid"]
+    assert alive(sleeper)
+    assert sup.stop("ext-fork")["state"] == "stopped"
+    assert wait_gone(sleeper), "the forked sleeper outlived the stop"
+
+
+@needs_linux
+def test_stop_kills_a_group_that_ignores_sigterm_after_the_grace(ext):
+    # MUTATION: drop the SIGKILL to the group after the grace -> the child
+    # is still running when stop waits for it, red.
+    pidfile = ext / "stubborn.pid"
+    (ext / "stubborn.py").write_text(
+        "import os, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "p = subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])\n"
+        f"with open({str(pidfile)!r} + '.tmp', 'w') as fh:\n"
+        "    fh.write(str(p.pid))\n"
+        f"os.replace({str(pidfile)!r} + '.tmp', {str(pidfile)!r})\n"
+        "time.sleep(120)\n"
+    )
+    sup = supervisor.Supervisor()
+    snap = sup.start("ext-stubborn", ["python", "stubborn.py"], cwd=None, restart="never", max_restarts=0, env={})
+    sleeper = _read_pid(pidfile)
+    assert sup.stop("ext-stubborn", grace_s=0.5)["state"] == "stopped"
+    assert wait_gone(snap["pid"]) and wait_gone(sleeper)
+
+
+@needs_linux
+def test_a_child_that_exits_takes_its_forks_with_it(ext):
+    # With restart "never" a crashed extension stays down until install()
+    # starts it again; what it forked must not keep running meanwhile.
+    # MUTATION: drop the group kill in _watch and the sleeper survives, red.
+    pidfile = _forker(ext, "crasher", "raise SystemExit(4)")
+    sup = supervisor.Supervisor()
+    sup.start("ext-crash", ["python", "crasher.py"], cwd=None, restart="never", max_restarts=0, env={})
+    sleeper = _read_pid(pidfile)
+    assert _wait_for(sup, "ext-crash", {"failed"})["exitCode"] == 4
+    assert wait_gone(sleeper), "the forked sleeper outlived its parent"
 
 
 # ── WARP-2900 H2: the seam as slice H needs it ──────────────────────────────

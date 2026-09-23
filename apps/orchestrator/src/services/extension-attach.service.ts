@@ -14,10 +14,16 @@
  *   1. the sandbox URL must name the compose-internal `sandbox` host. The
  *      relay is the only road to an extension; a SANDBOX_URL pointed
  *      anywhere else is refused before a byte is sent;
- *   2. the SESSION PROFILE is built from the manifest the lifecycle just
- *      re-verified (install re-verifies on every start). It names the
- *      server, version, runtime and a hash of the tools — and, by type, no
- *      host or URL: where the process runs is the sandbox's business;
+ *   2. the stored statement is RE-VERIFIED here, against the box key now,
+ *      and the row against the statement (the lifecycle's own check,
+ *      verifyStoredExtensionVersion): the attach also runs from the
+ *      reconciler with no install before it, so it never takes the
+ *      manifest bytes on the row's word (review #2325). A statement that
+ *      does not verify is a permanent refusal; a key that cannot be read
+ *      yet is transient. The SESSION PROFILE is built from the verified
+ *      manifest. It names the server, version, runtime and a hash of the
+ *      tools — and, by type, no host or URL: where the process runs is the
+ *      sandbox's business;
  *   3. the extension's live `tools/list` must be exactly what the signed
  *      manifest provides — the same names, descriptions and input schemas.
  *      The shim serves the manifest, but the extension's own code runs in
@@ -25,9 +31,10 @@
  *      check runs on every later listing (the port is pinned to the
  *      manifest), so a listing that drifts at runtime stops being
  *      advertised instead of being absorbed;
- *   4. `recordDiscoveredRemoteTools` with each tool's input-schema hash:
- *      every tool is a confirming write until a person says otherwise, and
- *      a tool whose schema changed since that person said so is again;
+ *   4. `recordDiscoveredRemoteTools` with each tool's description and
+ *      input-schema hash: every tool is a confirming write until a person
+ *      says otherwise, and a tool whose description or schema changed since
+ *      that person said so is again;
  *   5. the classification cache refresh, so step 4 is what dispatch reads.
  *      Steps 4 and 5 run BEFORE anything is attached or advertised, and a
  *      failure of either is a transient attach failure (retried), never a
@@ -58,15 +65,13 @@ import type { RecordParams } from "./activity.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { McpClientPort, McpToolCallOutcome } from "./mcp-client.port.js";
 import { namespacedToolName, type McpToolMultiplexer } from "./mcp-multiplexer.service.js";
-import {
-  canonicalJson,
-  parseExtensionManifest,
-  type ExtensionManifest,
-} from "./extension-manifest.js";
+import { canonicalJson, type ExtensionManifest } from "./extension-manifest.js";
 import {
   ExtensionAttachError,
   extensionServerId,
+  verifyStoredExtensionVersion,
   type ExtensionAttachPort,
+  type ExtensionKeySource,
 } from "./extension-lifecycle.service.js";
 import { extensionAuditRefs } from "./extension-token.js";
 import { remoteCallAttribution } from "./remote-call-attribution.js";
@@ -209,6 +214,8 @@ export interface ExtensionAttacherDeps {
   /** Read per attach, so a test can point it elsewhere. Defaults to config.SANDBOX_URL. */
   sandboxUrl?: () => string;
   audit?: (p: RecordParams) => Promise<unknown>;
+  /** The box extension key, to re-verify the stored statement at every attach. */
+  identity: ExtensionKeySource;
 }
 
 export interface ExtensionAttacher extends ExtensionAttachPort {
@@ -253,7 +260,7 @@ export function lazyExtensionAttachPort(make: () => ExtensionAttacher): Extensio
 }
 
 export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionAttacher {
-  const { prisma, mux, sandbox } = deps;
+  const { prisma, mux, sandbox, identity } = deps;
   const registry = deps.registry ?? runtimeToolRegistry;
   const cache = deps.cache ?? remoteToolClassificationCache;
   const sandboxUrl = deps.sandboxUrl ?? (() => config.SANDBOX_URL ?? "http://sandbox:8030");
@@ -284,11 +291,29 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
     if (!ext?.currentVersion) {
       throw new ExtensionAttachError("not_promoted", true, `extension ${slug} has no signed version`);
     }
-    const parsed = parseExtensionManifest(ext.currentVersion.manifestBytes);
-    if (!parsed.ok) {
-      throw new ExtensionAttachError("manifest_invalid", true, `extension ${slug}'s manifest does not parse: ${parsed.detail}`);
+    const v = ext.currentVersion;
+    let boxKey: { spkiDer: Uint8Array } | null = null;
+    if (v.signer === "box") {
+      try {
+        const k = await identity.getExtensionPublicKey();
+        boxKey = k ? { spkiDer: k.spkiDer } : null;
+      } catch (err) {
+        throw new ExtensionAttachError(
+          "statement_unavailable",
+          false,
+          `the box extension key could not be read to verify ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
-    const manifest = parsed.manifest;
+    const check = await verifyStoredExtensionVersion(slug, ext.workspaceId, v, boxKey);
+    if (!check.ok) {
+      throw new ExtensionAttachError(
+        "statement_unverified",
+        true,
+        `extension ${slug}'s stored statement does not verify: ${check.failureReason}: ${check.detail}`,
+      );
+    }
+    const manifest = check.manifest;
     const profile = buildExtensionSessionProfile(slug, manifest);
     const expected = manifest.provides.tools.map((t) => ({
       name: t.name,

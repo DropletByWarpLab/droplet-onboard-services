@@ -49,6 +49,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { summarizeToolArguments } from "../services/confirmation-summary.js";
 import { WORKSPACE_ID } from "../services/workspace.service.js";
+import { decideCloudTurn } from "../services/cloud-access.service.js";
 import {
   isSupportedRrule,
   isSupportedTimezone,
@@ -186,6 +187,9 @@ interface RunRow {
   pendingDecision: string | null;
   pendingDecidedAt: Date | null;
   workspaceId: string | null;
+  cloudGate: string;
+  offLanProvider: string | null;
+  offLanWithheldTools: string[];
 }
 
 function serializeRun(r: RunRow, withTrace: boolean) {
@@ -213,6 +217,10 @@ function serializeRun(r: RunRow, withTrace: boolean) {
     error: r.error,
     // WARP-2896 — the workshop workspace, for the run list and the run page.
     workspaceId: r.workspaceId,
+    // WARP-2997 — where the model ran, and what it was not given.
+    cloudGate: r.cloudGate,
+    offLanProvider: r.offLanProvider,
+    offLanWithheldTools: r.offLanWithheldTools ?? [],
     // WARP-2179 — the parked call with its provenance, for the confirm
     // surface: tool, a PHI-free argument summary, the raw args (the caller
     // is the run's owner), and when it parked. Meaningful ONLY while the run
@@ -261,6 +269,9 @@ const RUN_SELECT = {
   pendingDecision: true,
   pendingDecidedAt: true,
   workspaceId: true,
+  cloudGate: true,
+  offLanProvider: true,
+  offLanWithheldTools: true,
 } as const;
 
 export function createAgentRunsRouter(prisma: PrismaClient): Router {
@@ -287,6 +298,19 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       return null;
     }
     return actor;
+  }
+
+  /**
+   * WARP-2997 — refuse a cloud model the person may not use up front, with
+   * chat's own 451/503 body and no row written. A courtesy, not the gate:
+   * the worker asks again at every claim, which is what holds for schedules
+   * and for any caller that enqueues without coming through here.
+   */
+  async function cloudAllowedOr451(res: Response, actor: Actor, model: string): Promise<boolean> {
+    const decision = await decideCloudTurn({ user: { id: actor.id, role: actor.role }, model });
+    if (decision.kind === "allowed") return true;
+    res.status(decision.status).json(decision.body);
+    return false;
   }
 
   router.post("/agent-runs", gate, async (req: Request, res: Response, next: NextFunction) => {
@@ -332,6 +356,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
           return;
         }
       }
+      if (!(await cloudAllowedOr451(res, actor, model))) return;
       let id: string;
       try {
         ({ id } = await enqueueAgentRun(prisma, {
@@ -481,6 +506,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "model is required (no LLM_MODEL configured)" });
         return;
       }
+      if (!(await cloudAllowedOr451(res, actor, model))) return;
       const now = new Date();
       const nextFireAt = nextFireFromRrule(parsed.data.rrule, now, timezone);
       if (nextFireAt === null) {

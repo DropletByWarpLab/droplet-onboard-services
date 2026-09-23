@@ -27,6 +27,7 @@ import {
   composeRemoteCallPolicy,
   createRecordBackedRemoteCallPolicy,
   recordDiscoveredRemoteTools,
+  remoteToolReviewHash,
   type ClassificationPrisma,
   type RemoteToolClassificationRow,
 } from "./remote-tool-classification.service.js";
@@ -279,6 +280,8 @@ describe("composed over a compiled table", () => {
 });
 
 describe("WARP-2900 — a re-discovered tool keeps its review only while its input schema is the same", () => {
+  // The row keeps the hash of what was reviewed: these callers send no description.
+  const reviewed = (schemaHash: string) => remoteToolReviewHash(undefined, schemaHash);
   const demote = (prisma: ClassificationPrisma, toolName: string) =>
     classifyRemoteTool(
       prisma,
@@ -289,7 +292,7 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
   it("records the schema hash on the created row, as the import default", async () => {
     const { prisma, rows } = fakePrisma();
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T0);
-    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, inputSchemaHash: "h1" });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, inputSchemaHash: reviewed("h1") });
   });
 
   it("the same name and hash (a version bump that left the tool alone) keeps the reviewed read", async () => {
@@ -317,7 +320,7 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
       ...IMPORT_DEFAULT_CLASSIFICATION,
       reviewedBy: null,
       reviewedAt: null,
-      inputSchemaHash: "h2",
+      inputSchemaHash: reviewed("h2"),
       firstSeenAt: T0,
       lastSeenAt: T1,
     });
@@ -328,7 +331,7 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count" }], T0);
     expect((await demote(prisma, "word_count")).ok).toBe(true);
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T1);
-    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, reviewedBy: null, inputSchemaHash: "h1" });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ ...IMPORT_DEFAULT_CLASSIFICATION, reviewedBy: null, inputSchemaHash: reviewed("h1") });
   });
 
   it("an operator's block survives a schema change: the reset never unblocks a tool", async () => {
@@ -342,7 +345,7 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
       T0,
     );
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "wipe", inputSchemaHash: "h2" }], T1);
-    expect(rows.get("ext-wc|wipe")).toMatchObject({ denied: true, reviewedBy: "owner", inputSchemaHash: "h2" });
+    expect(rows.get("ext-wc|wipe")).toMatchObject({ denied: true, reviewedBy: "owner", inputSchemaHash: reviewed("h2") });
   });
 
   it("a review sent with the hash it was shown lands only on that schema (a reset in between is a STALE_REVIEW)", async () => {
@@ -355,14 +358,51 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
     const asRead = { serverId: "ext-wc", toolName: "word_count", requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "owner" };
     // v2 is attached before the owner's click lands.
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h2" }], T1);
-    const stale = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: "h1" }, T1);
+    const stale = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: reviewed("h1") }, T1);
     expect(stale).toMatchObject({ ok: false, code: "STALE_REVIEW" });
-    expect(rows.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null, inputSchemaHash: "h2" });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null, inputSchemaHash: reviewed("h2") });
     // The review of the schema the owner is now shown lands.
-    const fresh = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: "h2" }, T1);
-    expect(fresh).toMatchObject({ ok: true, row: { requiresWrite: false, reviewedBy: "owner", inputSchemaHash: "h2" } });
+    const fresh = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: reviewed("h2") }, T1);
+    expect(fresh).toMatchObject({ ok: true, row: { requiresWrite: false, reviewedBy: "owner", inputSchemaHash: reviewed("h2") } });
     // An unseen tool is still NOT_FOUND, not STALE_REVIEW.
-    expect(await classifyRemoteTool(prisma, { ...asRead, toolName: "ghost", expectedInputSchemaHash: "h2" }, T1)).toMatchObject({ code: "NOT_FOUND" });
+    expect(await classifyRemoteTool(prisma, { ...asRead, toolName: "ghost", expectedInputSchemaHash: reviewed("h2") }, T1)).toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("a changed description resets the review too: the hash covers what the person read (review #2325)", async () => {
+    // MUTATION: store the caller's schema hash alone → a description that
+    // now says "Deletes every file." keeps the review of "Count words." → red.
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", description: "Count words.", inputSchemaHash: "h1" }], T0);
+    expect((await demote(prisma, "word_count")).ok).toBe(true);
+    const out = await recordDiscoveredRemoteTools(
+      prisma,
+      "ext-wc",
+      [{ wireName: "word_count", description: "Deletes every file.", inputSchemaHash: "h1" }],
+      T1,
+    );
+    expect(out).toEqual({ created: [], seen: 1, reset: ["word_count"] });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({
+      ...IMPORT_DEFAULT_CLASSIFICATION,
+      reviewedBy: null,
+      inputSchemaHash: remoteToolReviewHash("Deletes every file.", "h1"),
+    });
+  });
+
+  it("a review shown one description is STALE once only the description changed", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", description: "Count words.", inputSchemaHash: "h1" }], T0);
+    const shown = rows.get("ext-wc|word_count")!.inputSchemaHash!;
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", description: "Deletes every file.", inputSchemaHash: "h1" }], T1);
+    const asRead = { serverId: "ext-wc", toolName: "word_count", requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "owner" };
+    expect(await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: shown }, T1)).toMatchObject({ ok: false, code: "STALE_REVIEW" });
+  });
+
+  it("remoteToolReviewHash is a sha256 over the description and the schema hash, and tells them apart", () => {
+    expect(remoteToolReviewHash("Count words.", "h1")).toMatch(/^[0-9a-f]{64}$/);
+    expect(remoteToolReviewHash("Count words.", "h1")).toBe(remoteToolReviewHash("Count words.", "h1"));
+    expect(remoteToolReviewHash("Count words.", "h1")).not.toBe(remoteToolReviewHash("Count words!", "h1"));
+    expect(remoteToolReviewHash("Count words.", "h1")).not.toBe(remoteToolReviewHash("Count words.", "h2"));
+    expect(remoteToolReviewHash(undefined, "h1")).not.toBe(remoteToolReviewHash("", "h1"));
   });
 
   it("a caller that sends no hash (the Atlassian attach) keeps today's behaviour exactly", async () => {

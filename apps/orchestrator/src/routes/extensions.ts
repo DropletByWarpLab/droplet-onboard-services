@@ -22,9 +22,11 @@
  * extension-principal guard confines to the two `/self` routes. Those
  * resolve the INSTALLING OWNER at call time — the User row, still active,
  * still an owner — and answer 403 when nobody resolves (never an empty
- * 200). `/self/call` runs a static READ tool (TOOL_CATALOG, requiresWrite
- * and requiresConfirmation both false) as that owner, after the owner's
- * own reach check; a write is refused in v1. `/self/call` ships OFF
+ * 200). `/self/call` runs a static tool as that owner, after the owner's
+ * own reach check, only if it is on the pinned allowlist of box-local reads
+ * (services/extension-self-call.ts, EMPTY in v1); a write, or a read that
+ * reaches outside the box, is refused whatever the allowlist says (review
+ * #2325). `/self/call` ships OFF
  * (EXTENSION_SELF_CALL_ENABLED, a 503) until the sandbox's same-uid
  * limitation is closed. The /self routes are registered before every
  * `/extensions/:param` route.
@@ -71,6 +73,7 @@ import {
   ExtensionSandboxError,
   type ExtensionSandboxClient,
 } from "../services/extension-sandbox.client.js";
+import { extensionSelfCallRefusal } from "../services/extension-self-call.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("extensions-route");
@@ -112,6 +115,12 @@ interface ExtensionsRouterDeps {
   mcp?: Pick<McpClientPort, "isStarted" | "callTool">;
   /** H3: config.EXTENSION_SELF_CALL_ENABLED. Absent → off: `/self/call` is a 503. */
   selfCallEnabled?: boolean;
+  /**
+   * Tests only: the static tools `/self/call` admits. Absent → the pinned
+   * EXTENSION_SELF_CALL_TOOLS (empty in v1). A tool that leaves the box is
+   * refused whatever this names.
+   */
+  selfCallTools?: readonly string[];
 }
 
 export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRouterDeps = {}): Router {
@@ -246,9 +255,13 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
         res.status(404).json({ error: "unknown_tool" });
         return;
       }
-      if (tool.requiresWrite || tool.requiresConfirmation) {
-        recordAccessDenied(req, "extension-write-tool");
-        res.status(403).json({ error: "write_tool_refused", message: "an extension may call read-only tools only" });
+      // An explicit allowlist of box-local reads (empty in v1), never
+      // "any read": a read can still carry the owner's data off the box
+      // (review #2325; services/extension-self-call.ts).
+      const refusal = extensionSelfCallRefusal(tool, deps.selfCallTools);
+      if (refusal) {
+        recordAccessDenied(req, refusal.auditReason);
+        res.status(403).json({ error: refusal.code, message: refusal.message });
         return;
       }
       const access = await resolveAttributedToolAccess(prisma, self.owner.id);

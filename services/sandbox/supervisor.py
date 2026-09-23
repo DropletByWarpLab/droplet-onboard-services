@@ -58,13 +58,29 @@ can hand a child ``SANDBOX_SERVICE_TOKEN`` or any other secret by name.
 Restart policy: ``never`` | ``on-failure`` (non-zero exit, up to
 ``max_restarts``) | ``always`` (up to ``max_restarts``). Exit state is
 explicit — ``running`` | ``exited`` | ``failed`` | ``stopped`` — never
-inferred from a missing pid.
+inferred from a missing pid. An extension is started with ``never``
+(extensions.py): it comes back only through its install, which re-verifies.
+
+The process tree (WARP-2900 review #2323)
+-----------------------------------------
+Every child is started in a new session, so it leads its own process group
+(pgid == its pid) and everything it forks joins that group. A stop signals
+the GROUP: SIGTERM, the grace period, then SIGKILL to whatever is left, so a
+fork that ignored SIGTERM goes too. When the child exits on its own (a crash,
+or the SIGTERM) the watcher SIGKILLs the rest of its group before any
+restart. Without this, an extension that forked kept the fork running
+through disable and uninstall, holding its ``DROPLET_EXT_TOKEN``. The group
+is addressed by the child's pid, never ``os.getpgid`` (once the child is
+reaped that would fail, or name another group). A fork that calls ``setsid``
+itself leaves the group; the container's ``pids_limit`` still bounds it, and
+a same-uid process can do worse (extension-trust.md).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -233,6 +249,21 @@ class _Entry:
         }
 
 
+def _signal_group(proc: subprocess.Popen, *, kill: bool) -> None:
+    """SIGTERM (or SIGKILL) the child's whole process group. start_new_session
+    made the child its group leader, so the group id IS its pid. A group with
+    nobody left in it is not an error. A Windows dev checkout has no process
+    groups: the child alone is signalled there."""
+    if not hasattr(os, "killpg"):
+        if proc.poll() is None:
+            proc.kill() if kill else proc.terminate()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 class Supervisor:
     def __init__(self) -> None:
         self._entries: dict[str, _Entry] = {}
@@ -240,6 +271,8 @@ class Supervisor:
 
     def _spawn(self, entry: _Entry) -> None:
         # No preexec_fn: the limits are the wrapper's job (limited_command).
+        # A new session: the child leads its own process group, so a stop can
+        # take everything it forks (the module docstring).
         entry.proc = subprocess.Popen(
             entry.argv,
             cwd=entry.cwd,
@@ -248,6 +281,7 @@ class Supervisor:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            start_new_session=True,
         )
         entry.state = "running"
         entry.started_at = time.time()
@@ -256,6 +290,8 @@ class Supervisor:
     def _watch(self, entry: _Entry) -> None:
         assert entry.proc is not None
         code = entry.proc.wait()
+        # Whatever the child forked dies with it, before any restart.
+        _signal_group(entry.proc, kill=True)
         with self._lock:
             entry.exit_code = code
             if entry.stop_requested:
@@ -318,13 +354,17 @@ class Supervisor:
                 return None
             entry.stop_requested = True
             proc = entry.proc
+        # A child that already exited had its group killed by the watcher.
         if proc is not None and proc.poll() is None:
-            proc.terminate()
+            _signal_group(proc, kill=False)
             try:
                 proc.wait(timeout=grace_s)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=grace_s)
+                pass
+            # Whatever is left of the group: the child if it ignored SIGTERM,
+            # or a fork that did.
+            _signal_group(proc, kill=True)
+            proc.wait(timeout=grace_s)
         # Let the watcher record the final state.
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:

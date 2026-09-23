@@ -18,8 +18,9 @@
  * for a privilege claim. The classification record (WARP-2426) decides.
  *
  * PINNED TO THE SIGNED MANIFEST. The attach path hands the port the tools
- * the verified manifest provides (`pinned`). Every listing is compared with
- * them — names, descriptions, input-schema hashes — and a listing that
+ * the verified manifest provides (`pinned`, required: there is no unpinned
+ * port, which would pass the wire's listing through). Every listing is
+ * compared with them — names, descriptions, input-schema hashes — and a listing that
  * differs throws {@link ExtensionListingMismatchError}: the extension's own
  * code runs in the shim's process, so a listing that drifts after attach
  * is a changed surface, and the multiplexer stops advertising it
@@ -28,7 +29,12 @@
  * A FAILED CALL IS A TOOL ERROR. A JSON-RPC error, a relay refusal (the
  * extension is not running) or a sandbox error comes back as
  * `{isError: true}` with a bounded message, the shape the agent loop feeds
- * back to the model; it is never thrown into the loop. `listTools` DOES
+ * back to the model; it is never thrown into the loop. A successful result
+ * is bounded too: at most MAX_CONTENT_ENTRIES text entries, each cut at
+ * EXTENSION_CONTENT_TEXT_CAP_BYTES (on a character boundary, with a line
+ * that says so). The sandbox relay caps only the whole answer
+ * (SANDBOX_EXTENSION_OUTPUT_CAP_BYTES, 1 MiB by default), which the
+ * extension could spend on one entry. `listTools` DOES
  * throw: the multiplexer records that as REMOTE_CATALOG_UNAVAILABLE, and the
  * attach path refuses to advertise a catalog it could not read.
  */
@@ -45,12 +51,14 @@ export const EXTENSION_CALL_TIMEOUT_MS = 30_000;
 const MAX_ERROR_TEXT = 500;
 /** Bound on content entries relayed from one result. */
 const MAX_CONTENT_ENTRIES = 16;
+/** Bound on the UTF-8 bytes of one text entry relayed from a result. */
+export const EXTENSION_CONTENT_TEXT_CAP_BYTES = 32 * 1024;
 
 export interface ExtensionMcpPortOptions {
   slug: string;
   sandbox: Pick<ExtensionSandboxClient, "rpc">;
   /** The tools the signed manifest provides; every listing must equal them. */
-  pinned?: readonly McpToolDescriptor[];
+  pinned: readonly McpToolDescriptor[];
   listTimeoutMs?: number;
   callTimeoutMs?: number;
 }
@@ -104,6 +112,21 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 
 const bounded = (s: string): string => (s.length > MAX_ERROR_TEXT ? `${s.slice(0, MAX_ERROR_TEXT)}…` : s);
 
+/**
+ * One text entry, at most EXTENSION_CONTENT_TEXT_CAP_BYTES of it: cut on a
+ * UTF-8 character boundary, followed by a line that says how much there
+ * was. Never a silent slice.
+ */
+function capText(text: string): string {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= EXTENSION_CONTENT_TEXT_CAP_BYTES) return text;
+  const buf = Buffer.from(text, "utf8");
+  let end = EXTENSION_CONTENT_TEXT_CAP_BYTES;
+  // Back up over continuation bytes (10xxxxxx) to the start of a character.
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;
+  return `${buf.subarray(0, end).toString("utf8")}\n[truncated: the extension returned ${bytes} bytes; the first ${end} are shown]`;
+}
+
 function toolError(tool: string, message: string): McpToolCallOutcome {
   return {
     isError: true,
@@ -117,7 +140,7 @@ export class ExtensionMcpPort implements McpClientPort {
   readonly #sandbox: Pick<ExtensionSandboxClient, "rpc">;
   readonly #listTimeoutMs: number;
   readonly #callTimeoutMs: number;
-  readonly #pinned: readonly McpToolDescriptor[] | null;
+  readonly #pinned: readonly McpToolDescriptor[];
   #nextId = 1;
 
   constructor(opts: ExtensionMcpPortOptions) {
@@ -125,7 +148,10 @@ export class ExtensionMcpPort implements McpClientPort {
     this.#sandbox = opts.sandbox;
     this.#listTimeoutMs = opts.listTimeoutMs ?? EXTENSION_LIST_TIMEOUT_MS;
     this.#callTimeoutMs = opts.callTimeoutMs ?? EXTENSION_CALL_TIMEOUT_MS;
-    this.#pinned = opts.pinned ? opts.pinned.map((t) => ({ ...t })) : null;
+    if (!Array.isArray(opts.pinned)) {
+      throw new ExtensionMcpError(`the port for ${opts.slug} needs the signed manifest's tools (pinned)`);
+    }
+    this.#pinned = opts.pinned.map((t) => ({ ...t }));
   }
 
   /** One JSON-RPC exchange; returns `result` or throws with the reason. */
@@ -161,7 +187,6 @@ export class ExtensionMcpPort implements McpClientPort {
       // extension's code put on the wire stop here.
       return { name: t.name, description: t.description, inputSchema: t.inputSchema };
     });
-    if (!this.#pinned) return listed;
     const why = compareExtensionListing(this.#pinned, listed);
     if (why) throw new ExtensionListingMismatchError(`${this.slug}: ${why}`);
     // What crosses is the signed manifest's copy, never the wire's.
@@ -181,7 +206,7 @@ export class ExtensionMcpPort implements McpClientPort {
     const content = result.content
       .filter((c): c is { type: string; text: string } => isObject(c) && c.type === "text" && typeof c.text === "string")
       .slice(0, MAX_CONTENT_ENTRIES)
-      .map((c) => ({ type: "text", text: c.text }));
+      .map((c) => ({ type: "text", text: capText(c.text) }));
     // Omitted is false (MCP default); anything but a boolean is an error.
     const isError = result.isError === undefined ? false : result.isError !== false;
     return { content, isError };

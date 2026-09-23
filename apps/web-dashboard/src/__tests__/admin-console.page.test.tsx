@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import React from "react";
-import { NAV_GROUPS, visibleItems } from "@/components/nav-config";
+import { NAV_GROUPS, settingsGroups, visibleItems } from "@/components/nav-config";
 
 const fetchSystemHealthMock = vi.fn();
 const fetchUsersMock = vi.fn();
@@ -164,15 +164,26 @@ describe("/admin — nav entry", () => {
     expect(entry).toBeDefined();
   });
 
-  it("is visible to an operator", () => {
+  // WARP-2967 tucked it behind Settings → System: the console is where an
+  // operator goes deliberately, not a row every viewer scans past. The ROLE
+  // gate is what these cases hold and it did not move.
+  const offered = (role: Parameters<typeof visibleItems>[1]) =>
+    settingsGroups(role, caps, allModulesOn).flatMap((g) =>
+      g.items.map((i) => i.href),
+    );
+
+  it("is offered to an operator, from Settings", () => {
+    expect(offered("owner")).toContain("/admin");
+    // …and on no nav surface, which is what the tuck means.
     const hrefs = visibleItems(adminGroup().items, "owner", caps, allModulesOn).map(
       (i) => i.href,
     );
-    expect(hrefs).toContain("/admin");
+    expect(hrefs).not.toContain("/admin");
   });
 
   it("is hidden from everyone else", () => {
     for (const role of ["family", "guest"] as const) {
+      expect(offered(role), role).not.toContain("/admin");
       const hrefs = visibleItems(adminGroup().items, role, caps, allModulesOn).map(
         (i) => i.href,
       );

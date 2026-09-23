@@ -7,7 +7,6 @@ const {
   createSourceMock,
   syncSourceMock,
   deleteSourceMock,
-  getPublishUrlMock,
 } = vi.hoisted(() => ({
   toastMock: vi.fn(),
   useCalendarSourcesMock: vi.fn(() => ({
@@ -18,7 +17,6 @@ const {
   createSourceMock: vi.fn(),
   syncSourceMock: vi.fn(),
   deleteSourceMock: vi.fn(),
-  getPublishUrlMock: vi.fn(),
 }));
 
 vi.mock("@/components/Toast", () => ({
@@ -30,7 +28,9 @@ vi.mock("@/lib/hooks/useCalendar", () => ({
   createSource: createSourceMock,
   syncSource: syncSourceMock,
   deleteSource: deleteSourceMock,
-  getPublishUrl: getPublishUrlMock,
+  usePublishLinkStatus: () => ({ status: undefined, refresh: vi.fn() }),
+  rotatePublishLink: vi.fn(),
+  revokePublishLink: vi.fn(),
 }));
 
 import { SubscriptionsPanel } from "@/components/calendar/SubscriptionsPanel";
@@ -41,7 +41,6 @@ describe("SubscriptionsPanel — typed error → friendly toast (WARP-294)", () 
     createSourceMock.mockReset();
     syncSourceMock.mockReset();
     deleteSourceMock.mockReset();
-    getPublishUrlMock.mockReset();
     useCalendarSourcesMock.mockReturnValue({
       sources: [],
       refresh: vi.fn(),

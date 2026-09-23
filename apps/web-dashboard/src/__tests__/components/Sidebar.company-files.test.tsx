@@ -6,7 +6,7 @@
  * (WARP-1341: the build is business-only, so there is no workspace gate.)
  * Mock setup mirrors Sidebar.module-gating.test.tsx.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, within } from "@testing-library/react";
 
 vi.mock("next/link", () => ({
@@ -39,11 +39,12 @@ vi.mock("@/lib/workspace", () => ({
   }),
 }));
 
+const pathnameRef = { current: "/settings" as string };
 vi.mock("next/navigation", async () => {
   const actual: any = await vi.importActual("next/navigation");
   return {
     ...actual,
-    usePathname: () => "/",
+    usePathname: () => pathnameRef.current,
     useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   };
 });
@@ -71,7 +72,17 @@ function desktopAside(): HTMLElement {
   return aside;
 }
 
+/**
+ * WARP-2967 — the entry moved behind Settings (→ Workspace: it is the
+ * company's storage roster, not a daily destination), so the sidebar offers it
+ * from the contextual Settings panel rather than the main tree. The ROLE gate
+ * is what this file has always been about and it did not move.
+ */
 describe("<Sidebar> Company files entry", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/settings";
+  });
+
   it("shows for an owner", () => {
     authRole = "owner";
     render(<Sidebar />);
@@ -95,6 +106,13 @@ describe("<Sidebar> Company files entry", () => {
     render(<Sidebar />);
     const aside = desktopAside();
     expect(within(aside).queryByRole("link", { name: /company files/i })).toBeNull();
+    expect(document.querySelector("a[href='/admin/files']")).toBeNull();
+  });
+
+  it("is absent from the MAIN tree even for an owner — Settings owns the way in", () => {
+    authRole = "owner";
+    pathnameRef.current = "/";
+    render(<Sidebar />);
     expect(document.querySelector("a[href='/admin/files']")).toBeNull();
   });
 });

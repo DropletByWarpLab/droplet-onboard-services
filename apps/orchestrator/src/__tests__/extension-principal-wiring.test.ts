@@ -34,7 +34,7 @@ vi.mock("../services/ai-gateway.client.js", () => ({
 }));
 
 import { createApp } from "../app.js";
-import { _setAuthPrismaForTests } from "../middleware/auth.js";
+import { bindExtensionPrincipalPrisma } from "../services/extension-principal.js";
 import { mintExtensionToken } from "../services/extension-lifecycle.service.js";
 import { extensionPrisma } from "./helpers/extension-test-kit.js";
 
@@ -45,7 +45,7 @@ let token: string;
 
 beforeAll(() => {
   app = createApp(new PrismaClient());
-  // createApp wires its own Prisma into auth; the extension row lives in the kit.
+  // createApp binds its own Prisma to the bearer lookup; the extension row lives in the kit.
   const db = extensionPrisma({ users: [{ id: "u-owner", username: "romain", role: "owner" }] });
   const minted = mintExtensionToken();
   token = minted.token;
@@ -61,11 +61,11 @@ beforeAll(() => {
     failureReason: null,
   });
   db.versions.set("v-wc", { id: "v-wc", extensionId: "wc", version: "0.1.0" });
-  _setAuthPrismaForTests(db.prisma);
+  bindExtensionPrincipalPrisma(db.prisma);
 });
 
 afterAll(() => {
-  _setAuthPrismaForTests(null);
+  bindExtensionPrincipalPrisma(null);
 });
 
 describe("createApp mounts the extension principal guard before every protected router", () => {

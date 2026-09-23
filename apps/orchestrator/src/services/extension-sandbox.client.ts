@@ -48,6 +48,12 @@ export interface SandboxExtensionStatus {
   process: { state: string; restarts: number; exitCode: number | null } | null;
 }
 
+/** One entry of GET /extensions: an extension the sandbox holds. */
+export interface SandboxHeldExtension {
+  slug: string;
+  running: boolean;
+}
+
 export interface ExtensionInstallRequest {
   workspaceId: string;
   version: string;
@@ -84,6 +90,8 @@ export class ExtensionSandboxError extends Error {
 export interface ExtensionSandboxClient {
   proposalManifest(workspaceId: string, version: string): Promise<ProposalManifest>;
   budget(): Promise<SandboxBudget>;
+  /** Every extension the sandbox holds and whether its process runs (the reconciler's stray sweep). */
+  list(): Promise<SandboxHeldExtension[]>;
   /** null when the sandbox has no such extension installed (e.g. after a restart). */
   status(slug: string): Promise<SandboxExtensionStatus | null>;
   install(slug: string, req: ExtensionInstallRequest): Promise<SandboxExtensionStatus>;
@@ -247,6 +255,28 @@ export function createExtensionSandboxClient(
     },
     async budget() {
       return unwrap<SandboxBudget>(await call("GET", "/extensions/budget", undefined, DEFAULT_TIMEOUT_MS), "budget");
+    },
+    async list() {
+      const body = unwrap<{ extensions?: unknown }>(
+        await call("GET", "/extensions", undefined, DEFAULT_TIMEOUT_MS),
+        "extension list",
+      );
+      // Only a well-formed list is trusted: the reconciler stops what this
+      // says runs, and a body it cannot read must not pass for "nothing".
+      const list = body && typeof body === "object" ? body.extensions : undefined;
+      const wellFormed =
+        Array.isArray(list) &&
+        list.every(
+          (e) =>
+            e !== null &&
+            typeof e === "object" &&
+            typeof (e as SandboxHeldExtension).slug === "string" &&
+            typeof (e as SandboxHeldExtension).running === "boolean",
+        );
+      if (!wellFormed) {
+        throw new ExtensionSandboxError("the sandbox answered an extension list it could not read", 502, "SANDBOX_ERROR");
+      }
+      return (list as SandboxHeldExtension[]).map((e) => ({ slug: e.slug, running: e.running }));
     },
     async status(slug) {
       const r = await call("GET", slugPath(slug), undefined, DEFAULT_TIMEOUT_MS);

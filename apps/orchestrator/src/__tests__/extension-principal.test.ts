@@ -12,7 +12,11 @@
  *   - /self resolves the INSTALLING OWNER at call time: demoted, deactivated
  *     or deleted → 403, never an empty 200;
  *   - /self/call runs a static read tool AS THAT OWNER (MUTATION: dispatch
- *     as the principal → red) and refuses a write tool with a 403.
+ *     as the principal → red) and refuses a write tool with a 403;
+ *   - /self/call admits only the pinned allowlist (empty in v1), and never
+ *     a read that leaves the box: get_weather and cloud_query_dataset are a
+ *     403 even from an allowlist that names them (review #2325 blocker 2;
+ *     MUTATION: go back to the read-only predicate → they run → red).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
@@ -46,7 +50,8 @@ vi.mock("../services/jwt.service.js", () => ({
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 
 import { TOOL_CATALOG } from "@droplet/tools-core";
-import { authMiddleware, _setAuthPrismaForTests, validateTokenForWs } from "../middleware/auth.js";
+import { authMiddleware, validateTokenForWs } from "../middleware/auth.js";
+import { bindExtensionPrincipalPrisma } from "../services/extension-principal.js";
 import { extensionPrincipalGuard } from "../middleware/extension-principal-guard.js";
 import { createExtensionsRouter } from "../routes/extensions.js";
 import { mintExtensionToken } from "../services/extension-lifecycle.service.js";
@@ -63,7 +68,9 @@ type CallTool = (name: string, args: Record<string, unknown>, context?: McpCallC
   content: { type: string; text?: string }[];
 }>;
 
-function setup(opts: { owner?: KitUser | null; status?: string; selfCall?: boolean } = {}) {
+function setup(
+  opts: { owner?: KitUser | null; status?: string; selfCall?: boolean; selfCallTools?: readonly string[] } = {},
+) {
   const users = opts.owner === null ? [] : [opts.owner ?? OWNER];
   const db = extensionPrisma({ users });
   const { token, hash } = mintExtensionToken();
@@ -79,7 +86,7 @@ function setup(opts: { owner?: KitUser | null; status?: string; selfCall?: boole
     failureReason: null,
   });
   db.versions.set("v-wc", { id: "v-wc", extensionId: "wc", version: "0.1.0" });
-  _setAuthPrismaForTests(db.prisma);
+  bindExtensionPrincipalPrisma(db.prisma);
 
   const callTool = vi.fn<CallTool>(async () => ({ isError: false, content: [{ type: "text", text: "{\"ok\":true}" }] }));
   const app = express();
@@ -98,6 +105,7 @@ function setup(opts: { owner?: KitUser | null; status?: string; selfCall?: boole
       identity: fakeSidecar(),
       mcp: { isStarted: true, callTool },
       selfCallEnabled: opts.selfCall ?? true,
+      ...(opts.selfCallTools ? { selfCallTools: opts.selfCallTools } : {}),
     }),
   );
   return { app, db, token, callTool };
@@ -115,7 +123,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  _setAuthPrismaForTests(null);
+  bindExtensionPrincipalPrisma(null);
 });
 
 const deniedRows = () =>
@@ -247,8 +255,8 @@ describe("/self/call", () => {
     expect((await request(k.app).get("/api/extensions/self").set(bearer(k.token))).status).toBe(200);
   });
 
-  it("runs a static read tool as the installing owner, naming the extension", async () => {
-    const k = setup();
+  it("runs an allowlisted box-local read tool as the installing owner, naming the extension", async () => {
+    const k = setup({ selfCallTools: [READ_TOOL] });
     const res = await request(k.app)
       .post("/api/extensions/self/call")
       .set(bearer(k.token))
@@ -259,12 +267,34 @@ describe("/self/call", () => {
   });
 
   it("refuses a write tool with a 403 and dispatches nothing", async () => {
-    const k = setup();
+    const k = setup({ selfCallTools: [WRITE_TOOL] });
     const res = await request(k.app).post("/api/extensions/self/call").set(bearer(k.token)).send({ tool: WRITE_TOOL });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe("write_tool_refused");
     expect(k.callTool).not.toHaveBeenCalled();
   });
+
+  it("with the shipped allowlist (empty in v1) every static tool is refused, and the denial is audited", async () => {
+    const k = setup();
+    const res = await request(k.app).post("/api/extensions/self/call").set(bearer(k.token)).send({ tool: READ_TOOL });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("tool_not_allowlisted");
+    expect(k.callTool).not.toHaveBeenCalled();
+    expect(deniedRows().at(-1)?.refs).toMatchObject({ reason: "extension-tool-not-allowlisted" });
+  });
+
+  for (const tool of ["get_weather", "cloud_query_dataset", "currency_convert"]) {
+    it(`refuses ${tool}: its read leaves the box, even from an allowlist that names it`, async () => {
+      for (const allow of [undefined, [tool]]) {
+        const k = setup(allow ? { selfCallTools: allow } : {});
+        const res = await request(k.app).post("/api/extensions/self/call").set(bearer(k.token)).send({ tool });
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe("off_box_tool_refused");
+        expect(k.callTool).not.toHaveBeenCalled();
+        expect(deniedRows().at(-1)?.refs).toMatchObject({ reason: "extension-off-box-tool" });
+      }
+    });
+  }
 
   it("knows only the static catalog: a runtime or another extension's tool is not callable", async () => {
     const k = setup();

@@ -23,6 +23,7 @@ from cryptography.x509.oid import NameOID
 
 from extension_signing import (
     EXTENSION_KEY_FILE,
+    EXTENSION_KEY_FILE_MODE,
     EXTENSION_KEY_USAGE,
     signing_envelope,
     spki_fingerprint,
@@ -339,6 +340,9 @@ class MockBackend:
                     "priv_pem": priv_pem.decode(),
                     "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 }).encode(),
+                # Private-key material: owner read/write only, whatever the
+                # process umask is (review #2312).
+                mode=EXTENSION_KEY_FILE_MODE,
             )
             self._extension_key = key
             return key

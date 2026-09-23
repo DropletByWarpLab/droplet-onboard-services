@@ -20,9 +20,18 @@ vi.mock("./api", async (importOriginal) => {
 import { createDirectory, uploadFiles, UploadBatchError } from "./api";
 import { runUpload } from "./run-upload";
 import type { DroppedSelection } from "@/components/FileManager/dropped-entries";
+import type { UploadedFileEntry } from "@droplet/shared-types";
 
 const uploadFilesMock = vi.mocked(uploadFiles);
 const createDirectoryMock = vi.mocked(createDirectory);
+
+const landedAs = (name: string, extra: Partial<UploadedFileEntry> = {}): UploadedFileEntry => ({
+  name,
+  path: `/${name}`,
+  size: 1,
+  status: "uploaded",
+  ...extra,
+});
 
 function selectionOf(paths: string[]): DroppedSelection {
   return {
@@ -36,7 +45,10 @@ function selectionOf(paths: string[]): DroppedSelection {
 }
 
 beforeEach(() => {
-  uploadFilesMock.mockReset().mockResolvedValue(undefined);
+  // The server echoes each file under its own name unless told otherwise.
+  uploadFilesMock.mockReset().mockImplementation(async (_path, files) =>
+    Array.from(files).map((f) => landedAs(f.name)),
+  );
   createDirectoryMock.mockReset().mockResolvedValue(undefined);
 });
 
@@ -64,7 +76,10 @@ describe("WARP-1912 — runUpload uploadedPaths manifest", () => {
 
   it("excludes exactly the files the typed error says did not land", async () => {
     uploadFilesMock.mockRejectedValueOnce(
-      new UploadBatchError(2, 3, new Error("boom"), ["b.txt"]),
+      new UploadBatchError(2, 3, new Error("boom"), ["b.txt"], [
+        landedAs("a.txt"),
+        landedAs("c.txt"),
+      ]),
     );
 
     const result = await runUpload(selectionOf(["a.txt", "b.txt", "c.txt"]), {
@@ -74,6 +89,25 @@ describe("WARP-1912 — runUpload uploadedPaths manifest", () => {
 
     expect(result.uploaded).toBe(2);
     expect(result.uploadedPaths).toEqual(["/a.txt", "/c.txt"]);
+  });
+
+  // WARP-2096 — a same-name upload is kept under a new name. Undo must
+  // address THAT file; addressing the picked name would delete the user's
+  // pre-existing original.
+  it("uses the server's final name, and counts renamed + already-on-the-box files", async () => {
+    uploadFilesMock.mockResolvedValueOnce([
+      landedAs("report (1).pdf", { status: "renamed", requestedName: "report.pdf" }),
+      landedAs("photo.jpg", { duplicateOf: "/Old/photo.jpg" }),
+    ]);
+
+    const result = await runUpload(selectionOf(["report.pdf", "photo.jpg"]), {
+      basePath: "/Docs",
+      space: "personal",
+    });
+
+    expect(result.uploadedPaths).toEqual(["/Docs/report (1).pdf", "/Docs/photo.jpg"]);
+    expect(result.renamed).toBe(1);
+    expect(result.duplicates).toBe(1);
   });
 
   it("claims nothing for a group lost to an untyped failure", async () => {

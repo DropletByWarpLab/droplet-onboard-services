@@ -22,13 +22,17 @@
  * a demotion survives every reconnect.
  *
  * WARP-2900 — with ONE exception, for a caller that knows the tool's input
- * schema (a promoted extension; the Atlassian attach sends none). A tool
- * whose schema hash CHANGED is a different tool under an old name: a person
- * reviewed the arguments it used to take, not the ones it takes now. So it
- * goes back to {@link IMPORT_DEFAULT_CLASSIFICATION} with the review
- * cleared. The same name with the same hash keeps its review across a
- * version bump. An operator's BLOCK is never lifted by a reset: `denied`
- * stays, with the reviewer who set it. An unconfirmed write
+ * schema (a promoted extension; the Atlassian attach sends none). What a
+ * person reviewed is the tool's description AND its arguments, so the row
+ * keeps {@link remoteToolReviewHash} of the two (in the `inputSchemaHash`
+ * column). A tool whose description or schema CHANGED is a different tool
+ * under an old name: a person reviewed what it used to say and take, not
+ * what it says and takes now (review #2325: a description change reset
+ * nothing). So it goes back to {@link IMPORT_DEFAULT_CLASSIFICATION} with
+ * the review cleared, and a review sent with the hash it was shown is a
+ * STALE_REVIEW. The same name, description and schema keep their review
+ * across a version bump. An operator's BLOCK is never lifted by a reset:
+ * `denied` stays, with the reviewer who set it. An unconfirmed write
  * (`requiresWrite: true, requiresConfirmation: false`) is not expressible
  * through any writer: the service refuses it.
  *
@@ -55,6 +59,7 @@
  * refresh. A stale cache errs closed: a row that does not exist in the cache
  * is "not classified", never "allowed".
  */
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
 import {
@@ -92,7 +97,11 @@ export interface RemoteToolClassificationRow {
   reviewedBy: string | null;
   reviewedAt: Date | null;
   wireDescription: string | null;
-  /** WARP-2900 — sha256 of the canonical inputSchema last discovered; null when the caller sent none. */
+  /**
+   * WARP-2900 — {@link remoteToolReviewHash} of the description and the
+   * input-schema hash last discovered: what a review covers. Null when the
+   * caller sent no schema hash.
+   */
   inputSchemaHash?: string | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
@@ -101,14 +110,30 @@ export interface RemoteToolClassificationRow {
 export interface DiscoveredRemoteTool {
   /** The WIRE name — what the server calls it, before namespacing. */
   wireName: string;
-  /** Recorded for the operator; never read as truth. */
+  /**
+   * Recorded for the operator; never read as a privilege claim. With an
+   * `inputSchemaHash` it is also part of what a review covers (the header).
+   */
   description?: string;
   /**
-   * WARP-2900 — sha256 of the tool's canonical inputSchema. When present, a
-   * row whose stored hash differs is reset to the import default (see the
-   * header). Absent → the row's classification is never touched.
+   * WARP-2900 — sha256 of the tool's canonical inputSchema. When present,
+   * the row keeps {@link remoteToolReviewHash} of it and the description,
+   * and a row whose stored hash differs is reset to the import default (see
+   * the header). Absent → the row's classification is never touched.
    */
   inputSchemaHash?: string;
+}
+
+/**
+ * sha256 hex over what a person reviews of a tool: its description (absent
+ * is not the empty string) and its input-schema hash. Stored in the row's
+ * `inputSchemaHash` column, and what a review sends back as the hash it was
+ * shown.
+ */
+export function remoteToolReviewHash(description: string | undefined, inputSchemaHash: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ description: description ?? null, inputSchemaHash }), "utf8")
+    .digest("hex");
 }
 
 /** The one Prisma surface this module needs; typed narrowly so tests can hand
@@ -140,7 +165,8 @@ export async function recordDiscoveredRemoteTools(
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
       select: { id: true, denied: true, inputSchemaHash: true },
     })) as { id: string; denied: boolean; inputSchemaHash: string | null } | null;
-    const hash = tool.inputSchemaHash;
+    // The description and the arguments together: a person reviewed both.
+    const hash = tool.inputSchemaHash === undefined ? undefined : remoteToolReviewHash(tool.description, tool.inputSchemaHash);
     const schemaChanged = before !== null && hash !== undefined && before.inputSchemaHash !== hash;
     await prisma.remoteToolClassification.upsert({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
