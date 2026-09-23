@@ -63,7 +63,7 @@ type CallTool = (name: string, args: Record<string, unknown>, context?: McpCallC
   content: { type: string; text?: string }[];
 }>;
 
-function setup(opts: { owner?: KitUser | null; status?: string } = {}) {
+function setup(opts: { owner?: KitUser | null; status?: string; selfCall?: boolean } = {}) {
   const users = opts.owner === null ? [] : [opts.owner ?? OWNER];
   const db = extensionPrisma({ users });
   const { token, hash } = mintExtensionToken();
@@ -97,6 +97,7 @@ function setup(opts: { owner?: KitUser | null; status?: string } = {}) {
       sandbox: fakeSandbox().client,
       identity: fakeSidecar(),
       mcp: { isStarted: true, callTool },
+      selfCallEnabled: opts.selfCall ?? true,
     }),
   );
   return { app, db, token, callTool };
@@ -236,6 +237,16 @@ describe("/self acts for the owner who installed it, as they are now", () => {
 });
 
 describe("/self/call", () => {
+  it("ships off: with the flag unset it is a 503 and nothing is dispatched; /self still answers", async () => {
+    // MUTATION: drop the selfCallEnabled check → the read tool runs → red.
+    const k = setup({ selfCall: false });
+    const res = await request(k.app).post("/api/extensions/self/call").set(bearer(k.token)).send({ tool: READ_TOOL });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("self_call_disabled");
+    expect(k.callTool).not.toHaveBeenCalled();
+    expect((await request(k.app).get("/api/extensions/self").set(bearer(k.token))).status).toBe(200);
+  });
+
   it("runs a static read tool as the installing owner, naming the extension", async () => {
     const k = setup();
     const res = await request(k.app)

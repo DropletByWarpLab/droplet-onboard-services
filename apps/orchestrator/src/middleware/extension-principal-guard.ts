@@ -31,7 +31,8 @@ export const EXTENSION_PRINCIPAL_ROUTES: ReadonlySet<string> = new Set([
 /** An extension's call-back principal, by either of its two marks. */
 export function isExtensionPrincipal(user: AuthUser | undefined): boolean {
   if (!user) return false;
-  return user.extensionId !== undefined || user.id.startsWith(EXTENSION_PRINCIPAL_PREFIX);
+  // `id` is typed as always present; a hand-built principal may still lack it.
+  return user.extensionId !== undefined || (typeof user.id === "string" && user.id.startsWith(EXTENSION_PRINCIPAL_PREFIX));
 }
 
 export function extensionPrincipalGuard(req: Request, res: Response, next: NextFunction): void {

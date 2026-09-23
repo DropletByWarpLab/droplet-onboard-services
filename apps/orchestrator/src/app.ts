@@ -505,6 +505,7 @@ export function createApp(
         createExtensionAttacher({ prisma, mux: mcpClient, sandbox: createExtensionSandboxClient() }),
       ),
       orchestratorUrl: config.EXTENSION_CALLBACK_URL,
+      selfCallEnabled: config.EXTENSION_SELF_CALL_ENABLED,
       mcp: {
         get isStarted() {
           return mcpClient.isStarted;

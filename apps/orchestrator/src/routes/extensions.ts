@@ -24,8 +24,10 @@
  * still an owner — and answer 403 when nobody resolves (never an empty
  * 200). `/self/call` runs a static READ tool (TOOL_CATALOG, requiresWrite
  * and requiresConfirmation both false) as that owner, after the owner's
- * own reach check; a write is refused in v1. The /self routes are
- * registered before every `/extensions/:param` route.
+ * own reach check; a write is refused in v1. `/self/call` ships OFF
+ * (EXTENSION_SELF_CALL_ENABLED, a 503) until the sandbox's same-uid
+ * limitation is closed. The /self routes are registered before every
+ * `/extensions/:param` route.
  *
  * This file exports only the router factory (the route-file rule); every
  * helper lives in services/.
@@ -108,6 +110,8 @@ interface ExtensionsRouterDeps {
   orchestratorUrl?: string;
   /** H3: the dispatch `/self/call` runs through (the process-wide multiplexer). */
   mcp?: Pick<McpClientPort, "isStarted" | "callTool">;
+  /** H3: config.EXTENSION_SELF_CALL_ENABLED. Absent → off: `/self/call` is a 503. */
+  selfCallEnabled?: boolean;
 }
 
 export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRouterDeps = {}): Router {
@@ -223,6 +227,13 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
     try {
       const self = await resolveSelf(req, res);
       if (!self) return;
+      if (deps.selfCallEnabled !== true) {
+        res.status(503).json({
+          error: "self_call_disabled",
+          message: "extensions may not call tools on this box (EXTENSION_SELF_CALL_ENABLED is off)",
+        });
+        return;
+      }
       const body = selfCallSchema.safeParse(req.body ?? {});
       if (!body.success) {
         res.status(400).json({ error: "invalid_request", details: body.error.flatten() });
