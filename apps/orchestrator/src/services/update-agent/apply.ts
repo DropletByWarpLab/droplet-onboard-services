@@ -19,6 +19,10 @@
  *   2. pull the release images BY DIGEST;
  *   3. stage the release configs (sha256-gated against the VERIFIED
  *      manifest before a byte is unpacked);
+ *   3b. WARP-2995: reconcile the HOST .env (additive keys, COMPOSE_PROFILES
+ *      tokens, boot-unit profile flags) with the staged
+ *      docker/ota/env-reconcile.sh; a failure refuses the release
+ *      (`env_reconcile_failed`) before anything is swapped;
  *   4. `prisma migrate deploy` — gated on minOrchestratorSchema (the
  *      parse gate refuses `orchestrator_schema_unsupported` outright);
  *   5. recreate every manifest service EXCEPT the orchestrator via the
@@ -74,6 +78,8 @@
  *     failed and the rollback restored a healthy previous state;
  *   - `degraded_health`     — rides `failed`: the rollback ALSO failed
  *     its health gate (WARP-538 convention: NOT a new enum value).
+ *   - `env_reconcile_failed` — rides `rejected`: the host .env reconcile
+ *     (step 3b) failed; configs were restored and nothing was swapped.
  *
  * OBSERVABILITY (WARP-541) — every stage emits a structured
  * `event: "update.<stage>"` pino event (canonical list + payload rules:
@@ -110,7 +116,20 @@ export type ApplyFailureReason =
   | "configs_mismatch"
   | "image_signature_failed"
   | "health_gate_failed"
-  | "degraded_health";
+  | "degraded_health"
+  | "env_reconcile_failed";
+
+/**
+ * WARP-2995 — what docker/ota/env-reconcile.sh did to the host .env (key
+ * NAMES and profile tokens only, never a value). `profiles` is the box's
+ * COMPOSE_PROFILES after the reconcile.
+ */
+export interface EnvReconcileReport {
+  addedKeys: string[];
+  addedProfiles: string[];
+  profiles: string;
+  unitUpdated: boolean;
+}
 
 /**
  * Port to the compose-over-socket mechanics (production:
@@ -173,10 +192,20 @@ export interface ApplyRunner {
    */
   recreateSelfDetached(opts: { updateId: string; target: RecreateTarget }): Promise<void>;
   /**
-   * WARP-2970 — the compose services the (now staged) compose file enables on
-   * this box under its own COMPOSE_PROFILES: `docker compose config --services`.
+   * WARP-2995 — step 3b: additive, idempotent reconcile of the HOST .env
+   * (new keys, COMPOSE_PROFILES tokens, boot-unit profile flags) by the
+   * staged docker/ota/env-reconcile.sh, run host-side off `image` (the
+   * release orchestrator image, already pulled + verified). Throws on
+   * failure; the report is also kept in the update dir.
    */
-  enabledServices(): Promise<string[]>;
+  reconcileEnv(opts: { updateId: string; image: string }): Promise<EnvReconcileReport>;
+  /**
+   * WARP-2970 — the compose services the (now staged) compose file enables on
+   * this box: `docker compose config --services` under the box's REAL
+   * COMPOSE_PROFILES (WARP-2995: taken from this update's reconcile report;
+   * with no report, only profile-less services count as enabled).
+   */
+  enabledServices(opts: { updateId: string }): Promise<string[]>;
   /**
    * WARP-2970 — start services that have NO container yet, pinned to their
    * release refs (a third override, override-grow.yml). Post-commit only.
@@ -376,7 +405,7 @@ async function startNewlyEnabledServices(
   opts: { updateId: string; manifest: ReleaseManifest; refs: Record<string, string | null> },
 ): Promise<void> {
   try {
-    const enabled = new Set(await runner.enabledServices());
+    const enabled = new Set(await runner.enabledServices({ updateId: opts.updateId }));
     const missing = opts.manifest.services.filter(
       (s) => opts.refs[s.name] === null && enabled.has(s.name),
     );
@@ -700,6 +729,41 @@ export async function applyPendingUpdate(
     },
     "OTA step 3 — sha256-gated release configs staged",
   );
+  // ── step 3b (WARP-2995): reconcile the HOST .env before anything swaps ──
+  // The orchestrator cannot see .env, and scripts/ never ships over OTA, so
+  // this is the only way a key or COMPOSE_PROFILES token a release needs
+  // reaches an OTA-only box. A failure refuses the release HERE — configs
+  // restored, nothing recreated — instead of half-applying it.
+  const selfService = manifest.services.find((s) => s.name === SELF_SERVICE_NAME);
+  try {
+    if (!selfService) throw new Error("manifest has no orchestrator image to run the reconcile from");
+    const report = await runner.reconcileEnv({ updateId: row.id, image: selfService.image });
+    log.info(
+      {
+        event: "update.env_reconciled",
+        deviceUpdateId: row.id,
+        addedKeys: report.addedKeys,
+        addedProfiles: report.addedProfiles,
+        unitUpdated: report.unitUpdated,
+      },
+      "OTA step 3b — host .env reconciled (additive; key names only)",
+    );
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    await runner.restoreConfigs({ updateId: row.id });
+    await setStatus(prisma, log, row.id, "rejected", "env_reconcile_failed");
+    log.error(
+      { event: "update.env_reconcile_failed", deviceUpdateId: row.id, err: detail },
+      "OTA apply refused — the host .env reconcile failed; configs restored, nothing swapped",
+    );
+    return {
+      outcome: "rejected",
+      deviceUpdateId: row.id,
+      failureReason: "env_reconcile_failed",
+      detail,
+    };
+  }
+
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).
   const migrateStartedAt = Date.now();

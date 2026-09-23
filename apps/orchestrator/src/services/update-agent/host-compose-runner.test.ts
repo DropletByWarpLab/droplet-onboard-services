@@ -12,11 +12,15 @@
  * exec boundary is faked so the command surface is asserted deterministically.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createHostComposeRunner, type ExecFn } from "./host-compose-runner.js";
+import {
+  createHostComposeRunner,
+  parseEnvReconcileReport,
+  type ExecFn,
+} from "./host-compose-runner.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const DIGEST = (c: string) => `sha256:${c.repeat(64)}`;
@@ -331,12 +335,64 @@ describe("createHostComposeRunner (WARP-539)", () => {
       "enabled-services": "orchestrator\nemail-indexer\n\nWARN something odd\n",
     });
     const runner = makeRunner(fn);
-    expect(await runner.enabledServices()).toEqual(["orchestrator", "email-indexer"]);
+    expect(await runner.enabledServices({ updateId: "du-none" })).toEqual([
+      "orchestrator",
+      "email-indexer",
+    ]);
+    // WARP-2995: no reconcile report → explicit EMPTY profiles (profile-less
+    // services only), never "whatever this container's env says".
     expect(calls[0]!.args).toEqual([
       "enabled-services",
       "--compose-file",
       "/opt/droplet/docker/docker-compose.yml",
+      "--profiles",
+      "",
     ]);
+  });
+
+  it("enabledServices passes the box's real profiles from the update's reconcile report (WARP-2995)", async () => {
+    const { fn, calls } = fakeExec({ "enabled-services": "gateway\n" });
+    const runner = makeRunner(fn);
+    mkdirSync(path.join(workDir, "du-7"), { recursive: true });
+    writeFileSync(
+      path.join(workDir, "du-7", "env-reconcile.json"),
+      '{"addedKeys":[],"addedProfiles":["email"],"profiles":"linux,eval,email","unitUpdated":true,"backup":null}\n',
+    );
+    await runner.enabledServices({ updateId: "du-7" });
+    expect(calls[0]!.args.slice(-2)).toEqual(["--profiles", "linux,eval,email"]);
+  });
+
+  it("reconcileEnv runs the helper with the release image and parses its report (WARP-2995)", async () => {
+    const report =
+      '{"addedKeys":["SANDBOX_SERVICE_TOKEN"],"addedProfiles":["email"],"profiles":"linux,email","unitUpdated":true,"backup":"/d/.env.bak.ota-du-3"}';
+    const { fn, calls } = fakeExec({ "reconcile-env": `${report}\n` });
+    const runner = makeRunner(fn);
+    const img = `ghcr.io/x/droplet-orchestrator@${DIGEST("a")}`;
+    await expect(runner.reconcileEnv({ updateId: "du-3", image: img })).resolves.toEqual({
+      addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+      addedProfiles: ["email"],
+      profiles: "linux,email",
+      unitUpdated: true,
+    });
+    expect(calls[0]!.args).toEqual([
+      "reconcile-env",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-3",
+      "--image",
+      img,
+    ]);
+  });
+
+  it("parseEnvReconcileReport refuses an off-shape report (a value where a name belongs)", () => {
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":["A=secret"],"addedProfiles":[],"profiles":"","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":[],"addedProfiles":[],"profiles":"a;b","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseEnvReconcileReport("not json")).toThrow();
   });
 
   it("startServices pins each service in override-grow.yml and recreates with --target grow (WARP-2970)", async () => {

@@ -54,13 +54,14 @@
  * recreating them would grow the deployment, not update it (apply.ts).
  */
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import {
   SELF_SERVICE_NAME,
   type ApplyRunner,
+  type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
@@ -129,6 +130,36 @@ const DEFAULT_TIMEOUTS = { quickMs: 60_000, pullMs: 600_000, recreateMs: 300_000
  * parsed manifest and must not reach the generated YAML.
  */
 const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** COMPOSE_PROFILES shape apply-update.sh's `validate_profiles` accepts. */
+const PROFILES_RE = /^[a-z0-9,_-]*$/;
+
+/**
+ * Parse env-reconcile.sh's one-line JSON report, strictly: anything off-shape
+ * means the host step did not do what we think, so the caller refuses the
+ * update rather than guessing.
+ */
+export function parseEnvReconcileReport(text: string): EnvReconcileReport {
+  const line = text.trim().split("\n").at(-1) ?? "";
+  const r = JSON.parse(line) as Record<string, unknown>;
+  const names = (v: unknown) =>
+    Array.isArray(v) && v.every((x) => typeof x === "string" && /^[A-Za-z0-9_-]+$/.test(x));
+  if (
+    !names(r.addedKeys) ||
+    !names(r.addedProfiles) ||
+    typeof r.profiles !== "string" ||
+    !PROFILES_RE.test(r.profiles) ||
+    typeof r.unitUpdated !== "boolean"
+  ) {
+    throw new Error(`env-reconcile report has an unexpected shape: ${line.slice(0, 200)}`);
+  }
+  return {
+    addedKeys: r.addedKeys as string[],
+    addedProfiles: r.addedProfiles as string[],
+    profiles: r.profiles,
+    unitUpdated: r.unitUpdated,
+  };
+}
 
 /**
  * Image ref / image ID shape safe to embed UNQUOTED in the generated
@@ -407,8 +438,33 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       );
     },
 
-    async enabledServices(): Promise<string[]> {
-      const stdout = await run("enabled-services", [], timeouts.quickMs);
+    async reconcileEnv(args: { updateId: string; image: string }): Promise<EnvReconcileReport> {
+      const stdout = await run(
+        "reconcile-env",
+        ["--update-id", args.updateId, "--image", args.image],
+        timeouts.quickMs,
+      );
+      return parseEnvReconcileReport(stdout);
+    },
+
+    async enabledServices(args: { updateId: string }): Promise<string[]> {
+      // WARP-2995 — the box's REAL profiles come from this update's host-side
+      // reconcile report. This container's own COMPOSE_PROFILES is not a
+      // source: it is frozen at the orchestrator's creation, so it misses a
+      // token the reconcile just added (and is empty when compose could not
+      // read .env). No report → "" → only profile-less services count.
+      let profiles = "";
+      try {
+        profiles = parseEnvReconcileReport(
+          await readFile(path.join(updateDir(args.updateId), "env-reconcile.json"), "utf8"),
+        ).profiles;
+      } catch {
+        log.warn(
+          { deviceUpdateId: args.updateId },
+          "no env-reconcile report for this update — only profile-less services count as enabled",
+        );
+      }
+      const stdout = await run("enabled-services", ["--profiles", profiles], timeouts.quickMs);
       // One name per line; anything not service-shaped is not a service.
       return stdout
         .split("\n")

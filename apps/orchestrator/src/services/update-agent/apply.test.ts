@@ -364,8 +364,17 @@ class FakeRunner implements ApplyRunner {
   /** WARP-2970 — make the post-commit start fail. */
   startFails = false;
 
-  async enabledServices(): Promise<string[]> {
-    this.calls.push("enabledServices()");
+  /** WARP-2995 — make the host .env reconcile fail. */
+  reconcileFails = false;
+
+  async reconcileEnv(opts: { updateId: string; image: string }) {
+    this.calls.push(`reconcileEnv(${opts.updateId},${opts.image.split("@")[0]})`);
+    if (this.reconcileFails) throw new Error("stub: env-reconcile failed on the host");
+    return { addedKeys: ["SANDBOX_SERVICE_TOKEN"], addedProfiles: [], profiles: "linux", unitUpdated: false };
+  }
+
+  async enabledServices(opts: { updateId: string }): Promise<string[]> {
+    this.calls.push(`enabledServices(${opts.updateId})`);
     return this.enabled;
   }
 
@@ -473,6 +482,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
       "snapshot(du-1)",
       "pullImages(orchestrator,web-dashboard,device-identity-svc)",
       `stageConfigs(du-1,${CONFIGS_TAR.length}b)`,
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
       "migrateDeploy()",
       "recreateServices(web-dashboard,device-identity-svc,release)",
       "recreateSelfDetached(du-1,release)",
@@ -510,6 +520,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
         "update.snapshot_taken",
         "update.images_pulled",
         "update.configs_staged",
+        "update.env_reconciled",
         "update.migrations_applied",
         "update.apply_started",
         "update.services_recreated",
@@ -764,6 +775,52 @@ describe("applyPendingUpdate (WARP-539)", () => {
   });
 });
 
+describe("host .env reconcile before any swap (WARP-2995)", () => {
+  it("a failed reconcile refuses the release before anything is swapped, and restores configs", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.reconcileFails = true;
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "rejected",
+      failureReason: "env_reconcile_failed",
+    });
+    // Nothing migrated, recreated or swapped; the staged configs rolled back.
+    expect(runner.calls.slice(-2)).toEqual([
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
+      "restoreConfigs(du-1)",
+    ]);
+    expect(runner.calls.some((c) => /^(migrateDeploy|recreate)/.test(c))).toBe(false);
+    expect(runner.running).toEqual(PREVIOUS);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+  });
+
+  it("records what the reconcile added (key names only) in the update audit log", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.env_reconciled",
+        addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+        addedProfiles: [],
+        unitUpdated: false,
+      }),
+      expect.any(String),
+    );
+  });
+});
+
 describe("post-commit start of newly enabled services (WARP-2970)", () => {
   const EMAIL_DIGEST = `sha256:${"5".repeat(64)}`;
   function manifestWithEmailIndexer(): ReleaseManifest {
@@ -808,6 +865,10 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
     const runner = new FakeRunner(); // enabled = the deployed three only
     const { resume } = await applyAndResume(runner);
     expect(resume.outcome).toBe("committed");
+    // Romain 2026-09-23 (WARP-3001): profile off → image updated, not started.
+    expect(runner.calls).toContain(
+      "pullImages(orchestrator,web-dashboard,device-identity-svc,email-indexer)",
+    );
     expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
     expect(runner.running["email-indexer"]).toBeUndefined();
   });
