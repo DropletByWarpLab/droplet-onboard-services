@@ -249,6 +249,22 @@ def test_a_scheme_in_a_draft_string_is_a_problem_except_the_static_origin():
     assert not any("baseUrl.origin" in p for p in facts["problems"])
 
 
+def test_a_scheme_in_a_draft_key_is_a_problem_and_no_key_spells_the_origin():
+    # A key is a string too (rjouffret on #2324), and a key that is not a
+    # plain name is located as [?], so a root "baseUrl.origin" key is not
+    # the static origin. MUTATION: walk values only, or locate keys by their
+    # raw text → red.
+    dyn = _dynamic_draft()
+    dyn["guide"]["https://exfil.evil.example/x"] = ""
+    facts = connector_draft.describe_tree(lambda p: json.dumps(dyn) if p == "connector-draft.json" else None)
+    assert any("guide.[?] (key) carries a scheme URL" in p for p in facts["problems"])
+    assert not any("exfil" in p for p in facts["problems"])
+    static = _static_draft()
+    static["baseUrl.origin"] = "https://exfil.evil.example"
+    facts = connector_draft.describe_tree(lambda p: json.dumps(static) if p == "connector-draft.json" else None)
+    assert any("[?] carries a scheme URL" in p for p in facts["problems"])
+
+
 def test_the_readback_only_ever_names_a_domain_and_a_bounded_name():
     # rjouffret on #2324: describe_tree does not re-validate the draft, so a
     # hand-written suffix or host (an IP, free prose) reached "nothing on
@@ -309,6 +325,10 @@ def test_propose_a_connector_draft_writes_no_manifest_and_tags(store):
         ("profile-origin", "baseUrl does not match connector-draft.json"),
         ("profile-extra-code", "not the profile `npm run build` renders"),
         ("profile-escaped-url", "scheme URL other than its origin"),
+        # The same URL as a KEY, whose value is a number (rjouffret's repro),
+        # and as a value under a key that spells the origin's location.
+        ("profile-escaped-url-key", "scheme URL other than its origin"),
+        ("profile-origin-spelling-key", "scheme URL other than its origin"),
         ("adr042-header-only", "no §2 row for Acme Tasks"),
         ("adr042-no-provisioning", "no §7 provisioning row for Acme Tasks"),
         ("adr042-blank-cell", "no §4 accept/reject row for Acme Tasks"),
@@ -344,6 +364,16 @@ def test_propose_refuses_a_draft_whose_renders_are_missing_or_disagree(store, br
         (work / paths["profile"]).write_text(
             text.replace('"probePath": "/v1/me"', '"probePath": "https:\\/\\/api.evil.example/v1"'), encoding="utf-8"
         )
+    elif breakage in ("profile-escaped-url-key", "profile-origin-spelling-key"):
+        text = (work / paths["profile"]).read_text(encoding="utf-8")
+        extra = (
+            '"https:\\/\\/exfil.evil.example\\/x": 1'
+            if breakage == "profile-escaped-url-key"
+            else '"baseUrl.origin": "https:\\/\\/exfil.evil.example\\/x"'
+        )
+        edited = text.replace('"probePath": "/v1/me"', f'"probePath": "/v1/me", {extra}')
+        assert edited.count("://") == 1  # the origin's own, nothing else in the text
+        (work / paths["profile"]).write_text(edited, encoding="utf-8")
     elif breakage == "adr042-header-only":
         (work / paths["adr042"]).write_text(
             "| Vendor | What the owner pastes | Accepted shape | Full-privilege alternative to refuse "
@@ -389,6 +419,16 @@ def test_propose_refuses_a_scheme_url_in_a_dynamic_draft(store):
     with pytest.raises(StoreError) as escaped:
         workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
     assert escaped.value.status == 409 and "scheme URL" in str(escaped.value)
+    # The same URL as a KEY beside probePath, its value a number
+    # (rjouffret's repro on #2324). MUTATION: walk values only → red.
+    profile.write_text(
+        rendered.replace('"probePath": "/v1/me"', '"probePath": "/v1/me", "https:\\/\\/exfil.evil.example\\/x": 1'),
+        encoding="utf-8",
+    )
+    assert "://" not in profile.read_text(encoding="utf-8")
+    with pytest.raises(StoreError) as keyed:
+        workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
+    assert keyed.value.status == 409 and "scheme URL" in str(keyed.value)
     profile.write_text(rendered, encoding="utf-8")
     guide.write_text(GUIDE, encoding="utf-8")
     p = workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)

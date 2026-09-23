@@ -136,14 +136,28 @@ def _h2(text: str) -> list[str]:
     return [line.rstrip() for line in text.replace("\r\n", "\n").split("\n") if line.startswith("## ")]
 
 
+_PLAIN_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
+
 def _strings(value: Any, at: str = "") -> list[tuple[str, str]]:
-    """Every string in `value` with its dotted location (validate.mjs strings())."""
+    """Every string in `value`, object KEYS as well as values, with its dotted
+    location (validate.mjs strings()). A key is a string too: `"https:\\/\\/x": 1`
+    decodes to a URL (review of #2324). A key that is not a plain name is
+    located as `[?]`, so no key can spell `baseUrl.origin` (the one place a
+    static draft may carry a scheme) and no URL is echoed into a problem."""
     if isinstance(value, str):
         return [(at, value)]
     if isinstance(value, list):
         return [pair for i, v in enumerate(value) for pair in _strings(v, f"{at}[{i}]")]
     if isinstance(value, dict):
-        return [pair for k, v in value.items() for pair in _strings(v, f"{at}.{k}" if at else str(k))]
+        out: list[tuple[str, str]] = []
+        for k, v in value.items():
+            key = str(k)
+            seg = key if _PLAIN_KEY_RE.fullmatch(key) else "[?]"
+            loc = f"{at}.{seg}" if at else seg
+            out.append((f"{loc} (key)", key))
+            out.extend(_strings(v, loc))
+        return out
     return []
 
 

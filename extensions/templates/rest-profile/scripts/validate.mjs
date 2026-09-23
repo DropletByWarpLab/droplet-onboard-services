@@ -60,11 +60,26 @@ export const OUTPUT_DIRS = [
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStr = (v) => typeof v === "string";
 
-/** Every string anywhere in `value`, with its dotted location. */
+const PLAIN_KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+
+/**
+ * Every string anywhere in `value`, object KEYS as well as values, with its
+ * dotted location. A key is a string too: `"https:\/\/x": 1` decodes to a
+ * URL (review of #2324). A key that is not a plain name is located as `[?]`,
+ * so no key can spell a location such as `baseUrl.origin` (the one place a
+ * static draft may carry a scheme) and no URL is echoed into a problem.
+ * connector_draft.py's _strings() builds the same locations.
+ */
 function strings(value, at = "") {
   if (isStr(value)) return [[at, value]];
   if (Array.isArray(value)) return value.flatMap((v, i) => strings(v, `${at}[${i}]`));
-  if (isObj(value)) return Object.entries(value).flatMap(([k, v]) => strings(v, at ? `${at}.${k}` : k));
+  if (isObj(value)) {
+    return Object.entries(value).flatMap(([k, v]) => {
+      const seg = PLAIN_KEY_RE.test(k) ? k : "[?]";
+      const loc = at ? `${at}.${seg}` : seg;
+      return [[`${loc} (key)`, k], ...strings(v, loc)];
+    });
+  }
   return [];
 }
 

@@ -197,6 +197,10 @@ const INVALID = {
   "static origin is an IP": invalid("static", (d) => (d.baseUrl.origin = SCHEME + "127.0.0.1")),
   "allowed host is an IP": invalid("dynamic", (d) => (d.baseUrl.allowedHosts = ["127.0.0.1"])),
   "allowed suffix is numeric": invalid("dynamic", (d) => (d.baseUrl.allowedSuffixes = [".0.0.1"])),
+  // A key is a string too (review of #2324), and no key may spell the one
+  // location a static draft's scheme is allowed at.
+  "a key carrying a scheme": invalid("dynamic", (d) => (d.guide[`${SCHEME}exfil.evil.example/x`] = "")),
+  "a key spelling baseUrl.origin": invalid("static", (d) => (d["baseUrl.origin"] = `${SCHEME}exfil.evil.example`)),
 };
 
 test("an invalid draft is refused with a problem, and render writes NOTHING", () => {
@@ -302,4 +306,28 @@ test("checkRendered wants each ADR-042 table's row, and no scheme outside a stat
   const escaped = (t) => t.replace(/"probePath": "([^"]*)"/, `"probePath": "$1", "note": "https:\\/\\/exfil.evil.example\\/x"`);
   assert.ok(!escaped(dout.get(dprofile)).includes(SCHEME));
   assert.ok(checkRendered(dyn, reader(dout, { [dprofile]: escaped })).some((m) => m.includes("scheme URL")));
+});
+
+test("checkRendered reads a profile's object KEYS as well as its values, static and dynamic", () => {
+  // rjouffret's repro on #2324: `"https:\/\/exfil.evil.example\/x": 1` beside
+  // probePath. No "://" in the text, and the value is a number — the URL is
+  // the key. A static profile also may not grow a key that spells the one
+  // location its origin is allowed at. MUTATION: walk values only, or locate
+  // keys by their raw text → red.
+  const BS = "\\";
+  const url = `https:${BS}/${BS}/exfil.evil.example${BS}/x`;
+  const edits = {
+    "a URL key": (t) => t.replace(/"probePath": "([^"]*)"/, `"probePath": "$1", "${url}": 1`),
+    "a key spelling baseUrl.origin": (t) => t.replace(/"probePath": "([^"]*)"/, `"probePath": "$1", "baseUrl.origin": "${url}"`),
+  };
+  for (const name of ["static", "dynamic"]) {
+    const draft = fixture(name);
+    const out = render(draft);
+    const p = outputPaths(draft.provider).profile;
+    for (const [label, edit] of Object.entries(edits)) {
+      const text = edit(out.get(p));
+      assert.equal(text.split(SCHEME).length - 1, name === "static" ? 1 : 0, `${name} ${label}: only the origin's scheme is in the text`);
+      assert.ok(checkRendered(draft, reader(out, { [p]: edit })).some((m) => m.includes("scheme URL")), `${name} ${label}`);
+    }
+  }
 });
