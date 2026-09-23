@@ -1218,7 +1218,10 @@ async function main() {
         result.adminGroupFailed > 0 ||
         // pr-reviewer #1229 N1: the directoryStatus → NC disable mirror.
         result.ncDisableMirrored > 0 ||
-        result.ncDisableMirrorFailed > 0
+        result.ncDisableMirrorFailed > 0 ||
+        // WARP-2993: humans stripped from NC instance admin.
+        result.ncInstanceAdminRemoved > 0 ||
+        result.ncInstanceAdminFailed > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }

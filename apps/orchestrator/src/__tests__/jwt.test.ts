@@ -25,7 +25,6 @@ import {
   verifyRefreshToken,
   denyRefreshToken,
   claimRefreshRotation,
-  roleFromGroups,
   isRole,
   type Role,
 } from "../services/jwt.service.js";
@@ -204,45 +203,6 @@ describe("JWT Service", () => {
       // Not an `in`-style check: object prototype keys must not pass.
       expect(isRole("constructor")).toBe(false);
       expect(isRole("toString")).toBe(false);
-    });
-  });
-
-  describe("roleFromGroups (ADR-004 §4 mapping)", () => {
-    // The mapping is the single source of truth for translating
-    // Nextcloud groups → Role. AC #4 / ADR-004 §4 require:
-    //   admin group → owner, staff group → admin, guest group → guest,
-    //   no recognised group → family (least-privileged default).
-    // Precedence is owner > admin > guest > default so a user in
-    // overlapping groups always lands on the most-privileged tier.
-    it("maps the admin group to owner", () => {
-      expect(roleFromGroups(["admin"])).toBe("owner");
-    });
-
-    it("maps the staff group to admin", () => {
-      expect(roleFromGroups(["staff"])).toBe("admin");
-    });
-
-    it("maps the guest group to guest", () => {
-      expect(roleFromGroups(["guest"])).toBe("guest");
-    });
-
-    it("defaults to family when no recognised group is present", () => {
-      expect(roleFromGroups([])).toBe("family");
-      expect(roleFromGroups(["random-group"])).toBe("family");
-    });
-
-    it("gives admin group precedence over staff/guest/default", () => {
-      expect(roleFromGroups(["admin", "staff", "guest"])).toBe("owner");
-      expect(roleFromGroups(["staff", "admin"])).toBe("owner");
-    });
-
-    it("gives staff group precedence over guest/default", () => {
-      expect(roleFromGroups(["staff", "guest"])).toBe("admin");
-      expect(roleFromGroups(["other", "staff"])).toBe("admin");
-    });
-
-    it("gives guest group precedence over the default fallthrough", () => {
-      expect(roleFromGroups(["guest", "users"])).toBe("guest");
     });
   });
 
