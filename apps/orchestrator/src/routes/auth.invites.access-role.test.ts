@@ -85,7 +85,7 @@ const storeNcToken = vi.fn().mockResolvedValue(undefined);
 const getNcToken = vi.fn().mockResolvedValue(null);
 const deleteNcToken = vi.fn().mockResolvedValue(undefined);
 const touchNcToken = vi.fn().mockResolvedValue(undefined);
-const resolveNcToken = vi.fn().mockResolvedValue("test-nc-token");
+const resolveNcToken = vi.fn().mockResolvedValue("caller-nc-token");
 vi.mock("../services/nextcloud-session.service.js", () => ({
   storeNcToken: (...args: unknown[]) => storeNcToken(...args),
   getNcToken: (...args: unknown[]) => getNcToken(...args),
@@ -418,10 +418,11 @@ describe("accept path — accessRoleId assignment in the mint (WARP-1051 pattern
     expect(row.accessRoleId).toBe(ADMIN_ROLE.id);
     expect(row.role).toBe("admin");
     expect(sessionJwt(res).role).toBe("admin");
-    // NC groups derive from the resolved tier — an admin invitee lands the
-    // NC admin group (pre-WARP-171 wire contract preserved).
+    // NC groups derive from the resolved tier — an admin invitee lands
+    // `droplet-admins`, never NC's instance-admin group (WARP-2993).
     const groupsArg = (nc.ncCreateUser as any).mock.calls[0]?.[4] as string[];
-    expect(groupsArg).toContain("admin");
+    expect(groupsArg).toContain("droplet-admins");
+    expect(groupsArg).not.toContain("admin");
   });
 
   it("a drifted invite row (tier ≠ startingPoint) resolves toward the ROLE's startingPoint everywhere", async () => {

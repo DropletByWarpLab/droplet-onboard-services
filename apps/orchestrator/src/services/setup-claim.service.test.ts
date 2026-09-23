@@ -147,6 +147,44 @@ describe("claim-code normalization + hashing (PR #373)", () => {
   });
 });
 
+// WARP-2985 — no literal key is reachable. The old code fell back to
+// "dev-only-not-secure" unless NODE_ENV=production, and a box never sets
+// NODE_ENV, so every shipped box without DEVICE_SECRET keyed its claim-code
+// hashes with a string published in this repo.
+describe("claim-code HMAC key has no fallback (WARP-2985)", () => {
+  const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+  afterEach(() => {
+    delete process.env.DEVICE_SECRET;
+    if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+  });
+
+  it.each(["development", "test", "production"])(
+    "throws with DEVICE_SECRET unset under NODE_ENV=%s",
+    (nodeEnv) => {
+      process.env.NODE_ENV = nodeEnv;
+      delete process.env.DEVICE_SECRET;
+      expect(() => hashClaimCode("DRPL-7K2Q-9F4M")).toThrow(/DEVICE_SECRET/);
+    },
+  );
+
+  it.each(["", "  ", "change-me", "dev-only-not-secure"])(
+    "throws when DEVICE_SECRET is the public value %j",
+    (value) => {
+      process.env.NODE_ENV = "development";
+      process.env.DEVICE_SECRET = value;
+      expect(() => hashClaimCode("DRPL-7K2Q-9F4M")).toThrow(/DEVICE_SECRET/);
+    },
+  );
+
+  it("is keyed by DEVICE_SECRET (a different secret yields a different hash)", () => {
+    process.env.DEVICE_SECRET = "key-A";
+    const a = hashClaimCode("DRPL-7K2Q-9F4M");
+    process.env.DEVICE_SECRET = "key-B";
+    expect(hashClaimCode("DRPL-7K2Q-9F4M")).not.toBe(a);
+  });
+});
+
 describe("consumeClaimCode — atomic, single-use, constant-time (PR #373)", () => {
   beforeEach(() => {
     process.env.DEVICE_SECRET = "test-device-secret";

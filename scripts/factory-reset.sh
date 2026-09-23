@@ -673,6 +673,9 @@ VOLUMES=(
   # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
   # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
   "migration-snapshots"
+  # WARP-1401: the `cache` Redis AOF: session records, refresh denylist and
+  # Nextcloud app-passwords. A reset box must boot with zero sessions/tokens.
+  "cache-data"
   # --- Rebuildable caches / regenerated state (device-backup.sh EXCLUDED_VOLUMES:
   #     wiped but intentionally not backed up — regenerated on reinstall). ---
   "frigate-config"
