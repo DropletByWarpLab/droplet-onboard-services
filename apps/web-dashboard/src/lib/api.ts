@@ -2951,7 +2951,45 @@ export async function unregisterPushSubscription(endpoint: string): Promise<void
   }
 }
 
-export async function sendTestPush(): Promise<{ sent: number; pruned: number }> {
+/**
+ * WARP-2904 — the workspace `web_push` off-LAN channel. Every push the box
+ * sends dials a push service run by Google, Apple or Mozilla, so it is gated
+ * like every other off-LAN channel (default off). `null` = unreadable; the
+ * card must not guess.
+ */
+export async function fetchWebPushChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "web_push");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-2904 — flip `web_push`. Owner/admin only (the route 403s others). */
+export async function setWebPushChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/web_push`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled
+        ? "Turned on from the Push notifications card"
+        : "Turned off from the Push notifications card",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change push delivery: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
+/** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
+export async function sendTestPush(): Promise<{
+  sent: number;
+  pruned: number;
+  refused?: "egress_disabled";
+}> {
   const res = await authFetch(`${BASE}/api/devices/push/test`, { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

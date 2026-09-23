@@ -28,6 +28,9 @@ import webpush from "web-push";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
+import { webPushGate } from "./off-lan-gate.service.js";
+import { recordActivity } from "./activity.singleton.js";
 
 const logger = createLogger("push-dispatch");
 
@@ -171,24 +174,104 @@ export interface PushPayload {
   data?: Record<string, unknown>;
 }
 
+/** WARP-2904 — what one push dial (or refusal) did, for the audit row. */
+type PushEgressOutcome =
+  | "allowed"
+  | "refused_gate"
+  | "refused_endpoint"
+  | "pruned"
+  | "provider_error";
+
+/**
+ * WARP-2904 — one signed `network` activity row per dial and per refusal, the
+ * `routes/web.ts` egress-audit idiom, so /admin/audit shows push beside
+ * weather and mail. Fire-and-forget and fail-soft (`recordActivity` swallows).
+ *
+ * Carries the endpoint's HOST only: the full endpoint is a per-subscriber
+ * capability URL (anyone holding it plus the keys can push to that browser),
+ * and the payload never appears here at all.
+ */
+function auditPushEgress(userId: string, outcome: PushEgressOutcome, host?: string): void {
+  void recordActivity({
+    kind: "network",
+    severity: outcome === "allowed" ? "info" : "warn",
+    sourceIcon: "globe",
+    what: host ? `Web push: ${host}` : "Web push",
+    sub: "web_push",
+    refs: {
+      channel: "web_push",
+      outcome,
+      userId,
+      ...(host ? { dst: host } : {}),
+    },
+    actor: { type: "system", id: null },
+  });
+}
+
+/**
+ * WARP-2904 — the endpoint check at DISPATCH time. The subscribe route runs
+ * the same check at registration, but rows stored before that existed are
+ * never otherwise re-checked, and a user-supplied URL this process POSTs to is
+ * an SSRF primitive before it is egress. Web Push endpoints are always https.
+ * Returns the host when the endpoint may be dialled, null when it may not.
+ */
+function dialableHost(endpoint: string): string | null {
+  try {
+    const url = assertOutboundUrlAllowed(endpoint);
+    return url.protocol === "https:" ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface DispatchOutcome {
+  sent: number;
+  pruned: number;
+  /** Dials actually attempted — 0 with no `refused` means "no subscribers". */
+  attempted: number;
+  /** Set when the `web_push` off-LAN channel refused the whole dispatch. */
+  refused?: "egress_disabled";
+}
+
 /**
  * Send a push to every active subscription for `userId`. Subscriptions
  * that come back with 404 or 410 are deleted — those are the standard
  * "this endpoint is dead, give up" status codes per the Web Push spec.
+ *
+ * WARP-2904 — this is the ONE dial site for web push, so the `web_push`
+ * off-LAN gate is read here, on every call, before a single subscription is
+ * loaded: sendNotification, the camera fan-out and the test button are all
+ * covered by it. A refusal is DATA (`refused`), never a throw — every caller
+ * treats push as best-effort and must not start failing its own write.
  */
 export async function dispatchToUser(
   prisma: PrismaClient,
   userId: string,
   payload: PushPayload,
-): Promise<{ sent: number; pruned: number }> {
+): Promise<DispatchOutcome> {
+  if (!(await webPushGate(prisma))) {
+    auditPushEgress(userId, "refused_gate");
+    return { sent: 0, pruned: 0, attempted: 0, refused: "egress_disabled" };
+  }
   if (!configured) initPushDispatch();
-  const subs = await prisma.pushSubscription.findMany({ where: { userId } });
-  if (subs.length === 0) return { sent: 0, pruned: 0 };
+  const rows = await prisma.pushSubscription.findMany({ where: { userId } });
+
+  // Refuse (and prune) any stored endpoint that fails the outbound guard.
+  const blocked: string[] = [];
+  const subs: Array<(typeof rows)[number] & { host: string }> = [];
+  for (const r of rows) {
+    const host = dialableHost(r.endpoint);
+    if (host) subs.push({ ...r, host });
+    else {
+      blocked.push(r.endpoint);
+      auditPushEgress(userId, "refused_endpoint");
+    }
+  }
 
   const body = JSON.stringify(payload);
   let sent = 0;
   let pruned = 0;
-  const deadEndpoints: string[] = [];
+  const deadEndpoints: string[] = [...blocked];
 
   // Fan out in parallel — each push call is independent, and waiting
   // serially would compound latency on a slow push service.
@@ -204,12 +287,15 @@ export async function dispatchToUser(
           { TTL: 60 }, // Best-effort: stale notifications past 1 min are useless.
         );
         sent++;
+        auditPushEgress(userId, "allowed", s.host);
       } catch (err) {
         const status = (err as { statusCode?: number })?.statusCode;
         if (status === 404 || status === 410) {
           deadEndpoints.push(s.endpoint);
+          auditPushEgress(userId, "pruned", s.host);
         } else {
-          logger.warn({ err, endpoint: s.endpoint.slice(0, 60) }, "push send failed");
+          auditPushEgress(userId, "provider_error", s.host);
+          logger.warn({ err, host: s.host }, "push send failed");
         }
       }
     }),
@@ -222,6 +308,7 @@ export async function dispatchToUser(
       })
     ).count;
   }
+  if (subs.length === 0) return { sent, pruned, attempted: 0 };
   // Non-blocking: bump lastFiredAt for monitoring. Failure here is fine.
   prisma.pushSubscription
     .updateMany({
@@ -229,7 +316,7 @@ export async function dispatchToUser(
       data: { lastFiredAt: new Date() },
     })
     .catch(() => {});
-  return { sent, pruned };
+  return { sent, pruned, attempted: subs.length };
 }
 
 /**

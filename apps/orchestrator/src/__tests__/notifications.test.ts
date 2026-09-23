@@ -9,6 +9,7 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: (...a: unknown[]) => mqttPublish(...a),
 }));
 
+import webpush from "web-push";
 import { sendNotification, listRecentNotifications } from "../services/notifications.service.js";
 
 function makePrismaStub() {
@@ -129,5 +130,56 @@ describe("listRecentNotifications", () => {
     expect(prisma.notificationLog.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({ take: 1 }),
     );
+  });
+});
+
+// WARP-2904 — the push leg's outcome is an explicit enum on the row, so a dial
+// refused by the `web_push` off-LAN gate is distinguishable from "no
+// subscribers" and from "push failed" — and never hides in `error` behind a
+// delivered toast.
+describe("sendNotification — NotificationLog.pushOutcome", () => {
+  // A real pair: setVapidDetails validates the key shapes.
+  const vapid = webpush.generateVAPIDKeys();
+  function stubWithPush(gateEnabled: boolean | "throws") {
+    const stub = makePrismaStub() as any;
+    stub.systemFlag = { findUnique: vi.fn(async () => ({ valueJson: vapid })) };
+    stub.offLanAllowlistChannel = {
+      findUnique: vi.fn(async () => {
+        if (gateEnabled === "throws") throw new Error("db down");
+        return { key: "web_push", enabled: gateEnabled };
+      }),
+    };
+    stub.pushSubscription = {
+      findMany: vi.fn(async () => []),
+      deleteMany: vi.fn(),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    };
+    return stub;
+  }
+
+  for (const gate of [false, "throws"] as const) {
+    it(`gate ${String(gate)} → refused_gate; toast still delivered, error stays null`, async () => {
+      const prisma = stubWithPush(gate);
+      const result = await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+      expect(result.channels).toEqual(["toast"]);
+      expect(prisma._created[0].pushOutcome).toBe("refused_gate");
+      expect(prisma._created[0].error).toBeNull();
+      expect(prisma.pushSubscription.findMany).not.toHaveBeenCalled();
+    });
+  }
+
+  it("gate on, no subscriptions → no_subscribers", async () => {
+    const prisma = stubWithPush(true);
+    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    expect(prisma._created[0].pushOutcome).toBe("no_subscribers");
+    expect(prisma._created[0].channels).toBe("toast");
+  });
+
+  it("a throwing push leg → failed", async () => {
+    const prisma = stubWithPush(true);
+    prisma.pushSubscription.findMany.mockRejectedValueOnce(new Error("db down"));
+    await sendNotification(prisma, { userId: "alice", kind: "ai", title: "x" });
+    expect(prisma._created[0].pushOutcome).toBe("failed");
+    expect(prisma._created[0].error).toBeNull(); // the toast carried it
   });
 });

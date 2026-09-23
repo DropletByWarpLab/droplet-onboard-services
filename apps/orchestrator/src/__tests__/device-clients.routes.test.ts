@@ -418,3 +418,38 @@ describe("POST /api/devices/pair — code alphabet", () => {
     expect(seen.size).toBeGreaterThan(1);
   });
 });
+
+// WARP-2904 — the orchestrator POSTs to a subscription's endpoint, so it is
+// vetted at registration (and again at dial time, push-dispatch.test.ts).
+describe("POST /api/devices/push/subscribe — endpoint guard", () => {
+  const keys = { p256dh: "p".repeat(40), auth: "a".repeat(20) };
+
+  it.each([
+    ["a private address", "https://192.168.1.10/push"],
+    ["loopback", "https://127.0.0.1/push"],
+    ["a .local name", "https://droplet-ai.local/push"],
+  ])("refuses %s with 400 blocked_destination", async (_label, endpoint) => {
+    const res = await request(makeApp()).post("/api/devices/push/subscribe").send({ endpoint, keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "blocked_destination" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses a plain-http endpoint with 400 https_required", async () => {
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "http://push.vendor.test/send/x", keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "https_required" });
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it("accepts a public https endpoint", async () => {
+    mockPrisma.pushSubscription.upsert.mockResolvedValue({ id: "sub-1" });
+    const res = await request(makeApp())
+      .post("/api/devices/push/subscribe")
+      .send({ endpoint: "https://push.vendor.test/send/x", keys });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: "sub-1" });
+  });
+});

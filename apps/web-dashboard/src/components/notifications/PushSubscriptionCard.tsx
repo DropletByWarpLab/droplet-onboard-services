@@ -167,7 +167,13 @@ export function PushSubscriptionCard() {
     setMsg(null);
     try {
       const r = await sendTestPush();
-      if (r.sent === 0) {
+      if (r.refused) {
+        // WARP-2904 — the box refused to dial the push service at all.
+        setMsg({
+          text: "Push delivery is turned off for this Droplet, so nothing was sent. An owner or admin can turn it on above.",
+          tone: "error",
+        });
+      } else if (r.sent === 0) {
         setMsg({
           text: "Test queued — but no active subscription. Re-subscribe?",
           tone: "error",

@@ -962,6 +962,43 @@ entries:
       - apps/orchestrator/src/services/caldav.client.ts
       - apps/orchestrator/src/services/calendar.service.ts
 
+  - id: web-push-services
+    kind: dynamic
+    service: orchestrator
+    config_key: PushSubscription.endpoint (per subscription row, browser-supplied)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Web Push (RFC 8030/8291) delivery to the browsers a user subscribed from
+      the dashboard. The destination is whatever push service that browser
+      handed over at subscribe time — in practice Google (fcm.googleapis.com),
+      Apple (web.push.apple.com) or Mozilla (updates.push.services.mozilla.com)
+      — stored as a database row, so there is no hostname to write down here.
+
+      WHAT CROSSES: the RFC 8291 ciphertext (title/body/url are encrypted to
+      the subscription's own keys, so the push service CANNOT read them), the
+      endpoint itself (which identifies the subscriber's browser to the
+      vendor), the VAPID JWT with its mailto: contact, the ciphertext length
+      and the timing of every notification. That metadata is why this is an
+      off-LAN channel at all. The plaintext still lands in a vendor-managed
+      notification tray on the device, so notification text stays PHI-free
+      exactly as before.
+
+      THE ENFORCEMENT IS IN CODE (WARP-2904). dispatchToUser is the one dial
+      site and reads the `web_push` off-LAN channel on every call, fail-closed
+      (default OFF; an admin opts in). Endpoints go through
+      lib/outbound-url-guard.ts plus an https-only check at BOTH registration
+      (POST /api/devices/push/subscribe) and dial time; a stored row that
+      fails is pruned, never dialled. Every dial and refusal writes one
+      `network` activity row carrying the endpoint HOST only.
+    ticket: WARP-2904
+    added: 2026-09-22
+    review_by: 2027-09-22
+    code_refs:
+      - apps/orchestrator/src/services/push-dispatch.service.ts
+      - apps/orchestrator/src/services/off-lan-gate.service.ts
+      - apps/orchestrator/src/routes/device-clients.ts
+
   - id: sso-custom-issuer
     kind: dynamic
     service: orchestrator

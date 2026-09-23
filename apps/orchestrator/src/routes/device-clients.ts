@@ -20,6 +20,7 @@ import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
+import { assertOutboundUrlAllowed, isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -613,6 +614,21 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return res
           .status(400)
           .json({ error: "Invalid subscription", details: parsed.error.flatten() });
+      }
+      // WARP-2904 — the orchestrator will POST to this URL, so it is an SSRF
+      // primitive before it is egress: refuse a LAN / loopback / credentialed
+      // endpoint (the WARP-2022 registration-time guard; dispatchToUser runs
+      // the same check again at dial time). Web Push endpoints are always
+      // https, and `assertOutboundUrlAllowed` also admits http, so that is
+      // checked on its own with a self-describing error.
+      try {
+        const url = assertOutboundUrlAllowed(parsed.data.endpoint);
+        if (url.protocol !== "https:") {
+          return res.status(400).json({ error: "https_required" });
+        }
+      } catch (err) {
+        if (isOutboundUrlBlocked(err)) return res.status(400).json({ error: err.message });
+        throw err;
       }
       const userId = getUser(req);
 
