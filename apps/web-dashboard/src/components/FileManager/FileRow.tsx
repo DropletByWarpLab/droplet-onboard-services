@@ -313,7 +313,7 @@ export function FileRow({
               if (e.key === "Escape") onCancelRename();
             }}
             onBlur={commitRename}
-            className="flex-1 py-1 px-2 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
+            className="flex-1 py-1 px-2 outline-none focus:ring-2 focus:ring-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",

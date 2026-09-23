@@ -267,6 +267,27 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
     expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
   });
 
+  // WARP-2966 — libraries must appear exactly ONCE per viewport. The sidebar's
+  // Libraries rail owns the choice from `lg` up (and the mobile More drawer
+  // mounts the same rail), so the in-page switcher is the small-screen half
+  // and must not double up with it.
+  it("hides the SpaceSwitcher from lg up — the sidebar rail owns it there", () => {
+    render(<FilesPage />);
+    const tab = screen.getByRole("tab", { name: /my files/i });
+    expect(tab.closest(".lg\\:hidden")).not.toBeNull();
+  });
+
+  // WARP-2966 — Favorites left the Files sub-nav because it is a FILTER over
+  // the places, not a place. That only holds if the browser itself offers it;
+  // otherwise the route is orphaned.
+  it("offers Favorites from the browser's own toolbar", () => {
+    render(<FilesPage />);
+    expect(screen.getByRole("link", { name: /favorites/i })).toHaveAttribute(
+      "href",
+      "/files/favorites",
+    );
+  });
+
   it("renders the file list rows", () => {
     render(<FilesPage />);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();

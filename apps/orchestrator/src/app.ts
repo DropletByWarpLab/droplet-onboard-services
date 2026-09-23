@@ -119,6 +119,7 @@ import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
+import { createBriefingsRouter } from "./routes/briefings.js";
 import { createTlsStatusPublicRouter } from "./routes/tls-status.public.route.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
@@ -661,6 +662,8 @@ export function createApp(
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
+  // WARP-2270 — the caller's own morning briefing (self-only).
+  app.use("/api", createBriefingsRouter(prisma));
 
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)

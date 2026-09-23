@@ -233,7 +233,7 @@ export function WifiChannelCard() {
                   id="wifi-channel"
                   value={selected}
                   onChange={(e) => setSelected(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors pl-10"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors pl-10"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",

@@ -12,7 +12,8 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useToast } from "./Toast";
+import { useRouter } from "next/navigation";
+import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
 
 interface IncomingNotification {
@@ -20,6 +21,14 @@ interface IncomingNotification {
   title?: string;
   body?: string | null;
   at?: string;
+  /** WARP-2909 — a same-origin dashboard path to open (e.g. a parked run). */
+  url?: string;
+}
+
+/** WARP-2909 — the box validates `url`, but the toaster never trusts a wire
+ *  value it navigates to: only an in-app path, never `//host` or a scheme. */
+export function isInAppPath(url: unknown): url is string {
+  return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\");
 }
 
 // When the server didn't ship a title, prefer a kind-derived Title Case
@@ -43,8 +52,11 @@ function kindFallbackTitle(kind?: IncomingNotification["kind"]): string {
 export function NotificationToaster() {
   const { toast } = useToast();
   const { user } = useAuth();
+  const router = useRouter();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const routerRef = useRef(router);
+  routerRef.current = router;
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -87,7 +99,11 @@ export function NotificationToaster() {
         const message = payload.body
           ? `${title} — ${payload.body}`
           : title;
-        toastRef.current(message, payload.kind === "ai" ? "info" : "success");
+        const link = payload.url;
+        const action: ToastAction | undefined = isInAppPath(link)
+          ? { label: "Open", onClick: () => routerRef.current.push(link) }
+          : undefined;
+        toastRef.current(message, payload.kind === "ai" ? "info" : "success", action);
       };
       ws.onclose = () => scheduleReconnect();
       ws.onerror = () => {

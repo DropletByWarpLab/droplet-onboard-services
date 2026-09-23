@@ -13,6 +13,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import {
   PENDING_COMPOSER_KEY,
   type ToolCatalogEntry,
+  type ToolReach,
   // WARP-2582 — PendingComposerPayload became a union (tool | pin). The
   // /tools surface only ever writes the TOOL variant, so these assertions
   // name it directly instead of narrowing a union they cannot produce.
@@ -40,6 +41,7 @@ function entry(
   homeDescription: string,
   requiresWrite = false,
   requiresConfirmation = false,
+  reach?: ToolReach,
 ): ToolCatalogEntry {
   // The page renders `homeDescription` (plain-language). `description` is the
   // agent-facing string and is never shown, so the 3rd arg is the friendly
@@ -51,6 +53,7 @@ function entry(
     homeDescription,
     requiresWrite,
     requiresConfirmation,
+    ...(reach ? { reach } : {}),
   };
 }
 
@@ -241,5 +244,71 @@ describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
     expect(payload.toolName).toBe("list_network_devices");
     expect(payload.requiresWrite).toBe(false);
     expect(payload.requiresConfirmation).toBe(false);
+  });
+});
+
+// ── WARP-2969: say why a tool is unavailable, and stop offering it ──
+
+describe("<ToolsPage /> reach (WARP-2969)", () => {
+  const REACHABLE = entry(
+    "list_network_devices", "network", "See every device on your network",
+    false, false, { chat: "allowed" },
+  );
+  const WITHHELD = entry(
+    "get_switch_ports", "switch", "Look at the switch ports",
+    false, false, { chat: "excluded" },
+  );
+  const REACH_SAMPLE: ToolCatalogEntry[] = [REACHABLE, WITHHELD];
+
+  it("chips a chat-excluded tool as reachable from elsewhere, not gone", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    // "Dashboard & MCP only", never "Unavailable" — the tool works, it is
+    // just not reachable by asking.
+    expect(screen.getByText(/dashboard & mcp only/i)).toBeInTheDocument();
+  });
+
+  it("puts no chip on a tool a chat turn can reach", () => {
+    ready([REACHABLE]);
+    render(<ToolsPage />);
+    expect(screen.queryByText(/dashboard & mcp only/i)).not.toBeInTheDocument();
+  });
+
+  it("still LISTS every tool — reach annotates, it never filters", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    // An MCP client can still call a withheld tool, so /tools remains the
+    // full catalog; the card just stops offering chat.
+    expect(screen.getByRole("button", { name: /^all 2$/i })).toBeInTheDocument();
+    expect(screen.getByText(/Look at the switch ports/i)).toBeInTheDocument();
+  });
+
+  it("keeps the withheld tool readable — name and description still render", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    expect(screen.getByText("Get switch ports")).toBeInTheDocument();
+    expect(screen.getByText(/Look at the switch ports/i)).toBeInTheDocument();
+  });
+
+  it("does not offer 'Use in chat' on a tool chat cannot reach", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    // The whole card used to be the button, so a withheld tool still seeded
+    // the composer with a request that could only come back refused.
+    expect(
+      screen.queryByRole("button", { name: /use get switch ports in chat/i }),
+    ).not.toBeInTheDocument();
+    // The reachable one is untouched.
+    expect(
+      screen.getByRole("button", { name: /use list network devices in chat/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking a withheld card seeds nothing and navigates nowhere", () => {
+    ready(REACH_SAMPLE);
+    render(<ToolsPage />);
+    fireEvent.click(screen.getByText("Get switch ports"));
+    expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
+    expect(pushMock).not.toHaveBeenCalled();
   });
 });
