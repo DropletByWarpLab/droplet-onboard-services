@@ -2005,6 +2005,41 @@ model Note {
 // `source = "local"` and are publishable via the /api/calendar/publish/... ICS
 // feed, so phones can subscribe without needing OAuth.
 
+/// WARP-2767: lifecycle of a calendar feed link. Persistent state lives in
+/// this enum, never inferred from a nullable timestamp (PairingCodeStatus is
+/// the precedent).
+///   - active  — the feed answers. `expiresAt` stays authoritative in real
+///               time: the feed refuses an overdue active row and stamps it
+///               `expired` on the spot.
+///   - rotated — replaced by a newer link via POST /calendar/publish/rotate.
+///   - revoked — turned off via POST /calendar/publish/revoke.
+///   - expired — past `expiresAt`.
+enum CalendarFeedTokenState {
+  active
+  rotated
+  revoked
+  expired
+}
+
+/// WARP-2767: a bearer credential for the pre-auth ICS feed at
+/// /api/calendar/publish/:user.ics. The URL token is `<id>.<secret>`; only
+/// sha256(secret) is stored, so a database read never yields a working link.
+/// Bound to exactly one account by FK — the feed also requires the URL's
+/// username to be that account's current username.
+model CalendarFeedToken {
+  id         String                 @id @default(uuid())
+  userId     String
+  secretHash String
+  state      CalendarFeedTokenState @default(active)
+  createdAt  DateTime               @default(now())
+  expiresAt  DateTime
+  /// Set when the row leaves `active` (rotated / revoked / expired).
+  endedAt    DateTime?
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, state])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2737,6 +2772,10 @@ model User {
   // was supplied up front). Anonymous passwordless-authenticate challenges
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
+  // WARP-2767: calendar ICS feed links ("subscribe on my phone"). Deleting
+  // the user cascades them, so a reused username can never inherit an old
+  // link (see CalendarFeedToken).
+  calendarFeedTokens  CalendarFeedToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -3181,6 +3220,11 @@ model WebAuthnCredential {
   // hybrid"). Optional — older authenticators omit it. Used only as a UX
   // hint to the browser on the next authenticate ceremony.
   transports   String?
+  // WARP-1157: owner-chosen label shown in Settings. NULL until renamed.
+  name         String?
+  // WARP-1157: the RP ID (host) this passkey was created on — passkeys only
+  // work on that address. NULL only for rows enrolled before it was recorded.
+  rpId         String?
   createdAt    DateTime  @default(now())
   // Bumped on every successful assertion so the dashboard can show
   // "last used 3 days ago" without a separate audit query.
@@ -3261,12 +3305,20 @@ model File {
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
   path         String?
+  // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
+  // through, and their length. Null for rows written before it or outside
+  // POST /files/upload. The (owner, sha256) index is deliberately NOT unique:
+  // a second copy of the same bytes is a legitimate file, so duplicates are
+  // reported to the uploader, never refused by the database.
+  sha256       String?
+  sizeBytes    BigInt?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
   @@index([departmentId])
+  @@index([ownerUserId, sha256])
 }
 
 // ── WARP-456: signed append-only activity log ──

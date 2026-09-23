@@ -110,6 +110,7 @@ import {
 import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
+import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -192,6 +193,14 @@ export function createApp(
   // sends the latter for /scim/v2/* — without it, req.body would arrive empty
   // and every SCIM create/update would 400). The explicit `type` list keeps
   // the default JSON behavior intact for every other route.
+  //
+  // WARP-2093: the upload route's JSON transport (write_file /
+  // create_document) carries up to 10 MB of DECODED bytes as base64 (~13.4 MB
+  // on the wire). body-parser's 100 kb default killed anything past ~75 KB
+  // before the route's own 10 MB ceiling could answer, so this one path gets
+  // an explicit limit; body-parser skips an already-parsed body, so the
+  // global parser below leaves it alone and keeps its default elsewhere.
+  app.use("/api/files/upload", express.json({ limit: "16mb" }));
   app.use(express.json({ type: ["application/json", "application/scim+json"] }));
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.
@@ -223,8 +232,9 @@ export function createApp(
   app.use(createScimRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
-  // without a session cookie. Token in the query string is the auth (HMAC
-  // of DEVICE_SECRET + username, see routes/calendar.ts publishToken).
+  // without a session cookie. Token in the query string is the auth (a
+  // stored, per-user, expiring credential — WARP-2767,
+  // services/calendar-feed-token.service.ts).
   // Mount BEFORE the auth middleware so it doesn't require a session.
   app.use("/api", createCalendarPublicRouter(prisma));
   // Public clip-share endpoint — recipient of a shared link doesn't have a
@@ -616,6 +626,10 @@ export function createApp(
   // (days left, when the box renews, whether renewal is failing). Owner +
   // admin, read-only; the public /api/tls/status stays the pre-login minimum.
   app.use("/api", createTlsCertificateRouter(prisma));
+
+  // WARP-1405: backup health for Settings → Device information (last success,
+  // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
+  app.use("/api", createBackupStatusRouter());
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.

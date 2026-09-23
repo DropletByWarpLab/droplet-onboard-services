@@ -16,9 +16,9 @@
  * thing that re-issues the call can present the approval.
  *
  * The fixture tool is the WARP-2305 NAKED-HANDLER class — a confirming
- * tool whose schema does not declare `confirmed`, so the legacy
- * `confirmed: true` path is unavailable to it and a real token is the
- * only way through. That is the class this ticket exists for.
+ * tool whose schema does not declare `confirmed`. Since WARP-2002 a real
+ * token is the only way through for EVERY confirming tool; this class
+ * was the one this ticket (WARP-2469) was written for.
  */
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -47,7 +47,22 @@ const DELETE_FILE: InterceptableTool = {
   inputSchema: { type: "object", properties: { path: { type: "string" } } },
 };
 
-const TOOLS = [NAKED, DELETE_FILE];
+/**
+ * WARP-2002 — shaped like the hand-rolled two-phase tools (`remove_device`,
+ * `memory_forget`, …): its schema DECLARES `confirmed`. A fixture name, not a
+ * catalog one, so the per-turn catalog/domain gates do not filter it out.
+ */
+const DECLARING: InterceptableTool = {
+  name: "declaring_write",
+  requiresConfirmation: true,
+  requiresWrite: true,
+  inputSchema: {
+    type: "object",
+    properties: { nodeId: { type: "string" }, confirmed: { type: "boolean" } },
+  },
+};
+
+const TOOLS = [NAKED, DELETE_FILE, DECLARING];
 
 /**
  * A faithful stand-in for the one `tool.handler(...)` call site.
@@ -119,6 +134,8 @@ async function runTurn(args: {
   approvals: ReturnType<typeof createChatApprovalStore>;
   turns: unknown[];
   events: SSEEvent[];
+  /** Receives the model stub, so a test can read what the model was sent. */
+  onChat?: (chat: ReturnType<typeof vi.fn>) => void;
 }) {
   const chat = vi.fn(async () => ({
     ok: true,
@@ -131,6 +148,7 @@ async function runTurn(args: {
       ],
     }),
   }));
+  args.onChat?.(chat);
   const deps: AgentDeps = {
     mcp: {
       listTools: vi
@@ -251,6 +269,85 @@ describe("WARP-2469 — challenge → approve → bound token → execution", ()
     expect(rendered).not.toContain("Moreau");
     // …and it is still a reviewable prompt.
     expect(handle!.summary!.fields.map((f) => f.key)).toEqual(["name", "owner"]);
+  });
+});
+
+describe("WARP-2002 — the model cannot approve its own write", () => {
+  it("a same-turn re-issue with `confirmed: true` is challenged again and never executes", async () => {
+    const clock = { now: Date.now() };
+    const { handler, callTool } = makeDispatch(() => clock.now);
+    const approvals = createChatApprovalStore();
+    const events: SSEEvent[] = [];
+
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [
+        toolCallTurn("declaring_write", { nodeId: "7" }),
+        // The model, unprompted by any human, sets the flag itself.
+        toolCallTurn("declaring_write", { nodeId: "7", confirmed: true }),
+        { role: "assistant", content: "Removed." },
+      ],
+      events,
+    });
+
+    // MUTATION (restore the live-challenge acceptance in interceptor.ts):
+    // the second call proceeds and the device is unpaired → red.
+    expect(handler).not.toHaveBeenCalled();
+    expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("after a HUMAN approves, the re-issue executes even though it carries `confirmed: true`", async () => {
+    const clock = { now: Date.now() };
+    const { handler, callTool } = makeDispatch(() => clock.now);
+    const approvals = createChatApprovalStore();
+    const events: SSEEvent[] = [];
+
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [toolCallTurn("declaring_write", { nodeId: "7" }), { role: "assistant", content: "ok" }],
+      events,
+    });
+    const handle = confirmationHandle(events);
+    expect(approvals.approve(handle!.challengeId!, USER, clock.now).ok).toBe(true);
+
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [
+        toolCallTurn("declaring_write", { nodeId: "7", confirmed: true }),
+        { role: "assistant", content: "Removed." },
+      ],
+      events: [],
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("the model is never handed the confirmation token", async () => {
+    const clock = { now: Date.now() };
+    const { callTool, interceptor } = makeDispatch(() => clock.now);
+    const approvals = createChatApprovalStore();
+    const mintSpy = vi.spyOn(interceptor.tokens, "mint");
+    let chat: ReturnType<typeof vi.fn> | undefined;
+
+    await runTurn({
+      callTool,
+      approvals,
+      turns: [toolCallTurn("declaring_write", { nodeId: "7" }), { role: "assistant", content: "ok" }],
+      events: [],
+      onChat: (c) => (chat = c),
+    });
+
+    const minted = mintSpy.mock.results[0]!.value as { token: string };
+    // The model's second request carries the tool result for the challenge.
+    expect(chat!.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const sentToModel = JSON.stringify(chat!.mock.calls[1]);
+    // Non-vacuous: the challenge itself really reached the model…
+    expect(sentToModel).toContain("CONFIRMATION_REQUIRED");
+    // …but its secret did not. MUTATION (drop the redaction in
+    // llm-agent.service.ts) → red.
+    expect(sentToModel).not.toContain(minted.token);
   });
 });
 

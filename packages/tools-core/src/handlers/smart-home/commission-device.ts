@@ -37,7 +37,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "commission_device",
   description:
-    "Commission (pair) a new Matter device using its pairing code. Establishes a secure connection and adds the device to the Droplet controller. Destructive: requires user confirmation in the Droplet dashboard (Tier 2 modal) — pairing a device is a meaningful state change and the LLM should never enroll a device without explicit human approval.",
+    "Commission (pair) a new Matter device using its pairing code. Establishes a secure connection and adds the device to the Droplet controller. Destructive: the first call only asks; it pairs once the user approves the prompt — pairing a device is a meaningful state change and the LLM should never enroll a device without explicit human approval.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
