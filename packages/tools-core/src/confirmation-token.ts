@@ -124,27 +124,12 @@ export interface ConfirmationTokenStore {
     args: Record<string, unknown>,
     now?: number,
   ): ConfirmationRedeemResult;
-  /**
-   * Spend a live challenge for this exact tool + arguments WITHOUT
-   * presenting the token secret — the legacy `confirmed: true` path.
-   *
-   * Exists because the chat surface has no way to carry a token back:
-   * `_meta` is set by the orchestrator, not by the model, and the model
-   * is what re-issues a confirming call. Requiring the secret there would
-   * make every one of the 16 hand-rolled two-phase tools challenge
-   * forever. See `docs/tool-confirmation-contract.md` §5.
-   *
-   * WEAKER THAN `redeem`, deliberately and explicitly: it proves the call
-   * was challenged, not that the approver held a secret. It still binds
-   * to tool + arguments, still expires, and is still single-use — so a
-   * `confirmed: true` cannot authorise a call that was never challenged,
-   * cannot authorise a DIFFERENT call, and cannot be replayed.
-   */
-  redeemLiveChallenge(
-    toolName: string,
-    args: Record<string, unknown>,
-    now?: number,
-  ): ConfirmationRedeemResult;
+  // WARP-2002 — there is deliberately NO way to spend a challenge without
+  // presenting its token. A `redeemLiveChallenge(tool, args)` used to
+  // exist for the legacy `confirmed: true` path; it let the MODEL approve
+  // its own write by re-issuing the challenged call with the flag set.
+  // Retired once #1830 gave chat a human round-trip that carries the real
+  // token. Do not re-add it: see `docs/tool-confirmation-contract.md` §3.
   /** Drop expired entries. Pure memory hygiene — see the note below. */
   sweepExpired(now?: number): number;
   /** Pending (minted, unspent) entries. Test/diagnostic surface. */
@@ -249,29 +234,6 @@ export function createConfirmationTokenStore(
       // locked out of an approval the user already gave.
       entry.usedAt = now;
       return { ok: true, mintedAt: entry.mintedAt };
-    },
-
-    redeemLiveChallenge(toolName, args, now = Date.now()) {
-      const wanted = confirmationBindingHash(toolName, args);
-      let sawSpent = false;
-      let sawExpired = false;
-      for (const entry of pending.values()) {
-        if (entry.bindingHash !== wanted) continue;
-        if (entry.usedAt !== null) {
-          sawSpent = true;
-          continue;
-        }
-        if (entry.expiresAt <= now) {
-          sawExpired = true;
-          continue;
-        }
-        entry.usedAt = now;
-        return { ok: true, mintedAt: entry.mintedAt };
-      }
-      // Most specific true statement available, same as `redeem`.
-      if (sawSpent) return { ok: false, reason: "already_used" };
-      if (sawExpired) return { ok: false, reason: "expired" };
-      return { ok: false, reason: "unknown_token" };
     },
 
     sweepExpired(now = Date.now()) {

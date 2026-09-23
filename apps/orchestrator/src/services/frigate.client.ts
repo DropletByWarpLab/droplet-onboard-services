@@ -54,12 +54,23 @@ export async function fetchConfig(): Promise<Record<string, unknown>> {
 
 // --- Events ---
 
+/**
+ * WARP-2982 — an EMPTY camera filter means "no cameras", never "no filter".
+ * Callers narrow the filter to the caller's per-camera scope; a scope with
+ * nothing in it must yield nothing, and Frigate reads a missing `cameras`
+ * param as "all". Every event/review fetcher checks this before querying.
+ */
+function isEmptyCameraFilter(cameras: string[] | undefined): boolean {
+  return cameras !== undefined && cameras.length === 0;
+}
+
 export async function fetchEvents(
   limit = 20,
-  camera?: string
+  cameras?: string[]
 ): Promise<unknown[]> {
+  if (isEmptyCameraFilter(cameras)) return [];
   const params = new URLSearchParams({ limit: String(limit) });
-  if (camera) params.set("camera", camera);
+  if (cameras) params.set("cameras", cameras.join(","));
   const resp = await fetch(`${FRIGATE_URL}/api/events?${params}`, { signal: timeout() });
   if (!resp.ok) throw new Error(`Frigate events: ${resp.status}`);
   return resp.json();
@@ -113,6 +124,7 @@ export interface FrigateSearchFilter extends FrigateEventFilter {
 export async function searchEventsSemantic(
   filter: FrigateSearchFilter,
 ): Promise<unknown[]> {
+  if (isEmptyCameraFilter(filter.cameras)) return [];
   const params = new URLSearchParams();
   params.set("query", filter.query);
   if (filter.searchType) params.set("search_type", filter.searchType);
@@ -141,6 +153,7 @@ export async function searchEventsSemantic(
 export async function fetchEventsFiltered(
   filter: FrigateEventFilter,
 ): Promise<unknown[]> {
+  if (isEmptyCameraFilter(filter.cameras)) return [];
   const params = new URLSearchParams();
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.labels?.length) params.set("labels", filter.labels.join(","));
@@ -343,6 +356,34 @@ export async function openBirdseyeStream(
   return resp;
 }
 
+/**
+ * WARP-2982 — which camera recorded this event? The per-camera guard needs
+ * it for every route addressed by event id. `null` when Frigate does not
+ * know the id (the guard answers that like a denied camera: 404).
+ */
+export async function fetchEventCamera(eventId: string): Promise<string | null> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}`,
+    { signal: timeout() },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`Frigate event lookup: ${resp.status}`);
+  const body = (await resp.json()) as { camera?: unknown };
+  return typeof body.camera === "string" && body.camera ? body.camera : null;
+}
+
+/** WARP-2982 — which camera does this review cluster belong to? */
+export async function fetchReviewCamera(reviewId: string): Promise<string | null> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}`,
+    { signal: timeout() },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`Frigate review lookup: ${resp.status}`);
+  const body = (await resp.json()) as { camera?: unknown };
+  return typeof body.camera === "string" && body.camera ? body.camera : null;
+}
+
 export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/thumbnail.jpg`,
@@ -424,6 +465,7 @@ export interface FrigateReviewFilter {
 export async function fetchReviews(
   filter: FrigateReviewFilter,
 ): Promise<unknown[]> {
+  if (isEmptyCameraFilter(filter.cameras)) return [];
   const params = new URLSearchParams();
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.severity?.length) params.set("severity", filter.severity.join(","));
