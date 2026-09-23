@@ -116,7 +116,11 @@ describe("Files page — Undo on the post-upload confirmation toast (WARP-1912)"
   beforeEach(() => {
     vi.clearAllMocks();
     cleanup();
-    vi.mocked(uploadFiles).mockResolvedValue(undefined);
+    // WARP-2096: the server echoes each file under its final name.
+    vi.mocked(uploadFiles).mockImplementation(
+      async (_p: string, files: FileList | File[]) =>
+        Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+    );
     vi.mocked(deleteFile).mockResolvedValue(undefined);
   });
 
@@ -152,6 +156,27 @@ describe("Files page — Undo on the post-upload confirmation toast (WARP-1912)"
     await waitFor(() =>
       expect(toastSpy).toHaveBeenCalledWith("Removed 2 uploaded files.", "info"),
     );
+  });
+
+  // WARP-2096 — a same-name upload is kept under a new name. The toast must
+  // say so, and Undo must remove the NEW copy, never the user's original.
+  it("a kept-both upload is announced, and Undo targets the renamed copy", async () => {
+    vi.mocked(uploadFiles).mockResolvedValueOnce([
+      { name: "pick-0 (1).txt", path: "", size: 1, status: "renamed", requestedName: "pick-0.txt" },
+    ]);
+    render(<FilesPage />);
+
+    chooseFiles(1);
+
+    await waitFor(() => expect(actionToast()).toBeDefined());
+    expect(actionToast()?.[0]).toBe(
+      "Uploaded 1 file. 1 file had the same name as an existing one and was saved under a new name.",
+    );
+
+    actionToast()?.[2].onClick();
+
+    await waitFor(() => expect(deleteFile).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(deleteFile).mock.calls).toEqual([["/pick-0 (1).txt", "personal"]]);
   });
 
   it("a partial undo failure reports what remains", async () => {

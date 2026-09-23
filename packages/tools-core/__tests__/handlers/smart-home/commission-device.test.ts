@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import commissionDevice from "../../../src/handlers/smart-home/commission-device.js";
+import {
+  createToolCallInterceptor,
+  interceptOutcomeToToolResult,
+} from "../../../src/interceptor.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWith(commission: Mock): ToolContext {
@@ -22,9 +26,9 @@ function ctxWith(commission: Mock): ToolContext {
 
 describe("commission_device", () => {
   it("flags write+confirmation", () => {
-    // Pairing is a meaningful state change; the dashboard's Tier 2 modal
-    // is the trust anchor for human approval per spec §7. Reviewer-flagged
-    // follow-up from WARP-102.
+    // Pairing is a meaningful state change. The gate is the WARP-2305
+    // interceptor, which challenges on this flag before the handler runs
+    // (there is no separate "Tier 2 modal"; WARP-2008).
     expect(commissionDevice.requiresWrite).toBe(true);
     expect(commissionDevice.requiresConfirmation).toBe(true);
   });
@@ -49,5 +53,28 @@ describe("commission_device", () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("COMMISSION_FAILED");
+  });
+});
+
+describe("commission_device — gated at dispatch (WARP-2008)", () => {
+  const CODE = "34970112332";
+
+  it("the first call is challenged and never reaches the Matter controller", async () => {
+    const interceptor = createToolCallInterceptor();
+    const commission = vi.fn();
+    const outcome = interceptor.intercept(commissionDevice, { pairing_code: CODE });
+
+    // Dispatch as mcp-server does: the handler runs only on `proceed`.
+    if (outcome.kind === "proceed") await commissionDevice.handler(outcome.args, ctxWith(commission));
+
+    expect(outcome.kind).toBe("confirmation_required");
+    expect(commission).not.toHaveBeenCalled();
+  });
+
+  it("the challenge never echoes the pairing code (credential material)", () => {
+    const interceptor = createToolCallInterceptor();
+    const outcome = interceptor.intercept(commissionDevice, { pairing_code: CODE });
+    const serialized = JSON.stringify(interceptOutcomeToToolResult(commissionDevice, outcome));
+    expect(serialized).not.toContain(CODE);
   });
 });

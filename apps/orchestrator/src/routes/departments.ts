@@ -53,6 +53,7 @@ import {
 } from "../services/nextcloud-groups.client.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { config } from "../config.js";
+import { mountDepartmentProfileRoutes } from "./department-profile.routes.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("departments-route");
@@ -200,7 +201,10 @@ function formatMembershipResponse(m: {
  * loud, audited path, not a membership fabrication).
  */
 function formatDepartmentResponse(
-  dept: Department & { _count?: { teams?: number; memberships?: number } },
+  dept: Department & {
+    _count?: { teams?: number; memberships?: number };
+    profile?: { template: string; icon: string } | null;
+  },
   myRight: string | null = null,
   usedBytes: string | null = null,
 ) {
@@ -225,6 +229,15 @@ function formatDepartmentResponse(
     teamCount: dept._count?.teams ?? 0,
     myRight,
     usedBytes,
+    // WARP-2976 (ADR-059 P1): the row's OWN dashboard arrangement summary, so
+    // the department switcher renders from this one list call. Emitted only
+    // when the caller loaded it — the create/update/restore responses don't,
+    // and a `profile: null` there would claim "not set up" about a department
+    // that may well be set up. A TEAM never carries its own profile (it reads
+    // its parent's), so a TEAM row omits the key for the same reason.
+    ...("profile" in dept && dept.kind !== "TEAM"
+      ? { profile: dept.profile ? { template: dept.profile.template, icon: dept.profile.icon } : null }
+      : {}),
   };
 }
 
@@ -271,6 +284,7 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
             _count: {
               select: { memberships: true, teams: true },
             },
+            profile: { select: { template: true, icon: true } },
           },
         });
 
@@ -330,6 +344,7 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
           where: { id: departmentId },
           include: {
             _count: { select: { memberships: true, teams: true } },
+            profile: { select: { template: true, icon: true } },
             teams: {
               include: { _count: { select: { memberships: true, teams: true } } },
             },
@@ -1255,6 +1270,9 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  // WARP-2976 (ADR-059 P1): GET/PUT /departments/:id/profile.
+  mountDepartmentProfileRoutes(router, prisma);
 
   return router;
 }

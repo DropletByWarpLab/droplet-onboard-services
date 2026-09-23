@@ -116,6 +116,7 @@ export const SPACES: SpaceDef[] = [
     // rather than its child, so it is its own chip here too — the pin in
     // workspace-nav-config.test.ts caught the two PRs crossing on stage.
     hrefs: [
+      "/security",
       "/cameras",
       "/events",
       "/network",
@@ -209,11 +210,18 @@ export function indexedNavHrefs(): string[] {
  * visible destination are dropped, so the tab row never advertises an empty
  * space — the handoff's "a space with no visible destinations must not render
  * its tab".
+ *
+ * WARP-2976 (ADR-059 §2.3) — `restrictTo`, when given, is the active
+ * department's href set: a destination survives only if its href is in it AND
+ * it passes every gate above. An intersection, never a union — the set can
+ * only remove chips, and a space it empties drops exactly as a gated-empty
+ * one does. Omitted (Whole business), the result is unchanged.
  */
 export function resolveSpaces(
   role: AuthRole | undefined,
   capabilities: NavCapabilities,
   isModuleOn: (moduleId: string) => boolean,
+  restrictTo?: ReadonlySet<string>,
 ): Space[] {
   const allowed = (entry: Indexed): boolean =>
     passesGates(entry.item, role, capabilities, isModuleOn) &&
@@ -223,6 +231,7 @@ export function resolveSpaces(
   return SPACES.map((def) => {
     const destinations: Destination[] = [];
     for (const href of def.hrefs) {
+      if (restrictTo && !restrictTo.has(href)) continue;
       const entry = INDEX.get(href);
       if (!entry || !allowed(entry)) continue;
       const views = viewsFor(entry.item, role, capabilities, isModuleOn);
