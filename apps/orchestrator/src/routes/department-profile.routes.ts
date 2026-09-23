@@ -74,7 +74,13 @@ export const departmentProfileBodySchema = z
           })
           .strict(),
       )
-      .max(MAX_HOME_WIDGETS),
+      .max(MAX_HOME_WIDGETS)
+      // The board keys tiles by widget id — a repeat would render the same
+      // tile twice under a duplicate React key.
+      .refine(
+        (widgets) => new Set(widgets.map((w) => w.widget)).size === widgets.length,
+        "widgets must be unique",
+      ),
   })
   .strict();
 

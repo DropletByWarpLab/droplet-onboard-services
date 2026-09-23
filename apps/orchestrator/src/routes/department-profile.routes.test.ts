@@ -267,6 +267,16 @@ describe("PUT /api/departments/:id/profile", () => {
     ["an href with a trailing slash", { ...VALID_BODY, navHrefs: ["/cameras/"] }],
     ["an href with a query string", { ...VALID_BODY, navHrefs: ["/cameras?x=1"] }],
     ["duplicate hrefs", { ...VALID_BODY, navHrefs: ["/cameras", "/cameras"] }],
+    [
+      "duplicate widgets",
+      {
+        ...VALID_BODY,
+        homeWidgets: [
+          { widget: "cameras", size: "m" },
+          { widget: "cameras", size: "s" },
+        ],
+      },
+    ],
     ["too many hrefs", { ...VALID_BODY, navHrefs: Array.from({ length: 41 }, (_, i) => `/p${i}`) }],
     ["a widget size outside s/m/l", { ...VALID_BODY, homeWidgets: [{ widget: "cameras", size: "xl" }] }],
     ["an extra key on a widget", { ...VALID_BODY, homeWidgets: [{ widget: "cameras", size: "s", html: "<b>" }] }],
@@ -323,5 +333,35 @@ describe("GET /api/departments — the switcher's profile summary", () => {
     const byId = Object.fromEntries(res.body.departments.map((d: any) => [d.id, d]));
     expect(byId["d-sec"].profile).toEqual({ template: "security", icon: "shield-check" });
     expect(byId["d-sales"].profile).toBeNull();
+  });
+
+  it("a TEAM row omits the key — a team reads its parent's profile, so null would claim 'not set up'", async () => {
+    const prisma = mkPrisma();
+    prisma.department.findMany.mockResolvedValue([
+      { ...LIST_ROW, profile: { template: "security", icon: "shield-check" } },
+      { ...LIST_ROW, id: "t-nights", slug: "nights", name: "Nights", kind: "TEAM", parentId: "d-sec", profile: null },
+    ]);
+    const res = await request(mkApp(prisma, OWNER)).get("/api/departments");
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.departments.map((d: any) => [d.id, d]));
+    expect(byId["d-sec"].profile).toEqual({ template: "security", icon: "shield-check" });
+    expect("profile" in byId["t-nights"]).toBe(false);
+  });
+
+  it("the detail read omits the key for a TEAM too", async () => {
+    const prisma = mkPrisma();
+    prisma.department.findUnique.mockResolvedValue({
+      ...LIST_ROW,
+      id: "t-nights",
+      slug: "nights",
+      name: "Nights",
+      kind: "TEAM",
+      parentId: "d-sec",
+      profile: null,
+      teams: [],
+    });
+    const res = await request(mkApp(prisma, OWNER)).get("/api/departments/t-nights");
+    expect(res.status).toBe(200);
+    expect("profile" in res.body.department).toBe(false);
   });
 });

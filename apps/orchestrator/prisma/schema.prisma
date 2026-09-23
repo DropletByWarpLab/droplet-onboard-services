@@ -6373,8 +6373,6 @@ model Department {
   @@index([parentId])
 }
 
-/// WARP-1255: department membership — explicit access rights for a user in a
-/// department. The sync state tracks whether NC group membership has converged.
 /// WARP-2976 (ADR-059 P1) — a department's dashboard arrangement. Shows,
 /// never grants: `navHrefs` is intersected with the viewer's existing nav gates
 /// (role / capability / module) on the client, so a destination the person may
@@ -6396,6 +6394,8 @@ model DepartmentProfile {
   updatedAt    DateTime           @updatedAt
 }
 
+/// WARP-1255: department membership — explicit access rights for a user in a
+/// department. The sync state tracks whether NC group membership has converged.
 model DepartmentMembership {
   id               String          @id @default(uuid())
   departmentId     String
