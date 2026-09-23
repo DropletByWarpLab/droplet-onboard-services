@@ -173,3 +173,73 @@ describe("passkey authentication steps (WARP-1054)", () => {
     expect(webAuthnCancelCeremony).toHaveBeenCalledTimes(1);
   });
 });
+
+// =====================================================================
+// WARP-1157 — error classification and the passkey list wire calls.
+// =====================================================================
+import {
+  classifyPasskeyError,
+  describePasskeyError,
+  PasskeyServerError,
+  listPasskeys,
+  renamePasskey,
+  removePasskey,
+} from "./webauthn";
+
+describe("classifyPasskeyError (WARP-1157)", () => {
+  it.each([
+    [new PasskeyServerError(400, "origin_unsupported", "x"), "ip_address"],
+    [new PasskeyServerError(400, "challenge_expired", "x"), "challenge_expired"],
+    [new PasskeyServerError(400, "verification_failed", "x"), "verification_failed"],
+    [new PasskeyServerError(409, "already_registered", "x"), "already_registered"],
+    [new PasskeyServerError(500, "storage_failed", "x"), "storage_failed"],
+    [new PasskeyServerError(503, "directory_unavailable", "x"), "unavailable"],
+    [new PasskeyServerError(429, null, "x"), "unavailable"],
+    [new TypeError("Failed to fetch"), "network"],
+    [new DOMException("x", "NotAllowedError"), "cancelled"],
+    [new DOMException("x", "AbortError"), "cancelled"],
+    [new DOMException("x", "InvalidStateError"), "already_registered"],
+    [new DOMException("x", "NotSupportedError"), "authenticator_unsupported"],
+    [new DOMException("WebAuthn is not supported on sites with TLS certificate errors.", "NotAllowedError"), "certificate"],
+  ])("%s → %s", (err, kind) => {
+    expect(classifyPasskeyError(err)).toBe(kind);
+  });
+
+  it("only offers retry where retrying can succeed", () => {
+    expect(describePasskeyError(new DOMException("x", "NotAllowedError")).retryable).toBe(true);
+    expect(describePasskeyError(new PasskeyServerError(400, "origin_unsupported", "x")).retryable).toBe(false);
+    expect(describePasskeyError(new PasskeyServerError(500, "storage_failed", "x")).retryable).toBe(false);
+    for (const err of [
+      new PasskeyServerError(400, "origin_unsupported", "x"),
+      new PasskeyServerError(500, "storage_failed", "x"),
+      new PasskeyServerError(400, "verification_failed", "x"),
+    ]) {
+      expect(describePasskeyError(err).message).not.toMatch(/try again\.$/i);
+    }
+  });
+});
+
+describe("passkey list wire (WARP-1157)", () => {
+  it("lists, renames and removes via the self-scoped routes", async () => {
+    authFetch
+      .mockResolvedValueOnce(jsonResponse({ credentials: [{ id: "p1" }] }))
+      .mockResolvedValueOnce(jsonResponse({ id: "p1", name: "Phone" }))
+      .mockResolvedValueOnce({ ok: true, status: 204, json: async () => ({}) } as unknown as Response);
+
+    expect(await listPasskeys()).toEqual([{ id: "p1" }]);
+    await renamePasskey("p1", "Phone");
+    await removePasskey("p1");
+
+    expect(authFetch.mock.calls.map((c) => [c[1].method, c[0]])).toEqual([
+      ["GET", "/api/auth/webauthn/credentials"],
+      ["PATCH", "/api/auth/webauthn/credentials/p1"],
+      ["DELETE", "/api/auth/webauthn/credentials/p1"],
+    ]);
+    expect(JSON.parse(authFetch.mock.calls[1]![1].body)).toEqual({ name: "Phone" });
+  });
+
+  it("carries the server's code on a failure", async () => {
+    authFetch.mockResolvedValueOnce(jsonResponse({ error: "nope", code: "not_found" }, false, 404));
+    await expect(removePasskey("p9")).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
+});

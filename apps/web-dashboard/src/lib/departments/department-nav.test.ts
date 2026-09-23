@@ -84,10 +84,8 @@ describe("departmentNavGroups — intersection, never union", () => {
     expect(every).not.toContain("/");
     expect(every).not.toContain("/files");
     expect(hrefsOf(groups[1].items)).toEqual(["/chat", "/settings", "/help"]);
-    expect(groups[1]).toEqual({
-      label: "General",
-      items: DEPARTMENT_ALWAYS_HREFS.map((h) => topLevel.find((i) => i.href === h)),
-    });
+    expect(groups[1].label).toBe("General");
+    expect(hrefsOf(groups[1].items)).toEqual([...DEPARTMENT_ALWAYS_HREFS]);
     expect(groups).toHaveLength(2);
   });
 
@@ -194,11 +192,60 @@ describe("slugFromPath", () => {
   });
 });
 
+describe("departmentNavGroups × the WARP-2967 tuck and nesting", () => {
+  const render = (
+    slug: string,
+    role: Parameters<typeof visibleItems>[1] = "owner",
+    isOn: (id: string) => boolean = allOn,
+  ) =>
+    departmentNavGroups(NAV_GROUPS, { name: slug, slug }, {
+      icon: "briefcase",
+      navHrefs: [...templateFor(slug as never)!.navHrefs],
+    }).flatMap((g) => hrefsOf(visibleItems(g.items, role, ALL_CAPS, isOn)));
+
+  it("IT keeps Integrations, Users and Health, though Settings owns them in the whole-business nav", () => {
+    expect(render("it")).toEqual(
+      expect.arrayContaining(["/integrations", "/users", "/health"]),
+    );
+  });
+
+  it("Operations keeps Routines; every department keeps Help", () => {
+    expect(render("operations")).toContain("/routines");
+    for (const slug of ["security", "it", "finance", "operations", "sales"])
+      expect(render(slug), slug).toContain("/help");
+  });
+
+  it("Finance shows Money and Reports, not the Projects and Insights they nest under", () => {
+    const hrefs = render("finance");
+    expect(hrefs).toEqual(expect.arrayContaining(["/money", "/reports"]));
+    expect(hrefs).not.toContain("/projects");
+    expect(hrefs).not.toContain("/business");
+  });
+
+  it("a listed child still carries its parent's gates where it names none", () => {
+    const g = (navHrefs: string[]) =>
+      departmentNavGroups(NAV_GROUPS, SECURITY, { icon: "shield-check", navHrefs });
+    // Events has no module of its own — it is part of Cameras.
+    const events = g(["/events"])[0].items.find((i) => i.href === "/events")!;
+    expect(visibleItems([events], "owner", ALL_CAPS, (id) => id !== "cameras")).toEqual([]);
+    // Reports keeps the Insights role gate: guests never see it.
+    const reports = g(["/reports"])[0].items.find((i) => i.href === "/reports")!;
+    expect(visibleItems([reports], "guest", ALL_CAPS, allOn)).toEqual([]);
+    // Money names its own module, so it survives Projects being off.
+    const money = g(["/money"])[0].items.find((i) => i.href === "/money")!;
+    expect(hrefsOf(visibleItems([money], "owner", ALL_CAPS, (id) => id !== "projects"))).toEqual([
+      "/money",
+    ]);
+  });
+});
+
 describe("navChoices — only what the editor can reach", () => {
-  it("drops tucked entries and the always-reachable ones", () => {
+  it("offers tucked entries, drops the always-reachable ones", () => {
     const hrefs = navChoices(NAV_GROUPS, "owner", ALL_CAPS, allOn).map((c) => c.href);
-    expect(hrefs).not.toContain("/knowledge");
-    expect(hrefs).not.toContain("/context");
+    // WARP-2967: templates seed tucked hrefs (IT's /users, /health); an
+    // editor who cannot see them in the checklist cannot uncheck them.
+    expect(hrefs).toContain("/knowledge");
+    expect(hrefs).toContain("/users");
     expect(hrefs).not.toContain("/chat");
     expect(hrefs).not.toContain("/settings");
     expect(hrefs).not.toContain("/help");
@@ -213,6 +260,14 @@ describe("navChoices — only what the editor can reach", () => {
     expect(hrefs).not.toContain("/cameras");
     // A child drops with its parent, exactly as `visibleItems` drops it.
     expect(hrefs).not.toContain("/events");
+  });
+
+  it("offers Money when only Projects is off — the parent failed only its module", () => {
+    const hrefs = navChoices(NAV_GROUPS, "owner", ALL_CAPS, (id) => id !== "projects").map(
+      (c) => c.href,
+    );
+    expect(hrefs).toContain("/money");
+    expect(hrefs).not.toContain("/projects");
   });
 });
 

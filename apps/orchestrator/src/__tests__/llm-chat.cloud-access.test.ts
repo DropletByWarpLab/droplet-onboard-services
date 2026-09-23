@@ -200,7 +200,11 @@ function systemPromptText(): string {
 // own those); it is the statement that the turns measured in the rest of this
 // file run against the prompt the product assembles, blocks included.
 describe("POST /api/llm/chat — the prompt blocks this suite assumes (fixture floor)", () => {
-  it("assembles a base prompt carrying both the persona and the business block", async () => {
+  // WARP-2746 — this suite's turns resolve to a CLOUD provider, and a cloud
+  // turn is never sent the business block (stored-content-egress.service.ts).
+  // The floor is therefore persona present, business withheld; the local
+  // half is pinned in llm-chat.stored-content-egress.test.ts.
+  it("assembles a base prompt carrying the persona block, and withholds the business block off-LAN", async () => {
     mockResolveEffectiveAccess.mockResolvedValue(accessWith(true));
     // Owner, not the `family` reception principal the gate cases use: the
     // business block is role-filtered (§15 audience ladder) and only the
@@ -218,7 +222,7 @@ describe("POST /api/llm/chat — the prompt blocks this suite assumes (fixture f
     expect(res.status).toBe(200);
     const sys = systemPromptText();
     expect(sys).toContain(PERSONA_BLOCK_PREFIX);
-    expect(sys).toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    expect(sys).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
   });
 });
 

@@ -113,13 +113,13 @@ import {
   findMatchingRecoveryCodeHash,
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
-import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
+import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
 import { warmDefaultModel } from "../services/model-readiness.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
-import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
+import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -724,6 +724,11 @@ const DIRECTORY_USER_SELECT = {
 function isIdpProvisioned(u: { provisionSource?: string | null }): boolean {
   return u.provisionSource === "SSO" || u.provisionSource === "SCIM";
 }
+
+/** WARP-2984 — where a roster row's account comes from. Explicit, per row:
+ *  `local` / `sso` / `scim` read `User.provisionSource`; `nextcloud` is a
+ *  Nextcloud user with no local directory row (legacy). */
+type RosterSource = "local" | "sso" | "scim" | "nextcloud";
 
 /** WARP-2858 — the one refusal body for a local-password write on an
  *  SSO/SCIM-provisioned account (admin PUT and self-service change). */
@@ -2042,12 +2047,10 @@ export function createPublicAuthRouter(
 
       try {
         await ncCreateUser(
-          // Use the configured admin token from env. No request-bound NC
-          // token is available since the invitee isn't logged in yet.
-          process.env.NEXTCLOUD_ADMIN_TOKEN ||
-            Buffer.from(
-              `${process.env.NEXTCLOUD_ADMIN_USER || "admin"}:${process.env.NEXTCLOUD_ADMIN_PASSWORD || ""}`,
-            ).toString("base64"),
+          // WARP-2993 — the box service account. The previous
+          // `NEXTCLOUD_ADMIN_TOKEN || <bare base64>` went out as a Bearer
+          // (no `basic:` prefix) and NEXTCLOUD_ADMIN_TOKEN is wired nowhere.
+          adminBasicToken(),
           invite.username,
           password,
           invite.displayName || undefined,
@@ -2897,11 +2900,10 @@ export function createProtectedAuthRouter(
   // PR #258 review (a "admin only" comment with no enforcing guard).
   router.get("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // Hide the Nextcloud system/database admin account — it exists for
       // internal orchestrator use only and must never appear in the UI.
@@ -2913,12 +2915,21 @@ export function createProtectedAuthRouter(
       // plain built-in tier) — the T8 RosterUser extension. The select stays
       // EXPLICIT: never return raw User rows from this endpoint (the full
       // passwordHash serialization sweep is WARP-1539 — don't widen it here).
+      // WARP-2984 (Romain, 2026-09-22): the roster shows EVERYONE — Nextcloud
+      // users AND local directory rows with no Nextcloud user (SSO / SCIM),
+      // merged, no duplicates, each tagged with where it comes from. It used
+      // to map over Nextcloud only, so an IdP-provisioned account could be
+      // signed in (GET /auth/sessions lists it) with no row to disable it from.
       type LocalRosterRow = {
         id: string;
         username: string;
+        displayName: string;
+        email: string | null;
         nextcloudUsername: string | null;
         role: string;
         accessRoleId: string | null;
+        directoryStatus: string;
+        provisionSource: string;
       };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
@@ -2927,9 +2938,13 @@ export function createProtectedAuthRouter(
               select: {
                 id: true,
                 username: true,
+                displayName: true,
+                email: true,
                 nextcloudUsername: true,
                 role: true,
                 accessRoleId: true,
+                directoryStatus: true,
+                provisionSource: true,
               },
             }) as Promise<LocalRosterRow[]>)
           : ([] as LocalRosterRow[]),
@@ -2941,17 +2956,44 @@ export function createProtectedAuthRouter(
         if (row.nextcloudUsername) localByNcUsername.set(row.nextcloudUsername.toLowerCase(), row);
         localByUsername.set(row.username.toLowerCase(), row);
       }
+      const sourceOf = (row: LocalRosterRow): RosterSource =>
+        row.provisionSource === "SSO" ? "sso" : row.provisionSource === "SCIM" ? "scim" : "local";
+      const matched = new Set<string>();
       const users = ncUsers.map((u) => {
         const key = u.id.toLowerCase();
         const local = localByNcUsername.get(key) ?? localByUsername.get(key) ?? null;
+        if (local) matched.add(local.id);
         return {
           ...u,
           userId: local?.id ?? null,
           // No local row → no fabricated tier; the dashboard renders no chip.
           role: local?.role ?? null,
           accessRoleId: local?.accessRoleId ?? null,
+          source: local ? sourceOf(local) : ("nextcloud" satisfies RosterSource),
+          hasStorage: true,
         };
       });
+      // Local rows Nextcloud does not list: every SSO/SCIM account, plus any
+      // local row whose Nextcloud user is gone. `id` is the handle the write
+      // routes' resolver (findDirectoryUserByHandle) accepts, so every action
+      // on the row reaches it. Service principals are machine accounts, not
+      // people — kept off the roster like the Nextcloud system admin above.
+      for (const row of localRows) {
+        if (matched.has(row.id) || row.role === "service") continue;
+        users.push({
+          id: row.nextcloudUsername ?? row.username,
+          displayName: row.displayName,
+          email: readUserEmail(row.email),
+          // No Nextcloud flag exists for this row; the directory status is
+          // the whole state.
+          enabled: row.directoryStatus === "ACTIVE",
+          userId: row.id,
+          role: row.role,
+          accessRoleId: row.accessRoleId,
+          source: sourceOf(row),
+          hasStorage: false,
+        });
+      }
       res.json({ users });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -3007,11 +3049,10 @@ export function createProtectedAuthRouter(
         throw err;
       }
 
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // WARP-485 follow-up (Romain PR #279 review): fail-CLOSED if
       // prisma isn't wired so we never create an NC user that we
@@ -3171,11 +3212,10 @@ export function createProtectedAuthRouter(
   // WARP-171: per-route guard. owner + admin only.
   router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // The target row, read ONCE and shared by both guarded branches below.
       // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
@@ -3437,11 +3477,10 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
 
         // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
         // the auth source of truth and the guard rails key off it.
@@ -3582,11 +3621,10 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
         // WARP-1526: dashboard-disable parks the LOCAL row on
         // directoryStatus=DEACTIVATED (see the disable handler) — re-enable
         // must flip it back or the account stays locally locked out
@@ -3760,11 +3798,10 @@ export function createProtectedAuthRouter(
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // WARP-1526 rails. This surface predated every people-surface
       // invariant — an admin could delete the owner's account here. Resolve
