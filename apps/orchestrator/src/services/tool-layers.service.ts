@@ -234,11 +234,18 @@ export function runtimeToolLookupFrom(
 }
 
 /**
- * THE runtime lookup for the chat estimate (routes/llm.ts) and the agent
- * loop (llm-agent.service.ts). One helper, so the two sites cannot disagree
- * about which runtime tools a scoped person reaches — the WARP-2556 drift
- * class. Reads the process registry and the classification cache the
- * multiplexer's policy already reads (a stale cache errs toward write).
+ * THE runtime lookup for the chat catalog build (routes/llm.ts
+ * `narrowAllowedToolsForRole`) and the agent loop (llm-agent.service.ts).
+ * One helper, so the two sites cannot disagree about which runtime tools a
+ * scoped person reaches — the WARP-2556 drift class. Reads the process
+ * registry and the classification cache the multiplexer's policy already
+ * reads (a stale cache errs toward write).
+ *
+ * Effective-access (`loadToolLayers`) reads the classification ROWS inside
+ * its REPEATABLE READ tx, while this lookup reads
+ * `remoteToolClassificationCache`; the owner's classification route writes
+ * the row and refreshes the cache in the same request, so the two drift only
+ * briefly.
  */
 export function currentRuntimeToolLookup(): RuntimeToolLookup {
   return runtimeToolLookupFrom(runtimeToolRegistry, remoteToolClassificationCache.lookup);
