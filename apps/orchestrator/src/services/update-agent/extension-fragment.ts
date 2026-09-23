@@ -37,10 +37,12 @@
  *    value that would need escaping is a refusal.
  * 4. The written text is RE-PARSED by `assertExtensionOverrideShape` before
  *    it is returned (defence in depth, and the check K3's runner repeats
- *    before `writeFile`): one YAML document, unique keys, no anchors, aliases,
- *    merge keys or explicit tags, the exact top-level and service key sets,
- *    exactly one service named `ext-<id>` that is not a base service, and
- *    every hard-coded value exactly as emitted.
+ *    before `writeFile`): one YAML 1.2 document with no directive or BOM,
+ *    unique keys, no anchors, aliases, merge keys, explicit tags or flow
+ *    collections, the exact top-level and service key sets, exactly one
+ *    service named `ext-<id>` that is not a base service (an empty base list
+ *    is refused, so the guard fails closed), and every hard-coded value
+ *    exactly as emitted.
  *
  * ## Open decisions this module deliberately does NOT make
  *
@@ -55,7 +57,7 @@
  *   secret: `environment` is literal and `env_file`/`secrets` are refused),
  *   are Romain's calls on WARP-2924.
  */
-import { isAlias, isScalar, parseAllDocuments, visit } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parseAllDocuments, visit } from "yaml";
 import { z } from "zod";
 import { EXTENSION_MEMORY_MB_MIN, EXTENSION_SLUG_PATTERN } from "../extension-manifest.js";
 import type { RecreateTarget } from "./apply.js";
@@ -386,8 +388,21 @@ export function assertExtensionOverrideShape(text: string, opts: ExtensionOverri
     refuse("shape_invalid", `override must be a string of at most ${EXT_OVERRIDE_MAX_BYTES} bytes`);
   }
 
+  // The base-merge guard below is only as good as this list: an empty one
+  // (e.g. a failed compose read defaulting to []) would drop it silently.
+  if (!Array.isArray(opts.baseServices) || opts.baseServices.length === 0) {
+    refuse("shape_invalid", "the base service list is empty; the not-a-base-service guard fails closed");
+  }
+
   // ── YAML adversaries ──
-  const docs = parseAllDocuments(text, { uniqueKeys: true, merge: false });
+  // A directive (%YAML 1.1, %TAG) changes how scalars resolve, so the closed
+  // patterns below would be judged under rules they were not written for
+  // (`yes` becomes a bool, `0x40` an int). The serializer writes neither a
+  // directive nor a BOM; both are refused before parsing, and the parser is
+  // pinned to YAML 1.2.
+  if (text.includes("\uFEFF")) refuse("yaml_adversary", "a byte-order mark is refused");
+  if (/^%/m.test(text)) refuse("yaml_adversary", "YAML directives are refused (%YAML, %TAG)");
+  const docs = parseAllDocuments(text, { version: "1.2", uniqueKeys: true, merge: false });
   if (!Array.isArray(docs) || docs.length !== 1) {
     refuse("yaml_adversary", "the override must be exactly one YAML document");
   }
@@ -414,6 +429,11 @@ export function assertExtensionOverrideShape(text: string, opts: ExtensionOverri
       }
       if ((node as { tag?: string }).tag) {
         refuse("yaml_adversary", `explicit tags are refused (${(node as { tag?: string }).tag})`);
+      }
+      // The serializer writes block style only; `{}` / `[]` would otherwise
+      // let an empty environment or a one-line list through.
+      if ((isMap(node) || isSeq(node)) && node.flow) {
+        refuse("yaml_adversary", "flow collections are refused ({...} / [...])");
       }
     },
   });
@@ -469,8 +489,8 @@ export function assertExtensionOverrideShape(text: string, opts: ExtensionOverri
     refuse("shape_invalid", `${name}.mem_limit must be ${EXT_MIN_MEMORY_MB}m..${EXT_MAX_MEMORY_MB}m`);
   }
   const cpus = body.cpus;
-  if (typeof cpus !== "number" || !(cpus > 0 && cpus <= EXT_MAX_CPUS)) {
-    refuse("shape_invalid", `${name}.cpus must be a number in (0, ${EXT_MAX_CPUS}]`);
+  if (typeof cpus !== "number" || !(cpus > 0 && cpus <= EXT_MAX_CPUS) || !inHundredths(cpus)) {
+    refuse("shape_invalid", `${name}.cpus must be a number in (0, ${EXT_MAX_CPUS}] in steps of 0.01`);
   }
   const pids = body.pids_limit;
   if (typeof pids !== "number" || !Number.isInteger(pids) || pids < EXT_MIN_PIDS || pids > EXT_MAX_PIDS) {

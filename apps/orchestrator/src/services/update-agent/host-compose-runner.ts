@@ -135,7 +135,7 @@ const DEFAULT_TIMEOUTS = { quickMs: 60_000, pullMs: 600_000, recreateMs: 300_000
  * (`[a-z0-9-]`, comma-separated there). Anything else never came from a
  * parsed manifest and must not reach the generated YAML.
  */
-const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+export const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 /**
  * Image ref / image ID shape safe to embed UNQUOTED in the generated

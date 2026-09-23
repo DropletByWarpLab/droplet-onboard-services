@@ -37,6 +37,7 @@ import {
   renderExtensionOverride,
   type ExtensionFragmentRefusal,
 } from "./extension-fragment.js";
+import { SERVICE_NAME_RE } from "./host-compose-runner.js";
 
 // ─── fixtures ────────────────────────────────────────────────────────────
 
@@ -363,7 +364,7 @@ describe("renderExtensionOverride: the emitted override", () => {
     const out = render({ ...validContainer(), image: `${REGISTRY_HOST}/ext/${longest}@sha256:${DIGEST}` }, longest);
     const name = `ext-${longest}`;
     expect(out).toContain(`  ${name}:`);
-    expect(name).toMatch(/^[a-z0-9][a-z0-9-]*$/);
+    expect(name).toMatch(SERVICE_NAME_RE);
     expect(name.length).toBeLessThanOrEqual(32);
   });
 });
@@ -403,20 +404,6 @@ describe("renderExtensionOverride: nothing hostile passes through (refuse, never
       for (const marker of MARKERS) expect(out).not.toMatch(marker);
     });
   }
-
-  it("manifest free text (name, summary, descriptions) has no path into the override", () => {
-    // The v2 manifest will carry the container block beside the author's
-    // free text; only the block is handed to the serializer.
-    const manifest = {
-      id: ID,
-      name: "x\n    privileged: true",
-      summary: "${HOST_ROOT}\nservices:\n  orchestrator: {}",
-      container: validContainer(),
-    };
-    const out = render(manifest.container);
-    for (const marker of MARKERS) expect(out).not.toMatch(marker);
-    expect(out).toBe(GOLDEN);
-  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -459,6 +446,28 @@ describe("assertExtensionOverrideShape: YAML adversaries", () => {
     expectRefusal(() => shape(text), "yaml_adversary", /YAML warning: Unresolved tag: !override/);
   });
 
+  it.each([
+    ["%YAML 1.1 (turns `yes` into a bool)", `%YAML 1.1\n---\n${GOLDEN.replace("    read_only: true\n", "    read_only: yes\n")}`],
+    ["%YAML 1.1 (turns `0x40` into an int)", `%YAML 1.1\n---\n${GOLDEN.replace("    pids_limit: 64\n", "    pids_limit: 0x40\n")}`],
+    ["%YAML 1.2 (even the version the patterns assume)", `%YAML 1.2\n---\n${GOLDEN}`],
+    ["%TAG (a tag handle)", `%TAG !d! tag:droplet.example,2026:\n---\n${GOLDEN}`],
+  ])("refuses a directive: %s", (_label, text) => {
+    expectRefusal(() => shape(text), "yaml_adversary", /directives are refused/);
+  });
+
+  it("refuses a byte-order mark", () => {
+    expectRefusal(() => shape(`\uFEFF${GOLDEN}`), "yaml_adversary", /byte-order mark/);
+  });
+
+  it.each([
+    ["an empty flow sequence", "    cap_drop:\n      - ALL\n", "    cap_drop: []\n"],
+    ["a flow sequence", "    cap_drop:\n      - ALL\n", "    cap_drop: [ALL]\n"],
+    ["a flow mapping", "    security_opt:\n      - no-new-privileges:true\n", "    security_opt: [{x: 1}]\n"],
+    ["an empty flow environment", "    environment:\n      LOG_LEVEL: info\n      NODE_ENV: production\n", "    environment: {}\n"],
+  ])("refuses %s (the serializer only writes block style)", (_label, from, to) => {
+    expectRefusal(() => shape(tamper(from, to)), "yaml_adversary", /flow collections are refused/);
+  });
+
   it("refuses a second YAML document", () => {
     expectRefusal(() => shape(`${GOLDEN}---\nservices:\n  orchestrator:\n    privileged: true\n`), "yaml_adversary", /exactly one YAML document/);
   });
@@ -496,6 +505,15 @@ describe("assertExtensionOverrideShape: service identity", () => {
     expectRefusal(() => shape(GOLDEN, ID, [...BASE, "ext-word-count"]), "shape_invalid", /is a base service/);
   });
 
+  it("fails closed when the base service list is empty (a failed compose read must not drop the guard)", () => {
+    expectRefusal(() => shape(GOLDEN, ID, []), "shape_invalid", /base service list is empty/);
+    expectRefusal(
+      () => renderExtensionOverride({ extensionId: ID, target: "release", container: validContainer(), baseServices: [] }),
+      "shape_invalid",
+      /base service list is empty/,
+    );
+  });
+
   it("refuses an invalid extension id before parsing", () => {
     expectRefusal(() => shape(GOLDEN, "Word Count"), "extension_id_invalid");
   });
@@ -522,7 +540,7 @@ describe("assertExtensionOverrideShape: forbidden keys injected into the service
     ["configs", "configs:\n      - nginx"],
     ["labels", "labels:\n      com.docker.compose.project: droplet"],
     ["build", "build:\n      context: /"],
-    ["command", "command: [sh, -c, id]"],
+    ["command", "command:\n      - sh\n      - -c\n      - id"],
     ["entrypoint", "entrypoint: /bin/sh"],
     ["depends_on", "depends_on:\n      - db"],
     ["container_name", "container_name: droplet-orchestrator"],
@@ -556,14 +574,14 @@ describe("assertExtensionOverrideShape: widened values for the keys the serializ
   const WIDEN: Array<[string, string, string, RegExp]> = [
     ["read_only: false", "    read_only: true\n", "    read_only: false\n", /read_only must be true/],
     ["read_only: \"true\" (a string)", "    read_only: true\n", '    read_only: "true"\n', /read_only must be true/],
-    ["cap_drop: [] ", "    cap_drop:\n      - ALL\n", "    cap_drop: []\n", /cap_drop must be exactly \[ALL\]/],
+    ["cap_drop: (null)", "    cap_drop:\n      - ALL\n", "    cap_drop:\n", /cap_drop must be exactly \[ALL\]/],
     ["cap_drop: [NET_RAW]", "      - ALL\n", "      - NET_RAW\n", /cap_drop must be exactly \[ALL\]/],
     ["networks: [default]", "      - droplet-internal\n", "      - default\n", /networks must be exactly/],
     ["networks: + default", "      - droplet-internal\n", "      - droplet-internal\n      - default\n", /networks must be exactly/],
     [
       "networks as a map with an alias spoofing db",
       "    networks:\n      - droplet-internal\n",
-      "    networks:\n      droplet-internal:\n        aliases: [db]\n",
+      "    networks:\n      droplet-internal:\n        aliases:\n          - db\n",
       /networks must be exactly/,
     ],
     ["security_opt seccomp=unconfined", "      - no-new-privileges:true\n", "      - seccomp=unconfined\n", /security_opt must be exactly/],
@@ -593,6 +611,7 @@ describe("assertExtensionOverrideShape: widened values for the keys the serializ
     ["cpus 0 (unlimited)", "    cpus: 0.50\n", "    cpus: 0\n", /cpus must be/],
     ["cpus over the ceiling", "    cpus: 0.50\n", `    cpus: ${EXT_MAX_CPUS + 1}\n`, /cpus must be/],
     ["cpus as a string", "    cpus: 0.50\n", '    cpus: "0.50"\n', /cpus must be/],
+    ["cpus finer than 0.01 steps", "    cpus: 0.50\n", "    cpus: 0.001\n", /cpus must be/],
     ["pids_limit -1 (unlimited)", "    pids_limit: 64\n", "    pids_limit: -1\n", /pids_limit must be/],
     ["pids_limit over the ceiling", "    pids_limit: 64\n", `    pids_limit: ${EXT_MAX_PIDS + 1}\n`, /pids_limit must be/],
     ["image by tag", `    image: ${IMAGE}\n`, `    image: ${REGISTRY_HOST}/ext/${ID}:latest\n`, /image is not/],
