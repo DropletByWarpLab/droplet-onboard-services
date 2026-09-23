@@ -211,6 +211,8 @@ function createPrismaMock(seed: any[] = []) {
       return n;
     }),
   };
+  // WARP-2984: the roster reads the directory too.
+  self.user.findMany = vi.fn(async () => users.map((u) => ({ ...u })));
   self.m365Connection = { deleteMany: vi.fn(async () => ({ count: 0 })) };
   self._users = users;
   return self;
@@ -480,5 +482,27 @@ describe("handle resolution order — nextcloudUsername before username", () => 
     expect(res.status).toBe(200);
     expect(row(prisma, "u-a")).toBeUndefined();
     expect(row(prisma, "u-b")).toBeDefined();
+  });
+});
+
+/**
+ * WARP-2984 — every roster row's `id` is a handle the write routes resolve.
+ * Round trip: list, take the SSO row's id, disable it, list again.
+ */
+describe("roster → action round trip (WARP-2984)", () => {
+  it("the SSO row the roster lists can be disabled by its roster id", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([{ id: "alice", displayName: "Alice", email: null, enabled: true }]);
+    const prisma = createPrismaMock([LOCAL, SSO, OTHER_ADMIN]);
+    const app = buildApp(prisma);
+
+    const before = await request(app).get("/api/auth/users");
+    const dana = before.body.users.find((u: any) => u.userId === "u-dana");
+    expect(dana).toMatchObject({ source: "sso", hasStorage: false, enabled: true });
+
+    const res = await request(app).post(`/api/auth/users/${encodeURIComponent(dana.id)}/disable`);
+    expect(res.status).toBe(200);
+
+    const after = await request(app).get("/api/auth/users");
+    expect(after.body.users.find((u: any) => u.userId === "u-dana").enabled).toBe(false);
   });
 });

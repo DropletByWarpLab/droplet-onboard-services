@@ -40,7 +40,7 @@ import {
   createUser,
   deleteUser as apiDeleteUser,
 } from "@/lib/api";
-import type { AuthUser } from "@/lib/types";
+import { ROSTER_SOURCE_LABEL, type RosterUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
 import { inferenceRuntimeLabel } from "@/lib/provider";
@@ -51,7 +51,7 @@ export default function SettingsPage() {
   // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
   // (fail-open — hidden only on a positive "off").
   const isModuleOn = useModuleGate();
-  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [users, setUsers] = useState<RosterUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
@@ -418,6 +418,13 @@ export default function SettingsPage() {
                       <span className="nm">{u.displayName || u.id}</span>
                       <span className="sub mono">{u.id}</span>
                     </span>
+                    {/* WARP-2984: where the account comes from — the roster
+                        lists every account, so the origin is shown, not implied. */}
+                    {u.source && (
+                      <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
+                        {ROSTER_SOURCE_LABEL[u.source]}
+                      </span>
+                    )}
                     {u.id !== currentUser?.username ? (
                       // Always rendered (no opacity-gate on hover) so the
                       // action is discoverable for touch + keyboard users.
