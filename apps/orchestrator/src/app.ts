@@ -525,7 +525,12 @@ export function createApp(
     "/api",
     createExtensionsRouter(prisma, {
       attach: lazyExtensionAttachPort(() =>
-        createExtensionAttacher({ prisma, mux: mcpClient, sandbox: createExtensionSandboxClient() }),
+        createExtensionAttacher({
+          prisma,
+          mux: mcpClient,
+          sandbox: createExtensionSandboxClient(),
+          identity: createDeviceIdentityClient(),
+        }),
       ),
       orchestratorUrl: config.EXTENSION_CALLBACK_URL,
       selfCallEnabled: config.EXTENSION_SELF_CALL_ENABLED,

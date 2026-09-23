@@ -529,11 +529,12 @@ async function main() {
   // outlive the in-memory attachment), and each restarted child gets the
   // call-back URL.
   const extensionSandbox = createExtensionSandboxClient();
+  const extensionIdentity = createDeviceIdentityClient();
   const extensionLifecycle = createExtensionLifecycle({
     prisma,
     sandbox: extensionSandbox,
-    identity: createDeviceIdentityClient(),
-    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox }),
+    identity: extensionIdentity,
+    attach: createExtensionAttacher({ prisma, mux: mcpClient, sandbox: extensionSandbox, identity: extensionIdentity }),
     orchestratorUrl: config.EXTENSION_CALLBACK_URL,
   });
   void extensionLifecycle.refreshInstalledIds().catch((err) => {

@@ -87,7 +87,7 @@ import {
   type SandboxHeldExtension,
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
-import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
+import { verifyExtensionStatement, type ExtensionSigner } from "./update-agent/extension-verify.js";
 import { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
 
 export { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken };
@@ -286,12 +286,15 @@ export interface ExtensionAttachPort {
 export type ExtensionAttachErrorCode =
   | "sandbox_url_refused"
   | "not_promoted"
-  | "manifest_invalid"
   | "listing_unavailable"
   | "listing_mismatch"
   | "attach_rejected"
   /** The review could not be recorded or re-read: transient, retried. */
-  | "classification_unavailable";
+  | "classification_unavailable"
+  /** The stored statement no longer verifies, or the row disagrees with it. */
+  | "statement_unverified"
+  /** The box's extension key could not be read (the sidecar): transient. */
+  | "statement_unavailable";
 
 /**
  * Why an attach did not happen. `permanent` is the lifecycle's switch: a
@@ -359,6 +362,48 @@ export function statementMismatch(
     if (row[field] !== signed[field]) return `the stored ${field} is not the signed ${field}`;
   }
   return null;
+}
+
+/** The signed columns of a stored ExtensionVersion. */
+export interface StoredExtensionVersion {
+  version: string;
+  commit: string;
+  tree: string;
+  statementBytes: Uint8Array;
+  signature: string;
+  manifestBytes: Uint8Array;
+  signer: ExtensionSigner;
+  keyFingerprint: string;
+}
+
+export type StoredExtensionVersionCheck =
+  | { ok: true; manifest: ExtensionManifest; statement: ExtensionStatement }
+  | { ok: false; failureReason: string; detail: string };
+
+/**
+ * Re-verify a stored version: the statement's signature by the signer and
+ * key recorded at promote, the manifest's digest against the statement, and
+ * the row's plain columns against the statement ({@link statementMismatch}).
+ * What install() starts and what the attach pins both come from here, never
+ * from the row alone. `boxKey` is the box extension key now (null: none).
+ */
+export async function verifyStoredExtensionVersion(
+  slug: string,
+  workspaceId: string,
+  v: StoredExtensionVersion,
+  boxKey: { spkiDer: Uint8Array } | null,
+): Promise<StoredExtensionVersionCheck> {
+  const check = await verifyExtensionStatement({
+    statement: v.statementBytes,
+    signature: v.signature,
+    manifest: v.manifestBytes,
+    boxKey,
+    recorded: { signer: v.signer, keyFingerprint: v.keyFingerprint },
+  });
+  if (!check.ok) return { ok: false, failureReason: check.failureReason, detail: check.detail };
+  const mismatch = statementMismatch(slug, workspaceId, v, check.statement);
+  if (mismatch) return { ok: false, failureReason: "statement_mismatch", detail: mismatch };
+  return { ok: true, manifest: check.manifest, statement: check.statement };
 }
 
 /** Supervisor states that mean the process died: the sandbox never restarts one. */
@@ -503,31 +548,27 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         boxKey = null;
       }
     }
-    const check = await verifyExtensionStatement({
-      statement: v.statementBytes,
-      signature: v.signature,
-      manifest: v.manifestBytes,
-      boxKey,
-      recorded: { signer: v.signer, keyFingerprint: v.keyFingerprint },
-    });
-    const refuse = async (failureReason: string, detail: string, what: string): Promise<never> => {
-      const reason = `${failureReason}: ${detail}`;
-      if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
-      await record(op, slug, actor, { severity: "warn", what, refs: { version: v.version, failureReason } });
-      throw new ExtensionLifecycleError("verify_failed", 409, reason);
-    };
-    if (!check.ok) {
-      return refuse(check.failureReason, check.detail, "Extension refused: its signed statement no longer verifies");
-    }
-    const manifest = check.manifest;
     // The signature covers the statement, never the row's plain columns
     // (review #2323). A row whose workspace, version, commit or tree says
     // something the statement does not, or that carries another extension's
-    // statement, is refused. What the sandbox is sent comes from the
-    // statement alone.
+    // statement, is refused (statement_mismatch). What the sandbox is sent
+    // comes from the statement alone.
+    const check = await verifyStoredExtensionVersion(slug, ext.workspaceId, v, boxKey);
+    if (!check.ok) {
+      const reason = `${check.failureReason}: ${check.detail}`;
+      if (!(await markFailed(slug, reason, from))) throw await overtaken(slug);
+      await record(op, slug, actor, {
+        severity: "warn",
+        what:
+          check.failureReason === "statement_mismatch"
+            ? "Extension refused: its row is not what was signed"
+            : "Extension refused: its signed statement no longer verifies",
+        refs: { version: v.version, failureReason: check.failureReason },
+      });
+      throw new ExtensionLifecycleError("verify_failed", 409, reason);
+    }
+    const manifest = check.manifest;
     const signed = check.statement;
-    const mismatch = statementMismatch(slug, ext.workspaceId, v, signed);
-    if (mismatch) return refuse("statement_mismatch", mismatch, "Extension refused: its row is not what was signed");
 
     // 2. Rotate the bearer BEFORE the start: the child may call back at once.
     const { token, hash } = mintExtensionToken();

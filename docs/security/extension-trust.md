@@ -132,7 +132,13 @@ statement alone.
 
 ## Attach and call-back (slice H3)
 
-- **Attach.** After a start, the orchestrator lists the extension's tools
+- **Attach.** Every attach re-verifies the stored statement against the
+  box key and the row against the statement (the check install() makes),
+  and pins what that verified, never the row's manifest bytes on their own
+  word: the reconciler attaches with no install before it. A statement
+  that does not verify fails the extension; a box key the sidecar cannot
+  hand over yet leaves it `installed` for a later tick. The orchestrator
+  then lists the extension's tools
   through the relay (`services/extension-mcp.port.ts`, plain JSON-RPC
   over the sandbox client, no MCP SDK transport) and compares the listing
   with the signed manifest: the same names, descriptions and input-schema
@@ -146,7 +152,10 @@ statement alone.
 - **The row is `live` only once attached.** An extension that does not
   answer yet stays `installed`, and the reconciler attaches it later. The
   same tick re-attaches every running extension after an orchestrator
-  restart (the attachment is in-process memory).
+  restart (the attachment is in-process memory), but only the process
+  install() started (`restarts` 0). One the sandbox restarted in place, or
+  one with no process record, is detached and reinstalled through
+  install() first (review #2325).
 - **Classification.** Every tool is recorded as a confirming write
   (`requiresWrite`, `requiresConfirmation`), whatever the author proposed
   or the wire claims (`readOnlyHint` is never read). For `ext-*` the

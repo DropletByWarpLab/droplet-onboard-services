@@ -12,7 +12,11 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import { extensionKeyFingerprint } from "../../services/extension-manifest.js";
+import {
+  buildExtensionStatement,
+  extensionKeyFingerprint,
+  manifestSha256,
+} from "../../services/extension-manifest.js";
 import { EXTENSION_STATEMENT_PREFIX } from "../../services/update-agent/extension-verify.js";
 import type { ExtensionSignResult } from "../../services/device-identity.client.js";
 import type {
@@ -90,12 +94,56 @@ export function fakeSidecar(opts: { provisioned?: boolean } = {}) {
       };
     }),
     getExtensionPublicKey: vi.fn(async () => ({ spkiDer: spki(), fingerprint: extensionKeyFingerprint(spki()) })),
+    /** The same envelope signature, synchronously: for seeding a stored version. */
+    signSync(statement: Uint8Array): { signature: string; keyFingerprint: string } {
+      const prefix = Buffer.from(EXTENSION_STATEMENT_PREFIX, "utf8");
+      return {
+        signature: sign("sha256", Buffer.concat([prefix, statement]), privateKey).toString("base64"),
+        keyFingerprint: extensionKeyFingerprint(spki()),
+      };
+    },
     /** A rebuilt boot disk: the sidecar now holds a different extension key. */
     rotateKey() {
       ({ privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" }));
     },
   };
   return identity;
+}
+
+/**
+ * An ExtensionVersion row as a promote stores it, signed by the sidecar's
+ * current key: the statement names the slug (workspace id = slug), the
+ * version, COMMIT, TREE and the manifest's sha256.
+ */
+export function signedVersionRow(
+  identity: ReturnType<typeof fakeSidecar>,
+  o: { slug: string; version: string; manifest: Buffer; id?: string },
+): Record<string, unknown> {
+  const statement = buildExtensionStatement({
+    extensionId: o.slug,
+    workspaceId: o.slug,
+    version: o.version,
+    commit: COMMIT,
+    tree: TREE,
+    manifestSha256: manifestSha256(o.manifest),
+  });
+  const signed = identity.signSync(statement);
+  return {
+    id: o.id ?? `v-${o.slug}-${o.version}`,
+    extensionId: o.slug,
+    version: o.version,
+    tag: `proposal/${o.version}`,
+    commit: COMMIT,
+    tree: TREE,
+    manifestBytes: o.manifest,
+    manifestSha256: manifestSha256(o.manifest),
+    statementBytes: statement,
+    signature: signed.signature,
+    signer: "box",
+    keyFingerprint: signed.keyFingerprint,
+    promotedByUserId: "u-owner",
+    createdAt: new Date(),
+  };
 }
 
 // ─── the sandbox ─────────────────────────────────────────────────────────

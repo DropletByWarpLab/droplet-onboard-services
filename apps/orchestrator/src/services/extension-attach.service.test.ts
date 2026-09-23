@@ -45,9 +45,11 @@ import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { parseExtensionManifest } from "./extension-manifest.js";
 import {
   extensionPrisma,
+  fakeSidecar,
   hostShimRpc,
   manifestBytes,
   manifestObject,
+  signedVersionRow,
   type HostShimOpts,
   type ManifestOpts,
 } from "../__tests__/helpers/extension-test-kit.js";
@@ -58,11 +60,14 @@ const LOCAL: McpClientPort = {
   callTool: async () => ({ isError: false, content: [{ type: "text", text: "{}" }] }),
 };
 
+/** The box's extension key: every seeded version is signed by it, the way a promote stores one. */
+let sidecar = fakeSidecar();
+
 function seed(db: ReturnType<typeof extensionPrisma>, m: ManifestOpts, opts: { operatorDomain?: string | null; status?: string } = {}) {
   const slug = m.id;
   const version = m.version ?? "0.1.0";
   const vid = `v-${slug}-${version}`;
-  db.versions.set(vid, { id: vid, extensionId: slug, version, manifestBytes: manifestBytes(m) });
+  db.versions.set(vid, signedVersionRow(sidecar, { slug, version, manifest: manifestBytes(m), id: vid }));
   db.extensions.set(slug, {
     id: slug,
     workspaceId: slug,
@@ -96,6 +101,7 @@ function kit(manifests: Record<string, ManifestOpts>, shim: HostShimOpts = {}, s
     cache,
     sandboxUrl: () => sandboxUrl,
     audit,
+    identity: sidecar,
   });
   return { db, relay, cache, mux, registry, audit, attacher, served };
 }
@@ -112,6 +118,62 @@ const refusal = async (p: Promise<unknown>) => {
 beforeEach(() => {
   installedExtensionIds.clear();
   installedExtensionIds.add("ext-wc");
+  sidecar = fakeSidecar();
+});
+
+describe("the attach re-verifies what it pins (review #2325)", () => {
+  // The listing is pinned to the manifest the attach reads. Read from the
+  // row unverified, a row whose manifest was rewritten (a tool added) pins
+  // the rewritten surface, and an extension that lists it attaches.
+  // MUTATION: parse currentVersion.manifestBytes without verifying the
+  // statement → the rewritten manifest attaches → red.
+  const WIDER: ManifestOpts = { id: "wc", tools: [{ name: "word_count" }, { name: "export_everything" }] };
+
+  it("a stored manifest that is not the signed one is refused before the relay is dialled", async () => {
+    const k = kit({ wc: WIDER });
+    // Signed over the one-tool manifest; the row now carries the wider one.
+    const vid = "v-wc-0.1.0";
+    k.db.versions.set(vid, {
+      ...signedVersionRow(sidecar, { slug: "wc", version: "0.1.0", manifest: manifestBytes({ id: "wc" }), id: vid }),
+      manifestBytes: manifestBytes(WIDER),
+    });
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toBeInstanceOf(ExtensionAttachError);
+    expect(err).toMatchObject({ code: "statement_unverified", permanent: true });
+    expect(k.relay.calls).toEqual([]);
+    expect(k.mux.remoteServerIds()).toEqual([]);
+    expect(k.registry.list()).toEqual([]);
+  });
+
+  it("a row whose plain columns disagree with its statement is refused", async () => {
+    const k = kit({ wc: { id: "wc" } });
+    const row = k.db.versions.get("v-wc-0.1.0") as Record<string, unknown>;
+    row.commit = "f".repeat(40);
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "statement_unverified", permanent: true });
+    expect(err.message).toMatch(/statement_mismatch/);
+    expect(k.relay.calls).toEqual([]);
+  });
+
+  it("a box key that changed since the promote is permanent", async () => {
+    const k = kit({ wc: { id: "wc" } });
+    sidecar.rotateKey();
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "statement_unverified", permanent: true });
+    expect(err.message).toMatch(/extension_key_changed/);
+  });
+
+  it("a sidecar that does not answer is transient: nothing attaches, the reconciler retries", async () => {
+    const k = kit({ wc: { id: "wc" } });
+    sidecar.getExtensionPublicKey.mockRejectedValueOnce(new Error("device-identity is not answering"));
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "statement_unavailable", permanent: false });
+    expect(k.relay.calls).toEqual([]);
+    expect(k.attacher.isAttached("wc")).toBe(false);
+    // Once it answers, the same attach goes through.
+    await k.attacher.attach("wc");
+    expect(k.attacher.isAttached("wc")).toBe(true);
+  });
 });
 
 describe("attach", () => {
