@@ -53,6 +53,32 @@
 #
 # Usage:
 #   ./scripts/host/droplet-backup.sh [--full]
+#   ./scripts/host/droplet-backup.sh --check-key          (WARP-1405)
+#   ./scripts/host/droplet-backup.sh --rekey-from FILE    (WARP-1405)
+#
+#   --check-key       open (or first-time init) the repository and stop — no
+#                     backup. setup.sh runs this after every install so a
+#                     `--regenerate-env` rotation re-keys the repository in the
+#                     same run instead of the next night.
+#   --rekey-from FILE --check-key, also trying the DEVICE_SECRET_KEY in FILE
+#                     (a copy of the .env from before the rotation).
+#
+# Status + alerting (WARP-1405): EVERY exit writes the explicit status file
+# $DROPLET_BACKUP_STATUS_DIR/status.json (default
+# /var/lib/droplet/backup-status) — state ok|failed|key_mismatch|pending plus
+# last success/failure times and the reason. The orchestrator reads it
+# (read-only mount) and notifies the owner when no backup has succeeded in
+# 48 h or the repository no longer opens.
+#
+# Key lifecycle + recovery (WARP-1405) — see droplet-backup-lib.sh:
+#   * DEVICE_SECRET_KEY rotated by setup.sh (--regenerate-env / torn .env):
+#     the old key survives in .env.bak.* and the repository is RE-KEYED
+#     automatically (restic key add → verify → remove old key).
+#   * Old key gone (factory reset shreds it by design; reflash): state
+#     key_mismatch, owner notified. Recover with `--rekey-from <old .env>` if a
+#     copy exists; otherwise an operator moves the repository aside by hand
+#     (the log prints the exact command). NOTHING here deletes, moves or
+#     re-initializes an existing repository.
 #
 # Env overrides (defaults match the production compose stack — the drill
 # harness in tests/restic-backup.test.sh points these at a disposable project):
@@ -78,9 +104,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/droplet-backup-lib.sh"
 
 FULL=0
+CHECK_KEY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --full) FULL=1; shift ;;
+    --check-key) CHECK_KEY=1; shift ;;
+    --rekey-from)
+      [ -n "${2:-}" ] && [ -f "$2" ] || { log_error "--rekey-from needs a readable .env file"; exit 64; }
+      export DROPLET_BACKUP_REKEY_FROM="$2"; CHECK_KEY=1; shift 2 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -88,6 +119,34 @@ while [ $# -gt 0 ]; do
     *) log_error "unknown argument: $1 (see --help)"; exit 64 ;;
   esac
 done
+
+# --- WARP-1405: every exit leaves an explicit status behind ------------------
+# The trap is the ONLY status writer, so no path — set -e abort, a missing
+# binary, a key mismatch — can end a run without recording it. PHASE names
+# what was running when a failure hit; it becomes the recorded reason.
+PHASE="preflight"
+_record_status() {
+  local rc=$?
+  if [ "$rc" -eq 0 ] && [ "$CHECK_KEY" = "1" ]; then
+    # A key check is not a backup: never claim a success. First contact (or a
+    # repository that has just been re-keyed out of key_mismatch) → pending.
+    local prev
+    prev="$(droplet_backup_status_field state)"
+    case "$prev" in
+      ok|failed) droplet_backup_write_status "$prev" "$(droplet_backup_status_field reason)" keep ;;
+      *) droplet_backup_write_status pending "" keep ;;
+    esac
+  elif [ "$rc" -eq 0 ]; then
+    droplet_backup_write_status ok ""
+  elif [ "${DROPLET_BACKUP_KEY_MISMATCH:-0}" = "1" ]; then
+    droplet_backup_write_status key_mismatch "the backup repository no longer opens with this Droplet's key"
+  else
+    droplet_backup_write_status failed "$PHASE (exit $rc)"
+    logger -t droplet-backup -p daemon.err "Droplet backup FAILED during $PHASE (exit $rc)" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+trap _record_status EXIT
 
 REPO_ROOT="$(droplet_backup_resolve_repo_root)"
 
@@ -131,12 +190,18 @@ if [ ! -f "$COMPOSE_FILE" ]; then
   exit 2
 fi
 
+PHASE="opening the repository"
 droplet_backup_prepare_restic_env
 droplet_backup_ensure_repo
+if [ "$CHECK_KEY" = "1" ]; then
+  log_success "restic repository opens with the current device identity"
+  exit 0
+fi
 
 dc() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 
 # --- Phase 1: stage the Postgres dumps --------------------------------------
+PHASE="dumping the databases"
 # The staging paths are STABLE across runs (never mktemp) so restic's
 # parent-snapshot change detection sees the same file identity every day.
 #
@@ -189,6 +254,7 @@ else
 fi
 
 # --- Phase 2: stage data volumes --------------------------------------------
+PHASE="snapshotting the file volumes"
 # Snapshot via a throwaway sibling container that mounts the named volume
 # read-only and streams a tar — works identically on the box, in CI, and on
 # dev machines (no /var/lib/docker host access, no bind mounts). restic's
@@ -253,6 +319,7 @@ for c in "${CONFIG_CANDIDATES[@]}"; do
 done
 
 # --- Phase 4: restic backup --------------------------------------------------
+PHASE="writing the snapshot"
 TAG="daily"
 EXTRA_FLAGS=()
 if [ "$FULL" = "1" ]; then
@@ -275,6 +342,7 @@ restic backup --tag "$TAG" \
 log_success "snapshot created (tag: $TAG)"
 
 # --- Phase 5: retention -------------------------------------------------------
+PHASE="applying retention"
 log_info "Applying retention: ${KEEP_DAILY} daily / ${KEEP_WEEKLY} weekly / ${KEEP_MONTHLY} monthly"
 # --group-by host (not restic's host,paths default): the backup path set changes
 # over the box's lifetime — config-dir candidates are existence-guarded and .env

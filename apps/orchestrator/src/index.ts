@@ -92,6 +92,7 @@ import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import { createTlsNotifier } from "./services/tls-notify.service.js";
+import { createBackupHealthCheck } from "./services/backup-health.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
@@ -176,6 +177,7 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 // WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
+import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1046,6 +1048,12 @@ async function main() {
     );
   }
 
+  // WARP-2977 (ADR-059 §3.3) — the Security event store's two jobs: mirror
+  // warn/err network/auth ActivityRows every minute, trim to 30 days at 03:50
+  // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
+  // the ingest itself: the module toggle decides the surface, not the capture.
+  registerSecurityJobs(cronRuntime, prisma);
+
   cronRuntime.scheduleCron(
     "0 3 * * *",
     async () => {
@@ -1210,7 +1218,10 @@ async function main() {
         result.adminGroupFailed > 0 ||
         // pr-reviewer #1229 N1: the directoryStatus → NC disable mirror.
         result.ncDisableMirrored > 0 ||
-        result.ncDisableMirrorFailed > 0
+        result.ncDisableMirrorFailed > 0 ||
+        // WARP-2993: humans stripped from NC instance admin.
+        result.ncInstanceAdminRemoved > 0 ||
+        result.ncInstanceAdminFailed > 0
       ) {
         logger.info(result, "department-reconciler tick complete");
       }
@@ -1635,6 +1646,21 @@ async function main() {
   // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
   // the setup route reads it via reissueTlsNow() (a no-op until this runs).
   initTlsReissueHook(() => tlsIssuance.runOnce());
+
+  // WARP-1405 — backups can no longer fail silently. The host backup writes an
+  // explicit status file on every exit; this hourly check turns "no success in
+  // 48 h" or "repository no longer opens with this box's key" into ONE owner +
+  // admin notification per outage (deduped on NotificationLog, like
+  // tls-notify). lockKey: one replica per tick. Errors propagate to safeRun so
+  // the cron canary sees them.
+  const backupHealthCheck = createBackupHealthCheck({ prisma });
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      await backupHealthCheck.runOnce();
+    },
+    { lockKey: "droplet:backup-health" },
+  );
   // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
   // reflash gets its publicly-trusted cert within seconds instead of waiting up
   // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);

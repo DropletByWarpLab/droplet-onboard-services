@@ -30,6 +30,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Sun,
   Video,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -46,6 +47,7 @@ import {
 import { fetchHome, type HomePayload } from "./api";
 import {
   ActivityBody,
+  BriefingBody,
   ChainChip,
   FoldersBody,
   IntegrationsBody,
@@ -75,6 +77,8 @@ interface TileSpec {
  * mobile; the single-column stack is meant to follow exactly this sequence.
  */
 const TILES: TileSpec[] = [
+  // WARP-2250 — the caller's own briefing, above the box-wide report.
+  { id: "a0", span: "8x2", title: "Your morning briefing", icon: Sun, owner: "WARP-2250" },
   { id: "a1", span: "8x2", title: "Daily report", icon: Sparkles, owner: "WARP-1996" },
   { id: "a2", span: "4x2", title: "Money", icon: DollarSign, owner: "WARP-1995" },
   { id: "b1", span: "3x1", title: "Files", icon: FolderOpen, owner: "WARP-1993" },
@@ -322,6 +326,7 @@ function tileBody(id: string, d: BodyDeps): ReactNode {
   }
   // Money's floor is family-and-up PLUS a connector grant; the grant is
   // enforced server-side (403), which MoneyBody renders as its locked state.
+  if (id === "a0") return <BriefingBody canRead={d.canSeePhi} now={d.now} />;
   if (id === "a1") return <ReportBody range={d.range} canRead={d.canSeePhi} now={d.now} />;
   if (id === "a2") return <MoneyBody canRead={d.canSeePhi} now={d.now} />;
   if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;

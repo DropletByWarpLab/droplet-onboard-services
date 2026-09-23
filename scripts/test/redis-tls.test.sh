@@ -17,6 +17,10 @@
 #      commands are denied,
 #   6. ai-gateway: session/ratelimit patterns + EVAL work; rerank:* denied,
 #   7. nextcloud: keyspace read/write + the KEYS carve-out; FLUSHALL denied.
+#   8. WARP-1401: persistence — a session record, a refresh-denylist entry and
+#      an NC token (with their TTLs) survive a container RECREATE on the same
+#      named volume (what `compose down`/reboot and OTA `--force-recreate` do),
+#      using the persistence flags read from the compose `cache` block.
 #
 # Requires local Docker for 1-7 (SKIPs cleanly without a daemon). A static
 # TLS 1.3 pin check runs unconditionally.
@@ -34,6 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_REAL="$(cd "$SCRIPT_DIR/../.." && pwd)"
 IMG=redis:7-alpine
 NAME=droplet-redistls-test
+VOL=droplet-redistls-test-data
 
 # --- Colors ---
 if [ -t 1 ]; then
@@ -56,7 +61,15 @@ _run_test() {
 }
 
 _docker_up() { docker info >/dev/null 2>&1; }
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; docker volume rm -f "$VOL" >/dev/null 2>&1 || true; }
+
+# WARP-1401: the persistence flags, read from the compose `cache` block (with
+# ${VAR:-default} resolved to the default) so this harness boots exactly what
+# ships. Comment lines are skipped.
+PERSIST_FLAGS="$(awk '/^  cache:/{f=1;next} f&&/^  [a-z0-9-]+:/{exit} f' \
+  "$REPO_ROOT_REAL/docker/docker-compose.yml" | grep -vE '^[[:space:]]*#' \
+  | grep -oE -- '--(appendonly|appendfsync|save|maxmemory|maxmemory-policy) [^ ]+' \
+  | sed -E 's/\$\{[A-Z_]+:-([^}]*)\}/\1/g' | tr '\n' ' ')"
 trap cleanup EXIT
 
 PW_DEFAULT="redistls-default-pw"
@@ -89,7 +102,18 @@ start_cache() {
   REDIS_PASSWORD="$PW_DEFAULT" REDIS_HOST_PASSWORD="$PW_NC" \
     REDIS_PASSWORD_ORCHESTRATOR="$PW_ORCH" REDIS_PASSWORD_AI_GATEWAY="$PW_AIGW" \
     REDIS_PASSWORD_MCP="$PW_MCP" _generate_redis_acl || return 1
+  docker volume rm -f "$VOL" >/dev/null 2>&1 || true
+  boot_cache "$sandbox"
+}
+
+# (Re)create the container on the named volume — a fresh container each call,
+# which is what a recreate/reboot does.
+boot_cache() {
+  local sandbox="$1"
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086  # PERSIST_FLAGS is a flag list, split on purpose
   docker run -d --name "$NAME" \
+    -v "$VOL:/data" \
     -v "$sandbox/data/secrets/service-tls/cache:/certs-src:ro" \
     -v "$sandbox/data/secrets/redis/users.acl:/etc/redis/users.acl:ro" \
     "$IMG" \
@@ -104,7 +128,7 @@ start_cache() {
              --tls-ca-cert-file /tmp/redis-ca.crt \
              --tls-auth-clients no \
              --tls-protocols "TLSv1.3" \
-             --aclfile /etc/redis/users.acl' >/dev/null || return 1
+             --aclfile /etc/redis/users.acl '"$PERSIST_FLAGS" >/dev/null || return 1
   local i; for i in $(seq 1 30); do
     [ "$(rcli default "$PW_DEFAULT" PING)" = "PONG" ] && return 0
     sleep 1
@@ -164,6 +188,24 @@ test_nextcloud_keys_carveout_no_flush() {
   rcli nextcloud "$PW_NC" FLUSHALL | grep -q "NOPERM"
 }
 
+# WARP-1401: login state survives a recreate. Written as the orchestrator
+# identity (the real writer), then the container is REMOVED and a new one
+# started on the same volume. TTLs must survive too — the idle/absolute
+# session clocks and the denylist lifetime depend on them.
+test_session_survives_recreate() {
+  local sandbox="$1"
+  [ "$(rcli orchestrator "$PW_ORCH" SET sess:rec:persist '{"userId":"u1"}' EX 43200)" = "OK" ] || return 1
+  [ "$(rcli orchestrator "$PW_ORCH" SET jwt:deny:persist 1 EX 604800)" = "OK" ] || return 1
+  [ "$(rcli orchestrator "$PW_ORCH" SET auth:nc-token:persist tok EX 604800)" = "OK" ] || return 1
+  sleep 2  # > appendfsync everysec
+  boot_cache "$sandbox" || return 1
+  [ "$(rcli orchestrator "$PW_ORCH" GET sess:rec:persist)" = '{"userId":"u1"}' ] || return 1
+  [ "$(rcli orchestrator "$PW_ORCH" GET jwt:deny:persist)" = "1" ] || return 1
+  [ "$(rcli orchestrator "$PW_ORCH" GET auth:nc-token:persist)" = "tok" ] || return 1
+  local ttl; ttl="$(rcli orchestrator "$PW_ORCH" TTL sess:rec:persist)"
+  [ "$ttl" -gt 43000 ] && [ "$ttl" -le 43200 ]
+}
+
 # Static — no docker. The TLS 1.3 pin must not silently regress.
 test_compose_pins_tls13() {
   grep -q -- '--tls-protocols "TLSv1.3"' "$REPO_ROOT_REAL/docker/docker-compose.yml"
@@ -191,18 +233,20 @@ if _docker_up; then
     _run_test "mcp-server: get/setex on rerank:* only" test_mcp_scoped_to_rerank_cache
     _run_test "ai-gateway: session/ratelimit patterns + Lua; rerank denied" test_ai_gateway_sessions_and_ratelimit_only
     _run_test "nextcloud: read/write + KEYS carve-out; FLUSHALL denied" test_nextcloud_keys_carveout_no_flush
+    _run_test "WARP-1401: session + denylist + NC token (and TTL) survive a recreate" test_session_survives_recreate "$SANDBOX"
   else
     _fail "cache container failed to boot"
   fi
 else
-  printf "\n  ${_YELLOW}Docker daemon unreachable — skipping the 8 dockerized TLS/ACL tests${_RESET}\n"
+  printf "\n  ${_YELLOW}Docker daemon unreachable — skipping the 9 dockerized TLS/ACL tests${_RESET}\n"
   printf "  ${_YELLOW}(run on a box with Docker; see the PR's deferred stack-verification section)${_RESET}\n"
   for t in "cache container boots" "plaintext port 6379 refuses connections" \
            "default user is PING-only (harness identity)" "wrong password fails closed (WRONGPASS)" \
            "orchestrator: keyspace-wide + scripting, @dangerous denied" \
            "mcp-server: get/setex on rerank:* only" \
            "ai-gateway: session/ratelimit patterns + Lua; rerank denied" \
-           "nextcloud: read/write + KEYS carve-out; FLUSHALL denied"; do
+           "nextcloud: read/write + KEYS carve-out; FLUSHALL denied" \
+           "WARP-1401: session + denylist + NC token (and TTL) survive a recreate"; do
     _skip "$t"
   done
 fi
