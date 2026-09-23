@@ -756,6 +756,13 @@ export async function runRemovalPostEffects(args: {
  * Post-effects of a committed disable (WARP-116 immediate revocation +
  * the WARP-1062 mandatory-emit row, shape unchanged from auth.ts).
  */
+/**
+ * Outcome of the Nextcloud mirror on a directory write — an explicit enum,
+ * never derived from absence. `no_account` (WARP-2858): the row has no
+ * Nextcloud user (SSO/SCIM-provisioned), so there was nothing to mirror.
+ */
+export type NcMirror = "synced" | "failed" | "no_account";
+
 export async function runDisablePostEffects(args: {
   targetUserId: string | null;
   username: string;
@@ -766,8 +773,11 @@ export async function runDisablePostEffects(args: {
    * locally is not indistinguishable from a fully-applied one — NC is
    * proxied without orchestrator auth in front, so the difference is real
    * access, and the reconciler's mirror pass is what closes it.
+   *
+   * WARP-2858: `no_account` — the row has no Nextcloud user (SSO/SCIM-
+   * provisioned), so the local DEACTIVATED is the entire disable.
    */
-  ncMirror?: "synced" | "failed";
+  ncMirror?: NcMirror;
 }): Promise<void> {
   const sessionsRevoked = args.targetUserId
     ? await revokeAllSessions(args.targetUserId)
