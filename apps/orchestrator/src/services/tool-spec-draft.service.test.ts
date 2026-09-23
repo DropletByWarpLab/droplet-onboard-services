@@ -5,12 +5,14 @@
  * tool-spec-transform.routes, tool-step-outputs) keep proving the route's
  * behaviour is unchanged. These specs pin what the service adds for slice
  * I-1's seeded drafts: optional runtime tool sets, the explicit draft
- * status, and a slug collision as a refusal rather than a throw.
+ * status, and a slug collision as a TYPED THROW (the transaction is aborted
+ * by then, so the caller must unwind rather than carry on).
  */
 import { describe, it, expect, vi } from "vitest";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 import {
   createDraftSpecTx,
+  DraftSlugTakenError,
   validateDraftSpec,
   type CreateSpecInput,
 } from "./tool-spec-draft.service.js";
@@ -101,16 +103,28 @@ describe("createDraftSpecTx", () => {
     expect(tx.toolSpec.create).not.toHaveBeenCalled();
   });
 
-  it("a slug collision is a 409 refusal, not a throw", async () => {
+  /**
+   * On Postgres a unique violation ABORTS an interactive transaction: any
+   * further statement fails with 25P02, and returning normally from the
+   * `$transaction` callback turns the commit into a silent ROLLBACK. So a
+   * collision must not come back as an ordinary `{ok:false}` a multi-draft
+   * caller (slice I-1) could "handle" and carry on from. It throws a typed
+   * error that carries the 409 body; the route maps it, a transaction
+   * unwinds.
+   *
+   * MUTATION: return the refusal instead of throwing -> red.
+   */
+  it("a slug collision throws DraftSlugTakenError carrying the 409 body", async () => {
     const tx = fakeTx(
       vi.fn(async (_args: { data: Record<string, unknown> }) => {
         throw Object.assign(new Error("unique"), { code: "P2002" });
       }),
     );
-    const out = await createDraftSpecTx(tx as never, input(), "u1");
-    expect(out).toEqual({
-      ok: false,
-      refusal: { status: 409, body: { error: "Slug already in use", slug: "morning-slots" } },
+    const err = await createDraftSpecTx(tx as never, input(), "u1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DraftSlugTakenError);
+    expect((err as DraftSlugTakenError).refusal).toEqual({
+      status: 409,
+      body: { error: "Slug already in use", slug: "morning-slots" },
     });
   });
 

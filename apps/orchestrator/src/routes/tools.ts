@@ -47,6 +47,7 @@ import {
 } from "../services/tool-access.service.js";
 import {
   createDraftSpecTx,
+  DraftSlugTakenError,
   createSpecSchema,
   reconcileWrites,
   stepReferenceError,
@@ -444,11 +445,16 @@ export function createToolsRouter(
         // (tool-spec-draft.service.ts) so slice I-1's seeded drafts pass the
         // same checks. WARP-485: ownerId is the User.id, never the username.
         // No runtime tool sets: the walker dispatches compiled tools only.
+        // A slug collision is thrown typed (it aborts a transaction, so a
+        // multi-draft caller must unwind); here it is just the 409.
         const created = await createDraftSpecTx<SpecRow & { steps: StepRow[] }>(
           prisma,
           parsed.data,
           who.id,
-        );
+        ).catch((err: unknown) => {
+          if (err instanceof DraftSlugTakenError) return { ok: false as const, refusal: err.refusal };
+          throw err;
+        });
         if (!created.ok) {
           res.status(created.refusal.status).json(created.refusal.body);
           return;

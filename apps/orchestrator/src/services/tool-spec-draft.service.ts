@@ -323,10 +323,33 @@ export function validateDraftSpec(
 export type DraftSpecTx = Pick<Prisma.TransactionClient, "toolSpec">;
 
 /**
+ * A slug collision on create. THROWN, never returned: on Postgres a unique
+ * violation aborts an interactive transaction, so nothing after it may run on
+ * the same `tx` (25P02), and a `$transaction` callback that returns normally
+ * commits an aborted transaction as a silent ROLLBACK. Throwing makes the one
+ * safe move — unwind — the default. `refusal` is the 409 the route answers.
+ */
+export class DraftSlugTakenError extends Error {
+  readonly refusal: DraftSpecRefusal;
+  constructor(slug: string) {
+    super(`tool spec slug already in use: ${slug}`);
+    this.name = "DraftSlugTakenError";
+    this.refusal = { status: 409, body: { error: "Slug already in use", slug } };
+  }
+}
+
+/**
  * Validate, then create the draft with its ordered steps. `ownerId` is the
- * acting person's `User.id` (WARP-485 — never a username). A slug collision
- * (P2002) is a 409 refusal, not a throw, so a caller running several drafts
- * in one transaction can decide to roll the whole thing back.
+ * acting person's `User.id` (WARP-485 — never a username).
+ *
+ * Two failure shapes, split by whether the caller's transaction is still
+ * usable:
+ *   - a validation refusal is RETURNED (`{ok:false}`): no statement ran, the
+ *     transaction is intact. A caller running several drafts in one
+ *     transaction must still throw to roll the earlier ones back.
+ *   - a slug collision (P2002) THROWS {@link DraftSlugTakenError}: the
+ *     statement failed, the transaction is aborted, and the only correct
+ *     move is to unwind. The route maps it to 409.
  */
 export async function createDraftSpecTx<Row>(
   tx: DraftSpecTx,
@@ -364,12 +387,9 @@ export async function createDraftSpecTx<Row>(
     return { ok: true, spec };
   } catch (err) {
     // Prisma surfaces unique-constraint violations as P2002 — "slug already
-    // in use" for the dashboard.
+    // in use" for the dashboard. Thrown typed (see DraftSlugTakenError).
     if ((err as { code?: string }).code === "P2002") {
-      return {
-        ok: false,
-        refusal: { status: 409, body: { error: "Slug already in use", slug: input.slug } },
-      };
+      throw new DraftSlugTakenError(input.slug);
     }
     throw err;
   }
