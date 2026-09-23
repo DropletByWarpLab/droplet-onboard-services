@@ -22,7 +22,7 @@ Install, step by step
   2. node20 with a tsconfig.json: ``tsc -p .`` with the image's global tsc,
      through the supervisor's limits wrapper, with a timeout — no network,
      nothing installed;
-  3. the whole dir is made read-only (files 0444, dirs 0555);
+  3. the whole dir is made read-only and owner-only (files 0400, dirs 0500);
   4. a free loopback port from ``SANDBOX_EXTENSION_PORT_RANGE``;
   5. the runtime's first-party host shim (ext_host/) is started under the
      supervisor: restart on failure, the manifest's memory budget, and an
@@ -208,12 +208,12 @@ def _make_readonly(root: Path) -> None:
         for name in filenames:
             p = os.path.join(dirpath, name)
             if not os.path.islink(p):
-                os.chmod(p, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+                os.chmod(p, stat.S_IRUSR)
         for name in dirnames:
             p = os.path.join(dirpath, name)
             if not os.path.islink(p):
-                os.chmod(p, stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-    os.chmod(root, stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+                os.chmod(p, stat.S_IRUSR | stat.S_IXUSR)
+    os.chmod(root, stat.S_IRUSR | stat.S_IXUSR)
 
 
 def _remove_tree(root: Path) -> None:
