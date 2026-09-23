@@ -1016,7 +1016,7 @@ DROPLET_INTERNAL_TLS=0
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
 FILES_ROOT=/data/files
-MAX_UPLOAD_SIZE_MB=100
+MAX_UPLOAD_SIZE_MB=1024
 
 # --- WARP-230 device identity ---
 # Selects the device-identity-svc backend.
@@ -1546,6 +1546,16 @@ migrate_env() {
     sed -i.bak -E 's|^(DATABASE_URL=postgresql://[^?]*)$|\1?sslmode=require|' "$stage" && rm -f "$stage.bak"
     normalized=true
     log_info "Migrated .env: DATABASE_URL now pins sslmode=require (WARP-233)"
+  fi
+
+  # WARP-2093: uploads stream to Nextcloud now, so the 100 MB per-file cap —
+  # an OOM guard for the old buffered transport — rises to Nextcloud's own
+  # 1 GiB per-request limit. Rewrites ONLY the exact value every earlier
+  # generate_env wrote; an operator's own value is kept.
+  if grep -qE '^MAX_UPLOAD_SIZE_MB=100$' "$stage"; then
+    sed -i.bak -E 's|^MAX_UPLOAD_SIZE_MB=100$|MAX_UPLOAD_SIZE_MB=1024|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: MAX_UPLOAD_SIZE_MB 100 -> 1024 (WARP-2093 — uploads stream now)"
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then

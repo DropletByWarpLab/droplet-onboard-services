@@ -78,6 +78,7 @@ import { translateError } from "@/lib/friendly-errors";
 import {
   folderOnlyOutcomeMessage,
   uploadOutcomeMessage,
+  uploadNoticeMessage,
   uploadProgressLabel,
 } from "@/lib/upload-feedback";
 import { runUpload } from "@/lib/run-upload";
@@ -607,6 +608,8 @@ export default function FilesPage() {
           directoryCount,
           directoriesFailed,
           uploadedPaths,
+          renamed,
+          duplicates,
         } = await runUpload(selection, {
           basePath: currentPath,
           space,
@@ -617,8 +620,12 @@ export default function FilesPage() {
         // swallow that message (nor escape as an unhandled rejection): the
         // listing being stale is the lesser failure.
         if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
+        // WARP-2096 — renamed-because-taken / already-on-the-box, appended to
+        // whichever message the run gets.
+        const notice = uploadNoticeMessage(renamed, duplicates);
+        const outcome = uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed);
         const message =
-          uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed) ??
+          (outcome !== null ? `${outcome}${notice}` : null) ??
           // Everything the drop carried landed and none of it was a file —
           // say what DID happen to the folders.
           (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
@@ -634,7 +641,7 @@ export default function FilesPage() {
           // the v1 contract.
           const undoSpace = space;
           toast(
-            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.`,
+            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.${notice}`,
             "success",
             {
               label: "Undo",

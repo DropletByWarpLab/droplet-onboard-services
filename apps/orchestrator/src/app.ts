@@ -192,6 +192,14 @@ export function createApp(
   // sends the latter for /scim/v2/* — without it, req.body would arrive empty
   // and every SCIM create/update would 400). The explicit `type` list keeps
   // the default JSON behavior intact for every other route.
+  //
+  // WARP-2093: the upload route's JSON transport (write_file /
+  // create_document) carries up to 10 MB of DECODED bytes as base64 (~13.4 MB
+  // on the wire). body-parser's 100 kb default killed anything past ~75 KB
+  // before the route's own 10 MB ceiling could answer, so this one path gets
+  // an explicit limit; body-parser skips an already-parsed body, so the
+  // global parser below leaves it alone and keeps its default elsewhere.
+  app.use("/api/files/upload", express.json({ limit: "16mb" }));
   app.use(express.json({ type: ["application/json", "application/scim+json"] }));
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.

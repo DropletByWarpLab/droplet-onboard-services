@@ -3261,12 +3261,20 @@ model File {
   // Cached path for display. Refreshed from the file-indexer's MQTT
   // bridge when Nextcloud renames or moves the file.
   path         String?
+  // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
+  // through, and their length. Null for rows written before it or outside
+  // POST /files/upload. The (owner, sha256) index is deliberately NOT unique:
+  // a second copy of the same bytes is a legitimate file, so duplicates are
+  // reported to the uploader, never refused by the database.
+  sha256       String?
+  sizeBytes    BigInt?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([ownerUserId])
   @@index([scope])
   @@index([departmentId])
+  @@index([ownerUserId, sha256])
 }
 
 // ── WARP-456: signed append-only activity log ──

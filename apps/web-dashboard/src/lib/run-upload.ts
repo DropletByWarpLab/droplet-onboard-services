@@ -28,6 +28,7 @@ import {
   type DroppedSelection,
 } from "@/components/FileManager/dropped-entries";
 import type { FileSpaceId } from "./types";
+import type { UploadedFileEntry } from "@droplet/shared-types";
 
 export interface UploadRunOptions {
   /** Space-relative directory the drop landed on ("/" at a space root). */
@@ -70,8 +71,19 @@ export interface UploadRunResult {
    * files minus the typed `UploadBatchError.failedFiles`; a group lost to an
    * untyped failure contributes nothing — over-claiming here would make Undo
    * delete a file the user already had.
+   *
+   * WARP-2096: built from the SERVER's final names, not the picked ones — a
+   * same-name upload is kept as `report (1).pdf`, and an Undo addressed to
+   * `report.pdf` would delete the user's original.
    */
   uploadedPaths: string[];
+  /** WARP-2096 — files kept under a new name because theirs was taken. */
+  renamed: number;
+  /**
+   * WARP-2096 — files whose exact bytes the user already had in that space
+   * (advisory: they were still uploaded).
+   */
+  duplicates: number;
 }
 
 /** Join a dropped folder's relative directory onto the target path. */
@@ -117,12 +129,21 @@ export async function runUpload(
   }
 
   const uploadedPaths: string[] = [];
+  let renamed = 0;
+  let duplicates = 0;
+  const noteLanded = (dirPath: string, entries: readonly UploadedFileEntry[]) => {
+    for (const e of entries) {
+      uploadedPaths.push(joinRelativePath(dirPath, e.name));
+      if (e.status === "renamed") renamed++;
+      if (e.duplicateOf) duplicates++;
+    }
+  };
   for (const group of groups) {
     const groupBytes = group.files.reduce((sum, f) => sum + f.size, 0);
     const before = sentBytes;
     const dirPath = joinRelativePath(basePath, group.dir);
     try {
-      await uploadFiles(
+      const entries = await uploadFiles(
         dirPath,
         group.files,
         onProgress &&
@@ -135,9 +156,7 @@ export async function runUpload(
         space,
       );
       uploaded += group.files.length;
-      uploadedPaths.push(
-        ...group.files.map((f) => joinRelativePath(dirPath, f.name)),
-      );
+      noteLanded(dirPath, entries);
     } catch (err) {
       // A failed group still uploaded whatever its own batches got through
       // — count those, don't write them off. The manifest keeps exactly the
@@ -146,12 +165,7 @@ export async function runUpload(
       // rest of the group is on the box and undoable (WARP-1912).
       if (err instanceof UploadBatchError) {
         uploaded += err.uploaded;
-        const lost = new Set(err.failedFiles);
-        uploadedPaths.push(
-          ...group.files
-            .filter((f) => !lost.has(f.name))
-            .map((f) => joinRelativePath(dirPath, f.name)),
-        );
+        noteLanded(dirPath, err.landed);
       }
       console.error("partial upload", group.dir, err);
       noteFailure(err);
@@ -167,5 +181,7 @@ export async function runUpload(
     directoryCount: dirs.length,
     directoriesFailed,
     uploadedPaths,
+    renamed,
+    duplicates,
   };
 }
