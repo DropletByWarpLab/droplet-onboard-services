@@ -276,6 +276,25 @@ describe("phase 2 — confirm, sign, store, install", () => {
     expect((await phase1(t)).body.error).toBe("already_promoted");
   });
 
+  it("a slug another workspace took between the phases is 409 slug_taken, and nothing is stored under it", async () => {
+    // MUTATION: drop the workspaceId re-check in the phase-2 transaction and
+    // this workspace's version lands under the other workspace's extension.
+    const t = setup();
+    const p1 = (await phase1(t)).body;
+    t.db.extensions.set(WS, {
+      id: WS, workspaceId: "someone-else", name: "Other", installedByUserId: "u-owner2", status: "installed",
+      operatorDomain: null, currentVersionId: null, serviceTokenHash: null, failureReason: null,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    const r = await request(t.app)
+      .post(`/api/extensions/${WS}/promote`)
+      .send({ confirmationToken: p1.confirmationToken, manifestSha256: p1.manifestSha256 });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("slug_taken");
+    expect(t.db.versions.size).toBe(0);
+    expect((await phase1(t)).body.error).toBe("slug_taken");
+  });
+
   it("an operatorDomain outside the tool domains is 400", async () => {
     const t = setup();
     const p1 = (await phase1(t)).body;

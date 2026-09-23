@@ -371,7 +371,7 @@ export async function confirmPromotion(
   const slug = signed.statement.extensionId;
   try {
     await deps.prisma.$transaction(async (tx) => {
-      await tx.extension.upsert({
+      const ext = await tx.extension.upsert({
         where: { id: slug },
         create: {
           id: slug,
@@ -389,6 +389,12 @@ export async function confirmPromotion(
           ...(input.operatorDomain != null ? { operatorDomain: input.operatorDomain } : {}),
         },
       });
+      // Phase 1 checked the slug; re-check inside the write, so two
+      // workspaces whose ids hash to one slug cannot both sign under it
+      // (the upsert's update would otherwise adopt the other's row).
+      if (ext.workspaceId !== workspaceId) {
+        throw new PromoteError(409, "slug_taken", `extension id ${slug} already belongs to another workspace`);
+      }
       const row = await tx.extensionVersion.create({
         data: {
           extensionId: slug,
