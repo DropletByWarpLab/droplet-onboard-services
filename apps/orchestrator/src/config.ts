@@ -353,7 +353,11 @@ const envSchema = z.object({
   BUSINESS_PROFILE_REVIEW_DAYS: z.coerce.number().int().nonnegative().default(90),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
+  // WARP-2093: per-file upload ceiling. Uploads stream to Nextcloud (never
+  // buffered here), so this is no longer an OOM guard; 1024 matches the
+  // nextcloud:29-apache image's APACHE_BODY_LIMIT (1 GiB per request), past
+  // which Nextcloud itself answers 413. Per-user policies can only lower it.
+  MAX_UPLOAD_SIZE_MB: z.coerce.number().default(1024),
 
   // --- CORS (WARP-562) ---
   // Comma-separated allowlist of browser Origins permitted to make

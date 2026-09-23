@@ -1,6 +1,7 @@
 import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
+  type UploadedFileEntry,
 } from "@droplet/shared-types";
 // WARP-2633 — the ONE `SaasConnectionState`; re-exported below (see the
 // docstring there) so `@/lib/api` stays the name every consumer imports from.
@@ -5109,7 +5110,12 @@ export class UploadBatchError extends Error {
     readonly total: number,
     readonly cause: unknown,
     /** Names of the files that did NOT land, in selection order (WARP-1843). */
-    readonly failedFiles: readonly string[] = []
+    readonly failedFiles: readonly string[] = [],
+    /**
+     * WARP-2096 — the server's entries for the files that DID land, with
+     * their final names (a same-name upload is kept under a new name).
+     */
+    readonly landed: readonly UploadedFileEntry[] = []
   ) {
     super(`Uploaded ${uploaded} of ${total} files`);
   }
@@ -5148,12 +5154,29 @@ function uploadRejectionError(status: number, body: string): Error {
   });
 }
 
+/**
+ * WARP-2096 — the server's per-file entries. They carry the FINAL name, which
+ * differs from the picked file's when the name was taken (kept both), so
+ * anything that later addresses the upload (Undo) must use these. A 2xx body
+ * that doesn't parse falls back to the requested names — the pre-WARP-2096
+ * server shape, where nothing was ever renamed.
+ */
+function uploadedEntries(body: string, batch: File[]): UploadedFileEntry[] {
+  try {
+    const parsed = JSON.parse(body) as { uploaded?: unknown };
+    if (Array.isArray(parsed.uploaded)) return parsed.uploaded as UploadedFileEntry[];
+  } catch {
+    /* fall through */
+  }
+  return batch.map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" }));
+}
+
 /** POST a single batch — never more files than the server accepts at once. */
 async function uploadBatch(
   url: string,
   batch: File[],
   onFraction?: (fraction: number) => void
-): Promise<void> {
+): Promise<UploadedFileEntry[]> {
   const formData = new FormData();
   for (const file of batch) {
     formData.append("files", file);
@@ -5174,7 +5197,7 @@ async function uploadBatch(
 
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
+          resolve(uploadedEntries(xhr.responseText, batch));
         } else {
           reject(uploadRejectionError(xhr.status, xhr.responseText));
         }
@@ -5186,10 +5209,9 @@ async function uploadBatch(
   }
 
   const res = await authFetch(url, { method: "POST", body: formData });
-  if (!res.ok) {
-    const body = await res.text();
-    throw uploadRejectionError(res.status, body);
-  }
+  const body = await res.text();
+  if (!res.ok) throw uploadRejectionError(res.status, body);
+  return uploadedEntries(body, batch);
 }
 
 /**
@@ -5197,7 +5219,7 @@ async function uploadBatch(
  *
  * WARP-1843: a batch must respect BOTH caps the server side enforces —
  * `MAX_FILES_PER_UPLOAD` files (multer) and `MAX_UPLOAD_BATCH_BYTES` summed
- * file bytes (safely under nginx's `/api/` `client_max_body_size 100M`, which
+ * file bytes (safely under nginx's upload `client_max_body_size`, which
  * 413-rejects an over-cap request wholesale). Packing is first-fit
  * sequential: each file joins the current batch unless doing so would break a
  * cap, in which case the current batch is sealed and a new one starts. Files
@@ -5240,9 +5262,10 @@ function packUploadBatches(all: File[]): File[][] {
  * {@link packUploadBatches}), and a failed batch no longer strands the ones
  * behind it — the run continues, and the failure is reported at the end.
  *
- * Batches run sequentially, not concurrently: each is buffered in the
- * orchestrator's memory before it reaches Nextcloud, so parallel batches would
- * multiply peak memory on the box for no user-visible gain.
+ * Batches run sequentially, not concurrently. WARP-2093: uploads now stream
+ * through the orchestrator (no longer buffered in its memory), but each
+ * request is committed as a unit and Nextcloud's WebDAV races under
+ * concurrent writes, so parallel batches would add risk for little gain.
  *
  * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
  * advances monotonically to 100% instead of resetting once per batch. A failed
@@ -5251,13 +5274,16 @@ function packUploadBatches(all: File[]): File[][] {
  *
  * Throws {@link UploadBatchError} after all batches have been attempted if any
  * of them failed; successful batches stay uploaded.
+ *
+ * WARP-2096 — resolves with the server's per-file entries (final names,
+ * `renamed` / `replaced` status, `duplicateOf`), in selection order.
  */
 export async function uploadFiles(
   path: string,
   files: FileList | File[],
   onProgress?: (percent: number) => void,
   space: FileSpaceId = "personal"
-): Promise<void> {
+): Promise<UploadedFileEntry[]> {
   const qs = new URLSearchParams({ path });
   if (space !== "personal") qs.set("space", space);
   const url = `${BASE}/api/files/upload?${qs.toString()}`;
@@ -5268,13 +5294,14 @@ export async function uploadFiles(
   let sentBytes = 0;
   let lastPercent = 0;
   const failedFiles: string[] = [];
+  const landed: UploadedFileEntry[] = [];
   let firstFailure: unknown;
 
   for (const batch of packUploadBatches(all)) {
     const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
 
     try {
-      await uploadBatch(
+      const entries = await uploadBatch(
         url,
         batch,
         onProgress &&
@@ -5290,6 +5317,7 @@ export async function uploadFiles(
           })
       );
       uploaded += batch.length;
+      landed.push(...entries);
     } catch (err) {
       // WARP-1843: don't strand the tail — record the failure, keep going.
       if (failedFiles.length === 0) firstFailure = err;
@@ -5302,8 +5330,9 @@ export async function uploadFiles(
   }
 
   if (failedFiles.length > 0) {
-    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles);
+    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles, landed);
   }
+  return landed;
 }
 
 export async function deleteFile(
