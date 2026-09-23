@@ -789,6 +789,75 @@ describe("H3 — an extension is live only once its tools are attached", () => {
     expect(a.port.attach).toHaveBeenCalledTimes(1);
   });
 
+  describe("only the process install() started is re-attached as it runs (review #2325, blocker 1)", () => {
+    // A process the sandbox restarted in place runs from files the same uid
+    // can rewrite (docs/security/extension-trust.md): what runs is no longer
+    // what install() re-verified. MUTATION: drop the restarts check from
+    // reconcile() → it is attached as it runs, before any reinstall → red.
+    const restartedInPlace = (restarts: number | null): SandboxExtensionStatus => ({
+      slug: "wc", workspaceId: "wc", version: "0.1.0", runtime: "python312", memoryMb: 64, port: 18000,
+      running: true, process: restarts === null ? null : { state: "running", restarts, exitCode: null },
+    });
+
+    for (const restarts of [1, 3, null]) {
+      it(`restarts ${restarts === null ? "unknown" : restarts}: not attached until install() has re-verified and restarted it`, async () => {
+        const a = scriptedAttach();
+        const k = kitWith(a.port);
+        await seedSigned(k.db, k.identity, { status: "live" });
+        k.sandbox.installed.set("wc", restartedInPlace(restarts));
+        // How many starts the sandbox had seen each time something attached.
+        const startsAtAttach: number[] = [];
+        a.state.during = async () => {
+          startsAtAttach.push(k.sandbox.installs.length);
+        };
+        const report = await k.lifecycle.reconcile();
+        expect(report).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
+        expect(startsAtAttach).toEqual([1]);
+        expect(k.sandbox.installs).toHaveLength(1);
+        const token = k.sandbox.installs[0].req.token;
+        expect(k.db.extensions.get("wc")).toMatchObject({ status: "live", serviceTokenHash: hashExtensionToken(token) });
+      });
+    }
+
+    it("restarts > 0 and a statement that no longer verifies: never attached, the row fails", async () => {
+      const a = scriptedAttach();
+      const k = kitWith(a.port);
+      await seedSigned(k.db, k.identity, { status: "live", tamper: true });
+      k.sandbox.installed.set("wc", restartedInPlace(2));
+      const report = await k.lifecycle.reconcile();
+      expect(report).toEqual({ checked: 1, restarted: [], failed: ["wc"], stopped: [], reattached: [] });
+      expect(a.port.attach).not.toHaveBeenCalled();
+      expect(a.attached.has("wc")).toBe(false);
+      expect(k.sandbox.installs).toEqual([]);
+      expect(k.db.extensions.get("wc")?.status).toBe("failed");
+      expect(installedExtensionIds.has("ext-wc")).toBe(false);
+    });
+
+    it("an attached process found restarted in place is detached before its reinstall starts", async () => {
+      // MUTATION: drop the detach before the reinstall → its tools stay
+      // dispatchable while the sandbox rebuilds it → red.
+      const a = scriptedAttach();
+      const k = kitWith(a.port);
+      await seedSigned(k.db, k.identity);
+      expect((await k.lifecycle.install("wc", OWNER)).status).toBe("live");
+      k.sandbox.installed.set("wc", restartedInPlace(1));
+      let release: () => void = () => {};
+      k.sandbox.state.installHold = new Promise<void>((r) => {
+        release = r;
+      });
+      const reconciling = k.lifecycle.reconcile();
+      const starts = () => k.sandbox.calls.filter((c) => c === "install wc").length;
+      for (let i = 0; i < 50 && starts() < 2; i += 1) await new Promise((r) => setTimeout(r, 0));
+      expect(starts()).toBe(2);
+      // The reinstall is in the sandbox: nothing of the restarted process is attached.
+      expect(a.attached.has("wc")).toBe(false);
+      expect(installedExtensionIds.has("ext-wc")).toBe(false);
+      release();
+      expect(await reconciling).toEqual({ checked: 1, restarted: ["wc"], failed: [], stopped: [], reattached: [] });
+      expect(a.attached.has("wc")).toBe(true);
+    });
+  });
+
   it("a disable that lands while the tools are being attached wins, and the attachment is taken down", async () => {
     const a = scriptedAttach();
     const k = kitWith(a.port);

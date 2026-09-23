@@ -61,7 +61,9 @@
  * the reconciler attaches it on a later tick — the same tick that
  * re-attaches every running extension after an orchestrator restart, since
  * the attachment lives in this process's memory and the sandbox's process
- * outlives it.
+ * outlives it. Re-attached as it runs is only the process install() started
+ * (`restarts` 0): one the sandbox restarted in place, or one with no process
+ * record, is reinstalled through install() first (review #2325).
  *
  * AUDIT: every transition writes a `tool_run` activity row with
  * `refs.extensionId` and `refs.op` — no new activity kind.
@@ -827,10 +829,12 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
           logger.warn({ err, slug: id }, "extension_reconcile_status_failed");
           continue;
         }
-        if (st?.running === true) {
+        if (st?.running === true && st.process?.restarts === 0) {
           installedExtensionIds.add(extensionServerId(id));
           // Running, but not attached in THIS process: an orchestrator
-          // restart, or an attach that did not answer last time.
+          // restart, or an attach that did not answer last time. Only the
+          // process install() re-verified and started (restarts 0) is
+          // attached as it runs.
           if (attach?.isAttached && !attach.isAttached(id)) {
             try {
               await goLive(attach, id, SYSTEM_ACTOR, "reconcile");
@@ -841,6 +845,18 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
             }
           }
           continue;
+        }
+        if (st?.running === true) {
+          // Restarted in place (or no process record says otherwise): it runs
+          // from files the same uid can rewrite, so it is not the code
+          // install() verified (review #2325). Nothing of it stays attached;
+          // it is reinstalled below, through install() — re-verified, a new
+          // bearer, a fresh export — and attached from there, or failed.
+          logger.warn({ slug: id, restarts: st.process?.restarts ?? null }, "extension_reconcile_restarted_in_place");
+          installedExtensionIds.delete(extensionServerId(id));
+          if (attach) {
+            await attach.detach(id).catch((err: unknown) => logger.warn({ err, slug: id }, "extension_detach_before_reinstall_failed"));
+          }
         }
         const proc = st?.process ?? null;
         if (proc && DEAD_PROCESS_STATES.has(proc.state)) {
