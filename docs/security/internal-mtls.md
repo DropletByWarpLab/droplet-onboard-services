@@ -241,6 +241,33 @@ every fresh install by `relocate_secrets_to_data`'s tree-wide `chown -R`
 (crash-looping the broker), and the fallback left the private key
 world-readable whenever passwordless sudo was absent.
 
+### Secret readers — who opens each mounted key (WARP-2548)
+
+Setup writes every secret install-user-owned (keys 0600, certs/CA/redis ACL
+0644), and `relocate_secrets_to_data` re-owns the tree to the install user, so
+a container can open a mounted secret only as **root** or via **o+r**. Three
+layers keep that true:
+
+- `tests/secret-readers.test.sh` (setup-tests lane) derives the reader uid of
+  every `../data/secrets` mount in compose (staging wrapper → root, else
+  `user:`, else Dockerfile `USER`, else a known-image table; an unknown image
+  fails) and checks it against the modes the real writers produce. Non-root
+  readers must be declared in `SECRET_READERS` (`scripts/lib/secret-readers.sh`).
+- `secret_readers_guard` runs at the end of `materialize_artifacts`: it
+  repairs service-tls bundles to 0600/0644 install-user ownership (undoing the
+  pre-WARP-2154 1883 chown and 0644 fallback), then fails setup naming the
+  file, owner, mode and uid if a declared reader can't open its file.
+- The db/cache/broker staging wrappers read every source before staging and
+  exit with `FATAL secret-guard (WARP-2548) <svc> cannot read <file> as uid
+  <n> -- <ls -ln>` instead of an opaque TLS error. The orchestrator's health
+  monitor reports a down broker as the soft `mqtt` component (Degraded, with
+  the client's last connect error) on the Health page.
+
+Box check: `docker inspect -f '{{.RestartCount}} {{.State.Health.Status}}'
+droplet-broker-1` gives a flat count and `healthy`, the Health page lists
+"Messaging (MQTT broker)" Up, and `docker logs droplet-broker-1 | grep
+secret-guard` is empty.
+
 ## Runbook
 
 ### Enabling internal mTLS on a box (WARP-1061)

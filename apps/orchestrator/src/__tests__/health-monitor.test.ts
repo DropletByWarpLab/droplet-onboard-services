@@ -78,6 +78,10 @@ import { initDeviceService } from "../services/device.service.js";
 import { isRedisHealthy } from "../services/cache.service.js";
 import { healthCheck as routingHealth } from "../services/openwrt.client.js";
 import { ncPing } from "../services/nextcloud.client.js";
+import { recordMqttState } from "../services/mqtt-status.js";
+
+// WARP-2548: the orchestrator's MQTT client is up unless a test says not.
+recordMqttState("connected");
 import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js";
 import { healthCheck as fileIndexerHealth } from "../services/file-indexer.client.js";
 
@@ -191,7 +195,8 @@ describe("runAllProbes (WARP-43)", () => {
       "redis",
       "routing",
       "storage",
-    ]);
+      "mqtt",
+    ].sort());
     expect(results.every((r) => r.status === "ok")).toBe(true);
   });
 
@@ -304,6 +309,30 @@ describe("runAllProbes (WARP-43)", () => {
     expect(classifyAggregate(results)).toBe("degraded");
   });
 
+  it("marks mqtt down WITH the client's last connect error, and it stays SOFT (WARP-2548)", async () => {
+    // The incident: the broker crash-looped on an unreadable TLS key and the
+    // orchestrator's client could only ever see a refused connection.
+    recordMqttState("disconnected", "connect ECONNREFUSED 172.18.0.9:8883");
+    recordMqttState("connecting");
+    try {
+      const results = await runAllProbes({
+        $queryRaw: vi.fn().mockResolvedValue([]),
+      } as unknown as PrismaClient);
+      const mqtt = results.find((r) => r.name === "mqtt");
+
+      expect(mqtt?.status).toBe("down");
+      expect(mqtt?.error).toBe("MQTT broker connecting: connect ECONNREFUSED 172.18.0.9:8883");
+      expect(classifyAggregate(results)).toBe("degraded");
+    } finally {
+      recordMqttState("connected");
+    }
+    // A reconnect clears the stale reason.
+    const again = await runAllProbes({
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient);
+    expect(again.find((r) => r.name === "mqtt")).toMatchObject({ status: "ok", error: undefined });
+  });
+
   it("marks components down when probes return false", async () => {
     (isRedisHealthy as any).mockResolvedValueOnce(false);
     (ncPing as any).mockResolvedValueOnce(false);
@@ -335,7 +364,7 @@ describe("runAllProbes (WARP-43)", () => {
   });
 });
 
-/** All 8 components the probe set produces today (kept in one place so the
+/** All 9 components the probe set produces today (kept in one place so the
  *  WARP-618 observer tests don't repeat the WARP-43 list assertions). */
 const ALL_COMPONENTS = [
   "ai-gateway",
@@ -346,7 +375,8 @@ const ALL_COMPONENTS = [
   "redis",
   "routing",
   "storage",
-];
+  "mqtt",
+].sort();
 
 describe("health snapshot observers (WARP-618)", () => {
   const okPrisma = () =>
@@ -547,7 +577,7 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(8);
+    expect(res.body.components.length).toBe(ALL_COMPONENTS.length);
     expect(res.body.version).toBe("0.1.0");
     expect(typeof res.body.uptime).toBe("number");
   });

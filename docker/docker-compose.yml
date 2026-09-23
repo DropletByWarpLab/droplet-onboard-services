@@ -1136,7 +1136,7 @@ services:
     command:
       - bash
       - -c
-      - install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
+      - for f in /certs-src/key.pem /certs-src/cert.pem; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) db cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done && install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
@@ -1191,7 +1191,9 @@ services:
       - "sh"
       - "-c"
       - >-
-        install -o redis -g redis -m 600 /certs-src/key.pem /tmp/redis.key
+        for f in /certs-src/key.pem /certs-src/cert.pem /certs-src/ca.pem /etc/redis/users.acl; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) cache cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done
+        && { setpriv --reuid redis --regid redis --clear-groups head -c1 /etc/redis/users.acl >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) cache cannot read /etc/redis/users.acl as uid $$(id -u redis) (redis-server opens it after the entrypoint drops to redis) -- $$(ls -ln /etc/redis/users.acl 2>&1)" >&2; exit 1; }; }
+        && install -o redis -g redis -m 600 /certs-src/key.pem /tmp/redis.key
         && install -o redis -g redis -m 644 /certs-src/cert.pem /tmp/redis.crt
         && install -o redis -g redis -m 644 /certs-src/ca.pem /tmp/redis-ca.crt
         && exec docker-entrypoint.sh redis-server
@@ -1233,11 +1235,18 @@ services:
     # stock entrypoint — the WARP-233 db / WARP-234 cache pattern. The ACL
     # copy (0640, mosquitto-owned) also clears mosquitto's world-readable /
     # wrong-owner acl_file warnings (2.x warns; future versions refuse).
+    # WARP-2548: the leading `for … done` is the secret-guard — each staging
+    # source must be non-empty and actually readable (a real read, not
+    # `test -r`, which lies for root under userns remap) BEFORE staging, or the
+    # container exits with ONE line naming the file, its `ls -ln` owner/mode
+    # and the uid that tried, instead of mosquitto's opaque "Check keyfile".
+    # Same guard on db and cache; tests/secret-readers.test.sh pins all three.
     command:
       - "sh"
       - "-c"
       - >-
-        install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
+        for f in /certs-src/ca.pem /certs-src/cert.pem /certs-src/key.pem /acl-src/droplet.acl; do [ -s "$$f" ] && head -c1 "$$f" >/dev/null 2>&1 || { echo "FATAL secret-guard (WARP-2548) broker cannot read $$f as uid $$(id -u) -- $$(ls -ln "$$f" 2>&1)" >&2; exit 1; }; done
+        && install -d -o mosquitto -g mosquitto -m 700 /mosquitto/config/tls
         && install -o mosquitto -g mosquitto -m 644 /certs-src/ca.pem /mosquitto/config/tls/ca.pem
         && install -o mosquitto -g mosquitto -m 644 /certs-src/cert.pem /mosquitto/config/tls/cert.pem
         && install -o mosquitto -g mosquitto -m 600 /certs-src/key.pem /mosquitto/config/tls/key.pem
@@ -1254,6 +1263,16 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto.acl:/acl-src/droplet.acl:ro
       - ../data/secrets/service-tls/broker:/certs-src:ro
+    # WARP-2548: a broker that isn't LISTENING on 8883 is unhealthy, not
+    # "Up". A mTLS pub/sub probe would need a client cert the broker's own
+    # container shouldn't hold, so this reads the kernel's socket table:
+    # 22B3 = 8883, state 0A = LISTEN (tcp or tcp6). Needs only grep.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qE ':22B3 [0-9A-F]+:0000 0A' /proc/net/tcp /proc/net/tcp6"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
