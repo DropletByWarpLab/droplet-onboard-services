@@ -224,6 +224,20 @@ describe("Settings — the front door for every surface the nav tucked (WARP-296
     expect(seen).toEqual([...SETTINGS_SECTIONS]);
   });
 
+  it("heads the Workspace rows once — inside PersonalityCard's group for an owner", () => {
+    // Review of #2284: the derived section and PersonalityCard each rendered
+    // a "Workspace" heading for owner/admin.
+    render(<SettingsPage />);
+    const workspace = screen
+      .getAllByRole("heading")
+      .filter((h) => h.textContent === "Workspace");
+    expect(workspace).toHaveLength(1);
+    const row = document.querySelector("a[href='/files/devices']")!;
+    expect(
+      workspace[0].compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("honours the capability probe — fail-closed, like the nav", () => {
     render(<SettingsPage />);
     expect(document.querySelector("a[href='/admin/rag-eval']")).toBeNull();

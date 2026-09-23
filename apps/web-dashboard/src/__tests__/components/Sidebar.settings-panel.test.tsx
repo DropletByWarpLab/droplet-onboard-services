@@ -135,6 +135,25 @@ describe("the sidebar swaps to the Settings panel inside Settings (WARP-2967)", 
     ).toHaveAttribute("aria-current", "page");
   });
 
+  it("heads the panel with a Settings row, lit on /settings only", () => {
+    // Review of #2284: the panel led everywhere except to /settings itself.
+    pathnameRef.current = "/admin/audit";
+    const { unmount } = render(<Sidebar />);
+    let panel = within(aside()).getByRole("navigation", { name: /settings/i });
+    const row = within(panel).getByRole("link", { name: /^settings$/i });
+    expect(row).toHaveAttribute("href", "/settings");
+    expect(row).not.toHaveAttribute("aria-current");
+    unmount();
+
+    pathnameRef.current = "/settings";
+    render(<Sidebar />);
+    panel = within(aside()).getByRole("navigation", { name: /settings/i });
+    expect(within(panel).getByRole("link", { name: /^settings$/i })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
   it("leads with Back to main menu, and that returns the main tree", () => {
     pathnameRef.current = "/settings";
     render(<Sidebar />);

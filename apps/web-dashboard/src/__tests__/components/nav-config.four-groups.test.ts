@@ -41,7 +41,7 @@ const ALL_CAPS: NavCapabilities = {
   ragEval: true,
   medicalConnector: true,
 };
-const allOn = () => true;
+const allOn = (_id: string) => true;
 
 const group = (label: string) => {
   const g = NAV_GROUPS.find((x) => x.label === label);

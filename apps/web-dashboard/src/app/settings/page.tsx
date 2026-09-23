@@ -34,7 +34,7 @@ import { useModuleGate } from "@/lib/hooks/useModuleGate";
 import { useCapabilities } from "@/lib/hooks/useCapabilities";
 // WARP-2967 — the Settings front door's rows are DERIVED from the one nav
 // definition, the same function the sidebar's contextual panel renders from.
-import { settingsGroups, type AuthRole } from "@/components/nav-config";
+import { settingsGroups, type AuthRole, type NavItem } from "@/components/nav-config";
 import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
@@ -59,6 +59,41 @@ export default function SettingsPage() {
     currentUser?.role as AuthRole | undefined,
     { ...adminCapabilities, medicalConnector: false },
     isModuleOn,
+  );
+  // PersonalityCard renders (and owns the "Workspace" heading) for exactly
+  // these roles — the same expression it gates on.
+  const workspaceInCard =
+    currentUser?.role === "owner" || currentUser?.role === "admin";
+  const workspaceRows =
+    settingsSections.find((s) => s.label === "Workspace")?.items ?? [];
+  const linkRows = (items: NavItem[]) => (
+    <div className="card" style={{ padding: 0 }}>
+      <div className="rows">
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Icon size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">{item.label}</span>
+                <span className="sub">{item.settingsBlurb}</span>
+              </span>
+              <ChevronRight
+                size={16}
+                style={{ marginLeft: "auto", opacity: 0.5 }}
+              />
+            </Link>
+          );
+        })}
+      </div>
+    </div>
   );
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
@@ -207,38 +242,16 @@ export default function SettingsPage() {
             second probe. The MODULE gate stays fail-OPEN via `useModuleGate`,
             which is the WARP-1807 posture: a probe blip must never hide the
             last path in. */}
-        {settingsSections.map((section) => (
-          <div key={section.label}>
-            <Sect title={section.label} />
-            <div className="card" style={{ padding: 0 }}>
-              <div className="rows">
-                {section.items.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      className="lrow"
-                      style={{ padding: "12px 16px", alignItems: "center" }}
-                    >
-                      <span className="ri">
-                        <Icon size={16} />
-                      </span>
-                      <span className="rt">
-                        <span className="nm">{item.label}</span>
-                        <span className="sub">{item.settingsBlurb}</span>
-                      </span>
-                      <ChevronRight
-                        size={16}
-                        style={{ marginLeft: "auto", opacity: 0.5 }}
-                      />
-                    </Link>
-                  );
-                })}
-              </div>
+        {settingsSections
+          // Owner/admin get the Workspace rows inside PersonalityCard's own
+          // "Workspace" group below — two "Workspace" headings otherwise.
+          .filter((section) => !(workspaceInCard && section.label === "Workspace"))
+          .map((section) => (
+            <div key={section.label}>
+              <Sect title={section.label} />
+              {linkRows(section.items)}
             </div>
-          </div>
-        ))}
+          ))}
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
@@ -269,6 +282,12 @@ export default function SettingsPage() {
               the same `user.role` expression PersonalityCard uses, and
               renders nothing for lesser roles. */}
           <LocationsCard />
+
+          {/* WARP-2967 — the derived Workspace rows (Sync devices,
+              Integrations, Credentials, Company files) for owner/admin; the
+              map above renders them under their own heading for everyone
+              else. */}
+          {workspaceInCard && workspaceRows.length > 0 && linkRows(workspaceRows)}
         </PersonalityCard>
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}

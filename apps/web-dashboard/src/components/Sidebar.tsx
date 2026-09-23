@@ -189,6 +189,9 @@ export function Sidebar() {
         isModuleOn,
       )
     : [];
+  const settingsHome = showSettingsPanel
+    ? NAV_GROUPS.flatMap((g) => g.items).find((i) => i.href === "/settings")
+    : undefined;
 
   // Which hrefs own a bottom-tab slot. Whole business keeps the fixed
   // MOBILE_PRIMARY_HREFS. Inside a department most of those are not in its
@@ -364,6 +367,21 @@ export function Sidebar() {
           aria-label={showSettingsPanel ? "Settings" : "Sections"}
           className="flex-1 px-3 py-1 overflow-y-auto"
         >
+          {/* WARP-2967 review — the panel's own index. Every tucked row leads
+              away from /settings; without this the page that owns them was
+              reachable only by "Back to main menu" and then Settings. */}
+          {settingsHome && (
+            <div className="space-y-0.5 mb-4">
+              <NavLink
+                item={settingsHome}
+                active={isItemActive(settingsHome)}
+                showChildren={false}
+                pathname={pathname}
+                badge={0}
+                collapsed={collapsed}
+              />
+            </div>
+          )}
           {(showSettingsPanel ? settingsSections : renderedGroups).map(
             (group, groupIndex) => (
             <div key={group.label} className={groupIndex > 0 ? "mt-4" : ""}>
