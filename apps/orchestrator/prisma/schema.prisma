@@ -2355,9 +2355,26 @@ model NotificationLog {
   channels    String
   deliveredAt DateTime?
   error       String?
+  /// WARP-2904 — what the web-push leg did, explicitly. NULL only on rows
+  /// written before this column existed and on `recordNotification` rows
+  /// (queued, no transport yet); never inferred from `channels`/`error`.
+  pushOutcome PushOutcome?
   createdAt   DateTime         @default(now())
 
   @@index([userId, createdAt])
+}
+
+/// WARP-2904 — the web-push leg of one sendNotification call.
+///   sent           at least one subscription accepted the push
+///   no_subscribers the user has no (valid) PushSubscription row
+///   refused_gate   the `web_push` off-LAN channel is off (or unreadable)
+///   failed         subscribers existed and nothing was accepted, or the
+///                  push leg threw
+enum PushOutcome {
+  sent
+  no_subscribers
+  refused_gate
+  failed
 }
 
 // ── WARP-446: Coverage extender APs (auto-onboarded OpenWrt APs) ──
@@ -4266,6 +4283,10 @@ enum OffLanChannelKey {
   /// Bank)": the /api/web/weather + /api/web/rates routes' egress gate,
   /// fronting the services/web-fetch allowlisted fetcher.
   ambient_data
+  /// WARP-2904 — Web Push delivery: the dial to whichever push service
+  /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
+  /// `webPushGate` in dispatchToUser, the one dial site, on every call.
+  web_push
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
