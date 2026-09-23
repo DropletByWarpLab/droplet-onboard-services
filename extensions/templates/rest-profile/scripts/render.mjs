@@ -90,7 +90,8 @@ function renderGuide(draft) {
     "## Plan prerequisite": pin(g.planPrerequisite),
     "## Cost": pin(g.cost),
     "## Click-path": steps.length ? `${steps.map((s, i) => `${i + 1}. ${s.trim()}`).join("\n")}\n\n${TODO}` : TODO,
-    "## Scopes and permissions": pin(g.scopes),
+    // The key's prefix or shape is a fact pin too (check-setup-guides fact_pins).
+    "## Scopes and permissions": `${pin(g.scopes)}\n\nAccepted credential: ${pin(c.acceptedShape)}`,
     "## Rotation and expiry": `Rotation: ${fill(g.rotation)}\n\nExpiry: ${pin(c.expires)}`,
     "## Revocation": fill(g.revocation),
   };

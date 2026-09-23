@@ -199,6 +199,73 @@ export function validateDraft(draft, vocab) {
   return problems;
 }
 
+const SCHEME = "://";
+
+/** The baseUrl renderProfile writes for the draft's baseUrl (profileOf). */
+function expectedBase(base) {
+  if (base.kind === "static") return { kind: "static", origin: base.origin };
+  const out = {};
+  for (const k of ["kind", "configField", "allowedSuffixes", "allowedHosts"]) if (k in base) out[k] = base[k];
+  return out;
+}
+
+/** JSON with sorted keys, so two equal values compare equal as text. */
+function canon(value) {
+  return JSON.stringify(value, (_k, v) =>
+    isObj(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : v,
+  );
+}
+
+/**
+ * The profile's object literal, read as JSON, or null when the file is not
+ * exactly the renderer's layout: `//` comments, one import, two constants.
+ * Nothing else may sit in it, so no second statement can re-point the
+ * baseUrl the readback names. (JavaScript ends a line at U+2028/U+2029 too,
+ * so a comment may not carry them.)
+ */
+function profileObject(text, provider) {
+  const up = providerConst(provider);
+  const m = new RegExp(
+    String.raw`^(?:[ \t]*\/\/[^\n\r\u2028\u2029]*\n|[ \t]*\n)*` +
+      String.raw`import type \{ RestVendorProfile \} from "\.\.\/profile\.js";\n\s*` +
+      String.raw`export const ${up}_PROVIDER = "${provider}";\n\s*` +
+      String.raw`export const ${up}_PROFILE: RestVendorProfile = (\{[\s\S]*\});\s*$`,
+  ).exec(text.replace(/\r\n/g, "\n"));
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+/** renderAdr042's three tables: the header each starts with, and its row. */
+const ADR042_TABLES = [
+  ["§2", "| Vendor | What the owner pastes |", (n) => `| **${n}** |`],
+  ["§4 accept/reject", "| Vendor | Accept | Reject |", (n) => `| ${n} |`],
+  ["§7 provisioning", "| Integration | Who provisions |", (n) => `| ${n} |`],
+];
+const cellsOf = (line) => line.split(/(?<!\\)\|/).slice(1, -1);
+
+function adr042Problems(text, name, path) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const problems = [];
+  for (const [label, header, row] of ADR042_TABLES) {
+    const at = lines.findIndex((l) => l.startsWith(header));
+    let ok = false;
+    if (at >= 0 && at + 2 < lines.length) {
+      const cells = cellsOf(lines[at + 2]);
+      ok =
+        /^\|(?:\s*:?-+:?\s*\|)+\s*$/.test(lines[at + 1]) &&
+        lines[at + 2].startsWith(row(name)) &&
+        cells.length === cellsOf(lines[at]).length &&
+        cells.every((c) => c.trim());
+    }
+    if (!ok) problems.push(`${path} has no ${label} row for ${name}`);
+  }
+  return problems;
+}
+
 /**
  * Whether the rendered files agree with the draft. `read(path)` returns a
  * file's text or null. The sandbox's connector_draft.py makes the same checks
@@ -207,10 +274,29 @@ export function validateDraft(draft, vocab) {
 export function checkRendered(draft, read) {
   const problems = [];
   const paths = outputPaths(draft.provider);
+  const isStatic = draft.baseUrl.kind === "static";
   const profile = read(paths.profile);
   if (profile === null) problems.push(`${paths.profile} is missing`);
   else if (!profile.includes(`export const ${providerConst(draft.provider)}_PROFILE`)) {
     problems.push(`${paths.profile} does not export ${providerConst(draft.provider)}_PROFILE`);
+  } else {
+    const obj = profileObject(profile, draft.provider);
+    if (!isObj(obj)) {
+      problems.push(`${paths.profile} is not the profile \`npm run build\` renders; edit the draft, not the render`);
+    } else {
+      if (obj.provider !== draft.provider) problems.push(`${paths.profile} names a provider other than ${draft.provider}`);
+      if (canon(obj.baseUrl) !== canon(expectedBase(draft.baseUrl))) {
+        problems.push(`${paths.profile} baseUrl does not match connector-draft.json`);
+      }
+      if (isStatic) {
+        // The origin, once, in the text AND in the values (a `\/` escape
+        // hides the scheme from the text but not from the value).
+        const extra = strings(obj).filter(([at, v]) => v.includes(SCHEME) && at !== "baseUrl.origin");
+        if (profile.split(SCHEME).length - 1 !== 1 || extra.length) {
+          problems.push(`${paths.profile} carries a scheme URL other than its origin`);
+        }
+      }
+    }
   }
   const guide = read(paths.guide);
   if (guide === null) problems.push(`${paths.guide} is missing`);
@@ -222,18 +308,24 @@ export function checkRendered(draft, read) {
   }
   const egress = read(paths.egress);
   if (egress === null) problems.push(`${paths.egress} is missing`);
-  else if (draft.baseUrl.kind === "static") {
+  else if (isStatic) {
     const host = new URL(draft.baseUrl.origin).hostname;
     if (!egress.includes(host)) problems.push(`${paths.egress} does not name ${host}`);
   } else {
     const key = `IntegrationConnection.providerConfig.${draft.baseUrl.configField}`;
     if (!egress.includes(key)) problems.push(`${paths.egress} does not name ${key}`);
   }
-  if (read(paths.adr042) === null) problems.push(`${paths.adr042} is missing`);
-  if (draft.baseUrl.kind === "dynamic") {
-    for (const p of [paths.profile, paths.guide, paths.egress, paths.adr042]) {
-      if ((read(p) ?? "").includes("://")) problems.push(`${p} carries a scheme URL in a dynamic draft`);
-    }
+  const adr042 = read(paths.adr042);
+  if (adr042 === null) problems.push(`${paths.adr042} is missing`);
+  else {
+    const name = (draft.displayName?.trim() || draft.provider).replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
+    problems.push(...adr042Problems(adr042, name, paths.adr042));
+  }
+  // Any scheme, an IP or a single label included. A dynamic draft carries
+  // none; a static one carries its origin in the profile only (above).
+  const others = isStatic ? [paths.guide, paths.egress, paths.adr042] : [paths.profile, paths.guide, paths.egress, paths.adr042];
+  for (const p of others) {
+    if ((read(p) ?? "").includes(SCHEME)) problems.push(`${p} carries a scheme URL; describe the host in words (only a static profile carries its origin)`);
   }
   return problems;
 }

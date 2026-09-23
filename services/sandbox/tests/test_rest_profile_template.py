@@ -87,21 +87,70 @@ def _dynamic_draft() -> dict:
     return d
 
 
+def _profile_text(draft: dict) -> str:
+    """The profile exactly as scripts/render.mjs lays it out (renderProfile)."""
+    p = draft["provider"]
+    up = p.upper().replace("-", "_")
+    base = draft["baseUrl"]
+    if base["kind"] == "static":
+        base = {"kind": "static", "origin": base["origin"]}
+    else:
+        base = {k: base[k] for k in ("kind", "configField", "allowedSuffixes", "allowedHosts") if k in base}
+    body = json.dumps({"provider": p, "baseUrl": base, "probePath": draft["probePath"]}, indent=2)
+    return "\n".join(
+        [
+            "// Drafted on a Droplet box by the rest-profile template (WARP-2899). Not verified.",
+            "// Rendered from connector-draft.json by `npm run build`. Edit the draft, not this file.",
+            'import type { RestVendorProfile } from "../profile.js";',
+            "",
+            f"export const {up}_PROVIDER = {json.dumps(p)};",
+            "",
+            f"export const {up}_PROFILE: RestVendorProfile = {body};",
+            "",
+        ]
+    )
+
+
+def _rows_text(name: str) -> str:
+    """The three ADR-042 tables, one row each, as renderAdr042 lays them out."""
+    return "\n".join(
+        [
+            "## §2 What the owner pastes",
+            "",
+            (
+                "| Vendor | What the owner pastes | Accepted shape | Full-privilege alternative to refuse "
+                "| Scope granularity | Expires? | Verified |"
+            ),
+            "|---|---|---|---|---|---|---|",
+            f"| **{name}** | TODO(verify) | TODO(verify) | TODO(verify) | TODO(verify) | TODO(verify) | TODO(verify) |",
+            "",
+            "## §4 Accept and reject",
+            "",
+            "| Vendor | Accept | Reject |",
+            "|---|---|---|",
+            f"| {name} | TODO(verify) | TODO(verify) |",
+            "",
+            "## §7 Who provisions",
+            "",
+            "| Integration | Who provisions | Does Warp Lab register or publish anything? |",
+            "|---|---|---|",
+            f"| {name} | TODO(verify) | **No** TODO(verify) |",
+            "",
+        ]
+    )
+
+
 def _write_rendered(work: Path, draft: dict) -> None:
     """A minimal, consistent render — what `npm run build` leaves, by hand, so
     these tests do not need node. The node-backed test below proves the real
     renderer's output satisfies the same reader."""
     p = draft["provider"]
     paths = connector_draft.output_paths(p)
-    up = p.upper().replace("-", "_")
     (work / "connector-draft.json").write_text(json.dumps(draft, indent=2), encoding="utf-8")
     files = {
-        paths["profile"]: f"export const {up}_PROVIDER = {json.dumps(p)};\nexport const {up}_PROFILE = "
-        + json.dumps({"provider": p, "baseUrl": draft["baseUrl"]})
-        + ";\n",
+        paths["profile"]: _profile_text(draft),
         paths["guide"]: GUIDE,
-        paths["adr042"]: "| Vendor | What the owner pastes | Accepted shape | Full-privilege alternative to refuse "
-        "| Scope granularity | Expires? | Verified |\n",
+        paths["adr042"]: _rows_text(draft["displayName"]),
     }
     if draft["baseUrl"]["kind"] == "static":
         files[paths["egress"]] = "entries:\n  - id: acme-api\n    destination:\n      hosts: [\"api.acme.example\"]\n"
@@ -186,6 +235,20 @@ def test_a_bad_provider_id_is_a_problem_and_no_path_is_built_from_it():
     assert seen == ["connector-draft.json"]
 
 
+def test_a_scheme_in_a_draft_string_is_a_problem_except_the_static_origin():
+    # validate.mjs's rule, re-read at propose: nothing but a static origin
+    # carries "://". MUTATION: skip the draft-string walk → red.
+    dyn = _dynamic_draft()
+    dyn["baseUrl"]["hostShape"] = "like https://acme.globex.example"
+    facts = connector_draft.describe_tree(lambda p: json.dumps(dyn) if p == "connector-draft.json" else None)
+    assert any("baseUrl.hostShape carries a scheme URL" in p for p in facts["problems"])
+    static = _static_draft()
+    static["guide"]["cost"] = "see https://api.acme.example/pricing"
+    facts = connector_draft.describe_tree(lambda p: json.dumps(static) if p == "connector-draft.json" else None)
+    assert any("guide.cost carries a scheme URL" in p for p in facts["problems"])
+    assert not any("baseUrl.origin" in p for p in facts["problems"])
+
+
 # ── propose ─────────────────────────────────────────────────────────────────
 
 
@@ -217,6 +280,16 @@ def test_propose_a_connector_draft_writes_no_manifest_and_tags(store):
         ("guide-order", "six sections"),
         ("egress-host", "does not name api.acme.example"),
         ("adr042", "adr-042/acme"),
+        # A hand-edited profile that dials another host while the draft's
+        # origin still sits in a comment (review of #2324).
+        ("profile-origin-comment", "not the profile `npm run build` renders"),
+        ("profile-origin", "baseUrl does not match connector-draft.json"),
+        ("profile-extra-code", "not the profile `npm run build` renders"),
+        ("profile-escaped-url", "scheme URL other than its origin"),
+        ("adr042-header-only", "no §2 row for Acme Tasks"),
+        ("adr042-no-provisioning", "no §7 provisioning row for Acme Tasks"),
+        ("adr042-blank-cell", "no §4 accept/reject row for Acme Tasks"),
+        ("static-url-in-guide", "carries a scheme URL"),
     ],
 )
 def test_propose_refuses_a_draft_whose_renders_are_missing_or_disagree(store, breakage, expect):
@@ -231,6 +304,37 @@ def test_propose_refuses_a_draft_whose_renders_are_missing_or_disagree(store, br
         (work / paths["egress"]).write_text("entries: []\n", encoding="utf-8")
     elif breakage == "adr042":
         (work / paths["adr042"]).unlink()
+    elif breakage == "profile-origin-comment":
+        (work / paths["profile"]).write_text(
+            'export const ACME_PROFILE = {origin:"https://api.evil.example"}; // "https://api.acme.example"\n',
+            encoding="utf-8",
+        )
+    elif breakage == "profile-origin":
+        text = (work / paths["profile"]).read_text(encoding="utf-8")
+        (work / paths["profile"]).write_text(text.replace(ORIGIN, "https://api.evil.example"), encoding="utf-8")
+    elif breakage == "profile-extra-code":
+        text = (work / paths["profile"]).read_text(encoding="utf-8")
+        (work / paths["profile"]).write_text(text + 'ACME_PROFILE.probePath = "/x";\n', encoding="utf-8")
+    elif breakage == "profile-escaped-url":
+        # `\/` is "/" to TypeScript and to JSON: the text holds no "://", the value does.
+        text = (work / paths["profile"]).read_text(encoding="utf-8")
+        (work / paths["profile"]).write_text(
+            text.replace('"probePath": "/v1/me"', '"probePath": "https:\\/\\/api.evil.example/v1"'), encoding="utf-8"
+        )
+    elif breakage == "adr042-header-only":
+        (work / paths["adr042"]).write_text(
+            "| Vendor | What the owner pastes | Accepted shape | Full-privilege alternative to refuse "
+            "| Scope granularity | Expires? | Verified |\n",
+            encoding="utf-8",
+        )
+    elif breakage == "adr042-no-provisioning":
+        rows = _rows_text("Acme Tasks")
+        (work / paths["adr042"]).write_text(rows[: rows.index("## §7")], encoding="utf-8")
+    elif breakage == "adr042-blank-cell":
+        rows = _rows_text("Acme Tasks").replace("| Acme Tasks | TODO(verify) | TODO(verify) |", "| Acme Tasks |  | TODO(verify) |")
+        (work / paths["adr042"]).write_text(rows, encoding="utf-8")
+    elif breakage == "static-url-in-guide":
+        (work / paths["guide"]).write_text(GUIDE + "\nSee https://docs.acme.example/tokens\n", encoding="utf-8")
     with pytest.raises(StoreError) as exc:
         workspace.propose(f"ws-bad-{breakage}", "Acme", "0.1.0", "s", ALICE)
     assert exc.value.status == 409 and expect in str(exc.value) and "npm run build" in str(exc.value)
@@ -240,10 +344,14 @@ def test_propose_refuses_a_draft_whose_renders_are_missing_or_disagree(store, br
 def test_propose_refuses_a_scheme_url_in_a_dynamic_draft(store):
     work = _draft_workspace(store, "ws-dyn", _dynamic_draft())
     guide = work / connector_draft.output_paths("globex")["guide"]
-    guide.write_text(GUIDE + "\nSee https://acme.globex.example/settings\n", encoding="utf-8")
-    with pytest.raises(StoreError) as exc:
-        workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
-    assert exc.value.status == 409 and "scheme URL" in str(exc.value)
+    # Any scheme, not only the gate's dotted-TLD shape: an IP and a single
+    # label are URLs too (validate.mjs refuses any "://"). MUTATION: go back
+    # to URL_RE for the dynamic scan → the last two red.
+    for url in ("https://acme.globex.example/settings", "https://127.0.0.1/settings", "https://intranet/settings"):
+        guide.write_text(GUIDE + f"\nSee {url}\n", encoding="utf-8")
+        with pytest.raises(StoreError) as exc:
+            workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
+        assert exc.value.status == 409 and "scheme URL" in str(exc.value), url
     guide.write_text(GUIDE, encoding="utf-8")
     p = workspace.propose("ws-dyn", "Globex", "0.1.0", "s", ALICE)
     assert p["connectorDraft"]["host"]["kind"] == "dynamic"
