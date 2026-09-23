@@ -16,8 +16,10 @@
 # cannot read .env (WARP-1669: it mounts docker/ only).
 #
 # CONTRACT (never broken, pinned by scripts/test/ota-env-reconcile.test.sh):
-#   * ADDITIVE: a key is written only when no `KEY=` line exists. An existing
-#     value, even an empty one, is never touched. A profile token is appended
+#   * ADDITIVE: a key is written only when no assignment to it exists —
+#     `KEY=`, `export KEY=` and `KEY = v` all count (compose takes the LAST
+#     assignment, so a duplicate would override the operator's value). An
+#     existing value, even an empty one, is never touched. A profile token is appended
 #     to an existing COMPOSE_PROFILES only when it is not already a list
 #     element.
 #   * IDEMPOTENT: a second run changes nothing and writes no backup.
@@ -28,20 +30,63 @@
 #     tokens and paths, never a value.
 #
 # It also re-renders the boot unit's `--profile` flags from the merged
-# COMPOSE_PROFILES (render_systemd_unit bakes them in at setup time). No
-# daemon-reload from here: systemd reads the file fresh at the next boot,
-# and that boot is the only time the unit's ExecStart runs.
+# COMPOSE_PROFILES (render_systemd_unit bakes them in at setup time) —
+# only when .env HAS a COMPOSE_PROFILES line: with none, what the unit bakes
+# in is the only record of the box's profiles and is left alone. The unit is
+# written atomically (temp + rename beside the real file) with a backup
+# <unit>.bak.ota-<id>. No daemon-reload from here: systemd reads the file
+# fresh at the next boot, and that boot is the only time ExecStart runs.
+#
+# ROLLBACK (`--restore`): puts back .env and the unit from this update's
+# backups, if it made any. apply-update.sh restore-configs calls it before
+# it unpacks the config pre-image, so a release that fails its health gate
+# does not leave the previous images running under the new .env.
 #
 # Usage: env-reconcile.sh <repo-root> [update-id]
+#        env-reconcile.sh --restore <repo-root> <update-id>
 #   DROPLET_OTA_UNIT_FILE overrides the unit path (tests).
 # =============================================================================
 set -eu
 
-ROOT="${1:?usage: env-reconcile.sh <repo-root> [update-id]}"
+MODE=reconcile
+if [ "${1:-}" = "--restore" ]; then MODE=restore; shift; fi
+ROOT="${1:?usage: env-reconcile.sh [--restore] <repo-root> [update-id]}"
 TAG="${2:-$(date +%s)}"
 UNIT="${DROPLET_OTA_UNIT_FILE:-/etc/systemd/system/droplet.service}"
 
 die() { printf '[env-reconcile] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# The file behind a path (.env may be a symlink onto /data, WARP-232).
+real_path() { if [ -L "$1" ]; then readlink -f "$1"; else printf '%s' "$1"; fi; }
+
+# --- rollback -----------------------------------------------------------------
+if [ "$MODE" = restore ]; then
+  [ -n "${2:-}" ] || die "--restore needs the update id"
+  restored_env=false
+  restored_unit=false
+  # Nothing to restore (no .env visible, no backup made) is not an error.
+  if [ -e "$ROOT/.env" ]; then
+    env_real="$(real_path "$ROOT/.env")"
+    if [ -f "$env_real.bak.ota-$TAG" ]; then
+      cp -p "$env_real.bak.ota-$TAG" "$env_real.ota-restore.$$"
+      mv "$env_real.ota-restore.$$" "$env_real"
+      restored_env=true
+    fi
+  fi
+  if [ -e "$UNIT" ]; then
+    unit_real="$(real_path "$UNIT")"
+    if [ -f "$unit_real.bak.ota-$TAG" ]; then
+      cp -p "$unit_real.bak.ota-$TAG" "$unit_real.ota-restore.$$"
+      mv "$unit_real.ota-restore.$$" "$unit_real"
+      restored_unit=true
+    fi
+  fi
+  printf '{"restoredEnv":%s,"restoredUnit":%s}\n' "$restored_env" "$restored_unit"
+  exit 0
+fi
+
+# Any assignment to $1: KEY=, export KEY=, KEY = v (leading blanks allowed).
+assigns() { grep -Eq "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$2"; }
 
 # Keys OTA may add: bearer tokens both ends read from .env (no file for setup
 # to materialize) and fixed defaults. Mirrors migrate_env's backfills; the
@@ -127,7 +172,7 @@ if [ -s "$STAGE" ] && [ -n "$(tail -c 1 "$STAGE")" ]; then printf '\n' >> "$STAG
 added_keys=""
 echo "$ENSURE_KEYS" | while read -r key gen; do
   [ -n "$key" ] || continue
-  grep -q "^${key}=" "$STAGE" && continue
+  assigns "$key" "$STAGE" && continue
   case "$gen" in
     hex32) val="$(rand_hex 32)" ;;
     hex64) val="$(rand_hex 64)" ;;
@@ -142,12 +187,16 @@ if [ -f "$STAGE.keys" ]; then
   rm -f "$STAGE.keys"
 fi
 
-# Last assignment wins (how compose reads .env). Strip spaces and quotes.
+# Last assignment wins (how compose reads .env). Tolerates `export`, blanks
+# around `=`, a trailing ` # comment` and CRLF; strips spaces and quotes.
 current_profiles() {
-  sed -n 's/^COMPOSE_PROFILES=//p' "$1" | tail -n 1 | tr -d ' "'"'"
+  sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROFILES[[:space:]]*=//p' "$1" \
+    | tail -n 1 | tr -d '\r' | sed 's/[[:space:]]#.*//' | tr -d ' \t"'"'"
 }
 added_profiles=""
-if grep -q '^COMPOSE_PROFILES=' "$STAGE"; then
+profiles_known=false
+if assigns COMPOSE_PROFILES "$STAGE"; then
+  profiles_known=true
   profiles="$(current_profiles "$STAGE")"
   for tok in $ENSURE_PROFILES; do
     case ",$profiles," in *",$tok,"*) continue ;; esac
@@ -155,8 +204,10 @@ if grep -q '^COMPOSE_PROFILES=' "$STAGE"; then
     added_profiles="$added_profiles $tok"
   done
   if [ -n "$added_profiles" ]; then
-    awk -v v="$profiles" '/^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }' \
-      "$STAGE" > "$STAGE.tmp"
+    # Rewrite every assignment line in place, keeping its `export ` prefix.
+    awk -v v="$profiles" '
+      /^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROFILES[[:space:]]*=/ { sub(/=.*/, "=" v); print; next }
+      { print }' "$STAGE" > "$STAGE.tmp"
     cat "$STAGE.tmp" > "$STAGE"
   fi
 else
@@ -177,7 +228,9 @@ fi
 # Same shape render_systemd_unit writes: one `--profile X` per token right
 # after `-f <compose>` on the ExecStart/ExecReload `up` lines.
 unit_updated=false
-if [ -f "$UNIT" ]; then
+# No COMPOSE_PROFILES line → the unit's baked-in flags are the only record of
+# this box's profiles; rewriting them from "" would drop every one of them.
+if [ -f "$UNIT" ] && [ "$profiles_known" = true ]; then
   flags=""
   for tok in $(echo "$profiles" | tr ',' ' '); do flags="$flags --profile $tok"; done
   awk -v flags="$flags" '
@@ -195,7 +248,12 @@ if [ -f "$UNIT" ]; then
     }
     { print }' "$UNIT" > "$STAGE.unit"
   if ! cmp -s "$UNIT" "$STAGE.unit"; then
-    cat "$STAGE.unit" > "$UNIT"
+    unit_real="$(real_path "$UNIT")"
+    cp -p "$unit_real" "$unit_real.bak.ota-$TAG"
+    # Atomic: same directory, same mode, then rename over the real file.
+    cp -p "$unit_real" "$unit_real.ota-reconcile.$$"
+    cat "$STAGE.unit" > "$unit_real.ota-reconcile.$$"
+    mv "$unit_real.ota-reconcile.$$" "$unit_real"
     unit_updated=true
   fi
   rm -f "$STAGE.unit"

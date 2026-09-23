@@ -724,6 +724,17 @@ fi
 
 unset DOCKER_STUB_PS_CID DOCKER_STUB_MOUNTS DOCKER_STUB_HEALTHY_AFTER
 
+# --- #2320 review: restore-configs undoes .env + the boot unit FIRST ---
+RST_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" DROPLET_OTA_CONFIG_ROOT=/opt/droplet \
+  bash "$APPLY_SH" restore-configs --compose-file "$COMPOSE_FILE" "$UPDATE_ID" 2>&1)"
+RST_ENV_N="$(printf '%s\n' "$RST_OUT" | grep -n "env-reconcile.sh --restore /opt/droplet $UPDATE_ID" | head -1 | cut -d: -f1)"
+RST_TAR_N="$(printf '%s\n' "$RST_OUT" | grep -n "DRY-RUN: tar -xzf" | head -1 | cut -d: -f1)"
+if [ -n "$RST_ENV_N" ] && [ -n "$RST_TAR_N" ] && [ "$RST_ENV_N" -lt "$RST_TAR_N" ]; then
+  pass "restore-configs restores .env + the unit (release's env-reconcile --restore) before the pre-image"
+else
+  fail "restore-configs env restore missing or out of order (got: $RST_OUT)"
+fi
+
 # =============================================================================
 # Phase 4 — dry-run hook still short-circuits every daemon op
 # =============================================================================

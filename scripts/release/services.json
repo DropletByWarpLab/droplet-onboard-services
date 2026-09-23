@@ -89,7 +89,7 @@
       "name": "gateway",
       "context": ".",
       "dockerfile": "docker/nginx/Dockerfile",
-      "healthcheck": { "type": "none" }
+      "healthcheck": { "type": "http", "port": 9981, "path": "/healthz" }
     },
     {
       "name": "doc-render",
