@@ -32,6 +32,10 @@ import {
   runPasskeyAuthenticationCeremony,
   verifyPasskeyAuthentication,
   cancelPasskeyCeremony,
+  classifyPasskeyError,
+  passkeyErrorView,
+  passkeyOriginProblem,
+  type PasskeyErrorKind,
 } from "@/lib/webauthn";
 
 /**
@@ -60,13 +64,23 @@ type PasskeyState =
   | "success" // verified — confirmation beat, then redirect
   | "failed" // one state, copy varies by cause
   | "unsupported" // direct nav on a browser without WebAuthn
+  | "blocked" // WARP-1157: this ADDRESS can't use passkeys (http, raw IP, untrusted cert)
   | "ready"; // contingency: browser refused to auto-start; explicit Continue
 
 /** Why a `failed` state happened. NotAllowedError is deliberately opaque per the
  *  WebAuthn spec (dismiss vs. timeout vs. no-credential are indistinguishable),
  *  so `cancelled` folds dismiss + no-match, and `timeout` is inferred from the
  *  elapsed time against the options' own timeout. */
-type FailCause = "cancelled" | "timeout" | "network" | "rejected";
+type FailCause = "cancelled" | "timeout" | "network" | "rejected" | "unavailable";
+
+/** WARP-1157 — failures that are about the address, not the attempt. Retrying
+ *  from this page can never succeed, so they get the `blocked` state (no
+ *  "Try again"), not `failed`. */
+const ADDRESS_KINDS: ReadonlySet<PasskeyErrorKind> = new Set([
+  "insecure_context",
+  "ip_address",
+  "certificate",
+]);
 
 /** Confirmation beat before redirecting on success (design brief §3.4). */
 const SUCCESS_HOLD_MS = 600;
@@ -125,6 +139,8 @@ function failGuidance(cause: FailCause): string {
       return "The request timed out before a passkey was used. You can try again, or sign in with your password.";
     case "network":
       return "We couldn't reach your Droplet to finish signing in. Check that you're on your office network, then try again.";
+    case "unavailable":
+      return "Your Droplet can't take passkey sign-ins right now. Try again in a few minutes, or sign in with your password.";
     case "rejected":
       return "We couldn't verify that passkey. Try again, or use your password — if this keeps happening, you can manage passkeys in Settings after signing in.";
     case "cancelled":
@@ -187,7 +203,11 @@ interface StateView {
   guidance: string;
 }
 
-function viewFor(state: PasskeyState, cause: FailCause | null): StateView {
+function viewFor(
+  state: PasskeyState,
+  cause: FailCause | null,
+  blockedKind: PasskeyErrorKind | null,
+): StateView {
   switch (state) {
     case "starting":
       return {
@@ -239,6 +259,14 @@ function viewFor(state: PasskeyState, cause: FailCause | null): StateView {
         guidance:
           "This browser doesn't support passkeys. Sign in with your password instead, or open this page in a browser that supports passkeys.",
       };
+    case "blocked":
+      return {
+        icon: KeyRound,
+        variant: "muted",
+        ring: "none",
+        headline: "Passkeys can't be used at this address",
+        guidance: `${passkeyErrorView(blockedKind ?? "insecure_context").message} For now, sign in with your password.`,
+      };
     case "ready":
       return {
         icon: KeyRound,
@@ -262,6 +290,7 @@ function PasskeyApprovalInner() {
 
   const [state, setState] = useState<PasskeyState>("starting");
   const [cause, setCause] = useState<FailCause | null>(null);
+  const [blockedKind, setBlockedKind] = useState<PasskeyErrorKind | null>(null);
 
   // The raw `?next=` rides through untouched; we only resolve it with the shared
   // hardened guard at the moment we actually redirect (success), and we preserve
@@ -286,6 +315,10 @@ function PasskeyApprovalInner() {
         setCause(c);
         setState("failed");
       };
+      const block = (k: PasskeyErrorKind) => {
+        setBlockedKind(k);
+        setState("blocked");
+      };
 
       setCause(null);
       setState("starting");
@@ -295,9 +328,12 @@ function PasskeyApprovalInner() {
         let options: PublicKeyCredentialRequestOptionsJSON;
         try {
           options = await getPasskeyAuthenticationOptions();
-        } catch {
+        } catch (err) {
           if (!isCurrent()) return;
-          fail("network");
+          // WARP-1157: a reachable box that refuses is not a network failure.
+          const kind = classifyPasskeyError(err);
+          if (ADDRESS_KINDS.has(kind)) block(kind);
+          else fail(kind === "network" ? "network" : "unavailable");
           return;
         }
         if (!isCurrent()) return;
@@ -312,6 +348,14 @@ function PasskeyApprovalInner() {
         } catch (err) {
           if (!isCurrent()) return; // our own cancel/unmount — say nothing
           const elapsed = performance.now() - startedAt;
+          // WARP-1157: RP-ID/origin refusals and Chrome's certificate refusal
+          // are about the address — checked first, because the certificate
+          // refusal arrives as a NotAllowedError.
+          const kind = classifyPasskeyError(err);
+          if (ADDRESS_KINDS.has(kind)) {
+            block(kind);
+            return;
+          }
           if (isNotAllowedError(err)) {
             if (auto && elapsed < AUTOSTART_REFUSED_MS) {
               // Browser likely refused to auto-start without a user gesture —
@@ -358,7 +402,13 @@ function PasskeyApprovalInner() {
   // browser skips the ceremony entirely and shows the unsupported state.
   useEffect(() => {
     aliveRef.current = true;
-    if (!isPasskeySupported()) {
+    // WARP-1157: check the address first — on plain http the browser hides
+    // WebAuthn, and "this browser doesn't support passkeys" would be wrong.
+    const problem = passkeyOriginProblem();
+    if (problem) {
+      setBlockedKind(problem);
+      setState("blocked");
+    } else if (!isPasskeySupported()) {
       setState("unsupported");
     } else {
       runCeremony(true);
@@ -402,7 +452,7 @@ function PasskeyApprovalInner() {
 
   const tryAgain = useCallback(() => runCeremony(false), [runCeremony]);
 
-  const view = viewFor(state, cause);
+  const view = viewFor(state, cause, blockedKind);
   const isWaiting = state === "waiting";
   // verifying + success are transient (well under a second) and carry no
   // actions; success also drops the reassurance footer (the page is leaving).
@@ -555,6 +605,12 @@ function StateActions({
         <button type="button" onClick={onBail} className={PK_PRIMARY}>
           <ArrowLeft size={15} aria-hidden="true" />
           Back to sign in
+        </button>
+      );
+    case "blocked":
+      return (
+        <button type="button" onClick={onBail} className={PK_PRIMARY}>
+          Use your password instead
         </button>
       );
     case "verifying":

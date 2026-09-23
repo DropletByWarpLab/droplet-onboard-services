@@ -1,6 +1,7 @@
 import {
   MAX_FILES_PER_UPLOAD,
   MAX_UPLOAD_BATCH_BYTES,
+  type UploadedFileEntry,
 } from "@droplet/shared-types";
 // WARP-2633 — the ONE `SaasConnectionState`; re-exported below (see the
 // docstring there) so `@/lib/api` stays the name every consumer imports from.
@@ -119,6 +120,9 @@ import type {
   DepartmentRight,
   CreateDepartmentPayload,
   DepartmentMembership,
+  DepartmentProfile,
+  DepartmentProfileResponse,
+  PutDepartmentProfilePayload,
   AccessRole,
   AccessRolePayload,
   AccessSyncState,
@@ -133,6 +137,9 @@ import type {
   RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
+  SecurityEventKind,
+  SecurityEventsPage,
+  SecurityHealthRow,
 } from "./types";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -1361,6 +1368,28 @@ export async function fetchTlsCertificate(): Promise<TlsCertificate> {
   });
   if (!res.ok) {
     throw new Error(`Failed to fetch certificate lifecycle: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-1405 — backup health (GET /api/backup/status), computed server-side
+ *  from the host backup's explicit status file. */
+export type BackupHealth = "healthy" | "pending" | "failing" | "overdue" | "key_mismatch" | "not_reporting";
+export interface BackupStatus {
+  health: BackupHealth;
+  alerting: boolean;
+  reason: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastAttemptAt: string | null;
+  lastRekeyAt: string | null;
+  windowHours: number;
+}
+
+export async function fetchBackupStatus(): Promise<BackupStatus> {
+  const res = await fetch(`${BASE}/api/backup/status`, { credentials: "include" });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch backup status: ${res.status}`);
   }
   return res.json();
 }
@@ -5109,7 +5138,12 @@ export class UploadBatchError extends Error {
     readonly total: number,
     readonly cause: unknown,
     /** Names of the files that did NOT land, in selection order (WARP-1843). */
-    readonly failedFiles: readonly string[] = []
+    readonly failedFiles: readonly string[] = [],
+    /**
+     * WARP-2096 — the server's entries for the files that DID land, with
+     * their final names (a same-name upload is kept under a new name).
+     */
+    readonly landed: readonly UploadedFileEntry[] = []
   ) {
     super(`Uploaded ${uploaded} of ${total} files`);
   }
@@ -5148,12 +5182,29 @@ function uploadRejectionError(status: number, body: string): Error {
   });
 }
 
+/**
+ * WARP-2096 — the server's per-file entries. They carry the FINAL name, which
+ * differs from the picked file's when the name was taken (kept both), so
+ * anything that later addresses the upload (Undo) must use these. A 2xx body
+ * that doesn't parse falls back to the requested names — the pre-WARP-2096
+ * server shape, where nothing was ever renamed.
+ */
+function uploadedEntries(body: string, batch: File[]): UploadedFileEntry[] {
+  try {
+    const parsed = JSON.parse(body) as { uploaded?: unknown };
+    if (Array.isArray(parsed.uploaded)) return parsed.uploaded as UploadedFileEntry[];
+  } catch {
+    /* fall through */
+  }
+  return batch.map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" }));
+}
+
 /** POST a single batch — never more files than the server accepts at once. */
 async function uploadBatch(
   url: string,
   batch: File[],
   onFraction?: (fraction: number) => void
-): Promise<void> {
+): Promise<UploadedFileEntry[]> {
   const formData = new FormData();
   for (const file of batch) {
     formData.append("files", file);
@@ -5174,7 +5225,7 @@ async function uploadBatch(
 
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
+          resolve(uploadedEntries(xhr.responseText, batch));
         } else {
           reject(uploadRejectionError(xhr.status, xhr.responseText));
         }
@@ -5186,10 +5237,9 @@ async function uploadBatch(
   }
 
   const res = await authFetch(url, { method: "POST", body: formData });
-  if (!res.ok) {
-    const body = await res.text();
-    throw uploadRejectionError(res.status, body);
-  }
+  const body = await res.text();
+  if (!res.ok) throw uploadRejectionError(res.status, body);
+  return uploadedEntries(body, batch);
 }
 
 /**
@@ -5197,7 +5247,7 @@ async function uploadBatch(
  *
  * WARP-1843: a batch must respect BOTH caps the server side enforces —
  * `MAX_FILES_PER_UPLOAD` files (multer) and `MAX_UPLOAD_BATCH_BYTES` summed
- * file bytes (safely under nginx's `/api/` `client_max_body_size 100M`, which
+ * file bytes (safely under nginx's upload `client_max_body_size`, which
  * 413-rejects an over-cap request wholesale). Packing is first-fit
  * sequential: each file joins the current batch unless doing so would break a
  * cap, in which case the current batch is sealed and a new one starts. Files
@@ -5240,9 +5290,10 @@ function packUploadBatches(all: File[]): File[][] {
  * {@link packUploadBatches}), and a failed batch no longer strands the ones
  * behind it — the run continues, and the failure is reported at the end.
  *
- * Batches run sequentially, not concurrently: each is buffered in the
- * orchestrator's memory before it reaches Nextcloud, so parallel batches would
- * multiply peak memory on the box for no user-visible gain.
+ * Batches run sequentially, not concurrently. WARP-2093: uploads now stream
+ * through the orchestrator (no longer buffered in its memory), but each
+ * request is committed as a unit and Nextcloud's WebDAV races under
+ * concurrent writes, so parallel batches would add risk for little gain.
  *
  * `onProgress` is weighted by bytes across the WHOLE selection, so the bar
  * advances monotonically to 100% instead of resetting once per batch. A failed
@@ -5251,13 +5302,16 @@ function packUploadBatches(all: File[]): File[][] {
  *
  * Throws {@link UploadBatchError} after all batches have been attempted if any
  * of them failed; successful batches stay uploaded.
+ *
+ * WARP-2096 — resolves with the server's per-file entries (final names,
+ * `renamed` / `replaced` status, `duplicateOf`), in selection order.
  */
 export async function uploadFiles(
   path: string,
   files: FileList | File[],
   onProgress?: (percent: number) => void,
   space: FileSpaceId = "personal"
-): Promise<void> {
+): Promise<UploadedFileEntry[]> {
   const qs = new URLSearchParams({ path });
   if (space !== "personal") qs.set("space", space);
   const url = `${BASE}/api/files/upload?${qs.toString()}`;
@@ -5268,13 +5322,14 @@ export async function uploadFiles(
   let sentBytes = 0;
   let lastPercent = 0;
   const failedFiles: string[] = [];
+  const landed: UploadedFileEntry[] = [];
   let firstFailure: unknown;
 
   for (const batch of packUploadBatches(all)) {
     const batchBytes = batch.reduce((sum, f) => sum + f.size, 0);
 
     try {
-      await uploadBatch(
+      const entries = await uploadBatch(
         url,
         batch,
         onProgress &&
@@ -5290,6 +5345,7 @@ export async function uploadFiles(
           })
       );
       uploaded += batch.length;
+      landed.push(...entries);
     } catch (err) {
       // WARP-1843: don't strand the tail — record the failure, keep going.
       if (failedFiles.length === 0) firstFailure = err;
@@ -5302,8 +5358,9 @@ export async function uploadFiles(
   }
 
   if (failedFiles.length > 0) {
-    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles);
+    throw new UploadBatchError(uploaded, all.length, firstFailure, failedFiles, landed);
   }
+  return landed;
 }
 
 export async function deleteFile(
@@ -6254,6 +6311,49 @@ export async function getDepartment(id: string): Promise<DepartmentDetail> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const err = new Error(body.error || `Failed to load department: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+// A profile arranges what a department SHOWS; it never grants (§2.5). Errors
+// carry `status` + the orchestrator's stable `code` (NOT_A_MEMBER, NOT_FOUND,
+// VALIDATION_ERROR, TEAM_INHERITS_PROFILE, HOUSEHOLD_HAS_NO_PROFILE, ARCHIVED,
+// FORBIDDEN) so a page can tell "not yours" from "not there".
+
+export async function getDepartmentProfile(id: string): Promise<DepartmentProfileResponse> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to load department profile: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = body.code;
+    throw err;
+  }
+  return res.json();
+}
+
+export async function putDepartmentProfile(
+  id: string,
+  payload: PutDepartmentProfilePayload,
+): Promise<{ profile: DepartmentProfile }> {
+  const res = await authFetch(`${BASE}/api/departments/${encodeURIComponent(id)}/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `Failed to save department profile: ${res.status}`) as Error & {
       status?: number;
       code?: string;
     };
@@ -8777,4 +8877,80 @@ export async function deleteRoutineSchedule(
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete schedule: ${res.status}`);
   }
+}
+
+/** WARP-2991 — what a cloud turn on this conversation would carry. Mirrors
+ *  `CloudHistorySummary` in the orchestrator's cloud-history-consent.service. */
+export interface CloudHistorySummary {
+  consent: "not_asked" | "granted" | "declined";
+  decidedAt: string | null;
+  uncoveredOnBoxAnswers: number;
+  unaskedOnBoxAnswers: number;
+  userMessages: number;
+  drewOn: string[];
+}
+
+export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/cloud-history`,
+  );
+  if (!res.ok) throw new Error(`Failed to read conversation history state: ${res.status}`);
+  return (await res.json()) as CloudHistorySummary;
+}
+
+/** Record the owner's answer. The server enforces the rule either way. */
+export async function setCloudHistoryConsent(
+  conversationId: string,
+  decision: "granted" | "declined",
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/cloud-history`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to record the choice: ${res.status}`);
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center ──
+// Read-only in P2. A 503 is an outage, never an empty feed — the page renders
+// it as "not reporting", because an empty list reads as a quiet site.
+
+export interface SecurityEventsQuery {
+  cursor?: string | null;
+  limit?: number;
+  kinds?: SecurityEventKind[];
+  camera?: string;
+  includeLow?: boolean;
+}
+
+export function securityEventsPath(q: SecurityEventsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
+  if (q.camera) p.set("camera", q.camera);
+  if (q.includeLow) p.set("includeLow", "true");
+  const qs = p.toString();
+  return `/api/security/events${qs ? `?${qs}` : ""}`;
+}
+
+export async function getSecurityEvents(q: SecurityEventsQuery = {}): Promise<SecurityEventsPage> {
+  const res = await authFetch(`${BASE}${securityEventsPath(q)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security events: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[] }> {
+  const res = await authFetch(`${BASE}/api/security/health`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load security health: ${res.status}`);
+  }
+  return res.json();
 }

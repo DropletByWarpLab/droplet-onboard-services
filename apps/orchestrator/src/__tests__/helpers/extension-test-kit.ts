@@ -109,6 +109,11 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
     supervisionOff: false,
     availableMb: init.availableMb ?? 200,
     failInstall: null as Error | null,
+    /** When set, install() starts the process and THEN throws it: a caller-side
+     *  TIMEOUT / UNREACHABLE, where the sandbox went on and started it anyway. */
+    startThenFail: null as Error | null,
+    /** When set, stop() throws it and leaves the process running. */
+    failStop: null as Error | null,
     /** When set, install() waits on it after the request lands (a long tsc). */
     installHold: null as Promise<void> | null,
   };
@@ -152,17 +157,25 @@ export function fakeSandbox(init: { proposals?: Record<string, Buffer | null>; a
         process: { state: "running", restarts: 0, exitCode: null },
       };
       installed.set(slug, st);
+      if (state.startThenFail) throw state.startThenFail;
       return st;
+    }),
+    list: vi.fn(async () => {
+      calls.push("list");
+      gate();
+      return [...installed.values()].map((st) => ({ slug: st.slug, running: st.running }));
     }),
     stop: vi.fn(async (slug: string) => {
       calls.push(`stop ${slug}`);
       gate();
+      if (state.failStop) throw state.failStop;
       const st = installed.get(slug);
       if (st) installed.set(slug, { ...st, running: false });
     }),
     uninstall: vi.fn(async (slug: string) => {
       calls.push(`uninstall ${slug}`);
       gate();
+      if (state.failStop) throw state.failStop;
       installed.delete(slug);
     }),
     rpc: vi.fn(async () => ({ status: 200, json: {} })),

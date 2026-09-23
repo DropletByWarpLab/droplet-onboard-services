@@ -46,7 +46,8 @@ vi.mock("../services/jwt.service.js", () => ({
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 
 import { TOOL_CATALOG } from "@droplet/tools-core";
-import { authMiddleware, _setAuthPrismaForTests, validateTokenForWs } from "../middleware/auth.js";
+import { authMiddleware, validateTokenForWs } from "../middleware/auth.js";
+import { bindExtensionPrincipalPrisma } from "../services/extension-principal.js";
 import { extensionPrincipalGuard } from "../middleware/extension-principal-guard.js";
 import { createExtensionsRouter } from "../routes/extensions.js";
 import { mintExtensionToken } from "../services/extension-lifecycle.service.js";
@@ -79,7 +80,7 @@ function setup(opts: { owner?: KitUser | null; status?: string; selfCall?: boole
     failureReason: null,
   });
   db.versions.set("v-wc", { id: "v-wc", extensionId: "wc", version: "0.1.0" });
-  _setAuthPrismaForTests(db.prisma);
+  bindExtensionPrincipalPrisma(db.prisma);
 
   const callTool = vi.fn<CallTool>(async () => ({ isError: false, content: [{ type: "text", text: "{\"ok\":true}" }] }));
   const app = express();
@@ -115,7 +116,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  _setAuthPrismaForTests(null);
+  bindExtensionPrincipalPrisma(null);
 });
 
 const deniedRows = () =>

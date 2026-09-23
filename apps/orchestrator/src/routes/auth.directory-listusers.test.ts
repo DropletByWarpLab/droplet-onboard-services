@@ -85,6 +85,8 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import type { Role } from "../services/jwt.service.js";
+import * as sessionSvc from "../services/nextcloud-session.service.js";
+import { adminBasicToken } from "../services/department-provisioner.service.js";
 
 interface SeedUser {
   id: string;
@@ -95,6 +97,10 @@ interface SeedUser {
    *  assigned custom-role id per row (T8's RosterUser extension). */
   role?: string;
   accessRoleId?: string | null;
+  /** WARP-2984 — directory-only rows need these to render. */
+  email?: string | null;
+  directoryStatus?: string;
+  provisionSource?: string;
 }
 
 /** Prisma stub exposing only `user.findMany` keyed for the directory join. */
@@ -106,8 +112,12 @@ function createPrismaMock(seed: SeedUser[]) {
         id: u.id,
         username: u.username,
         nextcloudUsername: u.nextcloudUsername,
+        displayName: u.displayName,
+        email: u.email ?? null,
         role: u.role ?? "family",
         accessRoleId: u.accessRoleId ?? null,
+        directoryStatus: u.directoryStatus ?? "ACTIVE",
+        provisionSource: u.provisionSource ?? "LOCAL",
       })),
     ),
   };
@@ -225,12 +235,18 @@ describe("GET /api/auth/users — directory carries the local userId UUID (WARP-
     expect(u.accessRoleId).toBe("role-reception");
     // the select stays explicit — nothing secret rides along
     const selectArg = prisma.user.findMany.mock.calls[0]?.[0]?.select;
+    // WARP-2984 widened it by what a directory-only row needs to render —
+    // still no passwordHash, no TOTP, nothing secret.
     expect(selectArg).toEqual({
       id: true,
       username: true,
+      displayName: true,
+      email: true,
       nextcloudUsername: true,
       role: true,
       accessRoleId: true,
+      directoryStatus: true,
+      provisionSource: true,
     });
   });
 
@@ -257,5 +273,99 @@ describe("GET /api/auth/users — directory carries the local userId UUID (WARP-
       ["ana", true],
       ["tomas", false],
     ]);
+  });
+});
+
+/**
+ * WARP-2984 (Romain, 2026-09-22) — the roster shows EVERYONE: Nextcloud users
+ * and local directory rows merged, no duplicates, each tagged with its source.
+ */
+describe("GET /api/auth/users — every account, tagged by source (WARP-2984)", () => {
+  it("appends SSO/SCIM rows Nextcloud does not list, with no duplicates", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([
+      { id: "alice", displayName: "Alice", email: "alice@acme.test", enabled: true },
+      { id: "legacy", displayName: "Legacy", email: null, enabled: true },
+    ]);
+    const prisma = createPrismaMock([
+      { id: "u-alice", username: "alice", displayName: "Alice", nextcloudUsername: "alice" },
+      {
+        id: "u-dana", username: "dana.chen", displayName: "Dana Chen", nextcloudUsername: null,
+        email: "dana@acme.test", provisionSource: "SSO",
+      },
+      {
+        id: "u-kim", username: "kim", displayName: "Kim", nextcloudUsername: null,
+        provisionSource: "SCIM", directoryStatus: "DEACTIVATED",
+      },
+    ]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.users.map((u: any) => [u.id, u]));
+    // Exactly one row per account — alice is NOT repeated by the local pass.
+    expect(res.body.users.map((u: any) => u.id).sort()).toEqual(["alice", "dana.chen", "kim", "legacy"]);
+    expect(byId.alice).toMatchObject({ userId: "u-alice", source: "local", hasStorage: true });
+    expect(byId.legacy).toMatchObject({ userId: null, source: "nextcloud", hasStorage: true });
+    expect(byId["dana.chen"]).toMatchObject({
+      userId: "u-dana", source: "sso", hasStorage: false, enabled: true,
+      displayName: "Dana Chen", email: "dana@acme.test", role: "family",
+    });
+    // Directory-only row: `enabled` is the directory status, the only state it has.
+    expect(byId.kim).toMatchObject({ userId: "u-kim", source: "scim", hasStorage: false, enabled: false });
+  });
+
+  it("a local row matched by username (null mapping key) is not appended a second time", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([{ id: "bob", displayName: "Bob", email: null }]);
+    const prisma = createPrismaMock([
+      { id: "u-bob", username: "bob", displayName: "Bob", nextcloudUsername: null },
+    ]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    expect(res.body.users).toHaveLength(1);
+    expect(res.body.users[0]).toMatchObject({ id: "bob", userId: "u-bob", hasStorage: true });
+  });
+
+  it("a local row whose Nextcloud user is gone is listed under its mapping key, without storage", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([]);
+    const prisma = createPrismaMock([
+      { id: "u-eve", username: "eve", displayName: "Eve", nextcloudUsername: "eve-nc" },
+    ]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    // The mapping key is what the write routes' resolver tries first.
+    expect(res.body.users).toEqual([
+      expect.objectContaining({ id: "eve-nc", userId: "u-eve", source: "local", hasStorage: false }),
+    ]);
+  });
+
+  it("service principals stay off the roster (machine accounts, not people)", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([]);
+    const prisma = createPrismaMock([
+      { id: "u-svc", username: "svc-agent", displayName: "Agent", nextcloudUsername: null, role: "service" },
+    ]);
+
+    const res = await request(buildApp(prisma)).get("/api/auth/users");
+
+    expect(res.body.users).toEqual([]);
+  });
+});
+
+describe("GET /api/auth/users — runs as the box service account (WARP-2993)", () => {
+  it("works for an owner/admin with NO Nextcloud credential of their own (no longer NC instance admins)", async () => {
+    // A de-admined human's own NC token could not list users anyway; the
+    // route must not depend on it at all.
+    (sessionSvc.resolveNcToken as any).mockResolvedValueOnce(null);
+    (nc.ncListUsers as any).mockResolvedValue([{ id: "bob", displayName: "Bob", email: null }]);
+
+    for (const role of ["owner", "admin"] as Role[]) {
+      const res = await request(buildApp(createPrismaMock([]), role)).get("/api/auth/users");
+      expect(res.status).toBe(200);
+    }
+    for (const call of (nc.ncListUsers as any).mock.calls) {
+      expect(call[0]).toBe(adminBasicToken());
+    }
+    expect(sessionSvc.resolveNcToken).not.toHaveBeenCalled();
   });
 });

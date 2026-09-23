@@ -25,7 +25,11 @@ import {
   type VerifyExtensionStatementOptions,
 } from "./extension-verify.js";
 import { extensionKeyFingerprint } from "../extension-manifest.js";
-import { buildExtensionStatement, manifestSha256 } from "../extension-manifest.js";
+import {
+  buildExtensionStatement,
+  extensionStatementSchema,
+  manifestSha256,
+} from "../extension-manifest.js";
 import { REPO_ROOT } from "../../__tests__/helpers/test-paths.js";
 
 const fx = (name: string): string => path.join(__dirname, "__fixtures__", name);
@@ -106,6 +110,30 @@ describe("verifyExtensionStatement: the box extension key (WARP-2900)", () => {
       opts("extension.kind-release.json", "extension.kind-release.json.box.sig"),
     );
     expect(res).toMatchObject({ ok: false, failureReason: "key_usage_mismatch" });
+  });
+
+  it("a release-key-signed statement of kind 'release' is refused before any cosign spawn", async () => {
+    // Review #2312: the non-extension branch used to run cosign for a result
+    // that could never be ok (the statement schema pins kind "extension").
+    // It refuses right after the key_usage_mismatch check now. NO_COSIGN
+    // points at a binary that does not exist, so a spawn would answer
+    // cosign_unavailable instead.
+    // MUTATION: put the releaseKeyVerifies() call back in that branch ->
+    // cosign_unavailable, red.
+    const res = await verifyExtensionStatement(
+      opts("extension.kind-release.json", "extension.kind-release.json.release.sig"),
+    );
+    expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
+  });
+
+  it.each([
+    ["no box key on the box", { boxKey: undefined }],
+    ["a box key that did not sign it", {}],
+  ])("a non-extension kind signed by no known key is refused without cosign (%s)", async (_l, extra) => {
+    const res = await verifyExtensionStatement(
+      opts("extension.kind-release.json", "extension.valid.json.neither.sig", extra),
+    );
+    expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
   });
 
   it("(c) a statement with no kind is extension_kind_missing, before any key is tried", async () => {
@@ -272,5 +300,20 @@ describe("the prefix is the sidecar's constant (drift gate)", () => {
     const m = /^EXTENSION_STATEMENT_PREFIX = b"([^"]+)"$/m.exec(py);
     expect(m, "EXTENSION_STATEMENT_PREFIX not found in extension_signing.py").not.toBeNull();
     expect(EXTENSION_STATEMENT_PREFIX).toBe(m![1]);
+  });
+
+  it("the sidecar signs exactly the key set of extensionStatementSchema (review #2312)", () => {
+    // The sidecar refuses a statement with one key more or fewer than
+    // EXTENSION_STATEMENT_KEYS. If the schema gains a field without the
+    // sidecar, every promote is refused; if the sidecar gains one without the
+    // schema, it signs statements no verifier accepts. Either way, red here.
+    const py = readFileSync(
+      path.join(REPO_ROOT, "services", "device-identity-svc", "extension_signing.py"),
+      "utf8",
+    );
+    const m = /^EXTENSION_STATEMENT_KEYS = frozenset\(\{([^}]*)\}\)$/m.exec(py);
+    expect(m, "EXTENSION_STATEMENT_KEYS not found in extension_signing.py").not.toBeNull();
+    const pyKeys = [...m![1].matchAll(/"([^"]+)"/g)].map((k) => k[1]).sort();
+    expect(pyKeys).toEqual(Object.keys(extensionStatementSchema.shape).sort());
   });
 });

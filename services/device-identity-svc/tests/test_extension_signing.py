@@ -7,13 +7,16 @@ the orchestrator cannot enforce from the outside:
   - the key is distinct from the device-id key, in its own file, created
     lazily on the first sign (never by GetStatus, never before provisioning);
   - the sidecar, not the caller, decides what gets signed: the statement
-    must parse as a JSON object with kind == keyUsage == "extension", and
-    the signed bytes are EXTENSION_STATEMENT_PREFIX || statement;
+    must parse as a JSON object with kind == keyUsage == "extension",
+    exactly the statement's key set, in canonical (sorted, compact) form,
+    and the signed bytes are EXTENSION_STATEMENT_PREFIX || statement;
   - the real (TPM) backend fails closed until it implements the key.
 
 Mutations each test is written to catch are named inline.
 """
 import json
+import os
+import stat
 import sys
 import threading
 import time
@@ -29,7 +32,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from backends.mock import MockBackend
 from extension_signing import (
     EXTENSION_KEY_FILE,
+    EXTENSION_KEY_FILE_MODE,
     EXTENSION_KEY_USAGE,
+    EXTENSION_STATEMENT_KEYS,
     EXTENSION_STATEMENT_PREFIX,
     MAX_STATEMENT_BYTES,
     StatementRefused,
@@ -38,6 +43,7 @@ from extension_signing import (
 )
 from grpc_generated import device_identity_pb2 as pb
 from grpc_server import DeviceIdentityServicer
+from storage import Storage
 
 
 def _statement(**overrides) -> bytes:
@@ -153,6 +159,87 @@ def test_validate_refuses_an_oversized_statement():
         validate_statement(padded)
 
 
+def _raw_statement(body: dict, **dumps_kwargs) -> bytes:
+    return json.dumps(body, **dumps_kwargs).encode()
+
+
+_CANONICAL_BODY = json.loads(_statement())
+
+
+@pytest.mark.parametrize(
+    "statement,why",
+    [
+        # Exact key set (review #2312): a JSON object that merely declares
+        # itself an extension is not a statement.
+        (_statement(extra="x"), "one key more"),
+        (_statement(role="owner"), "another key more"),
+        (_statement(commit=None), "commit missing"),
+        (_statement(tree=None), "tree missing"),
+        (_statement(manifestSha256=None), "digest missing"),
+        (
+            json.dumps({"kind": "extension", "keyUsage": "extension"}).encode(),
+            "only the two declaring keys",
+        ),
+        # Canonical bytes (review #2312): sorted keys, compact separators.
+        (
+            _raw_statement(
+                dict(reversed(list(_CANONICAL_BODY.items()))),
+                separators=(",", ":"),
+            ),
+            "keys unsorted",
+        ),
+        (_raw_statement(_CANONICAL_BODY, sort_keys=True), "default separators"),
+        (_raw_statement(_CANONICAL_BODY, sort_keys=True, indent=2), "pretty-printed"),
+        (_statement() + b"\n", "trailing newline"),
+        (b" " + _statement(), "leading space"),
+        (
+            _raw_statement(
+                {**_CANONICAL_BODY, "extensionId": "caf" + chr(0xE9)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "non-ASCII escaped (JSON.stringify leaves it raw)",
+        ),
+    ],
+)
+def test_validate_refuses_anything_but_the_exact_canonical_statement(statement, why):
+    # MUTATION: drop the key-set check -> the key-set rows go green.
+    # MUTATION: drop the canonical check -> the canonical rows go green.
+    with pytest.raises(StatementRefused):
+        validate_statement(statement)
+
+
+def test_validate_accepts_non_ascii_written_raw_like_json_stringify():
+    # canonicalJson() is JSON.stringify per value, which writes non-ASCII as
+    # raw UTF-8. The sidecar's canonical check must agree, or it would refuse
+    # bytes the orchestrator really builds. (The statement schema pins ASCII
+    # today; this keeps the two encoders from drifting apart silently.)
+    # MUTATION: ensure_ascii=True in the canonical check -> refused, red.
+    body = {**_CANONICAL_BODY, "extensionId": "caf" + chr(0xE9)}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    validate_statement(raw.encode("utf-8"))
+
+
+def test_statement_key_set_is_what_the_fixture_builds():
+    # The fixture mirrors buildExtensionStatement(); if the key set moved
+    # without the fixture (or the reverse), every accept test above is moot.
+    assert set(_CANONICAL_BODY) == EXTENSION_STATEMENT_KEYS
+
+
+def test_rpc_refuses_a_non_canonical_statement_before_any_key_exists(
+    provisioned, servicer, tmp_path
+):
+    # The RPC path reaches the same check, and a refused statement never
+    # mints the key (it is created lazily by the first ACCEPTED sign).
+    ctx = MagicMock()
+    resp = servicer.SignExtensionManifest(
+        pb.SignExtensionManifestRequest(statement=_statement(extra="x")), ctx
+    )
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert resp.signature == b""
+    assert not (tmp_path / EXTENSION_KEY_FILE).exists()
+
+
 # ─── MockBackend: a distinct, lazily created, persisted key ─────────────
 
 
@@ -218,6 +305,70 @@ def test_backend_refuses_a_non_extension_statement_itself(provisioned):
     # the extension key to sign a release statement.
     with pytest.raises(StatementRefused):
         provisioned.sign_extension(_statement(kind="release", keyUsage="release"))
+
+
+def test_extension_key_is_written_owner_only(provisioned, tmp_path, monkeypatch):
+    """Review #2312: the plaintext PKCS8 key is written with an explicit
+    0o600, not the process umask. The spy half runs on every platform; the
+    stat half needs POSIX mode bits.
+    MUTATION: drop mode= from the key write (or set it to 0o644) -> red."""
+    assert EXTENSION_KEY_FILE_MODE == 0o600
+    calls = []
+    real_write = provisioned._storage.write
+
+    def spy(name, data, **kwargs):
+        calls.append((name, kwargs.get("mode")))
+        return real_write(name, data, **kwargs)
+
+    monkeypatch.setattr(provisioned._storage, "write", spy)
+    provisioned.sign_extension(_statement())
+    assert calls == [(EXTENSION_KEY_FILE, 0o600)]
+    if os.name == "posix":
+        assert stat.S_IMODE((tmp_path / EXTENSION_KEY_FILE).stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_storage_mode_ignores_umask_and_narrows_a_stale_tmp(tmp_path):
+    # A permissive umask, and a world-readable .tmp a crashed write left.
+    stale = tmp_path / f"{EXTENSION_KEY_FILE}.tmp"
+    stale.write_bytes(b"old")
+    os.chmod(stale, 0o644)
+    old_umask = os.umask(0)
+    try:
+        Storage(tmp_path).write(EXTENSION_KEY_FILE, b"secret", mode=0o600)
+    finally:
+        os.umask(old_umask)
+    target = tmp_path / EXTENSION_KEY_FILE
+    assert target.read_bytes() == b"secret"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(not hasattr(os, "fchmod"), reason="os.fchmod is POSIX-only before Python 3.13")
+def test_storage_mode_is_set_on_the_open_fd_and_a_failure_closes_it(tmp_path, monkeypatch):
+    """Re-review #2312: the mode is set through the fd Storage.write holds
+    (fchmod), not by path, and a failure there closes the fd instead of
+    leaking it. MUTATIONS: chmod by path again -> no error raised, red; drop
+    the close on failure -> the fd is still open, red."""
+    opened = []
+    real_open = os.open
+
+    def spy_open(path, flags, mode=0o777, *args, **kwargs):
+        fd = real_open(path, flags, mode, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def refuse(fd, mode):
+        raise PermissionError(1, "fchmod refused")
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "fchmod", refuse)
+    with pytest.raises(PermissionError):
+        Storage(tmp_path).write(EXTENSION_KEY_FILE, b"secret", mode=0o600)
+    monkeypatch.undo()
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert not (tmp_path / EXTENSION_KEY_FILE).exists()
 
 
 def test_key_persists_across_a_restart(provisioned, tmp_path):
@@ -333,6 +484,39 @@ def test_a_damaged_extension_key_never_breaks_get_status(provisioned, servicer, 
     # fresh key behind the owner's back.
     with pytest.raises((RuntimeError, ValueError, KeyError)):
         fresh.sign_extension(_statement())
+    assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"usage": "other", "priv_pem": "x"}).encode(),
+        b"not json at all",
+        json.dumps({"usage": EXTENSION_KEY_USAGE}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": "garbage"}).encode(),
+        json.dumps({"usage": EXTENSION_KEY_USAGE, "priv_pem": _ed25519_pem()}).encode(),
+    ],
+    ids=["wrong-usage", "not-json", "no-pem", "bad-pem", "not-ec"],
+)
+def test_rpc_on_a_damaged_extension_key_is_failed_precondition(provisioned, tmp_path, body):
+    """Review #2312: the sign RPC used to let _load_extension_key's
+    RuntimeError / ValueError / KeyError escape, i.e. gRPC UNKNOWN. It is a
+    deliberate FAILED_PRECONDITION now, with no signature, no key material in
+    the details, and the damaged file left as it was.
+    MUTATION: drop the (RuntimeError, ValueError, KeyError) arm -> the
+    exception escapes the handler, red."""
+    _write_key_file(tmp_path, body)
+    fresh = MockBackend(storage_root=tmp_path)
+    ctx = MagicMock()
+    resp = DeviceIdentityServicer(fresh).SignExtensionManifest(
+        pb.SignExtensionManifestRequest(statement=_statement()), ctx
+    )
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    assert resp.signature == b""
+    assert resp.extension_spki_der == b""
+    details = ctx.set_details.call_args.args[0]
+    assert "damaged" in details
+    assert "PRIVATE KEY" not in details
     assert (tmp_path / EXTENSION_KEY_FILE).read_bytes() == body
 
 

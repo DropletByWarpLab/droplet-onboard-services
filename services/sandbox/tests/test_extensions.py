@@ -27,6 +27,7 @@ import os
 import shutil
 import socket
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ import extensions
 import supervisor
 import workspace
 from gitstore import StoreError
+from tests.proc_helpers import alive, needs_linux, wait_gone
 
 ALICE = ("Alice", "alice@example.test")
 TOKEN = "dxt_" + "a" * 43
@@ -315,6 +317,81 @@ def test_the_shim_refuses_a_caller_without_the_relay_key(ext):
         conn.close()
 
 
+def _install_tool(store, ws: str, tool_py: str) -> dict:
+    """Install the python template with `tool.py` replaced by `tool_py`."""
+    store.create_workspace(ws, "python-tool", ALICE)
+    workspace.write(ws, "tool.py", tool_py)
+    workspace.commit(ws, "probe", ALICE)
+    found = _propose(store, ws, None)
+    return _install(ws, found)
+
+
+def _tool_result(slug: str) -> dict:
+    out = _rpc(slug, "tools/call", {"name": "word_count", "arguments": {}})["result"]
+    assert out["isError"] is False, out
+    return json.loads(out["content"][0]["text"])
+
+
+@needs_linux
+def test_disable_takes_a_process_the_extension_forked(client, auth, ext, monkeypatch):
+    # Review #2323 (d): extension code runs inside the host shim and may
+    # fork. The fork inherits DROPLET_EXT_TOKEN, so the owner's disable (the
+    # orchestrator's DELETE /extensions/<slug>/process) must take it too.
+    # MUTATION: stop with proc.terminate() instead of killpg -> red.
+    monkeypatch.setattr(supervisor, "SUPERVISION_ENABLED", True)
+    _install_tool(
+        ext,
+        "ws-v",
+        "import subprocess\nimport sys\n\n"
+        "SLEEPER = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n\n\n"
+        "def run(input):\n    return {'pid': SLEEPER.pid}\n",
+    )
+    sleeper = _tool_result("ws-v")["pid"]
+    assert alive(sleeper)
+    r = client.delete("/extensions/ws-v/process", headers=auth)
+    assert r.status_code == 200 and r.json()["state"] == "stopped"
+    assert wait_gone(sleeper), "the extension's fork outlived the disable"
+
+
+def test_a_crashed_extension_stays_down_until_install_starts_it_again(ext):
+    # Review #2323 (5): the supervisor used to restart a dead extension from
+    # its directory without re-verifying it, and a same-uid workspace run can
+    # rewrite that directory and then kill the process. Started with restart
+    # "never", a dead extension only comes back through install(), which
+    # re-exports and re-verifies (the orchestrator's reconciler calls it).
+    # MUTATION: restart="on-failure" -> it comes back on its own, red.
+    st = _install_tool(ext, "ws-w", "import os\n\n\ndef run(input):\n    os._exit(3)\n")
+    assert st["process"]["restartPolicy"] == "never"
+    with pytest.raises(StoreError):
+        extensions.relay("ws-w", json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                             "params": {"name": "word_count", "arguments": {}}}).encode())
+    deadline = time.monotonic() + 10
+    proc = extensions.status("ws-w")["process"]
+    while time.monotonic() < deadline and proc["state"] == "running" and proc["restarts"] == 0:
+        time.sleep(0.05)
+        proc = extensions.status("ws-w")["process"]
+    time.sleep(0.5)  # room for a restart that must not happen
+    proc = extensions.status("ws-w")["process"]
+    assert (proc["state"], proc["restarts"], proc["exitCode"]) == ("failed", 0, 3)
+    assert extensions.status("ws-w")["running"] is False
+
+
+def test_the_sandbox_lists_what_it_holds_and_what_runs(client, auth, ext, monkeypatch):
+    # Review #2323 (c): the orchestrator's reconciler stops a process whose
+    # row says it must not run (a disable whose stop failed, an install that
+    # outlived the caller's timeout). It needs the sandbox's own list for that.
+    monkeypatch.setattr(supervisor, "SUPERVISION_ENABLED", True)
+    assert client.get("/extensions", headers=auth).json() == {"extensions": []}
+    _install("ws-x", _propose(ext, "ws-x", "python-tool"))
+    _install("ws-y", _propose(ext, "ws-y", "python-tool"))
+    extensions.stop("ws-y")
+    assert client.get("/extensions", headers=auth).json() == {
+        "extensions": [{"slug": "ws-x", "running": True}, {"slug": "ws-y", "running": False}]
+    }
+    extensions.uninstall("ws-x")
+    assert client.get("/extensions", headers=auth).json() == {"extensions": [{"slug": "ws-y", "running": False}]}
+
+
 @needs_node
 def test_node_extension_starts_under_the_limits_and_answers(ext):
     # The WARP-2895 seam set RLIMIT_AS=256MB on every child, and V8 cannot
@@ -372,6 +449,7 @@ def test_a_failing_build_is_a_422_with_the_compiler_output(ext, monkeypatch):
 
 NEW_ROUTES = [
     ("get", "/workspaces/ws-a/proposals/0.1.0/manifest", None),
+    ("get", "/extensions", None),
     ("get", "/extensions/budget", None),
     ("get", "/extensions/ws-a", None),
     ("post", "/extensions/ws-a/install", {}),
@@ -433,5 +511,6 @@ def test_routes_round_trip_when_enabled(client, auth, ext, monkeypatch):
 
 def test_extension_routes_need_the_bearer(client, monkeypatch):
     monkeypatch.setattr(supervisor, "SUPERVISION_ENABLED", True)
+    assert client.get("/extensions").status_code == 401
     assert client.get("/extensions/budget").status_code == 401
     assert client.post("/extensions/ws-a/rpc", json={}).status_code == 401

@@ -25,9 +25,10 @@ The API
     DELETE /processes/{id}
     GET  /workspaces/{id}/proposals/{version}/manifest
                                        WARP-2900 H2, gated like /processes:
-    GET  /extensions/budget            extensions.py (install, relay, stop,
-    GET  /extensions/{slug}            uninstall) and the proposal a promote
-    POST /extensions/{slug}/install    reads from the bare repository
+    GET  /extensions                   extensions.py (list, install, relay,
+    GET  /extensions/budget            stop, uninstall) and the proposal a
+    GET  /extensions/{slug}            promote reads from the bare repository
+    POST /extensions/{slug}/install
     POST /extensions/{slug}/rpc
     DELETE /extensions/{slug}/process
     DELETE /extensions/{slug}
@@ -409,6 +410,14 @@ async def proposal_manifest(workspace_id: str, version: str):
         # Base64 of the exact committed bytes: what is digested and signed.
         "manifest": base64.b64encode(manifest).decode("ascii") if manifest is not None else None,
     }
+
+
+@app.get("/extensions", dependencies=[Depends(_processes_enabled)])
+async def extensions_listing():
+    # The reconciler's other direction (review #2323): what this sandbox
+    # holds and whether each process runs, so the orchestrator can stop one
+    # whose row says it must not run.
+    return {"extensions": extensions.listing()}
 
 
 @app.get("/extensions/budget", dependencies=[Depends(_processes_enabled)])

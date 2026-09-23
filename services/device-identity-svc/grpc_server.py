@@ -131,8 +131,8 @@ class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
         Order matters: provisioned -> the statement is an extension statement
         (INVALID_ARGUMENT otherwise) -> sign PREFIX || statement. A backend
         that holds no extension key (the TPM scaffold) is FAILED_PRECONDITION,
-        which the orchestrator surfaces as a 503. The device-id key is never
-        a fallback."""
+        which the orchestrator surfaces as a 503; so is a damaged key file.
+        The device-id key is never a fallback."""
         if not self._backend.is_provisioned():
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             context.set_details("device not provisioned")
@@ -151,6 +151,22 @@ class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
             context.set_details(
                 f"backend {self._backend.name!r} holds no extension-signing key"
             )
+            return pb.SignExtensionManifestResponse()
+        except (RuntimeError, ValueError, KeyError) as exc:
+            # A damaged or foreign extension-signing.sealed (wrong usage, not
+            # JSON, no PEM, not an EC key). The backend never overwrites it,
+            # so this is a state the operator has to fix, not a transient
+            # error: FAILED_PRECONDITION (the promote route's 503), never the
+            # UNKNOWN an escaped exception would give. The statement already
+            # passed validate_statement above, so a StatementRefused (a
+            # ValueError) cannot land here. Only the exception type is
+            # logged: the file's content is private-key material.
+            logger.error(
+                "extension-signing key unusable (%s); refusing to sign",
+                type(exc).__name__,
+            )
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("the extension-signing key on this box is damaged")
             return pb.SignExtensionManifestResponse()
         if ext is None:
             # A signature nobody can attribute to a recorded key is useless to

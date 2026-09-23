@@ -1,71 +1,86 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Check, KeyRound } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Check, KeyRound, Pencil, Trash2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
-import { isPasskeySupported, registerPasskey } from "@/lib/webauthn";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import {
+  describePasskeyError,
+  isPasskeySupported,
+  listPasskeys,
+  passkeyErrorView,
+  passkeyOriginProblem,
+  registerPasskey,
+  removePasskey,
+  renamePasskey,
+  type PasskeyErrorView,
+  type PasskeyOriginProblem,
+  type PasskeySummary,
+} from "@/lib/webauthn";
 
 /**
- * PR #377 (WARP-___) — Settings → Passkeys.
+ * Settings → Passkeys.
  *
- * The in-product home for enrolling a passkey. The AC allows the Account-step
- * OR settings; settings is the right fit because the setup wizard's AccountStep
- * auto-advances to the next step and passkey enrolment is optional — a forced
- * extra step there would fight the wizard flow. Here it's a calm, opt-in action
- * the owner can take any time after first sign-in.
+ * PR #377 added enrolment. WARP-1156 added honest DOMException copy.
+ * WARP-1157 adds:
+ *   - the address check runs FIRST: on plain http the browser hides WebAuthn
+ *     entirely, so `isPasskeySupported()` is false there, and the old order
+ *     blamed the browser for what is really the connection. A raw IP is also
+ *     refused here, because an IP address is never a valid RP ID.
+ *   - one shared error mapping (`describePasskeyError`) for browser and box
+ *     failures, offering "try again" only where a retry can succeed.
+ *   - the list of your own passkeys: name, the address it works at, when it
+ *     was added and last used, rename and remove.
  *
- * Scope is REGISTER only (per the AC: "register a passkey + sign in with a
- * passkey"). Listing and revoking enrolled passkeys is a follow-up — it needs
- * GET/DELETE credential endpoints not built in this PR.
- *
- * Matches the surrounding settings sections: a shell <Sect> header (sentence
- * case, WARP-1344) + a .card body. All copy is sentence case, no exclamation
- * marks (design copy rules). Motion comes from the .btn token (ease-smooth).
+ * Copy is sentence case with no exclamation marks. Rows use the shell's
+ * `.lrow` list-row tokens; the rename input takes the shell's input styling
+ * plus the ratified 2px brand focus ring (no legacy `dp-*` / `bg-surface-*`).
  */
-// WARP-1156 — shown when the page isn't a secure context (plain-HTTP
-// droplet.local) and on a SecurityError from the ceremony (origin/RP-ID
-// mismatch). Both mean: this address can never mint a passkey; the fix is
-// visiting the box's https address, not retrying here.
-const SECURE_ADDRESS_COPY =
-  "Passkeys need a secure connection, and this address doesn't have one. " +
-  "Open your Droplet at its secure https address from setup, then add the passkey there.";
 
-/** WARP-1156 — map the register failure to honest copy by the DOMException
- *  NAME only (never echo raw messages — they can carry transport detail).
- *  The old catch-all collapsed every cause into one dead-end "Try again",
- *  which on an insecure origin was a lie: no retry could ever succeed. */
-function friendlyRegisterError(err: unknown): string {
-  switch ((err as { name?: unknown })?.name) {
-    case "NotAllowedError":
-      // The spec deliberately folds dismiss / timeout / no-match into one.
-      return "The passkey prompt was closed or timed out. Try again when you're ready.";
-    case "InvalidStateError":
-      return "This device already has a passkey for this Droplet. Try signing in with it instead.";
-    case "SecurityError":
-      return SECURE_ADDRESS_COPY;
-    default:
-      return "We couldn't add that passkey. Try again.";
-  }
+function formatDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 export function PasskeysSection() {
   const [supported, setSupported] = useState(false);
-  // WARP-1156 — assume secure until mount proves otherwise so SSR markup
+  // Assume the address is fine until mount proves otherwise, so SSR markup
   // doesn't flash the warning on https pages.
-  const [secure, setSecure] = useState(true);
+  const [originProblem, setOriginProblem] = useState<PasskeyOriginProblem | null>(null);
+  const [host, setHost] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PasskeyErrorView | null>(null);
   const [added, setAdded] = useState(false);
 
-  // Client-side capability check after mount (window is undefined during SSR).
-  useEffect(() => {
-    setSupported(isPasskeySupported());
-    // WebAuthn only runs in a secure context; on plain HTTP the browser
-    // rejects credentials.create() outright, so a button here would be a
-    // dead-end (the WARP-1156 live report). isSecureContext is the same
-    // signal the browser gates on.
-    setSecure(window.isSecureContext !== false);
+  const [passkeys, setPasskeys] = useState<PasskeySummary[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [removing, setRemoving] = useState<PasskeySummary | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setPasskeys(await listPasskeys());
+      setListError(null);
+    } catch (err) {
+      setListError(
+        describePasskeyError(err).kind === "network"
+          ? "We couldn't reach your Droplet to load your passkeys."
+          : "Your passkeys couldn't be loaded right now.",
+      );
+    }
   }, []);
+
+  // Capability + address checks after mount (window is undefined during SSR).
+  useEffect(() => {
+    setOriginProblem(passkeyOriginProblem());
+    setSupported(isPasskeySupported());
+    setHost(window.location?.hostname ?? null);
+    void refresh();
+  }, [refresh]);
 
   async function handleAdd() {
     setError(null);
@@ -74,12 +89,39 @@ export function PasskeysSection() {
     try {
       await registerPasskey();
       setAdded(true);
+      await refresh();
     } catch (err) {
-      setError(friendlyRegisterError(err));
+      setError(describePasskeyError(err));
     } finally {
       setBusy(false);
     }
   }
+
+  async function handleRename(id: string) {
+    const name = draftName.trim();
+    if (!name) return;
+    setError(null);
+    try {
+      await renamePasskey(id, name);
+      setEditingId(null);
+      await refresh();
+    } catch (err) {
+      setError({ ...describePasskeyError(err), message: "That name couldn't be saved. Try again." });
+    }
+  }
+
+  async function handleRemove(id: string) {
+    setError(null);
+    try {
+      await removePasskey(id);
+      await refresh();
+    } catch (err) {
+      setError({ ...describePasskeyError(err), message: "That passkey couldn't be removed. Try again." });
+      throw err; // keep the dialog open
+    }
+  }
+
+  const canAdd = originProblem === null && supported;
 
   return (
     <section className="mb-10">
@@ -91,24 +133,19 @@ export function PasskeysSection() {
           Droplet.
         </p>
 
-        {supported && secure ? (
-          <button
-            type="button"
-            onClick={handleAdd}
-            disabled={busy}
-            className="btn"
-          >
+        {canAdd ? (
+          <button type="button" onClick={handleAdd} disabled={busy} className="btn">
             <KeyRound size={16} strokeWidth={1.5} />
             {busy ? "Waiting for passkey..." : "Add a passkey"}
           </button>
-        ) : supported ? (
-          // WARP-1156 — insecure context: every create() would be refused by
-          // the browser, so render the way forward instead of a doomed button.
+        ) : originProblem ? (
+          // The browser would refuse every attempt here, so show the way
+          // forward instead of a button that can't work.
           <p
             className="type-footnote bg-system-orange/10 rounded-sm px-3 py-2"
             style={{ color: "var(--text-muted)" }}
           >
-            {SECURE_ADDRESS_COPY}
+            {passkeyErrorView(originProblem).message}
           </p>
         ) : (
           <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
@@ -124,11 +161,106 @@ export function PasskeysSection() {
         )}
 
         {error && (
-          <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-            {error}
+          <p role="alert" className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+            {error.message}
           </p>
         )}
+
+        {listError && (
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
+            {listError}
+          </p>
+        )}
+
+        {passkeys && passkeys.length > 0 && (
+          <ul aria-label="Your passkeys">
+            {passkeys.map((pk) => {
+              const label = pk.name ?? "Unnamed passkey";
+              const addedOn = formatDate(pk.createdAt);
+              const used = formatDate(pk.lastUsedAt);
+              const elsewhere = pk.rpId !== null && host !== null && pk.rpId !== host;
+              return (
+                // Shell list row (.lrow/.ri/.rt, droplet-shell.css): the
+                // DESIGN.md row tokens, same as CertificateRows.
+                <li key={pk.id} className="lrow">
+                  <span className="ri" aria-hidden="true">
+                    <KeyRound size={16} strokeWidth={1.5} />
+                  </span>
+                  <div className="rt">
+                    {editingId === pk.id ? (
+                      <form
+                        className="flex items-center gap-2"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleRename(pk.id);
+                        }}
+                      >
+                        <input
+                          aria-label="Passkey name"
+                          // Romain 2026-09-22: input focus = full-strength 2px brand ring (as PR #2287).
+                          className="flex-1 h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                          value={draftName}
+                          maxLength={64}
+                          autoFocus
+                          onChange={(e) => setDraftName(e.target.value)}
+                        />
+                        <button type="submit" className="btn" disabled={!draftName.trim()}>
+                          Save
+                        </button>
+                        <button type="button" className="btn" onClick={() => setEditingId(null)}>
+                          Cancel
+                        </button>
+                      </form>
+                    ) : (
+                      <span className="nm">{label}</span>
+                    )}
+                    <span className="sub">
+                      {pk.rpId
+                        ? `Works at ${pk.rpId}${elsewhere ? " (not this address)" : ""}`
+                        : "Address not recorded"}
+                      {addedOn ? ` · Added ${addedOn}` : ""}
+                      {` · ${used ? `Last used ${used}` : "Not used yet"}`}
+                    </span>
+                  </div>
+                  {editingId !== pk.id && (
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <button
+                        type="button"
+                        className="btn"
+                        aria-label={`Rename ${label}`}
+                        onClick={() => {
+                          setEditingId(pk.id);
+                          setDraftName(pk.name ?? "");
+                        }}
+                      >
+                        <Pencil size={14} strokeWidth={1.5} />
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        aria-label={`Remove ${label}`}
+                        onClick={() => setRemoving(pk)}
+                      >
+                        <Trash2 size={14} strokeWidth={1.5} />
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={removing !== null}
+        title="Remove this passkey?"
+        description="You won't be able to sign in with it any more. Your password still works, and you can add a new passkey at any time."
+        confirmedIdentifier={removing ? (removing.name ?? "Unnamed passkey") : undefined}
+        confirmLabel="Remove passkey"
+        onConfirm={() => (removing ? handleRemove(removing.id) : undefined)}
+        onCancel={() => setRemoving(null)}
+      />
     </section>
   );
 }
