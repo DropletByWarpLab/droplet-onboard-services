@@ -294,10 +294,21 @@ export function clampConnectorLevel(
 
 // ── Tool-domain axis ──────────────────────────────────────────────
 
-/** domain → owning module, from the ONE canonical module registry. */
-const MODULE_BY_DOMAIN: ReadonlyMap<string, ModuleId> = new Map(
-  MODULES.flatMap((def) => def.toolDomains.map((d) => [d, def.id] as const)),
-);
+/**
+ * domain → the modules that claim it, from the ONE canonical module registry.
+ * Usually one. A domain claimed by SEVERAL modules passes the feature
+ * intersection when ANY of them is held (WARP-2988: `business` is claimed by
+ * `crm` and `projects`, per Romain's "CRM or Projects" decision). Because a
+ * second claim WIDENS a domain, `access-catalog.test.ts` pins the multi-owner
+ * set exactly.
+ */
+export const OWNERS_BY_DOMAIN: ReadonlyMap<string, readonly ModuleId[]> = (() => {
+  const m = new Map<string, ModuleId[]>();
+  for (const def of MODULES) {
+    for (const d of def.toolDomains) m.set(d, [...(m.get(d) ?? []), def.id]);
+  }
+  return m;
+})();
 
 /**
  * WARP-2742 — the tool domains that are DELIBERATELY not feature-gated, each
@@ -337,10 +348,6 @@ export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, s
   erp:
     "Connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant), not a feature, " +
     "and erp is never a grantable tool domain.",
-  business:
-    "ADR-045's one door to the CRM and the tracker. Spans two modules (crm, projects); the " +
-    "data is gated at /api/crm and /api/pm by the workspace module gate. OPEN (WARP-2742): " +
-    "whether to require crm-or-projects per person is Romain's call.",
   cloud:
     "cloud_query_dataset (WARP-2497) reads connected SaaS accounts; /api/erp/dataset is " +
     "owner/admin-only on the resolved user and needs a live connection. OPEN (WARP-2742): " +
@@ -356,19 +363,22 @@ function isFeatureUngated(domain: string): boolean {
  * are not declared ungated. Must be empty; the gate denies whatever is here.
  */
 export function unmappedToolDomains(): string[] {
-  return TOOL_DOMAINS.filter((d) => !MODULE_BY_DOMAIN.has(d) && !isFeatureUngated(d));
+  return TOOL_DOMAINS.filter((d) => !OWNERS_BY_DOMAIN.has(d) && !isFeatureUngated(d));
 }
 
 /**
  * §3 `moduleToolDomains(features)`: the tools-core domains reachable given
- * an effective feature set — claimed domains whose module is in the set,
- * plus the declared FEATURE_UNGATED_TOOL_DOMAINS. Everything else is denied.
+ * an effective feature set — claimed domains with at least one owning module
+ * in the set (OR across owners), plus the declared
+ * FEATURE_UNGATED_TOOL_DOMAINS. Everything else is denied.
  */
 export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<string> {
   const out = new Set<string>();
   for (const domain of TOOL_DOMAINS) {
-    const owner = MODULE_BY_DOMAIN.get(domain);
-    if (owner !== undefined ? featureIds.has(owner) : isFeatureUngated(domain)) out.add(domain);
+    const owners = OWNERS_BY_DOMAIN.get(domain);
+    if (owners !== undefined ? owners.some((m) => featureIds.has(m)) : isFeatureUngated(domain)) {
+      out.add(domain);
+    }
   }
   return out;
 }
@@ -382,9 +392,8 @@ export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<strin
  *  (apps/web-dashboard/src/lib/access.ts TOOL_DOMAIN_GROUPS) is the
  *  hand-kept half of that pair and has to move with it: WARP-2583's review
  *  found `business` filed under the System row there while the Projects row
- *  still wrote a grant for the emptied `pm`. Note `business` is declared
- *  FEATURE-UNGATED (no module owns it), which is precisely why the grant axis
- *  has to hold it: the module filter passes it unconditionally. */
+ *  still wrote a grant for the emptied `pm`. `business` is claimed by BOTH
+ *  `crm` and `projects` (WARP-2988, OR semantics). */
 export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter(
   (d) => d !== "erp",
 );

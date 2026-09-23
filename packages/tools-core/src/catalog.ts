@@ -250,10 +250,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
   cloud: ["cloud_query_dataset"],
-  // ADR-045 slice C — `business` is a FEATURE-UNGATED domain (access-catalog.ts
-  // FEATURE_UNGATED_TOOL_DOMAINS, WARP-2742),
-  // so unlike `crm`/`pm` these two are advertised regardless of the module
-  // toggles. The DATA stays gated at the route (`requireModuleEnabled` 404s
+  // ADR-045 slice C — `business` is claimed by BOTH the `crm` and `projects`
+  // modules (WARP-2988): it passes the per-person feature intersection when
+  // EITHER is held, and the orchestrator narrows `_service:mcp` on the CRM/PM
+  // routes by the acting user's tool scope. The DATA stays gated at the route (`requireModuleEnabled` 404s
   // `/api/crm/*` and `/api/pm/*`), and `_graph.ts`'s `businessError`
   // turns that 404 into a sentence naming the switch — the same bargain
   // `cloud_query_dataset` makes with `DatasetNotServedError`.
