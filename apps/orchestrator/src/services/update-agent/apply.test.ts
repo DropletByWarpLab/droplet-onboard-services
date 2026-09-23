@@ -204,6 +204,7 @@ interface Row {
   manifestSha256: string;
   manifestJson: unknown;
   failureReason: string | null;
+  outcome: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -263,13 +264,16 @@ function createPrismaStub(opts: {
     // keep working.
     updateMany: async (args: {
       where: { id?: string; status?: string };
-      data: { status?: string; failureReason?: string | null };
+      data: { status?: string; failureReason?: string | null; outcome?: string };
     }) => {
       let count = 0;
       for (const row of rows) {
         if (args.where.id !== undefined && row.id !== args.where.id) continue;
         if (args.where.status !== undefined && row.status !== args.where.status) continue;
-        if (args.data.status !== undefined) row.status = args.data.status;
+        if (args.data.outcome !== undefined) row.outcome = args.data.outcome;
+        count += 1;
+        if (args.data.status === undefined) continue; // an outcome-only write
+        row.status = args.data.status;
         if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
         row.updatedAt = new Date();
         statusWrites.push({
@@ -277,15 +281,15 @@ function createPrismaStub(opts: {
           status: row.status,
           failureReason: row.failureReason,
         });
-        count += 1;
       }
       return { count };
     },
-    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason"> & { failureReason?: string | null } }) => {
+    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason" | "outcome"> & { failureReason?: string | null } }) => {
       seq += 1;
       const row: Row = {
         id: `du-${seq}`,
         failureReason: null,
+        outcome: "not_applied",
         ...args.data,
         createdAt: new Date(Date.now() + seq),
         updatedAt: new Date(),
@@ -572,6 +576,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
     // AC: the box is RUNNING the prior digests.
     expect(runner.running).toEqual(PREVIOUS);
@@ -672,6 +677,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
     // Rollback restored configs and recreated the sidecars on the previous
     // refs; the orchestrator itself was NEVER swapped.
@@ -711,6 +717,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "failed",
       failureReason: "degraded_health",
+      outcome: "rollback_failed",
     });
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.failed", failureReason: "degraded_health" }),
@@ -865,10 +872,13 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
 
     expect(resume.outcome).toBe("committed");
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // WARP-3007 — committed, post-commit start still to run.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("starting_services");
     // The resume hook itself does NOT start anything: index.ts runs it after
     // listen, unawaited, so the boot path never waits on `compose up`.
     expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
     await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("committed");
     // Never part of the swap/rollback set — only started after commit.
     expect(runner.calls.filter((c) => c.startsWith("recreateServices")).join()).not.toContain(
       "email-indexer",
@@ -884,7 +894,7 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
 
   it("leaves a service off when this box's compose does not enable it (profile-gated)", async () => {
     const runner = new FakeRunner(); // enabled = the deployed three only
-    const { resume } = await applyAndResume(runner);
+    const { resume, prisma } = await applyAndResume(runner);
     expect(resume.outcome).toBe("committed");
     // Romain 2026-09-23 (WARP-3001): profile off → image updated, not started.
     expect(runner.calls).toContain(
@@ -893,6 +903,8 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
     await runPostCommit(resume);
     expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
     expect(runner.running["email-indexer"]).toBeUndefined();
+    // WARP-3007 — nothing to start is a clean commit.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("committed");
   });
 
   it("leaves a service an operator stopped alone (it has a container)", async () => {
@@ -916,6 +928,8 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
     const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
     await runPostCommit(resume);
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // WARP-3007 — the verdict is ON the row, not only in a log line.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("services_start_failed");
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.services_start_failed", services: ["email-indexer"] }),
       expect.any(String),
@@ -933,6 +947,7 @@ describe("post-commit start of newly enabled services (WARP-2970)", () => {
     const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
     await runPostCommit(resume);
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("services_start_failed");
     expect(logger.info).not.toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.services_started" }),
       expect.any(String),
@@ -994,6 +1009,7 @@ describe("resumeInterruptedApply (WARP-539 onStart hook)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
   });
 });

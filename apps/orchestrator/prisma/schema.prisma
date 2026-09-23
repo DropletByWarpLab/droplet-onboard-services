@@ -5344,6 +5344,27 @@ enum DeviceUpdateStatus {
   rejected
 }
 
+/// WARP-3007 follow-up (Stefan on #2302; Romain approved 2026-09-23): what an
+/// apply actually did to the box, recorded as an explicit column instead of
+/// being read out of status + failureReason + logs. `status` stays the
+/// advance-only lifecycle; `outcome` is the verdict an operator acts on —
+/// notably a committed update whose post-commit start of a newly-enabled
+/// service failed, which `status` (committed, final) cannot say.
+enum DeviceUpdateOutcome {
+  /// No swap outcome yet: pending, verifying, applying, rejected, superseded.
+  not_applied
+  /// Committed; the post-commit start of services new to this box is running.
+  starting_services
+  /// Committed; every service this box enables is running.
+  committed
+  /// Committed, but a newly-enabled service did not start or never went healthy.
+  services_start_failed
+  /// A health gate failed; the previous release is back and healthy.
+  rolled_back
+  /// The rollback's own health gate failed too (status failed, degraded_health).
+  rollback_failed
+}
+
 /// One row per release the update agent decided to track (signature-verified
 /// at discovery time — a release that fails signature verification writes NO
 /// row, only an `update.signature_failed` log event, per WARP-538).
@@ -5376,8 +5397,10 @@ model DeviceUpdate {
   /// apply-time verdict such as `degraded_health` (WARP-539). Null while the
   /// row is healthy.
   failureReason  String?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  /// WARP-3007 — explicit apply outcome (see DeviceUpdateOutcome).
+  outcome        DeviceUpdateOutcome @default(not_applied)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   @@index([status, createdAt])
   @@index([gitSha])

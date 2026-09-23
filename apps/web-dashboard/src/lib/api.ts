@@ -7823,6 +7823,14 @@ export interface UpdateRelease {
   gitSha: string;
   builtAt: string;
   failureReason: string | null;
+  /** WARP-3007 — explicit apply outcome (orchestrator DeviceUpdateOutcome). */
+  outcome:
+    | "not_applied"
+    | "starting_services"
+    | "committed"
+    | "services_start_failed"
+    | "rolled_back"
+    | "rollback_failed";
   createdAt: string;
   updatedAt: string;
 }

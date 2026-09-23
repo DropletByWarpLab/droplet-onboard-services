@@ -93,6 +93,9 @@ export const UPDATE_EVENTS = {
   "update.services_started": "apply",
   /** error — WARP-2970: that post-commit start failed; the update stays committed. */
   "update.services_start_failed": "apply",
+  /** debug — WARP-3007: the post-commit outcome (committed |
+   *  services_start_failed) written to DeviceUpdate.outcome. */
+  "update.outcome_recorded": "transitions",
 
   // ── boot resume wrapper (index.ts) ──
   /** info — the onStart resume hook settled an interrupted apply. */
