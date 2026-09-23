@@ -87,6 +87,9 @@ describe("🔴 the reported gate order is the order the chain applies", () => {
       "off_lan_withhold",
       "chat_policy",
       "turn_relevance",
+      // WARP-2900 — a runtime tool's dispatch verdict, decided at the call,
+      // after the tool was advertised: last.
+      "runtime_classification",
     ]);
   });
 });

@@ -28,9 +28,30 @@
  * The gate order below is not a design choice either. It is the order the
  * shipped chain applies, read off the call sites in `routes/llm.ts` and
  * `llm-agent.service.ts`, and a test pins it.
+ *
+ * ── Runtime tools (WARP-2900, ADR-056 slice H4) ────────────────────────────
+ *
+ * A promoted extension or a connected vendor server adds tools that exist
+ * only at runtime (`runtimeToolRegistry`). The chat path lists them through
+ * the multiplexer and narrows them with the SAME name predicates as a
+ * compiled tool — so they get a row here, run through the same gates, with
+ * two differences that are both the shipped behaviour rather than a choice:
+ *
+ *   - `role_grant`: a runtime tool has no catalog entry, and
+ *     `toolAllowedInScope` fails closed on that, so a person with a custom
+ *     role never reaches one. The reason says so instead of naming an area.
+ *   - `runtime_classification`, the last gate: the multiplexer asks the
+ *     remote call policy (the WARP-2426 record, for an extension) at the
+ *     moment of the call. The model is shown the tool, but every call is
+ *     refused — an unreviewed extension tool reads REMOTE_WRITE_NOT_PERMITTED
+ *     until an owner reviews it as a read. The verdict is the policy's
+ *     answer, obtained by calling it (runtime-tool-view.service.ts).
+ *
+ * A runtime row never carries the wire description: `homeDescription` is a
+ * sentence this box writes from the name and the source.
  */
 import type { PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG, type ToolCatalogEntry } from "@droplet/tools-core";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 import {
   DENY_ALL_TOOL_SCOPE,
@@ -44,7 +65,19 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
-import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+import {
+  runtimeToolRegistry,
+  type RuntimeToolDescriptor,
+} from "./runtime-tool-registry.service.js";
+import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
+import { remoteCallPolicy } from "./mcp-client.singleton.js";
+import {
+  classifyRuntimeTool,
+  extensionOfRuntimeTool,
+  runtimeToolSource,
+  wireNameOf,
+  type RuntimeToolClassificationView,
+} from "./runtime-tool-view.service.js";
 import { isWithheldFromOffLan } from "./stored-content-egress.service.js";
 import {
   CORE_TOOL_NAMES,
@@ -70,6 +103,9 @@ export const INSPECT_GATES = [
   "off_lan_withhold",
   "chat_policy",
   "turn_relevance",
+  // WARP-2900 — a runtime tool's dispatch verdict. LAST, because it is
+  // decided at the call, after the tool has been advertised.
+  "runtime_classification",
 ] as const;
 
 export type InspectGate = (typeof INSPECT_GATES)[number];
@@ -102,6 +138,22 @@ export interface ToolInspectRow {
    * instead of implying the tool is fully available.
    */
   lockCaveat?: string;
+  /**
+   * WARP-2900 — where the tool comes from: `built-in` for a compiled tool,
+   * `extension:<slug>@<version>` for a promoted extension, `remote:<serverId>`
+   * for any other runtime server.
+   */
+  source: string;
+  /** The runtime server that advertised it. Null for a compiled tool. */
+  serverId: string | null;
+  /**
+   * WARP-2900 — runtime rows only: what the dispatch policy answers for a
+   * call to this tool (the classification that applied). For a runtime row,
+   * `requiresWrite` / `requiresConfirmation` say what dispatch treats it as:
+   * only an allowed tool is a read; everything else is held as a confirming
+   * write, the import default.
+   */
+  classification?: RuntimeToolClassificationView;
 }
 
 export interface ToolInspectResult {
@@ -158,13 +210,46 @@ export interface ToolInspectInput {
   selectionMode?: ToolSelectionMode;
 }
 
-const REASONS: Record<InspectGate, (e: ToolCatalogEntry, tier: string | null) => string> = {
+/** Injectable for tests; production uses the process-wide registry and policy. */
+export interface ToolInspectDeps {
+  /** The runtime half of the universe. Defaults to `runtimeToolRegistry.list()`. */
+  runtimeTools?: readonly RuntimeToolDescriptor[];
+  /**
+   * The policy the multiplexer dispatches remote calls through. Defaults to
+   * the process-wide `remoteCallPolicy`, read lazily.
+   */
+  remoteCallPolicy?: RemoteCallPolicy;
+}
+
+/** What the gates need to know about a row's tool, compiled or runtime. */
+interface GateSubject {
+  name: string;
+  domain: string;
+  requiresWrite: boolean;
+  /** Present ⇔ a runtime tool. */
+  runtime?: { classification: RuntimeToolClassificationView };
+}
+
+const RUNTIME_REFUSAL: Record<string, string> = {
+  REMOTE_WRITE_NOT_PERMITTED:
+    `The assistant is shown it, but every call is refused: it starts as a change ` +
+    `that asks first, and this box cannot yet ask before a tool it did not build ` +
+    `makes a change. An owner can review it as read-only.`,
+  REMOTE_TOOL_DENIED: `An owner blocked it. The assistant is shown it, but every call is refused.`,
+  REMOTE_TOOL_NOT_CLASSIFIED:
+    `Nobody has classified it on this box yet, so the assistant is shown it but every call is refused.`,
+};
+
+const REASONS: Record<InspectGate, (e: GateSubject, tier: string | null) => string> = {
   write_tier: (_e, tier) =>
     `It changes something, and ${tier ?? "this person"} is not owner or admin. ` +
     `The assistant can read on their behalf; it cannot act on their behalf.`,
   role_grant: (e) =>
-    `Their role does not reach the "${e.domain}" area` +
-    (e.requiresWrite ? `, or reaches it read-only.` : `.`),
+    e.runtime
+      ? `Their role is a custom one, and custom roles do not reach tools added at runtime ` +
+        `(an extension or a connected server).`
+      : `Their role does not reach the "${e.domain}" area` +
+        (e.requiresWrite ? `, or reaches it read-only.` : `.`),
   interview_strip: () =>
     `This is a setup conversation. Nothing that changes anything runs during setup.`,
   off_lan_withhold: () =>
@@ -175,6 +260,10 @@ const REASONS: Record<InspectGate, (e: ToolCatalogEntry, tier: string | null) =>
     `from an external client, but not by asking.`,
   turn_relevance: () =>
     `Nothing in this message matched its area. It would come back on a message that did.`,
+  runtime_classification: (e) => {
+    const code = e.runtime?.classification.code ?? "";
+    return RUNTIME_REFUSAL[code] ?? `The assistant is shown it, but every call is refused (${code}).`;
+  },
 };
 
 /**
@@ -186,7 +275,7 @@ const REASONS: Record<InspectGate, (e: ToolCatalogEntry, tier: string | null) =>
  * `alsoWithheldBy` mean something.
  */
 function gatesWithholding(
-  entry: ToolCatalogEntry,
+  entry: GateSubject,
   opts: {
     tier: string | null;
     scope: ToolAccessScope | null;
@@ -210,6 +299,9 @@ function gatesWithholding(
   if (opts.offLan && isWithheldFromOffLan(name)) hits.push("off_lan_withhold");
   if (EXCLUDED_FROM_CHAT_TOOLS.has(name)) hits.push("chat_policy");
   if (!opts.advertisedThisTurn.has(name)) hits.push("turn_relevance");
+  if (entry.runtime && entry.runtime.classification.decision !== "allow") {
+    hits.push("runtime_classification");
+  }
 
   return hits;
 }
@@ -223,21 +315,43 @@ function gatesWithholding(
  * pool assembled any other way would make the relevance answer wrong in a way
  * no test of this file alone could catch.
  */
-function poolFor(opts: {
-  tier: string | null;
-  scope: ToolAccessScope | null;
-  interview: boolean;
-  offLan: boolean;
-  voice: boolean;
-}): string[] {
-  return TOOL_CATALOG.filter((e) => {
-    if (!toolAllowedForTier(e.name, opts.tier ?? undefined, opts.voice)) return false;
-    if (opts.scope && !toolAllowedInScope(e.name, opts.scope)) return false;
-    if (opts.interview && WRITE_TOOLS.has(e.name)) return false;
-    if (opts.offLan && isWithheldFromOffLan(e.name)) return false;
-    if (EXCLUDED_FROM_CHAT_TOOLS.has(e.name)) return false;
+function poolFor(
+  names: readonly string[],
+  opts: {
+    tier: string | null;
+    scope: ToolAccessScope | null;
+    interview: boolean;
+    offLan: boolean;
+    voice: boolean;
+  },
+): string[] {
+  // WARP-2900 — `names` is the compiled catalog plus the runtime tools: the
+  // chat path's pool is `mcpClient.listTools()`, which carries both, narrowed
+  // by the same predicates below.
+  return names.filter((name) => {
+    if (!toolAllowedForTier(name, opts.tier ?? undefined, opts.voice)) return false;
+    if (opts.scope && !toolAllowedInScope(name, opts.scope)) return false;
+    if (opts.interview && WRITE_TOOLS.has(name)) return false;
+    if (opts.offLan && isWithheldFromOffLan(name)) return false;
+    if (EXCLUDED_FROM_CHAT_TOOLS.has(name)) return false;
     return true;
-  }).map((e) => e.name);
+  });
+}
+
+/** snake_case → "Snake case", for a runtime row's box-written label. */
+function humanize(name: string): string {
+  const spaced = name.replace(/_/g, " ").trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/**
+ * A runtime row's `homeDescription`, written by this box from the name and
+ * the source. Never the wire description: that is the author's claim.
+ */
+function runtimeLabel(tool: RuntimeToolDescriptor): string {
+  const ext = extensionOfRuntimeTool(tool);
+  const from = ext ? `the ${ext.id} extension, version ${ext.version}` : `the ${tool.serverId} server`;
+  return `${humanize(wireNameOf(tool))}, from ${from}`;
 }
 
 /**
@@ -251,6 +365,7 @@ function poolFor(opts: {
 export async function inspectToolsForPerson(
   prisma: PrismaClient,
   input: ToolInspectInput,
+  deps: ToolInspectDeps = {},
 ): Promise<ToolInspectResult> {
   const attributed: AttributedToolAccess = await resolveAttributedToolAccess(
     prisma,
@@ -269,18 +384,25 @@ export async function inspectToolsForPerson(
     ? DENY_ALL_TOOL_SCOPE
     : attributed.scope;
   const tier = attributed.tier;
+  const runtimeTools = deps.runtimeTools ?? runtimeToolRegistry.list();
+  // Lazy on purpose: suites that mock the singleton never reach it unless a
+  // runtime tool exists, and a box with none never consults it.
+  const policy: RemoteCallPolicy = deps.remoteCallPolicy ?? ((i) => remoteCallPolicy(i));
 
   const advertisedThisTurn = attributed.unresolved
     ? new Set<string>()
     : effectiveAdvertisedToolNames({
         mode: input.selectionMode ?? "domains",
         messages: [{ role: "user", content: input.message ?? "" }],
-        pool: poolFor({ tier, scope, interview, offLan, voice }),
+        pool: poolFor(
+          [...TOOL_CATALOG.map((e) => e.name), ...runtimeTools.map((t) => t.name)],
+          { tier, scope, interview, offLan, voice },
+        ),
         // The dynamic half of the universe, passed for the same reason the
         // wire path passes it: a registered remote tool can open a domain, and
         // an inspector that omitted them would report `turn_relevance` on a
         // tool the real turn advertises. Empty on a box with no remote server.
-        runtimeTools: runtimeToolRegistry.list(),
+        runtimeTools,
       });
 
   const byGate = Object.fromEntries(INSPECT_GATES.map((g) => [g, 0])) as Record<
@@ -288,15 +410,10 @@ export async function inspectToolsForPerson(
     number
   >;
 
+  const gateOpts = { tier, scope, interview, offLan, voice, advertisedThisTurn };
+
   const rows: ToolInspectRow[] = TOOL_CATALOG.map((entry) => {
-    const hits = gatesWithholding(entry, {
-      tier,
-      scope,
-      interview,
-      offLan,
-      voice,
-      advertisedThisTurn,
-    });
+    const hits = gatesWithholding(entry, gateOpts);
     const gate = hits[0] ?? null;
     if (gate) byGate[gate] += 1;
 
@@ -320,8 +437,43 @@ export async function inspectToolsForPerson(
       reason: gate ? REASONS[gate](entry, tier) : null,
       alsoWithheldBy: hits.slice(1),
       ...(lockCaveat ? { lockCaveat } : {}),
+      source: "built-in",
+      serverId: null,
     };
   });
+
+  // WARP-2900 — the runtime half, through the same gates plus the dispatch
+  // verdict. The multiplexer never registers a runtime name that matches a
+  // compiled one (WARP-2420), so a runtime row cannot shadow a compiled row.
+  const compiled = new Set(TOOL_CATALOG.map((e) => e.name));
+  for (const tool of runtimeTools) {
+    if (compiled.has(tool.name)) continue;
+    const classification = classifyRuntimeTool(tool, policy);
+    const readAllowed = classification.decision === "allow";
+    const subject: GateSubject = {
+      name: tool.name,
+      domain: tool.domain,
+      requiresWrite: !readAllowed,
+      runtime: { classification },
+    };
+    const hits = gatesWithholding(subject, gateOpts);
+    const gate = hits[0] ?? null;
+    if (gate) byGate[gate] += 1;
+    rows.push({
+      name: tool.name,
+      domain: tool.domain,
+      homeDescription: runtimeLabel(tool),
+      requiresWrite: !readAllowed,
+      requiresConfirmation: !readAllowed,
+      advertised: gate === null,
+      gate,
+      reason: gate ? REASONS[gate](subject, tier) : null,
+      alsoWithheldBy: hits.slice(1),
+      source: runtimeToolSource(tool),
+      serverId: tool.serverId,
+      classification,
+    });
+  }
 
   const advertised = rows.filter((r) => r.advertised).length;
 
