@@ -4057,6 +4057,87 @@ enum WorkshopWorkspaceStatus {
   archived
 }
 
+/// WARP-2900 (ADR-056 slice H2) — a promoted extension: one per workshop
+/// workspace, keyed by its SLUG (deriveExtensionSlug(workspaceId), <= 27
+/// chars, so "ext-" + slug fits the multiplexer's 32-char server id).
+///
+/// `status` is explicit (CLAUDE.md "No guessing"): never inferred from a
+/// NULL token or a missing process.
+///   signed       — promoted and box-signed, not installed yet
+///   installed    — the sandbox is running its host shim
+///   live         — installed AND attached through the multiplexer (H3)
+///   disabled     — stopped by the owner; the signed versions stay
+///   failed       — the last install/verify failed (failureReason says why)
+///   uninstalled  — removed from the sandbox; the signed history stays
+///
+/// `serviceTokenHash` is the sha256 of the extension's call-back bearer
+/// (`dxt_...`), rotated on every start and cleared when it stops. The
+/// plaintext only ever exists in the sandbox child's environment.
+model Extension {
+  id                String             @id
+  workspaceId       String             @unique
+  name              String
+  /// The owner who promoted it: the person the extension acts for (H3).
+  installedByUserId String
+  status            ExtensionStatus    @default(signed)
+  /// The tool domain chosen at promote (domainSource "operator", H3).
+  operatorDomain    String?
+  currentVersionId  String?            @unique
+  currentVersion    ExtensionVersion?  @relation("ExtensionCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  serviceTokenHash  String?            @unique
+  failureReason     String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  versions          ExtensionVersion[] @relation("ExtensionVersions")
+
+  @@index([status])
+}
+
+/// One signed version of an extension: the statement the box (or Warp Lab's
+/// release key) signed, exactly as signed, and the manifest bytes it names.
+/// Every install re-verifies these bytes (update-agent/extension-verify.ts)
+/// with `signer` + `keyFingerprint` as the recorded expectation, so a
+/// rebuilt boot disk (a new box extension key) is extension_key_changed and
+/// needs a re-promote, never a silent re-sign.
+model ExtensionVersion {
+  id               String          @id @default(uuid())
+  extensionId      String
+  extension        Extension       @relation("ExtensionVersions", fields: [extensionId], references: [id], onDelete: Cascade)
+  currentOf        Extension?      @relation("ExtensionCurrentVersion")
+  version          String
+  /// The proposal/<version> tag the owner promoted.
+  tag              String
+  commit           String
+  tree             String
+  manifestBytes    Bytes
+  manifestSha256   String
+  statementBytes   Bytes
+  /// Base64 DER ECDSA-P256-SHA256 (the cosign sig-file format, both signers).
+  signature        String
+  signer           ExtensionSigner
+  /// "sha256:<hex>" of the signing key's SPKI.
+  keyFingerprint   String
+  promotedByUserId String
+  createdAt        DateTime        @default(now())
+
+  @@unique([extensionId, version])
+  @@index([extensionId, createdAt(sort: Desc)])
+}
+
+enum ExtensionStatus {
+  signed
+  installed
+  live
+  disabled
+  failed
+  uninstalled
+}
+
+enum ExtensionSigner {
+  box
+  release
+}
+
 /// WARP-2180 — a recurring background run: the same RRULE vocabulary as
 /// `ToolSchedule` / `SceneSchedule`, fired by the agent-run-schedule ticker
 /// on the ONE sanctioned clock (`cronRuntime.scheduleInterval`, its own lock
@@ -8122,6 +8203,10 @@ model RemoteToolClassification {
   reviewedBy           String?
   reviewedAt           DateTime?
   wireDescription      String?
+  /// WARP-2900: sha256 of the tool's canonical inputSchema when it was last
+  /// discovered. A re-discovery with the same name and hash keeps the
+  /// reviewed classification; a changed hash resets it (H3).
+  inputSchemaHash      String?
   firstSeenAt          DateTime  @default(now())
   lastSeenAt           DateTime  @default(now())
 

@@ -35,6 +35,11 @@ import {
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import {
+  createExtensionLifecycle,
+  EXTENSION_RECONCILE_LOCK_KEY,
+} from "./services/extension-lifecycle.service.js";
+import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
 import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
@@ -505,6 +510,29 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler. A sandbox
+  // restart forgets every extension process; each tick reinstalls any
+  // `installed`/`live` extension the sandbox no longer runs — re-verifying
+  // its signed statement and rotating its bearer first (install()). Same
+  // clock, its own lock key (the sandbox is one shared resource), never a
+  // `while True`. No Extension rows → the tick dials nothing, so a box with
+  // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
+  const extensionLifecycle = createExtensionLifecycle({
+    prisma,
+    sandbox: createExtensionSandboxClient(),
+    identity: createDeviceIdentityClient(),
+  });
+  void extensionLifecycle.refreshInstalledIds().catch((err) => {
+    logger.warn({ err }, "extension installed-id refresh failed at boot");
+  });
+  cronRuntime.scheduleInterval(
+    config.EXTENSION_RECONCILE_INTERVAL_MS,
+    async () => {
+      await extensionLifecycle.reconcile();
+    },
+    { lockKey: EXTENSION_RECONCILE_LOCK_KEY },
+  );
 
   // Router-dependent schedulers only run when routing supervision is active.
   // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
