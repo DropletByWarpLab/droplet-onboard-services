@@ -130,6 +130,13 @@ case "${1:-}" in
     exit 0
     ;;
   run)
+    case "$*" in
+      # WARP-2995 reconcile-env: scripted host report + exit code.
+      *env-reconcile.sh*)
+        printf '%s\n' "${DOCKER_STUB_RUN_OUT:-}"
+        exit "${DOCKER_STUB_RUN_EXIT:-0}"
+        ;;
+    esac
     echo "stub-helper-cid"
     exit 0
     ;;
@@ -162,6 +169,8 @@ run_apply() {
   DOCKER_STUB_LOGS="${DOCKER_STUB_LOGS:-}" \
   DOCKER_STUB_LOGS_EXIT="${DOCKER_STUB_LOGS_EXIT:-0}" \
   DOCKER_STUB_HELPER_JSON="${DOCKER_STUB_HELPER_JSON:-}" \
+  DOCKER_STUB_RUN_OUT="${DOCKER_STUB_RUN_OUT:-}" \
+  DOCKER_STUB_RUN_EXIT="${DOCKER_STUB_RUN_EXIT:-0}" \
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   DROPLET_OTA_CONFIG_ROOT="${DROPLET_OTA_CONFIG_ROOT:-}" \
@@ -416,6 +425,77 @@ if [ "$ENABLED_OUT" = "$(printf 'orchestrator\nemail-indexer')" ] \
   pass "enabled-services prints compose config --services for the staged file"
 else
   fail "enabled-services output wrong (got: $ENABLED_OUT)"
+fi
+
+# --- WARP-2995: enabled-services takes the box's REAL profiles ---
+stub_reset
+run_apply enabled-services --compose-file "$COMPOSE_FILE" --profiles linux,eval >/dev/null 2>&1
+if grep -qF -- "compose -f $COMPOSE_FILE --profile droplet-ota-no-profile --profile linux --profile eval config --services" \
+    "$STUB_DIR/calls.log"; then
+  pass "enabled-services --profiles passes each profile + the match-nothing sentinel"
+else
+  fail "enabled-services --profiles argv wrong (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+stub_reset
+if run_apply enabled-services --compose-file "$COMPOSE_FILE" --profiles 'linux;rm' >/dev/null 2>&1; then
+  fail "enabled-services must refuse a malformed --profiles"
+else
+  pass "enabled-services refuses a malformed --profiles"
+fi
+# Real compose (no shim, client-side only): the enabled set follows
+# --profiles and IGNORES this process's COMPOSE_PROFILES (the orchestrator's
+# is stale). That is what keeps a profile-off release service unstarted.
+PROF_COMPOSE="$FIXTURE/profiles-compose.yml"
+cat > "$PROF_COMPOSE" <<YAML
+services:
+  gateway:
+    image: alpine
+  fleet-agent:
+    image: alpine
+    profiles: [telemetry]
+  rag-eval:
+    image: alpine
+    profiles: [eval]
+YAML
+REAL_NONE="$(COMPOSE_PROFILES=telemetry bash "$APPLY_SH" enabled-services --compose-file "$PROF_COMPOSE" --profiles "" 2>/dev/null | sort | tr '\n' ' ')"
+REAL_EVAL="$(COMPOSE_PROFILES=telemetry bash "$APPLY_SH" enabled-services --compose-file "$PROF_COMPOSE" --profiles eval 2>/dev/null | sort | tr '\n' ' ')"
+if [ "$REAL_NONE" = "gateway " ] && [ "$REAL_EVAL" = "gateway rag-eval " ]; then
+  pass "real compose: profile-off services are excluded, profile-on ones included"
+else
+  fail "real compose enabled set wrong (none='$REAL_NONE' eval='$REAL_EVAL')"
+fi
+
+# --- WARP-2995: reconcile-env runs the staged script on the host ---
+REC_IMG="ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:$HEX_A"
+REC_REPORT='{"addedKeys":["SANDBOX_SERVICE_TOKEN"],"addedProfiles":[],"profiles":"linux","unitUpdated":false,"backup":"/x/.env.bak.ota-du-test-1"}'
+stub_reset
+REC_OUT="$(DOCKER_STUB_RUN_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --image "$REC_IMG" 2>/dev/null)"; REC_RC=$?
+REC_ROOT="$(dirname "$FIXTURE")"
+if [ "$REC_RC" -eq 0 ] && [ "$REC_OUT" = "$REC_REPORT" ] \
+  && grep -qF -- "run --rm --name droplet-ota-env-reconcile-$UPDATE_ID --network none --user 0:0 --entrypoint chroot -v /:/host $REC_IMG /host /bin/sh $REC_ROOT/docker/ota/env-reconcile.sh $REC_ROOT $UPDATE_ID" \
+    "$STUB_DIR/calls.log"; then
+  pass "reconcile-env chroots into the host, no network, and runs the STAGED script"
+else
+  fail "reconcile-env invocation wrong (rc=$REC_RC out=$REC_OUT calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+if [ "$(cat "$UDIR/env-reconcile.json" 2>/dev/null)" = "$REC_REPORT" ]; then
+  pass "reconcile-env keeps its report in the update dir"
+else
+  fail "env-reconcile.json not written"
+fi
+stub_reset
+if DOCKER_STUB_RUN_EXIT=1 run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --image "$REC_IMG" >/dev/null 2>&1; then
+  fail "reconcile-env must fail when the host script fails"
+else
+  pass "reconcile-env fails loudly when the host script fails"
+fi
+if run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --image "ghcr.io/x/orchestrator:latest" >/dev/null 2>&1; then
+  fail "reconcile-env must refuse a tag-only (unpinned) image"
+else
+  pass "reconcile-env refuses an image that is not digest-pinned"
 fi
 
 # --- per-service failure capture: one failing recreate must NOT abort the
