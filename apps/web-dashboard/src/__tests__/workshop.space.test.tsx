@@ -18,7 +18,9 @@
  * The composer:
  *   7. Starting a run POSTs `{ goal }`, clears the field, opens the run.
  *   8. A refused start renders the calm error with the cause, keeps the goal.
- *   9. Choosing a custom tool under `Work in` makes the POST a workshop run.
+ *   9. Choosing a custom tool under `Work in` makes the POST a workshop run
+ *      (the chip is a themed menu — its own suite is
+ *      workshop.work-in-picker.test.tsx).
  * Custom tools:
  *  10. `New custom tool` POSTs name + template and points the composer at it.
  *  11. `?workspace=<id>` opens the context pane: branch, proposal, changes,
@@ -408,9 +410,10 @@ describe("Workshop — the composer", () => {
   it("choosing a custom tool under 'Work in' makes the start POST a workshop run, and the placeholder speaks to the tool", async () => {
     wire({ workspaces: [WS] });
     render(<WorkshopSpace />);
-    const select = (await screen.findByTestId("workspace-select")) as HTMLSelectElement;
-    await waitFor(() => expect(select.options.length).toBe(2));
-    fireEvent.change(select, { target: { value: "ws-a" } });
+    const pill = screen.getByRole("form", { name: "Start a run" });
+    fireEvent.click(within(pill).getByRole("button", { name: "Work in: No workspace" }));
+    fireEvent.click(await within(pill).findByRole("menuitemradio", { name: /Word counter/ }));
+    expect(within(pill).getByRole("button", { name: "Work in: Word counter" })).toBeInTheDocument();
     const field = screen.getByLabelText("What should Word counter do?") as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "count words in every scan" } });
     fireEvent.click(screen.getByRole("button", { name: /start run/i }));
@@ -441,7 +444,7 @@ describe("Workshop — custom tools", () => {
       expect(post).toBeTruthy();
       expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ name: "Booking reminders", template: "typescript-tool" });
     });
-    await waitFor(() => expect((screen.getByTestId("workspace-select") as HTMLSelectElement).value).toBe("new-ws-abc123"));
+    await waitFor(() => expect(screen.getByTestId("workspace-picker")).toHaveAccessibleName("Work in: Booking reminders"));
     expect(screen.getByLabelText("What should Booking reminders do?")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Custom tools" }).textContent).toContain("Booking reminders");
   });
@@ -471,7 +474,7 @@ describe("Workshop — custom tools", () => {
     expect(commits.textContent).toContain("proposal");
     expect(within(pane).getByTestId("clone-url").textContent).toMatch(/\/git\/ws-a\.git$/);
     // The composer is pointed at it.
-    expect((screen.getByTestId("workspace-select") as HTMLSelectElement).value).toBe("ws-a");
+    expect(screen.getByTestId("workspace-picker")).toHaveAccessibleName("Work in: Word counter");
     // And a proposed workspace offers no "start a run here" — it is waiting for review.
     expect(within(pane).queryByRole("button", { name: /start a run here/i })).toBeNull();
   });

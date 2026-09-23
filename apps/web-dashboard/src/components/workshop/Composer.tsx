@@ -5,15 +5,17 @@
  *
  * One floating pill, the Mac app's composer anatomy (DropletAgent design
  * spec §5: `+`, field, a selector, send): `+` makes a new custom tool, the
- * goal field grows with what is typed, the `Work in` chip chooses an ordinary
- * run or one custom tool's workspace (which makes it a WORKSHOP run —
- * WARP-2896), and Start. The safety chips every write surface carries sit on
- * the quiet line under the pill, with any notice. Enter sends, Shift+Enter
- * breaks a line — the chat's own rule.
+ * goal field grows with what is typed, the `Work in` chip (WorkInPicker — a
+ * themed menu, not a native select) chooses an ordinary run or one custom
+ * tool's workspace (which makes it a WORKSHOP run — WARP-2896), and Start.
+ * The safety chips every write surface carries sit on the quiet line under
+ * the pill, with any notice. Enter sends, Shift+Enter breaks a line — the
+ * chat's own rule.
  */
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState, type ForwardedRef } from "react";
-import { ArrowUp, Eye, Hammer, Pencil, Plus } from "lucide-react";
+import { ArrowUp, Eye, Pencil, Plus } from "lucide-react";
 import type { WorkspaceSummary } from "./workspaces/api";
+import { WorkInPicker } from "./WorkInPicker";
 
 const GOAL_MAX = 4000;
 
@@ -94,20 +96,7 @@ export const Composer = forwardRef(function Composer(
           placeholder={selected ? `Build ${selected.name} so that it…` : "What should your Droplet do?"}
           aria-label={selected ? `What should ${selected.name} do?` : "What should your Droplet do?"}
         />
-        <label className="ws-workin" title="An ordinary run works across the box. A custom tool's workspace makes it a workshop run.">
-          <Hammer size={13} aria-hidden />
-          <span className="sr-only">Work in</span>
-          <select value={workspaceId} disabled={busy || disabled} onChange={(e) => onWorkspaceId(e.target.value)} data-testid="workspace-select">
-            <option value="">No workspace</option>
-            {workspaces
-              .filter((w) => w.status === "active")
-              .map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-          </select>
-        </label>
+        <WorkInPicker workspaces={workspaces} workspaceId={workspaceId} onWorkspaceId={onWorkspaceId} disabled={busy || disabled} />
         <button type="submit" className="chat-send" disabled={!canSend} aria-label="Start run" title="Start run">
           <ArrowUp size={16} aria-hidden />
         </button>
