@@ -14,7 +14,9 @@
  *     The echoed digest must be the one the token was issued for
  *     (TOKEN_OPERATION_MISMATCH, 409), and the proposal is read AGAIN: if the
  *     bytes or the commit moved since phase 1, 409 `manifest_changed` and the
- *     owner starts over. Then: sign (extension-promotion.service.ts, the one
+ *     owner starts over. Preflight runs AGAIN against the box as it is now:
+ *     another proposal confirmed in between may have taken a tool name or
+ *     the memory (409 `preflight_changed`). Then: sign (extension-promotion.service.ts, the one
  *     signer caller; an unprovisioned or unreachable sidecar is 503
  *     device_identity_svc_unreachable and NOTHING is stored) → persist the
  *     statement exactly as signed → install (which re-verifies the stored
@@ -37,6 +39,7 @@ import {
   EXTENSION_VERSION_PATTERN,
   manifestSha256,
   parseExtensionManifest,
+  type ExtensionManifest,
   type ExtensionReadback,
 } from "./extension-manifest.js";
 import {
@@ -53,8 +56,7 @@ import {
 import {
   EXTENSION_TICKET,
   ExtensionLifecycleError,
-  otherExtensionTools,
-  preflightExtension,
+  preflightAgainstBox,
   type ExtensionLifecycle,
   type PreflightResult,
 } from "./extension-lifecycle.service.js";
@@ -63,8 +65,13 @@ import { recordActivity } from "./activity.singleton.js";
 
 export const PROMOTE_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const PROPOSAL_TAG_PREFIX = "proposal/";
-/** Slugs H3's self-routes and the proposals list own. */
-export const RESERVED_EXTENSION_SLUGS: ReadonlySet<string> = new Set(["self", "proposals"]);
+/**
+ * Slugs a route already owns: H3's self-routes and the proposals list here,
+ * and the sandbox's GET /extensions/budget, which is declared before
+ * GET /extensions/{slug} — an extension called `budget` would read the
+ * budget as its status (never `running`) and be reinstalled every tick.
+ */
+export const RESERVED_EXTENSION_SLUGS: ReadonlySet<string> = new Set(["self", "proposals", "budget"]);
 
 /** A failure a route turns into `status` + `{ error: code, ... }`. */
 export class PromoteError extends Error {
@@ -129,11 +136,12 @@ export function createPromoteConfirmationStore(
       return entry;
     },
     /**
-     * Check a phase-2 echo. Does NOT consume: a mismatch leaves the token
-     * for its rightful confirmer. `consume` is called once the bytes are
-     * re-read and about to be signed.
+     * Check a phase-2 echo and, when it matches, TAKE the token in the same
+     * tick (no await between the lookup and the delete): a double-click or a
+     * retried POST finds it gone (410) and never reaches the signer. A
+     * mismatch leaves the token for its rightful confirmer.
      */
-    check(
+    take(
       token: string,
       echo: { userId: string; workspaceId: string; manifestSha256: string },
     ): { ok: true; pending: PendingPromotion } | { ok: false; code: ConfirmationRefusal } {
@@ -147,10 +155,8 @@ export function createPromoteConfirmationStore(
       if (p.workspaceId !== echo.workspaceId || p.manifestSha256 !== echo.manifestSha256) {
         return { ok: false, code: "TOKEN_OPERATION_MISMATCH" };
       }
-      return { ok: true, pending: p };
-    },
-    consume(token: string): void {
       pending.delete(token);
+      return { ok: true, pending: p };
     },
     size(): number {
       return pending.size;
@@ -225,6 +231,25 @@ async function readProposal(deps: PromoteDeps, workspaceId: string) {
   return { tag, version, proposal, manifestBytes: proposal.manifest };
 }
 
+/** Memory this slug's running version holds (a reinstall frees it). */
+async function runningMemoryMb(deps: PromoteDeps, slug: string): Promise<number> {
+  const existing = await deps.prisma.extension.findUnique({
+    where: { id: slug },
+    select: { status: true, currentVersion: { select: { manifestBytes: true } } },
+  });
+  if (!existing?.currentVersion || (existing.status !== "installed" && existing.status !== "live")) return 0;
+  const cur = parseExtensionManifest(existing.currentVersion.manifestBytes);
+  return cur.ok ? cur.manifest.resources.memoryMb : 0;
+}
+
+async function preflightNow(deps: PromoteDeps, slug: string, manifest: ExtensionManifest): Promise<PreflightResult> {
+  try {
+    return await preflightAgainstBox(deps.prisma, deps.sandbox, slug, manifest, await runningMemoryMb(deps, slug));
+  } catch (err) {
+    sandboxFailure(err);
+  }
+}
+
 export async function preparePromotion(
   deps: PromoteDeps,
   owner: PromoteOwner,
@@ -237,7 +262,7 @@ export async function preparePromotion(
   }
   const existing = await deps.prisma.extension.findUnique({
     where: { id: slug },
-    select: { workspaceId: true, currentVersion: { select: { manifestBytes: true, version: true } }, status: true },
+    select: { workspaceId: true },
   });
   if (existing && existing.workspaceId !== workspaceId) {
     throw new PromoteError(409, "slug_taken", `extension id ${slug} already belongs to another workspace`);
@@ -263,24 +288,7 @@ export async function preparePromotion(
   }
   const readback = deriveReadback(parsed.manifest);
 
-  let budget;
-  try {
-    budget = await deps.sandbox.budget();
-  } catch (err) {
-    sandboxFailure(err);
-  }
-  let currentMemoryMb = 0;
-  if (existing?.currentVersion && (existing.status === "installed" || existing.status === "live")) {
-    const cur = parseExtensionManifest(existing.currentVersion.manifestBytes);
-    if (cur.ok) currentMemoryMb = cur.manifest.resources.memoryMb;
-  }
-  const preflight = preflightExtension({
-    slug,
-    manifest: parsed.manifest,
-    budget,
-    currentMemoryMb,
-    otherExtensionTools: await otherExtensionTools(deps.prisma, slug),
-  });
+  const preflight = await preflightNow(deps, slug, parsed.manifest);
   if (!preflight.ok) {
     throw new PromoteError(422, "preflight_blocked", preflight.blocking.map((b) => b.detail).join("; "), {
       preflight,
@@ -324,7 +332,7 @@ export async function confirmPromotion(
   input: PromotePhase2Input,
 ) {
   const audit = deps.audit ?? recordActivity;
-  const checked = deps.confirmations.check(input.confirmationToken, {
+  const checked = deps.confirmations.take(input.confirmationToken, {
     userId: owner.id,
     workspaceId,
     manifestSha256: input.manifestSha256,
@@ -344,10 +352,21 @@ export async function confirmPromotion(
     proposal.commit !== pending.commit ||
     manifestSha256(manifestBytes) !== pending.manifestSha256
   ) {
-    deps.confirmations.consume(pending.token);
     throw new PromoteError(409, "manifest_changed", "the proposal changed since you reviewed it; review it again");
   }
-  deps.confirmations.consume(pending.token);
+  // What phase 1 checked may no longer hold: another proposal confirmed in
+  // between can have taken a tool name or the memory.
+  const reparsed = parseExtensionManifest(manifestBytes);
+  if (!reparsed.ok) throw new PromoteError(422, "manifest_invalid", reparsed.detail);
+  const preflight = await preflightNow(deps, deriveExtensionSlug(workspaceId), reparsed.manifest);
+  if (!preflight.ok) {
+    throw new PromoteError(
+      409,
+      "preflight_changed",
+      `the box changed since you reviewed it: ${preflight.blocking.map((b) => b.detail).join("; ")}`,
+      { preflight },
+    );
+  }
 
   let signed;
   try {

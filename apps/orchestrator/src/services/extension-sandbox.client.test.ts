@@ -69,6 +69,17 @@ describe("extension-sandbox.client", () => {
     await expect(client(missing).stop("wc")).resolves.toBeUndefined();
   });
 
+  it("a status body that is not about the extension asked for is an error, never 'not running'", async () => {
+    // MUTATION: trust any 200 body in status() and the budget JSON (what
+    // GET /extensions/budget answers) reads as a stopped extension, which
+    // the reconciler reinstalls every tick.
+    const budgetBody = { ceilingMb: 512, source: "env", transformHeadroomMb: 256, installedMb: 0, availableMb: 256 };
+    const f = fakeFetch(() => ({ status: 200, body: budgetBody }));
+    await expect(client(f).status("budget")).rejects.toMatchObject({ code: "SANDBOX_ERROR", status: 502 });
+    const ok = fakeFetch(() => ({ status: 200, body: { slug: "wc", running: true, process: null } }));
+    expect(await client(ok).status("wc")).toMatchObject({ slug: "wc", running: true });
+  });
+
   it("relays a 4xx detail and turns a 5xx into a 502", async () => {
     const conflict = fakeFetch(() => ({ status: 409, body: { detail: "memoryMb 300 does not fit" } }));
     const err = await client(conflict)

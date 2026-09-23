@@ -47,10 +47,19 @@ const mcp: AuthUser = { id: "_service:mcp", username: "_service:mcp", displayNam
 
 const WS = "word-count";
 
-function setup(opts: { manifest?: Buffer | null; provisioned?: boolean; availableMb?: number } = {}) {
-  const db = extensionPrisma({ workspaces: [{ id: WS }, { id: "draft-ws" }] });
+function setup(
+  opts: { manifest?: Buffer | null; provisioned?: boolean; availableMb?: number; extra?: Record<string, Buffer> } = {},
+) {
+  const extra = opts.extra ?? {};
+  const db = extensionPrisma({
+    workspaces: [{ id: WS }, { id: "draft-ws" }, ...Object.keys(extra).map((id) => ({ id }))],
+  });
   const sandbox = fakeSandbox({
-    proposals: { [WS]: opts.manifest === undefined ? manifestBytes({ id: WS }) : opts.manifest, "draft-ws": null },
+    proposals: {
+      [WS]: opts.manifest === undefined ? manifestBytes({ id: WS }) : opts.manifest,
+      "draft-ws": null,
+      ...extra,
+    },
     availableMb: opts.availableMb,
   });
   const identity = fakeSidecar({ provisioned: opts.provisioned });
@@ -138,6 +147,15 @@ describe("phase 1 — the readback", () => {
     expect(r.body.readback.tools.startsAsWriteWithConfirmation).toBe(1);
     const text = JSON.stringify(r.body.readback);
     expect(text).not.toMatch(/harmless|read-only|just looks/i);
+  });
+
+  it("a workspace whose slug is a sandbox route word (budget) cannot be promoted", async () => {
+    // MUTATION: drop "budget" from RESERVED_EXTENSION_SLUGS and the sandbox's
+    // GET /extensions/budget answers this extension's status forever.
+    const t = setup({ extra: { budget: manifestBytes({ id: "budget" }) } });
+    const r = await phase1(t, "budget");
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("slug_reserved");
   });
 
   it("a connector draft (no manifest) is not promotable", async () => {
@@ -293,6 +311,58 @@ describe("phase 2 — confirm, sign, store, install", () => {
     expect(r.body.error).toBe("slug_taken");
     expect(t.db.versions.size).toBe(0);
     expect((await phase1(t)).body.error).toBe("slug_taken");
+  });
+
+  it("two proposals that were each clean at phase 1 cannot both be signed with one tool name", async () => {
+    // MUTATION: drop the phase-2 preflight and both confirm with 201, and two
+    // servers offer word_count.
+    const OTHER = "word-count-too";
+    const t = setup({ extra: { [OTHER]: manifestBytes({ id: OTHER }) } });
+    const a = (await phase1(t)).body;
+    const b = (await phase1(t, OTHER)).body;
+    expect(a.preflight.ok && b.preflight.ok).toBe(true);
+    const ra = await request(t.app)
+      .post(`/api/extensions/${WS}/promote`)
+      .send({ confirmationToken: a.confirmationToken, manifestSha256: a.manifestSha256 });
+    expect(ra.status).toBe(201);
+    const rb = await request(t.app)
+      .post(`/api/extensions/${OTHER}/promote`)
+      .send({ confirmationToken: b.confirmationToken, manifestSha256: b.manifestSha256 });
+    expect(rb.status).toBe(409);
+    expect(rb.body.error).toBe("preflight_changed");
+    expect(rb.body.preflight.blocking[0]).toMatchObject({ code: "tool_name_collides_with_extension" });
+    expect(t.identity.signExtensionManifest).toHaveBeenCalledTimes(1);
+    expect(t.db.extensions.has(OTHER)).toBe(false);
+  });
+
+  it("a double-submitted confirmation signs once: the token is taken in the same tick it is checked", async () => {
+    // MUTATION: check without taking (consume after the awaited re-read) and
+    // both requests reach the signer.
+    const t = setup();
+    const p1 = (await phase1(t)).body;
+    const confirm = { confirmationToken: p1.confirmationToken, manifestSha256: p1.manifestSha256 };
+    // Hold the phase-2 re-read until both requests are inside it (or 300 ms,
+    // when the second was refused before it got there), so the two overlap.
+    const read = vi.mocked(t.sandbox.client.proposalManifest);
+    const real = read.getMockImplementation()!;
+    let waiting = 0;
+    let open: () => void = () => {};
+    const bothIn = new Promise<void>((r) => {
+      open = r;
+      setTimeout(r, 300);
+    });
+    read.mockImplementation(async (workspaceId: string, version: string) => {
+      waiting += 1;
+      if (waiting === 2) open();
+      await bothIn;
+      return real(workspaceId, version);
+    });
+    const [r1, r2] = await Promise.all([
+      request(t.app).post(`/api/extensions/${WS}/promote`).send(confirm),
+      request(t.app).post(`/api/extensions/${WS}/promote`).send(confirm),
+    ]);
+    expect([r1.status, r2.status].sort()).toEqual([201, 410]);
+    expect(t.identity.signExtensionManifest).toHaveBeenCalledTimes(1);
   });
 
   it("an operatorDomain outside the tool domains is 400", async () => {

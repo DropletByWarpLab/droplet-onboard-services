@@ -223,7 +223,13 @@ export function createExtensionSandboxClient(
     async status(slug) {
       const r = await call("GET", slugPath(slug), undefined, DEFAULT_TIMEOUT_MS);
       if (r.status === 404 && !isGate(r)) return null;
-      return unwrap<SandboxExtensionStatus>(r, "extension status");
+      const st = unwrap<SandboxExtensionStatus | null>(r, "extension status");
+      // Trust `running` only from a body about THIS extension: a route that
+      // shadows /extensions/{slug} (the budget) must not read as "stopped".
+      if (!st || typeof st !== "object" || st.slug !== slug) {
+        throw new ExtensionSandboxError(`the sandbox answered a status that is not about ${slug}`, 502, "SANDBOX_ERROR");
+      }
+      return st;
     },
     async install(slug, req) {
       return unwrap<SandboxExtensionStatus>(
