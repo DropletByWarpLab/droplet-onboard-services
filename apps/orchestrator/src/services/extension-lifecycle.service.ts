@@ -345,9 +345,17 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return ext;
   }
 
-  /** `failed` only while the row is still in `from`; false when someone else moved it. */
+  /**
+   * `failed` only while the row is still in `from`; false when someone else
+   * moved it. A failed extension is never left attached: a re-install of a
+   * live one (a promote) that fails before its attach would otherwise leave
+   * the previous version's tools in the multiplexer.
+   */
   async function markFailed(slug: string, reason: string, from: readonly ExtensionStatusName[]): Promise<boolean> {
     installedExtensionIds.delete(extensionServerId(slug));
+    if (attach) {
+      await attach.detach(slug).catch((err: unknown) => logger.warn({ err, slug }, "extension_detach_on_failure_failed"));
+    }
     const u = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
       data: { status: "failed", failureReason: reason.slice(0, 1000), serviceTokenHash: null },

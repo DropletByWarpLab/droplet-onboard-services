@@ -595,6 +595,22 @@ describe("H3 — an extension is live only once its tools are attached", () => {
     expect(installedExtensionIds.has("ext-wc")).toBe(false);
   });
 
+  it("a re-install of a live extension that fails before the attach takes the old attachment down", async () => {
+    // Review finding (PR #2325): a promote over a live version reinstalls
+    // without detaching; a failed start marked the row `failed` but left
+    // the previous version's tools in the multiplexer, dispatchable.
+    // MUTATION: drop the detach from markFailed → still attached → red.
+    const a = scriptedAttach();
+    const k = kitWith(a.port);
+    await seedSigned(k.db, k.identity);
+    expect((await k.lifecycle.install("wc", OWNER)).status).toBe("live");
+    expect(a.attached.has("wc")).toBe(true);
+    k.sandbox.state.failInstall = new Error("the TypeScript build failed");
+    await expect(k.lifecycle.install("wc", OWNER)).rejects.toMatchObject({ code: "install_failed" });
+    expect(k.db.extensions.get("wc")?.status).toBe("failed");
+    expect(a.attached.has("wc")).toBe(false);
+  });
+
   it("disable and uninstall detach", async () => {
     const a = scriptedAttach();
     const k = kitWith(a.port);

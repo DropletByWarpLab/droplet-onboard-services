@@ -75,7 +75,11 @@ import {
   ExtensionMcpPort,
   extensionInputSchemaHash,
 } from "./extension-mcp.port.js";
-import type { ExtensionSandboxClient } from "./extension-sandbox.client.js";
+import {
+  EXTENSION_SANDBOX_HOST,
+  isInternalSandboxUrl,
+  type ExtensionSandboxClient,
+} from "./extension-sandbox.client.js";
 import { syncRemoteCatalog } from "./remote-mcp-servers.js";
 import {
   recordDiscoveredRemoteTools,
@@ -89,8 +93,7 @@ export { extensionInputSchemaHash };
 
 const logger = createLogger("extension-attach");
 
-/** The one host the relay may be reached at: the compose service name. */
-export const EXTENSION_SANDBOX_HOST = "sandbox";
+export { EXTENSION_SANDBOX_HOST };
 
 // ─── the session profile ─────────────────────────────────────────────────
 
@@ -131,23 +134,18 @@ export function extensionProvenance(slug: string, version: string): string {
 }
 
 /**
- * Refuse a relay that is not the compose-internal sandbox. The orchestrator
- * reaches an extension only through `sandbox` on `droplet-internal`; a
- * SANDBOX_URL pointed at another host would send extension traffic — and
- * the sandbox bearer — somewhere else.
+ * Refuse a relay that is not the compose-internal sandbox, as a PERMANENT
+ * attach refusal. The orchestrator reaches an extension only through
+ * `sandbox` on `droplet-internal`. The sandbox client applies the same
+ * predicate to every call it makes (install included, so the `dxt_` bearer
+ * never leaves either); this is the attach's own, earlier, typed refusal.
  */
 export function assertInternalSandboxUrl(url: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new ExtensionAttachError("sandbox_url_refused", true, "SANDBOX_URL is not a URL; extensions attach only through the sandbox");
-  }
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.hostname !== EXTENSION_SANDBOX_HOST) {
+  if (!isInternalSandboxUrl(url)) {
     throw new ExtensionAttachError(
       "sandbox_url_refused",
       true,
-      `extensions attach only through the compose-internal '${EXTENSION_SANDBOX_HOST}' host; SANDBOX_URL names '${parsed.hostname}'`,
+      `extensions attach only through the compose-internal '${EXTENSION_SANDBOX_HOST}' host; SANDBOX_URL names another`,
     );
   }
 }

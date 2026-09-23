@@ -96,6 +96,31 @@ describe("extension-sandbox.client", () => {
     await expect(client(broken).uninstall("wc")).rejects.toMatchObject({ status: 502 });
   });
 
+  it("sends nothing — no bearer, no extension token — to a SANDBOX_URL that is not the compose-internal sandbox", async () => {
+    // Review finding (PR #2325): only the attach refused a foreign host, so
+    // the install had already POSTed the fresh dxt_ bearer and the sandbox
+    // token there. MUTATION: drop the host check in settings() → the
+    // install is dialled → red.
+    const lan = ["192", "168", "1", "50"].join(".");
+    for (const baseUrl of ["http://evil:8030", `http://${lan}:8030`, "http://sandbox.example:8030", "ftp://sandbox:8030", "not a url"]) {
+      const f = fakeFetch(() => ({ status: 200, body: {} }));
+      const c = createExtensionSandboxClient({ baseUrl, serviceToken: "sb-token", fetchImpl: f.impl });
+      await expect(
+        c.install("wc", {
+          workspaceId: "wc", version: "0.1.0", commit: "c", tree: "t", runtime: "python312",
+          entrypoint: "tool.py", memoryMb: 64, token: "dxt_x",
+        }),
+      ).rejects.toMatchObject({ code: "HOST_REFUSED", status: 503 });
+      await expect(c.rpc("wc", { jsonrpc: "2.0", id: 1, method: "tools/list" })).rejects.toMatchObject({ code: "HOST_REFUSED" });
+      await expect(c.budget()).rejects.toMatchObject({ code: "HOST_REFUSED" });
+      expect(f.calls).toEqual([]);
+    }
+    // The compose name itself, with or without a trailing slash, is dialled.
+    const ok = fakeFetch(() => ({ status: 200, body: { availableMb: 1 } }));
+    await createExtensionSandboxClient({ baseUrl: "https://sandbox:8030/", serviceToken: "sb-token", fetchImpl: ok.impl }).budget().catch(() => undefined);
+    expect(ok.calls[0].url).toMatch(/^https:\/\/sandbox:8030\//);
+  });
+
   it("a hung sandbox is a caller-side TIMEOUT", async () => {
     vi.useFakeTimers();
     try {
