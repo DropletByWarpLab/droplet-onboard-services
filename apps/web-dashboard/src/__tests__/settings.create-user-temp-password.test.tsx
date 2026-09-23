@@ -18,6 +18,9 @@ vi.mock("@/lib/api", () => ({
   deleteUser: (...a: any[]) => deleteUserMock(...a),
   // ShellPage's status chip reads /api/orchestrator/health via this fetcher.
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+  // WARP-2967: the Settings page derives its tucked-surface rows from
+  // nav-config and resolves their capability gates through this probe.
+  fetchCapabilities: () => Promise.resolve({ claudeActivity: false, ragEval: false }),
 }));
 
 vi.mock("@/lib/auth", () => ({

@@ -317,7 +317,7 @@ const SECTIONS: Section[] = [
           chat, and cameras without changing how it&rsquo;s set up.
         </p>
         <p>
-          <strong>To invite someone:</strong> open People in the sidebar,
+          <strong>To invite someone:</strong> open Settings, then Users,
           tap Invite, choose a role, and share the invite link. You can
           change or remove someone&rsquo;s access at any time.
         </p>
