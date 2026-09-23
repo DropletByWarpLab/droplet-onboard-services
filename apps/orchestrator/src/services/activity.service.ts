@@ -243,8 +243,7 @@ export function createActivityRecorder(
       // backend, so a throwing signer can't leak it. Constant key: every
       // appender in every orchestrator process contends on the same lock,
       // which IS the serialization the chain needs. Appliance-scale cost
-      // is one extra round-trip per append (see
-      // audit-insert-bench.pg.test.ts for the p99 budget).
+      // is one extra round-trip per append.
       const inserted = await deps.prisma.$transaction(async (tx) => {
         // `pg_advisory_xact_lock` returns `void`, which Prisma's raw-query
         // deserializer rejects (P2010, "cannot deserialize column of type
