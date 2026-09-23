@@ -63,6 +63,8 @@ grep -q '^SANDBOX_SERVICE_TOKEN=[0-9a-f]\{64\}$' "$BOX/.env" \
   && pass "missing token key added (64 hex)" || fail "SANDBOX_SERVICE_TOKEN not added"
 grep -q '^JWT_SECRET=[0-9a-f]\{128\}$' "$BOX/.env" \
   && pass "hex64 key added (128 hex)" || fail "JWT_SECRET not added as hex64"
+grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" \
+  && pass "OTA apply enabled with the release-shipped helper path (WARP-3007)" || fail "DROPLET_OTA_APPLY_SCRIPT not added"
 grep -q '^NVR_MEDIA_SOURCE=nvrdata$' "$BOX/.env" \
   && pass "missing literal-default key added" || fail "NVR_MEDIA_SOURCE literal missing"
 grep -q '^COMPOSE_PROFILES=linux,display,eval,email$' "$BOX/.env" \
@@ -125,6 +127,49 @@ cp "$BOX3/.env" "$TMP/env3"
 if reconcile "$BOX3" upd4 >/dev/null 2>&1; then fail "odd COMPOSE_PROFILES accepted"
 else cmp -s "$BOX3/.env" "$TMP/env3" && pass "unexpected profile chars refused, .env untouched" || fail "refusal still wrote .env"; fi
 reconcile "$TMP/nobox" upd5 >/dev/null 2>&1 && fail "missing .env accepted" || pass "missing .env fails loudly"
+
+echo "env-reconcile: #2320 review — rollback restores .env and the unit"
+[ -f "$BOX/droplet.service.bak.ota-upd1" ] && grep -q -- "--profile eval up -d --remove-orphans$" "$BOX/droplet.service.bak.ota-upd1" \
+  && pass "unit backup written beside the unit when it changed" || fail "no unit backup"
+ls "$BOX"/droplet.service.ota-reconcile.* >/dev/null 2>&1 && fail "unit temp file left behind" || pass "unit written atomically, no temp left"
+BOXR="$TMP/boxr"; make_box "$BOXR"
+cp "$BOXR/.env" "$TMP/envr.orig"; cp "$BOXR/droplet.service" "$TMP/unitr.orig"
+reconcile "$BOXR" updr >/dev/null 2>&1
+RST="$(DROPLET_OTA_UNIT_FILE="$BOXR/droplet.service" /bin/sh "$RECONCILE" --restore "$BOXR" updr 2>&1)"
+cmp -s "$BOXR/.env" "$TMP/envr.orig" && cmp -s "$BOXR/droplet.service" "$TMP/unitr.orig" \
+  && [ "$RST" = '{"restoredEnv":true,"restoredUnit":true}' ] \
+  && pass "--restore puts .env and the unit back byte-identical" || fail "--restore wrong ($RST)"
+[ "$(stat -c %a "$BOXR/.env" 2>/dev/null || stat -f %Lp "$BOXR/.env")" = "600" ] \
+  && pass "restored .env stays 0600" || fail "restored .env mode changed"
+RST2="$(DROPLET_OTA_UNIT_FILE="$TMP/none.service" /bin/sh "$RECONCILE" --restore "$TMP/nobox" updx 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && [ "$RST2" = '{"restoredEnv":false,"restoredUnit":false}' ] \
+  && pass "--restore with nothing to restore is a no-op" || fail "--restore no-op wrong (rc=$RC $RST2)"
+
+echo "env-reconcile: #2320 review — no COMPOSE_PROFILES line leaves the unit alone"
+BOX4="$TMP/box4"; make_box "$BOX4"
+sed -i.b '/^COMPOSE_PROFILES=/d' "$BOX4/.env"; rm -f "$BOX4/.env.b"
+cp "$BOX4/droplet.service" "$TMP/unit4"
+OUT4="$(reconcile "$BOX4" upd6 2>&1)"
+cmp -s "$BOX4/droplet.service" "$TMP/unit4" && echo "$OUT4" | grep -q '"unitUpdated":false' \
+  && pass "profile flags kept when .env has no COMPOSE_PROFILES" || fail "unit rewritten without profiles ($OUT4)"
+
+echo "env-reconcile: #2320 review — export / spaced / CRLF / commented forms"
+BOX5="$TMP/box5"; make_box "$BOX5"
+{ echo 'export DEVICE_SECRET=operator-set'; echo 'TUNNEL_TOKEN = keep'; } >> "$BOX5/.env"
+sed -i.b '/^TUNNEL_TOKEN=$/d; s/^COMPOSE_PROFILES=.*/export COMPOSE_PROFILES=linux,display # set by hand\r/' "$BOX5/.env"; rm -f "$BOX5/.env.b"
+reconcile "$BOX5" upd7 >/dev/null 2>"$TMP/err5"; RC=$?
+[ "$RC" -eq 0 ] && pass "CRLF + trailing comment in COMPOSE_PROFILES accepted" || fail "rc=$RC ($(cat "$TMP/err5"))"
+[ "$(grep -c 'DEVICE_SECRET' "$BOX5/.env")" -eq 1 ] && [ "$(grep -c 'TUNNEL_TOKEN' "$BOX5/.env")" -eq 1 ] \
+  && pass "export KEY= and KEY = v count as present (no duplicate appended)" || fail "duplicate appended ($(grep -E 'DEVICE_SECRET|TUNNEL_TOKEN' "$BOX5/.env"))"
+grep -q '^export COMPOSE_PROFILES=linux,display,email$' "$BOX5/.env" \
+  && grep -q -- "--profile linux --profile display --profile email up -d" "$BOX5/droplet.service" \
+  && pass "export-form COMPOSE_PROFILES merged in place and the unit follows" || fail "export form mishandled ($(grep COMPOSE_PROFILES "$BOX5/.env"))"
+
+echo "env-reconcile: DEVICE_SECRET is added only when absent"
+grep -q '^DEVICE_SECRET=[0-9a-f]\{64\}$' "$BOX/.env" \
+  && pass "absent DEVICE_SECRET generated" || fail "DEVICE_SECRET not added to an old box"
+grep -q '^export DEVICE_SECRET=operator-set$' "$BOX5/.env" \
+  && pass "present DEVICE_SECRET untouched" || fail "operator DEVICE_SECRET touched"
 
 echo "env-reconcile: drift vs migrate_env"
 MIGRATE_KEYS="$(awk '/^migrate_env\(\)/,/^}/' "$SECRETS_SH" | grep -o '_migrate_ensure_key [A-Z0-9_]*' | awk '{print $2}' | sort -u)"

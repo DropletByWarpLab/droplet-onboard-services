@@ -192,9 +192,11 @@ RUN set -eu; \
     disc="$(req /docs/hosting/discovery)"; \
     caps="$(req /docs/hosting/capabilities)"; \
     other="$(req /anything-else)"; \
+    health="$(req /healthz)"; \
     nginx -c /tmp/leg-test.conf -g 'pid /tmp/leg.pid; error_log /tmp/leg.err;' -s stop; \
     rm -f /tmp/leg.conf /tmp/leg-test.conf /tmp/leg.err; \
     printf '%s' "$disc" | grep -q 'HTTP/1.1 200'                                   || { echo "WARP-2903: discovery via the leg did not return 200"; printf '%s\n' "$disc"; exit 1; }; \
+    printf '%s' "$health" | grep -q 'HTTP/1.1 200'                                 || { echo "#2320 review: the OTA health probe /healthz on :9981 did not return 200"; printf '%s\n' "$health"; exit 1; }; \
     [ "$(printf '%s' "$disc" | grep -o 'urlsrc="/docs/browser/1/cool.html?"' | wc -l)" -eq 3 ] \
                                                                                    || { echo "WARP-2903: urlsrc was NOT rewritten to a path-relative /docs/… (all three: two https, one http — sub_filter_once must be off)"; printf '%s\n' "$disc"; exit 1; }; \
     printf '%s' "$disc" | grep -q 'docserver:9980'                                  && { echo "WARP-2903: an absolute docserver:9980 origin survived the rewrite"; printf '%s\n' "$disc"; exit 1; }; \

@@ -943,7 +943,8 @@ const envSchema = z.object({
   //                    it; by convention the helper's host path. The helper
   //                    that runs is ALWAYS <CONFIG_ROOT>/docker/ota/
   //                    apply-update.sh, shipped in every release and executed
-  //                    ON THE HOST (host-exec.ts).
+  //                    ON THE HOST (host-exec.ts). setup.sh writes it on
+  //                    Linux (on by default, WARP-3007); macOS gets it empty.
   //   COMPOSE_FILE   — HOST path of the compose file the helper drives
   //                    (derived from DROPLET_HOST_ROOT by docker-compose.yml).
   //   CONFIG_ROOT    — where a release's configs.tar.gz is extracted. CI packs

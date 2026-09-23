@@ -1012,6 +1012,15 @@ SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 # MQTT stays scheme-gated (mqtts://) independent of this knob (WARP-235).
 DROPLET_INTERNAL_TLS=0
 
+# --- OTA apply (WARP-3007) ---
+# Enable flag for the orchestrator's OTA apply window: any value turns it on,
+# empty leaves the box polling + tracking releases without ever applying one.
+# The helper that runs is always the release-shipped docker/ota/apply-update.sh
+# (executed on the HOST); this is its path by convention. On by default on
+# Linux (Romain 2026-09-23: V1.1 needs updates to work); empty on macOS, a dev
+# laptop must never self-update from the release feed.
+DROPLET_OTA_APPLY_SCRIPT=$([ "$(uname)" = "Linux" ] && printf '%s' "$REPO_ROOT/docker/ota/apply-update.sh")
+
 # --- Application ---
 STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
@@ -1545,6 +1554,12 @@ migrate_env() {
   # byte-identical posture to before). Append-if-missing only, so a box whose
   # operator flipped it to 1 keeps that choice across setup re-runs.
   _migrate_ensure_key DROPLET_INTERNAL_TLS 0
+
+  # WARP-3007: OTA apply on by default on Linux (see generate_env). Only when
+  # ABSENT, so a box whose operator set it empty (apply off) keeps that.
+  local ota_apply_default=""
+  [ "$(uname)" = "Linux" ] && ota_apply_default="$REPO_ROOT/docker/ota/apply-update.sh"
+  _migrate_ensure_key DROPLET_OTA_APPLY_SCRIPT "$ota_apply_default"
 
   # WARP-235: move existing installs from the shared-password plaintext broker
   # to the mTLS endpoint (single listener :8883; identity = client cert CN).

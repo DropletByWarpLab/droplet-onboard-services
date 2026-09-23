@@ -35,7 +35,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import type { PrismaClient } from "@prisma/client";
@@ -48,8 +49,10 @@ import {
   imageRefMatchesDigest,
   SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
+  type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
+import { createHostComposeRunner } from "./host-compose-runner.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
@@ -374,7 +377,7 @@ class FakeRunner implements ApplyRunner {
   /** WARP-2995 — make the host .env reconcile fail. */
   reconcileFails = false;
 
-  async reconcileEnv(opts: { updateId: string; image: string }) {
+  async reconcileEnv(opts: { updateId: string; image: string }): Promise<EnvReconcileReport> {
     this.calls.push(`reconcileEnv(${opts.updateId},${opts.image.split("@")[0]})`);
     if (this.reconcileFails) throw new Error("stub: env-reconcile failed on the host");
     return { addedKeys: ["SANDBOX_SERVICE_TOKEN"], addedProfiles: [], profiles: "linux", unitUpdated: false };
@@ -830,6 +833,65 @@ describe("host .env reconcile before any swap (WARP-2995)", () => {
       }),
       expect.any(String),
     );
+  });
+});
+
+describe("a helper that predates reconcile-env (#2320 review blocker)", () => {
+  // The REAL runner + execFile against a stand-in helper script, so the
+  // detection is exercised on an actual non-zero exit and its stderr.
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "warp2995-helper-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  function withHelper(name: string, stderrLine: string) {
+    const script = path.join(dir, name);
+    writeFileSync(script, `#!/usr/bin/env bash\necho '${stderrLine}' >&2\nexit 1\n`, { mode: 0o755 });
+    const real = createHostComposeRunner({
+      scriptPath: script,
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: dir,
+    });
+    const runner = new FakeRunner();
+    runner.reconcileEnv = (opts) => real.reconcileEnv(opts);
+    return runner;
+  }
+
+  it.each([
+    // stage/main's helper: its parser dies on --image before dispatch.
+    ["unknown flag", "[apply-update] ERROR: unknown flag: --image"],
+    ["unknown subcommand", "[apply-update] ERROR: unknown subcommand: reconcile-env"],
+  ])("%s → logged skip, and the release still applies", async (_label, line) => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(`old-${_label.replace(" ", "-")}.sh`, line);
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(runner.calls).toContain("migrateDeploy()");
+    expect(runner.calls).not.toContain("restoreConfigs(du-1)");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_skipped", reason: "helper_unsupported" }),
+      expect.any(String),
+    );
+  });
+
+  it("a real reconcile failure from a helper that HAS the subcommand still refuses", async () => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(
+      "new-but-failing.sh",
+      "[apply-update] ERROR: env-reconcile failed on the host for du-1",
+    );
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(runner.calls).toContain("restoreConfigs(du-1)");
+    expect(runner.calls).not.toContain("migrateDeploy()");
   });
 });
 
