@@ -9,6 +9,7 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
+import { sendNotification } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -92,6 +93,7 @@ import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import { createTlsNotifier } from "./services/tls-notify.service.js";
+import { createBackupHealthCheck } from "./services/backup-health.service.js";
 import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
 import {
   createHqIssuanceClient,
@@ -176,6 +178,7 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 // WARP-2408 — the Xero minted-token cache's expiry sweep. See its cron leg.
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
+import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1046,6 +1049,12 @@ async function main() {
     );
   }
 
+  // WARP-2977 (ADR-059 §3.3) — the Security event store's two jobs: mirror
+  // warn/err network/auth ActivityRows every minute, trim to 30 days at 03:50
+  // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
+  // the ingest itself: the module toggle decides the surface, not the capture.
+  registerSecurityJobs(cronRuntime, prisma);
+
   cronRuntime.scheduleCron(
     "0 3 * * *",
     async () => {
@@ -1313,8 +1322,19 @@ async function main() {
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        notifyOwners: async (title: string, body: string) => {
+          const owners = await prisma.user.findMany({
+            where: { role: { in: ["owner", "admin"] } },
+            select: { username: true },
+          });
+          for (const { username } of owners) {
+            await sendNotification(prisma, { userId: username, kind: "system", title, body });
+          }
+        },
       }
     : null;
+  // WARP-2970 — set by a committed resume; run after listen, never awaited.
+  let otaPostCommit: (() => Promise<void>) | null = null;
 
   // onStart resume hook: if the previous orchestrator process died mid-apply,
   // this boot is either the freshly-swapped orchestrator (health-gate all +
@@ -1325,6 +1345,7 @@ async function main() {
   if (otaApplyOpts) {
     try {
       const resumed = await resumeInterruptedApply(otaApplyOpts);
+      if (resumed.outcome === "committed") otaPostCommit = resumed.startNewServices;
       if (resumed.outcome !== "nothing_to_resume") {
         logger.info(
           { event: "update.resume", outcome: resumed.outcome },
@@ -1635,6 +1656,21 @@ async function main() {
   // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
   // the setup route reads it via reissueTlsNow() (a no-op until this runs).
   initTlsReissueHook(() => tlsIssuance.runOnce());
+
+  // WARP-1405 — backups can no longer fail silently. The host backup writes an
+  // explicit status file on every exit; this hourly check turns "no success in
+  // 48 h" or "repository no longer opens with this box's key" into ONE owner +
+  // admin notification per outage (deduped on NotificationLog, like
+  // tls-notify). lockKey: one replica per tick. Errors propagate to safeRun so
+  // the cron canary sees them.
+  const backupHealthCheck = createBackupHealthCheck({ prisma });
+  cronRuntime.scheduleCron(
+    "20 * * * *",
+    async () => {
+      await backupHealthCheck.runOnce();
+    },
+    { lockKey: "droplet:backup-health" },
+  );
   // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
   // reflash gets its publicly-trusted cert within seconds instead of waiting up
   // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
@@ -1895,6 +1931,8 @@ async function main() {
   attachWsBridge(server);
   server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);
+    // Never throws (it logs + notifies on its own failure).
+    if (otaPostCommit) void otaPostCommit();
   });
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their

@@ -40,7 +40,9 @@ self.addEventListener("push", (event) => {
     badge: "/icon.svg",
     tag: payload.tag,
     image: payload.imageUrl,
-    data: { url: payload.url || "/cameras", ...(payload.data || {}) },
+    // WARP-2909 — `url` LAST so a `data.url` can never override the link the
+    // box validated (the box also refuses a `data.url` key outright).
+    data: { ...(payload.data || {}), url: payload.url || "/cameras" },
     // Keep the notification in the tray until dismissed — security
     // events are easy to miss otherwise.
     requireInteraction: false,

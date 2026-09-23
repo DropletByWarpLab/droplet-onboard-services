@@ -9,8 +9,8 @@
  *
  * SECURITY CONTRACT
  *   - Codes are HASHED AT REST. `hashClaimCode` is a keyed one-way HMAC-SHA256
- *     over the NORMALIZED code (same DEVICE_SECRET-derived approach the
- *     calendar publish token uses). The plaintext never touches the DB, so a
+ *     over the NORMALIZED code, keyed by DEVICE_SECRET (required — no
+ *     fallback, WARP-2985). The plaintext never touches the DB, so a
  *     backup / breach / hand-edit can't recover a live code. Verification
  *     re-hashes the candidate and compares hashes in CONSTANT TIME
  *     (timingSafeEqual) — no early-exit byte compare that could leak the code
@@ -33,6 +33,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import type { PrismaClient } from "@prisma/client";
+import { isWeakDeviceSecret } from "../lib/device-secret.js";
 
 /** Outcomes the route maps onto HTTP responses. A closed set — never a free
  *  string — so the route's switch is exhaustive. */
@@ -65,18 +66,19 @@ export function normalizeClaimCode(code: string): string {
 }
 
 /**
- * The HMAC key. Mirrors `routes/calendar.ts` publishToken: read
- * `DEVICE_SECRET` from the environment; in production an unset secret is a hard
- * error (every hash would be derivable from a known literal); in dev/test fall
- * back to a deterministic placeholder so a seeded fixture hash is stable.
+ * The HMAC key: `DEVICE_SECRET`, required in EVERY environment (WARP-2985).
+ * There is deliberately no fallback — a literal key would make every stored
+ * hash computable offline from this repo, and the orchestrator never sets
+ * NODE_ENV on a box, so a "dev-only" branch is live in the field. A missing or
+ * publicly-known value (`isWeakDeviceSecret`) throws; callers already fail
+ * closed on a throw (the claim routes 500, the lid-display refresh logs).
  */
 function claimHmacKey(): string {
   const key = process.env.DEVICE_SECRET;
-  if (key) return key;
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("DEVICE_SECRET must be set to hash claim codes");
+  if (isWeakDeviceSecret(key)) {
+    throw new Error("DEVICE_SECRET must be set to a per-device value to hash claim codes");
   }
-  return "dev-only-not-secure";
+  return key as string;
 }
 
 /**

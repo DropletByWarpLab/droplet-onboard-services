@@ -316,7 +316,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 }}
                 placeholder="Alice"
                 maxLength={40}
-                className="flex-1 px-3 py-2 outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                className="flex-1 px-3 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",

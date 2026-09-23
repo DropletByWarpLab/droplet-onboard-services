@@ -78,13 +78,13 @@ describe("Files no longer offers Drives", () => {
     const hrefs = filesChildren().map((c) => c.href);
     expect(hrefs).not.toContain("/files/drives");
     // …and the rest of the sub-nav is untouched.
+    // WARP-2966 re-cut the rest of the sub-nav to three places: the "All
+    // files" row repeated the parent href, Favorites is a filter reached from
+    // the browser's toolbar, and Sync devices left Files for Settings.
     expect(hrefs).toEqual([
-      "/files",
       "/files/recents",
-      "/files/favorites",
       "/files/shared",
       "/files/trash",
-      "/files/devices",
     ]);
   });
 

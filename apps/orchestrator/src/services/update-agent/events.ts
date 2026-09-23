@@ -69,7 +69,7 @@ export const UPDATE_EVENTS = {
   "update.apply_started": "apply",
   /** info — a recreate batch landed (services + release/previous target). */
   "update.services_recreated": "apply",
-  /** info — a health gate passed (phase: sidecars | post_swap | rollback). */
+  /** info — a health gate passed (phase: sidecars | post_swap | rollback | post_commit_start). */
   "update.health_gate_passed": "apply",
   /** warn — a health gate FAILED; names the first unhealthy service. */
   "update.health_gate_failed": "apply",

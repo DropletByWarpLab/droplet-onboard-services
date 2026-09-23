@@ -619,6 +619,70 @@ export interface Department {
    *  batch lookup for the whole list). Null on any read failure or before
    *  discovery — never a fabricated 0. */
   usedBytes: string | null;
+  /**
+   * WARP-2976 (ADR-059 §2.2) — the row's OWN profile summary. `null` is a
+   * real state: the department is not set up yet, and the UI says so rather
+   * than guessing a template from the name. Optional because the key is
+   * absent (not null) on rows the server did not load it for — team
+   * summaries inside a detail read, or an orchestrator older than P1 — and
+   * absent must never be read as "not set up".
+   */
+  profile?: DepartmentProfileSummary | null;
+}
+
+// ── WARP-2976 (ADR-059 P1): department profiles ──
+
+/** The seven templates. A template is data — default nav hrefs, default home
+ *  widgets and a headline figure (`lib/departments/templates.ts`). */
+export type DepartmentTemplate =
+  | "security"
+  | "sales"
+  | "finance"
+  | "operations"
+  | "front_desk"
+  | "it"
+  | "custom";
+
+export type DepartmentWidgetSize = "s" | "m" | "l";
+
+/** One tile on a department home. `widget` is validated for SHAPE only on the
+ *  server; the dashboard skips an id its widget registry does not know. */
+export interface DepartmentHomeWidget {
+  widget: string;
+  size: DepartmentWidgetSize;
+}
+
+/** What GET /api/departments carries per row: enough to label the switcher. */
+export interface DepartmentProfileSummary {
+  template: DepartmentTemplate;
+  /** A lucide icon name (kebab-case); unknown names render a fallback glyph. */
+  icon: string;
+}
+
+/** The full profile — GET/PUT /api/departments/:id/profile. It ARRANGES what a
+ *  department shows; it grants nothing (ADR-059 §2.5). */
+export interface DepartmentProfile extends DepartmentProfileSummary {
+  departmentId: string;
+  /** Ordered nav hrefs. An href that is not in NAV_GROUPS never renders. */
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface DepartmentProfileResponse {
+  profile: DepartmentProfile | null;
+  /** Set for a TEAM: the parent department whose profile this is. */
+  inheritedFrom: string | null;
+  /** Owner/admin, or a manager of this department (or of its parent). */
+  canEdit: boolean;
+}
+
+export interface PutDepartmentProfilePayload {
+  template: DepartmentTemplate;
+  icon: string;
+  navHrefs: string[];
+  homeWidgets: DepartmentHomeWidget[];
 }
 
 export type DepartmentSyncState = "pending" | "synced" | "failed" | "removing";
@@ -1364,7 +1428,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-2977 — the Security command center (ADR-059). */
+  | "security";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -2855,6 +2921,26 @@ export interface ScheduleEvent {
 // from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
 // orchestrator's declared tool domains; it arrives as a string so the
 // dashboard never has to stay in lockstep with the registry's union.
+/**
+ * WARP-2969 — whether a chat turn can reach this tool at all.
+ *
+ * `excluded` is the chat-scope policy list (`EXCLUDED_FROM_CHAT_TOOLS`),
+ * which withholds a tool from ASKING while leaving it callable from its own
+ * screen or by an MCP client. It is "not by asking", never "unavailable".
+ *
+ * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
+ * not applied to the chat pool for an owner or anybody holding no AccessRole,
+ * so a "Module off" chip would have been a confident false statement on every
+ * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ *
+ * The per-person axes (role grants, off-LAN withholding, turn relevance) need
+ * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
+ * inspector instead.
+ */
+export interface ToolReach {
+  chat: "allowed" | "excluded";
+}
+
 export interface ToolCatalogEntry {
   name: string;
   /** Agent-facing description from the registry (may contain jargon). */
@@ -2864,6 +2950,14 @@ export interface ToolCatalogEntry {
   domain: string;
   requiresWrite: boolean;
   requiresConfirmation: boolean;
+  /**
+   * WARP-2969. Optional because the field is additive and an orchestrator
+   * from before it shipped answers without one — absence means "no evidence
+   * this is withheld", which is the pre-WARP-2969 behaviour, not "withheld".
+   * Read it through `reachableInChat` / `reachNote` (lib/tool-domains), never
+   * by hand, so both surfaces agree on what absence means.
+   */
+  reach?: ToolReach;
 }
 
 // ── WARP-2823: the admin console's prompt + tool inspector ────────────────
@@ -3176,4 +3270,47 @@ export interface RoutineSchedule {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
+
+/** Mirrors the orchestrator's SecurityEventKind enum. */
+export type SecurityEventKind =
+  | "detection"
+  | "detection_low"
+  | "camera_offline"
+  | "camera_online"
+  | "source_offline"
+  | "source_online"
+  | "threat";
+
+export interface SecurityEvent {
+  /** BigInt id, serialised as a string. */
+  id: string;
+  source: "frigate" | "frigate_status" | "activity_mirror";
+  kind: SecurityEventKind;
+  severity: "info" | "notice" | "alert";
+  /** Frigate camera name; null for rows no camera produced. */
+  camera: string | null;
+  labels: string[];
+  cameraZones: string[];
+  score: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  summary: string;
+  /** Set on detections — the clip/thumbnail routes key on it. */
+  frigateEventId: string | null;
+}
+
+export interface SecurityEventsPage {
+  events: SecurityEvent[];
+  nextCursor: string | null;
+}
+
+/** One line of the feed header: what the feed is listening to, and whether it is reporting. */
+export interface SecurityHealthRow {
+  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  state: "ok" | "quiet" | "down" | "not_configured";
+  detail: string;
+  lastSeenAt: string | null;
 }

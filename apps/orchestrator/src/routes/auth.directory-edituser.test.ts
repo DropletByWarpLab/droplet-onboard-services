@@ -118,9 +118,13 @@ function createPrismaMock(seed: any[] = []) {
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
+          // WARP-2858: the route resolves via the shared handle resolver —
+          // nextcloudUsername first, then username. Each clause is gated on
+          // its own key so a nextcloudUsername probe never matches a null.
           (u) =>
-            where.nextcloudUsername !== undefined &&
-            u.nextcloudUsername === where.nextcloudUsername,
+            (where.nextcloudUsername !== undefined &&
+              u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.username !== undefined && u.username === where.username),
         ) ?? null
       );
     }),
@@ -134,7 +138,8 @@ function createPrismaMock(seed: any[] = []) {
       for (let i = 0; i < users.length; i += 1) {
         const u = users[i];
         const match =
-          ((where.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
+          ((where.id !== undefined && u.id === where.id) ||
+            (where.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where.username !== undefined && u.username === where.username)) &&
           (where.role === undefined || u.role === where.role);
         if (match) {
@@ -781,7 +786,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 review L2: the write pins 
     // And the write really was attempted with the pin.
     expect(prisma.user.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { nextcloudUsername: "alice", role: "family" },
+        where: { id: "u-alice", role: "family" }, // WARP-2858: pinned by the resolved id
       }),
     );
   });
@@ -848,7 +853,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 review L2: the write pins 
     expect(res.status).toBe(200);
     expect(prisma.user.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { nextcloudUsername: "alice", role: "family" },
+        where: { id: "u-alice", role: "family" }, // WARP-2858: pinned by the resolved id
       }),
     );
   });

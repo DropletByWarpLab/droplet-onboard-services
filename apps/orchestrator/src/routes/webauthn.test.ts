@@ -68,6 +68,13 @@ vi.mock("../services/webauthn-challenge.service.js", () => ({
   WEBAUTHN_CHALLENGE_TTL_MS: 300000,
 }));
 
+// The per-IP limiters would share one bucket across every supertest call in
+// this file (all from 127.0.0.1); throttling has its own tests.
+vi.mock("../middleware/rate-limit.js", () => {
+  const passThrough = (_req: unknown, _res: unknown, next: () => void) => next();
+  return { authRateLimit: passThrough, sensitiveRateLimit: passThrough, standardRateLimit: passThrough };
+});
+
 const recordActivity = vi.fn().mockResolvedValue(undefined);
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: (...a: unknown[]) => recordActivity(...a),
@@ -86,6 +93,8 @@ interface CredentialRow {
   publicKey: Buffer;
   counter: number;
   transports: string | null;
+  name?: string | null;
+  rpId?: string | null;
   createdAt: Date;
   lastUsedAt: Date | null;
 }
@@ -135,6 +144,22 @@ function createPrismaMock(opts: { users?: UserRow[]; credentials?: CredentialRow
         Object.assign(row, data);
         return row;
       }),
+      updateMany: vi.fn(
+        async ({ where, data }: { where: { id: string; userId: string }; data: Partial<CredentialRow> }) => {
+          const rows = credentials.filter((c) => c.id === where.id && c.userId === where.userId);
+          rows.forEach((r) => Object.assign(r, data));
+          return { count: rows.length };
+        },
+      ),
+      deleteMany: vi.fn(async ({ where }: { where: { id: string; userId: string } }) => {
+        const before = credentials.length;
+        for (let i = credentials.length - 1; i >= 0; i--) {
+          if (credentials[i]!.id === where.id && credentials[i]!.userId === where.userId) {
+            credentials.splice(i, 1);
+          }
+        }
+        return { count: before - credentials.length };
+      }),
     },
   } as unknown as import("@prisma/client").PrismaClient;
   return { prisma, users, credentials };
@@ -148,11 +173,20 @@ const stefan: UserRow = {
   role: "owner",
 };
 
+/** supertest sends `Host: 127.0.0.1:<port>` — an IP, which the routes refuse
+ *  as an RP ID (WARP-1157). Stand in the box's LAN name unless a test sets
+ *  x-forwarded-host itself to exercise that refusal. */
+const lanHost: express.RequestHandler = (req, _res, next) => {
+  req.headers.host = "droplet-ai.local";
+  next();
+};
+
 /** Build an app with the PUBLIC webauthn router (no auth middleware). */
 function buildPublicApp(prisma: import("@prisma/client").PrismaClient) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
+  app.use(lanHost);
   app.use("/api", createPublicWebAuthnRouter(prisma));
   return app;
 }
@@ -166,6 +200,7 @@ function buildProtectedApp(
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
+  app.use(lanHost);
   app.use((req, _res, next) => {
     if (user) (req as unknown as { user: typeof user }).user = user;
     next();
@@ -585,5 +620,209 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     // address, never the attacker-claimed 6.6.6.6.
     expect(activity.refs.ip).toBe("::ffff:127.0.0.1");
     expect(activity.sub).not.toContain("6.6.6.6");
+  });
+});
+
+// =====================================================================
+// WARP-1157 — secure-origin refusal, coded errors, and the passkey list.
+// =====================================================================
+describe("WARP-1157 — honest refusals and coded errors", () => {
+  const liveChallenge = {
+    id: "c-1",
+    challenge: "mock-challenge-aaaaaaaaaaaaaaaaaaaaaa",
+    type: "REGISTRATION",
+    userId: "u-uuid-stefan-7777",
+    expiresAt: new Date(Date.now() + 60000),
+    createdAt: new Date(),
+  };
+  const verifiedAttestation = {
+    verified: true,
+    registrationInfo: {
+      credential: { id: "cred-id-b64url", publicKey: new Uint8Array([1]), counter: 0, transports: [] },
+    },
+  };
+
+  it("register/options on a raw IP → 400 origin_unsupported, no challenge minted", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/options")
+      .set("X-Forwarded-Host", "192.168.9.195");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("origin_unsupported");
+    expect(createChallenge).not.toHaveBeenCalled();
+  });
+
+  it("authenticate/options on an IPv6 literal → 400 origin_unsupported", async () => {
+    const { prisma } = createPrismaMock();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("X-Forwarded-Host", "[fe80::1]:443");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("origin_unsupported");
+    expect(createChallenge).not.toHaveBeenCalled();
+  });
+
+  it("register/verify records the RP ID the passkey was made on", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan] });
+    consumeChallenge.mockResolvedValue(liveChallenge);
+    verifyRegistrationResponse.mockResolvedValue(verifiedAttestation);
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(200);
+    expect(credentials[0]!.rpId).toBe("droplet-ai.local");
+  });
+
+  it("register/verify: expired challenge carries code challenge_expired", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    consumeChallenge.mockResolvedValue(null);
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.body.code).toBe("challenge_expired");
+  });
+
+  it("register/verify: failed attestation carries code verification_failed", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    consumeChallenge.mockResolvedValue(liveChallenge);
+    verifyRegistrationResponse.mockRejectedValue(new Error("Unexpected origin"));
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("verification_failed");
+  });
+
+  it("register/verify: duplicate credential id → 409 already_registered", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    consumeChallenge.mockResolvedValue(liveChallenge);
+    verifyRegistrationResponse.mockResolvedValue(verifiedAttestation);
+    (prisma.webAuthnCredential.create as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("already_registered");
+  });
+
+  it("register/verify: a database failure → 500 storage_failed, and no audit row", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan] });
+    consumeChallenge.mockResolvedValue(liveChallenge);
+    verifyRegistrationResponse.mockResolvedValue(verifiedAttestation);
+    (prisma.webAuthnCredential.create as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("connection terminated"),
+    );
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .post("/api/auth/webauthn/register/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("storage_failed");
+    expect(JSON.stringify(res.body)).not.toMatch(/connection terminated/);
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-1157 — the signed-in user's passkey list", () => {
+  const other: UserRow = { ...stefan, id: "u-other", username: "mallory" };
+  function seed(): CredentialRow[] {
+    return [
+      {
+        id: "row-mine",
+        userId: stefan.id,
+        credentialId: "secret-cred-id",
+        publicKey: Buffer.from([9, 9, 9]),
+        counter: 3,
+        transports: "internal,hybrid",
+        name: null,
+        rpId: "droplet-ai.local",
+        createdAt: new Date("2026-09-01T00:00:00Z"),
+        lastUsedAt: null,
+      },
+      {
+        id: "row-theirs",
+        userId: other.id,
+        credentialId: "their-cred-id",
+        publicKey: Buffer.from([7]),
+        counter: 0,
+        transports: null,
+        name: "Their key",
+        rpId: "droplet-ai.local",
+        createdAt: new Date(),
+        lastUsedAt: null,
+      },
+    ];
+  }
+
+  it("GET lists only my passkeys, without public keys or credential ids", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan, other], credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, stefan)).get("/api/auth/webauthn/credentials");
+    expect(res.status).toBe(200);
+    expect(res.body.credentials).toHaveLength(1);
+    expect(res.body.credentials[0]).toMatchObject({
+      id: "row-mine",
+      rpId: "droplet-ai.local",
+      transports: ["internal", "hybrid"],
+    });
+    // The route asks Prisma for a projection that omits the key material.
+    const call = (prisma.webAuthnCredential.findMany as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(call.select.publicKey).toBeUndefined();
+    expect(call.select.credentialId).toBeUndefined();
+  });
+
+  it("GET requires a signed-in user", async () => {
+    const { prisma } = createPrismaMock({ credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, null)).get("/api/auth/webauthn/credentials");
+    expect(res.status).toBe(401);
+  });
+
+  it("PATCH renames my passkey and audits it", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan], credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .patch("/api/auth/webauthn/credentials/row-mine")
+      .send({ name: "  Work laptop  " });
+    expect(res.status).toBe(200);
+    expect(credentials.find((c) => c.id === "row-mine")!.name).toBe("Work laptop");
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ refs: expect.objectContaining({ outcome: "passkey_renamed" }) }),
+    );
+  });
+
+  it("PATCH on someone else's passkey → 404 and nothing changes", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan, other], credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, stefan))
+      .patch("/api/auth/webauthn/credentials/row-theirs")
+      .send({ name: "pwned" });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe("not_found");
+    expect(credentials.find((c) => c.id === "row-theirs")!.name).toBe("Their key");
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("PATCH rejects an empty or over-long name", async () => {
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: seed() });
+    const app = buildProtectedApp(prisma, stefan);
+    expect((await request(app).patch("/api/auth/webauthn/credentials/row-mine").send({ name: "   " })).status).toBe(400);
+    expect(
+      (await request(app).patch("/api/auth/webauthn/credentials/row-mine").send({ name: "x".repeat(65) })).status,
+    ).toBe(400);
+  });
+
+  it("DELETE removes my passkey and audits it", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan], credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, stefan)).delete("/api/auth/webauthn/credentials/row-mine");
+    expect(res.status).toBe(204);
+    expect(credentials.map((c) => c.id)).toEqual(["row-theirs"]);
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ refs: expect.objectContaining({ outcome: "passkey_removed" }) }),
+    );
+  });
+
+  it("DELETE on someone else's passkey → 404 and it survives", async () => {
+    const { prisma, credentials } = createPrismaMock({ users: [stefan, other], credentials: seed() });
+    const res = await request(buildProtectedApp(prisma, stefan)).delete("/api/auth/webauthn/credentials/row-theirs");
+    expect(res.status).toBe(404);
+    expect(credentials).toHaveLength(2);
   });
 });

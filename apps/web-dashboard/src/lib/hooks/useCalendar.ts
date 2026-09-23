@@ -124,8 +124,33 @@ export async function syncSource(id: string) {
   );
 }
 
-export async function getPublishUrl() {
-  return apiFetch<{ url: string }>("/api/calendar/publish-token", {
+// WARP-2767 — the feed link is a stored credential: the server keeps only a
+// hash, so status never carries a URL. A URL comes back exactly once, from
+// rotate; revoke turns the link off with no replacement.
+export interface PublishLinkStatus {
+  state: "active" | "none";
+  createdAt: string | null;
+  expiresAt: string | null;
+}
+
+export function usePublishLinkStatus() {
+  const { data, mutate } = useSWR<PublishLinkStatus>(
+    "/api/calendar/publish-token",
+    (u: string) => apiFetch<PublishLinkStatus>(u, { credentials: "same-origin" }),
+  );
+  return { status: data, refresh: mutate };
+}
+
+export async function rotatePublishLink() {
+  return apiFetch<{ url: string; expiresAt: string }>("/api/calendar/publish/rotate", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+}
+
+export async function revokePublishLink() {
+  return apiFetch<{ revoked: number }>("/api/calendar/publish/revoke", {
+    method: "POST",
     credentials: "same-origin",
   });
 }
