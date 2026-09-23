@@ -143,7 +143,7 @@ export async function ncUploadFile(
   filename: string,
   buffer: Buffer,
   options?: { ifNoneMatch?: boolean }
-): Promise<void> {
+): Promise<NcWriteOutcome> {
   const url = webdavUrl(user, `${path}/${filename}`);
   const headers: Record<string, string> = {
     ...davHeaders(token),
@@ -168,6 +168,103 @@ export async function ncUploadFile(
   }
   if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
     throw new Error(`WebDAV PUT failed: ${resp.status}`);
+  }
+  return resp.status === 204 ? "replaced" : "created";
+}
+
+/**
+ * WARP-2096 — what a write did to its target. WebDAV answers 201 Created for
+ * a new resource and 204 No Content when it replaced one (RFC 4918 §9.9.4 /
+ * RFC 9110 §9.3.4), so the caller can REPORT an overwrite instead of it
+ * reading as a plain success.
+ */
+export type NcWriteOutcome = "created" | "replaced";
+
+// ── Streamed uploads (WARP-2093) ──
+//
+// Nextcloud's upload namespace (`/remote.php/dav/uploads/<user>/<id>/`) is
+// the same one its desktop client uses for chunked uploads: MKCOL a staging
+// collection, PUT the bytes into it, then MOVE its virtual `.file` onto the
+// destination. Verified against the pinned nextcloud:29-apache image:
+//   MKCOL → 201; PUT (chunked, no Content-Length) → 201;
+//   MOVE .file, Overwrite: F → 201 new / 412 target exists (staging KEPT, so
+//     the caller can retry under another name without re-sending bytes);
+//   MOVE .file, Overwrite: T → 204 replaced; staging dir is gone after MOVE;
+//   DELETE staging → 204, no trashbin entry.
+// Staging keeps a half-sent file out of the user's tree entirely: a stream
+// that dies midway is never MOVEd, so nothing partial can read as complete.
+// One PUT per file, so a file is bounded by the image's APACHE_BODY_LIMIT
+// (1 GiB) — the reason config.MAX_UPLOAD_SIZE_MB defaults to 1024.
+
+function uploadsUrl(user: string, uploadId: string, leaf = ""): string {
+  return `${config.NEXTCLOUD_URL}/remote.php/dav/uploads/${encodeURIComponent(user)}/${encodeURIComponent(uploadId)}${leaf}`;
+}
+
+/**
+ * Stream `body` into a fresh staging collection. Never buffers: the body is
+ * handed to fetch as a stream (`duplex: "half"`), so backpressure flows from
+ * Nextcloud back to whoever feeds `body`. If `body` errors (size cap hit,
+ * client aborted), fetch rejects and the PUT never completes.
+ */
+export async function ncStageUpload(
+  token: string,
+  user: string,
+  uploadId: string,
+  body: NodeJS.ReadableStream,
+): Promise<void> {
+  const mk = await fetch(uploadsUrl(user, uploadId), {
+    method: "MKCOL",
+    headers: davHeaders(token),
+  });
+  if (!mk.ok) throw new Error(`WebDAV MKCOL (upload staging) failed: ${mk.status}`);
+  const resp = await fetch(uploadsUrl(user, uploadId, "/00000"), {
+    method: "PUT",
+    headers: { ...davHeaders(token), "Content-Type": "application/octet-stream" },
+    // Node's fetch takes a Node stream as an async iterable body.
+    body: body as unknown as BodyInit,
+    duplex: "half",
+  } as RequestInit);
+  if (!resp.ok) throw new Error(`WebDAV PUT (upload staging) failed: ${resp.status}`);
+}
+
+/**
+ * MOVE a staged upload onto `destPath`. `overwrite: false` sends
+ * `Overwrite: F`, and a taken name throws {@link NcPreconditionFailedError}
+ * with the staging collection intact for a retry.
+ */
+export async function ncCommitUpload(
+  token: string,
+  user: string,
+  uploadId: string,
+  destPath: string,
+  overwrite: boolean,
+): Promise<NcWriteOutcome> {
+  const resp = await fetch(uploadsUrl(user, uploadId, "/.file"), {
+    method: "MOVE",
+    headers: {
+      ...davHeaders(token),
+      Destination: webdavUrl(user, destPath),
+      Overwrite: overwrite ? "T" : "F",
+    },
+  });
+  if (!overwrite && resp.status === 412) {
+    throw new NcPreconditionFailedError("WebDAV MOVE failed: 412 (target already exists)");
+  }
+  if (!resp.ok) throw new Error(`WebDAV MOVE (upload commit) failed: ${resp.status}`);
+  return resp.status === 204 ? "replaced" : "created";
+}
+
+/** Best-effort removal of a staging collection. Never throws. */
+export async function ncDiscardUpload(
+  token: string,
+  user: string,
+  uploadId: string,
+): Promise<void> {
+  try {
+    await fetch(uploadsUrl(user, uploadId), { method: "DELETE", headers: davHeaders(token) });
+  } catch (err) {
+    // Nextcloud's own UploadCleanup job expires abandoned staging dirs.
+    logger.warn({ err, uploadId }, "upload staging cleanup failed (NC expires it later)");
   }
 }
 

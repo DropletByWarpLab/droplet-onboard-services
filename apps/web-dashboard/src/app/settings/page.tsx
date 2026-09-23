@@ -29,6 +29,7 @@ import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
+import { BackupRows } from "@/components/settings/BackupRows";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -500,6 +501,9 @@ export default function SettingsPage() {
                 the one action when renewal is failing). Owner/admin only;
                 reads the state row the daily tick maintains, no new poll. */}
             <CertificateRows />
+            {/* WARP-1405 — backup health: last success, and the reason
+                when backups have stopped. Owner/admin only. */}
+            <BackupRows />
           </div>
         </div>
 

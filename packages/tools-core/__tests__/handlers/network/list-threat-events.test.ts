@@ -3,13 +3,33 @@
  *
  * Role-gated (owner/admin only, WARP-845 ladder) read over the
  * activity log's `network` + `auth` kinds, curated to security-relevant
- * severities (warn/error) — including the WARP-268 egress-anomaly rows.
+ * severities (warn/err) — including the WARP-268 egress-anomaly rows.
  * Tier-1 read.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  expectTypeOf,
+  vi,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import type { Mock } from "vitest";
-import listThreatEvents from "../../../src/handlers/network/list-threat-events.js";
+import type { ActivitySeverity as PrismaActivitySeverity } from "@prisma/client";
+import listThreatEvents, {
+  THREAT_SEVERITIES,
+  type ActivitySeverity,
+} from "../../../src/handlers/network/list-threat-events.js";
 import type { Role, ToolContext } from "../../../src/types.js";
+
+/**
+ * WARP-2999: the ActivitySeverity wire vocabulary, spelled out so the
+ * runtime guard below needs no generated Prisma client. The type-level
+ * test pins it to the generated enum, so this list cannot drift from
+ * schema.prisma unnoticed.
+ */
+const ACTIVITY_SEVERITIES = ["ok", "warn", "err", "info"] as const;
 
 function ctxWith(
   orchestratorGet: Mock,
@@ -76,7 +96,7 @@ const AUTH_ITEMS = [
   {
     id: "7",
     at: "2026-07-20T11:30:00.000Z",
-    severity: "error",
+    severity: "err",
     sourceIcon: "shield-off",
     what: "Failed login for admin",
     sub: "POST /api/auth/login",
@@ -103,6 +123,8 @@ const AUTH_ITEMS = [
 function routedGet(opts?: {
   networkStatus?: number;
   authStatus?: number;
+  networkItems?: readonly unknown[];
+  authItems?: readonly unknown[];
 }): Mock {
   return vi
     .fn()
@@ -111,12 +133,18 @@ function routedGet(opts?: {
         const kind = o?.params?.kind;
         if (kind === "network") {
           return new Response(
-            JSON.stringify({ items: NETWORK_ITEMS, nextCursor: null }),
+            JSON.stringify({
+              items: opts?.networkItems ?? NETWORK_ITEMS,
+              nextCursor: null,
+            }),
             { status: opts?.networkStatus ?? 200 },
           );
         }
         return new Response(
-          JSON.stringify({ items: AUTH_ITEMS, nextCursor: null }),
+          JSON.stringify({
+            items: opts?.authItems ?? AUTH_ITEMS,
+            nextCursor: null,
+          }),
           { status: opts?.authStatus ?? 200 },
         );
       },
@@ -166,7 +194,7 @@ describe("list_threat_events", () => {
     });
   });
 
-  it("queries both kinds, curates to warn/error, merges sorted by time desc", async () => {
+  it("queries both kinds, curates to warn/err, merges sorted by time desc", async () => {
     const get = routedGet();
     const res = await listThreatEvents.handler({}, ctxWith(get, "admin"));
 
@@ -189,7 +217,7 @@ describe("list_threat_events", () => {
           {
             at: "2026-07-20T11:30:00.000Z",
             kind: "auth",
-            severity: "error",
+            severity: "err",
             summary: "Failed login for admin",
             sub: "POST /api/auth/login",
             refs: { reason: "bad-password" },
@@ -290,6 +318,48 @@ describe("list_threat_events", () => {
     );
     expectError(res, "INVALID_ARGS");
     expect(get).not.toHaveBeenCalled();
+  });
+});
+
+describe("list_threat_events — severity vocabulary (WARP-2999)", () => {
+  it("the vocabulary list IS the generated Prisma ActivitySeverity enum", () => {
+    // Type-level only: checked by `typecheck:tests` (CI runs it after
+    // `db:generate`), a no-op under vitest.
+    expectTypeOf<
+      (typeof ACTIVITY_SEVERITIES)[number]
+    >().toEqualTypeOf<PrismaActivitySeverity>();
+    expectTypeOf<ActivitySeverity>().toEqualTypeOf<PrismaActivitySeverity>();
+  });
+
+  it("THREAT_SEVERITIES holds only ActivitySeverity values", () => {
+    // "error" was here and matched no row, so every err row was dropped.
+    expect(THREAT_SEVERITIES.size).toBeGreaterThan(0);
+    for (const severity of THREAT_SEVERITIES) {
+      expect(ACTIVITY_SEVERITIES).toContain(severity);
+    }
+  });
+
+  it("from a feed carrying every severity, returns exactly the warn and err rows", async () => {
+    // One row per vocabulary value, a minute apart.
+    const items = ACTIVITY_SEVERITIES.map((severity, i) => ({
+      id: String(i),
+      at: `2026-07-20T11:0${i}:00.000Z`,
+      severity,
+      sourceIcon: "shield-off",
+      what: `${severity} row`,
+      sub: null,
+      kind: "auth",
+      refs: null,
+      actorType: "system",
+      actorId: null,
+    }));
+    const get = routedGet({ networkItems: [], authItems: items });
+    const res = await listThreatEvents.handler({}, ctxWith(get, "owner"));
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const data = res.data as { events: Array<{ severity: string }> };
+      expect(data.events.map((e) => e.severity)).toEqual(["err", "warn"]);
+    }
   });
 });
 

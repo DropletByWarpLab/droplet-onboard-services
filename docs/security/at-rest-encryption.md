@@ -48,6 +48,7 @@ source of truth).
 |---|---|
 | Postgres data dir | docker volume under `/data/docker` (LUKS data LV) |
 | Nextcloud data dir | docker volume under `/data/docker` |
+| Redis `cache` AOF (session records, refresh denylist, lockout counters, **Nextcloud app-passwords in plaintext**, WARP-1401) | docker volume `cache-data` under `/data/docker`; wiped by factory reset, never backed up |
 | file-indexer / brain pgvector | docker volume under `/data/docker` |
 | Brain chunk text (chat attachments) | **column-level** AES-256-GCM under per-document DEKs (WARP-242, below) — on top of the LUKS layer |
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |

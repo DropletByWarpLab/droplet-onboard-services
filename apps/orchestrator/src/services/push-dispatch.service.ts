@@ -31,6 +31,7 @@ import { createLogger } from "../lib/logger.js";
 import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
 import { webPushGate } from "./off-lan-gate.service.js";
 import { recordActivity } from "./activity.singleton.js";
+import { canAccessCamera } from "./camera-access.service.js";
 
 const logger = createLogger("push-dispatch");
 
@@ -368,6 +369,20 @@ export async function dispatchDetectionEvent(
   });
   if (interestedPrefs.length === 0) return;
 
+  // WARP-2982: a pref is not access. Re-check each recipient against the
+  // per-camera grants at send time, so a person whose access was revoked
+  // (or whose role dropped below owner/admin) stops being told what this
+  // camera sees. Fail closed per user: an unknown user gets nothing.
+  const users = await prisma.user.findMany({
+    where: { id: { in: interestedPrefs.map((p) => p.userId) } },
+    select: { id: true, role: true },
+  });
+  const allowed: string[] = [];
+  for (const u of users) {
+    if (await canAccessCamera(prisma, u, ev.cameraName)) allowed.push(u.id);
+  }
+  if (allowed.length === 0) return;
+
   const cameraDisplay = camera.displayName || ev.cameraName.replace(/_/g, " ");
   const payload: PushPayload = {
     title: `${ev.label[0].toUpperCase()}${ev.label.slice(1)} detected`,
@@ -381,9 +396,9 @@ export async function dispatchDetectionEvent(
   // Fan out per-user. We don't bother awaiting individual results —
   // dispatchToUser handles its own pruning, and the SSE handler that
   // called us is already fire-and-forget.
-  for (const pref of interestedPrefs) {
-    void dispatchToUser(prisma, pref.userId, payload).catch((err) =>
-      logger.warn({ err, userId: pref.userId }, "push dispatch user-failed"),
+  for (const userId of allowed) {
+    void dispatchToUser(prisma, userId, payload).catch((err) =>
+      logger.warn({ err, userId }, "push dispatch user-failed"),
     );
   }
 }

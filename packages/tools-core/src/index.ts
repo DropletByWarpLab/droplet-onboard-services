@@ -17,7 +17,12 @@ export {
   type ToolCatalogEntry,
   type ToolDomain,
 } from "./catalog.js";
-export { confirmationRequired, isConfirmationResponse, passThroughConfirmation } from "./confirmation.js";
+export {
+  confirmationRequired,
+  isConfirmationResponse,
+  passThroughConfirmation,
+  redactConfirmationTokensForModel,
+} from "./confirmation.js";
 // WARP-2821 — the ONE corpus-visibility rule, called by the orchestrator's
 // Files search route and by the mcp-server's chunk-owner resolver. Two copies
 // of this disagreed once, and every shared document was invisible to the
