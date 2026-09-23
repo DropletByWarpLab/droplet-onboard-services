@@ -1294,6 +1294,32 @@ export interface RosterUser extends AuthUser {
    *  orchestrator older than this field sends nothing, and `undefined` must
    *  read as enabled rather than painting the whole roster deactivated. */
   enabled?: boolean;
+  /** WARP-2984 — where the account comes from. `local`/`sso`/`scim` read the
+   *  local row's explicit provisionSource; `nextcloud` is a Nextcloud user
+   *  with no local row. Optional: an older orchestrator sends nothing, and the
+   *  UI then renders no source chip rather than guessing. */
+  source?: RosterSource;
+  /** WARP-2984 — false when the account has no Nextcloud user, i.e. no file
+   *  storage: storage/upload limits don't apply. Optional for the same
+   *  reason; only an explicit false hides the storage controls. */
+  hasStorage?: boolean;
+}
+
+/** WARP-2984 — see RosterUser.source. */
+export type RosterSource = "local" | "sso" | "scim" | "nextcloud";
+
+/** WARP-2984 — roster chip copy per source. */
+export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
+  local: "Local",
+  sso: "SSO",
+  scim: "SCIM",
+  nextcloud: "Nextcloud only",
+};
+
+/** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set
+ *  a local password (409 SSO_MANAGED_ACCOUNT), so the UI never offers one. */
+export function isIdpManaged(u: { source?: RosterSource }): boolean {
+  return u.source === "sso" || u.source === "scim";
 }
 
 // ── WARP-217 invite types ──
