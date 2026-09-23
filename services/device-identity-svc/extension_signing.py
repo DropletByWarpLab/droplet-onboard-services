@@ -41,6 +41,10 @@ EXTENSION_KEY_USAGE = "extension"
 # Storage file for the extension key. Never "device-id.sealed".
 EXTENSION_KEY_FILE = "extension-signing.sealed"
 
+# Its mode: owner read/write only. On the mock backend it holds the private
+# key in plaintext, so it must not be readable under a permissive umask.
+EXTENSION_KEY_FILE_MODE = 0o600
+
 # A statement is a handful of short fields (ids, a semver, two git SHAs, a
 # sha256). 4 KiB is far above any legitimate one and bounds what a caller can
 # make the sidecar parse.

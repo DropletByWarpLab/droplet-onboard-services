@@ -157,7 +157,9 @@ the device-id key, and the device-id key never signs an extension.
   concurrent first promotes cannot mint two keys (a threaded test pins it).
 - **Custody on the mock backend is a plaintext PEM on the boot disk.** Same
   posture as `device-id.sealed`: the protection is the process boundary (only
-  this container mounts `/var/lib/droplet/tpm`), not a TPM. Every box ships
+  this container mounts `/var/lib/droplet/tpm`), not a TPM. The file is
+  written mode `0600` explicitly (`EXTENSION_KEY_FILE_MODE`), whatever the
+  process umask, and the mode is set before any key byte is written. Every box ships
   on the mock backend today (the real backend is the IDX-002 scaffold).
 - **The real (TPM) backend has no extension key yet.** `sign_extension`
   raises, the RPC answers `FAILED_PRECONDITION`, and promotion is a 503. It

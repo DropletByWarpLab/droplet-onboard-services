@@ -27,10 +27,25 @@ class Storage:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def write(self, name: str, data: bytes) -> None:
+    def write(self, name: str, data: bytes, *, mode: int | None = None) -> None:
+        """Atomically replace ``name`` with ``data``.
+
+        ``mode`` (e.g. 0o600 for private-key material) is applied to the tmp
+        file BEFORE any byte is written, so the content never exists on disk
+        under the process umask; os.replace keeps it on the final file. The
+        explicit chmod also narrows a stale ``.tmp`` a crashed earlier write
+        left behind, which O_CREAT alone would keep at its old mode. Without
+        ``mode`` the file gets the umask default, as before."""
         target = self.root / name
         tmp = self.root / f"{name}.tmp"
-        with tmp.open("wb") as f:
+        if mode is None:
+            f = tmp.open("wb")
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+            fd = os.open(tmp, flags, mode)
+            os.chmod(tmp, mode)
+            f = os.fdopen(fd, "wb")
+        with f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())

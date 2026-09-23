@@ -15,6 +15,8 @@ the orchestrator cannot enforce from the outside:
 Mutations each test is written to catch are named inline.
 """
 import json
+import os
+import stat
 import sys
 import threading
 import time
@@ -30,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from backends.mock import MockBackend
 from extension_signing import (
     EXTENSION_KEY_FILE,
+    EXTENSION_KEY_FILE_MODE,
     EXTENSION_KEY_USAGE,
     EXTENSION_STATEMENT_KEYS,
     EXTENSION_STATEMENT_PREFIX,
@@ -40,6 +43,7 @@ from extension_signing import (
 )
 from grpc_generated import device_identity_pb2 as pb
 from grpc_server import DeviceIdentityServicer
+from storage import Storage
 
 
 def _statement(**overrides) -> bytes:
@@ -301,6 +305,42 @@ def test_backend_refuses_a_non_extension_statement_itself(provisioned):
     # the extension key to sign a release statement.
     with pytest.raises(StatementRefused):
         provisioned.sign_extension(_statement(kind="release", keyUsage="release"))
+
+
+def test_extension_key_is_written_owner_only(provisioned, tmp_path, monkeypatch):
+    """Review #2312: the plaintext PKCS8 key is written with an explicit
+    0o600, not the process umask. The spy half runs on every platform; the
+    stat half needs POSIX mode bits.
+    MUTATION: drop mode= from the key write (or set it to 0o644) -> red."""
+    assert EXTENSION_KEY_FILE_MODE == 0o600
+    calls = []
+    real_write = provisioned._storage.write
+
+    def spy(name, data, **kwargs):
+        calls.append((name, kwargs.get("mode")))
+        return real_write(name, data, **kwargs)
+
+    monkeypatch.setattr(provisioned._storage, "write", spy)
+    provisioned.sign_extension(_statement())
+    assert calls == [(EXTENSION_KEY_FILE, 0o600)]
+    if os.name == "posix":
+        assert stat.S_IMODE((tmp_path / EXTENSION_KEY_FILE).stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_storage_mode_ignores_umask_and_narrows_a_stale_tmp(tmp_path):
+    # A permissive umask, and a world-readable .tmp a crashed write left.
+    stale = tmp_path / f"{EXTENSION_KEY_FILE}.tmp"
+    stale.write_bytes(b"old")
+    os.chmod(stale, 0o644)
+    old_umask = os.umask(0)
+    try:
+        Storage(tmp_path).write(EXTENSION_KEY_FILE, b"secret", mode=0o600)
+    finally:
+        os.umask(old_umask)
+    target = tmp_path / EXTENSION_KEY_FILE
+    assert target.read_bytes() == b"secret"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_key_persists_across_a_restart(provisioned, tmp_path):
