@@ -63,13 +63,12 @@ import {
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
-import { EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
+import { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
 
-export { EXTENSION_TOKEN_PREFIX, hashExtensionToken };
+export { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken };
 
 const logger = createLogger("extension-lifecycle");
 
-export const EXTENSION_SERVER_PREFIX = "ext-";
 export const EXTENSION_RECONCILE_LOCK_KEY = "droplet:extension-reconciler";
 export const EXTENSION_TICKET = "WARP-2900";
 

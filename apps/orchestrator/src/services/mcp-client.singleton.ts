@@ -27,8 +27,12 @@ import { McpClientService } from "./mcp-client.service.js";
 import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
   composeRemoteCallPolicy,
+  createRecordBackedRemoteCallPolicy,
   remoteToolClassificationCache,
 } from "./remote-tool-classification.service.js";
+import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
+import { installedExtensionIds } from "./extension-lifecycle.service.js";
+import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
 import {
   ATLASSIAN_REMOTE_SERVER_ID,
   attachAtlassianRemote,
@@ -101,26 +105,59 @@ const localClient = new McpClientService({
  */
 const remoteAllowlist = parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLIST);
 
-export const mcpClient = new McpToolMultiplexer(localClient, {
-  isServerAllowed: (serverId) => remoteAllowlist.has(serverId),
-  // WARP-2426 — the operator-owned classification record, layered over the
-  // reviewed Atlassian table: the record's `denied` wins over everything; its
-  // reviewed reads fill only the table's holes; the table's write-blocks are
-  // a floor no demotion reaches around. Read from a cache the attach path and
-  // the owner route refresh — a row the cache has not seen is "not
-  // classified", never "allowed".
-  remoteCallPolicy: composeRemoteCallPolicy({
-    lookup: remoteToolClassificationCache.lookup,
-    // `api-token` because that is the only credential a v1 box can hold: ADR-043
-    // §7 classifies Atlassian as the customer-created-credential model and the
-    // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
-    // parameter rather than an assumption so the Compass half of the auth-mode
-    // matrix is expressible and testable.
-    table: createAtlassianRemoteCallPolicy({
-      authMode: "api-token",
-      fallback: DENY_ALL_REMOTE_TOOLS,
-    }),
+/**
+ * Which server ids may attach.
+ *
+ * WARP-2900 — an `ext-<slug>` id is a promoted workshop extension, and ONLY
+ * the extension lifecycle decides it: it must be in `installedExtensionIds`
+ * (maintained from the Extension rows, never from env). The env allowlist
+ * does not reach that namespace — an operator typing `ext-foo` into
+ * REMOTE_MCP_SERVER_ALLOWLIST attaches nothing that was not promoted and
+ * installed. Every other id is the operator allowlist, exactly as before.
+ */
+export function isRemoteServerAllowed(serverId: string): boolean {
+  if (serverId.startsWith(EXTENSION_SERVER_PREFIX)) return installedExtensionIds.has(serverId);
+  return remoteAllowlist.has(serverId);
+}
+
+// WARP-2426 — the operator-owned classification record, layered over the
+// reviewed Atlassian table: the record's `denied` wins over everything; its
+// reviewed reads fill only the table's holes; the table's write-blocks are
+// a floor no demotion reaches around. Read from a cache the attach path and
+// the owner route refresh — a row the cache has not seen is "not
+// classified", never "allowed".
+const vendorRemoteCallPolicy: RemoteCallPolicy = composeRemoteCallPolicy({
+  lookup: remoteToolClassificationCache.lookup,
+  // `api-token` because that is the only credential a v1 box can hold: ADR-043
+  // §7 classifies Atlassian as the customer-created-credential model and the
+  // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
+  // parameter rather than an assumption so the Compass half of the auth-mode
+  // matrix is expressible and testable.
+  table: createAtlassianRemoteCallPolicy({
+    authMode: "api-token",
+    fallback: DENY_ALL_REMOTE_TOOLS,
   }),
+});
+
+/**
+ * WARP-2900 — no compiled table speaks for an extension, so for `ext-*` the
+ * record is the whole authority (createRecordBackedRemoteCallPolicy): an
+ * unreviewed tool is REMOTE_WRITE_NOT_PERMITTED (the confirming-write
+ * default), a reviewed read runs, a block is final. Every other server keeps
+ * the composed vendor policy above.
+ */
+const extensionRemoteCallPolicy: RemoteCallPolicy = createRecordBackedRemoteCallPolicy(
+  remoteToolClassificationCache.lookup,
+);
+
+export const remoteCallPolicy: RemoteCallPolicy = (input) =>
+  input.serverId.startsWith(EXTENSION_SERVER_PREFIX)
+    ? extensionRemoteCallPolicy(input)
+    : vendorRemoteCallPolicy(input);
+
+export const mcpClient = new McpToolMultiplexer(localClient, {
+  isServerAllowed: isRemoteServerAllowed,
+  remoteCallPolicy,
 });
 
 let started = false;

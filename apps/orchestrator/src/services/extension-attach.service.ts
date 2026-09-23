@@ -31,7 +31,7 @@
  *
  * TOOL_CATALOG is never touched (remote-mcp-servers.ts says why).
  *
- * AUDIT. {@link extensionAuditRefs} is the ONE place that decides a
+ * AUDIT. `extensionAuditRefs` (extension-token.ts) is the ONE place that decides a
  * `tool_call` row's `refs.extensionId`: for a model's call to an
  * `ext-<slug>__*` tool (the audited port below) and for a static tool an
  * extension called back into as its owner (mcp-client.service.ts's
@@ -45,22 +45,18 @@ import { createLogger } from "../lib/logger.js";
 import type { RecordParams } from "./activity.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { McpClientPort, McpToolCallOutcome } from "./mcp-client.port.js";
-import {
-  namespacedToolName,
-  parseNamespacedToolName,
-  type McpToolMultiplexer,
-} from "./mcp-multiplexer.service.js";
+import { namespacedToolName, type McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
   canonicalJson,
   parseExtensionManifest,
   type ExtensionManifest,
 } from "./extension-manifest.js";
 import {
-  EXTENSION_SERVER_PREFIX,
   ExtensionAttachError,
   extensionServerId,
   type ExtensionAttachPort,
 } from "./extension-lifecycle.service.js";
+import { extensionAuditRefs } from "./extension-token.js";
 import {
   ExtensionListingMismatchError,
   ExtensionMcpPort,
@@ -145,23 +141,9 @@ export function assertInternalSandboxUrl(url: string): void {
 
 // ─── audit ───────────────────────────────────────────────────────────────
 
-/**
- * The ONE helper for `refs.extensionId` on a `tool_call` row: the extension
- * a call came from (an extension calling back as its owner) or went to (a
- * namespaced `ext-<slug>__*` tool). `{}` for every other call, so a caller
- * spreads it unconditionally.
- */
-export function extensionAuditRefs(
-  toolName: string,
-  context?: { extensionId?: string },
-): { extensionId?: string } {
-  if (context?.extensionId) return { extensionId: context.extensionId };
-  const serverId = parseNamespacedToolName(toolName)?.serverId;
-  if (serverId && serverId.startsWith(EXTENSION_SERVER_PREFIX) && serverId.length > EXTENSION_SERVER_PREFIX.length) {
-    return { extensionId: serverId.slice(EXTENSION_SERVER_PREFIX.length) };
-  }
-  return {};
-}
+// extensionAuditRefs lives in extension-token.ts (dependency-light, so the
+// stdio dispatch's audit site can call it) and is exported from here too.
+export { extensionAuditRefs };
 
 /** The extension port, with a `tool_call` row per dispatch that reached it. */
 function auditedPort(

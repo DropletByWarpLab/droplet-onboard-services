@@ -1159,6 +1159,14 @@ const envSchema = z.object({
   // Extension rows dials nothing. Ships dark with the sandbox's
   // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
   EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
+  // WARP-2900 (ADR-056 slice H3) — the orchestrator URL an extension calls
+  // back on (handed to the child as DROPLET_ORCHESTRATOR_URL, next to its own
+  // dxt_ bearer). The orchestrator's name on `droplet-internal`: the only
+  // network the sandbox is on. The bearer resolves to `_service:ext:<slug>`,
+  // which reaches /api/extensions/self and /self/call and nothing else.
+  // Must stay a compose service name: the sandbox refuses anything that is not
+  // an http(s) URL of host[:port].
+  EXTENSION_CALLBACK_URL: z.string().url().default("http://orchestrator:3000"),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
