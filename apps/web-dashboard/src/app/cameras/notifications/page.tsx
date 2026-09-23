@@ -167,6 +167,7 @@ export default function NotificationsPage() {
 
   return (
     <ShellPage
+      rhythm
       icon={<Bell size={15} />}
       label="Notifications"
       title="Notifications"
@@ -184,7 +185,9 @@ export default function NotificationsPage() {
       {/* Push subscription state — handles its own permission flow.
           Lives above the per-camera prefs grid so the operator
           enables push first, then dials in what triggers it.
-          WARP-2904 — the box-wide off-LAN switch sits right above it. */}
+          WARP-2904 — the box-wide off-LAN switch sits right above it.
+          `rhythm` owns the gap between every card here; none carries an
+          outer margin of its own. */}
       <PushDeliveryChannel />
       <PushSubscriptionCard />
 

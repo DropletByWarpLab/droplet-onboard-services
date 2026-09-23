@@ -52,7 +52,7 @@ export function PushDeliveryChannel() {
 
   const enabled = state.kind === "ready" && state.enabled;
   return (
-    <div className="card mb-4" style={{ padding: "16px" }}>
+    <div className="card">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">
