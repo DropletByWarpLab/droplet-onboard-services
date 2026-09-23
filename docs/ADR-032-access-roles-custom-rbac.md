@@ -227,6 +227,8 @@ What that residual still buys an attacker who holds a narrowed `admin` role, sta
 
 **Update — the session vector is closed (WARP-2573).** The OCS fallback now refuses outright to authenticate an owner/admin-tier row (`isAdminTier` in `middleware/auth.ts`, applied on both the live mint and the cache-hit path, and shared by the WebSocket upgrade). Admin-tier people sign in only through paths that verify a Droplet-side factor (`/auth/login` with argon2 + TOTP, SSO, WebAuthn), all of which issue JWTs. So resetting the owner's NC password no longer yields a Droplet owner session, **no matter who is in NC's `admin` group** — including the box service account. That makes the cut independent of de-admining rather than waiting on it.
 
+**Update — the fallback is gone (WARP-2994).** A non-admin could still use the same path to skip Droplet TOTP and the `/auth/login` throttle with a password or an NC app-password. No shipped client used it, so the OCS fallback was removed outright: a Nextcloud credential never yields an orchestrator session, for any role, and `roleFromGroups` / `resolveNcSessionRole` were deleted with it. Everything above about the session plane is now history.
+
 What remains is the byte-layer and instance-admin part of the residual above: a Droplet admin can still reset another NC user's password and read that user's NC home (the owner's Tier-2 personal home is *not* covered by §7's `droplet-admins` see-all), and can administer the NC instance. Closing that still means moving user administration off caller impersonation onto the box service account and de-admining humans — WARP-2993. Do not re-derive it from `roleFromGroups`.
 
 ## Alternatives considered

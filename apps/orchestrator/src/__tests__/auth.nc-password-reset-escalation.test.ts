@@ -1,22 +1,17 @@
 /**
- * WARP-2573 — a Nextcloud instance admin who resets the OWNER's Nextcloud
- * password must not be able to turn that into a Droplet owner session.
+ * WARP-2573 + WARP-2994 — a Nextcloud credential never opens a Droplet
+ * session, for any role.
  *
- * The chain this pins shut (verified on stage @ 160badfc5):
- *   1. buildNcGroups puts every owner/admin-tier user in NC's built-in
- *      `admin` group → every Droplet admin is an NC instance admin.
- *   2. An NC instance admin can set any NC user's password.
- *   3. The orchestrator's OCS fallback forwards a `basic:<b64 user:pass>`
- *      bearer to Nextcloud as HTTP Basic, resolves the local row by
- *      `nextcloudUsername`, and (WARP-1636) caps the role at the row's
- *      stored role — which for the owner IS `owner`.
- * So `Authorization: Bearer basic:<b64(owner:newpass)>` was an owner
- * session with no Droplet password and no TOTP. The fix refuses admin-tier
- * rows on that path; they sign in through /auth/login (argon2 + TOTP), SSO
- * or WebAuthn, which issue JWTs.
+ * WARP-2573: an NC instance admin who reset the OWNER's NC password could
+ * present `Bearer basic:<b64 owner:newpass>`; the OCS fallback forwarded it
+ * to Nextcloud as HTTP Basic and minted an owner session. WARP-2573 refused
+ * admin-tier rows on that path.
  *
- * Runs the REAL jwt.service (no role stubs) so the assertions are about the
- * shipped mint path.
+ * WARP-2994: the same fallback let every other role skip Droplet TOTP and
+ * the /auth/login throttle with a password or an NC app-password. No shipped
+ * client used it, so the fallback is gone: only a Droplet JWT (minted by
+ * /auth/login, SSO or WebAuthn) or a SERVICE_TOKEN_* principal gets in, and
+ * Nextcloud is never consulted to decide who a caller is.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import type { Request, NextFunction } from "express";
@@ -27,20 +22,11 @@ vi.mock("../config.js", () => ({
     NEXTCLOUD_URL: "http://nextcloud.test",
     DATABASE_URL: "postgresql://test:test@localhost:5432/test",
     REDIS_URL: "redis://localhost:6379",
-    SERVICE_TOKEN_VOICE: "",
+    SERVICE_TOKEN_VOICE: "voice-service-token-aaaaaaaaaaaaaaaa",
     SERVICE_TOKEN_MCP: "",
     JWT_SECRET: "test-secret-at-least-32-chars-long-aaa",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
-}));
-
-const cacheGet = vi.fn().mockResolvedValue(null);
-const cacheSet = vi.fn().mockResolvedValue(undefined);
-const cacheDel = vi.fn().mockResolvedValue(undefined);
-vi.mock("../services/cache.service.js", () => ({
-  cacheGet: (...args: unknown[]) => cacheGet(...args),
-  cacheSet: (...args: unknown[]) => cacheSet(...args),
-  cacheDel: (...args: unknown[]) => cacheDel(...args),
 }));
 
 vi.mock("../services/auth-denylist.service.js", () => ({
@@ -50,58 +36,24 @@ vi.mock("../services/auth-denylist.service.js", () => ({
 import {
   authMiddleware,
   validateTokenForWs,
-  _setAuthPrismaForTests,
   SESSION_COOKIE_NAME,
 } from "../middleware/auth.js";
 import { signAccessToken } from "../services/jwt.service.js";
 
-const OWNER = {
-  id: "u-uuid-owner-2573",
-  username: "owner",
-  nextcloudUsername: "owner",
-  role: "owner",
-  directoryStatus: "ACTIVE",
+const b64 = (s: string) => Buffer.from(s).toString("base64");
+
+/** Every shape a Nextcloud credential used to take on the fallback. */
+const NC_CREDENTIALS: Record<string, string> = {
+  // WARP-2573: the owner's NC password after an NC admin reset it.
+  "reset owner password (basic:)": `basic:${b64("owner:attacker-chosen-pw")}`,
+  // WARP-2994: a family member's password — TOTP and the throttle skipped.
+  "family password (basic:)": `basic:${b64("kid:their-password")}`,
+  // WARP-2994: an NC app-password minted from that password, or lifted from
+  // a paired phone's WebDAV config — refusing only `basic:` would miss it.
+  "NC app-password": "aBcDe-FgHiJ-kLmNo-PqRsT-uVwXy",
+  // AUTH_MODE=oauth2's cookie value: an NC OAuth access token.
+  "NC OAuth access token": "nc-oauth-access-token-0123456789abcdef",
 };
-const FAMILY = {
-  id: "u-uuid-family-2573",
-  username: "kid",
-  nextcloudUsername: "kid",
-  role: "family",
-  directoryStatus: "ACTIVE",
-};
-
-function prismaWith(...rows: (typeof OWNER)[]) {
-  return {
-    user: {
-      findUnique: vi.fn(async ({ where }: { where: any }) => {
-        if (where.nextcloudUsername !== undefined) {
-          return rows.find((r) => r.nextcloudUsername === where.nextcloudUsername) ?? null;
-        }
-        if (where.id !== undefined) return rows.find((r) => r.id === where.id) ?? null;
-        return null;
-      }),
-    },
-  } as any;
-}
-
-/** The token the attacker holds after resetting the owner's NC password. */
-const resetOwnerToken = `basic:${Buffer.from("owner:attacker-chosen-pw").toString("base64")}`;
-
-/** Nextcloud accepts the reset password: OCS /cloud/user answers as the owner. */
-function ncAcceptsAs(ncUserId: string, groups: string[]) {
-  (global.fetch as any).mockImplementation(async (_url: string, init: any) => {
-    // The fallback really does turn the `basic:` bearer into HTTP Basic —
-    // i.e. the attacker's reset password is what authenticates here.
-    expect(init.headers.Authorization).toMatch(/^Basic /);
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        ocs: { meta: { status: "ok" }, data: { id: ncUserId, "display-name": ncUserId, groups } },
-      }),
-    };
-  });
-}
 
 function req(opts: { bearer?: string; cookie?: string }): Request {
   return {
@@ -136,82 +88,60 @@ async function run(r: Request, s: any) {
   return next;
 }
 
-describe("WARP-2573 — an NC-side password reset cannot yield a Droplet owner session", () => {
+describe("a Nextcloud credential never opens a Droplet session (WARP-2573, WARP-2994)", () => {
   const realFetch = global.fetch;
 
   beforeEach(() => {
-    cacheGet.mockReset().mockResolvedValue(null);
-    cacheSet.mockClear();
-    cacheDel.mockClear();
-    global.fetch = vi.fn();
-    _setAuthPrismaForTests(prismaWith(OWNER, FAMILY));
+    // If anything still asked Nextcloud who the caller is, it would get a
+    // cheerful "yes, that's the owner, in the admin group".
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ocs: {
+          meta: { status: "ok" },
+          data: { id: "owner", "display-name": "owner", groups: ["admin"] },
+        },
+      }),
+    })) as any;
   });
 
   afterAll(() => {
     global.fetch = realFetch;
-    _setAuthPrismaForTests(null);
   });
 
-  it("the reset owner password as a bearer → 401, no session, nothing cached", async () => {
-    ncAcceptsAs("owner", ["admin", "droplet-admins", "household"]);
-    const r = req({ bearer: resetOwnerToken });
-    const s = res();
-    const next = await run(r, s);
+  for (const [label, token] of Object.entries(NC_CREDENTIALS)) {
+    it(`${label} as a bearer → 401, no session, Nextcloud never asked`, async () => {
+      const r = req({ bearer: token });
+      const s = res();
+      const next = await run(r, s);
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(next).not.toHaveBeenCalled();
-    expect((r as any).user).toBeUndefined();
-    expect(s.statusCode).toBe(401);
-    expect(s.body.code).toBe("NC_CREDENTIAL_ADMIN_TIER_REFUSED");
-    expect(cacheSet).not.toHaveBeenCalled();
-  });
-
-  it("the same credential in the session cookie → 401 and the cookie is cleared", async () => {
-    ncAcceptsAs("owner", ["admin"]);
-    const r = req({ cookie: resetOwnerToken });
-    const s = res();
-    const next = await run(r, s);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(s.statusCode).toBe(401);
-    expect(s.clearCookie).toHaveBeenCalledWith(SESSION_COOKIE_NAME, { path: "/" });
-  });
-
-  it("the WebSocket upgrade path refuses it too", async () => {
-    ncAcceptsAs("owner", ["admin"]);
-    await expect(validateTokenForWs(resetOwnerToken)).resolves.toBeNull();
-  });
-
-  it("a warm cache entry for an owner (minted before this fix) is purged, not replayed", async () => {
-    cacheGet.mockResolvedValueOnce({
-      id: OWNER.id,
-      username: "owner",
-      displayName: "owner",
-      role: "owner",
+      expect(next).not.toHaveBeenCalled();
+      expect((r as any).user).toBeUndefined();
+      expect(s.statusCode).toBe(401);
+      expect(global.fetch).not.toHaveBeenCalled();
     });
-    const r = req({ bearer: resetOwnerToken });
-    const s = res();
-    const next = await run(r, s);
 
-    expect(next).not.toHaveBeenCalled();
-    expect(s.statusCode).toBe(401);
-    expect(cacheDel).toHaveBeenCalledTimes(1);
-    // Refused from the store's role, without a Nextcloud round-trip.
-    expect(global.fetch).not.toHaveBeenCalled();
-  });
+    it(`${label} in the session cookie → 401 and the cookie is cleared`, async () => {
+      const r = req({ cookie: token });
+      const s = res();
+      const next = await run(r, s);
 
-  it("non-regression: a family account still authenticates on the fallback", async () => {
-    ncAcceptsAs("kid", ["household"]);
-    const r = req({ bearer: `basic:${Buffer.from("kid:pw").toString("base64")}` });
-    const next = await run(r, res());
+      expect(next).not.toHaveBeenCalled();
+      expect(s.statusCode).toBe(401);
+      expect(s.clearCookie).toHaveBeenCalledWith(SESSION_COOKIE_NAME, { path: "/" });
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
 
-    expect(next).toHaveBeenCalledTimes(1);
-    expect((r as any).user).toMatchObject({ id: FAMILY.id, role: "family" });
-  });
+    it(`${label} on the WebSocket upgrade → refused`, async () => {
+      await expect(validateTokenForWs(token)).resolves.toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  }
 
-  it("non-regression: the owner's own Droplet JWT (from /auth/login) is untouched", async () => {
+  it("non-regression: a Droplet JWT (from /auth/login) still authenticates", async () => {
     const jwt = signAccessToken({
-      id: OWNER.id,
+      id: "u-uuid-owner",
       username: "owner",
       displayName: "owner",
       role: "owner",
@@ -220,7 +150,15 @@ describe("WARP-2573 — an NC-side password reset cannot yield a Droplet owner s
     const next = await run(r, res());
 
     expect(next).toHaveBeenCalledTimes(1);
-    expect((r as any).user).toMatchObject({ id: OWNER.id, role: "owner" });
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect((r as any).user).toMatchObject({ id: "u-uuid-owner", role: "owner" });
+    await expect(validateTokenForWs(jwt)).resolves.toMatchObject({ role: "owner" });
+  });
+
+  it("non-regression: a service principal bearer still authenticates", async () => {
+    const r = req({ bearer: "voice-service-token-aaaaaaaaaaaaaaaa" });
+    const next = await run(r, res());
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((r as any).user).toMatchObject({ role: "service" });
   });
 });
