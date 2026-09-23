@@ -513,12 +513,15 @@ async function main() {
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
 
-  // WARP-2900 (ADR-056 slice H2) — the extension reconciler. A sandbox
-  // restart forgets every extension process; each tick reinstalls any
-  // `installed`/`live` extension the sandbox no longer runs — re-verifying
-  // its signed statement and rotating its bearer first (install()). Same
-  // clock, its own lock key (the sandbox is one shared resource), never a
-  // `while True`. No Extension rows → the tick dials nothing, so a box with
+  // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
+  // sandbox restart forgets every extension process and a dead one is never
+  // restarted in place; each tick reinstalls any `installed`/`live`
+  // extension the sandbox no longer runs — re-verifying its signed statement
+  // and rotating its bearer first (install()), a bounded number of times for
+  // a process that keeps dying — and stops any process the sandbox runs for
+  // a row that must not run (review #2323). Same clock, its own lock key
+  // (the sandbox is one shared resource), never a `while True`. No Extension
+  // rows → the tick dials nothing, so a box with
   // SANDBOX_PROCESS_SUPERVISION=0 (the shipped default) never calls out.
   const extensionLifecycle = createExtensionLifecycle({
     prisma,

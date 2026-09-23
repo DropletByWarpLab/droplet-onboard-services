@@ -80,6 +80,21 @@ describe("extension-sandbox.client", () => {
     expect(await client(ok).status("wc")).toMatchObject({ slug: "wc", running: true });
   });
 
+  it("lists what the sandbox holds, and refuses a body that is not that list", async () => {
+    // Review #2323 (c): the reconciler stops a process whose row says it
+    // must not run, from this list. A malformed answer must not read as
+    // "nothing runs".
+    const f = fakeFetch(() => ({ status: 200, body: { extensions: [{ slug: "wc", running: true }, { slug: "old", running: false }] } }));
+    expect(await client(f).list()).toEqual([{ slug: "wc", running: true }, { slug: "old", running: false }]);
+    expect(f.calls[0].url).toBe("http://sandbox:8030/extensions");
+    expect(f.calls[0].init.method).toBe("GET");
+    for (const body of [{}, { extensions: [{ slug: "wc" }] }, { extensions: [{ slug: 3, running: true }] }, { ceilingMb: 512 }]) {
+      await expect(client(fakeFetch(() => ({ status: 200, body }))).list()).rejects.toMatchObject({ code: "SANDBOX_ERROR", status: 502 });
+    }
+    const gate = fakeFetch(() => ({ status: 404, body: { detail: "Not found" } }));
+    await expect(client(gate).list()).rejects.toMatchObject({ code: "SUPERVISION_OFF" });
+  });
+
   it("relays a 4xx detail and turns a 5xx into a 502", async () => {
     const conflict = fakeFetch(() => ({ status: 409, body: { detail: "memoryMb 300 does not fit" } }));
     const err = await client(conflict)

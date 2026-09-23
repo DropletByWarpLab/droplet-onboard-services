@@ -28,7 +28,24 @@
  * `installed`, a `failed` — is an updateMany whose WHERE still carries the
  * statuses the install started from. If the row has left them, the owner
  * won: the install stops (or removes) whatever the sandbox started, and
- * answers 409 wrong_state instead of reviving the extension.
+ * answers 409 wrong_state instead of reviving the extension. An install that
+ * FAILS stops what the sandbox may still start too: a TIMEOUT or UNREACHABLE
+ * is this side giving up, not the sandbox (review #2323).
+ *
+ * THE KILL SWITCH IS RETRYABLE. A disable or uninstall claims its row first
+ * (so an install in flight loses), then asks the sandbox. If that call fails
+ * the row already says `disabled` / `uninstalled`, and a retry of the same
+ * transition acts on it again while the sandbox still runs (holds) the
+ * extension, instead of answering 409.
+ *
+ * THE RECONCILER GOES BOTH WAYS. It reinstalls a row that should run and
+ * does not (through install(), so re-verified and with a new bearer), and it
+ * stops a process the sandbox runs for a row that should not: a kill switch
+ * whose sandbox call failed, an install that outlived its caller. A dead
+ * process is reinstalled at most EXTENSION_MAX_RECONCILE_RESTARTS times: the
+ * sandbox never restarts an extension itself (restart "never"), because the
+ * files it would restart from are writable by the same uid as every
+ * workspace run.
  *
  * `installedExtensionIds` is the set of multiplexer server ids
  * (`ext-<slug>`) this process considers installed. H3's
@@ -54,6 +71,7 @@ import {
   type ExtensionSandboxClient,
   type SandboxBudget,
   type SandboxExtensionStatus,
+  type SandboxHeldExtension,
 } from "./extension-sandbox.client.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement } from "./update-agent/extension-verify.js";
@@ -70,6 +88,25 @@ export const RUNNING_EXTENSION_STATUSES = ["installed", "live"] as const;
 
 /** Server ids (`ext-<slug>`) this process treats as installed. */
 export const installedExtensionIds = new Set<string>();
+
+/**
+ * Slugs with an install() in flight, counted (a promote and a reconcile may
+ * overlap). Module state, like installedExtensionIds: the routes' lifecycle
+ * and the reconciler's are two instances in one process, and the stray sweep
+ * must not stop what a promote or an enable is starting (its row is `signed`
+ * until the start lands).
+ */
+const installsInFlight = new Map<string, number>();
+
+/** How many times in a row the reconciler may reinstall a dead process. */
+export const EXTENSION_MAX_RECONCILE_RESTARTS = 5;
+
+/**
+ * Reinstalls the reconciler has spent on each slug's dead process since the
+ * owner last started it. Module state for the same reason as above: an
+ * owner's install or enable (the routes' instance) resets it.
+ */
+export const reconcileRestartCounts = new Map<string, number>();
 
 export function extensionServerId(slug: string): string {
   return `${EXTENSION_SERVER_PREFIX}${slug}`;
@@ -280,7 +317,7 @@ export function statementMismatch(
   return null;
 }
 
-/** Supervisor states that mean the process died and stays dead (restarts spent). */
+/** Supervisor states that mean the process died: the sandbox never restarts one. */
 const DEAD_PROCESS_STATES: ReadonlySet<string> = new Set(["failed", "exited"]);
 
 const SYSTEM_ACTOR: ActivityActor = { type: "system", id: null };
@@ -289,6 +326,8 @@ export interface ReconcileReport {
   checked: number;
   restarted: string[];
   failed: string[];
+  /** Processes the sandbox ran for a row that must not run, now stopped. */
+  stopped: string[];
   skipped?: "supervision_off";
 }
 
@@ -336,6 +375,15 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return u.count > 0;
   }
 
+  /** A sandbox stop that must not fail the caller: logged, never thrown. */
+  async function stopQuietly(slug: string, event: string): Promise<void> {
+    try {
+      await sandbox.stop(slug);
+    } catch (err) {
+      logger.warn({ err, slug }, event);
+    }
+  }
+
   async function overtaken(slug: string): Promise<ExtensionLifecycleError> {
     const now = await load(slug);
     return new ExtensionLifecycleError(
@@ -372,6 +420,17 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
   }
 
   async function install(slug: string, actor: ActivityActor, op: InstallOp) {
+    installsInFlight.set(slug, (installsInFlight.get(slug) ?? 0) + 1);
+    try {
+      return await installOnce(slug, actor, op);
+    } finally {
+      const n = (installsInFlight.get(slug) ?? 1) - 1;
+      if (n > 0) installsInFlight.set(slug, n);
+      else installsInFlight.delete(slug);
+    }
+  }
+
+  async function installOnce(slug: string, actor: ActivityActor, op: InstallOp) {
     const from = INSTALL_FROM[op];
     const ext = await load(slug);
     if (!from.includes(ext.status as ExtensionStatusName)) {
@@ -440,7 +499,14 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      if (!(await markFailed(slug, `install_failed: ${reason}`, from))) throw await overtaken(slug);
+      // The owner's disable or uninstall landed meanwhile: take down what the
+      // sandbox may have started, the way that transition would have.
+      if (!(await markFailed(slug, `install_failed: ${reason}`, from))) return undoOvertakenInstall(slug, actor, op);
+      // A TIMEOUT or UNREACHABLE is this side giving up, not the sandbox,
+      // which may go on to start the process; the row is `failed`, so nothing
+      // may run it. Best effort now; one the sandbox starts after this stop
+      // is the reconciler's stray sweep's.
+      await stopQuietly(slug, "extension_failed_install_cleanup_failed");
       await record(op, slug, actor, {
         severity: "warn",
         what: "Extension install failed",
@@ -457,6 +523,8 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       data: { status: "installed", failureReason: null },
     });
     if (done.count === 0) return undoOvertakenInstall(slug, actor, op);
+    // The owner started it: the reconciler's restart budget is whole again.
+    if (op !== "reconcile") reconcileRestartCounts.delete(slug);
     const row = await load(slug);
     installedExtensionIds.add(extensionServerId(slug));
     await attach.attach(slug);
@@ -478,15 +546,19 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     from: readonly ExtensionStatusName[],
     to: ExtensionStatusName,
     extra: { serviceTokenHash?: null } = {},
-  ): Promise<void> {
+    stillToDo?: () => Promise<boolean>,
+  ): Promise<{ retry: boolean }> {
     const u = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
       data: { status: to, ...extra },
     });
-    if (u.count === 0) {
-      const ext = await load(slug);
-      throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is ${ext.status}`);
-    }
+    if (u.count > 0) return { retry: false };
+    const ext = await load(slug);
+    // The same transition already won, but its sandbox call failed and the
+    // sandbox still has what it was meant to take down: act on it again
+    // (review #2323) rather than answer 409 while it runs.
+    if (ext.status === to && stillToDo && (await stillToDo())) return { retry: true };
+    throw new ExtensionLifecycleError("wrong_state", 409, `extension ${slug} is ${ext.status}`);
   }
 
   async function stopAndDetach(slug: string): Promise<void> {
@@ -520,20 +592,54 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     },
 
     async disable(slug: string, actor: ActivityActor) {
-      await claim(slug, ["signed", "installed", "live", "failed"], "disabled", { serviceTokenHash: null });
+      // The row first, so an install in flight loses (it re-checks the row
+      // at every write); then the process. A retry acts while it still runs.
+      const { retry } = await claim(
+        slug,
+        ["signed", "installed", "live", "failed"],
+        "disabled",
+        { serviceTokenHash: null },
+        async () => (await sandbox.status(slug))?.running === true,
+      );
       await stopAndDetach(slug);
-      await sandbox.stop(slug);
-      await record("disable", slug, actor, { what: "Extension disabled" });
+      try {
+        await sandbox.stop(slug);
+      } catch (err) {
+        await record("disable", slug, actor, {
+          severity: "warn",
+          what: "Extension disabled, but its process could not be stopped yet",
+          refs: { error: (err instanceof Error ? err.message : String(err)).slice(0, 300) },
+        });
+        throw err;
+      }
+      await record("disable", slug, actor, { what: "Extension disabled", ...(retry ? { refs: { retry: true } } : {}) });
       return load(slug);
     },
 
     async uninstall(slug: string, actor: ActivityActor) {
-      await claim(slug, ["signed", "installed", "live", "failed", "disabled"], "uninstalled", {
-        serviceTokenHash: null,
-      });
+      const { retry } = await claim(
+        slug,
+        ["signed", "installed", "live", "failed", "disabled"],
+        "uninstalled",
+        { serviceTokenHash: null },
+        async () => (await sandbox.status(slug)) !== null,
+      );
       await stopAndDetach(slug);
-      await sandbox.uninstall(slug);
-      await record("uninstall", slug, actor, { severity: "warn", what: "Extension uninstalled" });
+      try {
+        await sandbox.uninstall(slug);
+      } catch (err) {
+        await record("uninstall", slug, actor, {
+          severity: "warn",
+          what: "Extension uninstalled, but the sandbox could not remove it yet",
+          refs: { error: (err instanceof Error ? err.message : String(err)).slice(0, 300) },
+        });
+        throw err;
+      }
+      await record("uninstall", slug, actor, {
+        severity: "warn",
+        what: "Extension uninstalled",
+        ...(retry ? { refs: { retry: true } } : {}),
+      });
       return load(slug);
     },
 
@@ -548,17 +654,62 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     },
 
     /**
-     * Reinstall every extension that should be running and is not: after a
-     * sandbox restart the sandbox forgets every process. Each restart goes
-     * through install(): re-verify, rotate the bearer, start. No rows → no
-     * sandbox call at all.
+     * Both directions (review #2323), on the one sanctioned clock.
+     *
+     * 1. STRAYS: stop what the sandbox runs for a row that must not run — a
+     *    disable or uninstall whose sandbox call failed, an install that
+     *    outlived its caller, a row left `signed` by an orchestrator restart
+     *    mid-install, or no row at all. A row that still exists keeps its
+     *    sandbox copy (stop); an uninstalled row, or none, loses it
+     *    (uninstall). A slug with an install() in flight is left alone: its
+     *    own claimed writes decide.
+     * 2. MISSING: reinstall a row that should run and does not — the sandbox
+     *    restarted and forgot it, or its process died. Every restart goes
+     *    through install(): re-verify, rotate the bearer, start. A dead
+     *    process gets EXTENSION_MAX_RECONCILE_RESTARTS reinstalls, then the
+     *    row is marked `failed` and the owner re-enables.
+     *
+     * No Extension rows at all → no sandbox call.
      */
     async reconcile(): Promise<ReconcileReport> {
-      const rows = await prisma.extension.findMany({
-        where: { status: { in: [...RUNNING_EXTENSION_STATUSES] } },
-        select: { id: true },
-      });
-      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [] };
+      const all = await prisma.extension.findMany({ select: { id: true, status: true } });
+      const shouldRun = (status: string | undefined): boolean =>
+        (RUNNING_EXTENSION_STATUSES as readonly string[]).includes(status ?? "");
+      const rows = all.filter((r) => shouldRun(r.status));
+      const report: ReconcileReport = { checked: rows.length, restarted: [], failed: [], stopped: [] };
+      if (all.length === 0) return report;
+
+      // ── 1. strays ──
+      let held: SandboxHeldExtension[] = [];
+      try {
+        held = await sandbox.list();
+      } catch (err) {
+        if (err instanceof ExtensionSandboxError && err.code === "SUPERVISION_OFF") {
+          return { ...report, skipped: "supervision_off" };
+        }
+        logger.warn({ err }, "extension_reconcile_list_failed");
+      }
+      const statusOf = new Map(all.map((r) => [r.id, r.status as string]));
+      for (const { slug, running } of held) {
+        const status = statusOf.get(slug);
+        if (!running || shouldRun(status) || installsInFlight.has(slug)) continue;
+        try {
+          if (status === undefined || status === "uninstalled") await sandbox.uninstall(slug);
+          else await sandbox.stop(slug);
+        } catch (err) {
+          logger.warn({ err, slug, status }, "extension_reconcile_stray_stop_failed");
+          continue;
+        }
+        installedExtensionIds.delete(extensionServerId(slug));
+        report.stopped.push(slug);
+        await record("reconcile", slug, SYSTEM_ACTOR, {
+          severity: "warn",
+          what: `Extension process stopped: the extension is ${status ?? "unknown to this box"}`,
+          refs: { status: status ?? null },
+        });
+      }
+
+      // ── 2. missing ──
       for (const { id } of rows) {
         let st: SandboxExtensionStatus | null = null;
         try {
@@ -576,19 +727,24 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
         }
         const proc = st?.process ?? null;
         if (proc && DEAD_PROCESS_STATES.has(proc.state)) {
-          // The sandbox still has it and it died after its own restarts:
-          // rebuilding it every tick would loop (export, tsc, a new bearer,
-          // an audit row per minute). The owner sees why and re-enables.
-          const reason = `process_${proc.state}: exit code ${proc.exitCode ?? "unknown"} after ${proc.restarts} restarts`;
-          if (await markFailed(id, reason, INSTALL_FROM.reconcile)) {
-            await record("reconcile", id, SYSTEM_ACTOR, {
-              severity: "warn",
-              what: "Extension stopped: its process kept exiting",
-              refs: { process: proc.state, exitCode: proc.exitCode, restarts: proc.restarts },
-            });
+          const spent = reconcileRestartCounts.get(id) ?? 0;
+          if (spent >= EXTENSION_MAX_RECONCILE_RESTARTS) {
+            // Reinstalling it every tick would loop (export, tsc, a new
+            // bearer, an audit row per minute). The owner sees why and
+            // re-enables, which starts the count again.
+            reconcileRestartCounts.delete(id);
+            const reason = `process_${proc.state}: exit code ${proc.exitCode ?? "unknown"} after ${spent} restarts`;
+            if (await markFailed(id, reason, INSTALL_FROM.reconcile)) {
+              await record("reconcile", id, SYSTEM_ACTOR, {
+                severity: "warn",
+                what: "Extension stopped: its process kept exiting",
+                refs: { process: proc.state, exitCode: proc.exitCode, restarts: spent },
+              });
+            }
+            report.failed.push(id);
+            continue;
           }
-          report.failed.push(id);
-          continue;
+          reconcileRestartCounts.set(id, spent + 1);
         }
         if (proc?.state === "starting") continue;
         try {
