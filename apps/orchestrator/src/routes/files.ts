@@ -38,11 +38,22 @@ import {
   ncListMyShares,
   ncGetShare,
   ncDirExists,
+  ncCommitUpload,
+  ncDiscardUpload,
+  type NcWriteOutcome,
   NextcloudOcsError,
   NcPreconditionFailedError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
-import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
+import {
+  MAX_FILES_PER_UPLOAD,
+  type UploadEntryStatus,
+  type UploadedFileEntry,
+} from "@droplet/shared-types";
+import {
+  nextcloudUploadStorage,
+  type StagedUploadInfo,
+} from "../services/nextcloud-upload-storage.js";
 import {
   sendShareNotificationEmail,
   type SendOptions as EmailSendOptions,
@@ -84,6 +95,7 @@ import {
 import {
   resolveFileDepartment,
   upsertFileRegistryEntry,
+  findSameContentCandidates,
 } from "../services/file-registry.service.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
@@ -126,13 +138,24 @@ const CACHE_TTL = 10;
 // workbook is slow, not stuck, and timing it out would fail a request that
 // was about to succeed.
 const DOC_RENDER_TIMEOUT_MS = 30_000;
+/**
+ * WARP-2096 — keep-both naming for a same-name upload: `report.pdf` →
+ * `report (1).pdf`; a dotfile or extensionless name gets the suffix at the
+ * end (`.env (1)`, `Makefile (1)`).
+ */
+export function keepBothName(name: string, n: number): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return `${name} (${n})`;
+  return `${name.slice(0, dot)} (${n})${name.slice(dot)}`;
+}
+const MAX_KEEP_BOTH_SUFFIX = 99;
+const joinDir = (dir: string, name: string) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
+
 const DOC_RENDER_MIME: Record<"pdf" | "docx" | "xlsx", string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
-
-const MEMORY_STORAGE = multer.memoryStorage();
 
 /**
  * WARP-1271 (T19a) — per-user upload cap. WARP-1531 (RBAC v2 T7): the cap
@@ -1755,11 +1778,34 @@ export function createFilesRouter(
   // field name", pointing every reader at the wrong problem. With `limits.files`
   // set, busboy raises LIMIT_FILE_COUNT first and each code again means one
   // thing only.
+  //
+  // WARP-2093: parts no longer land in memory. `nextcloudUploadStorage`
+  // streams each one into Nextcloud's upload staging area while hashing it;
+  // the route below commits (MOVEs) them only once the whole body parsed.
+  // On ANY multer error here multer calls the engine's `_removeFile` for
+  // every staged part first, so a 413 / 400 / client abort leaves nothing
+  // behind — the batch lands whole or not at all. The JSON transport
+  // (write_file / create_document) is not multipart and skips all of this.
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
+    if (!req.is("multipart/form-data")) {
+      next();
+      return;
+    }
     const userId = (req as { user?: { id?: string } }).user?.id;
-    const limitMb = await resolveUploadLimitMb(prisma, userId);
+    let storage: multer.StorageEngine;
+    let limitMb: number;
+    try {
+      // Reject a bad target (`..` traversal) BEFORE a single byte streams to
+      // Nextcloud; the route resolves it again for the commit.
+      await rootForSpace(prisma, resolveSpace(req.query.space), (req.query.path as string) || "/");
+      limitMb = await resolveUploadLimitMb(prisma, userId);
+      storage = nextcloudUploadStorage(await getToken(req), getUser(req));
+    } catch (err) {
+      handleFileError(err, res, next);
+      return;
+    }
     const scopedUpload = multer({
-      storage: MEMORY_STORAGE,
+      storage,
       limits: {
         fileSize: limitMb * 1024 * 1024,
         files: MAX_FILES_PER_UPLOAD,
@@ -1789,11 +1835,67 @@ export function createFilesRouter(
         return;
       }
       if (err) {
-        next(err);
+        // A staging PUT that failed (Nextcloud down, quota) — same mapping
+        // the route's own WebDAV failures get.
+        handleFileError(err, res, next);
         return;
       }
       next();
     });
+  }
+
+  /**
+   * WARP-2096 — commit a staged upload WITHOUT ever replacing a file the
+   * caller did not ask to replace. `Overwrite: F` makes Nextcloud refuse a
+   * taken name atomically (412, staging kept), and the next candidate is
+   * tried: `report.pdf` → `report (1).pdf` → `report (2).pdf` … — "keep
+   * both", the non-destructive default. `overwrite: true` is the explicit
+   * opt-in to replace (`?overwrite=true`, the router's move/copy word).
+   */
+  async function commitStagedUpload(
+    token: string,
+    user: string,
+    dir: string,
+    name: string,
+    uploadId: string,
+    overwrite: boolean,
+  ): Promise<{ name: string; outcome: NcWriteOutcome }> {
+    for (let n = 0; n <= MAX_KEEP_BOTH_SUFFIX; n++) {
+      const candidate = n === 0 ? name : keepBothName(name, n);
+      try {
+        const outcome = await ncCommitUpload(
+          token,
+          user,
+          uploadId,
+          joinDir(dir, candidate),
+          overwrite,
+        );
+        return { name: candidate, outcome };
+      } catch (err) {
+        if (!(err instanceof NcPreconditionFailedError)) throw err;
+      }
+    }
+    throw new Error(`upload: no free name for "${name}" after ${MAX_KEEP_BOTH_SUFFIX} tries`);
+  }
+
+  /**
+   * WARP-2096 — the registry owner. A human session owns what it uploads.
+   * The mcp-server principal (`_service:mcp`) writes AS the asserted
+   * Nextcloud user, so the row belongs to that person — keyed by
+   * `User.username`, which mirrors the NC user id — not to the service
+   * account, where every user's agent-written files would collapse into one
+   * bucket and never match the person's own duplicate lookups.
+   */
+  async function resolveRegistryOwner(req: Request, ncUser: string): Promise<string | null> {
+    const id = (req as { user?: { id?: string } }).user?.id;
+    if (!id) return null;
+    if (!id.startsWith("_service:")) return id;
+    // Best-effort like every registry write: a lookup failure skips the
+    // row, never the upload.
+    const row = await prisma.user
+      .findUnique({ where: { username: ncUser }, select: { id: true } })
+      .catch(() => null);
+    return row?.id ?? null;
   }
 
   // ── List directory contents ──
@@ -2149,24 +2251,30 @@ export function createFilesRouter(
       const space = resolveSpace(req.query.space);
 
       // WARP-1460: two transports feed this route. multer only populates
-      // `req.files` for a multipart/form-data request — it calls next()
-      // untouched for a JSON body — so `req.files` presence discriminates the
-      // human dashboard upload (multipart; target dir in `?path=`) from the
-      // write_file / create_document tools (JSON `{dir, filename,
-      // contentBase64}`; target dir in the body `dir` field). Both shapes
-      // normalize to a single {name, buffer, size} list so the post-write
-      // bookkeeping loop below is SHARED and can never diverge between paths.
-      const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+      // `req.files` for a multipart/form-data request, so `req.files`
+      // presence discriminates the human dashboard upload (multipart; target
+      // dir in `?path=`) from the write_file / create_document tools (JSON
+      // `{dir, filename, contentBase64}`; target dir in the body `dir`).
+      //
+      // WARP-2093: a multipart part arrives already STAGED in Nextcloud
+      // (streamed + hashed by `nextcloudUploadStorage`) and is committed
+      // below; a JSON write still carries its (≤10 MB) decoded buffer. Both
+      // normalize into one list so the bookkeeping loop stays SHARED.
+      const files =
+        (req.files as (Express.Multer.File & StagedUploadInfo)[] | undefined) ?? [];
       let rawTargetPath: string;
-      let uploads: { name: string; buffer: Buffer; size: number }[];
+      type PendingUpload =
+        | { name: string; size: number; sha256: string; uploadId: string }
+        | { name: string; size: number; sha256: string; buffer: Buffer };
+      let uploads: PendingUpload[];
 
       if (files.length > 0) {
-        // Existing multipart path — byte-identical behavior: dir from `?path=`.
         rawTargetPath = (req.query.path as string) || "/";
         uploads = files.map((f) => ({
           name: f.originalname,
-          buffer: f.buffer,
           size: f.size,
+          sha256: f.sha256,
+          uploadId: f.uploadId,
         }));
       } else if (
         typeof (req.body as { contentBase64?: unknown } | undefined)?.contentBase64 ===
@@ -2212,8 +2320,8 @@ export function createFilesRouter(
 
         // Enforce the 10 MB LLM-write cap on the DECODED bytes (mirrors
         // @droplet/tools-core's MAX_WRITE_BYTES). The multipart path is capped
-        // upstream by multer's per-request `limits.fileSize`; the JSON path has
-        // no multer, so the ceiling is enforced here.
+        // by multer's per-request `limits.fileSize`; the JSON path has no
+        // multer, so the ceiling is enforced here.
         const MAX_JSON_WRITE_BYTES = 10 * 1024 * 1024;
         if (buffer.byteLength > MAX_JSON_WRITE_BYTES) {
           res.status(413).json({
@@ -2222,67 +2330,124 @@ export function createFilesRouter(
           return;
         }
 
-        uploads = [{ name: filename, buffer, size: buffer.byteLength }];
+        uploads = [
+          {
+            name: filename,
+            size: buffer.byteLength,
+            sha256: createHash("sha256").update(buffer).digest("hex"),
+            buffer,
+          },
+        ];
       } else {
         res.status(400).json({ error: "No files provided" });
         return;
       }
 
-      const targetPath = await rootForSpace(prisma, space, rawTargetPath);
-
+      // Staged parts not yet committed — discarded in `finally` if anything
+      // below throws, so an error mid-batch strands nothing in staging.
+      const uncommitted = new Set(
+        uploads.flatMap((u) => ("uploadId" in u ? [u.uploadId] : [])),
+      );
       const token = await getToken(req);
       const user = getUser(req);
-      const results: { name: string; path: string; size: number }[] = [];
+      try {
+        const targetPath = await rootForSpace(prisma, space, rawTargetPath);
+        // WARP-2096: replacing an existing file is an explicit opt-in on the
+        // multipart path; the default keeps both. The JSON transport keeps
+        // write_file's documented "create or overwrite" contract — but the
+        // outcome is now REPORTED (`status: "replaced"`), never silent.
+        const overwrite = req.query.overwrite === "true";
+        const results: UploadedFileEntry[] = [];
 
-      // WARP-1260 (T8) writer, WARP-1262 (T10) gate: the space was already
-      // resolved + authorized by `requireSpaceAccess` above, so the
-      // file-registry departmentId is just the guard's own resolved value
-      // — no second lookup needed.
-      const uploadDepartmentId = req.spaceDepartmentId ?? null;
-      const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+        // WARP-1260 (T8) writer, WARP-1262 (T10) gate: the space was already
+        // resolved + authorized by `requireSpaceAccess` above, so the
+        // file-registry departmentId is just the guard's own resolved value
+        // — no second lookup needed.
+        const uploadDepartmentId = req.spaceDepartmentId ?? null;
+        const ownerUserId = await resolveRegistryOwner(req, user);
 
-      for (const file of uploads) {
-        await ncUploadFile(token, user, targetPath, file.name, file.buffer);
-        const uploadedPath =
-          targetPath === "/"
-            ? `/${file.name}`
-            : `${targetPath}/${file.name}`;
-        results.push({
-          name: file.name,
-          path: uploadedPath,
-          size: file.size,
-        });
+        // Sequential on purpose: one MOVE/PUT at a time, like runBulk's
+        // default — Nextcloud's WebDAV races under concurrent writes.
+        for (const file of uploads) {
+          let finalName = file.name;
+          let outcome: NcWriteOutcome;
+          if ("uploadId" in file) {
+            ({ name: finalName, outcome } = await commitStagedUpload(
+              token,
+              user,
+              targetPath,
+              file.name,
+              file.uploadId,
+              overwrite,
+            ));
+            uncommitted.delete(file.uploadId);
+          } else {
+            outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
+          }
+          const uploadedPath = joinDir(targetPath, finalName);
+          const status: UploadEntryStatus =
+            outcome === "replaced" ? "replaced" : finalName !== file.name ? "renamed" : "uploaded";
+          const entry: UploadedFileEntry = {
+            name: finalName,
+            path: uploadedPath,
+            size: file.size,
+            status,
+            ...(status === "renamed" ? { requestedName: file.name } : {}),
+          };
+          results.push(entry);
 
-        // Best-effort, non-blocking: a registry-write failure must never
-        // fail the upload the user is actively waiting on.
-        if (ownerUserId) {
-          try {
-            const ncFileId = await ncGetFileId(token, user, uploadedPath);
-            if (ncFileId !== null) {
-              await upsertFileRegistryEntry(prisma, {
-                ncFileId,
+          // Best-effort, non-blocking: a registry-write or duplicate-lookup
+          // failure must never fail the upload the user is actively waiting on.
+          if (ownerUserId) {
+            try {
+              const ncFileId = await ncGetFileId(token, user, uploadedPath);
+              if (ncFileId !== null) {
+                await upsertFileRegistryEntry(prisma, {
+                  ncFileId,
+                  ownerUserId,
+                  path: uploadedPath,
+                  departmentId: uploadDepartmentId,
+                  sha256: file.sha256,
+                  sizeBytes: file.size,
+                });
+              }
+              // WARP-2096 — same bytes already on the box, in this person's
+              // same space? Advisory only: the upload is kept (never a silent
+              // drop) and the entry says where the other copy is. A candidate
+              // counts only if it still lives at its recorded path — the
+              // registry is not maintained on delete/move, and a phantom
+              // "already on the box" would be worse than none.
+              for (const c of await findSameContentCandidates(prisma, {
                 ownerUserId,
-                path: uploadedPath,
                 departmentId: uploadDepartmentId,
-              });
+                sha256: file.sha256,
+                excludeNcFileId: ncFileId,
+              })) {
+                if (c.path && (await ncGetFileId(token, user, c.path)) === c.ncFileId) {
+                  entry.duplicateOf = c.path;
+                  break;
+                }
+              }
+            } catch (registryErr) {
+              logger.warn(
+                { err: registryErr, path: uploadedPath },
+                "upload: file-registry write or duplicate lookup failed (non-fatal)",
+              );
             }
-          } catch (registryErr) {
-            logger.warn(
-              { err: registryErr, path: uploadedPath },
-              "upload: file-registry upsert failed (non-fatal)",
-            );
           }
         }
+
+        await invalidateListing(req, user, { space, path: targetPath });
+        safePublish(`droplet/files/${user}/uploaded`, {
+          path: targetPath,
+          files: results.map((r) => r.name),
+          count: results.length,
+        });
+
+        res.json({ uploaded: results });
+      } finally {
+        for (const uploadId of uncommitted) await ncDiscardUpload(token, user, uploadId);
       }
-
-      await invalidateListing(req, user, { space, path: targetPath });
-      safePublish(`droplet/files/${user}/uploaded`, {
-        path: targetPath,
-        files: results.map((r) => r.name),
-        count: results.length,
-      });
-
-      res.json({ uploaded: results });
     } catch (err) {
       handleFileError(err, res, next);
     }

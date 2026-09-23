@@ -27,6 +27,7 @@ import { healthCheck as routingHealth } from "./openwrt.client.js";
 import { healthCheck as displayHealth } from "./display.client.js";
 import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
+import { mqttHealth } from "./mqtt-status.js";
 import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
@@ -41,7 +42,8 @@ export type ComponentName =
   | "nextcloud"
   | "display"
   | "file-indexer"
-  | "storage";
+  | "storage"
+  | "mqtt";
 export type ComponentHealthStatus = "ok" | "down";
 export type AggregateStatus = "ok" | "degraded" | "down";
 
@@ -207,6 +209,11 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     // serves on a degraded mirror; the point is the WARNING pill, not a
     // container restart (`down` would 503 the Docker healthcheck).
     { name: "storage", probe: storagePoolsHealth },
+    // WARP-2548: the broker is SOFT (degraded-class) — events, indexer
+    // pipelines and cameras lose their bus, but the box still serves. The
+    // point is that a crash-looping broker shows as Degraded WITH a reason
+    // (the client's last connect error) instead of nothing at all.
+    { name: "mqtt", probe: mqttHealth },
   ];
 }
 

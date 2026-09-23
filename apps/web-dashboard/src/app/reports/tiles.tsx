@@ -29,6 +29,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Sun,
   TrendingDown,
   TrendingUp,
   Video,
@@ -38,15 +39,19 @@ import { fetchAdminFilesUsage } from "@/lib/api";
 import type { AdminUsageDepartmentRow } from "@/lib/types";
 import type { ActivityItem } from "@/components/audit/types";
 import {
+  BriefingRateLimited,
   ForbiddenError,
   fetchActivityRange,
   fetchArSummary,
   fetchChainVerify,
   fetchDailyReportRuns,
   fetchIntegrations,
+  fetchTodayBriefing,
   reportFromRun,
+  requestBriefingRewrite,
   runDailyReport,
   type ArSummary,
+  type Briefing,
   type DailyReport,
   type HomeTile,
   type IntegrationSummary,
@@ -486,6 +491,289 @@ export function ReportBody({
       {stale ? (
         <div className="rp-report-stale">Out of date for this range — rewrite to refresh.</div>
       ) : null}
+    </div>
+  );
+}
+
+// ── A0 · Your morning briefing (WARP-2250) ───────────────────────────────
+
+const BRIEF_MAX_ACTIONS = 5;
+const BRIEF_POLL_MS = 5000;
+
+/** Internal routes only. `//host` is protocol-relative — external — so it is
+ *  refused too; the server already allow-lists, this is the second lock. */
+function internalHref(href: string | undefined): string | null {
+  return href && href.startsWith("/") && !href.startsWith("//") ? href : null;
+}
+
+function humanise(reason: string | null): string {
+  return (reason ?? "no reason recorded").replace(/_/g, " ");
+}
+
+function rateLimitCopy(e: BriefingRateLimited): string {
+  if (e.reason === "briefing_run_too_soon" && e.retryAfterSec) {
+    return `You can rewrite again in ${Math.max(1, Math.ceil(e.retryAfterSec / 60))} min`;
+  }
+  return "Already writing — check back in a moment";
+}
+
+/**
+ * The caller's own briefing for today (self-only; no user picker). A row is
+ * `pending` from the moment Write/Rewrite is pressed until the executor
+ * claims it, then `running`; both poll every 5 s. `failed` renders the reason
+ * verbatim and never a partial paragraph.
+ */
+export function BriefingBody({ canRead, now }: { canRead: boolean; now: Date | null }) {
+  // undefined = not loaded yet; null = no row today (404).
+  const [briefing, setBriefing] = useState<Briefing | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [requesting, setRequesting] = useState(false);
+  const [photoBroken, setPhotoBroken] = useState(false);
+  const [nonce, setNonce] = useState(0);
+
+  // `now` is the page's refresh key: a press of Refresh re-reads the tile.
+  // Gated on it so the first client paint (now === null) doesn't fetch twice.
+  useEffect(() => {
+    if (!canRead || !now) return;
+    let live = true;
+    fetchTodayBriefing()
+      .then((b) => {
+        if (!live) return;
+        setError(null);
+        setBriefing(b);
+      })
+      .catch((e) => {
+        if (!live) return;
+        setError(e instanceof ForbiddenError ? "forbidden" : (e as Error).message);
+      });
+    return () => {
+      live = false;
+    };
+  }, [canRead, now, nonce]);
+
+  const inFlight = briefing?.status === "pending" || briefing?.status === "running";
+  useEffect(() => {
+    if (!inFlight) return;
+    const t = window.setTimeout(() => setNonce((n) => n + 1), BRIEF_POLL_MS);
+    return () => window.clearTimeout(t);
+  }, [inFlight, briefing]);
+
+  const write = useCallback(async () => {
+    setRequesting(true);
+    setNotice(null);
+    try {
+      await requestBriefingRewrite();
+      setPhotoBroken(false);
+      setBriefing((b) => (b ? { ...b, status: "pending" } : b));
+      setNonce((n) => n + 1);
+    } catch (e) {
+      if (e instanceof ForbiddenError) setError("forbidden");
+      else if (e instanceof BriefingRateLimited) setNotice(rateLimitCopy(e));
+      else setNotice((e as Error).message);
+    } finally {
+      setRequesting(false);
+    }
+  }, []);
+
+  if (!canRead || error === "forbidden") return <LockedBody />;
+
+  if (error) {
+    return (
+      <div className="rp-report">
+        <ErrorBody what="Couldn't load your briefing" onRetry={() => setNonce((n) => n + 1)} />
+        <div className="rp-report-reason">{error}</div>
+      </div>
+    );
+  }
+
+  if (briefing === undefined) return <SkeletonRows n={4} />;
+
+  const noticeLine = notice ? (
+    <div className="rp-report-reason" role="status">
+      {notice}
+    </div>
+  ) : null;
+
+  const writeButton = (label: string) => (
+    <button type="button" className="rp-retry" onClick={write} disabled={requesting}>
+      {label}
+    </button>
+  );
+
+  if (briefing === null) {
+    return (
+      <EmptyBody icon={<Sun size={32} aria-hidden="true" />} text="No briefing yet today">
+        {writeButton("Write my briefing")}
+        {noticeLine}
+      </EmptyBody>
+    );
+  }
+
+  if (briefing.status === "pending" || briefing.status === "running") {
+    return (
+      <div className="rp-report is-writing" aria-live="polite" aria-busy="true">
+        <span className="rp-report-writing">
+          {briefing.status === "pending" ? "Queued — Droplet will write this shortly…" : "Writing…"}
+        </span>
+        <SkeletonRows n={4} />
+      </div>
+    );
+  }
+
+  if (briefing.status === "failed") {
+    return (
+      <div className="rp-report">
+        <ErrorBody what="Couldn't write your briefing" onRetry={write} />
+        {/* The reason verbatim — never paraphrased into something more
+            reassuring than what happened. */}
+        <div className="rp-report-reason">{briefing.failureReason ?? "No reason recorded"}</div>
+        {noticeLine}
+      </div>
+    );
+  }
+
+  if (briefing.status === "skipped") {
+    return (
+      <EmptyBody text={`Skipped this morning — ${humanise(briefing.skipReason)}`}>
+        {writeButton("Write my briefing")}
+        {noticeLine}
+      </EmptyBody>
+    );
+  }
+
+  // ready
+  const body = briefing.body ?? {};
+  const headline = briefing.headline ?? body.headline ?? null;
+  const paras = (body.summary ?? "").split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  const actions = [...(body.actions ?? [])]
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, BRIEF_MAX_ACTIONS);
+  const suggestions = actions.length === 0 ? (body.suggestions ?? []).slice(0, BRIEF_MAX_ACTIONS) : [];
+  const sources = briefing.sources ?? [];
+  const shown = sources.slice(0, MAX_CHIPS);
+  const overflow = sources.length - shown.length;
+  const at = briefing.endedAt ?? briefing.startedAt;
+  const credit = body.photoCredit;
+  const creditUrl = credit?.photographerUrl?.startsWith("https://") ? credit.photographerUrl : null;
+  const showPhoto = briefing.artKind === "photo" && !photoBroken;
+
+  return (
+    <div className="rp-report">
+      <div className="rp-brief-scroll">
+        {/* WARP-2269 — decorative. The ASCII/SVG header (WARP-2253) mounts
+            here once the art set lands; until then only the opt-in photo
+            renders, and a broken photo simply hides. */}
+        {showPhoto ? (
+          <figure className="rp-brief-photo">
+            <img
+              src={`/api/briefings/${encodeURIComponent(briefing.id)}/photo`}
+              alt=""
+              aria-hidden="true"
+              loading="lazy"
+              onError={() => setPhotoBroken(true)}
+            />
+            {credit ? (
+              <figcaption className="rp-brief-credit">
+                Photo by{" "}
+                {creditUrl ? (
+                  <a href={creditUrl} target="_blank" rel="noopener noreferrer">
+                    {credit.photographer}
+                  </a>
+                ) : (
+                  credit.photographer
+                )}{" "}
+                on Pexels
+              </figcaption>
+            ) : null}
+          </figure>
+        ) : null}
+
+        {headline ? <h3 className="rp-brief-headline">{headline}</h3> : null}
+
+        {/* Announced once on settle, not per token. */}
+        <div className="rp-report-prose" aria-live="polite">
+          {paras.map((p, i) => (
+            <p key={i}>{p}</p>
+          ))}
+        </div>
+
+        {actions.length > 0 ? (
+          <ol className="rp-brief-actions" aria-label="Ranked actions">
+            {actions.map((a) => {
+              const href = internalHref(a.href);
+              return (
+                <li key={a.rank}>
+                  <span className="rp-brief-rank">{a.rank}</span>
+                  <div>
+                    <div className="rp-brief-title">{a.title}</div>
+                    <div className="rp-brief-detail">{a.why}</div>
+                    <div className="rp-brief-detail">
+                      <strong>Suggested:</strong> {a.suggestion}
+                    </div>
+                    <div className="rp-brief-meta">
+                      {href ? (
+                        <a className="rp-state-link" href={href}>
+                          Open →
+                        </a>
+                      ) : null}
+                      {(a.sourceTools ?? []).map((s) => (
+                        <span className="rp-src-chip" key={s}>
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        ) : suggestions.length > 0 ? (
+          <>
+            <div className="rp-brief-label">No actions today — a few ideas for your workflow</div>
+            <ul className="rp-brief-actions">
+              {suggestions.map((s, i) => (
+                <li key={i}>
+                  <span className="rp-brief-rank" aria-hidden="true">
+                    ·
+                  </span>
+                  <div>
+                    <div className="rp-brief-title">{s.title}</div>
+                    {s.why ? <div className="rp-brief-detail">{s.why}</div> : null}
+                    {s.suggestion ? <div className="rp-brief-detail">{s.suggestion}</div> : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </div>
+
+      <div className="rp-report-foot">
+        <span className="rp-report-stamp">
+          Written by Droplet from <span className="rp-mono">{sources.length}</span> tool result
+          {sources.length === 1 ? "" : "s"}
+          {now && at ? (
+            <>
+              {" · "}
+              <span className="rp-mono">
+                {new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </>
+          ) : null}
+        </span>
+        {writeButton("Rewrite")}
+        <span className="rp-report-chips">
+          {/* Provenance, not navigation — static, no hover lift. */}
+          {shown.map((s) => (
+            <span className="rp-src-chip" key={s}>
+              {s}
+            </span>
+          ))}
+          {overflow > 0 ? <span className="rp-src-chip">+{overflow}</span> : null}
+        </span>
+      </div>
+      {noticeLine}
     </div>
   );
 }

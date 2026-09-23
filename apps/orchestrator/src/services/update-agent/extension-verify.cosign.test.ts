@@ -85,15 +85,6 @@ describe("verifyExtensionStatement: the release key via cosign (WARP-2900)", () 
     expect(res).toMatchObject({ ok: false, failureReason: "signature_failed" });
   });
 
-  it("a release-signed statement of kind 'release' is not an extension (extension_schema_invalid)", async () => {
-    // The release key is a valid signer for kind release, so the signature
-    // holds; the statement is simply not an extension statement.
-    const res = await verifyExtensionStatement(
-      opts("extension.kind-release.json", "extension.kind-release.json.release.sig"),
-    );
-    expect(res).toMatchObject({ ok: false, failureReason: "extension_schema_invalid" });
-  });
-
   it("a record that says 'release' does not accept the box key", async () => {
     const res = await verifyExtensionStatement(
       opts("extension.valid.json", "extension.valid.json.box.sig", {

@@ -76,7 +76,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -132,6 +132,10 @@ import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 /** Prisma stub: findUnique by nextcloudUsername + count + tx passthrough. */
 function createPrismaMock(seed: any[] = []) {
@@ -211,6 +215,8 @@ function createPrismaMock(seed: any[] = []) {
       return n;
     }),
   };
+  // WARP-2984: the roster reads the directory too.
+  self.user.findMany = vi.fn(async () => users.map((u) => ({ ...u })));
   self.m365Connection = { deleteMany: vi.fn(async () => ({ count: 0 })) };
   self._users = users;
   return self;
@@ -280,7 +286,7 @@ describe("POST /api/auth/users/:username/disable", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "disabled", ncMirror: "synced" });
     expect(row(prisma, "u-alice").directoryStatus).toBe("DEACTIVATED");
-    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "alice", false);
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", false);
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
   });
 
@@ -322,7 +328,7 @@ describe("POST /api/auth/users/:username/enable", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "enabled", ncMirror: "synced" });
     expect(row(prisma, "u-alice").directoryStatus).toBe("ACTIVE");
-    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "alice", true);
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", true);
   });
 
   it("SSO/SCIM account: ACTIVE locally, Nextcloud skipped as no_account (was: 500, row left DEACTIVATED)", async () => {
@@ -346,7 +352,7 @@ describe("PUT /api/auth/users/:username", () => {
     expect(res.status).toBe(200);
     expect(res.body.ncMirror).toBe("synced");
     expect(row(prisma, "u-alice").passwordHash).toBe("$argon2id$stub");
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "password", "New-secret123");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "password", "New-secret123");
   });
 
   it("SSO/SCIM account: displayName + email land on the local row, Nextcloud skipped (was: 404 USER_NOT_FOUND)", async () => {
@@ -417,7 +423,7 @@ describe("DELETE /api/auth/users/:username", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "deleted", ncMirror: "synced" });
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith("test-nc-token", "alice");
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
     expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
     expect(row(prisma, "u-alice")).toBeUndefined();
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
@@ -480,5 +486,27 @@ describe("handle resolution order — nextcloudUsername before username", () => 
     expect(res.status).toBe(200);
     expect(row(prisma, "u-a")).toBeUndefined();
     expect(row(prisma, "u-b")).toBeDefined();
+  });
+});
+
+/**
+ * WARP-2984 — every roster row's `id` is a handle the write routes resolve.
+ * Round trip: list, take the SSO row's id, disable it, list again.
+ */
+describe("roster → action round trip (WARP-2984)", () => {
+  it("the SSO row the roster lists can be disabled by its roster id", async () => {
+    (nc.ncListUsers as any).mockResolvedValue([{ id: "alice", displayName: "Alice", email: null, enabled: true }]);
+    const prisma = createPrismaMock([LOCAL, SSO, OTHER_ADMIN]);
+    const app = buildApp(prisma);
+
+    const before = await request(app).get("/api/auth/users");
+    const dana = before.body.users.find((u: any) => u.userId === "u-dana");
+    expect(dana).toMatchObject({ source: "sso", hasStorage: false, enabled: true });
+
+    const res = await request(app).post(`/api/auth/users/${encodeURIComponent(dana.id)}/disable`);
+    expect(res.status).toBe(200);
+
+    const after = await request(app).get("/api/auth/users");
+    expect(after.body.users.find((u: any) => u.userId === "u-dana").enabled).toBe(false);
   });
 });
