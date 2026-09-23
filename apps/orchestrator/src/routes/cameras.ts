@@ -10,7 +10,7 @@
  * routes (/cameras/:name) to avoid shadowing.
  */
 
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { requireFeatureAccess } from "../middleware/feature-gate.js";
@@ -110,6 +110,7 @@ import {
 } from "../services/camera-retention-backfill.service.js";
 import {
   cameraScopeOf,
+  canSeeFaceFolder,
   filterVisibleCameras,
   inCameraScope,
   listGrantsForUser,
@@ -668,13 +669,33 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   //
   // Names + image filenames are tightened past Frigate's anything-goes
   // because we splice them straight into upstream URLs.
+  //
+  // WARP-3013: Frigate lists its `train` folder — recent face crops from
+  // every camera — alongside the named people. Every face route carries the
+  // per-camera guard, and every one addressed by `:name` also goes through
+  // `faceFolderAccess`: a scope that may not see a folder does not read,
+  // remove or write into it. The view-gate test pins that for every such
+  // route, custody-only ones included — they are safe today only because
+  // custody roles happen to see every camera.
 
   const FACE_NAME_RE = /^[a-zA-Z0-9_ -]{1,40}$/;
   const FACE_IMAGE_RE = /^[a-zA-Z0-9._-]{1,100}\.(jpg|jpeg|png|webp)$/i;
 
-  router.get("/cameras/faces", requireRole(...CAMERA_VIEW_ROLES), async (_req, res, next) => {
+  // An arrow bound to the const, so Express sees the name `faceFolderAccess`
+  // (the view-gate test finds the check by it). A same-named function
+  // expression would shadow the const and get renamed by the transform.
+  const faceFolderAccess: RequestHandler = (req, res, next) => {
+    if (!canSeeFaceFolder(cameraScopeOf(res), req.params.name)) {
+      res.status(404).json({ error: "Face not found" });
+      return;
+    }
+    next();
+  };
+
+  router.get("/cameras/faces", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (_req, res, next) => {
     try {
-      const faces = await fetchKnownFaces();
+      const scope = cameraScopeOf(res);
+      const faces = (await fetchKnownFaces()).filter((f) => canSeeFaceFolder(scope, f.name));
       // Rewrite image URLs to point at our proxy.
       const out = faces.map((f) => ({
         name: f.name,
@@ -689,7 +710,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/cameras/faces/:name/images/:image", requireRole(...CAMERA_VIEW_ROLES), async (req, res, next) => {
+  router.get("/cameras/faces/:name/images/:image", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, faceFolderAccess, async (req, res, next) => {
     try {
       if (!FACE_NAME_RE.test(req.params.name)) {
         return res.status(400).json({ error: "Invalid face name" });
@@ -710,7 +731,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/faces/:name", requireRole(...CAMERA_CUSTODY_ROLES), async (req, res, next) => {
+  router.delete("/cameras/faces/:name", requireRole(...CAMERA_CUSTODY_ROLES), cameraAccess, faceFolderAccess, async (req, res, next) => {
     try {
       if (!FACE_NAME_RE.test(req.params.name)) {
         return res.status(400).json({ error: "Invalid face name" });
@@ -725,6 +746,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.delete(
     "/cameras/faces/:name/images/:image",
     requireRole("owner", "admin", "family"),
+    cameraAccess,
+    faceFolderAccess,
     async (req, res, next) => {
       try {
         if (!FACE_NAME_RE.test(req.params.name)) {
@@ -745,6 +768,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     "/cameras/faces/:name/from-event/:eventId",
     requireRole("owner", "admin", "family"),
     cameraAccess,
+    faceFolderAccess,
     async (req, res, next) => {
       try {
         if (!FACE_NAME_RE.test(req.params.name)) {
