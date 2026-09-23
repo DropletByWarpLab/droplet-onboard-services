@@ -8,7 +8,6 @@ import { requestLogger } from "./middleware/request-logger.js";
 import { requestIdMiddleware } from "./middleware/request-id.js";
 import {
   authMiddleware,
-  setAuthPrisma,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
@@ -248,16 +247,8 @@ export function createApp(
   // orchestrator's internal namespace, parallel to other operator probes.
   app.use(createFipsRouter("orchestrator"));
 
-  // WARP-485 — wire the Prisma client into the auth middleware so the
-  // OCS fallback can resolve `ocs.data.id` (Nextcloud username) to the
-  // local `User.id` UUID. Must run before `app.use(authMiddleware)` so
-  // the very first request after boot gets a populated singleton; pre-
-  // boot requests fall into the fail-closed `USER_NOT_PROVISIONED`
-  // branch instead of regressing the OCS-username-as-id leak.
-  setAuthPrisma(prisma);
-
   // WARP-455 — bind the scope-loader singleton to the same Prisma client
-  // before the first request, for the same reason as setAuthPrisma above:
+  // before the first request:
   // requireScope()'s injected loader (loadUserEffectiveScopes) reads
   // ScopeBinding/GuestExpiry through this singleton, and the very first
   // post-boot request to a scope-guarded route must find it populated.
