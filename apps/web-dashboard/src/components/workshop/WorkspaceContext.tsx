@@ -10,10 +10,21 @@
  * Read-only by design (WARP-2896): the write path — edit, commit, run,
  * propose — belongs to the run; a person who wants to edit by hand clones
  * and pushes. No editor, no branch picker, no push button (brief §8).
+ *
+ * WARP-2899 — a connector draft (the `rest-profile` template) shows the
+ * server's readback under the proposal line, and what keeps it from being
+ * ready. Owner and admin get `Export bundle`: the workspace as a `git bundle`
+ * to take to a Warp Lab PR. The route is the boundary (owner/admin PEOPLE
+ * only, one audit row per download); the role check here decides only what
+ * to render.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Copy, FileDiff, FlaskConical, FolderGit2, GitCommitHorizontal, History, Play, Tag, X } from "lucide-react";
+import { Cable, Copy, Download, FileDiff, FlaskConical, FolderGit2, GitCommitHorizontal, History, Play, Tag, X } from "lucide-react";
+import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import {
+  connectorDraftOf,
+  exportWorkspace,
   getWorkspace,
   getWorkspaceDiff,
   getWorkspaceLog,
@@ -60,6 +71,10 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   const [output, setOutput] = useState<WorkspaceLastRun | null | undefined>(undefined);
   const [error, setError] = useState<{ message: string; status: number | null } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<{ text: string; title?: string } | null>(null);
+  const { user } = useAuth();
+  const canExport = isAdminRole(user?.role);
 
   const load = useCallback(async () => {
     try {
@@ -89,6 +104,7 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     setDiff(null);
     setOutput(undefined);
     setError(null);
+    setExportStatus(null);
     void load();
   }, [load]);
 
@@ -108,7 +124,21 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     }
   };
 
+  const exportBundle = async () => {
+    setExporting(true);
+    setExportStatus(null);
+    try {
+      const filename = await exportWorkspace(workspaceId);
+      setExportStatus({ text: `Downloaded ${filename}.` });
+    } catch (err) {
+      setExportStatus({ text: "Couldn't export this workspace. Try again in a moment.", title: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const git = detail && !("error" in detail.git) ? detail.git : null;
+  const draft = detail ? connectorDraftOf(detail) : null;
   const activeRun = detail?.runs.find((r) => r.status === "queued" || r.status === "running" || r.status === "awaiting_confirmation");
 
   return (
@@ -166,6 +196,26 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                     </dd>
                   </>
                 )}
+                {draft && (
+                  <>
+                    <dt>
+                      <Cable size={11} aria-hidden style={{ verticalAlign: "-1px" }} /> Draft
+                    </dt>
+                    <dd>
+                      <span data-testid="connector-draft-readback">This workspace {draft.readback}.</span>
+                      {draft.problems.length > 0 && (
+                        <>
+                          <span className="ws-draft-notready"> Not ready to propose yet:</span>
+                          <ul className="ws-draft-problems" data-testid="connector-draft-problems" aria-label="What keeps this draft from being ready">
+                            {draft.problems.map((p, i) => (
+                              <li key={`${i}-${p}`}>{p}</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </dd>
+                  </>
+                )}
               </dl>
               <div className="flex flex-wrap gap-2 mt-3">
                 {detail.status === "active" && !activeRun && onStartRun && (
@@ -178,7 +228,17 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                     <Play size={13} aria-hidden /> A run is working here
                   </button>
                 )}
+                {canExport && (
+                  <button type="button" className="btn sm" disabled={exporting} aria-busy={exporting} onClick={() => void exportBundle()}>
+                    <Download size={13} aria-hidden /> {exporting ? "Exporting…" : "Export bundle"}
+                  </button>
+                )}
               </div>
+              {canExport && exportStatus && (
+                <p className="ws-note" style={{ marginTop: 6 }} role="status" data-testid="export-status" title={exportStatus.title}>
+                  {exportStatus.text}
+                </p>
+              )}
             </section>
 
             <section className="ws-sect" aria-labelledby="ws-changes">

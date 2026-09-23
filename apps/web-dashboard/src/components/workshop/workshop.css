@@ -88,6 +88,10 @@
 .droplet-shell .ws-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
 .droplet-shell .ws-facts code,
 .droplet-shell .ws-mono { font-family: var(--font-mono); font-size: 12px; }
+/* WARP-2899 — what keeps a connector draft from being proposed. */
+.droplet-shell .ws-draft-notready { color: var(--text-muted); }
+.droplet-shell .ws-draft-problems { margin: 4px 0 0; padding-left: 16px; color: var(--text-muted); }
+.droplet-shell .ws-draft-problems li { margin: 2px 0; }
 
 .droplet-shell .ws-pre {
   margin: 0;
