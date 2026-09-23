@@ -378,7 +378,7 @@ export function buildSecurityHealth(input: {
       : mirrorRan && now.getTime() - mirrorRan.getTime() <= 5 * SECURITY_THREAT_MIRROR_INTERVAL_MS
         ? "ok"
         : "quiet",
-    detail: !ingest.jobsRegistered ? "Not scheduled" : "Network and sign-in warnings",
+    detail: !ingest.jobsRegistered ? "Not scheduled" : "Checks the network and sign-in log every minute",
     lastSeenAt: iso(mirrorRan),
   });
 

@@ -124,6 +124,23 @@ describe("rows", () => {
     expect(screen.getByText("front_door · 86% sure")).toBeInTheDocument();
   });
 
+  it("cameras are named the way the household named them", () => {
+    const label = (n: string) => (n === "front_door" ? "Front door" : n);
+    render(
+      <SecurityFeed
+        {...props({
+          cameraLabel: label,
+          events: [
+            event(),
+            event({ id: "2", source: "frigate_status", kind: "camera_offline", severity: "notice", labels: [], score: null, summary: "Camera front_door stopped reporting" }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("Front door · 86% sure")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Front door stopped reporting" })).toBeInTheDocument();
+  });
+
   it("a low-confidence detection says so", () => {
     render(<SecurityFeed {...props({ events: [event({ kind: "detection_low", score: 0.41 })] })} />);
     expect(screen.getByText("front_door · 41% sure · low confidence")).toBeInTheDocument();

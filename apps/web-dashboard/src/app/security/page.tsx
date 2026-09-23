@@ -14,7 +14,7 @@ import { useMemo, useState } from "react";
 import { Shield } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
-import { useSecurityFeed, useSecurityHealth } from "@/lib/hooks/useSecurity";
+import { useCameraDisplayNames, useSecurityFeed, useSecurityHealth } from "@/lib/hooks/useSecurity";
 import { useAuth } from "@/lib/auth";
 
 const PAGE_SUB = "What your cameras saw, whether they're reporting, and network warnings, in one place.";
@@ -31,6 +31,7 @@ export default function SecurityPage() {
   );
   const feed = useSecurityFeed(filter);
   const health = useSecurityHealth();
+  const cameraLabel = useCameraDisplayNames();
 
   return (
     <ShellPage icon={<Shield size={15} />} label="Security" title="Security" sub={PAGE_SUB}>
@@ -52,6 +53,7 @@ export default function SecurityPage() {
         includeLow={includeLow}
         onIncludeLowChange={setIncludeLow}
         canSeeThreats={canSeeThreats}
+        cameraLabel={cameraLabel}
       />
     </ShellPage>
   );

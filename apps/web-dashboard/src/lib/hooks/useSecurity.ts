@@ -12,8 +12,8 @@
 import { useCallback, useMemo } from "react";
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
-import { getSecurityEvents, getSecurityHealth, type SecurityEventsQuery } from "@/lib/api";
-import type { SecurityEvent, SecurityEventsPage, SecurityHealthRow } from "@/lib/types";
+import { fetchCameras, getSecurityEvents, getSecurityHealth, type SecurityEventsQuery } from "@/lib/api";
+import type { CameraInfo, SecurityEvent, SecurityEventsPage, SecurityHealthRow } from "@/lib/types";
 
 const REFRESH_MS = 15_000;
 
@@ -64,4 +64,15 @@ export function useSecurityHealth() {
     { refreshInterval: REFRESH_MS },
   );
   return { sources: data?.sources ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate() };
+}
+
+/**
+ * Frigate name → the household's name for the camera (WARP-1893). Shares the
+ * `/api/cameras` cache with the cameras pages. That list is already filtered
+ * to the viewer's grants, as the feed is, so it names nothing the feed hides.
+ */
+export function useCameraDisplayNames(): (name: string) => string {
+  const { data } = useSWR<CameraInfo[]>("/api/cameras", fetchCameras);
+  const byName = useMemo(() => new Map((data ?? []).map((c) => [c.name, c.displayName || c.name])), [data]);
+  return useCallback((name: string) => byName.get(name) ?? name, [byName]);
 }

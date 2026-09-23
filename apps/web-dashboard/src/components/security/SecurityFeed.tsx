@@ -107,10 +107,17 @@ function iconFor(e: SecurityEvent): LucideIcon {
   }
 }
 
-function subFor(e: SecurityEvent): string {
+/** Camera health reads better with the household's name for the camera in it. */
+function titleFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
+  if (e.camera && e.kind === "camera_offline") return `${cameraLabel(e.camera)} stopped reporting`;
+  if (e.camera && e.kind === "camera_online") return `${cameraLabel(e.camera)} is reporting again`;
+  return e.summary;
+}
+
+function subFor(e: SecurityEvent, cameraLabel: (name: string) => string): string {
   const parts: string[] = [];
   if (e.kind === "threat") parts.push(e.labels[0] === "auth" ? "Sign-in" : "Network");
-  if (e.camera) parts.push(e.camera);
+  if (e.camera) parts.push(cameraLabel(e.camera));
   if (e.score !== null && (e.kind === "detection" || e.kind === "detection_low")) {
     parts.push(`${Math.round(e.score * 100)}% sure`);
   }
@@ -134,6 +141,8 @@ export interface SecurityFeedProps {
   onIncludeLowChange: (v: boolean) => void;
   /** Owners and admins — the only people the network/sign-in rows are for. */
   canSeeThreats: boolean;
+  /** Frigate camera name → the name the household gave it. Defaults to the Frigate name. */
+  cameraLabel?: (name: string) => string;
   now?: Date;
 }
 
@@ -236,6 +245,7 @@ function SourcesCard({ sources, error, now }: { sources: SecurityHealthRow[] | n
 }
 
 function FeedBody(props: SecurityFeedProps & { now: Date }) {
+  const cameraLabel = props.cameraLabel ?? ((name: string) => name);
   if (props.error) {
     return (
       <div className="empty" role="alert">
@@ -303,16 +313,26 @@ function FeedBody(props: SecurityFeedProps & { now: Date }) {
                 <Icon size={16} />
               </span>
               <span className="rt">
-                <span className="nm">
+                {/* The shell's row title is one ellipsised line; a security
+                    event's title is the part that must never be cut off. */}
+                <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
                   {e.camera ? (
-                    <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{e.summary}</Link>
+                    <Link href={`/cameras/${encodeURIComponent(e.camera)}`}>{titleFor(e, cameraLabel)}</Link>
                   ) : (
-                    e.summary
+                    titleFor(e, cameraLabel)
                   )}
                 </span>
-                <span className="sub">{subFor(e)}</span>
+                <span className="sub">
+                  {/* In the second line, not beside the title: on a phone a
+                      badge column squeezes the headline to a word per line. */}
+                  {e.severity === "alert" && (
+                    <span className="badge danger" style={{ marginRight: 6 }}>
+                      Serious
+                    </span>
+                  )}
+                  <span>{subFor(e, cameraLabel)}</span>
+                </span>
               </span>
-              {e.severity === "alert" && <span className="badge danger">Serious</span>}
               <time className="rmeta mono" dateTime={e.startedAt} title={new Date(e.startedAt).toLocaleString()}>
                 {formatRelativeTime(e.startedAt, props.now)}
               </time>
