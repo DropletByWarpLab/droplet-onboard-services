@@ -3044,7 +3044,8 @@ export type PromptBlockStatus =
   | "absent"
   | "errored"
   | "dropped"
-  | "not_modelled";
+  | "not_modelled"
+  | "withheld_off_lan";
 
 export interface PromptBlockView {
   key: string;
