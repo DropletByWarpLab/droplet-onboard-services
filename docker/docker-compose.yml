@@ -1798,7 +1798,7 @@ services:
     # Idle with no mailbox connected (FastAPI + aioimaplib, capped below).
     # The `email` token that boxes already carry in COMPOSE_PROFILES is now
     # inert: compose ignores a profile name no service uses. Pinned by
-    # tests/email-indexer-default-on.test.sh.
+    # tests/setup.test.sh, check (4c).
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}

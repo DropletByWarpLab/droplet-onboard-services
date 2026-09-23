@@ -2077,7 +2077,7 @@ else
   pass "docker compose unavailable — resolved-set check skipped (static check above still ran)"
 fi
 
-
+# (5) Static: generate_env must STAGE the heredoc and rename into place —
 # writing the live .env directly means an interruption leaves a prefix of the
 # file that a re-run mistakes for a complete .env.
 if grep -qE 'cat > "\$env_file" <<' "$SECRETS_LIB"; then

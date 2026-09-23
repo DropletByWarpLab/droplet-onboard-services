@@ -1112,6 +1112,12 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 # 🔴 It shipped under \`profiles: ["full"]\` alone, and \`full\` is never in this
 # default — so the IMAP subsystem has never run on any box that ever shipped.
 # That is the defect WARP-2734 exists to close; the conditional is the close.
+#
+# WARP-2970: email-indexer is now default-on (no \`profiles:\` key), so on the
+# current compose file this token selects nothing. It is still written as a
+# COMPATIBILITY token: a box rolled back or reinstalled onto a compose file
+# from before WARP-2970 still gates email-indexer on \`email\`, and without it
+# that box silently loses mail ingest. Drop it once no such compose can return.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')$([ -n "$service_token_email" ] && printf ',email')
 
 # --- NVR recordings target (WARP-2099) ---
@@ -1377,7 +1383,9 @@ migrate_env() {
   # because it fails silently and looks fine.
   #
   # Fresh installs get `email` from generate_env's heredoc; this is the upgrade
-  # path's half of the same decision. Compared as a whole list element (the
+  # path's half of the same decision. Since WARP-2970 the token is inert on the
+  # current compose (email-indexer is default-on); it stays as a compatibility
+  # token for a pre-2970 compose file (see the generate_env heredoc note). Compared as a whole list element (the
   # comma-wrapping) so a profile merely STARTING with "email" is never mistaken
   # for it, and an empty value does not gain a leading comma.
   if grep -qE '^COMPOSE_PROFILES=' "$stage"; then
@@ -1394,7 +1402,7 @@ migrate_env() {
         /^COMPOSE_PROFILES=/ { print "COMPOSE_PROFILES=" v; next } { print }
       ' "$stage" > "$stage.tmp" && mv "$stage.tmp" "$stage"
       normalized=true
-      log_info "Migrated .env: added 'email' to COMPOSE_PROFILES (WARP-2734 — email-indexer never started on an upgraded box)"
+      log_info "Migrated .env: added the 'email' compatibility token to COMPOSE_PROFILES (WARP-2734; inert on the current compose, where email-indexer is default-on — WARP-2970)"
     fi
     unset _current_profiles _new_profiles
   fi
