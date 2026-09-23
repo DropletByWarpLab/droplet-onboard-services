@@ -29,6 +29,10 @@ the vendor's own documentation stays empty, and renders as `TODO(verify)`.
 2. `npm run build` — renders the draft's files, or prints what is wrong.
 3. `npm test` — checks the draft and the rendered files agree.
 4. `workspace_propose` — tags the draft. No extension manifest is written.
+   It makes the same checks as `npm test` and refuses while any fails. Edit
+   `connector-draft.json`, never a rendered file: a profile that is not what
+   `npm run build` wrote, or that dials a host the draft does not name, is
+   refused.
 
 ## For the owner
 
