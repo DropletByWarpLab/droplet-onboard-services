@@ -53,6 +53,9 @@
 # pins it. (The attach and token modules match extension-* above.)
 /apps/orchestrator/src/middleware/extension-principal-guard.ts   @rjouffret
 /apps/orchestrator/src/__tests__/extension-principal.test.ts     @rjouffret
+/apps/orchestrator/src/__tests__/extension-principal-wiring.test.ts @rjouffret
+# In-process attribution of a remote dispatch: it must never carry a token.
+/apps/orchestrator/src/services/remote-call-attribution.ts       @rjouffret
 
 # This file.
 /.github/CODEOWNERS                                             @rjouffret

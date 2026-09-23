@@ -69,6 +69,19 @@ function fakePrisma(seed: RemoteToolClassificationRow[] = []) {
       rows.set(key, next);
       return next;
     },
+    updateMany: async ({
+      where,
+      data,
+    }: {
+      where: { serverId: string; toolName: string; inputSchemaHash?: string | null };
+      data: Partial<RemoteToolClassificationRow>;
+    }) => {
+      const key = k(where.serverId, where.toolName);
+      const row = rows.get(key);
+      if (!row || ("inputSchemaHash" in where && (row.inputSchemaHash ?? null) !== where.inputSchemaHash)) return { count: 0 };
+      rows.set(key, { ...row, ...data });
+      return { count: 1 };
+    },
     findMany: async ({ where }: { where?: { serverId?: string } } = {}) =>
       [...rows.values()].filter((r) => !where?.serverId || r.serverId === where.serverId),
   };
@@ -330,6 +343,26 @@ describe("WARP-2900 — a re-discovered tool keeps its review only while its inp
     );
     await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "wipe", inputSchemaHash: "h2" }], T1);
     expect(rows.get("ext-wc|wipe")).toMatchObject({ denied: true, reviewedBy: "owner", inputSchemaHash: "h2" });
+  });
+
+  it("a review sent with the hash it was shown lands only on that schema (a reset in between is a STALE_REVIEW)", async () => {
+    // Review finding (PR #2325): the owner opens v1's tool, v2's attach
+    // resets the row, the owner clicks "read", and the review lands on v2's
+    // schema they never saw. MUTATION: ignore expectedInputSchemaHash (plain
+    // update) → the stale review lands → red.
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h1" }], T0);
+    const asRead = { serverId: "ext-wc", toolName: "word_count", requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "owner" };
+    // v2 is attached before the owner's click lands.
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: "h2" }], T1);
+    const stale = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: "h1" }, T1);
+    expect(stale).toMatchObject({ ok: false, code: "STALE_REVIEW" });
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null, inputSchemaHash: "h2" });
+    // The review of the schema the owner is now shown lands.
+    const fresh = await classifyRemoteTool(prisma, { ...asRead, expectedInputSchemaHash: "h2" }, T1);
+    expect(fresh).toMatchObject({ ok: true, row: { requiresWrite: false, reviewedBy: "owner", inputSchemaHash: "h2" } });
+    // An unseen tool is still NOT_FOUND, not STALE_REVIEW.
+    expect(await classifyRemoteTool(prisma, { ...asRead, toolName: "ghost", expectedInputSchemaHash: "h2" }, T1)).toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("a caller that sends no hash (the Atlassian attach) keeps today's behaviour exactly", async () => {

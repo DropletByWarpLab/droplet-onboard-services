@@ -332,6 +332,15 @@ export function extensionPrisma(
           return { ...next };
         },
       ),
+      updateMany: vi.fn(
+        async ({ where, data }: { where: { serverId: string; toolName: string; inputSchemaHash?: string | null }; data: Row }) => {
+          const key = ck({ serverId_toolName: { serverId: where.serverId, toolName: where.toolName } });
+          const row = classifications.get(key);
+          if (!row || ("inputSchemaHash" in where && (row.inputSchemaHash ?? null) !== where.inputSchemaHash)) return { count: 0 };
+          classifications.set(key, { ...row, ...data });
+          return { count: 1 };
+        },
+      ),
       findMany: vi.fn(async ({ where }: { where?: { serverId?: string } } = {}) =>
         [...classifications.values()].filter((r) => !where?.serverId || r.serverId === where.serverId).map((r) => ({ ...r })),
       ),

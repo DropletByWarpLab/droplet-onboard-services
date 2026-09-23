@@ -191,11 +191,19 @@ export interface ClassifyRemoteToolInput {
   denied: boolean;
   /** The person deciding. Required — an anonymous demotion is not a review. */
   reviewedBy: string;
+  /**
+   * WARP-2900 — the input-schema hash of the tool the person was SHOWN. When
+   * sent, the review lands only while the row still has that hash: a
+   * re-discovery that changed the schema (and so reset the review) between
+   * the person reading the tool and deciding is a STALE_REVIEW, never a
+   * review of arguments they did not see. Omitted: today's behaviour.
+   */
+  expectedInputSchemaHash?: string;
 }
 
 export type ClassifyRemoteToolResult =
   | { ok: true; row: RemoteToolClassificationRow }
-  | { ok: false; code: "NOT_FOUND" | "NO_REVIEWER" | "UNCONFIRMED_WRITE"; message: string };
+  | { ok: false; code: "NOT_FOUND" | "NO_REVIEWER" | "UNCONFIRMED_WRITE" | "STALE_REVIEW"; message: string };
 
 /**
  * A person's classification of one tool. Refuses:
@@ -232,16 +240,39 @@ export async function classifyRemoteTool(
       message: `${input.serverId} has never advertised a tool named ${input.toolName}.`,
     };
   }
-  const row = (await prisma.remoteToolClassification.update({
-    where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
-    data: {
-      requiresWrite: input.requiresWrite,
-      requiresConfirmation: input.requiresConfirmation,
-      denied: input.denied,
-      reviewedBy,
-      reviewedAt: now,
-    },
-  })) as RemoteToolClassificationRow;
+  const data = {
+    requiresWrite: input.requiresWrite,
+    requiresConfirmation: input.requiresConfirmation,
+    denied: input.denied,
+    reviewedBy,
+    reviewedAt: now,
+  };
+  let row: RemoteToolClassificationRow;
+  if (input.expectedInputSchemaHash !== undefined) {
+    // The hash in the WHERE: one statement, so a reset that lands between
+    // the read above and this write still wins.
+    const u = await prisma.remoteToolClassification.updateMany({
+      where: { serverId: input.serverId, toolName: input.toolName, inputSchemaHash: input.expectedInputSchemaHash },
+      data,
+    });
+    if (u.count === 0) {
+      return {
+        ok: false,
+        code: "STALE_REVIEW",
+        message:
+          `${input.serverId}'s ${input.toolName} has changed its arguments since it was shown to you; ` +
+          "its review was reset. Reload it and review the new arguments.",
+      };
+    }
+    row = (await prisma.remoteToolClassification.findUnique({
+      where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
+    })) as RemoteToolClassificationRow;
+  } else {
+    row = (await prisma.remoteToolClassification.update({
+      where: { serverId_toolName: { serverId: input.serverId, toolName: input.toolName } },
+      data,
+    })) as RemoteToolClassificationRow;
+  }
   logger.info(
     {
       serverId: row.serverId,
