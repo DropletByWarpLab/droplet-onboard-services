@@ -11,7 +11,12 @@ The sidecar, not its caller, decides what the extension key signs:
   1. the statement must be a UTF-8 JSON object of at most
      MAX_STATEMENT_BYTES, with no duplicate keys;
   2. it must declare kind == "extension" AND keyUsage == "extension";
-  3. the bytes actually signed are EXTENSION_STATEMENT_PREFIX || statement.
+  3. it must carry EXACTLY the statement's key set (EXTENSION_STATEMENT_KEYS,
+     mirrored from extensionStatementSchema in the orchestrator's
+     extension-manifest.ts, drift-tested there), and be in canonical form:
+     keys sorted, no whitespace. Anything else is not a statement the
+     orchestrator could have built, so the key does not sign it;
+  4. the bytes actually signed are EXTENSION_STATEMENT_PREFIX || statement.
 
 The prefix is a domain separator. No other message this box signs starts
 with it (the device-key flows use "droplet-cert:v1:", "droplet-overlay-*:v1:"
@@ -42,6 +47,23 @@ EXTENSION_KEY_FILE = "extension-signing.sealed"
 MAX_STATEMENT_BYTES = 4096
 
 EXTENSION_SIGNATURE_ALGORITHM = "ECDSA-P256-SHA256"
+
+# The exact top-level keys of an extension statement: extensionStatementSchema
+# (apps/orchestrator/src/services/extension-manifest.ts, a strict zod object).
+# A statement with one key more or one key fewer is refused, so the key signs
+# statements and nothing shaped like one. extension-verify.test.ts reads this
+# literal as text and compares it with the schema.
+EXTENSION_STATEMENT_KEYS = frozenset({
+    "commit",
+    "extensionId",
+    "keyUsage",
+    "kind",
+    "manifestSha256",
+    "schemaVersion",
+    "tree",
+    "version",
+    "workspaceId",
+})
 
 
 class StatementRefused(ValueError):
@@ -84,6 +106,23 @@ def validate_statement(statement: bytes) -> dict[str, Any]:
         raise StatementRefused("statement kind is not 'extension'")
     if parsed.get("keyUsage") != EXTENSION_KEY_USAGE:
         raise StatementRefused("statement keyUsage is not 'extension'")
+    keys = set(parsed)
+    if keys != EXTENSION_STATEMENT_KEYS:
+        extra = sorted(keys - EXTENSION_STATEMENT_KEYS)
+        missing = sorted(EXTENSION_STATEMENT_KEYS - keys)
+        raise StatementRefused(
+            f"statement keys differ from an extension statement's "
+            f"(extra {extra}, missing {missing})"
+        )
+    # Canonical form, the orchestrator's canonicalJson(): keys sorted, no
+    # whitespace. The verifier refuses anything else, so the key never needs
+    # to sign it. ensure_ascii=False matches JSON.stringify, which leaves
+    # non-ASCII characters unescaped.
+    canonical = json.dumps(
+        parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    if canonical != text:
+        raise StatementRefused("statement is not canonical JSON (sorted keys, compact)")
     return parsed
 
 

@@ -128,7 +128,12 @@ the device-id key, and the device-id key never signs an extension.
 - **One RPC.** `SignExtensionManifest(statement)` is the only way to reach
   it. The sidecar parses the statement (UTF-8 JSON object, at most 4 KiB, no
   duplicate keys) and refuses anything that is not
-  `kind == keyUsage == "extension"` with `INVALID_ARGUMENT`. The bytes it
+  `kind == keyUsage == "extension"` with `INVALID_ARGUMENT`. It also refuses
+  a statement whose keys are not exactly the statement schema's
+  (`EXTENSION_STATEMENT_KEYS`, drift-tested against `extensionStatementSchema`)
+  or whose bytes are not canonical (keys sorted, compact separators), so the
+  key signs only what the orchestrator's `buildExtensionStatement` could have
+  produced, not any object that calls itself an extension. The bytes it
   signs are `droplet-extension-statement:v1:` || statement; the prefix is a
   sidecar constant (`extension_signing.py`) that no caller can choose, and
   it is disjoint from every device-key message prefix

@@ -25,7 +25,11 @@ import {
   type VerifyExtensionStatementOptions,
 } from "./extension-verify.js";
 import { extensionKeyFingerprint } from "../extension-manifest.js";
-import { buildExtensionStatement, manifestSha256 } from "../extension-manifest.js";
+import {
+  buildExtensionStatement,
+  extensionStatementSchema,
+  manifestSha256,
+} from "../extension-manifest.js";
 import { REPO_ROOT } from "../../__tests__/helpers/test-paths.js";
 
 const fx = (name: string): string => path.join(__dirname, "__fixtures__", name);
@@ -272,5 +276,20 @@ describe("the prefix is the sidecar's constant (drift gate)", () => {
     const m = /^EXTENSION_STATEMENT_PREFIX = b"([^"]+)"$/m.exec(py);
     expect(m, "EXTENSION_STATEMENT_PREFIX not found in extension_signing.py").not.toBeNull();
     expect(EXTENSION_STATEMENT_PREFIX).toBe(m![1]);
+  });
+
+  it("the sidecar signs exactly the key set of extensionStatementSchema (review #2312)", () => {
+    // The sidecar refuses a statement with one key more or fewer than
+    // EXTENSION_STATEMENT_KEYS. If the schema gains a field without the
+    // sidecar, every promote is refused; if the sidecar gains one without the
+    // schema, it signs statements no verifier accepts. Either way, red here.
+    const py = readFileSync(
+      path.join(REPO_ROOT, "services", "device-identity-svc", "extension_signing.py"),
+      "utf8",
+    );
+    const m = /^EXTENSION_STATEMENT_KEYS = frozenset\(\{([^}]*)\}\)$/m.exec(py);
+    expect(m, "EXTENSION_STATEMENT_KEYS not found in extension_signing.py").not.toBeNull();
+    const pyKeys = [...m![1].matchAll(/"([^"]+)"/g)].map((k) => k[1]).sort();
+    expect(pyKeys).toEqual(Object.keys(extensionStatementSchema.shape).sort());
   });
 });

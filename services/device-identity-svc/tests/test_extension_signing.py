@@ -7,8 +7,9 @@ the orchestrator cannot enforce from the outside:
   - the key is distinct from the device-id key, in its own file, created
     lazily on the first sign (never by GetStatus, never before provisioning);
   - the sidecar, not the caller, decides what gets signed: the statement
-    must parse as a JSON object with kind == keyUsage == "extension", and
-    the signed bytes are EXTENSION_STATEMENT_PREFIX || statement;
+    must parse as a JSON object with kind == keyUsage == "extension",
+    exactly the statement's key set, in canonical (sorted, compact) form,
+    and the signed bytes are EXTENSION_STATEMENT_PREFIX || statement;
   - the real (TPM) backend fails closed until it implements the key.
 
 Mutations each test is written to catch are named inline.
@@ -30,6 +31,7 @@ from backends.mock import MockBackend
 from extension_signing import (
     EXTENSION_KEY_FILE,
     EXTENSION_KEY_USAGE,
+    EXTENSION_STATEMENT_KEYS,
     EXTENSION_STATEMENT_PREFIX,
     MAX_STATEMENT_BYTES,
     StatementRefused,
@@ -151,6 +153,87 @@ def test_validate_refuses_an_oversized_statement():
     assert len(padded) > MAX_STATEMENT_BYTES
     with pytest.raises(StatementRefused):
         validate_statement(padded)
+
+
+def _raw_statement(body: dict, **dumps_kwargs) -> bytes:
+    return json.dumps(body, **dumps_kwargs).encode()
+
+
+_CANONICAL_BODY = json.loads(_statement())
+
+
+@pytest.mark.parametrize(
+    "statement,why",
+    [
+        # Exact key set (review #2312): a JSON object that merely declares
+        # itself an extension is not a statement.
+        (_statement(extra="x"), "one key more"),
+        (_statement(role="owner"), "another key more"),
+        (_statement(commit=None), "commit missing"),
+        (_statement(tree=None), "tree missing"),
+        (_statement(manifestSha256=None), "digest missing"),
+        (
+            json.dumps({"kind": "extension", "keyUsage": "extension"}).encode(),
+            "only the two declaring keys",
+        ),
+        # Canonical bytes (review #2312): sorted keys, compact separators.
+        (
+            _raw_statement(
+                dict(reversed(list(_CANONICAL_BODY.items()))),
+                separators=(",", ":"),
+            ),
+            "keys unsorted",
+        ),
+        (_raw_statement(_CANONICAL_BODY, sort_keys=True), "default separators"),
+        (_raw_statement(_CANONICAL_BODY, sort_keys=True, indent=2), "pretty-printed"),
+        (_statement() + b"\n", "trailing newline"),
+        (b" " + _statement(), "leading space"),
+        (
+            _raw_statement(
+                {**_CANONICAL_BODY, "extensionId": "caf" + chr(0xE9)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "non-ASCII escaped (JSON.stringify leaves it raw)",
+        ),
+    ],
+)
+def test_validate_refuses_anything_but_the_exact_canonical_statement(statement, why):
+    # MUTATION: drop the key-set check -> the key-set rows go green.
+    # MUTATION: drop the canonical check -> the canonical rows go green.
+    with pytest.raises(StatementRefused):
+        validate_statement(statement)
+
+
+def test_validate_accepts_non_ascii_written_raw_like_json_stringify():
+    # canonicalJson() is JSON.stringify per value, which writes non-ASCII as
+    # raw UTF-8. The sidecar's canonical check must agree, or it would refuse
+    # bytes the orchestrator really builds. (The statement schema pins ASCII
+    # today; this keeps the two encoders from drifting apart silently.)
+    # MUTATION: ensure_ascii=True in the canonical check -> refused, red.
+    body = {**_CANONICAL_BODY, "extensionId": "caf" + chr(0xE9)}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    validate_statement(raw.encode("utf-8"))
+
+
+def test_statement_key_set_is_what_the_fixture_builds():
+    # The fixture mirrors buildExtensionStatement(); if the key set moved
+    # without the fixture (or the reverse), every accept test above is moot.
+    assert set(_CANONICAL_BODY) == EXTENSION_STATEMENT_KEYS
+
+
+def test_rpc_refuses_a_non_canonical_statement_before_any_key_exists(
+    provisioned, servicer, tmp_path
+):
+    # The RPC path reaches the same check, and a refused statement never
+    # mints the key (it is created lazily by the first ACCEPTED sign).
+    ctx = MagicMock()
+    resp = servicer.SignExtensionManifest(
+        pb.SignExtensionManifestRequest(statement=_statement(extra="x")), ctx
+    )
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert resp.signature == b""
+    assert not (tmp_path / EXTENSION_KEY_FILE).exists()
 
 
 # ─── MockBackend: a distinct, lazily created, persisted key ─────────────
