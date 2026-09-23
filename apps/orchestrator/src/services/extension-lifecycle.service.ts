@@ -245,7 +245,9 @@ export type ExtensionAttachErrorCode =
   | "manifest_invalid"
   | "listing_unavailable"
   | "listing_mismatch"
-  | "attach_rejected";
+  | "attach_rejected"
+  /** The review could not be recorded or re-read: transient, retried. */
+  | "classification_unavailable";
 
 /**
  * Why an attach did not happen. `permanent` is the lifecycle's switch: a

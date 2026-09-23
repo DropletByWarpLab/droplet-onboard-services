@@ -253,6 +253,41 @@ describe("attach", () => {
     expect(k.relay.calls.some((c) => c.method === "tools/call")).toBe(false);
   });
 
+  it("a re-attach that fails transiently leaves NOTHING attached, so the reconciler retries it", async () => {
+    // Review finding (PR #2325): the listing ran before the old attachment
+    // was dropped, so v1 stayed advertised under v1's provenance while v2
+    // ran, and isAttached stayed true, so the reconciler never retried.
+    // MUTATION: drop the first `drop(serverId)` and the catch-drop in
+    // attachNow → v1 is still attached after the failure → red.
+    const shim: HostShimOpts = {};
+    const k = kit({ wc: { id: "wc" } }, shim);
+    await k.attacher.attach("wc");
+    seed(k.db, { id: "wc", version: "0.2.0" });
+    k.served.wc = manifestObject({ id: "wc", version: "0.2.0" });
+    shim.down = true; // the restarted shim is not listening yet
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "listing_unavailable", permanent: false });
+    expect(k.mux.remoteServerIds()).toEqual([]);
+    expect(k.registry.list()).toEqual([]);
+    // The reconciler's test (extension-lifecycle: "not attached → reattached").
+    expect(k.attacher.isAttached("wc")).toBe(false);
+    shim.down = false;
+    await k.attacher.attach("wc");
+    expect(k.registry.list().map((t) => t.provenance)).toEqual(["extension:wc@0.2.0"]);
+  });
+
+  it("a refused re-attach (the new version's listing is not what was signed) leaves nothing attached", async () => {
+    const shim: HostShimOpts = {};
+    const k = kit({ wc: { id: "wc" } }, shim);
+    await k.attacher.attach("wc");
+    seed(k.db, { id: "wc", version: "0.2.0" });
+    shim.listing = [];
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "listing_mismatch", permanent: true });
+    expect(k.mux.remoteServerIds()).toEqual([]);
+    expect(k.registry.list()).toEqual([]);
+  });
+
   it("detach removes the server and its runtime tools", async () => {
     const k = kit({ wc: { id: "wc" } });
     await k.attacher.attach("wc");
@@ -328,6 +363,83 @@ describe("classification", () => {
     const out = await k.mux.callTool("ext-wc__word_count", { path: "/" });
     expect(out.content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
   });
+
+  /** v1 attached and reviewed as a read by the owner; v2 changes the tool's input schema. */
+  async function reviewedThenChanged() {
+    const k = kit({ wc: { id: "wc" } });
+    await k.attacher.attach("wc");
+    const prisma = k.db.prisma as unknown as ClassificationPrisma;
+    await classifyRemoteTool(prisma, {
+      serverId: "ext-wc",
+      toolName: "word_count",
+      requiresWrite: false,
+      requiresConfirmation: false,
+      denied: false,
+      reviewedBy: "owner",
+    });
+    await k.cache.refresh(prisma);
+    const changed = { id: "wc", version: "0.2.0", tools: [{ name: "word_count", inputSchema: { type: "object", properties: { path: { type: "string" } } } }] };
+    seed(k.db, changed);
+    k.served.wc = manifestObject(changed);
+    return k;
+  }
+
+  it("a failed reset of the review is a failed attach: the changed tool is never dispatched under the old review", async () => {
+    // Review finding (PR #2325): the record step ran after publishing and
+    // its failure was only logged, so v2 went live as a reviewed read.
+    // MUTATION: swallow the record failure (log and carry on) → the tool
+    // attaches and the call reaches the extension → red.
+    const k = await reviewedThenChanged();
+    k.db.raw.remoteToolClassification.upsert.mockRejectedValueOnce(new Error("pool exhausted"));
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "classification_unavailable", permanent: false });
+    expect(k.mux.remoteServerIds()).toEqual([]);
+    expect(k.registry.list()).toEqual([]);
+    // Not attached, so the call cannot reach the extension at all.
+    await k.mux.listTools();
+    await k.mux.callTool("ext-wc__word_count", { path: "/" });
+    expect(k.relay.calls.some((c) => c.method === "tools/call")).toBe(false);
+    // The retry resets the review and the tool is a confirming write again.
+    await k.attacher.attach("wc");
+    expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
+    await k.mux.listTools();
+    expect((await k.mux.callTool("ext-wc__word_count", { path: "/" })).content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
+  });
+
+  it("a failed cache refresh is a failed attach too", async () => {
+    // MUTATION: swallow the refresh failure → attached with the stale
+    // cached review → the call reaches the extension → red.
+    const k = await reviewedThenChanged();
+    vi.spyOn(k.cache, "refresh").mockRejectedValueOnce(new Error("db down"));
+    const err = await refusal(k.attacher.attach("wc"));
+    expect(err).toMatchObject({ code: "classification_unavailable", permanent: false });
+    expect(k.mux.remoteServerIds()).toEqual([]);
+    await k.mux.listTools();
+    await k.mux.callTool("ext-wc__word_count", { path: "/" });
+    expect(k.relay.calls.some((c) => c.method === "tools/call")).toBe(false);
+  });
+
+  it("the review is reset and the cache refreshed BEFORE anything is attached or advertised", async () => {
+    // MUTATION: move the classification steps back after syncRemoteCatalog
+    // → the upsert and the refresh see ext-wc attached and advertised → red.
+    const k = await reviewedThenChanged();
+    const seen: Record<"record" | "refresh", string[][]> = { record: [], refresh: [] };
+    const visible = () => [...k.mux.remoteServerIds(), ...k.registry.list().map((t) => t.name)];
+    const upsert = k.db.raw.remoteToolClassification.upsert;
+    const realUpsert = upsert.getMockImplementation()!;
+    upsert.mockImplementation(async (a: Parameters<typeof realUpsert>[0]) => {
+      seen.record.push(visible());
+      return realUpsert(a);
+    });
+    const realRefresh = k.cache.refresh.bind(k.cache);
+    vi.spyOn(k.cache, "refresh").mockImplementation(async (p: ClassificationPrisma) => {
+      seen.refresh.push(visible());
+      return realRefresh(p);
+    });
+    await k.attacher.attach("wc");
+    expect(seen).toEqual({ record: [[]], refresh: [[]] });
+    expect(k.registry.list().map((t) => t.provenance)).toEqual(["extension:wc@0.2.0"]);
+  });
 });
 
 describe("the session profile", () => {
@@ -391,5 +503,36 @@ describe("audit", () => {
     });
     // No arguments in the chain: they may carry anything.
     expect(JSON.stringify(k.audit.mock.calls[0][0])).not.toContain('"text"');
+  });
+
+  it("the row says whose turn and which durable run made the call, and none of it reaches the extension", async () => {
+    // Review finding (PR #2325): the row carried no userId / agentRunId,
+    // unlike the stdio dispatch row. MUTATION: call the remote port outside
+    // withRemoteCallAttribution in the multiplexer → no userId → red.
+    const k = kit({ wc: { id: "wc" } });
+    await k.attacher.attach("wc");
+    k.cache.seed([
+      {
+        serverId: "ext-wc", toolName: "word_count", requiresWrite: false, requiresConfirmation: false, denied: false,
+        reviewedBy: "owner", reviewedAt: new Date(), wireDescription: null, firstSeenAt: new Date(), lastSeenAt: new Date(),
+      },
+    ]);
+    await k.mux.listTools();
+    await k.mux.callTool(
+      "ext-wc__word_count",
+      { text: "a" },
+      { userId: "romain", agentRunId: "run-1", ncToken: "nc-FAKE-000", confirmationToken: "tok-FAKE-000" },
+    );
+    expect(k.audit.mock.calls[0][0]).toMatchObject({
+      kind: "tool_call",
+      sub: "for romain",
+      refs: { name: "ext-wc__word_count", extensionId: "wc", ok: true, userId: "romain", agentRunId: "run-1" },
+    });
+    const wire = JSON.stringify(k.relay.calls);
+    for (const secret of ["romain", "run-1", "nc-FAKE-000", "tok-FAKE-000"]) expect(wire).not.toContain(secret);
+    // A call with no context writes no empty keys.
+    await k.mux.callTool("ext-wc__word_count", { text: "a" });
+    expect(k.audit.mock.calls[1][0]).toMatchObject({ sub: null });
+    expect(Object.keys((k.audit.mock.calls[1][0] as { refs: object }).refs).sort()).toEqual(["extensionId", "name", "ok"]);
   });
 });

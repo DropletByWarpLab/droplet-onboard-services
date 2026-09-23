@@ -6,6 +6,11 @@
  *
  * THE ORDER, and every step refuses before the next one dials:
  *
+ *   0. whatever this process had attached for the slug is dropped FIRST,
+ *      and anything a failed attach half-did is dropped again on the way
+ *      out. An attach that fails therefore leaves NOTHING attached: never
+ *      the previous version's tools under its provenance while the new
+ *      version runs, and `isAttached` is false, so the reconciler retries;
  *   1. the sandbox URL must name the compose-internal `sandbox` host. The
  *      relay is the only road to an extension; a SANDBOX_URL pointed
  *      anywhere else is refused before a byte is sent;
@@ -20,14 +25,18 @@
  *      check runs on every later listing (the port is pinned to the
  *      manifest), so a listing that drifts at runtime stops being
  *      advertised instead of being absorbed;
- *   4. `attachRemote('ext-<slug>')` — refused unless the lifecycle put the
- *      id in `installedExtensionIds` (mcp-client.singleton);
- *   5. `syncRemoteCatalog` with the operator's domain (chosen at promote)
- *      and the provenance `extension:<slug>@<version>`;
- *   6. `recordDiscoveredRemoteTools` with each tool's input-schema hash:
+ *   4. `recordDiscoveredRemoteTools` with each tool's input-schema hash:
  *      every tool is a confirming write until a person says otherwise, and
  *      a tool whose schema changed since that person said so is again;
- *   7. the classification cache refresh, so step 6 is what dispatch reads.
+ *   5. the classification cache refresh, so step 4 is what dispatch reads.
+ *      Steps 4 and 5 run BEFORE anything is attached or advertised, and a
+ *      failure of either is a transient attach failure (retried), never a
+ *      logged warning: otherwise a tool whose arguments changed would be
+ *      dispatched under the review a person gave the old ones;
+ *   6. `attachRemote('ext-<slug>')` — refused unless the lifecycle put the
+ *      id in `installedExtensionIds` (mcp-client.singleton);
+ *   7. `syncRemoteCatalog` with the operator's domain (chosen at promote)
+ *      and the provenance `extension:<slug>@<version>`.
  *
  * TOOL_CATALOG is never touched (remote-mcp-servers.ts says why).
  *
@@ -35,7 +44,10 @@
  * `tool_call` row's `refs.extensionId`: for a model's call to an
  * `ext-<slug>__*` tool (the audited port below) and for a static tool an
  * extension called back into as its owner (mcp-client.service.ts's
- * dispatch row, via `McpCallContext.extensionId`).
+ * dispatch row, via `McpCallContext.extensionId`). The audited port's row
+ * also carries who the call ran for and its durable run, read from the
+ * multiplexer's in-process attribution scope (remote-call-attribution.ts):
+ * the port itself is never handed the call context.
  */
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
@@ -57,6 +69,7 @@ import {
   type ExtensionAttachPort,
 } from "./extension-lifecycle.service.js";
 import { extensionAuditRefs } from "./extension-token.js";
+import { remoteCallAttribution } from "./remote-call-attribution.js";
 import {
   ExtensionListingMismatchError,
   ExtensionMcpPort,
@@ -164,15 +177,23 @@ function auditedPort(
         return out;
       } finally {
         const ok = out !== null && !out.isError;
+        // Who the call ran for, the stdio row's shape (mcp-client.service).
+        const who = remoteCallAttribution();
         // Never the arguments: they may carry anything.
         void audit({
           kind: "tool_call",
           severity: ok ? "ok" : "err",
           sourceIcon: "puzzle",
           what: ok ? `Tool ${name}` : `Tool ${name} failed`,
-          sub: null,
+          sub: who?.userId ? `for ${who.userId}` : null,
           actor: { type: "ai", id: null },
-          refs: { name, ok, ...extensionAuditRefs(name) },
+          refs: {
+            name,
+            ...(who?.userId ? { userId: who.userId } : {}),
+            ok,
+            ...(who?.agentRunId ? { agentRunId: who.agentRunId } : {}),
+            ...extensionAuditRefs(name),
+          },
         }).catch(() => undefined);
       }
     },
@@ -246,8 +267,20 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
   }
 
   async function attachNow(slug: string): Promise<ExtensionSessionProfile> {
-    assertInternalSandboxUrl(sandboxUrl());
     const serverId = extensionServerId(slug);
+    // 0. Nothing of the previous attachment survives an attach, failed or
+    // not; and every refusal below is undone here, in one place.
+    drop(serverId);
+    try {
+      return await attachSteps(slug, serverId);
+    } catch (err) {
+      drop(serverId);
+      throw err;
+    }
+  }
+
+  async function attachSteps(slug: string, serverId: string): Promise<ExtensionSessionProfile> {
+    assertInternalSandboxUrl(sandboxUrl());
 
     const ext = await prisma.extension.findUnique({ where: { id: slug }, include: { currentVersion: true } });
     if (!ext?.currentVersion) {
@@ -280,8 +313,38 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
       );
     }
 
-    // 4. Replace whatever this process had attached for the slug.
-    drop(serverId);
+    // 4 + 5. Classification, BEFORE anything is attached or advertised. A
+    // tool whose input schema changed is back to a confirming write in the
+    // record AND in the cache dispatch reads, or the attach does not happen.
+    try {
+      const recorded = await recordDiscoveredRemoteTools(
+        prisma as unknown as ClassificationPrisma,
+        serverId,
+        expected.map((t) => ({
+          wireName: t.name,
+          description: t.description,
+          inputSchemaHash: extensionInputSchemaHash(t.inputSchema),
+        })),
+      );
+      logger.info({ slug, created: recorded.created.length, reset: recorded.reset.length }, "extension_tools_recorded");
+    } catch (err) {
+      throw new ExtensionAttachError(
+        "classification_unavailable",
+        false,
+        `the review of ${slug}'s tools could not be recorded: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      await cache.refresh(prisma as unknown as ClassificationPrisma);
+    } catch (err) {
+      throw new ExtensionAttachError(
+        "classification_unavailable",
+        false,
+        `the classification cache could not be refreshed for ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // 6. Attach (whatever was attached for the slug was dropped at step 0).
     const rejection = mux.attachRemote(serverId, auditedPort(port, serverId, audit));
     if (rejection) {
       throw new ExtensionAttachError("attach_rejected", true, `${rejection.code}: ${rejection.message}`);
@@ -289,7 +352,6 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
     try {
       await mux.listTools();
     } catch (err) {
-      drop(serverId);
       throw new ExtensionAttachError(
         "listing_unavailable",
         false,
@@ -305,7 +367,6 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
         .slice(-refused.length)
         .map((r) => `${r.toolName ?? ""}: ${r.code}`)
         .join("; ");
-      drop(serverId);
       throw new ExtensionAttachError(
         "listing_mismatch",
         true,
@@ -313,7 +374,7 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
       );
     }
 
-    // 5. Publish to the runtime layer.
+    // 7. Publish to the runtime layer.
     const operatorDomain =
       ext.operatorDomain && (TOOL_DOMAINS as readonly string[]).includes(ext.operatorDomain)
         ? (ext.operatorDomain as ToolDomain)
@@ -327,7 +388,6 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
       registry,
     });
     if (sync.registered.length !== expected.length) {
-      drop(serverId);
       throw new ExtensionAttachError(
         "listing_mismatch",
         true,
@@ -335,27 +395,6 @@ export function createExtensionAttacher(deps: ExtensionAttacherDeps): ExtensionA
       );
     }
 
-    // 6 + 7. Classification. A failure costs capability, never safety: a
-    // tool with no row is refused at dispatch as unclassified.
-    try {
-      const recorded = await recordDiscoveredRemoteTools(
-        prisma as unknown as ClassificationPrisma,
-        serverId,
-        expected.map((t) => ({
-          wireName: t.name,
-          description: t.description,
-          inputSchemaHash: extensionInputSchemaHash(t.inputSchema),
-        })),
-      );
-      logger.info({ slug, created: recorded.created.length, reset: recorded.reset.length }, "extension_tools_recorded");
-    } catch (err) {
-      logger.error({ err, slug }, "extension_tool_classification_record_failed");
-    }
-    try {
-      await cache.refresh(prisma as unknown as ClassificationPrisma);
-    } catch (err) {
-      logger.error({ err, slug }, "extension_tool_classification_cache_refresh_failed");
-    }
     logger.info({ slug, serverId, version: profile.version, tools: expected.length }, "extension_attached");
     return profile;
   }
