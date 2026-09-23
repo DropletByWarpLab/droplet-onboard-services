@@ -94,11 +94,15 @@ export function withholdStoredContentTools(allowed: readonly string[]): string[]
 export const OFF_LAN_WITHHELD_NOTICE =
   "You are running on a cloud model, off this appliance. The user's stored " +
   "files, their contents, their filenames, and any attachments are NOT " +
-  "available to you on this turn, and no file tools are offered. This is a " +
-  "deliberate privacy boundary, not a malfunction or a permissions error. If " +
-  "the user asks about their documents, say plainly that their files stay on " +
-  "the Droplet and are not sent to cloud models, and that switching to the " +
-  "on-box model in the model picker gives you full access to them.";
+  "available to you on this turn, and no file or memory tools are offered. " +
+  "Stored content was also left out of these instructions: the facts the " +
+  "user asked you to remember, the business profile, what the Droplet has " +
+  "learned about the business, and any pinned items. This is a deliberate " +
+  "privacy boundary, not a malfunction or a permissions error. If the user " +
+  "asks about their documents or anything you would normally remember, say " +
+  "plainly that it stays on the Droplet and is not sent to cloud models, " +
+  "and that switching to the on-box model in the model picker gives you " +
+  "full access to it.";
 
 /**
  * Appended when the user attached something to a turn that then resolved
@@ -111,3 +115,67 @@ export const OFF_LAN_ATTACHMENT_NOTICE =
   "images were withheld because this turn is running on a cloud model. Tell " +
   "the user their attachment stayed on the Droplet, and that switching to " +
   "the on-box model lets you read it.";
+
+/**
+ * WARP-2746 — the PROMPT axis of the same rule.
+ *
+ * The tool gate above stops a cloud model from ASKING for stored content. It
+ * did nothing about stored content the route hands over unasked: the memory
+ * facts, the business profile, the brain block and the context pins were
+ * spliced into every turn's system prompt whatever its destination. So a
+ * cloud turn had `memory_recall` withheld and then received the same facts
+ * in its instructions. The tool was withheld; the data was not.
+ *
+ * Every block the route injects is named here and is either withheld or,
+ * by omission, deliberately kept:
+ *
+ *  - `memory` / `brain` — FOLLOW THE `memory` TOOL DOMAIN, derived below
+ *    rather than restated, so the two axes cannot disagree again. `MemoryFact`
+ *    is workspace-wide (no userId column), and the brain block is built from
+ *    rows the corpus pass derived from Drive content (ADR-051).
+ *  - `business` — the BusinessProfile block. ADR-051 is silent on whether any
+ *    of its fields may leave the box, and every field identifies the company
+ *    (name, services, clients, locations). The conservative default applies:
+ *    withheld whole. Loosening it is a product decision for the owner, not a
+ *    refactor.
+ *  - `context_pins` — pinned file paths and resolved customer/deal names.
+ *    Filenames are stored content (see the module header), so a pin is the
+ *    `list_files` hole in prompt form.
+ *
+ * KEPT: identity, tool guidance and the interview conductor (static product
+ * text), and the persona block (tone plus the owner's style instructions).
+ */
+export type OffLanPromptBlock = "memory" | "brain" | "business" | "context_pins";
+
+const MEMORY_DOMAIN_WITHHELD = OFF_LAN_WITHHELD_DOMAINS.has("memory");
+
+export const OFF_LAN_WITHHELD_PROMPT_BLOCKS: ReadonlySet<OffLanPromptBlock> =
+  new Set<OffLanPromptBlock>([
+    ...(MEMORY_DOMAIN_WITHHELD ? (["memory", "brain"] as const) : []),
+    "business",
+    "context_pins",
+  ]);
+
+/**
+ * THE choke point for prompt content on an off-LAN turn. Pass every block the
+ * caller is about to inject; get them back with each withheld one blanked,
+ * plus the list of what was withheld, in the input's key order. That list is
+ * what the route records on the turn's audit row: only NON-EMPTY blocks count,
+ * so an audit line never claims a block was withheld when there was nothing to
+ * withhold.
+ *
+ * A local turn is returned untouched.
+ */
+export function withholdPromptBlocksForOffLan<
+  T extends Partial<Record<OffLanPromptBlock, string>>,
+>(blocks: T, offLan: boolean): { blocks: T; withheld: OffLanPromptBlock[] } {
+  if (!offLan) return { blocks, withheld: [] };
+  const out = { ...blocks };
+  const withheld: OffLanPromptBlock[] = [];
+  for (const key of Object.keys(blocks) as OffLanPromptBlock[]) {
+    if (!OFF_LAN_WITHHELD_PROMPT_BLOCKS.has(key)) continue;
+    if (blocks[key]) withheld.push(key);
+    (out as Record<OffLanPromptBlock, string>)[key] = "";
+  }
+  return { blocks: out, withheld };
+}

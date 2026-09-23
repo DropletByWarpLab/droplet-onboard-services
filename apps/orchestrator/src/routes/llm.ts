@@ -76,6 +76,8 @@ import {
 import {
   OFF_LAN_ATTACHMENT_NOTICE,
   OFF_LAN_WITHHELD_NOTICE,
+  withholdPromptBlocksForOffLan,
+  type OffLanPromptBlock,
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -1054,6 +1056,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         provider: chatReq.provider,
       });
       const isOffLanTurn = offLanProvider !== null;
+      // WARP-2746 — every prompt block `withholdPromptBlocksForOffLan` blanked
+      // on this turn, accumulated across its call sites and written to the
+      // turn's signed audit row. Empty on every local turn.
+      const offLanWithheld: OffLanPromptBlock[] = [];
 
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
@@ -1529,6 +1535,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             messageId: assistantMessageId ?? undefined,
             iterations: liveToolCalls.length,
             status,
+            // WARP-2746 — what this turn did NOT send because it went to a
+            // cloud model. On the signed row so "was X sent to the provider?"
+            // is answerable from the audit chain, not from reading the code.
+            offLanProvider: offLanProvider ?? undefined,
+            offLanWithheld: offLanWithheld.length > 0 ? offLanWithheld : undefined,
           }),
         });
 
@@ -1605,7 +1616,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             const targets = await resolveBusinessPinTargets(prisma, pins, {
               scope: toolAccessScope,
             });
-            const block = renderContextPinBlock(pins, targets);
+            // WARP-2746 — pinned paths and customer names are stored content;
+            // a cloud turn gets none of them (stored-content-egress.service).
+            const gate = withholdPromptBlocksForOffLan(
+              { context_pins: renderContextPinBlock(pins, targets) ?? "" },
+              isOffLanTurn,
+            );
+            offLanWithheld.push(...gate.withheld);
+            const block = gate.blocks.context_pins;
             // `null` when nothing survived resolution (every pin unavailable,
             // or a business pin the resolver could not reach). A header with
             // no lines under it is prompt the model reads for nothing.
@@ -1946,6 +1964,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
+        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
+        // BEFORE the size estimate so the estimate, `degradeToFit` and the
+        // wire all see the same text: a block withheld here can neither be
+        // sent nor charged against the window.
+        const promptGate = withholdPromptBlocksForOffLan(
+          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
+          isOffLanTurn,
+        );
+        offLanWithheld.push(...promptGate.withheld);
+        memoryBlock = promptGate.blocks.memory;
+        brainBlock = promptGate.blocks.brain;
+        businessBlock = promptGate.blocks.business;
+
         const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
