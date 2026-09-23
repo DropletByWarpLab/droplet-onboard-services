@@ -276,7 +276,7 @@ fi
 #     NOT here: /settings and /users consume it too, so it is in scope.
 #   - Co-located `*.test.ts(x)`. `__tests__/` is already dropped by
 #     --exclude-dir; these are the same thing in a different place.
-EXCLUDED_PATHS_REGEX='^(app/(login|setup|change-password|invite|tour)/|components/setup/|components/tour/ProductTour\.tsx:|components/auth/(SignInForm|AuthLayout|WelcomeFlourish|AuroraPanel)\.tsx:|[^:]*\.test\.(ts|tsx):)'
+EXCLUDED_PATHS_REGEX='^(app/(login|setup|change-password|invite|tour)/|components/setup/|components/tour/ProductTour\.tsx:|components/auth/(SignInForm|AuthLayout|WelcomeFlourish)\.tsx:|[^:]*\.test\.(ts|tsx):)'
 
 # Whole-token match, same anchoring style as BAD_CLASSES above.
 LEGACY_TOKEN_REGEX='(^|[^A-Za-z0-9_-])(dp-card|dp-btn[A-Za-z0-9_-]*|dp-input|bg-surface-[A-Za-z0-9_-]+|text-label-[A-Za-z0-9_-]+|text-accent|bg-accent|border-separator|bg-separator|bg-label-[A-Za-z0-9_-]+|ring-accent|--color-accent[A-Za-z0-9_-]*)([^A-Za-z0-9_-]|$)'
