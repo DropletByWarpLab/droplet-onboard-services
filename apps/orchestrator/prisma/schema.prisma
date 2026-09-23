@@ -3143,6 +3143,11 @@ model WebAuthnCredential {
   // hybrid"). Optional — older authenticators omit it. Used only as a UX
   // hint to the browser on the next authenticate ceremony.
   transports   String?
+  // WARP-1157: owner-chosen label shown in Settings. NULL until renamed.
+  name         String?
+  // WARP-1157: the RP ID (host) this passkey was created on — passkeys only
+  // work on that address. NULL only for rows enrolled before it was recorded.
+  rpId         String?
   createdAt    DateTime  @default(now())
   // Bumped on every successful assertion so the dashboard can show
   // "last used 3 days ago" without a separate audit query.
