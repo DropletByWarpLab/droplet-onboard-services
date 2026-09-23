@@ -19,7 +19,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Role } from "../services/jwt.service.js";
 
 vi.mock("../config.js", () => ({
@@ -94,11 +96,15 @@ import {
   shutdownCameraService,
   subscribeCameraEvents,
 } from "../services/camera.service.js";
+import { resetCameraEventGateForTests } from "../services/camera-event-gate.js";
 import { dispatchDetectionEvent } from "../services/push-dispatch.service.js";
 import webpush from "web-push";
 import type { CameraSSEEvent } from "../types/camera.js";
 
 const GRANTS: Record<string, string[]> = { "u-family": ["front_door"] };
+const grantFindMany = vi.fn(async ({ where }: { where: { userId: string } }) =>
+  (GRANTS[where.userId] ?? []).map((name) => ({ camera: { name } })),
+);
 
 const prisma = {
   camera: {
@@ -110,9 +116,7 @@ const prisma = {
     })),
   },
   cameraAccessGrant: {
-    findMany: vi.fn(async ({ where }: { where: { userId: string } }) =>
-      (GRANTS[where.userId] ?? []).map((name) => ({ camera: { name } })),
-    ),
+    findMany: grantFindMany,
   },
   user: {
     findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
@@ -272,29 +276,153 @@ describe("birdseye composites every camera, so only an all-camera viewer gets it
   });
 });
 
+/**
+ * A Frigate tracked-object message, as MQTT delivers it. Detections are the
+ * live stream this ticket is about, and they broadcast synchronously. They
+ * carry no label: an unlabelled detection skips push fan-out, so nothing
+ * async outlives the test.
+ */
+function frigateEvent(type: "new" | "update", id: string, camera: string) {
+  mqttClient.current!.emit(
+    "message",
+    "frigate/events",
+    Buffer.from(JSON.stringify({ type, after: { id, camera } })),
+  );
+}
+
+/** Let pending promise callbacks (the scope refresh) run. */
+const tick = () => new Promise<void>((r) => setImmediate(r));
+
 describe("the live SSE stream is filtered per subscriber", () => {
+  beforeEach(async () => {
+    resetCameraEventGateForTests();
+    await initCameraService(prisma);
+  });
   afterEach(async () => {
+    vi.useRealTimers();
     await shutdownCameraService();
   });
 
-  it("a scoped subscriber never receives another camera's events", async () => {
-    await initCameraService(prisma);
+  it("a scoped subscriber never receives another camera's events", () => {
     const samSaw: CameraSSEEvent[] = [];
     const ownerSaw: CameraSSEEvent[] = [];
     let samScope: Set<string> = new Set(["front_door"]);
     subscribeCameraEvents((e) => samSaw.push(e), () => samScope);
     subscribeCameraEvents((e) => ownerSaw.push(e), () => "all");
 
-    mqttClient.current!.emit("message", "frigate/front_door/status", Buffer.from("ON"));
-    mqttClient.current!.emit("message", "frigate/bedroom/status", Buffer.from("ON"));
+    frigateEvent("new", "ev-f1", "front_door");
+    frigateEvent("new", "ev-b1", "bedroom");
 
     expect(samSaw.map((e) => e.camera)).toEqual(["front_door"]);
     expect(ownerSaw.map((e) => e.camera)).toEqual(["front_door", "bedroom"]);
 
     // Scope is read per event: a revoked grant takes effect on the next one.
     samScope = new Set();
-    mqttClient.current!.emit("message", "frigate/front_door/status", Buffer.from("OFF"));
+    frigateEvent("update", "ev-f1", "front_door");
+    expect(ownerSaw).toHaveLength(3); // non-vacuous: the update WAS broadcast
     expect(samSaw).toHaveLength(1);
+  });
+
+  // The tests above prove the service filters by whatever scope it is
+  // handed. These prove the ROUTE hands it the caller's scope and keeps it
+  // current: each opens the real `/api/cameras/events/sse` over HTTP.
+
+  /** Open the SSE route as `role`; collect what it streams. */
+  async function openStream(role: Role) {
+    const server = appAs(role).listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const { port } = server.address() as AddressInfo;
+    let body = "";
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/cameras/events/sse" }, (res) => {
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => {
+        body += chunk;
+      });
+    });
+    req.on("error", () => {}); // destroyed by close()
+    await vi.waitFor(() => expect(body).toContain('"connected"'));
+    return {
+      text: () => body,
+      cameras: () => [...body.matchAll(/"camera":"([^"]+)"/g)].map((m) => m[1]),
+      heartbeats: () => body.split(": heartbeat").length - 1,
+      close: async () => {
+        req.destroy();
+        server.closeAllConnections();
+        await new Promise<void>((r) => server.close(() => r()));
+      },
+    };
+  }
+
+  /** Fire every open stream's 30 s heartbeat and wait until `stream` has it. */
+  async function heartbeat(stream: { heartbeats: () => number }) {
+    const before = stream.heartbeats();
+    vi.advanceTimersByTime(30_000);
+    await vi.waitFor(() => expect(stream.heartbeats()).toBe(before + 1));
+    await tick();
+    await tick();
+  }
+
+  it("the route streams a scoped user only their cameras", async () => {
+    const samStream = await openStream("family");
+    const ownerStream = await openStream("owner");
+    try {
+      frigateEvent("new", "ev-f1", "front_door");
+      frigateEvent("new", "ev-b1", "bedroom");
+      // Sentinel on Sam's own camera. A stream is ordered, so anything
+      // leaked before it has arrived by the time it does.
+      frigateEvent("update", "ev-f1", "front_door");
+      await vi.waitFor(() => expect(samStream.text()).toContain("detection_update"));
+      expect(samStream.cameras()).toEqual(["front_door", "front_door"]);
+
+      await vi.waitFor(() => expect(ownerStream.cameras()).toContain("bedroom")); // it was broadcast
+    } finally {
+      await samStream.close();
+      await ownerStream.close();
+    }
+  });
+
+  it("a grant revoked mid-stream stops the stream at the next heartbeat", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const samStream = await openStream("family");
+    const ownerStream = await openStream("owner");
+    try {
+      frigateEvent("new", "ev-f1", "front_door");
+      await vi.waitFor(() => expect(samStream.cameras()).toEqual(["front_door"]));
+
+      GRANTS["u-family"] = [];
+      await heartbeat(samStream);
+
+      frigateEvent("update", "ev-f1", "front_door");
+      await vi.waitFor(() => expect(ownerStream.text()).toContain("detection_update"));
+      await heartbeat(samStream); // sentinel: arrives after anything leaked
+      expect(samStream.text()).not.toContain("detection_update");
+    } finally {
+      GRANTS["u-family"] = ["front_door"];
+      await samStream.close();
+      await ownerStream.close();
+    }
+  });
+
+  it("a failed scope refresh narrows the stream to nothing, not the old answer", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const samStream = await openStream("family");
+    const ownerStream = await openStream("owner");
+    try {
+      frigateEvent("new", "ev-f1", "front_door");
+      await vi.waitFor(() => expect(samStream.cameras()).toEqual(["front_door"]));
+
+      // Only Sam's refresh reads grants (an owner's scope is "all").
+      grantFindMany.mockRejectedValueOnce(new Error("db down"));
+      await heartbeat(samStream);
+
+      frigateEvent("update", "ev-f1", "front_door");
+      await vi.waitFor(() => expect(ownerStream.text()).toContain("detection_update"));
+      await heartbeat(samStream);
+      expect(samStream.text()).not.toContain("detection_update");
+    } finally {
+      await samStream.close();
+      await ownerStream.close();
+    }
   });
 });
 
