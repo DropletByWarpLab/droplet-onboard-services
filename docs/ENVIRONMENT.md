@@ -163,6 +163,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `DB_MEM_RESERVATION` | Postgres mem reservation — most protected core service (default `512m`) |
 | `DB_CPUS` | Postgres CPU ceiling (default `2.0`) |
 | `CACHE_MEM_LIMIT` | Redis mem ceiling (default `256m`) |
+| `CACHE_MAXMEMORY` | (WARP-1401) Redis `maxmemory` (default `192mb`). Keep it ~25% under `CACHE_MEM_LIMIT` so the AOF-rewrite fork has headroom; raise both together. Policy is `noeviction` |
 | `CACHE_MEM_RESERVATION` | Redis mem reservation (default `128m`) |
 | `AI_GATEWAY_MEM_LIMIT` | AI gateway mem ceiling (default `512m`) |
 | `FRIGATE_MEM_LIMIT` | Frigate NVR mem ceiling (default `1g`) — raise for higher-resolution streams |

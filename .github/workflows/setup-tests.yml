@@ -60,6 +60,8 @@ on:
       # is the only PR class they newly catch.
       - "tests/systemd.test.sh"
       - "tests/redis-acl.test.sh"
+      # WARP-1401: cache persistence + wipe/backup classification
+      - "tests/cache-persistence.test.sh"
       - "tests/internal-ca.test.sh"
       - "tests/image-pipeline.test.sh"
       - "tests/single-box-openwrt-readiness.test.sh"
@@ -140,6 +142,8 @@ on:
       # is the only PR class they newly catch.
       - "tests/systemd.test.sh"
       - "tests/redis-acl.test.sh"
+      # WARP-1401: cache persistence + wipe/backup classification
+      - "tests/cache-persistence.test.sh"
       - "tests/internal-ca.test.sh"
       - "tests/image-pipeline.test.sh"
       - "tests/single-box-openwrt-readiness.test.sh"
@@ -336,6 +340,14 @@ jobs:
         # scripts/test/redis-tls.test.sh, which is declared developer-only; this
         # is the half a runner can prove.
         run: bash tests/redis-acl.test.sh
+
+      - name: Run cache persistence tests
+        # WARP-1401: the `cache` Redis keeps sessions, the refresh denylist
+        # and NC app-passwords across recreate/reboot (AOF on the named
+        # cache-data volume, noeviction, maxmemory under mem_limit), factory
+        # reset wipes that volume and device-backup never captures it. Static;
+        # the live recreate proof is scripts/test/redis-tls.test.sh.
+        run: bash tests/cache-persistence.test.sh
 
       - name: Run internal-CA issuance tests
         # WARP-236: scripts/lib/internal-ca.sh — CA mint idempotency, leaf
