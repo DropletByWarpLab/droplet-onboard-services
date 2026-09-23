@@ -133,6 +133,11 @@ const prisma = {
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   },
+  // WARP-2904: dispatchToUser reads the web_push off-LAN gate first; open it
+  // so this suite exercises the per-camera grant filter, not the gate.
+  offLanAllowlistChannel: {
+    findUnique: vi.fn().mockResolvedValue({ key: "web_push", enabled: true }),
+  },
 } as never;
 
 function appAs(role: Role) {
