@@ -47,6 +47,10 @@ die() { printf '[env-reconcile] ERROR: %s\n' "$*" >&2; exit 1; }
 # to materialize) and fixed defaults. Mirrors migrate_env's backfills; the
 # drift test fails when migrate_env gains a key that is in neither list below.
 #   hex32/hex64 = fresh random hex; =VALUE = that literal (may be empty).
+# DEVICE_SECRET (WARP-2985): added only when ABSENT, like every key here.
+#   migrate_env also replaces an empty or publicly-known value; OTA does not
+#   (existing values are never touched). Every setup.sh-written .env has had a
+#   generated one since the first release, so that case is hand-authored only.
 ENSURE_KEYS='
 ROUTING_SERVICE_TOKEN hex32
 DOC_RENDER_SERVICE_TOKEN hex32
@@ -68,6 +72,7 @@ SERVICE_TOKEN_MCP hex32
 DROPLET_MATTER_SERVICE_TOKEN hex32
 ONLYOFFICE_JWT_SECRET hex32
 JWT_SECRET hex64
+DEVICE_SECRET hex32
 NVR_MEDIA_SOURCE =nvrdata
 INFERENCE_RUNTIME =ollama
 HQ_ISSUANCE_URL =https://droplet-fleet-hq.rjouffret.workers.dev
