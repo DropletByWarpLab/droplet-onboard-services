@@ -80,7 +80,7 @@ grep -q '^ROUTING_MODE=\|^OPENWRT_PASSWORD=\|^REDIS_PASSWORD_\|^DROPLET_DEVICE_I
 
 [ -f "$BOX/.env.bak.ota-upd1" ] && grep -q '^COMPOSE_PROFILES=linux,display,eval$' "$BOX/.env.bak.ota-upd1" \
   && pass "pre-reconcile backup written beside .env" || fail "no backup of the pre-reconcile .env"
-[ "$(stat -f %Lp "$BOX/.env" 2>/dev/null || stat -c %a "$BOX/.env")" = "600" ] \
+[ "$(stat -c %a "$BOX/.env" 2>/dev/null || stat -f %Lp "$BOX/.env")" = "600" ] \
   && pass ".env stays 0600" || fail ".env mode changed"
 ls "$BOX"/.env.ota-reconcile.* >/dev/null 2>&1 && fail "stage file left behind" || pass "no stage file left behind"
 
