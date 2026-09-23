@@ -67,9 +67,11 @@ describe("departmentNavGroups — intersection, never union", () => {
   });
 
   it("holds only the profile's destinations, in profile order", () => {
-    // /events is a CHILD of /cameras, so it arrives with its parent.
+    // /events is a CHILD of /cameras, so it arrives with its parent; Areas and
+    // Opening hours arrive with /security the same way (WARP-2977).
     expect(hrefsOf(groups[0].items)).toEqual([
       "/d/security",
+      "/security",
       "/cameras",
       "/network",
       "/devices",
