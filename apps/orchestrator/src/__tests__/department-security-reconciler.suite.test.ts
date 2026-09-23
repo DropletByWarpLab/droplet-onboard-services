@@ -489,8 +489,10 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     // call is unrelated to household rights convergence, so the D-5 pin
     // narrows to "no HOUSEHOLD/department group is ever read": the only
     // membership read on this tick is the admin-group one.
+    // WARP-2993: plus NC's built-in `admin` group (the instance-admin sweep),
+    // likewise box-wide and unrelated to household rights.
     for (const call of ncListGroupMembersStrictMock.mock.calls) {
-      expect(call[1]).toBe("droplet-admins");
+      expect(["droplet-admins", "admin"]).toContain(call[1]);
     }
   });
 });

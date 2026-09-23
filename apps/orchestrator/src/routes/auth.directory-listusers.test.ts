@@ -85,6 +85,8 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import type { Role } from "../services/jwt.service.js";
+import * as sessionSvc from "../services/nextcloud-session.service.js";
+import { adminBasicToken } from "../services/department-provisioner.service.js";
 
 interface SeedUser {
   id: string;
@@ -347,5 +349,23 @@ describe("GET /api/auth/users — every account, tagged by source (WARP-2984)", 
     const res = await request(buildApp(prisma)).get("/api/auth/users");
 
     expect(res.body.users).toEqual([]);
+  });
+});
+
+describe("GET /api/auth/users — runs as the box service account (WARP-2993)", () => {
+  it("works for an owner/admin with NO Nextcloud credential of their own (no longer NC instance admins)", async () => {
+    // A de-admined human's own NC token could not list users anyway; the
+    // route must not depend on it at all.
+    (sessionSvc.resolveNcToken as any).mockResolvedValueOnce(null);
+    (nc.ncListUsers as any).mockResolvedValue([{ id: "bob", displayName: "Bob", email: null }]);
+
+    for (const role of ["owner", "admin"] as Role[]) {
+      const res = await request(buildApp(createPrismaMock([]), role)).get("/api/auth/users");
+      expect(res.status).toBe(200);
+    }
+    for (const call of (nc.ncListUsers as any).mock.calls) {
+      expect(call[0]).toBe(adminBasicToken());
+    }
+    expect(sessionSvc.resolveNcToken).not.toHaveBeenCalled();
   });
 });
