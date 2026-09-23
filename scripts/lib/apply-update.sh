@@ -65,6 +65,26 @@
 #       `docker compose -f <base> -f override-<target>.yml up -d --no-deps
 #       --no-build --pull never --force-recreate` each named service — i.e.
 #       ACTUALLY pinned to the release (manifest) or previous (backup) refs.
+#   recreate-services   ... --target grow
+#       WARP-2970: the same loop pinned to override-grow.yml — post-commit,
+#       starts release services this box enables but has no container for.
+#       A service that HAS a container (even a stopped one: an operator's
+#       `docker stop`) is skipped, never recreated; stdout then also carries
+#       {"failed":[…],"skipped":[…]}.
+#   enabled-services   [--profiles a,b]
+#       `docker compose config --services`: the services the staged compose
+#       file enables, one per line. WARP-2995: --profiles is the box's real
+#       COMPOSE_PROFILES (from the reconcile-env report), passed as explicit
+#       --profile flags plus a match-nothing sentinel. Any --profile flag
+#       overrides COMPOSE_PROFILES from the environment, so this container's
+#       stale (or, after a self-swap, empty) value is never consulted.
+#   reconcile-env       --update-id ID --image REF
+#       WARP-2995: run the staged docker/ota/env-reconcile.sh on the HOST
+#       (the orchestrator cannot see .env): a one-shot `chroot /host`
+#       container off REF (the release orchestrator image, already pulled +
+#       cosign-verified), no network. Additive, idempotent .env backfill +
+#       boot-unit profile flags. Its one-line JSON report (key NAMES only)
+#       is printed and kept as <updatesDir>/<ID>/env-reconcile.json.
 #   restore-configs     ID
 #       Restore the backed-up host config tree (rollback step 8).
 #   recreate-self-detached --update-id ID --target release|previous
@@ -200,6 +220,9 @@ SERVICES=""
 TARGET=""
 CONFIGS_TAR=""
 IMAGES=()
+IMAGE=""
+PROFILES=""
+PROFILES_SET=
 
 # --- Validators -------------------------------------------------------------
 
@@ -220,6 +243,24 @@ validate_target() {
 validate_update_id() {
   case "$1" in
     *[!a-zA-Z0-9._-]*) die "invalid --update-id: $1" ;;
+  esac
+}
+
+validate_profiles() {
+  # Comma list of compose profile names; empty is valid (no profiles).
+  case "$1" in
+    *[!a-z0-9,_-]*) die "invalid --profiles value: $1" ;;
+  esac
+}
+
+validate_image_ref() {
+  # One digest-pinned registry ref, the shape the signed manifest carries.
+  case "$1" in
+    *@sha256:*) : ;;
+    *) die "invalid --image: $1 (expected a digest-pinned ref)" ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._:@/-]*) die "invalid --image: $1" ;;
   esac
 }
 
@@ -420,7 +461,8 @@ cmd_migrate_deploy() {
 cmd_recreate_services() {
   validate_update_id "$UPDATE_ID"
   validate_services "$SERVICES"
-  validate_target "$TARGET"
+  # `grow` (WARP-2970) is recreate-services-only: never a self-swap target.
+  [ "$TARGET" = "grow" ] || validate_target "$TARGET"
   local override
   override="$(override_file "$UPDATE_ID" "$TARGET")"
   require_pin_file "$override" "per-target override"
@@ -432,10 +474,19 @@ cmd_recreate_services() {
   # EVERY service, collect the ones that failed, and return the list to the
   # caller (JSON on stdout + non-zero exit) so the outcome is actionable.
   local svc rc=0
-  local failed=()
+  local failed=() skipped=()
   local IFS=','
   for svc in $SERVICES; do
     [ -z "$svc" ] && continue
+    # grow starts only a service that has NEVER had a container here. The
+    # orchestrator's "not running" (current-image-refs, `ps -q`) also covers
+    # a container someone stopped on purpose; `ps -a -q` tells them apart.
+    if [ "$TARGET" = "grow" ] && \
+       [ -n "$(run_capture docker compose -f "$COMPOSE_FILE" ps -a -q "$svc")" ]; then
+      log "grow: $svc already has a container (stopped?) — leaving it as it is"
+      skipped+=("$svc")
+      continue
+    fi
     # --no-deps: recreate ONLY this service (its deps are already up);
     # --no-build: NEVER fall back to the local build — the override's image:
     #   pin is the whole point (build:-only services would otherwise reuse
@@ -460,14 +511,80 @@ cmd_recreate_services() {
   for f in ${failed[@]+"${failed[@]}"}; do
     [ -z "$joined" ] && joined="\"$f\"" || joined="$joined,\"$f\""
   done
-  printf '{"failed":[%s]}\n' "$joined"
+  if [ "$TARGET" = "grow" ]; then
+    local sk=""
+    for f in ${skipped[@]+"${skipped[@]}"}; do
+      [ -z "$sk" ] && sk="\"$f\"" || sk="$sk,\"$f\""
+    done
+    printf '{"failed":[%s],"skipped":[%s]}\n' "$joined" "$sk"
+  else
+    printf '{"failed":[%s]}\n' "$joined"
+  fi
   return "$rc"
+}
+
+# WARP-2970 — read-only. Lets the post-commit step tell "not running because
+# its profile is off here" from "not running because it is new to the default
+# set". Fails loudly (non-zero) rather than printing an empty set.
+cmd_enabled_services() {
+  local flags=()
+  if [ -n "$PROFILES_SET" ]; then
+    validate_profiles "$PROFILES"
+    # The sentinel makes "no profiles" explicit too: a --profile flag always
+    # beats COMPOSE_PROFILES from this container's environment.
+    flags=(--profile droplet-ota-no-profile)
+    local p
+    local IFS=','
+    for p in $PROFILES; do [ -n "$p" ] && flags+=(--profile "$p"); done
+    unset IFS
+  fi
+  [ -n "$DRY_RUN" ] && { run docker compose -f "$COMPOSE_FILE" ${flags[@]+"${flags[@]}"} config --services; return 0; }
+  dc ${flags[@]+"${flags[@]}"} config --services
+}
+
+# WARP-2995 — the host-side .env reconcile. The script comes from the STAGED
+# config tree (stage-configs already unpacked this release's docker/), so the
+# release that needs a key ships the code that adds it. `-v /:/host` + chroot
+# is the root-equivalence the socket already grants; --network none and
+# --rm keep the one-shot inert. Fails loudly: apply.ts refuses the update
+# (before any swap) on a non-zero exit.
+cmd_reconcile_env() {
+  validate_update_id "$UPDATE_ID"
+  validate_image_ref "$IMAGE"
+  local root report
+  root="$(config_root)"
+  report="$(updates_dir)/$UPDATE_ID/env-reconcile.json"
+  log "reconcile-env $UPDATE_ID (host .env under $root)"
+  if [ -n "$DRY_RUN" ]; then
+    run docker run --rm --name "droplet-ota-env-reconcile-$UPDATE_ID" \
+      --network none --user 0:0 --entrypoint chroot -v /:/host \
+      "$IMAGE" /host /bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID"
+    return 0
+  fi
+  local out
+  out="$(docker run --rm --name "droplet-ota-env-reconcile-$UPDATE_ID" \
+    --network none --user 0:0 --entrypoint chroot -v /:/host \
+    "$IMAGE" /host /bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID")" \
+    || die "env-reconcile failed on the host for $UPDATE_ID"
+  mkdir -p "$(dirname "$report")"
+  printf '%s\n' "$out" > "$report"
+  printf '%s\n' "$out"
 }
 
 cmd_restore_configs() {
   validate_update_id "$UPDATE_ID"
   local pre="${DROPLET_OTA_UPDATES_DIR:-/data/updates}/$UPDATE_ID/backup/configs-pre-image.tar.gz"
   log "restore-configs $UPDATE_ID from $pre"
+  # WARP-2995 (#2320 review): undo this update's .env + boot-unit changes
+  # FIRST, with the release's own env-reconcile.sh (it made the backups, and
+  # the pre-image unpacked below may carry an older copy). No backups → no-op.
+  # A failure is logged, not fatal: the config + image rollback matter more.
+  local reconcile
+  reconcile="$(config_root)/docker/ota/env-reconcile.sh"
+  if [ -f "$reconcile" ] || [ -n "$DRY_RUN" ]; then
+    run /bin/sh "$reconcile" --restore "$(config_root)" "$UPDATE_ID" >&2 \
+      || log "restore-configs: .env / boot-unit restore FAILED for $UPDATE_ID — continuing"
+  fi
   if [ -f "$pre" ] || [ -n "$DRY_RUN" ]; then
     run tar -xzf "$pre" -C "$(config_root)"
   else
@@ -675,6 +792,8 @@ while [ "$#" -gt 0 ]; do
     --services) SERVICES="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --configs-tar) CONFIGS_TAR="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;
+    --profiles) PROFILES="$2"; PROFILES_SET=1; shift 2 ;;
     --images) shift; while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do IMAGES+=("$1"); shift; done ;;
     # A bare positional (restore-configs ID).
     --*) die "unknown flag: $1" ;;
@@ -689,6 +808,8 @@ case "$SUBCOMMAND" in
   stage-configs) cmd_stage_configs ;;
   migrate-deploy) cmd_migrate_deploy ;;
   recreate-services) cmd_recreate_services ;;
+  enabled-services) cmd_enabled_services ;;
+  reconcile-env) cmd_reconcile_env ;;
   restore-configs) cmd_restore_configs ;;
   recreate-self-detached) cmd_recreate_self_detached ;;
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;

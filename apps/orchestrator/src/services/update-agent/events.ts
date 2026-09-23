@@ -59,13 +59,20 @@ export const UPDATE_EVENTS = {
   "update.images_pulled": "apply",
   /** info — step 3 done: sha256-gated release configs staged. */
   "update.configs_staged": "apply",
+  /** info — WARP-2995 step 3b: host .env reconciled (key NAMES + profile tokens only). */
+  "update.env_reconciled": "apply",
+  /** error — WARP-2995: host .env reconcile failed; release refused before any swap. */
+  "update.env_reconcile_failed": "apply",
+  /** warn — the installed helper predates reconcile-env; step 3b skipped
+   *  (additive), so an OTA-only box is never stranded (#2320 review). */
+  "update.env_reconcile_skipped": "apply",
   /** info — step 4 done: `prisma migrate deploy` for this build ran. */
   "update.migrations_applied": "apply",
   /** info — verifying → applying committed; container swaps begin. */
   "update.apply_started": "apply",
   /** info — a recreate batch landed (services + release/previous target). */
   "update.services_recreated": "apply",
-  /** info — a health gate passed (phase: sidecars | post_swap | rollback). */
+  /** info — a health gate passed (phase: sidecars | post_swap | rollback | post_commit_start). */
   "update.health_gate_passed": "apply",
   /** warn — a health gate FAILED; names the first unhealthy service. */
   "update.health_gate_failed": "apply",
@@ -83,6 +90,12 @@ export const UPDATE_EVENTS = {
   "update.resume_applying": "apply",
   /** info — the update is COMMITTED: all services healthy on release digests. */
   "update.committed": "apply",
+  /** info — WARP-2970: after commit, started release services this box's
+   *  compose enables but that were not running (a service new to the default
+   *  set). The update is already committed; this never rolls it back. */
+  "update.services_started": "apply",
+  /** error — WARP-2970: that post-commit start failed; the update stays committed. */
+  "update.services_start_failed": "apply",
 
   // ── boot resume wrapper (index.ts) ──
   /** info — the onStart resume hook settled an interrupted apply. */

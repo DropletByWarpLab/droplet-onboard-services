@@ -9,6 +9,7 @@ import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
+import { sendNotification } from "./services/notifications.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -1329,8 +1330,19 @@ async function main() {
         runner: otaApplyRunner,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+        notifyOwners: async (title: string, body: string) => {
+          const owners = await prisma.user.findMany({
+            where: { role: { in: ["owner", "admin"] } },
+            select: { username: true },
+          });
+          for (const { username } of owners) {
+            await sendNotification(prisma, { userId: username, kind: "system", title, body });
+          }
+        },
       }
     : null;
+  // WARP-2970 — set by a committed resume; run after listen, never awaited.
+  let otaPostCommit: (() => Promise<void>) | null = null;
 
   // onStart resume hook: if the previous orchestrator process died mid-apply,
   // this boot is either the freshly-swapped orchestrator (health-gate all +
@@ -1341,6 +1353,7 @@ async function main() {
   if (otaApplyOpts) {
     try {
       const resumed = await resumeInterruptedApply(otaApplyOpts);
+      if (resumed.outcome === "committed") otaPostCommit = resumed.startNewServices;
       if (resumed.outcome !== "nothing_to_resume") {
         logger.info(
           { event: "update.resume", outcome: resumed.outcome },
@@ -1926,6 +1939,8 @@ async function main() {
   attachWsBridge(server);
   server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);
+    // Never throws (it logs + notifies on its own failure).
+    if (otaPostCommit) void otaPostCommit();
   });
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their

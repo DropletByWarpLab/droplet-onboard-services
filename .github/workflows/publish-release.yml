@@ -269,10 +269,12 @@ jobs:
 
       # The manifest generator has its own unit suite (schema shape +
       # loud-failure paths). A release must never publish from an
-      # untested generator.
+      # untested generator. WARP-3001: the same suite carries the
+      # compose <-> services.json drift gate, so a release also refuses
+      # to publish while a compose-built service is missing from the list.
       - name: Test release manifest generator
         run: |
-          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install --upgrade pip pytest pyyaml
           python3 -m pytest scripts/release/ -q
 
       # ubuntu-latest has ~14GB free. Building every appliance image

@@ -35,7 +35,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import type { PrismaClient } from "@prisma/client";
@@ -46,9 +47,12 @@ import {
   applyWindowTick,
   httpHealthProbe,
   imageRefMatchesDigest,
+  SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
+  type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
+import { createHostComposeRunner } from "./host-compose-runner.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
@@ -359,6 +363,34 @@ class FakeRunner implements ApplyRunner {
   selfSwapHealthy = true;
   /** hook fired whenever a recreate lands, so tests can flip health state */
   onRecreate: (services: string[], target: RecreateTarget) => void = () => {};
+  /** WARP-2970 — what `docker compose config --services` reports on this box. */
+  enabled: string[] = Object.keys(PREVIOUS);
+  /** WARP-2970 — make the post-commit start fail. */
+  startFails = false;
+  /** WARP-2970 — services that already have a (stopped) container: grow skips them. */
+  hasStoppedContainer: string[] = [];
+
+  /** WARP-2995 — make the host .env reconcile fail. */
+  reconcileFails = false;
+
+  async reconcileEnv(opts: { updateId: string; image: string }): Promise<EnvReconcileReport> {
+    this.calls.push(`reconcileEnv(${opts.updateId},${opts.image.split("@")[0]})`);
+    if (this.reconcileFails) throw new Error("stub: env-reconcile failed on the host");
+    return { addedKeys: ["SANDBOX_SERVICE_TOKEN"], addedProfiles: [], profiles: "linux", unitUpdated: false };
+  }
+
+  async enabledServices(opts: { updateId: string }): Promise<string[]> {
+    this.calls.push(`enabledServices(${opts.updateId})`);
+    return this.enabled;
+  }
+
+  async startServices(opts: { updateId: string; services: ReleaseService[] }) {
+    this.calls.push(`startServices(${opts.services.map((s) => s.name).join(",")})`);
+    if (this.startFails) throw new Error("stub: start failed");
+    const started = opts.services.filter((s) => !this.hasStoppedContainer.includes(s.name));
+    for (const s of started) this.running[s.name] = s.digest;
+    return { started: started.map((s) => s.name) };
+  }
 
   async currentImageRefs(services: string[]): Promise<Record<string, string | null>> {
     this.calls.push(`currentImageRefs(${services.join(",")})`);
@@ -458,6 +490,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
       "snapshot(du-1)",
       "pullImages(orchestrator,web-dashboard,device-identity-svc)",
       `stageConfigs(du-1,${CONFIGS_TAR.length}b)`,
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
       "migrateDeploy()",
       "recreateServices(web-dashboard,device-identity-svc,release)",
       "recreateSelfDetached(du-1,release)",
@@ -495,6 +528,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
         "update.snapshot_taken",
         "update.images_pulled",
         "update.configs_staged",
+        "update.env_reconciled",
         "update.migrations_applied",
         "update.apply_started",
         "update.services_recreated",
@@ -746,6 +780,230 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
     expect(runner.calls).toEqual([]);
+  });
+});
+
+describe("host .env reconcile before any swap (WARP-2995)", () => {
+  it("a failed reconcile refuses the release before anything is swapped, and restores configs", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.reconcileFails = true;
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "rejected",
+      failureReason: "env_reconcile_failed",
+    });
+    // Nothing migrated, recreated or swapped; the staged configs rolled back.
+    expect(runner.calls.slice(-2)).toEqual([
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
+      "restoreConfigs(du-1)",
+    ]);
+    expect(runner.calls.some((c) => /^(migrateDeploy|recreate)/.test(c))).toBe(false);
+    expect(runner.running).toEqual(PREVIOUS);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+  });
+
+  it("records what the reconcile added (key names only) in the update audit log", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.env_reconciled",
+        addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+        addedProfiles: [],
+        unitUpdated: false,
+      }),
+      expect.any(String),
+    );
+  });
+});
+
+describe("a helper that predates reconcile-env (#2320 review blocker)", () => {
+  // The REAL runner + execFile against a stand-in helper script, so the
+  // detection is exercised on an actual non-zero exit and its stderr.
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "warp2995-helper-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  function withHelper(name: string, stderrLine: string) {
+    const script = path.join(dir, name);
+    writeFileSync(script, `#!/usr/bin/env bash\necho '${stderrLine}' >&2\nexit 1\n`, { mode: 0o755 });
+    const real = createHostComposeRunner({
+      scriptPath: script,
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: dir,
+    });
+    const runner = new FakeRunner();
+    runner.reconcileEnv = (opts) => real.reconcileEnv(opts);
+    return runner;
+  }
+
+  it.each([
+    // stage/main's helper: its parser dies on --image before dispatch.
+    ["unknown flag", "[apply-update] ERROR: unknown flag: --image"],
+    ["unknown subcommand", "[apply-update] ERROR: unknown subcommand: reconcile-env"],
+  ])("%s → logged skip, and the release still applies", async (_label, line) => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(`old-${_label.replace(" ", "-")}.sh`, line);
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(runner.calls).toContain("migrateDeploy()");
+    expect(runner.calls).not.toContain("restoreConfigs(du-1)");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_skipped", reason: "helper_unsupported" }),
+      expect.any(String),
+    );
+  });
+
+  it("a real reconcile failure from a helper that HAS the subcommand still refuses", async () => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(
+      "new-but-failing.sh",
+      "[apply-update] ERROR: env-reconcile failed on the host for du-1",
+    );
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(runner.calls).toContain("restoreConfigs(du-1)");
+    expect(runner.calls).not.toContain("migrateDeploy()");
+  });
+});
+
+describe("post-commit start of newly enabled services (WARP-2970)", () => {
+  const EMAIL_DIGEST = `sha256:${"5".repeat(64)}`;
+  function manifestWithEmailIndexer(): ReleaseManifest {
+    const m = buildManifest();
+    m.services.push({
+      name: "email-indexer",
+      image: `ghcr.io/dropletbywarplab/droplet-email-indexer@${EMAIL_DIGEST}`,
+      digest: EMAIL_DIGEST,
+      healthcheck: { type: "http", port: 8086, path: "/health" },
+    });
+    return m;
+  }
+
+  beforeEach(() => {
+    healthy["email-indexer"] = true;
+  });
+
+  async function applyAndResume(runner: FakeRunner, logger = createLoggerSpy()) {
+    const prisma = createPrismaStub();
+    await seedPendingRow(prisma, manifestWithEmailIndexer());
+    const notifyOwners = vi.fn(async () => {});
+    const opts = { ...baseOpts(prisma, runner, logger), notifyOwners };
+    await applyPendingUpdate(opts);
+    const resume = await resumeInterruptedApply(opts);
+    return { prisma, resume, logger, notifyOwners };
+  }
+
+  async function runPostCommit(resume: Awaited<ReturnType<typeof resumeInterruptedApply>>) {
+    if (resume.outcome !== "committed") throw new Error(`expected committed, got ${resume.outcome}`);
+    await resume.startNewServices();
+  }
+
+  it("starts a release service the box enables but has never run (OTA-upgraded box)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // The resume hook itself does NOT start anything: index.ts runs it after
+    // listen, unawaited, so the boot path never waits on `compose up`.
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    await runPostCommit(resume);
+    // Never part of the swap/rollback set — only started after commit.
+    expect(runner.calls.filter((c) => c.startsWith("recreateServices")).join()).not.toContain(
+      "email-indexer",
+    );
+    expect(runner.calls.at(-1)).toBe("startServices(email-indexer)");
+    expect(runner.running["email-indexer"]).toBe(EMAIL_DIGEST);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+    expect(notifyOwners).not.toHaveBeenCalled();
+  });
+
+  it("leaves a service off when this box's compose does not enable it (profile-gated)", async () => {
+    const runner = new FakeRunner(); // enabled = the deployed three only
+    const { resume } = await applyAndResume(runner);
+    expect(resume.outcome).toBe("committed");
+    // Romain 2026-09-23 (WARP-3001): profile off → image updated, not started.
+    expect(runner.calls).toContain(
+      "pullImages(orchestrator,web-dashboard,device-identity-svc,email-indexer)",
+    );
+    await runPostCommit(resume);
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+  });
+
+  it("leaves a service an operator stopped alone (it has a container)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.hasStoppedContainer = ["email-indexer"];
+    const { resume, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
+    expect(notifyOwners).not.toHaveBeenCalled();
+  });
+
+  it("a failed start is logged, reaches the owners, and never un-commits a healthy update", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.startFails = true;
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+    expect(notifyOwners).toHaveBeenCalledWith(
+      SERVICES_START_FAILED_TITLE,
+      expect.stringContaining("email-indexer"),
+    );
+  });
+
+  it("a started service that never goes healthy is a failure, not a success", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    healthy["email-indexer"] = false; // crash-looping
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed" }),
+      expect.any(String),
+    );
+    expect(notifyOwners).toHaveBeenCalledTimes(1);
   });
 });
 

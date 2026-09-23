@@ -113,9 +113,11 @@ class TestSchemaV1Shape:
         names = {s["name"] for s in m["services"]}
         # The core always-on stack must be present in every release.
         assert {"orchestrator", "web-dashboard", "mcp-server",
-                "ai-gateway", "routing"} <= names
-        # The evaluation harness is NOT an appliance service.
-        assert "rag-eval" not in names
+                "ai-gateway", "routing", "gateway"} <= names
+        # WARP-3001: rag-eval ships — `eval` is in the default Linux
+        # COMPOSE_PROFILES, so boxes run it. Completeness vs compose is
+        # check_services_drift.py's job, not this test's.
+        assert "rag-eval" in names
 
 
 class TestLoudFailures:

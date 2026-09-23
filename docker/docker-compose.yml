@@ -1840,16 +1840,17 @@ services:
       - orchestrator
     restart: always
     <<: *default-logging
-    # WARP-2734 — `email` joins `full`, and `scripts/lib/secrets.sh` appends
-    # that token to COMPOSE_PROFILES exactly when it provisions
-    # SERVICE_TOKEN_EMAIL. That is the same predicate the module registry
-    # already uses (`id: "email"`, `available: (c) => isSet(c.SERVICE_TOKEN_EMAIL)`),
-    # so a box gets the container precisely when it can authenticate it.
-    #
-    # Better than both alternatives: an idle container on every box that will
-    # never have a mailbox, or a profile nobody remembers to set — which is
-    # what shipped, and why the IMAP subsystem has never run anywhere.
-    profiles: ["full", "email"]
+    # WARP-2970 — DEFAULT-ON, no `profiles:` key. WARP-2734 gated this on an
+    # `email` token that secrets.sh writes whenever it provisions
+    # SERVICE_TOKEN_EMAIL, which it always does. So the gate never chose a
+    # feature state. It only chose which boxes drifted: a box that got its
+    # code by OTA never re-runs secrets.sh (the orchestrator can't even see
+    # .env, it mounts ../docker only), so the token never reached
+    # COMPOSE_PROFILES and "Connect a mailbox" could only answer 503.
+    # Idle with no mailbox connected (FastAPI + aioimaplib, capped below).
+    # The `email` token that boxes already carry in COMPOSE_PROFILES is now
+    # inert: compose ignores a profile name no service uses. Pinned by
+    # tests/setup.test.sh, check (4c).
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
