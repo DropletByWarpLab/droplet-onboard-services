@@ -124,6 +124,18 @@ test("every fact pin carries TODO(verify), and every empty value IS TODO(verify)
   assert.match(pinned, /\| read-only token kind\. TODO\(verify\) \| optional, owner-chosen\. TODO\(verify\) \|/);
 });
 
+test("a table cell escapes a literal backslash before escaping the pipe it precedes", () => {
+  // MUTATION: escape pipes before backslashes → the escaped backslash
+  // consumes the following pipe's escape, leaving an unescaped delimiter
+  // and splitting the row into an extra column (CodeQL: incomplete escaping).
+  const draft = structuredClone(fixture("static"));
+  draft.credential.pastes = "a" + "\\" + "|" + "b"; // a literal backslash immediately followed by a pipe
+  const rows = render(draft).get(outputPaths("acme").adr042);
+  const row = rows.split("\n").find((l) => l.startsWith("| **Acme Tasks**"));
+  assert.ok(row.includes("a\\\\\\|b"), row);
+  assert.equal(row.split(" | ").length, 7, row);
+});
+
 test("a dynamic draft renders no scheme URL anywhere, a kind: dynamic entry and one reference per suffix or host", () => {
   // MUTATION: emit a scheme URL for the suffix in render → red.
   const out = render(fixture("dynamic"));

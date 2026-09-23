@@ -38,7 +38,7 @@ function pin(value) {
 
 /** One markdown table cell: no pipe, no newline. */
 function cell(text) {
-  return text.replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
+  return text.replace(/\\/g, "\\\\").replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
 }
 
 /** A YAML scalar. JSON strings are valid YAML double-quoted scalars. */
