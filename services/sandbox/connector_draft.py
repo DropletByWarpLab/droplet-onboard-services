@@ -238,7 +238,7 @@ def describe_tree(read: Reader) -> dict[str, Any] | None:
     facts["displayName"] = display if len(display) <= MAX_DISPLAY_NAME else display[: MAX_DISPLAY_NAME - 1] + "…"
     host = _host(draft.get("baseUrl"), problems)
     facts["host"] = host
-    if not isinstance(provider, str) or not PROVIDER_RE.match(provider):
+    if not isinstance(provider, str) or not PROVIDER_RE.fullmatch(provider):
         # No path is built from an id that failed the grammar.
         problems.append("provider must match ^[a-z][a-z0-9-]{1,40}$")
         return facts

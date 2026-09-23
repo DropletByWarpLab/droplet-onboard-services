@@ -223,15 +223,23 @@ def test_describe_is_none_without_a_draft_and_reports_what_it_can_read(tmp_path)
     }
 
 
-def test_a_bad_provider_id_is_a_problem_and_no_path_is_built_from_it():
+@pytest.mark.parametrize(
+    "provider",
+    # The second: Python's `$` matches before a final "\n" and JS's .test
+    # does not (rjouffret on #2324). MUTATION: PROVIDER_RE.match → red.
+    ["../etc", "acme\n"],
+    ids=["traversal", "trailing-newline"],
+)
+def test_a_bad_provider_id_is_a_problem_and_no_path_is_built_from_it(provider):
     seen: list[str] = []
 
     def read(rel: str):
         seen.append(rel)
-        return json.dumps({**_static_draft(), "provider": "../etc"}) if rel == "connector-draft.json" else None
+        return json.dumps({**_static_draft(), "provider": provider}) if rel == "connector-draft.json" else None
 
     facts = connector_draft.describe_tree(read)
     assert any("provider" in p for p in facts["problems"])
+    assert facts["provider"] == "" and facts["files"] == {}
     assert seen == ["connector-draft.json"]
 
 
