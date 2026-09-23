@@ -1244,6 +1244,45 @@ describe("extension rows in the draft ⇄ payload round trip (WARP-2897)", () =>
     const draft = roleToDraft(role);
     expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
     expect(deadToolGrants(role)).toEqual([{ domain: "ext-bookings", deadReason: "not_provided" }]);
+
+    /**
+     * Removing it is the builder's only way to revoke a dead grant — the
+     * domain has no row to set Off, and the server lets a held dead grant be
+     * kept. Without this, the grant revives at its old level if anything
+     * later registers a tool under the same domain.
+     *
+     * MUTATION: ignore `removedToolGrants` in draftToRolePayload -> red.
+     */
+    const removed = { ...draft, removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(removed).toolGrants).toEqual([]);
+  });
+
+  it("a removed domain drops only its own original rows", () => {
+    const role = {
+      id: "r2",
+      name: "Back office",
+      slug: "back-office",
+      description: null,
+      startingPoint: "admin",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [
+        { domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" },
+        { domain: "erp", level: "view", state: "live", deadReason: null },
+      ],
+      connectorGrants: [],
+    } as AccessRole;
+    const draft = { ...roleToDraft(role), removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "erp", level: "view" }]);
   });
 
   it("deadToolGrants lists only not_provided grants — crm/pm landing slots are not badged", () => {

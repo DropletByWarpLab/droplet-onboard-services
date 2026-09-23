@@ -738,6 +738,12 @@ export interface RoleDraft {
    *  Create mode marks every group touched (the blank builder's selects
    *  are the source of truth for a brand-new role). */
   touchedToolGroups: string[];
+  /** WARP-2897 — domains whose ORIGINAL rows the admin removed this session
+   *  (the dead-grant Remove action). A dead grant has no group row to set
+   *  Off, and the server lets a held dead grant be kept, so this is the
+   *  builder's only way to revoke one before it revives when something
+   *  registers a tool under that domain again. Absent = nothing removed. */
+  removedToolGrants?: string[];
   /** Keyed by connector provider; "none" = no grant row. */
   connectors: Record<string, ConnectorAccessLevel | "none">;
   usage: RoleUsageDraft;
@@ -945,7 +951,9 @@ export function draftToRolePayload(
     if (level === "off") continue;
     for (const domain of g.domains) toolGrants.push({ domain, level });
   }
+  const removed = new Set(draft.removedToolGrants ?? []);
   for (const row of draft.originalToolGrants) {
+    if (removed.has(row.domain)) continue; // WARP-2897 — the dead-grant Remove
     const group = groupByDomain.get(row.domain);
     if (group && touched.has(group.id)) continue; // superseded by the fan-out
     if (group?.feature && !draft.features[group.feature]?.on) continue; // auto-off

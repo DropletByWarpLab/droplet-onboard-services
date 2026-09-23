@@ -633,4 +633,27 @@ describe("Extensions rows and dead grants (WARP-2897)", () => {
     fireEvent.click(screen.getByRole("button", { name: /save role/i }));
     expect(onSave.mock.calls[0]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
   });
+
+  /** The dead row's Remove is the only way to revoke it: it has no Off.
+   *  MUTATION: Remove does not record the domain in the draft -> red. */
+  it("Remove on a dead grant drops it from the save; Keep brings it back", () => {
+    const role = makeRole({
+      toolGrants: [{ domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" }],
+    });
+    const { onSave } = renderSheet({
+      mode: "edit",
+      base: roleToDraft(role),
+      deadToolGrants: [{ domain: "ext-bookings", deadReason: "not_provided" }],
+    });
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Finance 2" } });
+    const dead = screen.getByTestId("access-tools-dead-ext-bookings");
+    fireEvent.click(within(dead).getByRole("button", { name: "Remove ext-bookings grant" }));
+    expect(within(dead).getByText(ACCESS_COPY.deadToolGrantRemoved)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[0]![0].toolGrants).toEqual([]);
+
+    fireEvent.click(within(dead).getByRole("button", { name: "Keep ext-bookings grant" }));
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[1]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "use" }]);
+  });
 });

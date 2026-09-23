@@ -190,6 +190,18 @@ export function RoleBuilderSheet({
 
   const patch = (p: Partial<RoleDraft>) => setDraft((d) => ({ ...d, ...p }));
 
+  /** WARP-2897 — mark (or unmark) a dead grant for removal on save. */
+  const toggleDeadGrant = (domain: string) =>
+    setDraft((d) => {
+      const current = d.removedToolGrants ?? [];
+      return {
+        ...d,
+        removedToolGrants: current.includes(domain)
+          ? current.filter((x) => x !== domain)
+          : [...current, domain],
+      };
+    });
+
   /** Usage edits mark the axis touched — untouched usage re-emits the
    *  server's raw values verbatim on save (review F2; lossy GB/TB input). */
   const patchUsage = (p: Partial<RoleDraft["usage"]>) =>
@@ -681,22 +693,35 @@ export function RoleBuilderSheet({
             )}
 
             {/* WARP-2897 — grants on a domain nothing on this box provides any
-                more (its extension disabled). Kept, and saved back untouched;
-                shown so the reach the role list implies is not taken on faith. */}
+                more (its extension disabled). Kept, and saved back untouched,
+                unless the admin removes one here — a dead grant has no row to
+                set Off, so Remove is the only way to revoke it before it
+                revives when something provides that domain again. */}
             {deadToolGrants.length > 0 && (
               <div data-testid="access-tools-dead">
-                {deadToolGrants.map((grant) => (
-                  <div key={grant.domain} className="acc-tooldomain" data-testid={`access-tools-dead-${grant.domain}`}>
-                    <AlertTriangle size={16} aria-hidden="true" />
-                    <span className="tx">
-                      {grant.domain}
-                      <small>{ACCESS_COPY.deadToolGrant}</small>
-                    </span>
-                    <span className="acc-badge" aria-label={`${grant.domain}: reaches nothing`}>
-                      Reaches nothing
-                    </span>
-                  </div>
-                ))}
+                {deadToolGrants.map((grant) => {
+                  const isRemoved = (draft.removedToolGrants ?? []).includes(grant.domain);
+                  return (
+                    <div key={grant.domain} className="acc-tooldomain" data-testid={`access-tools-dead-${grant.domain}`}>
+                      <AlertTriangle size={16} aria-hidden="true" />
+                      <span className="tx">
+                        {grant.domain}
+                        <small>{isRemoved ? ACCESS_COPY.deadToolGrantRemoved : ACCESS_COPY.deadToolGrant}</small>
+                      </span>
+                      <span className="acc-badge" aria-label={`${grant.domain}: reaches nothing`}>
+                        Reaches nothing
+                      </span>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        aria-label={`${isRemoved ? "Keep" : "Remove"} ${grant.domain} grant`}
+                        onClick={() => toggleDeadGrant(grant.domain)}
+                      >
+                        {isRemoved ? "Keep" : "Remove"}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
