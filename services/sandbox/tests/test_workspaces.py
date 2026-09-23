@@ -507,7 +507,7 @@ def test_bundle_is_the_work_branch_and_every_proposal_tag_and_clones_offline(sto
     workspace.propose("ws-x", "Word counter", "0.1.0", "Counts.", ALICE)
     body, head = store.bundle("ws-x")
     assert head == store.git(["rev-parse", "refs/heads/work"], store.bare_path("ws-x")).stdout.strip()
-    assert body.startswith(b"# v2 git bundle") or body.startswith(b"# v3 git bundle")
+    assert body.startswith((b"# v2 git bundle", b"# v3 git bundle"))
     bundle = tmp_path / "ws-x.bundle"
     bundle.write_bytes(body)
     clone = tmp_path / "clone"

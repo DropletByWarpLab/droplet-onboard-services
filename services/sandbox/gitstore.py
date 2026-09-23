@@ -17,7 +17,13 @@ and a lost checkout is a `git clone` away.
 
 `templates.git` is seeded at service start from the templates baked into the
 image (`extensions/templates/` in the repo), only when absent — an operator's
-later commits to it are never overwritten.
+later commits to it are never overwritten. On every later start a template
+DIRECTORY the image has and the store does not is added in its own commit
+(WARP-2899: an existing box gains `rest-profile`); one the store has is never
+touched.
+
+A workspace leaves the box only as a `git bundle` an owner downloads
+(WARP-2899), built here from the local bare repo: nothing is dialled.
 """
 
 from __future__ import annotations
@@ -41,6 +47,13 @@ WORKSPACE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 TEMPLATES_REPO = "templates"
 WORK_BRANCH = "work"
 GIT_TIMEOUT_S = 60
+# The export ceiling — the same 64 MB the /git transport accepts for a push.
+MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+BUNDLE_TIMEOUT_S = 120
+MAX_SHOW_BYTES = 1024 * 1024
+# The refs a reader may name: the working branch, or a proposal tag. Closed on
+# purpose — the ref is interpolated into a `<ref>:<path>` object name.
+REF_RE = re.compile(r"^(work|proposal/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$")
 
 # Nothing from the service's environment reaches git: no token, no HOME
 # surprises, no proxy variables. A Windows dev checkout needs its own PATH and
@@ -176,6 +189,39 @@ def seed_templates() -> bool:
     return True
 
 
+def sync_templates() -> list[str]:
+    """Add every template directory the image carries and `templates.git`
+    lacks, one commit each. Never modifies a directory the store already has
+    — its operator's commits are theirs. Returns the names added."""
+    bare = REPOS_DIR / f"{TEMPLATES_REPO}.git"
+    if not bare.exists() or not TEMPLATES_SRC.is_dir():
+        return []
+    present = set(list_templates())
+    missing = sorted(
+        p.name for p in TEMPLATES_SRC.iterdir() if p.is_dir() and not p.name.startswith(".") and p.name not in present
+    )
+    if not missing:
+        return []
+    ensure_dirs()
+    staging = WORK_DIR / ".sync-templates"
+    if staging.exists():
+        _rmtree(staging)
+    try:
+        must(git(["clone", "-q", "-b", "main", str(bare), str(staging)], WORK_DIR), "clone templates.git")
+        for name in missing:
+            shutil.copytree(TEMPLATES_SRC / name, staging / name)
+            must(git(["add", "-A", "--", name], staging), "stage template")
+            must(
+                git(["commit", "-q", "-m", f"templates: add {name} from the image"], staging, author=SYSTEM_AUTHOR),
+                "commit template",
+            )
+        must(git(["push", "-q", "origin", "main:main"], staging), "push templates")
+    finally:
+        if staging.exists():
+            _rmtree(staging)
+    return missing
+
+
 def list_templates() -> list[str]:
     bare = REPOS_DIR / f"{TEMPLATES_REPO}.git"
     if not bare.exists():
@@ -247,6 +293,53 @@ def status(workspace_id: str) -> dict[str, Any]:
     dirty = bool(git(["status", "--porcelain"], work).stdout.strip())
     tags = git(["tag", "--list", "--sort=-creatordate"], work).stdout.split()
     return {"id": workspace_id, "branch": branch, "head": head, "dirty": dirty, "tags": tags[:20]}
+
+
+def _bare_or_404(workspace_id: str) -> Path:
+    bare = bare_path(workspace_id)
+    if not bare.is_dir():
+        raise StoreError(404, f"no workspace {workspace_id}")
+    return bare
+
+
+def _qualified(ref: str) -> str:
+    if not REF_RE.match(ref or ""):
+        raise StoreError(400, "ref must be work or proposal/<semver>")
+    return f"refs/heads/{ref}" if ref == WORK_BRANCH else f"refs/tags/{ref}"
+
+
+def bundle(workspace_id: str) -> tuple[bytes, str]:
+    """The workspace as a `git bundle`: HEAD, the `work` branch and every tag
+    (the proposals). Built from the local bare repo and returned on stdout —
+    no temp file for a run child (same UID, HOME=/tmp) to swap. Returns the
+    bytes and the head of `work`."""
+    bare = _bare_or_404(workspace_id)
+    head = must(git(["rev-parse", f"refs/heads/{WORK_BRANCH}"], bare), "rev-parse").stdout.strip()
+    cp = must(
+        git(["bundle", "create", "-", "HEAD", "--branches", "--tags"], bare, binary=True, timeout=BUNDLE_TIMEOUT_S),
+        "bundle",
+    )
+    if len(cp.stdout) > MAX_BUNDLE_BYTES:
+        raise StoreError(413, f"the workspace exceeds the {MAX_BUNDLE_BYTES // (1024 * 1024)} MB export ceiling")
+    return cp.stdout, head
+
+
+def ref_exists(workspace_id: str, ref: str) -> bool:
+    bare = _bare_or_404(workspace_id)
+    return git(["rev-parse", "-q", "--verify", f"{_qualified(ref)}^{{commit}}"], bare).returncode == 0
+
+
+def show_at(workspace_id: str, ref: str, path: str) -> str | None:
+    """One file of the bare repo at `ref` (work, or a proposal tag), or None
+    when the path is not there. 404 for an unknown workspace or ref."""
+    bare = _bare_or_404(workspace_id)
+    qualified = _qualified(ref)
+    if not ref_exists(workspace_id, ref):
+        raise StoreError(404, f"no {ref} in workspace {workspace_id}")
+    cp = git(["cat-file", "blob", f"{qualified}:{path}"], bare, binary=True)
+    if cp.returncode != 0:
+        return None
+    return cp.stdout[:MAX_SHOW_BYTES].decode("utf-8", "replace")
 
 
 def delete_workspace(workspace_id: str) -> bool:

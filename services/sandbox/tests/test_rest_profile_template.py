@@ -135,9 +135,9 @@ def test_the_template_carries_no_scheme_url():
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_the_generator_suite_passes_and_the_empty_draft_fails():
-    ok = subprocess.run([NODE, "--test", "test/render.test.mjs"], cwd=TEMPLATE, capture_output=True, text=True, encoding="utf-8", timeout=180)
+    ok = subprocess.run([NODE, "--test", "test/render.test.mjs"], cwd=TEMPLATE, capture_output=True, text=True, encoding="utf-8", check=False, timeout=180)
     assert ok.returncode == 0, ok.stdout[-2000:] + ok.stderr[-2000:]
-    empty = subprocess.run([NODE, "--test", "test/draft.test.mjs"], cwd=TEMPLATE, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    empty = subprocess.run([NODE, "--test", "test/draft.test.mjs"], cwd=TEMPLATE, capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
     assert empty.returncode != 0, "the untouched template's empty draft must not pass npm test"
 
 
@@ -152,7 +152,7 @@ def test_describe_is_none_without_a_draft_and_reports_what_it_can_read(tmp_path)
     work = tmp_path / "w"
     work.mkdir()
     _write_rendered(work, _static_draft())
-    read = lambda rel: (work / rel).read_text(encoding="utf-8") if (work / rel).is_file() else None  # noqa: E731
+    read = lambda rel: (work / rel).read_text(encoding="utf-8") if (work / rel).is_file() else None
     facts = connector_draft.describe_tree(read)
     assert facts["problems"] == []
     assert facts["provider"] == "acme" and facts["displayName"] == "Acme Tasks"
@@ -162,7 +162,7 @@ def test_describe_is_none_without_a_draft_and_reports_what_it_can_read(tmp_path)
     dyn = tmp_path / "d"
     dyn.mkdir()
     _write_rendered(dyn, _dynamic_draft())
-    read = lambda rel: (dyn / rel).read_text(encoding="utf-8") if (dyn / rel).is_file() else None  # noqa: E731
+    read = lambda rel: (dyn / rel).read_text(encoding="utf-8") if (dyn / rel).is_file() else None
     facts = connector_draft.describe_tree(read)
     assert facts["problems"] == []
     assert facts["host"] == {
@@ -270,7 +270,7 @@ def test_an_extension_still_proposes_as_one(store):
 
 def _node_render(work: Path, draft: dict) -> subprocess.CompletedProcess:
     (work / "connector-draft.json").write_text(json.dumps(draft, indent=2), encoding="utf-8")
-    return subprocess.run([NODE, "scripts/render.mjs"], cwd=work, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    return subprocess.run([NODE, "scripts/render.mjs"], cwd=work, capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -281,7 +281,7 @@ def test_the_python_reader_agrees_with_the_js_renderer(store, draft):
     work = store.work_path(wid)
     r = _node_render(work, draft)
     assert r.returncode == 0, r.stdout + r.stderr
-    t = subprocess.run([NODE, "--test", "test/draft.test.mjs"], cwd=work, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    t = subprocess.run([NODE, "--test", "test/draft.test.mjs"], cwd=work, capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
     assert t.returncode == 0, t.stdout[-2000:]
     p = workspace.propose(wid, "Draft", "0.1.0", "s", ALICE)
     assert p["kind"] == "connector-draft" and p["connectorDraft"]["problems"] == []
