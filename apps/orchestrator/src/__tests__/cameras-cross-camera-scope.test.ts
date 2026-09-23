@@ -106,6 +106,7 @@ import {
   shutdownCameraService,
   subscribeCameraEvents,
 } from "../services/camera.service.js";
+import { resetCameraEventGateForTests } from "../services/camera-event-gate.js";
 import { dispatchDetectionEvent } from "../services/push-dispatch.service.js";
 import webpush from "web-push";
 import type { CameraSSEEvent } from "../types/camera.js";
@@ -338,28 +339,46 @@ describe("birdseye composites every camera, so only an all-camera viewer gets it
   });
 });
 
+/**
+ * A Frigate tracked-object message, as MQTT delivers it. Detections are the
+ * live stream this ticket is about, and they broadcast synchronously. They
+ * carry no label: an unlabelled detection skips push fan-out, so nothing
+ * async outlives the test.
+ */
+function frigateEvent(type: "new" | "update", id: string, camera: string) {
+  mqttClient.current!.emit(
+    "message",
+    "frigate/events",
+    Buffer.from(JSON.stringify({ type, after: { id, camera } })),
+  );
+}
+
 describe("the live SSE stream is filtered per subscriber", () => {
+  beforeEach(async () => {
+    resetCameraEventGateForTests();
+    await initCameraService(prisma);
+  });
   afterEach(async () => {
     await shutdownCameraService();
   });
 
-  it("a scoped subscriber never receives another camera's events", async () => {
-    await initCameraService(prisma);
+  it("a scoped subscriber never receives another camera's events", () => {
     const samSaw: CameraSSEEvent[] = [];
     const ownerSaw: CameraSSEEvent[] = [];
     let samScope: Set<string> = new Set(["front_door"]);
     subscribeCameraEvents((e) => samSaw.push(e), () => samScope);
     subscribeCameraEvents((e) => ownerSaw.push(e), () => "all");
 
-    mqttClient.current!.emit("message", "frigate/front_door/status", Buffer.from("ON"));
-    mqttClient.current!.emit("message", "frigate/bedroom/status", Buffer.from("ON"));
+    frigateEvent("new", "ev-f1", "front_door");
+    frigateEvent("new", "ev-b1", "bedroom");
 
     expect(samSaw.map((e) => e.camera)).toEqual(["front_door"]);
     expect(ownerSaw.map((e) => e.camera)).toEqual(["front_door", "bedroom"]);
 
     // Scope is read per event: a revoked grant takes effect on the next one.
     samScope = new Set();
-    mqttClient.current!.emit("message", "frigate/front_door/status", Buffer.from("OFF"));
+    frigateEvent("update", "ev-f1", "front_door");
+    expect(ownerSaw).toHaveLength(3); // non-vacuous: the update WAS broadcast
     expect(samSaw).toHaveLength(1);
   });
 });
