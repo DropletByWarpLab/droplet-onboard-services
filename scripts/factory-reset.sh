@@ -696,6 +696,7 @@ VOLUMES=(
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
   "workspace-checkouts"  # WARP-2896 working trees — rebuilt from workspace-git
+  "extensions-installed" # WARP-2900 installed extensions — re-exported from workspace-git
   # INFRA-004: both are declared in docker-compose.yml but were missing here —
   # in the swallowed-`down -v` scenario this fallback exists for, they SURVIVED
   # a "factory reset" AND the verify gate (built from this same list) read clean.

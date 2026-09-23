@@ -14,6 +14,7 @@ seam runs REAL processes on the Linux CI runner and a Windows dev checkout.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -112,3 +113,92 @@ def test_a_clean_exit_with_never_is_exited_not_failed(ext):
     sup = supervisor.Supervisor()
     sup.start("ext-d", ["python", "ok.py"], cwd=None, restart="never", max_restarts=3, env={})
     assert _wait_for(sup, "ext-d", {"exited", "failed"})["state"] == "exited"
+
+
+# ── WARP-2900 H2: the seam as slice H needs it ──────────────────────────────
+
+
+def test_the_host_shims_are_the_one_entrypoint_outside_the_extensions_dir(ext):
+    shim = os.path.join(supervisor.HOST_SHIMS_DIR, "host.py")
+    argv, cwd = supervisor.resolve_argv(["python", shim, "."], str(ext))
+    assert argv == [sys.executable, shim, "."] and cwd == os.path.realpath(str(ext))
+    # Anything else next to the shims is still outside the extensions dir.
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.resolve_argv(["python", os.path.join(supervisor.HOST_SHIMS_DIR, "..", "main.py")], str(ext))
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.resolve_argv(["python", os.path.join(supervisor.HOST_SHIMS_DIR, "nope.py")], str(ext))
+
+
+def test_extra_env_is_an_allowlist(ext):
+    # MUTATION: return `dict(extra_env)` from check_extra_env without the
+    # unknown-key check and the first two cases start a child holding a
+    # secret it was never meant to see.
+    sup = supervisor.Supervisor()
+    for bad in ({"SANDBOX_SERVICE_TOKEN": "x"}, {"PATH": "/tmp/evil"}, {"DROPLET_EXT_ID": "a b"}):
+        with pytest.raises(supervisor.SupervisorError) as exc:
+            sup.start("ext-env", ["python", "ok.py"], cwd=None, restart="never", max_restarts=0, env={}, extra_env=bad)
+        assert exc.value.status == 400
+    assert sup.status("ext-env") is None
+    ok = supervisor.check_extra_env({"DROPLET_EXT_ID": "ws-a", "DROPLET_EXT_PORT": "18000", "DROPLET_EXT_TOKEN": "dxt_abc-_x"})
+    assert ok["DROPLET_EXT_PORT"] == "18000"
+
+
+def test_no_preexec_fn_the_limits_are_an_exec_wrapper(ext, monkeypatch):
+    # preexec_fn in a threaded server is unsafe (workspace.py); the WARP-2895
+    # seam used it. MUTATION: put `preexec_fn=...` back in _spawn and red.
+    seen: dict = {}
+    real_popen = supervisor.subprocess.Popen
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", spy)
+    sup = supervisor.Supervisor()
+    sup.start("ext-w", ["python", "ok.py"], cwd=None, restart="never", max_restarts=0, env={})
+    assert "preexec_fn" not in seen
+    _wait_for(sup, "ext-w", {"exited", "failed"})
+
+
+def test_node_gets_a_heap_cap_and_no_address_space_cap():
+    # The WARP-2895 seam capped every child's address space at 256 MB; V8
+    # reserves far more than that and dies at start. MUTATION: pass
+    # as_bytes=budget_bytes on the node branch of limited_command and red.
+    node = supervisor.limited_command("node", ["/usr/local/bin/node", "/ext/a/host.mjs", "."], 128, posix=True)
+    wrapper_args = node[5:8]
+    assert node[:5] == [sys.executable, "-I", "-S", "-c", supervisor._LIMIT_WRAPPER]
+    assert wrapper_args == [str(supervisor.CHILD_MAX_PROCS), str(supervisor.CHILD_MAX_FILE_BYTES), "0"]
+    assert node[8:] == ["/usr/local/bin/node", "--max-old-space-size=128", "/ext/a/host.mjs", "."]
+    py = supervisor.limited_command("python", ["/usr/local/bin/python", "/ext/a/host.py", "."], 64, posix=True)
+    assert py[7] == str(64 * 1024 * 1024) and py[8:] == ["/usr/local/bin/python", "/ext/a/host.py", "."]
+    # NPROC is 64 (per-UID; 16 starved node's own threads) and the wrapper
+    # sets RLIMIT_AS only when asked for a non-zero value.
+    assert supervisor.CHILD_MAX_PROCS == 64
+    assert "if as_bytes > 0" in supervisor._LIMIT_WRAPPER
+    # A dev checkout (not POSIX) runs the command plainly.
+    assert supervisor.limited_command("node", ["node", "x"], 128, posix=False) == ["node", "--max-old-space-size=128", "x"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="rlimits are POSIX-only")
+def test_the_wrapper_really_execs_under_the_limits(tmp_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import resource\nprint(resource.getrlimit(resource.RLIMIT_NPROC)[0], resource.getrlimit(resource.RLIMIT_AS)[0])\n",
+        encoding="utf-8",
+    )
+    import subprocess as sp
+
+    out = sp.run(supervisor.with_limits([sys.executable, str(probe)], as_bytes=0), capture_output=True, text=True, check=True)
+    nproc, as_limit = out.stdout.split()
+    assert int(nproc) == supervisor.CHILD_MAX_PROCS
+    assert int(as_limit) == -1  # RLIM_INFINITY: no address-space cap when 0
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("node") is None, reason="needs node on a POSIX host")
+def test_node_starts_under_the_wrapper(tmp_path):
+    # The regression for the RLIMIT_AS defect, end to end.
+    import subprocess as sp
+
+    node = shutil.which("node")
+    cmd = supervisor.limited_command("node", [node, "-e", "process.exit(0)"], 128)
+    assert sp.run(cmd, capture_output=True, timeout=60, check=False).returncode == 0

@@ -2160,13 +2160,22 @@ services:
       # Slice H's process-supervision seam. Off until an operator turns it on;
       # off, its routes are 404 and nothing on the box can discover them.
       - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
+      # WARP-2900 (slice H2): where promoted extensions are installed (one
+      # read-only dir per <slug>/<version>, exported from the signed commit)
+      # and the loopback ports their host shims bind INSIDE this container.
+      # Nothing here changes the network: an extension listens on 127.0.0.1
+      # only and the orchestrator reaches it through /extensions/<slug>/rpc.
+      - SANDBOX_EXTENSIONS_DIR=/var/lib/workspace-ext
+      - SANDBOX_EXTENSION_PORT_RANGE=${SANDBOX_EXTENSION_PORT_RANGE:-18000-18999}
       - PYTHONDONTWRITEBYTECODE=1
     # WARP-2896: the workspace git store. Bare repos (the truth, backed up)
     # and working checkouts (rebuildable from the bare repos) on two volumes,
     # the only writable paths besides /tmp on this read-only rootfs.
+    # WARP-2900: installed extensions on a third, rebuildable from the store.
     volumes:
       - workspace-git:/var/lib/workspace-git
       - workspace-checkouts:/var/lib/workspace
+      - extensions-installed:/var/lib/workspace-ext
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -3664,6 +3673,12 @@ volumes:
   # wiped by factory reset.
   workspace-git:
   workspace-checkouts:
+  # WARP-2900 (ADR-056 slice H2) — installed extensions: each promoted
+  # extension's signed commit exported read-only (and compiled, for node20).
+  # Rebuildable: the reconciler re-exports every enabled extension from
+  # workspace-git after re-verifying its signed statement, so it is excluded
+  # from backup like the checkouts. Wiped by factory reset.
+  extensions-installed:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.
