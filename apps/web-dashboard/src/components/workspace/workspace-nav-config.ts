@@ -29,9 +29,23 @@
  *      still gated exactly as the sidebar gates it.
  *
  * The handoff had five spaces. Stage carries the ADR-044 Business group
- * (Planning, Brief, Customers, Projects, Money, Practice) that post-dates the
+ * (Insights, Brief, Customers, Projects, Money, Practice) that post-dates the
  * handoff's read of the repo, so it is a sixth space here rather than folded
  * into Work — ADR-044's point was that those pages are one subject.
+ *
+ * ── WARP-2967 and this file ────────────────────────────────────────────────
+ *
+ * WARP-2967 cut the SIDEBAR to four groups and moved sixteen destinations
+ * behind Settings. Rule 2 above is exactly what kept this map from needing a
+ * re-cut: `hidden` is a surface decision, so a tucked item stays a first-class
+ * chip here, and the routes that merely changed INDENT in the sidebar (Brief,
+ * Reports and Money; Voice and Remote access) were already chips of their own.
+ *
+ * What the nesting reaches: a child inherits its parent's gate here too
+ * (`allowed()` below checks `entry.parent` through `passesParentGate`), with
+ * the sidebar's one exception — a parent failing only its MODULE gate does not
+ * take a child that names its own module. So Money survives `projects` off and
+ * Voice survives `network` off, matching the sidebar exactly.
  */
 import type { LucideIcon } from "lucide-react";
 import {
@@ -46,6 +60,7 @@ import {
 import {
   NAV_GROUPS,
   passesGates,
+  passesParentGate,
   pathMatches,
   type AuthRole,
   type NavCapabilities,
@@ -75,6 +90,11 @@ export const SPACES: SpaceDef[] = [
     icon: House,
     // Overview · Reports · Health · Activity — "what's happening now", "how
     // did it go", "is the box well", "what did the assistant do".
+    //
+    // WARP-2967 nested /reports under Insights in the SIDEBAR; the handoff
+    // reads it as the Home space's "how did it go", and rule 2 says only the
+    // surface may differ. It stays a Home chip, gated exactly as the sidebar
+    // gates it (its own roles, plus its new parent's — identical arrays).
     hrefs: ["/", "/reports", "/health", "/admin/claude-activity"],
   },
   {
@@ -111,10 +131,14 @@ export const SPACES: SpaceDef[] = [
     label: "Operations",
     icon: Radar,
     // Events is a CHILD of Cameras in the sidebar; the handoff promotes it to
-    // its own chip (they read as two destinations, not one section).
-    // WARP-2968 (#2241) made Credentials a top-level entry beside Integrations
-    // rather than its child, so it is its own chip here too — the pin in
+    // its own chip (they read as two destinations, not one section). WARP-2967
+    // did the same to Voice and Remote access, which were already chips here.
+    //
+    // WARP-2968 (#2241) made Credentials a SIBLING of Integrations rather than
+    // its child, so it is its own chip here too — the pin in
     // workspace-nav-config.test.ts caught the two PRs crossing on stage.
+    // WARP-2967 then tucked both behind Settings in the sidebar; rule 2 keeps
+    // them chips here, with their owner/admin gate untouched.
     hrefs: [
       "/security",
       "/cameras",
@@ -226,7 +250,7 @@ export function resolveSpaces(
   const allowed = (entry: Indexed): boolean =>
     passesGates(entry.item, role, capabilities, isModuleOn) &&
     (!entry.parent ||
-      passesGates(entry.parent, role, capabilities, isModuleOn));
+      passesParentGate(entry.parent, entry.item, role, capabilities, isModuleOn));
 
   return SPACES.map((def) => {
     const destinations: Destination[] = [];

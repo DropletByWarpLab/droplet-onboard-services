@@ -178,6 +178,7 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
+import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerMoneySnapshotMaintenance } from "./services/erp-sync/money-snapshot.service.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
@@ -1053,6 +1054,10 @@ async function main() {
   // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
   // the ingest itself: the module toggle decides the surface, not the capture.
   registerSecurityJobs(cronRuntime, prisma);
+  // WARP-2977 P2b (ADR-059 §3.6) — the site-mode ticker: every 60 s it
+  // reconciles SecurityModeState with the opening hours (level-triggered, on
+  // its own advisory lock). Unconditional, like the jobs above.
+  registerSecurityModeJobs(cronRuntime, prisma);
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
