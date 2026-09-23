@@ -23,15 +23,27 @@ command — the workspace ``run`` shape (workspace.py ``_with_limits``), NOT a
 ``preexec_fn`` in a threaded process is unsafe. The pid the supervisor holds
 is the command's own pid, because the wrapper replaces itself.
 
-* NO ``RLIMIT_AS`` for node. V8 reserves gigabytes of virtual address space
-  it never touches (the pointer-compression cage), so the 256 MB address-space
-  cap WARP-2895 set killed every Node process at start. A node child's heap
-  is capped with ``--max-old-space-size=<memoryMb>`` instead, and the
-  container's ``mem_limit`` is the hard ceiling. A python child keeps an
-  address-space cap (its own ``memoryMb``), which Python honours.
-* ``RLIMIT_NPROC`` 64, not 16. It is a per-UID ceiling: the kernel counts this
-  server's own threads and every other child against it, so 16 starved
-  node's own worker threads. 64 stays below the container's ``pids_limit``.
+* NO ``RLIMIT_AS``. V8 reserves gigabytes of virtual address space it never
+  touches (the pointer-compression cage), so the 256 MB address-space cap
+  WARP-2895 set killed every Node process at start. Python fares no better
+  as a SERVER: under a 64 MB cap the host shim cannot start a request thread
+  (each reserves an 8 MB stack and glibc a 64 MB malloc arena — measured on
+  Linux, "can't start new thread"). An address-space cap is not a memory
+  budget, so none is set. What bounds an extension's memory instead: a node
+  child's heap is capped with ``--max-old-space-size=<memoryMb>``; every
+  install is accounted against the container's cgroup limit before it
+  starts (extensions.py ``budget``); and the container's ``mem_limit`` is
+  the hard ceiling. A per-extension RSS cap needs cgroup delegation, which
+  this ``cap_drop: ALL`` container does not have.
+* NO ``RLIMIT_NPROC`` by default (``SANDBOX_PROCESS_MAX_PROCS`` sets one).
+  It is a per-UID ceiling, and without a user-namespace remap uid 1000 in
+  this container IS uid 1000 in every other container and on the host: the
+  kernel counts all of their tasks against it. WARP-2895's 16 starved node's
+  own threads; 64 still refused the python host shim a request thread on a
+  machine whose uid 1000 ran other workloads (measured under WSL2: "can't
+  start new thread", served once the ceiling was lifted). Process fan-out is
+  bounded by the container's ``pids_limit`` (a per-cgroup count, the right
+  tool) instead.
 * ``RLIMIT_FSIZE`` 64 MiB, the workspace value.
 
 Environment
@@ -151,33 +163,33 @@ def check_extra_env(extra_env: dict[str, str] | None) -> dict[str, str]:
 
 
 CHILD_MAX_MEMORY_BYTES = int(os.getenv("SANDBOX_CHILD_MAX_MEMORY_BYTES", str(256 * 1024 * 1024)))
-# Per-UID, so it counts this server's threads too; see the module docstring.
-CHILD_MAX_PROCS = int(os.getenv("SANDBOX_PROCESS_MAX_PROCS", "64"))
+# Per-UID across containers; 0 = not set (see the module docstring).
+CHILD_MAX_PROCS = int(os.getenv("SANDBOX_PROCESS_MAX_PROCS", "0"))
 CHILD_MAX_FILE_BYTES = 64 * 1024 * 1024
 
-# argv: [nproc, fsize, as_bytes (0 = none), executable, *args]
+# argv: [nproc, fsize, executable, *args]
 _LIMIT_WRAPPER = """
 import os, resource, sys
-nproc, fsize, as_bytes = (int(v) for v in sys.argv[1:4])
-limits = [(resource.RLIMIT_NPROC, nproc), (resource.RLIMIT_FSIZE, fsize)]
-if as_bytes > 0:
-    limits.append((resource.RLIMIT_AS, as_bytes))
+nproc, fsize = int(sys.argv[1]), int(sys.argv[2])
+limits = [(resource.RLIMIT_FSIZE, fsize)]
+if nproc > 0:
+    limits.append((resource.RLIMIT_NPROC, nproc))
 for r, v in limits:
     try:
         resource.setrlimit(r, (v, v))
     except (ValueError, OSError):
         pass
-os.execv(sys.argv[4], sys.argv[4:])
+os.execv(sys.argv[3], sys.argv[3:])
 """
 
 
-def with_limits(exe: list[str], *, as_bytes: int, posix: bool | None = None) -> list[str]:
-    """The exec wrapper around `exe`. `as_bytes` 0 sets no address-space cap."""
+def with_limits(exe: list[str], *, posix: bool | None = None) -> list[str]:
+    """The exec wrapper around `exe`: process fan-out and file size, nothing else."""
     if not (os.name == "posix" if posix is None else posix):
         return exe  # a Windows dev checkout: no rlimits, run it plainly
     return [
         sys.executable, "-I", "-S", "-c", _LIMIT_WRAPPER,
-        str(CHILD_MAX_PROCS), str(CHILD_MAX_FILE_BYTES), str(max(0, int(as_bytes))),
+        str(CHILD_MAX_PROCS), str(CHILD_MAX_FILE_BYTES),
         *exe,
     ]
 
@@ -185,14 +197,13 @@ def with_limits(exe: list[str], *, as_bytes: int, posix: bool | None = None) -> 
 def limited_command(
     argv0: str, resolved: list[str], memory_mb: int | None, *, posix: bool | None = None
 ) -> list[str]:
-    """What is actually exec'd for a resolved argv: node gets a heap cap and
-    NO address-space cap; everything else gets an address-space cap."""
-    budget_bytes = memory_mb * 1024 * 1024 if memory_mb else CHILD_MAX_MEMORY_BYTES
+    """What is actually exec'd for a resolved argv: the limits wrapper, and
+    for node a heap cap of the budget (``memory_mb``, else the child default)."""
     if argv0 in NODE_INTERPRETERS:
-        heap_mb = max(16, budget_bytes // (1024 * 1024))
-        exe = [resolved[0], f"--max-old-space-size={heap_mb}", *resolved[1:]]
-        return with_limits(exe, as_bytes=0, posix=posix)
-    return with_limits(resolved, as_bytes=budget_bytes, posix=posix)
+        budget_mb = memory_mb or CHILD_MAX_MEMORY_BYTES // (1024 * 1024)
+        exe = [resolved[0], f"--max-old-space-size={max(16, budget_mb)}", *resolved[1:]]
+        return with_limits(exe, posix=posix)
+    return with_limits(resolved, posix=posix)
 
 
 class _Entry:

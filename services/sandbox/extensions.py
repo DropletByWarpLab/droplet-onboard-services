@@ -248,7 +248,7 @@ def _inside(root: Path, rel: str) -> Path:
 
 def _build(directory: Path) -> None:
     """tsc -p . for a node20 extension that carries a tsconfig.json."""
-    cmd = supervisor.with_limits([*TSC_ARGV, "-p", "."], as_bytes=0)
+    cmd = supervisor.with_limits([*TSC_ARGV, "-p", "."])
     try:
         cp = subprocess.run(
             cmd,

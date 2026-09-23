@@ -269,8 +269,8 @@ def test_the_shim_refuses_a_caller_without_the_relay_key(ext):
 def test_node_extension_starts_under_the_limits_and_answers(ext):
     # The WARP-2895 seam set RLIMIT_AS=256MB on every child, and V8 cannot
     # start under it. On Linux this runs node through the real limits
-    # wrapper. MUTATION: pass as_bytes=budget for node in limited_command
-    # and the process never answers (it dies at start) — red on the runner.
+    # wrapper. MUTATION: add RLIMIT_AS back to the wrapper and the process
+    # never answers (it dies at start) — red on the runner.
     ext.create_workspace("ws-l", None, ALICE)
     manifest = json.loads(
         (Path(__file__).resolve().parents[3] / "extensions" / "templates" / "typescript-tool" / "extension-manifest.json").read_text(encoding="utf-8")
