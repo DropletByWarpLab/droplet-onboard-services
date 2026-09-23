@@ -8,7 +8,9 @@
  * An INTERSECTION, never a union, and the gates are not re-implemented here.
  * `departmentNavGroups` only NARROWS and REORDERS: every item it returns is the
  * original `NavItem` object from `NAV_GROUPS` (same `roles`, `requiresModule`,
- * `requiresCapability`, `hidden`, `children`), and the caller still runs
+ * `requiresCapability`, `children`) — except a tucked item, shown with
+ * `hidden` cleared, and a listed child, shown as itself with its parent's
+ * gates folded in (see `departmentRow`) — and the caller still runs
  * `visibleItems` / `passesGates` over the result exactly as it does for the
  * whole-business nav. So a `/cameras` href in a Security profile is still gone
  * for a person whose cameras module is off, and a profile can never surface a
@@ -22,6 +24,7 @@ import type { LucideIcon } from "lucide-react";
 
 import {
   passesGates,
+  passesParentGate,
   type AuthRole,
   type NavCapabilities,
   type NavGroup,
@@ -75,20 +78,56 @@ export function departmentHomeItem(
 
 /**
  * Find the NAV_GROUPS item that owns an href: the top-level item whose own
- * href matches, or whose child's does. Returns the ORIGINAL object.
+ * href matches, or whose child's does (then `parent` is set). Returns the
+ * ORIGINAL objects.
  */
-function ownerOf(groups: readonly NavGroup[], href: string): NavItem | null {
+function ownerOf(
+  groups: readonly NavGroup[],
+  href: string,
+): { item: NavItem; parent?: NavItem } | null {
   for (const g of groups) {
     for (const item of g.items) {
-      if (item.href === href) return item;
+      if (item.href === href) return { item };
     }
   }
   for (const g of groups) {
     for (const item of g.items) {
-      if (item.children?.some((c) => c.href === href)) return item;
+      const child = item.children?.find((c) => c.href === href);
+      if (child) return { item: child, parent: item };
     }
   }
   return null;
+}
+
+/**
+ * WARP-2967 — the row a department renders for a profile href.
+ *
+ * A department is a curated list, so two whole-business SURFACE decisions do
+ * not apply inside it, while every ACCESS gate still does:
+ *
+ * - A tucked item (`hidden`, reachable via Settings in the whole-business nav)
+ *   is shown: IT names Users and Health, every department names Help.
+ * - A nested child is shown as itself, not as its parent: Finance names Money
+ *   and Reports, not Projects and Insights. It carries its parent's gates where
+ *   it names none of its own — the same rule `passesParentGate` applies — so
+ *   Events still needs `cameras`, and Brief keeps its narrower roles.
+ *
+ * ponytail: when both name a capability the child's wins; no nav item has two
+ * today. Everything else returns the ORIGINAL object.
+ */
+function departmentRow(item: NavItem, parent?: NavItem): NavItem {
+  if (!parent) return item.hidden ? { ...item, hidden: false } : item;
+  const roles =
+    item.roles && parent.roles
+      ? item.roles.filter((r) => parent.roles!.includes(r))
+      : (item.roles ?? parent.roles);
+  return {
+    ...item,
+    roles,
+    requiresCapability: item.requiresCapability ?? parent.requiresCapability,
+    requiresModule: item.requiresModule ?? parent.requiresModule,
+    hidden: false,
+  };
 }
 
 type ProfileNav = Pick<DepartmentProfile, "navHrefs" | "icon">;
@@ -113,21 +152,27 @@ export function departmentNavGroups(
 ): NavGroup[] {
   if (!dept || !profile) return groups as NavGroup[];
 
-  const items: NavItem[] = [departmentHomeItem(dept, departmentIcon(profile.icon))];
+  const listed = new Set(profile.navHrefs);
   const seen = new Set<NavItem>();
-  for (const href of profile.navHrefs) {
+  const rowFor = (href: string): NavItem | null => {
     const owner = ownerOf(groups, href);
-    if (!owner || seen.has(owner)) continue;
-    seen.add(owner);
-    items.push(owner);
+    if (!owner || seen.has(owner.item)) return null;
+    // A child whose parent is also listed rides along under that parent.
+    if (owner.parent && listed.has(owner.parent.href)) return null;
+    seen.add(owner.item);
+    return departmentRow(owner.item, owner.parent);
+  };
+
+  const items: NavItem[] = [departmentHomeItem(dept, departmentIcon(profile.icon))];
+  for (const href of profile.navHrefs) {
+    const row = rowFor(href);
+    if (row) items.push(row);
   }
 
   const general: NavItem[] = [];
   for (const href of DEPARTMENT_ALWAYS_HREFS) {
-    const owner = ownerOf(groups, href);
-    if (!owner || seen.has(owner)) continue;
-    seen.add(owner);
-    general.push(owner);
+    const row = rowFor(href);
+    if (row) general.push(row);
   }
 
   const out: NavGroup[] = [{ label: dept.name, items }];
@@ -174,9 +219,15 @@ export interface NavChoice {
 
 /**
  * The destinations THIS viewer may pick for a department: every NAV_GROUPS
- * entry (and child) that passes the viewer's own gates, minus tucked entries
- * (no sidebar surface would render them) and the always-reachable ones. A
- * person can only arrange what they can already reach.
+ * entry (and child) that passes the viewer's own gates, minus the
+ * always-reachable ones. A person can only arrange what they can already
+ * reach.
+ *
+ * WARP-2967: tucked entries ARE offered. The department nav renders them
+ * (`departmentRow`), and the templates seed several (IT's Users and Health,
+ * Integrations) — leaving them out made those seeded rows impossible to
+ * uncheck. A child is offered when its parent lets it through
+ * (`passesParentGate`), the same rule the sidebar runs.
  */
 export function navChoices(
   groups: readonly NavGroup[],
@@ -186,17 +237,24 @@ export function navChoices(
 ): NavChoice[] {
   const out: NavChoice[] = [];
   const seen = new Set<string>();
-  const ok = (item: NavItem) =>
-    !item.hidden && passesGates(item, role, capabilities, isModuleOn);
+  const ok = (item: NavItem) => passesGates(item, role, capabilities, isModuleOn);
   for (const g of groups) {
     for (const item of g.items) {
-      if (!ok(item)) continue;
-      if (!seen.has(item.href) && !DEPARTMENT_ALWAYS_HREFS.includes(item.href)) {
+      if (
+        ok(item) &&
+        !seen.has(item.href) &&
+        !DEPARTMENT_ALWAYS_HREFS.includes(item.href)
+      ) {
         seen.add(item.href);
         out.push({ href: item.href, label: item.label, icon: item.icon });
       }
       for (const child of item.children ?? []) {
-        if (seen.has(child.href) || !ok(child)) continue;
+        if (
+          seen.has(child.href) ||
+          !ok(child) ||
+          !passesParentGate(item, child, role, capabilities, isModuleOn)
+        )
+          continue;
         seen.add(child.href);
         out.push({
           href: child.href,

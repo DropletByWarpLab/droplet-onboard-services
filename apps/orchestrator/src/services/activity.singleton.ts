@@ -14,8 +14,10 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import {
+  appendActivityRowInTx,
   createActivityRecorder,
   recordSafely,
+  type ActivityAppendTx,
   type ActivityRowRecorder,
   type RecordedActivityRow,
   type RecordParams,
@@ -55,6 +57,50 @@ export async function recordActivity(
 ): Promise<RecordedActivityRow | null> {
   if (!recorder) return null;
   return recordSafely(recorder, params);
+}
+
+/**
+ * Append a row INSIDE the caller's transaction (WARP-2977 P2b), so a change
+ * and its audit row commit or roll back together. Unlike `recordActivity`
+ * this THROWS — when the recorder has not been initialised as well as when
+ * the append fails — because its callers are human changes that must never
+ * commit unaudited: the throw rolls the caller's transaction back.
+ *
+ * The caller's transaction MUST be opened READ COMMITTED (lib/prisma-tx.ts's
+ * read-committed constant) — never serializable or repeatable read — and `tx`
+ * must be the interactive-transaction client Prisma handed the callback,
+ * never the bare one nor a wrapper built around it (it carries the
+ * transaction id the append queue is keyed on); all are refused with
+ * ActivityChainPreconditionError (see `appendActivityRowInTx`).
+ *
+ * Takes the chain-append advisory lock, held until the caller COMMITS. Run
+ * every CAS / row-locking write FIRST, then the audits (`Promise.all` over the
+ * audits only, or one at a time) — never a CAS after any audit in the same
+ * callback: it inverts the lock order against every other audited writer and
+ * Postgres answers with a deadlock. After the audits, NOTHING else may run in
+ * the callback — above all no global-client audit (`recordActivity`,
+ * `getActivityRecorder().record`, `auditSecuritySystem`): that waits on this
+ * same lock from another connection until the transaction times out, and the
+ * change is lost.
+ *
+ * Several appends on the same transaction (a `Promise.all`) are serialised
+ * in-process, in call order, and chain linearly. A rejection that did not
+ * reach the database (a signer failure, a precondition) does not block the
+ * next; one that DID (a failed statement) aborts the whole Postgres
+ * transaction, and every later statement on it fails. So the rejections must
+ * propagate out of the callback — `Promise.all` or sequential awaits, never
+ * `Promise.allSettled`, which would let `$transaction` resolve while Postgres
+ * rolled everything back. The serialisation covers in-tx appends only — a
+ * global-client audit must still never be interleaved with them.
+ */
+export async function recordActivityInTx(
+  tx: ActivityAppendTx,
+  params: RecordParams,
+): Promise<RecordedActivityRow> {
+  if (!recorder || !signer) {
+    throw new Error("activity recorder not initialised — refusing to commit an unaudited change");
+  }
+  return appendActivityRowInTx(tx, signer, params);
 }
 
 /**
