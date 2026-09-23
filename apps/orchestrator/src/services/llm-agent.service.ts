@@ -32,6 +32,7 @@
  */
 
 import type { PrivateEnhancement } from "@droplet/tools-core";
+import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -2585,7 +2586,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
       // the historical 8000), so it can be set from a measured distribution.
       const bounded = boundToolResultForModel(
-        text,
+        // WARP-2002 — the model never sees a confirmation token; see the helper.
+        isConfirmation ? redactConfirmationTokensForModel(text) : text,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
