@@ -345,7 +345,9 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     // estimate and dispatch sides drift apart. `narrowToolsToScope` is now the
     // single expression of it, and `tool-access.service.test.ts` pins its
     // behaviour — including that an absent scope narrows nothing.
-    expect(ROUTE_SRC).toMatch(/narrowToolsToScope\(pooledTools, toolAccessScope\)/);
+    expect(ROUTE_SRC).toMatch(
+      /narrowToolsToScope\(\s*pooledTools,\s*toolAccessScope,\s*currentRuntimeToolLookup\(\),?\s*\)/,
+    );
     expect(ROUTE_SRC).toContain("pool: effectiveTools.map((t) => t.name)");
   });
 
@@ -361,5 +363,21 @@ describe("the pool is scope-narrowed before it is sized (WARP-2556)", () => {
     for (const src of [ROUTE_SRC, LOOP_SRC]) {
       expect(src).not.toMatch(/\.filter\(\([a-z]+\) => toolAllowedInScope\(/);
     }
+  });
+
+  it("both sites hand the scope filter the SAME runtime lookup (WARP-2897)", () => {
+    // Runtime tools now pass the scope check when a role grants their
+    // domain. If one site passed the lookup and the other did not, the
+    // estimate and the wire would disagree about every runtime tool a scoped
+    // person reaches — WARP-2556 again, one axis over. And the dispatch gate
+    // must use the lookup the advertisement used, or a registered runtime
+    // tool out of scope would slip past the forbidden-tool refusal.
+    //
+    // Mutation: drop the lookup argument at either narrowing site, or at the
+    // dispatch gate → red.
+    expect(ROUTE_SRC).toContain("currentRuntimeToolLookup()");
+    expect(LOOP_SRC).toContain("const runtimeLookup = currentRuntimeToolLookup();");
+    expect(LOOP_SRC).toMatch(/narrowToolsToScope\([\s\S]{0,400}?scoped,\s*runtimeLookup,?\s*\)/);
+    expect(LOOP_SRC).toMatch(/toolDispatchDenial\(call\.function\.name, args, scoped, runtimeLookup\)/);
   });
 });

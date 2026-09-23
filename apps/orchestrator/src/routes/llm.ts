@@ -45,6 +45,7 @@ import {
 // WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
 // domain selection, so it sizes the tools[] the model actually receives.
 import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import { currentRuntimeToolLookup } from "../services/tool-layers.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -1984,7 +1985,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // Through the SHARED helper, not an inline re-expression of the same
         // rule: an inline copy here is what drifted out of step with the
         // dispatch-side filter in the first place.
-        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
+        //
+        // WARP-2897 — with the SAME runtime lookup the agent loop narrows
+        // with (`currentRuntimeToolLookup`), so the two sites keep agreeing
+        // once a scoped person's grants reach runtime tools.
+        const effectiveTools = narrowToolsToScope(
+          pooledTools,
+          toolAccessScope,
+          currentRuntimeToolLookup(),
+        );
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
         //
