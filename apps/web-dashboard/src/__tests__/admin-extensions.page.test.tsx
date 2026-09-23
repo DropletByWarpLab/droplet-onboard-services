@@ -14,7 +14,12 @@
  *   - a blocked preflight shows why and offers no confirm;
  *   - a moved-bytes refusal (409) says so and signs nothing;
  *   - an admin sees the lists but none of the owner's actions;
- *   - uninstall asks twice.
+ *   - uninstall asks twice;
+ *   - 🔴 a failure reason, a promote's installError and a proposal's reason
+ *     are rendered by CODE only, as sentences this box wrote: the tsc tail,
+ *     tool names and JSON-RPC text they carry never reach the DOM (review
+ *     #2326; MUTATION: render `failureReason` / `installError.message` /
+ *     `reason` → red).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
@@ -281,7 +286,7 @@ describe("/admin/extensions — installed", () => {
     await waitFor(() => expect(api.setExtensionEnabled).toHaveBeenCalledWith("wc", true));
   });
 
-  it("retries a failed one (enable), and can still switch it off", async () => {
+  it("retries a failed one (enable), and can still switch it off; its free-text reason is not shown", async () => {
     api.fetchExtensions.mockResolvedValue({
       extensions: [{ ...INSTALLED, status: "failed", failureReason: "did not answer its health check" }],
     });
@@ -289,6 +294,9 @@ describe("/admin/extensions — installed", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Retry wc" }));
     await waitFor(() => expect(api.setExtensionEnabled).toHaveBeenCalledWith("wc", true));
     expect(screen.getByRole("button", { name: "Disable wc" })).toBeTruthy();
+    // A reason with no code is not one this page repeats.
+    expect(document.body.textContent).not.toContain("did not answer its health check");
+    expect(screen.getByText(/failed for a reason this page does not show/)).toBeTruthy();
   });
 
   it("🔴 an uninstalled one stays listed, and can be reinstalled from its signed version", async () => {
@@ -326,6 +334,56 @@ describe("/admin/extensions — installed", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Disable wc" }));
     expect(await screen.findByText("Extensions are switched off on this box.")).toBeTruthy();
+  });
+});
+
+describe("/admin/extensions — 🔴 author-worded text never reaches the owner's lifecycle surface (review #2326)", () => {
+  /** Stands in for the tsc tail, a tool name the extension chose, its JSON-RPC error text. */
+  const MARKER = "EXTENSION-WORDED-5be2";
+
+  it("failureReason, installError.message and a proposal's reason render by code only", async () => {
+    api.fetchExtensions.mockResolvedValue({
+      extensions: [
+        { ...INSTALLED, id: "broke", status: "failed", failureReason: `install_failed: tsc: error TS2304 ${MARKER}` },
+        { ...INSTALLED, id: "liar", status: "failed", failureReason: `attach_refused: liar: ${MARKER} is listed but not signed` },
+        { ...INSTALLED, id: "odd", status: "failed", failureReason: `${MARKER} with no code at all` },
+      ],
+    });
+    api.fetchExtensionProposals.mockResolvedValue({
+      proposals: [
+        PROPOSAL,
+        { ...PROPOSAL, workspaceId: "ws-bad", slug: "ws-bad", tag: "proposal/0.2.0", version: "0.2.0", promotable: false, reason: `manifest invalid: provides.tools.0.name: ${MARKER}` },
+        { ...PROPOSAL, workspaceId: "ws-sb", slug: "ws-sb", tag: "proposal/0.3.0", version: "0.3.0", promotable: false, reason: `the sandbox said ${MARKER}` },
+      ],
+    });
+    api.confirmExtensionPromotion.mockResolvedValue({
+      version: "0.1.0",
+      installed: false,
+      installError: { code: "attach_refused", message: `the multiplexer refused ${MARKER}__delete_everything` },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign and install" }));
+    expect(await screen.findByText(/Promoted wc 0\.1\.0, but it is not running\./)).toBeTruthy();
+
+    expect(document.body.textContent).not.toContain(MARKER);
+    // What is shown instead: this box's sentence for each code.
+    expect(screen.getByText(/The sandbox could not build or start it/)).toBeTruthy();
+    expect(screen.getAllByText(/its tools were not the ones that were signed/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/failed for a reason this page does not show/)).toBeTruthy();
+    expect(screen.getByText("Its manifest is not valid.")).toBeTruthy();
+    expect(screen.getByText("The sandbox could not read this proposal.")).toBeTruthy();
+  });
+
+  it("a refused action is explained by its code, never by the server's message", async () => {
+    api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, status: "disabled" }] });
+    api.setExtensionEnabled.mockRejectedValue(
+      new ExtensionRequestError(`statement_mismatch: the stored tree is not the signed tree ${MARKER}`, 409, "verify_failed"),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Enable wc" }));
+    expect(await screen.findByText(/signed code no longer checks out on this box/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain(MARKER);
   });
 });
 

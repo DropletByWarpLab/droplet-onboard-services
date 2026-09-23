@@ -38,6 +38,7 @@ import {
   TOOLS_START_BLOCKED,
   WHAT_PROMOTING_DOES,
   explainExtensionError,
+  explainLifecycleFailure,
 } from "@/components/admin/extensions/copy";
 import { ExtensionRequestError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -139,12 +140,13 @@ export default function ExtensionsAdminPage() {
     try {
       const result = await ext.confirmPromotion(phase1, operatorDomain);
       closeReview();
+      // The install error by its code only: its message can carry the
+      // extension's build output and error text (review #2326).
+      const promoted = `Promoted ${phase1.slug} ${phase1.version}`;
       setNotice(
         result.installed
-          ? `Promoted ${phase1.slug} ${phase1.version}. It is signed and starting in the sandbox.`
-          : `Promoted ${phase1.slug} ${phase1.version}, but it did not start: ${
-              result.installError?.message ?? "no reason given"
-            }.`,
+          ? `${promoted}. It is signed and starting in the sandbox.`
+          : `${promoted}, but it is not running. ${explainLifecycleFailure(result.installError?.code ?? null)}`,
       );
     } catch (err) {
       setConfirmError(explainExtensionError(err));

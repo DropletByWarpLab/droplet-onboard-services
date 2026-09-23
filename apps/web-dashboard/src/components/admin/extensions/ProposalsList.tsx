@@ -14,11 +14,14 @@
  * directly above the Review button. Same rule as InstalledList and the
  * readback: at decision time, only words this box wrote. Nothing from the
  * extension's manifest text is shown either: what it would get is read back
- * only after "Review", from `provides`.
+ * only after "Review", from `provides`. Why a proposal cannot be promoted is
+ * said by the reason's code, never its detail (a manifest error quotes the
+ * manifest; a sandbox error, the sandbox) (review #2326).
  */
 import { Hammer } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionProposal } from "@/lib/types";
+import { explainExtensionError, explainProposalReason } from "./copy";
 
 export interface ProposalsListProps {
   proposals: ExtensionProposal[];
@@ -35,7 +38,7 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
     return (
       <Card>
         <p className="sub" role="alert">
-          Could not read the workshop proposals. {error.message}
+          Could not read the workshop proposals. {explainExtensionError(error)}
         </p>
       </Card>
     );
@@ -68,7 +71,7 @@ export function ProposalsList({ proposals, loading, error, canPromote, reviewing
             key={`${p.workspaceId}:${p.tag}`}
             icon={<Hammer size={15} />}
             title={p.slug}
-            sub={p.promotable ? `version ${p.version}` : (p.reason ?? "Cannot be promoted")}
+            sub={p.promotable ? `version ${p.version}` : explainProposalReason(p.reason)}
             meta={p.version}
             metaMono
             right={

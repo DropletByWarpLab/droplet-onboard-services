@@ -6,8 +6,11 @@
  *
  * A row is named by the extension's id and version (the box's names for it),
  * with what it got — the readback lines the orchestrator derived from
- * `provides` — never the author's own description. Uninstall asks twice: it
- * removes the running code, the tools and the call-back token.
+ * `provides` — never the author's own description. A failure is said by its
+ * CODE (explainLifecycleFailure), never by the reason's detail, which can
+ * carry the extension's build output, tool names and error text (review
+ * #2326). Uninstall asks twice: it removes the running code, the tools and
+ * the call-back token.
  *
  * Every lifecycle state the orchestrator can leave from is offered here, so
  * the owner never needs the raw API:
@@ -23,7 +26,7 @@ import { useState } from "react";
 import { Puzzle } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionListItem } from "@/lib/types";
-import { STATUS_BADGE } from "./copy";
+import { STATUS_BADGE, explainExtensionError, explainLifecycleFailure } from "./copy";
 
 export interface InstalledListProps {
   extensions: ExtensionListItem[];
@@ -47,7 +50,7 @@ export function InstalledList(props: InstalledListProps) {
     return (
       <Card>
         <p className="sub" role="alert">
-          Could not read the installed extensions. {props.error.message}
+          Could not read the installed extensions. {explainExtensionError(props.error)}
         </p>
       </Card>
     );
@@ -83,7 +86,7 @@ export function InstalledList(props: InstalledListProps) {
           const lines = ext.readback?.lines ?? [];
           const sub = [
             ext.version ? `version ${ext.version.version} · ${signerLabel(ext.version.signer)}` : "no signed version",
-            ext.status === "failed" && ext.failureReason ? ext.failureReason : null,
+            ext.status === "failed" ? explainLifecycleFailure(ext.failureReason) : null,
             lines[0] ?? null,
           ]
             .filter(Boolean)
