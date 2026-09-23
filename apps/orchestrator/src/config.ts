@@ -1189,14 +1189,19 @@ const envSchema = z.object({
   // Must stay a compose service name: the sandbox refuses anything that is not
   // an http(s) URL of host[:port].
   EXTENSION_CALLBACK_URL: z.string().url().default("http://orchestrator:3000"),
-  // WARP-2900 (H3) — whether POST /api/extensions/self/call may run a read
-  // tool AS THE INSTALLING OWNER. OFF by default, separately from
-  // SANDBOX_PROCESS_SUPERVISION: every process in the sandbox shares one uid,
-  // so a workspace `run` child can read an installed extension's `dxt_`
-  // bearer from /proc (docs/security/extension-trust.md). Turning this on
-  // lets that bearer read what the owner can read. Off, the route answers
-  // 503 and GET /api/extensions/self still works. String + transform, not
-  // z.coerce.boolean: "false" must stay false.
+  // WARP-2900 (H3) — whether POST /api/extensions/self/call may run a static
+  // tool AS THE INSTALLING OWNER. On, the route admits only the pinned
+  // allowlist of box-local reads (EXTENSION_SELF_CALL_TOOLS in
+  // services/extension-self-call.ts, EMPTY in v1) and never a tool that
+  // reaches outside the box (egress screen, cloud or ERP connector, model,
+  // mail server), so the bearer never reaches anything off the box. OFF by
+  // default, separately from SANDBOX_PROCESS_SUPERVISION: every process in
+  // the sandbox shares one uid, so a workspace `run` child can read an
+  // installed extension's `dxt_` bearer from /proc
+  // (docs/security/extension-trust.md) and run what the allowlist admits as
+  // that owner. Off, the route answers 503 and GET /api/extensions/self
+  // still works. String + transform, not z.coerce.boolean: "false" must stay
+  // false.
   EXTENSION_SELF_CALL_ENABLED: z
     .string()
     .default("0")

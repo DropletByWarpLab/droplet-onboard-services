@@ -176,11 +176,22 @@ statement alone.
 - **Acting for the owner.** Both routes resolve the owner who installed
   the extension at call time (the User row, active, still an owner) and
   answer `403 owner_unresolved` otherwise. `/self/call` runs a static
-  catalog tool with `requiresWrite` and `requiresConfirmation` both false,
-  as that owner, after the owner's own reach check; the `tool_call` row
-  carries `refs.extensionId`. Writes are refused in v1. **`/self/call`
-  ships off** (`EXTENSION_SELF_CALL_ENABLED=0`, a 503), for the reason in
-  the first known limitation below.
+  catalog tool as that owner, after the owner's own reach check, only if
+  the tool is on an explicit allowlist of box-local reads
+  (`EXTENSION_SELF_CALL_TOOLS`, `services/extension-self-call.ts`), which
+  is **empty in v1**: every tool is a `403 tool_not_allowlisted`. "Any
+  read" is not the rule (review #2325): a read can still carry the owner's
+  data off the box. A tool whose domain is a connector (`cloud`, `erp`), or
+  whose route goes through the egress screen (`/api/web/`, so
+  `get_weather`, `currency_convert`), a connector (`/api/erp/`, so
+  `cloud_query_dataset`; `/api/integrations/`), the model (`/api/llm/`: the
+  provider may be a cloud one) or a mail account (`/api/email/`), or that
+  has no route entry, is a `403 off_box_tool_refused` whatever the
+  allowlist says, and the allowlist's test refuses such an entry. Writes
+  are `403 write_tool_refused`. The `tool_call` row carries
+  `refs.extensionId`. **`/self/call` ships off**
+  (`EXTENSION_SELF_CALL_ENABLED=0`, a 503), for the reason in the first
+  known limitation below.
 
 ### Why a sandbox relay and not the mcp-bridge
 
@@ -221,11 +232,12 @@ inside the host shim) can do the following:
   including an installed extension's relay key and `dxt_` call-back
   bearer. The relay key stops a naive connect, not a same-uid reader.
   Since H3 that bearer has authority: with `EXTENSION_SELF_CALL_ENABLED=1`
-  it runs read tools as the extension's installing OWNER. A workspace
-  `run` child belongs to whoever started the workshop run, which need not
-  be an owner, so turning that flag on lets such a child read what the
-  owner can read. The flag stays off until WARP-2898 (or per-process
-  uids) closes this.
+  it runs the allowlisted box-local reads as the extension's installing
+  OWNER. A workspace `run` child belongs to whoever started the workshop
+  run, which need not be an owner, so turning that flag on lets such a
+  child run those reads as the owner. It never lets it reach outside the
+  box: no tool that does is callable, and the allowlist is empty in v1.
+  The flag stays off until WARP-2898 (or per-process uids) closes this.
 - **Not the server's bearer, conditionally.** `SANDBOX_SERVICE_TOKEN` is in
   the SERVER's environment only, and the server is non-dumpable (above).
   If `prctl` fails (the log line says so), a child can read
