@@ -3,6 +3,14 @@ import { z } from "zod";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { buildBrainBlock } from "../services/brain/brain-block.service.js";
+import {
+  decideHistoryReplay,
+  OFF_LAN_HISTORY_NOTICE,
+  recordCloudHistoryConsent,
+  summarizeCloudHistory,
+  userOnlyReplay,
+  type HistoryReplayMode,
+} from "../services/cloud-history-consent.service.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import {
   attachImageBlocksToLastUserMessage,
@@ -76,6 +84,8 @@ import {
 import {
   OFF_LAN_ATTACHMENT_NOTICE,
   OFF_LAN_WITHHELD_NOTICE,
+  withholdPromptBlocksForOffLan,
+  type OffLanPromptBlock,
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -1054,6 +1064,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         provider: chatReq.provider,
       });
       const isOffLanTurn = offLanProvider !== null;
+      // WARP-2746 — every prompt block `withholdPromptBlocksForOffLan` blanked
+      // on this turn, accumulated across its call sites and written to the
+      // turn's signed audit row. Empty on every local turn.
+      const offLanWithheld: OffLanPromptBlock[] = [];
+      // WARP-2991 — how this turn's history was replayed. Null on a local
+      // turn (the question does not arise); set below once the conversation
+      // is known.
+      let historyReplay: HistoryReplayMode | null = null;
+      let historyWithheldMessages = 0;
 
       // RBAC: write tools require owner/admin. /api/llm/chat is the
       // live MCP-backed route — without this gate any authenticated
@@ -1529,6 +1548,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             messageId: assistantMessageId ?? undefined,
             iterations: liveToolCalls.length,
             status,
+            // WARP-2746 — what this turn did NOT send because it went to a
+            // cloud model. On the signed row so "was X sent to the provider?"
+            // is answerable from the audit chain, not from reading the code.
+            offLanProvider: offLanProvider ?? undefined,
+            offLanWithheld: offLanWithheld.length > 0 ? offLanWithheld : undefined,
+            historyReplay: historyReplay ?? undefined,
+            historyWithheldMessages:
+              historyWithheldMessages > 0 ? historyWithheldMessages : undefined,
           }),
         });
 
@@ -1561,6 +1588,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           completedAt: completedAt.toISOString(),
         });
       };
+
+      // ── WARP-2991 — history replay on a cloud turn ──────────────────
+      //
+      // The client replays the whole thread in `messages`. On an off-LAN
+      // turn the assistant side goes only when the owner consented for this
+      // conversation after its last on-box answer; otherwise only the user's
+      // own messages go. Decided HERE, before any splice below adds the
+      // server's own system messages, so the filter only ever sees the
+      // client's replay. Fails closed: see cloud-history-consent.service.ts.
+      if (isOffLanTurn) {
+        historyReplay = await decideHistoryReplay(prisma, {
+          conversationId,
+          userId,
+          excludeMessageId: assistantMessageId,
+        });
+        if (historyReplay === "user_only") {
+          const before = agentMessages.length;
+          agentMessages = userOnlyReplay(agentMessages);
+          historyWithheldMessages = before - agentMessages.length;
+        }
+      }
 
       // ── WARP-460 Phase B3 — Context-pin injection ─────────────────
       //
@@ -1605,7 +1653,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             const targets = await resolveBusinessPinTargets(prisma, pins, {
               scope: toolAccessScope,
             });
-            const block = renderContextPinBlock(pins, targets);
+            // WARP-2746 — pinned paths and customer names are stored content;
+            // a cloud turn gets none of them (stored-content-egress.service).
+            const gate = withholdPromptBlocksForOffLan(
+              { context_pins: renderContextPinBlock(pins, targets) ?? "" },
+              isOffLanTurn,
+            );
+            offLanWithheld.push(...gate.withheld);
+            const block = gate.blocks.context_pins;
             // `null` when nothing survived resolution (every pin unavailable,
             // or a business pin the resolver could not reach). A header with
             // no lines under it is prompt the model reads for nothing.
@@ -1946,6 +2001,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
+        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
+        // BEFORE the size estimate so the estimate, `degradeToFit` and the
+        // wire all see the same text: a block withheld here can neither be
+        // sent nor charged against the window.
+        const promptGate = withholdPromptBlocksForOffLan(
+          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
+          isOffLanTurn,
+        );
+        offLanWithheld.push(...promptGate.withheld);
+        memoryBlock = promptGate.blocks.memory;
+        brainBlock = promptGate.blocks.brain;
+        businessBlock = promptGate.blocks.business;
+
         const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
@@ -2091,7 +2159,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // error, an outage) or answers from its own weights as though it
             // had read the document. Stating the constraint is what lets it
             // tell the user the truth and name the remedy.
-            (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : ""),
+            (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : "") +
+            // WARP-2991 — say so when the earlier replies were held back.
+            (historyWithheldMessages > 0 ? "\n\n" + OFF_LAN_HISTORY_NOTICE : ""),
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
@@ -2667,6 +2737,79 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           return;
         }
         res.json({ feedback: parsed.data.feedback });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-2991 — what a cloud turn on this conversation would carry, so the
+  // dashboard can name it in the consent dialog at the model switch.
+  // Owner-scoped exactly like the GET above: another person's id is a 404.
+  router.get(
+    "/llm/conversations/:id/cloud-history",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const summary = await summarizeCloudHistory(prisma, {
+          conversationId: req.params.id,
+          userId,
+        });
+        if (!summary) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+        res.json(summary);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-2991 — record the owner's answer. The server enforces the rule on
+  // every turn whatever is recorded here; this is how a person says yes.
+  router.put(
+    "/llm/conversations/:id/cloud-history",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const decision = (req.body as { decision?: unknown })?.decision;
+        if (decision !== "granted" && decision !== "declined") {
+          res.status(400).json({ error: "invalid_decision" });
+          return;
+        }
+        const ok = await recordCloudHistoryConsent(prisma, {
+          conversationId: req.params.id,
+          userId,
+          decision,
+        });
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+        await recordActivity({
+          kind: "chat",
+          severity: "info",
+          sourceIcon: "message-square",
+          actor: actorFromRequest(req),
+          what:
+            decision === "granted"
+              ? "Allowed earlier on-box answers to go to a cloud model"
+              : "Kept earlier on-box answers off the cloud model",
+          sub: userId,
+          refs: { userId, conversationId: req.params.id, cloudHistoryConsent: decision },
+        });
+        res.json({ consent: decision });
       } catch (err) {
         next(err);
       }

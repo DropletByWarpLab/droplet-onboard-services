@@ -94,6 +94,8 @@ function statusBadge(status: PromptBlockView["status"]) {
       return <Badge kind="danger">Broken</Badge>;
     case "dropped":
       return <Badge kind="warn">Dropped — too long</Badge>;
+    case "withheld_off_lan":
+      return <Badge kind="muted">Withheld — cloud model</Badge>;
     default:
       return <Badge kind="muted">Not shown here</Badge>;
   }
@@ -181,7 +183,7 @@ export default function AssistantInspectorPage() {
           <Row
             icon={<Lock size={15} />}
             title="Away from home"
-            sub="Off the home network, tools that read stored files and memory are withheld."
+            sub="On a cloud model, stored files, memory, the business profile and pins are withheld."
             right={
               <input
                 type="checkbox"
