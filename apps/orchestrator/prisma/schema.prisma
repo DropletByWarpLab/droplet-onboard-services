@@ -170,6 +170,16 @@ model ChatSession {
   /// its original chronological spot, not to "Today".
   pinned          Boolean           @default(false)
   pinnedAt        DateTime?
+  /// WARP-2991 — may this conversation's on-box answers be replayed to a
+  /// cloud model? Explicit enum, never inferred from the timestamp. The
+  /// server replays assistant history to a cloud provider ONLY when this is
+  /// `granted` AND `cloudHistoryConsentAt` is later than every on-box answer
+  /// in the thread; anything else replays the user's own messages only.
+  /// A CHECK ties the state to its actor pair (not_asked ⇔ both NULL).
+  cloudHistoryConsent   CloudHistoryConsent @default(not_asked)
+  cloudHistoryConsentAt DateTime?
+  /// Username of the person who decided (ChatSession.userId is a username too).
+  cloudHistoryConsentBy String?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @default(now()) @updatedAt
   messages        ChatMessage[]
@@ -937,6 +947,15 @@ model ChatMessage {
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
   @@index([sessionId, status])
+}
+
+/// WARP-2991 — the owner's answer to "send this conversation's earlier
+/// on-box answers to the cloud model?". `not_asked` and `declined` both
+/// replay the user's own messages only; the difference is audit, not effect.
+enum CloudHistoryConsent {
+  not_asked
+  granted
+  declined
 }
 
 /// WARP-844 — thumbs rating on an assistant message.

@@ -58,7 +58,13 @@ import {
   type PendingComposerToolPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
-import { createContextPin } from "@/lib/api";
+import {
+  createContextPin,
+  fetchCloudHistory,
+  setCloudHistoryConsent,
+  type CloudHistorySummary,
+} from "@/lib/api";
+import { CloudHistoryConsentDialog } from "@/components/chat/CloudHistoryConsentDialog";
 import type { ChatProject } from "@/lib/api";
 // WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
 // shared shell set; chat-indigo.css carries the chat-specific surface.
@@ -313,6 +319,13 @@ export default function ChatPage() {
   );
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  // WARP-2991 — the consent prompt at a local→cloud switch. The server
+  // enforces the rule on every turn; this is how the owner says yes.
+  const [historyPrompt, setHistoryPrompt] = useState<{
+    conversationId: string;
+    summary: CloudHistorySummary;
+    modelLabel: string;
+  } | null>(null);
   // WARP-829: the tool the composer was primed for via the /tools "Use in
   // chat" hand-off (null when the chat wasn't opened from a tool).
   // WARP-2582 — narrowed to the TOOL variant now that the hand-off payload is a
@@ -740,6 +753,25 @@ export default function ChatPage() {
     const flat = first.replace(/\s+/g, " ");
     return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
   }, [messages]);
+  const handleModelChange = useCallback(
+    (id: string) => {
+      setSelectedModel(id);
+      const target = models.find((m) => m.id === id);
+      if (!conversationId || !target || isLocalProvider(target.provider)) return;
+      const convo = conversationId;
+      fetchCloudHistory(convo)
+        .then((summary) => {
+          if (summary.unaskedOnBoxAnswers > 0) {
+            setHistoryPrompt({ conversationId: convo, summary, modelLabel: target.name || id });
+          }
+        })
+        // Unreadable state: no prompt, and the server keeps sending only the
+        // user's own messages — the fail-closed default.
+        .catch(() => {});
+    },
+    [models, conversationId],
+  );
+
   const isLocalModel = useMemo(
     () => isLocalProvider(models.find((m) => m.id === selectedModel)?.provider),
     [models, selectedModel],
@@ -1207,7 +1239,7 @@ export default function ChatPage() {
           // scrolls it out of reach.
           modelSelector={
             <>
-              <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+              <ModelSelector value={selectedModel} onChange={handleModelChange} />
               {isLocalModel && <span className="chat-tag">local · on-device</span>}
             </>
           }
@@ -1286,6 +1318,17 @@ export default function ChatPage() {
           />
         </div>
       </Dialog>
+      <CloudHistoryConsentDialog
+        open={historyPrompt !== null}
+        summary={historyPrompt?.summary ?? null}
+        modelLabel={historyPrompt?.modelLabel ?? ""}
+        onDecide={(decision) =>
+          historyPrompt
+            ? setCloudHistoryConsent(historyPrompt.conversationId, decision)
+            : Promise.resolve()
+        }
+        onClose={() => setHistoryPrompt(null)}
+      />
     </div>
   );
 }
