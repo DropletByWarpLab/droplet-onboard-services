@@ -233,8 +233,9 @@ function formatDepartmentResponse(
     // the department switcher renders from this one list call. Emitted only
     // when the caller loaded it — the create/update/restore responses don't,
     // and a `profile: null` there would claim "not set up" about a department
-    // that may well be set up.
-    ...("profile" in dept
+    // that may well be set up. A TEAM never carries its own profile (it reads
+    // its parent's), so a TEAM row omits the key for the same reason.
+    ...("profile" in dept && dept.kind !== "TEAM"
       ? { profile: dept.profile ? { template: dept.profile.template, icon: dept.profile.icon } : null }
       : {}),
   };

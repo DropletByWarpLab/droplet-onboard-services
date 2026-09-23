@@ -9,6 +9,7 @@
  *     department as their shell.
  *   · only DEPARTMENT rows that are not archived are choices.
  *   · visiting /d/<slug> makes that department active and remembers it.
+ *   · the remembered choice is per user and forgotten on sign-out.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -24,10 +25,12 @@ vi.mock("@/lib/api", () => ({
   getDepartmentProfile: (...a: unknown[]) => getDepartmentProfileMock(...a),
 }));
 
-const authRef: { current: { role: string } | null } = { current: { role: "owner" } };
+const authRef: { current: { role: string; id?: string } | null } = { current: { role: "owner" } };
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: authRef.current ? { id: "u1", username: "ada", ...authRef.current } : null }),
 }));
+// The signed-in user in these tests is "u1" unless a test overrides `id`.
+const U1_KEY = "droplet-active-department:u1";
 
 const pathRef = { current: "/" };
 vi.mock("next/navigation", () => ({
@@ -36,8 +39,8 @@ vi.mock("next/navigation", () => ({
 }));
 
 import {
-  ACTIVE_DEPARTMENT_STORAGE_KEY,
   ActiveDepartmentProvider,
+  activeDepartmentStorageKey,
   departmentChoices,
   resolveActive,
   switcherChoiceCount,
@@ -124,12 +127,12 @@ function Probe() {
   );
 }
 
-const wrap = (ui: ReactNode) =>
-  render(
-    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-      <ActiveDepartmentProvider>{ui}</ActiveDepartmentProvider>
-    </SWRConfig>,
-  );
+const tree = (ui: ReactNode) => (
+  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+    <ActiveDepartmentProvider>{ui}</ActiveDepartmentProvider>
+  </SWRConfig>
+);
+const wrap = (ui: ReactNode) => render(tree(ui));
 
 describe("<ActiveDepartmentProvider>", () => {
   beforeEach(() => {
@@ -179,7 +182,7 @@ describe("<ActiveDepartmentProvider>", () => {
     listDepartmentsMock.mockResolvedValue({ departments: [security, sales] });
     wrap(<Probe />);
     await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
-    expect(localStorage.getItem(ACTIVE_DEPARTMENT_STORAGE_KEY)).toBe("security");
+    expect(localStorage.getItem(U1_KEY)).toBe("security");
   });
 
   it("picking Whole business while still on /d/<slug> sticks (the URL is not re-applied)", async () => {
@@ -193,11 +196,11 @@ describe("<ActiveDepartmentProvider>", () => {
       fireEvent.click(screen.getByRole("button", { name: "whole" }));
     });
     expect(screen.getByTestId("active")).toHaveTextContent("whole");
-    expect(localStorage.getItem(ACTIVE_DEPARTMENT_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(U1_KEY)).toBeNull();
   });
 
   it("a remembered slug the viewer can no longer see falls back to Whole business", async () => {
-    localStorage.setItem(ACTIVE_DEPARTMENT_STORAGE_KEY, "gone");
+    localStorage.setItem(U1_KEY, "gone");
     listDepartmentsMock.mockResolvedValue({ departments: [security] });
     wrap(<Probe />);
     await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("1"));
@@ -209,6 +212,67 @@ describe("<ActiveDepartmentProvider>", () => {
     listDepartmentsMock.mockResolvedValue({ departments: [security] });
     wrap(<Probe />);
     await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("1"));
-    expect(localStorage.getItem(ACTIVE_DEPARTMENT_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(U1_KEY)).toBeNull();
+  });
+
+  it("keys the choice per user", () => {
+    expect(activeDepartmentStorageKey("u1")).toBe(U1_KEY);
+  });
+
+  it("another user with the same slug stored lands on Whole business (shared browser)", async () => {
+    // The owner (u1) picked Security on this browser; a family member (u2),
+    // also in Security, signs in next.
+    localStorage.setItem(U1_KEY, "security");
+    authRef.current = { role: "family", id: "u2" };
+    listDepartmentsMock.mockResolvedValue({ departments: [security] });
+    wrap(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("1"));
+    expect(screen.getByTestId("active")).toHaveTextContent("whole");
+  });
+
+  it("the owner's own stored choice is still honoured", async () => {
+    localStorage.setItem(U1_KEY, "security");
+    listDepartmentsMock.mockResolvedValue({ departments: [security] });
+    wrap(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
+  });
+
+  it("switching accounts without a reload does not carry the choice over", async () => {
+    localStorage.setItem(U1_KEY, "security");
+    listDepartmentsMock.mockResolvedValue({ departments: [security] });
+    const { rerender } = wrap(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
+
+    authRef.current = { role: "family", id: "u2" };
+    rerender(tree(<Probe />));
+    await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("whole"));
+    // u1's choice is untouched by u2 signing in.
+    expect(localStorage.getItem(U1_KEY)).toBe("security");
+  });
+
+  it("signing out clears the signed-out user's choice", async () => {
+    localStorage.setItem(U1_KEY, "security");
+    listDepartmentsMock.mockResolvedValue({ departments: [security] });
+    const { rerender } = wrap(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("active")).toHaveTextContent("security"));
+
+    authRef.current = null;
+    rerender(tree(<Probe />));
+    await waitFor(() => expect(localStorage.getItem(U1_KEY)).toBeNull());
+    expect(screen.getByTestId("active")).toHaveTextContent("whole");
+  });
+
+  it("storage that throws means Whole business, not a crash", async () => {
+    const spy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    try {
+      listDepartmentsMock.mockResolvedValue({ departments: [security] });
+      wrap(<Probe />);
+      await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("1"));
+      expect(screen.getByTestId("active")).toHaveTextContent("whole");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

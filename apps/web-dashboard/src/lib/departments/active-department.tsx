@@ -4,8 +4,10 @@
  * WARP-2976 (ADR-059 §2.3) — which department the shell is showing.
  *
  * Modelled on `lib/nav-layout.tsx`: a per-person DISPLAY preference, kept in
- * this browser's localStorage (`droplet-active-department`, the slug; absent
- * means Whole business). Server-side preference arrives with the clients in
+ * this browser's localStorage (`droplet-active-department:<user.id>`, the
+ * slug; absent means Whole business). The key is PER USER: a shared browser
+ * must not hand one person's narrowed shell to the next person who signs in
+ * (review of #2285), and it is removed when that user signs out. Server-side preference arrives with the clients in
  * P6. It changes how the same routes are ARRANGED and nothing about what the
  * person may reach — the nav still runs every existing gate after the
  * department filter (`department-nav.ts`).
@@ -56,6 +58,11 @@ import type {
 import { slugFromPath } from "./department-nav";
 
 export const ACTIVE_DEPARTMENT_STORAGE_KEY = "droplet-active-department";
+
+/** The localStorage key holding `userId`'s choice. */
+export function activeDepartmentStorageKey(userId: string): string {
+  return `${ACTIVE_DEPARTMENT_STORAGE_KEY}:${userId}`;
+}
 
 /** Shared with `components/projects/usePm.ts#useDepartments` — same endpoint,
  *  same `{ departments }` shape, so the two reads dedupe into one request. */
@@ -127,18 +134,18 @@ export function switcherChoiceCount(choices: readonly Department[]): number {
   return choices.length + 1;
 }
 
-function readStored(): string | null {
+function readStored(userId: string): string | null {
   try {
-    return localStorage.getItem(ACTIVE_DEPARTMENT_STORAGE_KEY);
+    return localStorage.getItem(activeDepartmentStorageKey(userId));
   } catch {
     return null;
   }
 }
 
-function writeStored(slug: string | null): void {
+function writeStored(userId: string, slug: string | null): void {
   try {
-    if (slug) localStorage.setItem(ACTIVE_DEPARTMENT_STORAGE_KEY, slug);
-    else localStorage.removeItem(ACTIVE_DEPARTMENT_STORAGE_KEY);
+    if (slug) localStorage.setItem(activeDepartmentStorageKey(userId), slug);
+    else localStorage.removeItem(activeDepartmentStorageKey(userId));
   } catch {
     // Storage unavailable (private mode, blocked) — the choice still applies
     // for this session.
@@ -150,12 +157,23 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   const pathname = usePathname();
   const canSeeOverview = user?.role === "owner" || user?.role === "admin";
 
+  const userId = user?.id ?? null;
+
   // Starts empty on server AND client and adopts the stored slug after mount,
-  // for the same hydration reason `NavLayoutProvider` gives.
-  const [storedSlug, setStoredSlug] = useState<string | null>(null);
+  // for the same hydration reason `NavLayoutProvider` gives. Re-read whenever
+  // the signed-in user changes, not only on mount: an account switch without
+  // a reload must not carry the previous person's choice over. The slug is
+  // tagged with the user it was read for, so the render between the switch
+  // and this effect already answers Whole business for the new user.
+  const [stored, setStored] = useState<{ userId: string; slug: string | null } | null>(null);
+  const previousUserId = useRef<string | null>(null);
   useEffect(() => {
-    setStoredSlug(readStored());
-  }, []);
+    // Signing out (a known user → none) forgets that user's choice.
+    if (!userId && previousUserId.current) writeStored(previousUserId.current, null);
+    previousUserId.current = userId;
+    setStored(userId ? { userId, slug: readStored(userId) } : null);
+  }, [userId]);
+  const storedSlug = stored && stored.userId === userId ? stored.slug : null;
 
   const { data, error } = useSWR<{ departments: Department[] }>(
     user ? DEPARTMENTS_KEY : null,
@@ -182,21 +200,28 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   const urlSlug = slugFromPath(pathname);
   const appliedUrlSlug = useRef<string | null>(null);
   useEffect(() => {
-    if (!urlSlug) {
+    if (!urlSlug || !userId) {
       appliedUrlSlug.current = null;
       return;
     }
-    if (appliedUrlSlug.current === urlSlug) return;
+    // Keyed by user too: the next person to sign in on the same URL gets it
+    // applied (and checked against THEIR choices) afresh.
+    const arrival = `${userId}:${urlSlug}`;
+    if (appliedUrlSlug.current === arrival) return;
     if (!choices.some((d) => d.slug === urlSlug)) return;
-    appliedUrlSlug.current = urlSlug;
-    setStoredSlug(urlSlug);
-    writeStored(urlSlug);
-  }, [urlSlug, choices]);
+    appliedUrlSlug.current = arrival;
+    setStored({ userId, slug: urlSlug });
+    writeStored(userId, urlSlug);
+  }, [urlSlug, choices, userId]);
 
-  const setActive = useCallback((slug: string | null) => {
-    setStoredSlug(slug);
-    writeStored(slug);
-  }, []);
+  const setActive = useCallback(
+    (slug: string | null) => {
+      if (!userId) return;
+      setStored({ userId, slug });
+      writeStored(userId, slug);
+    },
+    [userId],
+  );
 
   const active = useMemo(
     () => resolveActive(choices, storedSlug),
