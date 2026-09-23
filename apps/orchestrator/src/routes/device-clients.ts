@@ -20,7 +20,7 @@ import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
-import { assertOutboundUrlAllowed, isOutboundUrlBlocked } from "../lib/outbound-url-guard.js";
+import { PushEndpointRejected, vetPushEndpoint } from "../lib/push-endpoint.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -615,19 +615,24 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
           .status(400)
           .json({ error: "Invalid subscription", details: parsed.error.flatten() });
       }
-      // WARP-2904 — the orchestrator will POST to this URL, so it is an SSRF
-      // primitive before it is egress: refuse a LAN / loopback / credentialed
-      // endpoint (the WARP-2022 registration-time guard; dispatchToUser runs
-      // the same check again at dial time). Web Push endpoints are always
-      // https, and `assertOutboundUrlAllowed` also admits http, so that is
-      // checked on its own with a self-describing error.
+      // WARP-2904: the orchestrator will POST to this URL, so it is an SSRF
+      // primitive before it is egress. vetPushEndpoint requires https on the
+      // default port with no userinfo, a plain host that both URL parsers
+      // agree on (web-push dials the LEGACY parser's host), and a real push
+      // service host. dispatchToUser re-runs the check at dial time and adds
+      // a DNS check. The error names the rule, never the endpoint.
       try {
-        const url = assertOutboundUrlAllowed(parsed.data.endpoint);
-        if (url.protocol !== "https:") {
-          return res.status(400).json({ error: "https_required" });
-        }
+        vetPushEndpoint(parsed.data.endpoint);
       } catch (err) {
-        if (isOutboundUrlBlocked(err)) return res.status(400).json({ error: err.message });
+        if (err instanceof PushEndpointRejected) {
+          // `blocked_destination` is the WARP-2022 registration error for a
+          // refused destination; https_required keeps its own self-describing
+          // code. `reason` names which rule refused it.
+          return res.status(400).json({
+            error: err.reason === "https_required" ? "https_required" : "blocked_destination",
+            reason: err.reason,
+          });
+        }
         throw err;
       }
       const userId = getUser(req);

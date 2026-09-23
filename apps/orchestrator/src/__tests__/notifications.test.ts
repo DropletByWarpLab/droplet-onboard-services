@@ -9,6 +9,11 @@ vi.mock("../services/mqtt.service.js", () => ({
   publish: (...a: unknown[]) => mqttPublish(...a),
 }));
 
+// WARP-2904: the dial-time DNS check resolves push hosts; keep it offline.
+vi.mock("node:dns/promises", () => ({
+  lookup: async () => [{ address: "142.250.0.1", family: 4 }],
+}));
+
 // WARP-2909 — web-push itself is mocked so a test can capture the exact
 // payload the push channel would encrypt and send.
 const webpushSend = vi.fn(async () => ({}));
@@ -57,7 +62,9 @@ function makePushingPrismaStub() {
     findUnique: vi.fn(async () => ({ key: "web_push", enabled: true })),
   };
   stub.pushSubscription = {
-    findMany: vi.fn(async () => [{ endpoint: "https://push.example/1", p256dhKey: "p", authKey: "a" }]),
+    // WARP-2904: only a real push-service host is dialled.
+    findMany: vi.fn(async () => [{ endpoint: "https://fcm.googleapis.com/fcm/send/1", p256dhKey: "p", authKey: "a" }]),
+    count: vi.fn(async () => 1),
     deleteMany: vi.fn(async () => ({ count: 0 })),
     updateMany: vi.fn(async () => ({ count: 1 })),
   };
@@ -196,6 +203,7 @@ describe("sendNotification — NotificationLog.pushOutcome", () => {
     };
     stub.pushSubscription = {
       findMany: vi.fn(async () => []),
+      count: vi.fn(async () => 0),
       deleteMany: vi.fn(),
       updateMany: vi.fn(async () => ({ count: 0 })),
     };

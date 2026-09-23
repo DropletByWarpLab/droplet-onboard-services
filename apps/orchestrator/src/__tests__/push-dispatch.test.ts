@@ -19,15 +19,18 @@ vi.mock("web-push", () => ({
   },
 }));
 
+// DNS is mocked: every name resolves public unless a test says otherwise.
+const lookupMock = vi.fn(async () => [{ address: "142.250.0.1", family: 4 }]);
+vi.mock("node:dns/promises", () => ({ lookup: (...a: unknown[]) => lookupMock(...(a as [])) }));
+
 import { dispatchToUser } from "../services/push-dispatch.service.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
 import type { RecordParams } from "../services/activity.service.js";
 
 const audited: RecordParams[] = [];
 
-// Test-fixture hosts only (RFC 2606 `.test`); the real push services are
-// named in docs/security/allowed-egress.yaml, never in code.
-const GOOD = "https://push.vendor.test/send/abc123";
+// A real push-service host: since the review fix, only those are dialled.
+const GOOD = "https://fcm.googleapis.com/fcm/send/abc123";
 
 function sub(endpoint: string) {
   return { id: endpoint, userId: "alice", endpoint, p256dhKey: "p".repeat(40), authKey: "a".repeat(20) };
@@ -47,6 +50,7 @@ function makePrisma(opts: {
     },
     pushSubscription: {
       findMany: vi.fn(async () => opts.subs ?? []),
+      count: vi.fn(async () => (opts.subs ?? []).length),
       deleteMany: vi.fn(async ({ where }: { where: { endpoint: { in: string[] } } }) => ({
         count: where.endpoint.in.length,
       })),
@@ -58,6 +62,7 @@ function makePrisma(opts: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  lookupMock.mockImplementation(async () => [{ address: "142.250.0.1", family: 4 }]);
   audited.length = 0;
   _setActivityRecorderForTests(
     {
@@ -100,6 +105,21 @@ describe("dispatchToUser — web_push off-LAN gate (fail-closed)", () => {
     });
   }
 
+  it("gate off with NO subscriptions writes no audit row (push ships off; no warning per notification)", async () => {
+    const prisma = makePrisma({ gate: "off", subs: [] });
+    const result = await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
+    expect(result.refused).toBe("egress_disabled");
+    await flush();
+    expect(audited).toHaveLength(0);
+  });
+
+  it("passes a dial timeout so an endpoint that never answers cannot stall the caller", async () => {
+    sendNotification.mockResolvedValue({ statusCode: 201 });
+    const prisma = makePrisma({ gate: "on", subs: [sub(GOOD)] });
+    await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
+    expect(sendNotification.mock.calls[0][2]).toMatchObject({ timeout: 10_000 });
+  });
+
   it("reads the gate by the web_push enum key", async () => {
     const prisma = makePrisma({ gate: "off" });
     await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
@@ -121,7 +141,7 @@ describe("dispatchToUser — web_push off-LAN gate (fail-closed)", () => {
       channel: "web_push",
       outcome: "allowed",
       userId: "alice",
-      dst: "push.vendor.test",
+      dst: "fcm.googleapis.com",
     });
     const serialized = JSON.stringify(audited[0]);
     expect(serialized).not.toContain("abc123");
@@ -139,7 +159,13 @@ describe("dispatchToUser — endpoint re-checked at dial time", () => {
   for (const [label, endpoint] of [
     ["private address", "https://192.168.1.10/push"],
     ["loopback", "https://127.0.0.1:8443/push"],
-    ["plain http", "http://push.vendor.test/send/x"],
+    ["plain http", "http://fcm.googleapis.com/fcm/send/x"],
+    // The review's bypass: WHATWG says host "127.0.0.1;.evil.example",
+    // web-push's legacy url.parse dials 127.0.0.1.
+    ["semicolon parser-split", "https://127.0.0.1;.fcm.googleapis.com/push/abc"],
+    ["userinfo", "https://fcm.googleapis.com@127.0.0.1/x"],
+    ["non-default port", "https://fcm.googleapis.com:8443/fcm/send/x"],
+    ["non-push public host", "https://push.vendor.example.com/send/x"],
   ] as const) {
     it(`a pre-existing ${label} row is skipped and deleted, never dialled`, async () => {
       sendNotification.mockResolvedValue({ statusCode: 201 });
@@ -159,4 +185,35 @@ describe("dispatchToUser — endpoint re-checked at dial time", () => {
       ]);
     });
   }
+});
+
+describe("dispatchToUser — dials exactly the vetted host", () => {
+  it("a push-service name that resolves inside the boundary is refused and pruned", async () => {
+    lookupMock.mockImplementation(async () => [{ address: "10.0.0.5", family: 4 }]);
+    const prisma = makePrisma({ gate: "on", subs: [sub(GOOD)] });
+    const result = await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, pruned: 1, attempted: 0 });
+  });
+
+  it("hands web-push the normalised URL, whose legacy-parsed host is the audited host", async () => {
+    const { parse } = await import("node:url");
+    sendNotification.mockResolvedValue({ statusCode: 201 });
+    const wns = "https://wns2-by3p.notify.windows.com/w/?token=abc";
+    const prisma = makePrisma({ gate: "on", subs: [sub(wns)] });
+    await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
+    const dialled = (sendNotification.mock.calls[0][0] as { endpoint: string }).endpoint;
+    expect(dialled).toBe(wns);
+    await flush();
+    expect(parse(dialled).hostname).toBe((audited[0].refs as { dst: string }).dst);
+  });
+
+  it("dials the rebuilt URL, never the raw row", async () => {
+    sendNotification.mockResolvedValue({ statusCode: 201 });
+    const prisma = makePrisma({ gate: "on", subs: [sub("https://FCM.GoogleAPIs.com/fcm/send/x")] });
+    await dispatchToUser(prisma, "alice", { title: "t", body: "b" });
+    expect((sendNotification.mock.calls[0][0] as { endpoint: string }).endpoint).toBe(
+      "https://fcm.googleapis.com/fcm/send/x",
+    );
+  });
 });

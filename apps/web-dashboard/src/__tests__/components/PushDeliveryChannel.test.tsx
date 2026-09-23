@@ -17,7 +17,7 @@ describe("PushDeliveryChannel", () => {
     fetchMock.mockResolvedValue({ enabled: false });
     render(<PushDeliveryChannel />);
     expect(await screen.findByText(/Push delivery is off/)).toBeInTheDocument();
-    expect(screen.getByText(/Google, Apple or\s+Mozilla/)).toBeInTheDocument();
+    expect(screen.getByText(/Google, Apple,\s+Mozilla or Microsoft/)).toBeInTheDocument();
     expect(screen.getByText(/encrypted to your\s+device/)).toBeInTheDocument();
   });
 

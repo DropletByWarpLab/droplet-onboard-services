@@ -28,7 +28,11 @@ import webpush from "web-push";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
-import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
+import {
+  assertPushDestination,
+  vetPushEndpoint,
+  type VettedPushEndpoint,
+} from "../lib/push-endpoint.js";
 import { webPushGate } from "./off-lan-gate.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { canAccessCamera } from "./camera-access.service.js";
@@ -210,20 +214,27 @@ function auditPushEgress(userId: string, outcome: PushEgressOutcome, host?: stri
 }
 
 /**
- * WARP-2904 — the endpoint check at DISPATCH time. The subscribe route runs
- * the same check at registration, but rows stored before that existed are
- * never otherwise re-checked, and a user-supplied URL this process POSTs to is
- * an SSRF primitive before it is egress. Web Push endpoints are always https.
- * Returns the host when the endpoint may be dialled, null when it may not.
+ * WARP-2904: the endpoint check at DIAL time. The subscribe route runs the
+ * same structural check at registration, but rows stored before that check
+ * existed are never otherwise re-checked. Here the host is also resolved,
+ * so a push-service name that resolves inside the boundary is refused.
+ * Returns the vetted endpoint (the host web-push will actually connect to,
+ * plus the normalised URL to dial), or null when it may not be dialled.
+ * See lib/push-endpoint.ts for why this is not plain `assertOutboundUrlAllowed`.
  */
-function dialableHost(endpoint: string): string | null {
+async function dialableEndpoint(endpoint: string): Promise<VettedPushEndpoint | null> {
   try {
-    const url = assertOutboundUrlAllowed(endpoint);
-    return url.protocol === "https:" ? url.hostname : null;
+    const vetted = vetPushEndpoint(endpoint);
+    await assertPushDestination(vetted);
+    return vetted;
   } catch {
     return null;
   }
 }
+
+/** A dial that never answers must not stall the caller (the reminders poller
+ *  awaits each send in turn). */
+const PUSH_DIAL_TIMEOUT_MS = 10_000;
 
 export interface DispatchOutcome {
   sent: number;
@@ -251,18 +262,27 @@ export async function dispatchToUser(
   payload: PushPayload,
 ): Promise<DispatchOutcome> {
   if (!(await webPushGate(prisma))) {
-    auditPushEgress(userId, "refused_gate");
+    // Audit a refusal only when there was something to refuse. Push ships
+    // off, so an unconditional row here would mean one signed warning per
+    // notification (and per camera detection) on every box where nobody
+    // has even subscribed. Only a COUNT: no subscription row is loaded
+    // while the gate is closed. If the count cannot be read, the refusal is
+    // audited anyway.
+    const pending = await prisma.pushSubscription
+      .count({ where: { userId } })
+      .catch(() => 1);
+    if (pending > 0) auditPushEgress(userId, "refused_gate");
     return { sent: 0, pruned: 0, attempted: 0, refused: "egress_disabled" };
   }
   if (!configured) initPushDispatch();
   const rows = await prisma.pushSubscription.findMany({ where: { userId } });
 
-  // Refuse (and prune) any stored endpoint that fails the outbound guard.
+  // Refuse (and prune) any stored endpoint that fails the push-endpoint guard.
   const blocked: string[] = [];
-  const subs: Array<(typeof rows)[number] & { host: string }> = [];
+  const subs: Array<(typeof rows)[number] & VettedPushEndpoint> = [];
   for (const r of rows) {
-    const host = dialableHost(r.endpoint);
-    if (host) subs.push({ ...r, host });
+    const vetted = await dialableEndpoint(r.endpoint);
+    if (vetted) subs.push({ ...r, ...vetted });
     else {
       blocked.push(r.endpoint);
       auditPushEgress(userId, "refused_endpoint");
@@ -281,11 +301,14 @@ export async function dispatchToUser(
       try {
         await webpush.sendNotification(
           {
-            endpoint: s.endpoint,
+            // The NORMALISED url, never the raw row: its host is the one
+            // that was vetted and the one the audit row names.
+            endpoint: s.url,
             keys: { p256dh: s.p256dhKey, auth: s.authKey },
           },
           body,
-          { TTL: 60 }, // Best-effort: stale notifications past 1 min are useless.
+          // TTL: best-effort, stale notifications past 1 min are useless.
+          { TTL: 60, timeout: PUSH_DIAL_TIMEOUT_MS },
         );
         sent++;
         auditPushEgress(userId, "allowed", s.host);

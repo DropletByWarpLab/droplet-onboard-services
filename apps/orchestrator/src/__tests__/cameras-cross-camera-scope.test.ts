@@ -51,6 +51,11 @@ vi.mock("mqtt", () => ({
   },
 }));
 
+// WARP-2904: the dial-time DNS check resolves the push host; keep it offline.
+vi.mock("node:dns/promises", () => ({
+  lookup: async () => [{ address: "142.250.0.1", family: 4 }],
+}));
+
 vi.mock("web-push", () => ({
   default: {
     generateVAPIDKeys: () => ({ publicKey: "pub", privateKey: "priv" }),
@@ -129,7 +134,8 @@ const prisma = {
   },
   pushSubscription: {
     findMany: vi.fn(async ({ where }: { where: { userId: string } }) => [
-      { endpoint: `https://push.test/${where.userId}`, p256dhKey: "k", authKey: "a" },
+      // WARP-2904: only a real push-service host is dialled.
+      { endpoint: `https://fcm.googleapis.com/fcm/send/${where.userId}`, p256dhKey: "k", authKey: "a" },
     ]),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -334,7 +340,7 @@ describe("push notifications follow grants, not just prefs", () => {
     const endpoints = vi
       .mocked(webpush.sendNotification)
       .mock.calls.map((c) => (c[0] as { endpoint: string }).endpoint);
-    expect(endpoints).toEqual(["https://push.test/u-owner"]);
+    expect(endpoints).toEqual(["https://fcm.googleapis.com/fcm/send/u-owner"]);
   });
 });
 

@@ -4,8 +4,8 @@
  * WARP-2904 — the box-wide switch for the `web_push` off-LAN channel.
  *
  * Every phone or browser push the box sends is dialled through a push
- * service run by Google, Apple or Mozilla (whichever the subscribed browser
- * uses). The message text is encrypted to the device, but the dial itself —
+ * service run by Google, Apple, Mozilla or Microsoft (whichever the
+ * subscribed browser uses); the orchestrator refuses any other host. The message text is encrypted to the device, but the dial itself —
  * that this box notified someone, and when — leaves the network, so it is an
  * off-LAN channel like weather or outbound mail: off until an owner or admin
  * turns it on. There is no generic off-LAN settings panel in the dashboard,
@@ -66,8 +66,8 @@ export function PushDeliveryChannel() {
             </h3>
           </div>
           <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-            Push notifications travel through a push service run by Google, Apple or
-            Mozilla, depending on the browser. The message text is encrypted to your
+            Push notifications travel through a push service run by Google, Apple,
+            Mozilla or Microsoft, depending on the browser. The Droplet refuses any other. The message text is encrypted to your
             device, so that service can&apos;t read it. It does see that a
             notification was sent, and when.
           </p>
