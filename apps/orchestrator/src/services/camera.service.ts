@@ -54,6 +54,7 @@ import {
   noteFrigateSubscribeFailed,
   noteFrigateSubscription,
   recordSecurityEvent,
+  SECURITY_FRIGATE_TOPICS,
   type StatusTracker,
 } from "./security-events.service.js";
 
@@ -109,12 +110,10 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
       // exactly one level, so camera online/offline never arrived. The SUBACK
       // is checked: a refused topic is an ingest that is down, not a quiet
       // site, and /security says so.
+      // One list, shared with the SUBACK check, so a topic can never be
+      // subscribed without being verified (or verified without being asked for).
       _mqttClient!.subscribe(
-        {
-          "frigate/events": { qos: 1 },
-          "frigate/+/status/detect": { qos: 1 },
-          "frigate/available": { qos: 1 },
-        },
+        Object.fromEntries(SECURITY_FRIGATE_TOPICS.map((t) => [t, { qos: 1 as const }])),
         (err, granted) => {
           if (err) noteFrigateSubscribeFailed(err);
           else noteFrigateSubscription(granted ?? []);
