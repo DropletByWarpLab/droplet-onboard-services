@@ -109,6 +109,7 @@ import {
 import { initEffectiveAccess } from "./services/effective-access.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
+import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -611,6 +612,10 @@ export function createApp(
   // (days left, when the box renews, whether renewal is failing). Owner +
   // admin, read-only; the public /api/tls/status stays the pre-login minimum.
   app.use("/api", createTlsCertificateRouter(prisma));
+
+  // WARP-1405: backup health for Settings → Device information (last success,
+  // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
+  app.use("/api", createBackupStatusRouter());
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
