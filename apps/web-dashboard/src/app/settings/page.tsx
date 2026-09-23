@@ -8,6 +8,7 @@ import {
   Cloud,
   DownloadCloud,
   HardDrive,
+  Laptop,
   Mic,
   Plus,
   Settings as SettingsIcon,
@@ -216,6 +217,31 @@ export default function SettingsPage() {
               </span>
               <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
             </Link>
+            {/* WARP-2966 (files-surface addendum §2.3) — Sync devices left the
+                Files sub-nav: it pairs a desktop machine, it is not a place a
+                file can be, and a rail of locations that also held it meant
+                two things at once. The route is unchanged; this row is the
+                only way in now, which is why it ships in the same change.
+                Gated on the files module for the same reason the nav entry is,
+                with the same fail-open posture as Knowledge above. */}
+            {isModuleOn("files") && (
+              <Link
+                href="/files/devices"
+                className="lrow"
+                style={{ padding: "12px 16px", alignItems: "center" }}
+              >
+                <span className="ri">
+                  <Laptop size={16} />
+                </span>
+                <span className="rt">
+                  <span className="nm">Sync devices</span>
+                  <span className="sub">
+                    Computers mirroring a folder with this Droplet
+                  </span>
+                </span>
+                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+              </Link>
+            )}
           </div>
         </div>
 
