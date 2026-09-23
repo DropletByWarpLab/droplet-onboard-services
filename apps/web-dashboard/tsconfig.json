@@ -19,5 +19,11 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // WARP-2969 — `tool-domains.test.ts` is the ONE file here that imports
+  // `@droplet/tools-core`, whose `types` resolve at `dist/`. This lane never
+  // builds it (and pointing `paths` at the source instead makes tsc check
+  // tools-core's own source, which needs a generated Prisma client this lane
+  // never generates either — TS7031). It is a runtime drift gate; vitest
+  // runs it through `resolve.alias` in vitest.config.ts. Keep it runtime-only.
+  "exclude": ["node_modules", "src/lib/tool-domains.test.ts"]
 }
