@@ -8361,8 +8361,10 @@ enum BriefingTrigger {
 // zones), from the RAW message — never behind camera-event-gate, which drops
 // concurrent and cooldown events for the toast/push surface.
 //
-// Columns land with their first writer: `zoneId` with the P2b zones,
-// `incidentId` with P3, `correlationKey` with ADR-055's AccessEvent.
+// Columns land with their first writer: `incidentId` with P3,
+// `correlationKey` with ADR-055's AccessEvent. Zones resolve at read time
+// from SecurityZoneLink (camera, cameraZones, sourceRef); no zoneId column
+// (WARP-2977 P2b).
 
 /// Where a SecurityEvent came from. Explicit enum — never inferred from
 /// which columns are null.
@@ -8370,6 +8372,8 @@ enum SecurityEventSource {
   frigate
   frigate_status
   activity_mirror
+  /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
+  site_mode
 }
 
 enum SecurityEventKind {
@@ -8388,6 +8392,8 @@ enum SecurityEventKind {
   source_online
   /// A mirrored warn/err `network` or `auth` ActivityRow.
   threat
+  /// The site mode changed. labels = [mode, modeSource, fromMode]; startedAt = the boundary instant.
+  mode_changed
 }
 
 /// info < notice < alert. On an event this is the source's own weight; the
@@ -8437,4 +8443,165 @@ model SecurityIngestState {
   retentionRanAt    DateTime?
   retentionDeleted  Int       @default(0)
   updatedAt         DateTime  @updatedAt
+}
+
+// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
+//
+// Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
+// Values land with their first writer: link states proposed/rejected, origin,
+// evidence and confidence arrive with P4; the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it.
+//
+// Every shape rule below that Prisma cannot express is a hand-written CHECK in
+// 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
+// IS NULL as state.
+
+enum SecurityZoneKind {
+  entry
+  interior
+  perimeter
+  parking
+  restricted
+}
+
+/// Areas are never row-deleted: P3 incidents and P5 suppressions will FK here with Restrict.
+enum SecurityZoneState {
+  active
+  archived
+}
+
+enum SecurityZoneSourceKind {
+  camera
+  camera_zone
+}
+
+/// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
+enum SecurityZoneLinkState {
+  active
+  removed
+}
+
+model SecurityZone {
+  id          String             @id @default(uuid())
+  name        String             @db.VarChar(60)
+  /// lower(btrim(name)). Case-insensitive uniqueness in the database, not an app pre-check. CHECKed.
+  nameKey     String             @unique @db.VarChar(60)
+  kind        SecurityZoneKind
+  state       SecurityZoneState  @default(active)
+  /// Lost-update guard for the edit form and the link set. Bumped by every write to the area or its links.
+  version     Int                @default(0)
+  createdById String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  links       SecurityZoneLink[]
+
+  @@index([state])
+}
+
+model SecurityZoneLink {
+  id             String                 @id @default(uuid())
+  zoneId         String
+  zone           SecurityZone           @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  sourceKind     SecurityZoneSourceKind
+  /// camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. Names, never a Camera FK:
+  /// SecurityEvent.camera, CameraAccessGrant reads and Frigate all key on the name, and a Cascade FK
+  /// would drop links unaudited (a Restrict one breaks DELETE /cameras/:name after Frigate was edited).
+  sourceRef      String                 @db.VarChar(160)
+  /// Display snapshot at link time. Shown only when the source no longer exists; never matched on.
+  sourceLabel    String                 @db.VarChar(120)
+  state          SecurityZoneLinkState
+  createdById    String?
+  createdAt      DateTime               @default(now())
+  decidedById    String?
+  stateChangedAt DateTime               @default(now())
+
+  @@unique([zoneId, sourceKind, sourceRef])
+  @@index([sourceKind, sourceRef, state])
+  @@index([zoneId, state])
+}
+
+enum SecurityHoursState {
+  not_set
+  set
+}
+
+enum SecurityDayKind {
+  closed
+  open_all_day
+  hours
+}
+
+enum SecurityMode {
+  open
+  closed
+  away
+}
+
+enum SecurityModeSource {
+  schedule
+  manual
+}
+
+/// How a manual mode ends. Explicit — never inferred from manualUntil (a CHECK ties them).
+enum SecurityManualEnd {
+  none          // modeSource = schedule
+  next_opening  // closed until the opening hours next open the site; recomputed when the hours change
+  at_time       // open until manualUntil (Open up: now + 1/2/4 h, capped at the next opening)
+  until_changed // away; or closed when no opening lies ahead (no hours set, or never open)
+}
+
+/// Opening-hours header, one row. The ONLY zone the evaluator uses — never Workspace.tz at
+/// runtime, never the process zone (the container sets no TZ).
+model SecuritySiteHours {
+  id          String             @id @default("singleton")
+  state       SecurityHoursState @default(not_set)
+  /// Canonical IANA zone (Intl resolvedOptions().timeZone). Set iff state = set (CHECK).
+  timezone    String?            @db.VarChar(64)
+  /// Bumped by every hours AND every exception write: the form's lost-update guard.
+  version     Int                @default(0)
+  updatedById String?
+  updatedAt   DateTime           @updatedAt
+}
+
+/// Brief §5 SecuritySchedule: one weekday's usual hours. Exactly 7 rows iff SecuritySiteHours.state = set.
+model SecuritySchedule {
+  /// ISO weekday of the site-local date the window OPENS on: 1 = Monday … 7 = Sunday.
+  weekday   Int             @id @db.SmallInt
+  kind      SecurityDayKind
+  /// Minutes since site-local midnight, 0–1439; set iff kind = hours (CHECK).
+  /// closesMin < opensMin ⇒ closes the next day. Equal is refused (that is open_all_day).
+  opensMin  Int?            @db.SmallInt
+  closesMin Int?            @db.SmallInt
+  updatedAt DateTime        @updatedAt
+}
+
+/// A date whose hours differ (holiday, late night). Replaces that date's OWN window only;
+/// the previous evening's past-midnight tail still ends when it normally would.
+model SecurityScheduleException {
+  /// Site-local 'YYYY-MM-DD'. A string, never @db.Date (which round-trips as UTC midnight).
+  date        String          @id @db.VarChar(10)
+  kind        SecurityDayKind
+  opensMin    Int?            @db.SmallInt
+  closesMin   Int?            @db.SmallInt
+  note        String          @default("") @db.VarChar(80)
+  createdById String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+/// Brief §5 SecurityModeState, one row. Writers: the act-level mode route, the hours routes and
+/// the mode ticker, all by compare-and-set on `version`. Readers resolve the EFFECTIVE mode with
+/// resolveMode(), so an expired manual mode reads as expired even before the ticker writes it.
+model SecurityModeState {
+  id          String             @id @default("singleton")
+  mode        SecurityMode       @default(open)
+  modeSource  SecurityModeSource @default(schedule)
+  manualEnd   SecurityManualEnd  @default(none)
+  manualUntil DateTime?
+  /// User.id of whoever set a manual mode (no FK: users are deletable; the audit chain is the record).
+  setById     String?
+  setAt       DateTime           @default(now())
+  /// Bumped by every mode write AND by every hours/exception write (invalidates a tick that read old hours).
+  version     Int                @default(0)
+  updatedAt   DateTime           @updatedAt
 }

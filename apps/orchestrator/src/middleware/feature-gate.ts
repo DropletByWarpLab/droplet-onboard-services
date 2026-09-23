@@ -104,6 +104,31 @@ export function resolveEffectiveAccessForRequest(
 }
 
 /**
+ * WARP-2977 P2b — what a feature gate enforces, readable off the handler.
+ *
+ * `requireFeatureAccess` returns an anonymous `featureGate` closure, so a
+ * router-walk invariant ("every Security write route is gated at exactly its
+ * §7 level") had no way to ask a mounted handler what it checks. The marker
+ * is the `ROLE_GUARD_MARKER` / `isRoleGuard` precedent (middleware/auth.ts):
+ * a non-enumerable, non-writable symbol property, so it never shows up in a
+ * spread, a JSON dump or Express's own handling. `Symbol.for` so a second copy
+ * of this module (vitest's module graph) still reads the same key.
+ */
+export const FEATURE_GATE_META = Symbol.for("droplet.featureGate.meta");
+
+export interface FeatureGateMeta {
+  moduleId: ModuleId;
+  level: FeatureLevel;
+}
+
+/** The `{moduleId, level}` a `requireFeatureAccess` handler enforces, or null for anything else. */
+export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
+  if (typeof fn !== "function") return null;
+  const meta = (fn as unknown as Record<symbol, unknown>)[FEATURE_GATE_META];
+  return meta && typeof meta === "object" ? (meta as FeatureGateMeta) : null;
+}
+
+/**
  * Gate a route (or a whole module route group) on the caller holding at least
  * `minLevel` on `moduleId` in their resolved §9 catalog.
  *
@@ -116,6 +141,20 @@ export function requireFeatureAccess(
   moduleId: ModuleId,
   minLevel: FeatureLevel = "view",
   resolve: EffectiveAccessResolver = resolveEffectiveAccess,
+): RequestHandler {
+  const gate = featureGateFor(moduleId, minLevel, resolve);
+  Object.defineProperty(gate, FEATURE_GATE_META, {
+    value: Object.freeze({ moduleId, level: minLevel } satisfies FeatureGateMeta),
+    enumerable: false,
+    writable: false,
+  });
+  return gate;
+}
+
+function featureGateFor(
+  moduleId: ModuleId,
+  minLevel: FeatureLevel,
+  resolve: EffectiveAccessResolver,
 ): RequestHandler {
   const needed = FEATURE_LEVEL_RANK[minLevel];
 

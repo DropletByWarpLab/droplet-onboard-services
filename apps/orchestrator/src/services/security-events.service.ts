@@ -369,8 +369,15 @@ export function noteFrigateMessage(now = new Date()): void {
 
 export type SourceState = "ok" | "quiet" | "down" | "not_configured";
 
+/**
+ * The header's rows, in the pinned display order
+ * `camera_ingest, camera_system, (locks — PR-2), threat_mirror, site_mode, retention`.
+ * `site_mode` (WARP-2977 P2b) is the opening-hours ticker's row.
+ */
+export type SecurityHealthId = "camera_ingest" | "camera_system" | "threat_mirror" | "site_mode" | "retention";
+
 export interface SecurityHealthRow {
-  id: "camera_ingest" | "camera_system" | "threat_mirror" | "retention";
+  id: SecurityHealthId;
   state: SourceState;
   detail: string;
   lastSeenAt: string | null;
@@ -388,6 +395,12 @@ export function buildSecurityHealth(input: {
   ingest: Readonly<IngestHealthState>;
   frigate: { health: SourceHealth; at: Date } | undefined;
   state: { threatMirrorRanAt: Date | null; retentionRanAt: Date | null; retentionDeleted: number } | null;
+  /**
+   * WARP-2977 P2b — the site-mode ticker's row (`siteModeHealthRow` in
+   * security-mode.service.ts), placed before `retention`. Optional: omitted,
+   * the header is exactly P2a's.
+   */
+  siteMode?: SecurityHealthRow;
   now: Date;
 }): SecurityHealthRow[] {
   const { ingest, now } = input;
@@ -445,6 +458,8 @@ export function buildSecurityHealth(input: {
     detail: !ingest.jobsRegistered ? "Not scheduled" : "Checks the network and sign-in log every minute",
     lastSeenAt: iso(mirrorRan),
   });
+
+  if (input.siteMode) rows.push(input.siteMode);
 
   const retentionRan = input.state?.retentionRanAt ?? null;
   rows.push({
@@ -505,10 +520,20 @@ export function feedVisibilityWhere(
   return and.length > 0 ? { AND: and } : {};
 }
 
+/**
+ * One page of the feed. `visibility` is ALWAYS `AND[0]` — the DS-005 filter
+ * is never merged with, or replaced by, a caller's narrowing.
+ *
+ * `extraWhere` (WARP-2977 P2b) is appended after the camera clause: the area
+ * filter (`?zone=`) passes its `zoneEventWhere` clause here. It can only
+ * narrow — every entry is ANDed — so it can never widen what `visibility`
+ * lets through.
+ */
 export async function listSecurityEvents(
   prisma: Pick<PrismaClient, "securityEvent">,
   visibility: Prisma.SecurityEventWhereInput,
   q: SecurityFeedQuery,
+  extraWhere: readonly Prisma.SecurityEventWhereInput[] = [],
 ) {
   const where: Prisma.SecurityEventWhereInput = {
     AND: [
@@ -516,6 +541,7 @@ export async function listSecurityEvents(
       q.includeLow ? {} : { kind: { not: "detection_low" } },
       q.kinds ? { kind: q.kinds } : {},
       q.camera ? { camera: q.camera } : {},
+      ...extraWhere,
       q.cursor
         ? {
             OR: [

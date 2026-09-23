@@ -182,12 +182,29 @@ describe("gap (a) — a child item's own gate is no longer a no-op", () => {
   });
 });
 
+// WARP-2967 tucked both Integrations entries behind Settings — connecting a
+// connector is configuration, not operation — so the sidebar offers them from
+// the contextual Settings panel. The GATE is what gap (b) is about and it did
+// not move; these cases now ask the surface that actually renders them.
 describe("gap (b) — the Integrations item is gated", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/settings";
+  });
+
   it("an owner sees Integrations", () => {
     render(<Sidebar />);
     expect(
-      within(desktopAside()).getByRole("link", { name: /integrations/i }),
+      within(desktopAside()).getByRole("link", { name: /^integrations$/i }),
     ).toHaveAttribute("href", "/integrations");
+  });
+
+  it("never offers it from the main tree — Settings owns the way in", () => {
+    pathnameRef.current = "/";
+    render(<Sidebar />);
+    expect(document.querySelector("a[href='/integrations']")).toBeNull();
+    expect(
+      document.querySelector("a[href='/integrations/credentials']"),
+    ).toBeNull();
   });
 
   it("a staff (family) member does NOT — the orchestrator gates erp.ts owner/admin", () => {

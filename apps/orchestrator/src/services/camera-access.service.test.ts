@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   cameraScopeOf,
   canAccessCamera,
+  canSeeFaceFolder,
   inCameraScope,
   narrowCameraFilter,
   principalFromRequest,
@@ -362,6 +363,21 @@ describe("WARP-2982: narrowing a camera filter to the scope", () => {
   it("scopes membership", () => {
     expect(inCameraScope("all", "bedroom")).toBe(true);
     expect(inCameraScope(new Set(["front_door"]), "bedroom")).toBe(false);
+  });
+});
+
+describe("WARP-3013: Frigate's `train` face folder", () => {
+  it("is visible only to an all-camera scope", () => {
+    expect(canSeeFaceFolder("all", "train")).toBe(true);
+    expect(canSeeFaceFolder(new Set(["front_door", "bedroom"]), "train")).toBe(false);
+    expect(canSeeFaceFolder(new Set(), "train")).toBe(false);
+  });
+
+  it("leaves the curated roster household-wide", () => {
+    expect(canSeeFaceFolder(new Set(), "Alice")).toBe(true);
+    // Folder names are case-sensitive on the box's filesystem: `Train` is a
+    // person someone named, not Frigate's crop folder.
+    expect(canSeeFaceFolder(new Set(), "Train")).toBe(true);
   });
 });
 
