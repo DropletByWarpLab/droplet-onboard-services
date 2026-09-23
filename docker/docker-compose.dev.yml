@@ -160,7 +160,11 @@ services:
       MQTT_BROKER: mqtt://broker:1883
       # ── Auth ──
       JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-ship}
-      DEVICE_SECRET: ${DEVICE_SECRET:-dev-only-device-secret-do-not-ship}
+      # WARP-2985: no literal fallback. The orchestrator refuses a missing or
+      # publicly-known DEVICE_SECRET (claim-code hashes, clip share URLs), and
+      # the dev literal that used to sit here was exactly such a value. The
+      # README's step 3 copies docker/dev/.env.example, which sets one.
+      DEVICE_SECRET: ${DEVICE_SECRET:?set DEVICE_SECRET in .env (cp docker/dev/.env.example .env)}
       # WARP-2844 — the column-encryption master key. WITHOUT IT THE SETUP
       # WIZARD CANNOT COMPLETE, so the dev stack had no way to create an
       # account at all: emailWriteData HKDFs the User.email column key from

@@ -1477,6 +1477,29 @@ migrate_env() {
     log_warn "DROPLET_DEVICE_ID equals this host's hostname ('${_current_device_id}') — kept, but a hostname is not a device identity. If this box was never provisioned at HQ, set DROPLET_DEVICE_ID=\$(_derive_device_id) before minting its token (ADR-058)."
   fi
 
+  # WARP-2985: DEVICE_SECRET must be a per-device value — the orchestrator
+  # refuses to boot on DROPLET_ENV=production without one, and the claim-code
+  # HMAC / clip share signing / ai-gateway BYOK keystore refuse a missing or
+  # public value. Generate one when the key is absent, empty, or a
+  # publicly-known placeholder (the .env.example `change-me` and every literal
+  # a code path or dev compose ever fell back to). ANY OTHER VALUE IS KEPT:
+  # rotating a real secret would orphan unclaimed claim codes, live clip
+  # links and every stored BYOK cloud key. Replacing a public value orphans
+  # only material that was already keyed by a string anyone could read.
+  # Logs the key name only — never the value.
+  local _device_secret_now
+  _device_secret_now="$(grep -E '^DEVICE_SECRET=' "$stage" | tail -1 | cut -d= -f2- || true)"
+  case "$(printf '%s' "$_device_secret_now" | tr -d '[:space:]')" in
+    ""|change-me|dev-only-not-secure|dev-secret-change-in-production|dev-only-device-secret-do-not-ship)
+      if grep -qE '^DEVICE_SECRET=' "$stage"; then
+        { grep -vE '^DEVICE_SECRET=' "$stage" || true; } > "$stage.ds"
+        chmod 600 "$stage.ds"
+        mv "$stage.ds" "$stage"
+      fi
+      _migrate_ensure_key DEVICE_SECRET "$(_gen_fernet_key)"
+      ;;
+  esac
+
   # WARP-234: per-service Redis ACL identities for pre-existing installs.
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
