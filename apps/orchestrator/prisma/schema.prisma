@@ -2283,6 +2283,10 @@ model NotificationLog {
   kind        NotificationKind
   title       String
   body        String?
+  // WARP-2909 — deep link: a same-origin dashboard path (validated by
+  // assertNotificationLink) and small flat PHI-free client context.
+  url         String?
+  data        Json?
   // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
