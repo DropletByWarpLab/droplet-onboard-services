@@ -228,6 +228,42 @@ describe("toolAllowedInScope — runtime tools (WARP-2897)", () => {
     // …and an unregistered name still falls through to the WARP-642 guard.
     expect(toolDispatchDenial("bookings__unknown", {}, scope, runtime)).toBeNull();
   });
+
+  /**
+   * The PRINCIPAL helpers (both axes) are what chat's catalog build
+   * (`narrowAllowedToolsForRole`) goes through. Without the lookup here, a
+   * scoped family/guest person — or a scoped admin sending `allowed_tools` —
+   * never gets a runtime tool their grant admits, while effective-access
+   * reports the domain as theirs.
+   *
+   * MUTATION: drop the `runtime` argument in `toolAllowedForPrincipal`'s
+   * scope check → red (the principal helpers go back to catalog-only).
+   */
+  it("the principal helpers (tier + scope) thread the same lookup", () => {
+    const names = ["bookings__list_slots", "bookings__book_slot"];
+    const viewScope = scopeOf(["ext-bookings"]);
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(narrowToolNamesForPrincipal(names, "admin", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(
+      narrowToolNamesForPrincipal(
+        names,
+        "admin",
+        scopeOf(["ext-bookings"], ["ext-bookings"]),
+        false,
+        runtime,
+      ),
+    ).toEqual(names);
+    expect(firstToolDeniedForPrincipal(names, "family", viewScope, false, runtime)).toEqual({
+      tool: "bookings__book_slot",
+      axis: "role_grant",
+    });
+    // No lookup passed: the fail-closed default still denies every runtime tool.
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope)).toEqual([]);
+  });
 });
 
 describe("unknownToolsIn / writeToolsIn — optional runtime sets (WARP-2897)", () => {

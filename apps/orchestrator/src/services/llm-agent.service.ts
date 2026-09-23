@@ -1336,8 +1336,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // same call, so the two cannot drift apart the way they did in the
   // WARP-2497 × WARP-2552 conflict (WARP-2556).
   //
-  // WARP-2897 — and through the SAME runtime lookup routes/llm.ts uses
-  // (`currentRuntimeToolLookup`, one helper for both sites), so a role grant
+  // WARP-2897 — and through the SAME runtime lookup routes/llm.ts's catalog
+  // build (`narrowAllowedToolsForRole`) resolves by default
+  // (`currentRuntimeToolLookup`, one helper for both), so a role grant
   // on a runtime tool's domain admits that tool to a scoped person — and the
   // dispatch gate below refuses it with the identical answer. Snapshotted
   // once per turn: the advertisement and every dispatch decision in this turn

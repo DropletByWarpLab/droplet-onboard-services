@@ -45,7 +45,10 @@ import {
 // WARP-2497 — the context-budget estimate mirrors the agent loop's per-turn
 // domain selection, so it sizes the tools[] the model actually receives.
 import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
-import { currentRuntimeToolLookup } from "../services/tool-layers.service.js";
+import {
+  currentRuntimeToolLookup,
+  type RuntimeToolLookup,
+} from "../services/tool-layers.service.js";
 import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
@@ -513,19 +516,26 @@ export function resolveReasoningEffort(
  * chat-specific `undefined` handling (privileged ⇒ stay undefined; otherwise
  * materialise the live registry). The per-name verdict is not reimplemented
  * anywhere.
+ *
+ * WARP-2897 — `runtime` is the runtime-tool lookup the agent loop narrows
+ * with (`currentRuntimeToolLookup`, read once per call by default). Without
+ * it a scoped family/guest person — and a scoped admin sending
+ * `allowed_tools` — would never be handed a runtime tool their role's grant
+ * admits: the loop only intersects with the list materialised here.
  */
 export async function narrowAllowedToolsForRole(
   role: string | undefined,
   requestedAllowed: string[] | undefined,
   isVoice = false,
   scope: ToolAccessScope | null = null,
+  runtime: RuntimeToolLookup = currentRuntimeToolLookup(),
 ): Promise<string[] | undefined> {
   // Distinguish `undefined` (no list supplied → fall through to the
   // role default) from an explicit empty array (caller asked for ZERO
   // tools). `.length` truthiness would conflate the two and grant the
   // full non-write registry for an intentional `allowed_tools: []`.
   if (requestedAllowed !== undefined) {
-    return narrowToolNamesForPrincipal(requestedAllowed, role, scope, isVoice);
+    return narrowToolNamesForPrincipal(requestedAllowed, role, scope, isVoice, runtime);
   }
   if (isPrivilegedRole(role)) return undefined;
   // Default for unprivileged users: every tool the live MCP server
@@ -539,6 +549,7 @@ export async function narrowAllowedToolsForRole(
     role,
     scope,
     isVoice,
+    runtime,
   );
 }
 
@@ -1986,14 +1997,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // rule: an inline copy here is what drifted out of step with the
         // dispatch-side filter in the first place.
         //
-        // WARP-2897 — with the SAME runtime lookup the agent loop narrows
-        // with (`currentRuntimeToolLookup`), so the two sites keep agreeing
-        // once a scoped person's grants reach runtime tools.
-        const effectiveTools = narrowToolsToScope(
-          pooledTools,
-          toolAccessScope,
-          currentRuntimeToolLookup(),
-        );
+        // WARP-2897 — no runtime lookup here, deliberately: `pooledTools` is
+        // built from the compiled `TOOLS` map only, so the catalog answers for
+        // every name and a lookup could change nothing. Runtime tools are not
+        // sized by this estimate (see below); the runtime half of the scope
+        // rule lives where runtime names actually appear — the catalog build
+        // (`narrowAllowedToolsForRole`) and the agent loop, both through
+        // `currentRuntimeToolLookup`.
+        const effectiveTools = narrowToolsToScope(pooledTools, toolAccessScope);
         // WARP-2552 — but the pool is NOT what the model receives, and sizing
         // it as though it were is the defect this fixes.
         //

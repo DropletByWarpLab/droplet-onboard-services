@@ -450,9 +450,18 @@ export function toolAllowedForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  /**
+   * WARP-2897 — the runtime layer for the scope axis, as in
+   * {@link toolAllowedInScope}. Axis A stays catalog-only: a runtime tool is
+   * never in WRITE_TOOLS, and under a scope a write-classified one is refused
+   * by axis B anyway (non-privileged tiers hold no `writeDomains`). The
+   * default knows no runtime tool, so a caller that passes none keeps the
+   * pre-2897 answer.
+   */
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): boolean {
   if (!toolAllowedForTier(name, tier, isVoice)) return false;
-  return !scope || toolAllowedInScope(name, scope);
+  return !scope || toolAllowedInScope(name, scope, runtime);
 }
 
 /**
@@ -465,8 +474,9 @@ export function narrowToolNamesForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): string[] {
-  return names.filter((n) => toolAllowedForPrincipal(n, tier, scope, isVoice));
+  return names.filter((n) => toolAllowedForPrincipal(n, tier, scope, isVoice, runtime));
 }
 
 /**
@@ -496,12 +506,13 @@ export function firstToolDeniedForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): { tool: string; axis: ToolDenialAxis } | null {
   for (const name of names) {
     if (!toolAllowedForTier(name, tier, isVoice)) {
       return { tool: name, axis: "write_tier" };
     }
-    if (scope && !toolAllowedInScope(name, scope)) {
+    if (scope && !toolAllowedInScope(name, scope, runtime)) {
       return { tool: name, axis: "role_grant" };
     }
   }

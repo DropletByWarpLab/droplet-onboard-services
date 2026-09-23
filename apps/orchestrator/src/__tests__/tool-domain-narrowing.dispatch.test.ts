@@ -14,9 +14,12 @@
  * tools-core handler's own forced confirmation is still what actually
  * answers, unweakened.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { ToolDomain } from "@droplet/tools-core";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import type { ToolAccessScope } from "../services/tool-access.service.js";
+import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
+import { remoteToolClassificationCache } from "../services/remote-tool-classification.service.js";
 
 const POOL_TOOLS = [
   { name: "list_files", description: "d", inputSchema: {} },
@@ -254,5 +257,97 @@ describe("runAgent — §3 locks (mayOperateLocks)", () => {
       messages: [{ role: "user", content: "lock up" }],
     });
     expect(callTool).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── WARP-2897 — runtime tools through the loop's own lookup ───────────
+//
+// The loop narrows its advertisement AND re-checks at dispatch with
+// `currentRuntimeToolLookup()` (snapshotted once per turn). These run the
+// REAL registry and classification cache — nothing injected — so they prove
+// the behaviour, not the call shape: a role grant on a runtime tool's domain
+// admits a READ-classified tool, and a registered runtime tool the scope does
+// not reach is refused as forbidden without reaching the MCP client.
+describe("runAgent — runtime tools under a scope (WARP-2897)", () => {
+  const LIST = "bookings__list_slots";
+  const BOOK = "bookings__book_slot";
+  const at = new Date("2026-09-22T00:00:00Z");
+  const row = (toolName: string, requiresWrite: boolean) => ({
+    serverId: "bookings",
+    toolName,
+    requiresWrite,
+    requiresConfirmation: requiresWrite,
+    denied: false,
+    reviewedBy: "owner",
+    reviewedAt: at,
+    wireDescription: null,
+    firstSeenAt: at,
+    lastSeenAt: at,
+  });
+  const descriptor = (wireName: string) => ({
+    name: `bookings__${wireName}`,
+    serverId: "bookings",
+    // Slice H owns the extension-domain vocabulary; the layer model reads
+    // strings, so a fixture outside the closed union is cast.
+    domain: "ext-bookings" as ToolDomain,
+    domainSource: "server" as const,
+    description: "fixture",
+    inputSchema: {},
+  });
+  const withRuntimePool = (deps: AgentDeps) => {
+    (deps.mcp as unknown as { listTools: ReturnType<typeof vi.fn> }).listTools.mockResolvedValue([
+      ...POOL_TOOLS,
+      { name: LIST, description: "d", inputSchema: {} },
+      { name: BOOK, description: "d", inputSchema: {} },
+    ]);
+  };
+
+  beforeEach(() => {
+    runtimeToolRegistry.registerServerTools("bookings", [
+      descriptor("list_slots"),
+      descriptor("book_slot"),
+    ]);
+    remoteToolClassificationCache.seed([row("list_slots", false), row("book_slot", true)]);
+  });
+
+  afterEach(() => {
+    runtimeToolRegistry.clear();
+    remoteToolClassificationCache.seed([]);
+  });
+
+  /** MUTATION: drop `runtimeLookup` from the loop's `narrowToolsToScope` → red. */
+  it("advertises a READ runtime tool whose domain the scope grants, never the write", async () => {
+    const { deps, chat } = makeDeps([{ role: "assistant", content: "hi" }]);
+    withRuntimePool(deps);
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "hello" }],
+      toolAccessScope: scope(["files", "ext-bookings"]),
+    });
+    expect(toolNames(chat.mock.calls[0]![0])).toEqual(["list_files", LIST]);
+  });
+
+  /** MUTATION: drop `runtimeLookup` from the loop's `toolDispatchDenial` → red
+   *  (the in-scope read is refused as forbidden). */
+  it("dispatches the in-scope runtime read and refuses the out-of-scope write", async () => {
+    const { deps, callTool } = makeDeps([
+      callOf(LIST),
+      callOf(BOOK),
+      { role: "assistant", content: "ok" },
+    ]);
+    withRuntimePool(deps);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "book me a slot" }],
+      // A stale shelf that still names the write.
+      allowed_tools: [LIST, BOOK],
+      toolAccessScope: scope(["ext-bookings"]),
+    });
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(callTool.mock.calls[0]![0]).toBe(LIST);
+    expect(result.trace[1]).toMatchObject({
+      tool: BOOK,
+      result: { status: "error", error: { code: "FORBIDDEN_TOOL_FOR_ROLE" } },
+    });
   });
 });
