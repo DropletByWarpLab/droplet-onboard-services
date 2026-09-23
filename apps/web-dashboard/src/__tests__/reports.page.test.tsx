@@ -39,6 +39,7 @@ vi.mock("@/app/reports/api", async (orig) => ({
   fetchHome: vi.fn(() => new Promise(() => {})),
   fetchActivityRange: vi.fn(() => new Promise(() => {})),
   fetchChainVerify: vi.fn(() => new Promise(() => {})),
+  fetchTodayBriefing: vi.fn(() => new Promise(() => {})),
 }));
 vi.mock("@/lib/api", () => ({
   fetchAdminFilesUsage: vi.fn(() => new Promise(() => {})),
@@ -47,10 +48,10 @@ vi.mock("@/lib/api", () => ({
 import ReportsPage from "@/app/reports/page";
 
 /** Brief §4 — this order IS the reading order, and mobile preserves it. */
-const EXPECTED_ORDER = ["a1", "a2", "b1", "b2", "b3", "b4", "c1", "c2", "d1", "d2"];
+const EXPECTED_ORDER = ["a0", "a1", "a2", "b1", "b2", "b3", "b4", "c1", "c2", "d1", "d2"];
 
 const EXPECTED_SPANS: Record<string, string> = {
-  a1: "8x2", a2: "4x2",
+  a0: "8x2", a1: "8x2", a2: "4x2",
   b1: "3x1", b2: "3x1", b3: "3x1", b4: "3x1",
   c1: "6x2", c2: "6x2",
   d1: "8x2", d2: "4x2",

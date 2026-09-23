@@ -131,17 +131,30 @@ export function FilesLibrariesNav({
   const searchParams = useSearchParams();
   const isOwnerOrAdmin = user?.role === "owner" || user?.role === "admin";
 
-  // The active library is the `?space=` on /files; its absence means personal.
-  // Read from the URL rather than tracked here so a deep link, a back button
-  // and a rail click all agree — the same reason WARP-1547 made (space, path)
-  // addressable in the first place.
+  // The active library is the `?space=` in the URL. Read from there rather
+  // than tracked here so a deep link, a back button and a rail click all
+  // agree — the same reason WARP-1547 made (space, path) addressable in the
+  // first place.
   //
   // `||`, not `??`: `/files?space=` yields the empty string, which is a param
   // that is present and says nothing. `app/files/page.tsx` reads it with a
   // truthy check and falls back to the personal space, so `??` here would
   // leave the page showing My Files while the rail highlighted nothing.
-  const activeSpace: FileSpaceId | null =
-    pathname === "/files" ? searchParams?.get("space") || "personal" : null;
+  //
+  // WARP-2966: the test was `pathname === "/files"`, which lit a library on
+  // the browser and NOWHERE else. The rail reveals on every /files/* route,
+  // so opening Recent from inside a department left it on screen claiming the
+  // user was in no library at all. It now reads the param on any Files route.
+  //
+  // The personal fallback stays scoped to /files, because only the browser
+  // defaults to My Files. Recent, Shared and Trash span every library the
+  // viewer can see, so on those routes an absent `?space=` means "all of
+  // them" — lighting My Files there would claim a location the user is not in
+  // (pinned both ways in FilesLibrariesNav.test.tsx).
+  const inFiles = pathname === "/files" || pathname.startsWith("/files/");
+  const activeSpace: FileSpaceId | null = !inFiles
+    ? null
+    : searchParams?.get("space") || (pathname === "/files" ? "personal" : null);
 
   // One pass over the space list per render: the visibility filter feeds BOTH
   // the rows and the Home-mode gate below, and the rail re-renders on every
@@ -274,7 +287,15 @@ export function FilesLibrariesNav({
   };
 
   return (
-    <nav aria-label="Libraries" className="mt-2">
+    // WARP-2966 — a hairline above the caption. The group sits directly under
+    // the section's three sub-nav rows at the same indent, so without a rule
+    // "LIBRARIES" reads as a fourth row of the same list instead of the head
+    // of a different kind of list: places you can be, then libraries you can
+    // be in. The rule itself is `.files-rail-group` in globals.css, like every
+    // other colour this component paints (see the Colour note above): the
+    // sidebar renders above every page scope, and the `border-separator`
+    // utility is a pre-DESIGN.md token the class ratchet refuses in new code.
+    <nav aria-label="Libraries" className="files-rail-group mt-3 pt-3">
       <div
         className={`files-rail-caption type-caption-2 uppercase tracking-wider pb-1 ${
           drawer ? "px-3 pt-2" : "px-2"

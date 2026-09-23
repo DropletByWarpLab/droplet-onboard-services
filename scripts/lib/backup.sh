@@ -90,9 +90,27 @@ install_restic_backup() {
   sudo systemctl enable --now droplet-restic-backup-full.timer >/dev/null 2>&1
   sudo systemctl enable --now droplet-restore-drill.timer >/dev/null 2>&1
 
+  # --- WARP-1405: key check, in THIS run ------------------------------------
+  # If this setup run rotated DEVICE_SECRET_KEY (--regenerate-env, or a torn
+  # .env regenerated), the repository is re-keyed now from the .env.bak.* the
+  # rotation just wrote — not at 03:15, and not after the .bak has had time to
+  # go missing. It also writes the first status file (state `pending`), which
+  # starts the orchestrator's 48 h backup window. Best-effort: a failure is
+  # recorded in the status file (and alerts through the orchestrator); it must
+  # not abort setup.
+  if command -v restic >/dev/null 2>&1; then
+    if sudo DROPLET_REPO_ROOT="$REPO_ROOT" /usr/local/sbin/droplet-backup.sh --check-key; then
+      log_success "restic repository opens with this device's identity"
+    else
+      log_warn "restic repository check failed — see the output above; the dashboard"
+      log_warn "  and the owner's notifications will report it until it is fixed."
+    fi
+  fi
+
   log_success "restic backup host integration installed"
   log_info "  Repository:  \${DROPLET_BACKUP_TARGET:-/var/lib/droplet/restic-repo} (key derived from device identity)"
   log_info "  Cadence:     daily 03:15 / weekly-full Sun 04:15 / restore drill monthly 05:00"
   log_info "  Timers:      systemctl list-timers 'droplet-rest*'"
   log_info "  Drill state: /var/lib/droplet/backup/restore-drill-status.json (status: ok|failed)"
+  log_info "  Backup state: /var/lib/droplet/backup-status/status.json (ok|failed|key_mismatch|pending)"
 }

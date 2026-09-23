@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   Folder,
   FolderPlus,
@@ -77,6 +78,7 @@ import { translateError } from "@/lib/friendly-errors";
 import {
   folderOnlyOutcomeMessage,
   uploadOutcomeMessage,
+  uploadNoticeMessage,
   uploadProgressLabel,
 } from "@/lib/upload-feedback";
 import { runUpload } from "@/lib/run-upload";
@@ -606,6 +608,8 @@ export default function FilesPage() {
           directoryCount,
           directoriesFailed,
           uploadedPaths,
+          renamed,
+          duplicates,
         } = await runUpload(selection, {
           basePath: currentPath,
           space,
@@ -616,8 +620,12 @@ export default function FilesPage() {
         // swallow that message (nor escape as an unhandled rejection): the
         // listing being stale is the lesser failure.
         if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
+        // WARP-2096 — renamed-because-taken / already-on-the-box, appended to
+        // whichever message the run gets.
+        const notice = uploadNoticeMessage(renamed, duplicates);
+        const outcome = uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed);
         const message =
-          uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed) ??
+          (outcome !== null ? `${outcome}${notice}` : null) ??
           // Everything the drop carried landed and none of it was a file —
           // say what DID happen to the folders.
           (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
@@ -633,7 +641,7 @@ export default function FilesPage() {
           // the v1 contract.
           const undoSpace = space;
           toast(
-            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.`,
+            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.${notice}`,
             "success",
             {
               label: "Undo",
@@ -1336,6 +1344,16 @@ export default function FilesPage() {
   // by dragging.
   const filesActions = (
     <>
+      {/* WARP-2966 — Favorites left the Files sub-nav: it is a FILTER over the
+          places in the section, not a place of its own, and a sub-nav row made
+          it look like a fourth location. The browser is where a filter belongs,
+          so the route keeps a door here rather than becoming an orphan. A link,
+          not a button — it is a different page, and the toolbar's other
+          controls act on this one. */}
+      <Link href="/files/favorites" className="btn ghost" aria-label="Favorites">
+        <Star size={14} />
+        <span className="hidden sm:inline">Favorites</span>
+      </Link>
       {isOwnerOrAdmin && (
         <button
           onClick={() => setShowConnectDrive(true)}
@@ -1430,6 +1448,16 @@ export default function FilesPage() {
           WARP-1267). The switcher itself renders nothing when there's only
           one space to be in — no lone control.
 
+          WARP-2966 — `lg:hidden`. Libraries must appear exactly once per
+          viewport, and from `lg` up the sidebar's Libraries rail
+          (`components/nav/FilesLibrariesNav`) owns that choice: the addendum's
+          §2.2 supersedes this control "at every width", and two library
+          pickers on one screen read as two different questions. Below `lg`
+          the aside is `hidden lg:flex` and the rail's other mount lives
+          inside the More drawer — a modal — so deleting this outright would
+          leave the browser itself with no visible way to change library.
+          It stays as the small-screen half, and only that.
+
           WARP-1667: `relative z-30` for the same reason the search bar above
           carries `relative z-40` — ds-rise's `fill-mode: both` makes every
           `.page-inner` child a permanent stacking context, so the Spaces
@@ -1437,7 +1465,7 @@ export default function FilesPage() {
           siblings (breadcrumbs, banner, volumes, file rows) painted over it.
           z-30 and NOT z-40: a tie would go to this wrapper on DOM order and
           put the search results back underneath the pills (WARP-1139). */}
-      <div className="mb-4 relative z-30">
+      <div className="lg:hidden mb-4 relative z-30">
         <SpaceSwitcher
           spaces={spaces}
           active={space}
@@ -1506,7 +1534,7 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
+            className="flex-1 py-2 px-3 outline-none focus:ring-2 focus:ring-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",

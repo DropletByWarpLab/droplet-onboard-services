@@ -3,7 +3,7 @@
  *
  * Recent security-relevant events from the signed activity log: the
  * `network` and `auth` kinds of `GET /api/activity` (routes/activity.ts),
- * curated to severity warn/error. That predicate includes the WARP-268
+ * curated to severity warn/err. That predicate includes the WARP-268
  * egress-anomaly rows (kind `network`, severity `warn`, sub
  * `unlisted_destination` / `allowlist_unavailable`, refs from the
  * egress-audit collector) — the rows a "has anything phoned home?"
@@ -18,7 +18,7 @@
  * role → guest view) get FORBIDDEN before any HTTP leaves the handler.
  *
  * The route has no severity filter, so each kind is fetched at the
- * route's page cap (200) and curated client-side — otherwise warn/error
+ * route's page cap (200) and curated client-side — otherwise warn/err
  * rows buried under routine info rows would be silently missed.
  * Tier-1 read — no writes, no confirmation.
  */
@@ -41,9 +41,24 @@ const MAX_LIMIT = 100;
 /** GET /api/activity's `limit` cap (listQuerySchema in routes/activity.ts). */
 const ROUTE_PAGE_MAX = 200;
 
+/**
+ * `ActivityRow.severity` on the wire: the Prisma enum `ActivitySeverity`
+ * (apps/orchestrator/prisma/schema.prisma), which GET /api/activity passes
+ * through unchanged. Spelled out rather than imported from @prisma/client
+ * because rag-tests.yml builds tools-core BEFORE `db:generate`; the test
+ * pins this union to the generated enum.
+ */
+export type ActivitySeverity = "ok" | "warn" | "err" | "info";
+
 /** The two activity kinds that carry threat signal. */
 const THREAT_KINDS = ["network", "auth"] as const;
-const THREAT_SEVERITIES = new Set(["warn", "error"]);
+/**
+ * WARP-2999: `err` is the enum's spelling. This set used to say "error", a
+ * value no row carries, so every err row (the most severe) was dropped.
+ */
+export const THREAT_SEVERITIES: ReadonlySet<string> = new Set(
+  ["warn", "err"] satisfies ActivitySeverity[],
+);
 
 interface ActivityItem {
   at: string;

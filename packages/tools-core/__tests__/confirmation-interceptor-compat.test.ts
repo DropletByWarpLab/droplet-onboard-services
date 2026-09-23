@@ -225,11 +225,12 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
     }
   });
 
-  it("completes the CHAT-SHAPED flow (confirmed:true, no token) for every legacy tool", () => {
-    // This is the flow production actually performs: the model re-issues
-    // with `confirmed: true` because it has no way to obtain a token.
-    // If this regressed, every one of these tools would challenge forever
-    // in the chat surface — the production break this guards.
+  it("WARP-2002: the model cannot approve its own challenged call with confirmed:true, for every declaring tool", () => {
+    // Before WARP-2002 this was the chat flow: challenge, then the MODEL
+    // re-issued with `confirmed: true` and the interceptor accepted it
+    // against its own fresh challenge. That is self-attestation. The
+    // human-approved token (chat grant / run confirm route) is the only
+    // way through now; the token path is pinned by the test above.
     const declaring = INTERCEPTOR_OWNED.filter(declaresConfirmedFlag);
     const report: string[] = [];
 
@@ -243,21 +244,20 @@ describe("interceptor compatibility across every confirming tool (WARP-2322)", (
         continue;
       }
       const second = interceptor.intercept(tool, { ...args, confirmed: true }, undefined, T0 + 1);
-      if (second.kind !== "proceed") {
-        report.push(`${tool.name}: phase 2 (confirmed:true) was ${second.kind}, expected proceed`);
+      if (second.kind !== "confirmation_required") {
+        report.push(`${tool.name}: self-attested confirmed:true was ${second.kind}`);
       }
     }
 
-    expect(report, `chat-flow failures:\n${report.join("\n")}`).toEqual([]);
+    expect(report, `self-attestation accepted:\n${report.join("\n")}`).toEqual([]);
     // 15, not 16: WARP-2472 moved `set_wifi_password` — the one
     // route-owned tool that also declares `confirmed` — out of this
     // partition. Its own handler gate is untouched and still runs.
     expect(declaring.length).toBeGreaterThanOrEqual(15);
   });
 
-  it("refuses `confirmed: true` for every legacy tool when nothing challenged it", () => {
-    // The security floor the legacy path must not give up: a bare boolean
-    // is not an approval.
+  it("refuses `confirmed: true` for every declaring tool when nothing challenged it", () => {
+    // A bare boolean is not an approval.
     for (const tool of INTERCEPTOR_OWNED.filter(declaresConfirmedFlag)) {
       const interceptor = createToolCallInterceptor();
       const outcome = interceptor.intercept(

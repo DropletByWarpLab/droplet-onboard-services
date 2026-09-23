@@ -157,11 +157,16 @@ describe("workspace-nav-config — Level 3 views", () => {
   const dest = (href: string) =>
     spaces.flatMap((s) => s.destinations).find((d) => d.item.href === href);
 
-  it("Files' routed children become its views, All files first", () => {
-    const labels = dest("/files")?.views.map((v) => v.label);
-    expect(labels?.[0]).toBe("All files");
-    expect(labels).toContain("Recents");
-    expect(labels).toContain("Sync Devices");
+  it("Files' routed children become its views, the section itself first", () => {
+    // WARP-2966 removed the "All files" child whose href was its parent's, so
+    // `viewsFor` now prepends the section entry itself (marked `exact`) — the
+    // documented branch for a section that does not list its own index.
+    const views = dest("/files")?.views ?? [];
+    expect(views[0]?.href).toBe("/files");
+    expect(views[0]?.exact).toBe(true);
+    expect(views.map((v) => v.label)).toEqual(["Files", "Recent", "Shared", "Trash"]);
+    // Sync devices left Files entirely — it is its own Work chip now.
+    expect(dest("/files/devices")?.item.label).toBe("Sync devices");
   });
 
   it("Integrations and Credentials are sibling chips, neither has views (WARP-2968)", () => {
@@ -222,5 +227,46 @@ describe("workspace-nav-config — locate() derives space + destination from the
     expect(locate(spaces, "/admin/files")?.destination.item.href).toBe(
       "/admin/files",
     );
+  });
+});
+
+describe("workspace-nav-config — restrictTo (WARP-2976, ADR-059 §2.3)", () => {
+  const hrefsOf = (spaces: ReturnType<typeof resolveSpaces>) =>
+    spaces.flatMap((s) => s.destinations.map((d) => d.item.href));
+
+  it("omitted, the spaces are exactly today's", () => {
+    expect(hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, undefined))).toEqual(
+      hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn)),
+    );
+  });
+
+  it("keeps only destinations in the set, and drops the spaces it empties", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/settings", "/help"]);
+    const spaces = resolveSpaces("owner", ALL_CAPS, allOn, restrict);
+    expect(spaces.map((s) => s.def.id)).toEqual(["ops", "admin"]);
+    expect(hrefsOf(spaces)).toEqual(["/cameras", "/events", "/network", "/settings", "/help"]);
+  });
+
+  it("is an intersection: the gates still apply inside the set", () => {
+    const restrict = new Set(["/cameras", "/events", "/network", "/integrations"]);
+    const hrefs = hrefsOf(resolveSpaces("family", ALL_CAPS, (id) => id !== "cameras", restrict));
+    // cameras module off → Cameras and its Events child go; Integrations is
+    // owner/admin only → gone for family. Only Network survives.
+    expect(hrefs).toEqual(["/network"]);
+  });
+
+  it("an href outside NAV_GROUPS in the set adds nothing", () => {
+    const hrefs = hrefsOf(resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/nope", "/files"])));
+    expect(hrefs).toEqual(["/files"]);
+  });
+
+  it("an empty set leaves no spaces at all", () => {
+    expect(resolveSpaces("owner", ALL_CAPS, allOn, new Set())).toEqual([]);
+  });
+
+  it("keeps a destination's views when the destination survives", () => {
+    const files = resolveSpaces("owner", ALL_CAPS, allOn, new Set(["/files"]))[0]
+      ?.destinations[0];
+    expect(files?.views.map((v) => v.href)).toContain("/files/recents");
   });
 });

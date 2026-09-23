@@ -510,7 +510,7 @@ export function ShareDialog({
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
-                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:border-[var(--brand)]"
+                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:ring-2 focus:ring-[var(--brand)]"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -546,7 +546,7 @@ export function ShareDialog({
                         <input
                           readOnly
                           value={share.url ?? ""}
-                          className="type-caption-1 px-3 flex-1 !py-1.5 outline-none focus:border-[var(--brand)]"
+                          className="type-caption-1 px-3 flex-1 !py-1.5 outline-none focus:ring-2 focus:ring-[var(--brand)]"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -585,7 +585,7 @@ export function ShareDialog({
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
-                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:border-[var(--brand)]"
+                          className="type-caption-1 px-3 !py-1 flex-1 outline-none focus:ring-2 focus:ring-[var(--brand)]"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -867,7 +867,7 @@ export function ShareDialog({
                     value={expireDate}
                     onChange={(e) => setExpireDate(e.target.value)}
                     min={new Date().toISOString().split("T")[0]}
-                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)]"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:ring-2 focus:ring-[var(--brand)]"
                     style={{
                       background: "var(--surface)",
                       border: "1px solid var(--border)",
@@ -891,7 +891,7 @@ export function ShareDialog({
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Leave blank for no password"
-                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                     style={{
                       background: "var(--surface)",
                       border: "1px solid var(--border)",
@@ -915,7 +915,7 @@ export function ShareDialog({
                     onChange={(e) => setNote(e.target.value)}
                     placeholder="What's this link for?"
                     rows={2}
-                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                    className="type-footnote px-3 !py-1.5 w-full outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                     style={{
                       background: "var(--surface)",
                       border: "1px solid var(--border)",

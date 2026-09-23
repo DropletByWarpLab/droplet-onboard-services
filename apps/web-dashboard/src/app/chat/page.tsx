@@ -50,6 +50,7 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
+import { reachableInChat } from "@/lib/tool-domains";
 import { useAuth } from "@/lib/auth";
 import {
   PENDING_COMPOSER_KEY,
@@ -305,7 +306,14 @@ export default function ChatPage() {
   const { models, defaultModel } = useModels();
   // The chat composer's "/" slash menu lists these tools; picking one seeds
   // the composer + pins the "Ready to use X" indicator (same as /tools).
-  const { tools: slashTools } = useToolCatalog();
+  //
+  // WARP-2969 — narrowed to what a turn can actually reach. `/tools` still
+  // SHOWS the withheld ones, with a chip saying why, because an MCP client
+  // can still call them; this menu cannot, because every row in it is an
+  // offer to act, and offering a tool chat policy withholds only ever buys
+  // the user a message that comes back "I can't do that".
+  const { tools: allTools } = useToolCatalog();
+  const slashTools = useMemo(() => allTools.filter(reachableInChat), [allTools]);
   const [selectedModel, setSelectedModel] = useState("");
   // WARP-904 — the provider backing the currently-selected model, looked
   // up from the same gated `/api/llm/models` list ModelSelector reads.

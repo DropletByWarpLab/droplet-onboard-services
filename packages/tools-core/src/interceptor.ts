@@ -251,38 +251,22 @@ export function createToolCallInterceptor(opts?: {
         };
       }
 
-      // 5. LEGACY PATH — `confirmed: true` against a LIVE CHALLENGE.
+      // 5. NO TOKEN → CHALLENGE, WHATEVER `confirmed` SAYS (WARP-2002).
       //
-      //    Why this exists: in the chat surface nothing can carry a token
-      //    back. `_meta` is set by the orchestrator; the model is what
-      //    re-issues the call, and it only knows the tool's own schema.
-      //    Requiring the secret there would make all 16 hand-rolled
-      //    two-phase tools challenge forever — a production break, and a
-      //    violation of "all 37 still complete their two-phase flow".
+      //    `confirmed: true` is something the MODEL writes. Until WARP-2002
+      //    it was accepted here against a "live challenge" — but the live
+      //    challenge was the one this interceptor had just minted in reply
+      //    to the model's own first call, so the model could re-issue the
+      //    call with the flag set, in the same turn, and write with no
+      //    human involved. That is self-attestation with an extra step.
       //
-      //    It is deliberately WEAKER than the token and deliberately
-      //    STRONGER than what shipped before: `confirmed: true` alone no
-      //    longer authorises anything. The interceptor must have
-      //    challenged THIS tool with THESE arguments, within the TTL, and
-      //    the challenge is spent on use. So it cannot approve a call that
-      //    was never challenged, cannot be moved to a different call, and
-      //    cannot be replayed.
-      //
-      //    Gated on the schema declaring `confirmed`, so it is available
-      //    only to tools that already had a working two-phase contract. A
-      //    tool with no gate at all (the WARP-320 remote class, and the 8
-      //    registry tools that had no check) gets no legacy path and must
-      //    present a real token — fail-closed, which is the correct
-      //    direction for a write that nothing was guarding.
-      if (args.confirmed === true && declaresConfirmedFlag(tool)) {
-        const legacy = tokens.redeemLiveChallenge(tool.name, args, now);
-        if (legacy.ok) {
-          return { kind: "proceed", args, confirmationConsumed: true };
-        }
-        // No live challenge for this exact call — fall through and issue
-        // one. A `confirmed: true` that nothing challenged is not an
-        // approval, and must not read as one.
-      }
+      //    The only thing that admits a confirming call is the token, and
+      //    the token only reaches `_meta` from a human decision: the chat
+      //    grant (`POST /api/llm/confirm/:challengeId`, WARP-2469), the
+      //    parked-run confirm route (`decideAgentRun`), or an MCP client's
+      //    own approval UI. A surface with none of those (voice, ToolSpec)
+      //    fails closed and keeps challenging, which is the intended
+      //    outcome, not a regression.
 
       // 6. Challenge. NO WRITE HAPPENS: the caller returns this outcome
       //    without ever invoking the handler.
@@ -411,7 +395,8 @@ export function interceptOutcomeToToolResult(
       message:
         `'${tool.name}' writes, so it needs a thumbs-up. Relay this to the user, and ` +
         "only after they explicitly approve, re-issue the SAME call with the SAME arguments " +
-        "presenting this confirmationToken. Do NOT approve on the user's behalf.",
+        "presenting this confirmationToken. Do NOT approve on the user's behalf: setting " +
+        "`confirmed: true` yourself approves nothing and only asks again.",
       details: {
         interceptor: {
           outcome: "confirmation_required",

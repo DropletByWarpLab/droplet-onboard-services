@@ -28,6 +28,12 @@
  *     `npm run lint:dashboard-classes`.
  *   - Guard 1 is a fixed nine-name list that genuinely benefits from
  *     being asserted twice. A 130-entry ratchet does not.
+ *
+ * Guard 6 (WARP-1356, dead focus styling: a `focus:` utility defeated by
+ * an inline style on the same element) is also script-only. It needs a
+ * JSX-tag parser, and this suite already re-reads every source file once
+ * per bad class (WARP-2711 tracks its timeout); a second copy here would
+ * add cost for no extra signal.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -73,36 +79,35 @@ function walk(dir: string, files: string[] = []): string[] {
   return files;
 }
 
-function findHits(badClass: string, files: string[]): string[] {
+// WARP-2711: every bad class is checked against the same file contents, so
+// read the tree ONCE and hand the texts to each case. This used to re-read
+// every source file from disk once per bad class (nine full passes), which is
+// what made individual cases time out at random on a saturated Windows box.
+// The pattern is also built once per class and carries no `g` flag: a global
+// regex's `.test()` keeps `lastIndex` between calls, so after one file hit it
+// started the next file's search part-way in and under-reported the sites.
+function findHits(badClass: string, sources: ReadonlyArray<[string, string]>): string[] {
   // Match the class as a whole token: not preceded or followed by a word
   // char or `-`. Class strings live inside `className="…"` or template
   // literals, separated by whitespace.
-  const re = new RegExp(`(^|[^\\w-])${badClass.replace(/[-/\\^$*+?.()|[\\]{}]/g, "\\$&")}(?![\\w-])`, "g");
+  const re = new RegExp(`(^|[^\\w-])${badClass.replace(/[-/\\^$*+?.()|[\\]{}]/g, "\\$&")}(?![\\w-])`);
   const hits: string[] = [];
-  for (const file of files) {
-    const text = readFileSync(file, "utf8");
+  for (const [file, text] of sources) {
     if (!re.test(text)) continue;
-    // Reset for lineno walk
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const lineRe = new RegExp(
-        `(^|[^\\w-])${badClass.replace(/[-/\\^$*+?.()|[\\]{}]/g, "\\$&")}(?![\\w-])`,
-      );
-      if (lineRe.test(line)) {
-        hits.push(`${file}:${i + 1}: ${line.trim()}`);
-      }
+      if (re.test(lines[i])) hits.push(`${file}:${i + 1}: ${lines[i].trim()}`);
     }
   }
   return hits;
 }
 
 describe("dashboard-classes guard", () => {
-  const files = walk(SRC_ROOT);
+  const sources: Array<[string, string]> = walk(SRC_ROOT).map((f) => [f, readFileSync(f, "utf8")]);
 
   for (const badClass of BAD_CLASSES) {
     it(`no source file contains the bad class \`${badClass}\``, () => {
-      const hits = findHits(badClass, files);
+      const hits = findHits(badClass, sources);
       if (hits.length > 0) {
         const msg =
           `Bad class \`${badClass}\` found in ${hits.length} site(s):\n` +
