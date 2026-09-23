@@ -503,7 +503,9 @@ export async function ncInstallAndCreateAdmin(
   // the household group alongside "admin" so the shared "Household" groupfolder
   // mounts for the primary owner — without it the owner is in NEITHER the
   // literal "admin" nor the household group and the shared space never appears.
-  groups: string[] = ["admin"]
+  // WARP-2993: no default "admin" — only the service account is an NC
+  // instance admin.
+  groups: string[] = []
 ): Promise<void> {
   // Nextcloud must be installed before we can use the OCS API.
   // The container creates a default admin account (NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD).

@@ -64,7 +64,7 @@ describe("provisionDevOwnerNextcloudAccount — the happy path", () => {
     const outcome = await provisionDevOwnerNextcloudAccount("dev", "Dev-Stack-Local-1", "Droplet Dev");
     expect(outcome).toEqual({
       status: "provisioned",
-      groups: ["admin", "droplet-admins", "household"],
+      groups: ["droplet-admins", "household"],
     });
   });
 
@@ -80,7 +80,6 @@ describe("provisionDevOwnerNextcloudAccount — the happy path", () => {
     await provisionDevOwnerNextcloudAccount("dev", "Dev-Stack-Local-1", "Droplet Dev");
 
     expect(order).toEqual([
-      "ensure:admin",
       "ensure:droplet-admins",
       "ensure:household",
       "create",
@@ -97,7 +96,7 @@ describe("provisionDevOwnerNextcloudAccount — the happy path", () => {
     expect(username).toBe("dev");
     expect(password).toBe("Dev-Stack-Local-1");
     expect(displayName).toBe("Droplet Dev");
-    expect(groups).toEqual(["admin", "droplet-admins", "household"]);
+    expect(groups).toEqual(["droplet-admins", "household"]);
   });
 });
 

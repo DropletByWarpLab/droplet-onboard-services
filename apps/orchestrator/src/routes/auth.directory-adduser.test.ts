@@ -72,7 +72,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -396,7 +396,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         "ada",
         "Ada-secret123",
         undefined,
-        ["admin", "droplet-admins", "household"],
+        ["droplet-admins", "household"],
       );
       // The group is created lazily by the department provisioner, so a box
       // with no departments has never seen it and OCS would reject the whole
