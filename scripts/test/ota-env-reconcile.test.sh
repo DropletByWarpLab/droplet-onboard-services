@@ -63,6 +63,8 @@ grep -q '^SANDBOX_SERVICE_TOKEN=[0-9a-f]\{64\}$' "$BOX/.env" \
   && pass "missing token key added (64 hex)" || fail "SANDBOX_SERVICE_TOKEN not added"
 grep -q '^JWT_SECRET=[0-9a-f]\{128\}$' "$BOX/.env" \
   && pass "hex64 key added (128 hex)" || fail "JWT_SECRET not added as hex64"
+grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" \
+  && pass "OTA apply enabled with the release-shipped helper path (WARP-3007)" || fail "DROPLET_OTA_APPLY_SCRIPT not added"
 grep -q '^NVR_MEDIA_SOURCE=nvrdata$' "$BOX/.env" \
   && pass "missing literal-default key added" || fail "NVR_MEDIA_SOURCE literal missing"
 grep -q '^COMPOSE_PROFILES=linux,display,eval,email$' "$BOX/.env" \
