@@ -100,11 +100,12 @@ function catalogNote(
   if (data.degraded_manifest === true) {
     return "Couldn’t read this Droplet’s list of supported models, so no downloads are offered right now.";
   }
-  // `null` is "couldn't size this box". A `0` is a real measurement only on
-  // an orchestrator that also says where it came from (`vram_source`, C1);
-  // without it, 0 is the iGPU carve-out mis-read and means unknown too.
+  // `null` is "couldn't size this box". A `0` is a real measurement only when
+  // the orchestrator also says where it came from (`vram_source`, C1); with
+  // no source (absent on an older orchestrator, or `null` from a failed read)
+  // 0 is the iGPU carve-out mis-read and means unknown too.
   const vram = data.detected_vram_gb;
-  if (vram == null || (vram === 0 && data.vram_source === undefined)) {
+  if (vram == null || (vram === 0 && data.vram_source == null)) {
     return "Couldn’t measure this Droplet’s GPU memory, so no downloads are offered.";
   }
   // A GPU-less / APU / Jetson box is sized from memory it shares with the OS.
