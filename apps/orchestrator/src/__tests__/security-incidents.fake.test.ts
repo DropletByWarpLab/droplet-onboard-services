@@ -86,3 +86,45 @@ describe("the incident fake's transactions (the WARP-1570 seam)", () => {
     expect(f.world.user.find((u) => u.id === U1)).toMatchObject({ displayName: "Later" });
   });
 });
+
+/**
+ * WARP-2978 PR-D — the fake mirrors SecurityEvent_ongoing_shape
+ * (20260925030100), so an engine bug that would write an ill-formed ongoing
+ * row fails in the mocked lane the way Postgres would refuse it.
+ */
+describe("the incident fake's SecurityEvent_ongoing_shape mirror", () => {
+  type Events = { securityEvent: { createMany(a: unknown): Promise<{ count: number }> } };
+  const ongoing = (over: Record<string, unknown> = {}) => ({
+    source: "frigate",
+    kind: "detection_ongoing",
+    severity: "info",
+    camera: "back",
+    sourceRef: "back/1790000000.1-abc",
+    dedupeKey: "frigate-ongoing:1790000000.1-abc",
+    labels: ["person"],
+    cameraZones: [],
+    score: 0.9,
+    startedAt: new Date("2026-09-23T21:14:00Z"),
+    endedAt: null,
+    summary: "Person still in view after 30 s",
+    ...over,
+  });
+
+  it("accepts a legal ongoing row", async () => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Events).securityEvent.createMany({ data: [ongoing()] })).resolves.toEqual({ count: 1 });
+  });
+
+  it.each([
+    ["another source", { source: "frigate_status" }],
+    ["no camera", { camera: null }],
+    ["an end time", { endedAt: new Date("2026-09-23T21:15:00Z") }],
+    ["a finished detection's key", { dedupeKey: "frigate:1790000000.1-abc" }],
+  ])("refuses an ongoing row with %s", async (_name, over) => {
+    const f = createFakeSecurityPrisma();
+    await expect((f.client as unknown as Events).securityEvent.createMany({ data: [ongoing(over)] })).rejects.toThrow(
+      /SecurityEvent_ongoing_shape/,
+    );
+    expect(f.world.securityEvent).toHaveLength(0);
+  });
+});

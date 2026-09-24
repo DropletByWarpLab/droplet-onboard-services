@@ -387,7 +387,7 @@ describe("GET /api/security/events?zone= — DS-005 applied to places", () => {
         {
           camera: "back",
           OR: [
-            { kind: { in: ["detection", "detection_low"] }, cameraZones: { hasSome: ["porch"] } },
+            { kind: { in: ["detection", "detection_ongoing", "detection_low"] }, cameraZones: { hasSome: ["porch"] } },
             { kind: { in: ["camera_offline", "camera_online"] } },
           ],
         },

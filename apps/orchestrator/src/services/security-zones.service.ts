@@ -245,8 +245,13 @@ export function zoneVisibleTo(
   return allActive.length === 0 || visible.length > 0;
 }
 
-/** Frigate detection rows — the ones a part of a view (`cameraZones`) can narrow. */
-const DETECTION_KINDS = ["detection", "detection_low"] as const;
+/**
+ * Frigate detection rows — the ones a part of a view (`cameraZones`) can
+ * narrow. WARP-2978 PR-D: a person's "still in view" row carries the zones
+ * they entered so far, and must land in the same areas as their `end` row —
+ * or it would group (and alert) elsewhere.
+ */
+const DETECTION_KINDS = ["detection", "detection_ongoing", "detection_low"] as const;
 /** The camera's own health rows — an area watched through any part of the view still shows them. */
 const CAMERA_STATUS_KINDS = ["camera_offline", "camera_online"] as const;
 

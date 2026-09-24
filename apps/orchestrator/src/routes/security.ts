@@ -68,6 +68,8 @@ const SECURITY_VIEW_ROLES = ["owner", "admin", "family"] as const;
 
 const FEED_KINDS = [
   "detection",
+  // WARP-2978 PR-D — a person still in view 30 s in (the dashboard's "Still in view").
+  "detection_ongoing",
   "detection_low",
   "camera_offline",
   "camera_online",
